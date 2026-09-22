@@ -174,9 +174,9 @@ function createRuntimeHostTransportBundleFixture() {
     sessionListTransport: { list: vi.fn() },
     runtimeDirectoryTransport: { list: vi.fn() },
     fleetTransport: { execute: vi.fn() },
+    fleetCredentialsTransport: { write: vi.fn() },
     sessionContentTransport: { load: vi.fn() },
     sessionTimelineTransport: { list: vi.fn() },
-    matchaSessionListTransport: { list: vi.fn() },
     diagnosticsArchiveTransport: { archive: vi.fn(), download: vi.fn() },
     workspaceTextTransport: { read: vi.fn() },
     workspaceBinaryTransport: { read: vi.fn() },
@@ -251,7 +251,7 @@ function createRuntimeHostTransportBundleFixture() {
     sealedSkillsTransport: { execute: vi.fn() },
     pluginsTransport: { execute: vi.fn() },
     usageTransport: { read: vi.fn() },
-    matchaAgentHistoryTransport: { history: vi.fn() },
+    sessionHistoryTransport: { read: vi.fn() },
   };
   return {
     hostApiTransports,
@@ -386,6 +386,7 @@ describe('bootstrapMainApplication', () => {
       rendererEventRoutes: expect.anything(),
       providerCredentialStatusTransport:
         hoisted.createProviderCredentialStatusTransportMock.mock.results[0]?.value,
+      credentialWriteAdapter: expect.any(Function),
     }));
     expect(hostApiContext).not.toHaveProperty('hostApiTransports');
     expect(hostApiContext).not.toHaveProperty('sessionEventsTransport');
@@ -401,6 +402,7 @@ describe('bootstrapMainApplication', () => {
       expect.objectContaining({ command: expect.any(Function) }),
       context.deps.getMainWindow,
       bundle.hostApiTransports.providerAccountsTransport,
+      bundle.hostApiTransports.fleetCredentialsTransport,
       expect.objectContaining({ transport: expect.objectContaining({ download: expect.any(Function) }) }),
     );
     expect(hoisted.createDiagnosticsExportDependenciesMock).toHaveBeenCalledWith(
@@ -564,7 +566,7 @@ describe('bootstrapMainApplication', () => {
     await bootstrapMainApplication(context.deps as never);
 
     expect(context.launchRuntimeHost).toHaveBeenCalledTimes(1);
-    expect(hoisted.registerRuntimeIpcHandlersMock.mock.calls[0]).toHaveLength(4);
+    expect(hoisted.registerRuntimeIpcHandlersMock.mock.calls[0]).toHaveLength(5);
   });
 
   it('E2E 模式仍通过同一 Rust Host 路径启动，并只在 bundle 注入 Cron trace callback', async () => {

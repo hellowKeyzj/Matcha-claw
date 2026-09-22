@@ -151,7 +151,7 @@ Renderer store              = cache/projection
 - TS version 1 与 Rust version 3 的读取/写入互通未证明；
 - TypeScript secret references 与 Rust `deny_unknown_fields` schema 不一致；
 - Rust 当前 MCP HTTP status 是 `Unknown`，而 TS 会主动 probe；
-- Rust provider-models transport 已启动，但尚未证明接入 Electron `/dispatch`。
+- Rust provider-models transport 已启动，但尚未证明完整 Electron public route / signed loopback product path cutover。
 
 ## 3. 事件与状态的关系
 

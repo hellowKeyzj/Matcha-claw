@@ -1,9 +1,9 @@
 import { app } from 'electron';
 import type { IncomingMessage, ServerResponse } from 'http';
-import type { RuntimeHostControlOutcome } from '../../main/runtime-host-delivery/control';
+import type { RuntimeControlTransportResponse, RuntimeLogsResponse } from '../../main/runtime-host-delivery/transport/runtime-control';
 import { readGatewayStatusProjection, unavailableGatewayStatus } from './app';
 import { logger } from '../../utils/logger';
-import type { DiagnosticsApiContext } from '../context';
+import type { DiagnosticsApiContext, RuntimeHostTransportContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 
 const DEFAULT_TAIL_LINES = 200;
@@ -19,6 +19,7 @@ type OpenClawLogEntry = Readonly<{
 }>;
 
 type RuntimeHostControl = Pick<DiagnosticsApiContext['runtimeHost'], 'command'>;
+type RuntimeControlLogsContext = RuntimeHostTransportContext<'runtimeControlTransport'>;
 
 function readMainProcessMemoryUsage() {
   const usage = process.memoryUsage();
@@ -37,15 +38,14 @@ function toNumberOrNull(value: unknown): number | null {
     : null;
 }
 
-async function readOpenClawLogTails(runtimeHost: RuntimeHostControl): Promise<{
+async function readOpenClawLogTails(ctx: RuntimeControlLogsContext): Promise<{
   gatewayLogTail: string;
   gatewayErrLogTail: string;
 }> {
   try {
-    const entries = decodeOpenClawLogEntries(await runtimeHost.command({
-      name: 'openclaw.logs',
-      input: {},
-    }));
+    const entries = decodeOpenClawLogEntries(
+      await ctx.runtimeHostTransports.runtimeControlTransport.logs(),
+    );
     if (!entries) return emptyOpenClawLogTails();
     return {
       gatewayLogTail: entries
@@ -68,14 +68,12 @@ function emptyOpenClawLogTails() {
   return { gatewayLogTail: '', gatewayErrLogTail: '' };
 }
 
-function decodeOpenClawLogEntries(outcome: RuntimeHostControlOutcome): OpenClawLogEntry[] | null {
-  if (outcome.kind !== 'succeeded'
-    || !isRecord(outcome.result)
-    || !hasExactKeys(outcome.result, ['result'])) {
+function decodeOpenClawLogEntries(response: RuntimeControlTransportResponse<RuntimeLogsResponse>): OpenClawLogEntry[] | null {
+  if (response.status !== 200) {
     return null;
   }
 
-  const result = outcome.result.result;
+  const result = response.body.result;
   if (!isRecord(result)
     || !hasExactKeys(result, ['entries', 'cursor', 'reset', 'truncated', 'lifecycleTailEvicted'])
     || !Array.isArray(result.entries)
@@ -188,12 +186,12 @@ export async function handleDiagnosticsRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: DiagnosticsApiContext,
+  ctx: DiagnosticsApiContext & RuntimeControlLogsContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/diagnostics/gateway-snapshot' && req.method === 'GET') {
     const gateway = await readGatewayStatusProjection(ctx.runtimeHost)
       .then((status) => status ?? unavailableGatewayStatus());
-    const logs = await readOpenClawLogTails(ctx.runtimeHost);
+    const logs = await readOpenClawLogTails(ctx);
     sendJson(res, 200, {
       capturedAt: Date.now(),
       gateway,

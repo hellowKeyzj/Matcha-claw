@@ -2811,6 +2811,27 @@ fn run_id_for_event(
         .map(Option::flatten)
 }
 
+fn project_changed_event(
+    object: &Map<String, Value>,
+    session_key: SessionKey,
+    run_id: Option<RunId>,
+) -> Result<Option<SessionChangedEvent>, ProtocolError> {
+    let Some(run_id) = run_id else {
+        return Ok(None);
+    };
+    let phase = match object.get("phase").and_then(Value::as_str) {
+        Some("start") => SessionChangedPhase::Start,
+        Some("end") => SessionChangedPhase::End,
+        Some("error") => SessionChangedPhase::Error,
+        _ => return Ok(None),
+    };
+    Ok(Some(SessionChangedEvent {
+        session_key,
+        run_id,
+        phase,
+    }))
+}
+
 fn optional_value<T>(value: Option<&Value>) -> Result<Option<T>, ProtocolError>
 where
     T: for<'de> Deserialize<'de>,
@@ -2848,6 +2869,29 @@ pub enum SessionEventKind {
     ApprovalRequested,
     ApprovalResolved,
     Changed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionChangedPhase {
+    Start,
+    End,
+    Error,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct SessionChangedEvent {
+    pub session_key: SessionKey,
+    pub run_id: RunId,
+    pub phase: SessionChangedPhase,
+}
+
+impl fmt::Debug for SessionChangedEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionChangedEvent")
+            .field("phase", &self.phase)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3191,6 +3235,7 @@ pub struct SessionEventEnvelope {
     pub chat: Option<ChatEvent>,
     pub activity: Option<SessionActivity>,
     pub approval: Option<SessionApprovalEvent>,
+    pub changed: Option<SessionChangedEvent>,
 }
 impl fmt::Debug for SessionEventEnvelope {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -3304,6 +3349,11 @@ pub fn decode_session_event(
         (Some(_), None) => return Err(ProtocolError::InvalidSessionEvent),
         (None, _) => None,
     };
+    let changed = if kind == SessionEventKind::Changed {
+        project_changed_event(object, session_key.clone(), run_id.clone())?
+    } else {
+        None
+    };
     let envelope = SessionEventEnvelope {
         gateway_sequence: event.sequence,
         kind,
@@ -3314,6 +3364,7 @@ pub fn decode_session_event(
         chat,
         activity,
         approval,
+        changed,
     };
     Ok(Some(envelope))
 }
@@ -4662,6 +4713,7 @@ mod tests {
                 chat: Some(chat),
                 activity: None,
                 approval: None,
+                changed: None,
             },
             CANARIES,
         );

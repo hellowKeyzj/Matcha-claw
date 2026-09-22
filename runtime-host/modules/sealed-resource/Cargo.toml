@@ -1,0 +1,26 @@
+[package]
+name = "sealed-resource"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aes-gcm.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+openclaw = { version = "0.1.0", path = "../../integrations/openclaw" }
+platform = { version = "0.1.0", path = "../../platform" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+skills-module = { package = "skills", version = "0.1.0", path = "../skills" }
+subagents = { version = "0.1.0", path = "../subagents" }
+zeroize.workspace = true
+
+[dev-dependencies]
+openclaw = { version = "0.1.0", path = "../../integrations/openclaw", features = ["test-support"] }
+tempfile = "3.8"

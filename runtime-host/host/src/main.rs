@@ -4,7 +4,7 @@ mod bootstrap;
 
 use std::process::ExitCode;
 
-use runtime_host::{DeliveryTransportInput, run_delivery_transports};
+use runtime_host::{AppInput, run_app_service};
 use tokio::io::{stdin, stdout};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -28,7 +28,7 @@ async fn run() -> Result<(), Error> {
         .map_err(Error::Bootstrap)?;
     let parts = bootstrap.into_parts().map_err(Error::Bootstrap)?;
 
-    run_delivery_transports(DeliveryTransportInput {
+    run_app_service(AppInput {
         host: parts.host,
         verifier: parts.verifier,
         provider_credential_resolver: parts.provider_credential_resolver,

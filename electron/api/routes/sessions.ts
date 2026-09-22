@@ -38,7 +38,6 @@ export type SessionCapabilityRouteDeps = RuntimeHostTransportContext<
   | 'sessionListTransport'
   | 'sessionTimelineTransport'
   | 'sessionContentTransport'
-  | 'matchaSessionListTransport'
   | 'sessionAbortTransport'
   | 'sessionCreateTransport'
   | 'sessionDeleteTransport'
@@ -109,12 +108,7 @@ export async function dispatchSessionCapability(
     );
   }
   if (body.id === 'session.management' && body.operationId === 'sessions.list') {
-    const request = adaptSessionListRequest(body);
-    const transport = isRecord(request.scope) && isRuntimeEndpoint(request.scope.endpoint)
-      && request.scope.endpoint.runtimeAdapterId === 'openclaw'
-      ? deps.runtimeHostTransports.sessionListTransport
-      : deps.runtimeHostTransports.matchaSessionListTransport;
-    return await transport.list(request);
+    return await deps.runtimeHostTransports.sessionListTransport.list(adaptSessionListRequest(body));
   }
   if ((body.id === 'session.prompt' || body.id === 'session.abort')
     && body.operationId === 'sessions.abort') {

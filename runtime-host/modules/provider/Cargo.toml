@@ -1,0 +1,21 @@
+[package]
+name = "provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+arc-swap = "1.7"
+connectors = { version = "0.1.0", path = "../connectors" }
+foundation = { version = "0.1.0", path = "../../foundation" }
+platform = { version = "0.1.0", path = "../../platform" }
+runtime-directory = { version = "0.1.0", path = "../runtime-directory" }
+reqwest.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+serde_json.workspace = true
+sha2.workspace = true

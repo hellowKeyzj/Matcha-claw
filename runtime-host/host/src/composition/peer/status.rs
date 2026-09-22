@@ -1,13 +1,15 @@
 use foundation::process::supervision::{
-    RestartOutcome, StartOutcome, SupervisorPhase, SupervisorSnapshot, TerminationCompletion,
+    RestartOutcome, StartOutcome, SupervisorSnapshot, TerminationCompletion,
 };
 
 use crate::{
     HostState, RuntimeState,
-    runtime::adapters::openclaw::ControlLease,
-    runtime::driver::{
-        RuntimeDriverIdentity, RuntimeLifecycleFailure as DriverLifecycleFailure,
-        RuntimeStartFailure as DriverStartFailure,
+    composition::{
+        host::diagnostics::project_host_lifecycle,
+        runtime_ports::{
+            RuntimeDriverIdentity, RuntimeLifecycleFailure as DriverLifecycleFailure,
+            RuntimeStartFailure as DriverStartFailure,
+        },
     },
 };
 
@@ -16,32 +18,32 @@ use super::actor::PeerShared;
 pub(super) fn host_state(shared: &PeerShared) -> HostState {
     let matcha = matcha_lifecycle_snapshot(shared);
     let open_claw = open_claw_lifecycle_snapshot(shared);
-    HostState::from_supervisors(
-        shared.admission().state().phase(),
-        &matcha,
-        shared.matcha_startup_diagnostics().category(),
-        &open_claw,
-        shared.openclaw_startup_diagnostics().category(),
+    let phase = shared.admission().state().phase();
+    HostState::from_runtime_states(
+        phase == crate::composition::HostPhase::Ready,
+        project_host_lifecycle(phase),
+        RuntimeState::from_snapshot_with_startup_diagnostic(
+            &matcha,
+            shared.matcha_startup_diagnostics().category(),
+        ),
+        RuntimeState::from_snapshot_with_startup_diagnostic(
+            &open_claw,
+            shared.openclaw_startup_diagnostics().category(),
+        ),
     )
 }
 
 pub(super) fn matcha_state(shared: &PeerShared) -> RuntimeState {
     RuntimeState::from_snapshot_with_startup_diagnostic(
         &matcha_lifecycle_snapshot(shared),
-        shared
-            .matcha_startup_diagnostics()
-            .category()
-            .map(Into::into),
+        shared.matcha_startup_diagnostics().category(),
     )
 }
 
 pub(super) fn open_claw_state(shared: &PeerShared) -> RuntimeState {
     RuntimeState::from_snapshot_with_startup_diagnostic(
         &open_claw_lifecycle_snapshot(shared),
-        shared
-            .openclaw_startup_diagnostics()
-            .category()
-            .map(Into::into),
+        shared.openclaw_startup_diagnostics().category(),
     )
 }
 
@@ -60,19 +62,9 @@ fn lifecycle_snapshot(shared: &PeerShared, identity: RuntimeDriverIdentity) -> S
         .lookup(&endpoint)
         .expect("peer runtime lifecycle driver must be registered");
     driver
-        .lifecycle_ops()
+        .host_lifecycle_ops()
         .expect("peer runtime lifecycle ops must be registered")
         .snapshot()
-}
-
-pub(super) fn control_lease_for_snapshot(
-    shared: &PeerShared,
-    snapshot: &SupervisorSnapshot,
-) -> ControlLease {
-    match snapshot.phase() {
-        SupervisorPhase::Starting | SupervisorPhase::Running => shared.open_claw().control_lease(),
-        _ => ControlLease::unavailable(),
-    }
 }
 
 pub(super) fn start_failure(

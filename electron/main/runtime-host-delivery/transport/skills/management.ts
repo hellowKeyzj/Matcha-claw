@@ -18,10 +18,31 @@ export const SKILLS_ENDPOINTS = Object.freeze({
 
 type SkillsEndpoint = typeof SKILLS_ENDPOINTS[keyof typeof SKILLS_ENDPOINTS];
 type SkillsStatus = 200 | 400 | 404 | 503;
+type SkillCapabilityOperation =
+  | 'skills.refreshStatus'
+  | 'skills.updateConfig'
+  | 'skills.updateState'
+  | 'skills.updateBatchState'
+  | 'skills.exportBundles'
+  | 'skills.importBundles'
+  | 'clawhub.openReadme'
+  | 'clawhub.openPath';
+
+type SkillCapabilityRequest = Readonly<{
+  id: 'skill.management';
+  operationId: SkillCapabilityOperation;
+  scope: Record<string, unknown>;
+  target: Record<string, unknown>;
+  input: Record<string, unknown>;
+}>;
 
 export type SkillsTransportFailure = Readonly<{
   outcome: 'rejected' | 'unknown';
 }>;
+
+const CAPABILITY_EXECUTE_ENDPOINT = '/api/skills/capability/execute';
+const CAPABILITY_REJECTED = { outcome: 'rejected' } as const;
+const SKILL_MANAGEMENT_UNAVAILABLE = { outcome: 'unknown' } as const;
 
 export type SkillsSafeSource = string;
 
@@ -191,8 +212,13 @@ export type SkillsUploadBeginTransportResponse = SkillsTransportResponse<SkillsU
 export type SkillsUploadChunkTransportResponse = SkillsTransportResponse<SkillsUploadChunkResult>;
 export type SkillsUploadCommitTransportResponse = SkillsTransportResponse<SkillsUploadCommitResult>;
 export type SkillsReadmeTransportResponse = SkillsTransportResponse<SkillsReadmeResult>;
+export type SkillCapabilityTransportResponse = Readonly<{
+  status: 200 | 400 | 503;
+  body: unknown;
+}>;
 
 export interface SkillsManagementTransport {
+  execute(request: unknown): Promise<SkillCapabilityTransportResponse>;
   readStatus(): Promise<SkillsStatusTransportResponse>;
   detail(request: unknown): Promise<SkillsDetailTransportResponse>;
   mutateConfig(request: unknown): Promise<SkillsConfigMutationTransportResponse>;
@@ -213,6 +239,7 @@ export function createSkillsManagementTransport(
   fetcher: typeof fetch = fetch,
 ): SkillsManagementTransport {
   return {
+    execute: (request) => executeCapability(issuer, runtimeHostTransportPort, fetcher, request),
     readStatus: () => readStatus(issuer, runtimeHostTransportPort, fetcher),
     detail: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.detail, request, 'skills:read', 'skills.detail', 'skills-detail', isSkillsDetailRequest, isSkillsDetailResult),
     mutateConfig: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.config, request, 'skills:config:write', 'skills.config.update', 'skills-config', isSkillsConfigMutationRequest, isSkillsMutationResult),
@@ -226,6 +253,33 @@ export function createSkillsManagementTransport(
     importBundle: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.importBundle, request, 'skills:import', 'skills.import.bundle', 'skills-import-bundle', isSkillsImportBundleRequest, isSkillsMutationResult),
     readme: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.readme, request, 'skills:read', 'skills.readme', 'skills-readme', isSkillsReadmeRequest, isSkillsReadmeResult),
   };
+}
+
+async function executeCapability(
+  issuer: RuntimeHostDeliveryIssuer,
+  runtimeHostTransportPort: number,
+  fetcher: typeof fetch,
+  request: unknown,
+): Promise<SkillCapabilityTransportResponse> {
+  if (!isSkillCapabilityRequest(request)) return { status: 400, body: CAPABILITY_REJECTED };
+  const response = await sendLoopbackJson({
+    port: runtimeHostTransportPort,
+    path: CAPABILITY_EXECUTE_ENDPOINT,
+    issuer,
+    decision: {
+      endpoint: CAPABILITY_EXECUTE_ENDPOINT,
+      scope: 'skill.management',
+      capability: request.operationId,
+      subject: 'skill-management',
+    },
+    method: 'POST',
+    fetcher,
+    body: request,
+  });
+  if (response?.status === 401) return { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
+  if (response?.status === 400) return { status: 400, body: CAPABILITY_REJECTED };
+  if (response?.status === 200) return projectSkillCapabilityResult(request.operationId, response.body);
+  return { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
 }
 
 async function readStatus(
@@ -248,6 +302,45 @@ async function readStatus(
   const nativeStatus = decodeSkillsStatus(response.body);
   if (nativeStatus === null) return unknownResponse();
   return { status: 200, body: projectSkillsStatus(nativeStatus) };
+}
+
+function projectSkillCapabilityResult(
+  operation: SkillCapabilityOperation,
+  body: unknown,
+): SkillCapabilityTransportResponse {
+  if (!isRecord(body)) return { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
+  if (operation === 'skills.refreshStatus') {
+    const native = decodeSkillsStatus(body);
+    return native
+      ? { status: 200, body: projectSkillsStatus(native) }
+      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
+  }
+  if (operation === 'skills.exportBundles') {
+    return hasExactKeys(body, ['skillBundles']) && Array.isArray(body.skillBundles)
+      ? { status: 200, body: body.skillBundles }
+      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
+  }
+  if (operation === 'skills.importBundles') {
+    return hasExactKeys(body, ['ok']) && body.ok === true
+      ? { status: 200, body: { ok: true } }
+      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
+  }
+  if (operation === 'clawhub.openReadme') {
+    return hasExactKeys(body, ['success', 'content', 'filePath'])
+      && body.success === true
+      && typeof body.content === 'string'
+      && isAbsolutePath(body.filePath, 4 * 1024)
+      ? { status: 200, body }
+      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
+  }
+  if (operation === 'clawhub.openPath') {
+    return body.success === true
+      ? { status: 200, body: { success: true } }
+      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
+  }
+  return body.success === true
+    ? { status: 200, body: { success: true } }
+    : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
 }
 
 export function decodeSkillsStatus(value: unknown): NativeSkillsStatusResult | null {
@@ -312,6 +405,71 @@ function projectMissing(categories: readonly SkillMissingCategory[]): SkillMissi
 
 function isNativeSkillsStatusResult(value: unknown): value is NativeSkillsStatusResult {
   return decodeSkillsStatus(value) !== null;
+}
+
+function isSkillCapabilityRequest(value: unknown): value is SkillCapabilityRequest {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
+    || value.id !== 'skill.management'
+    || !isSkillCapabilityOperation(value.operationId)
+    || !isNativeRuntimeScope(value.scope)
+    || !isRecord(value.target)
+    || !isRecord(value.input)) {
+    return false;
+  }
+  return targetMatchesSkillOperation(value.target, value.input, value.operationId);
+}
+
+function isSkillCapabilityOperation(value: unknown): value is SkillCapabilityOperation {
+  return value === 'skills.refreshStatus'
+    || value === 'skills.updateConfig'
+    || value === 'skills.updateState'
+    || value === 'skills.updateBatchState'
+    || value === 'skills.exportBundles'
+    || value === 'skills.importBundles'
+    || value === 'clawhub.openReadme'
+    || value === 'clawhub.openPath';
+}
+
+function targetMatchesSkillOperation(target: Record<string, unknown>, input: Record<string, unknown>, operation: SkillCapabilityOperation): boolean {
+  if (operation === 'skills.refreshStatus') return hasExactKeys(target, ['kind']) && target.kind === 'none' && hasExactKeys(input, []);
+  if (operation === 'skills.exportBundles') return hasExactKeys(target, ['kind']) && target.kind === 'skill-bundle' && hasExactKeys(input, ['skillKeys']) && isOpenClawSkillKeyArray(input.skillKeys);
+  if (operation === 'skills.importBundles') return hasExactKeys(target, ['kind']) && target.kind === 'skill-bundle' && hasExactKeys(input, ['skillBundles']) && Array.isArray(input.skillBundles);
+  if (operation === 'skills.updateBatchState') return hasExactKeys(target, ['kind']) && target.kind === 'skill' && hasExactKeys(input, ['skillKeys', 'enabled']) && isOpenClawSkillKeyArray(input.skillKeys) && typeof input.enabled === 'boolean';
+  const skillId = skillTargetId(target);
+  if (skillId === null) return false;
+  if (operation === 'skills.updateConfig') return hasExactKeys(input, ['skillKey', 'apiKey', 'env']) && input.skillKey === skillId && typeof input.apiKey === 'string' && isCapabilityStringRecord(input.env);
+  if (operation === 'skills.updateState') return hasExactKeys(input, ['skillKey', 'enabled']) && input.skillKey === skillId && typeof input.enabled === 'boolean';
+  return input.skillKey === skillId
+    && (input.slug === undefined || input.slug === target.slug)
+    && (input.baseDir === undefined || isAbsolutePath(input.baseDir, 4 * 1024))
+    && (input.filePath === undefined || (isAbsolutePath(input.filePath, 4 * 1024) && isManifestPath(input.filePath)))
+    && hasOnlyKeys(input, ['skillKey', 'slug', 'baseDir', 'filePath']);
+}
+
+function skillTargetId(target: Record<string, unknown>): string | null {
+  if (!hasOnlyKeys(target, ['kind', 'skillId', 'slug'])
+    || target.kind !== 'skill'
+    || !isOpenClawSkillKey(target.skillId)
+    || (target.slug !== undefined && !isOpenClawSkillKey(target.slug))) {
+    return null;
+  }
+  return target.skillId;
+}
+
+function isNativeRuntimeScope(value: unknown): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ['kind', 'endpoint'])
+    && value.kind === 'runtime-instance'
+    && isRecord(value.endpoint)
+    && hasExactKeys(value.endpoint, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
+    && value.endpoint.kind === 'native-runtime'
+    && value.endpoint.runtimeAdapterId === 'openclaw'
+    && value.endpoint.runtimeInstanceId === 'local';
+}
+
+function isCapabilityStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'string');
 }
 
 function normalizeSkillStatusEntry(value: unknown): NativeSkillStatusEntry | null {
@@ -654,6 +812,10 @@ function isManifestPath(value: string): boolean {
 
 function isOpenClawSkillKey(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= 4_096 && !value.includes('\0');
+}
+
+function isOpenClawSkillKeyArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every(isOpenClawSkillKey);
 }
 
 function isSlug(value: unknown): value is string {

@@ -2,6 +2,74 @@
     "auth": {
         "boot": {
             "title": "ログイン状態を確認中"
+        },
+        "title": {
+            "login": "ログイン",
+            "register": "アカウントを作成",
+            "twoFactor": "2段階認証"
+        },
+        "description": {
+            "login": "アカウントでログインして、MatchaClaw の利用を続けましょう。",
+            "register": "MatchaClaw のアカウントを作成します。",
+            "twoFactor": "認証アプリに表示されているコードを入力してください。"
+        },
+        "submit": {
+            "login": "ログイン",
+            "register": "アカウントを作成",
+            "twoFactor": "認証してログイン"
+        },
+        "offline": {
+            "title": "サービスに接続できません",
+            "description": "一時的にアカウントサービスに接続できません。",
+            "hint": "先にローカル機能を利用するか、接続を再試行できます。",
+            "retry": "接続を再試行"
+        },
+        "localEntry": {
+            "offline": "ローカル機能を利用",
+            "guest": "今はログインしない",
+            "guestDescription": "まずはローカル機能を利用し、後からログインできます。"
+        },
+        "errors": {
+            "emailRequiredForCode": "コードを送信するには、メールアドレスを入力してください。",
+            "registrationClosed": "現在、新規登録は受け付けていません。"
+        },
+        "notice": {
+            "verifyCodeSent": "確認コードをメールで送信しました。"
+        },
+        "registrationClosedHint": "現在、新規登録は受け付けていません。既存のアカウントでログインしてください。",
+        "fields": {
+            "code": "認証コード",
+            "email": "メールアドレス",
+            "password": "パスワード",
+            "emailCode": "メール確認コード"
+        },
+        "placeholders": {
+            "twoFactorCode": "認証アプリのコードを入力",
+            "password": "パスワードを入力",
+            "emailCode": "メールで届いたコードを入力"
+        },
+        "actions": {
+            "sendVerifyCode": "コードを送信"
+        },
+        "switch": {
+            "hasAccount": "すでにアカウントをお持ちですか？",
+            "noAccount": "アカウントをお持ちでない方",
+            "login": "ログイン",
+            "register": "新規登録",
+            "registrationClosed": "新規登録は受付停止中です"
+        },
+        "legal": {
+            "prefix": "続行すると、",
+            "terms": "利用規約",
+            "and": "および",
+            "privacy": "プライバシーポリシー",
+            "suffix": "に同意したものとみなされます。"
+        },
+        "preview": {
+            "heading": "MatchaClaw へようこそ",
+            "copy": "MatchaClaw で、日々の作業を進めましょう。",
+            "offlineHeading": "まずはローカル機能から",
+            "offlineCopy": "アカウントサービスに接続できない間も、ローカル機能から利用を始められます。"
         }
     },
     "sidebar": {

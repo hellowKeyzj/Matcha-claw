@@ -7,18 +7,20 @@
 - `LEGACY-REJECTED`：path 仍注册，返回明确 bad request；它是当前可观察行为。
 - `main-owned`：Electron 在 child 前处理，见 [scope.md](scope.md)。
 
-Renderer public entry 由 Electron [capabilities.ts](../../electron/api/routes/capabilities.ts)、[sessions.ts](../../electron/api/routes/sessions.ts)、[cron.ts](../../electron/api/routes/cron.ts)、[channels.ts](../../electron/api/routes/channels.ts)、[providers.ts](../../electron/api/routes/providers.ts)、[runtime-topology.ts](../../electron/api/routes/runtime-topology.ts) 等 route 维持；Rust child 的 Host-owned loopback 入口已收敛为 [localhost server](../../runtime-host/host/src/transport/localhost/server.rs)，业务 handler/adapter 仍在 [runtime-host/host/src/transport/](../../runtime-host/host/src/transport/)，private control 在 [runtime-host/host/src/control/](../../runtime-host/host/src/control/) 中实现。旧 `runtime-host/composition/*.ts` route composition 已是历史来源，不是当前 active owner。
+Renderer public entry 由 Electron [capabilities.ts](../../electron/api/routes/capabilities.ts)、[sessions.ts](../../electron/api/routes/sessions.ts)、[cron.ts](../../electron/api/routes/cron.ts)、[channels.ts](../../electron/api/routes/channels.ts)、[providers.ts](../../electron/api/routes/providers.ts)、[runtime-topology.ts](../../electron/api/routes/runtime-topology.ts) 等 route 维持；Rust child 的 Host-owned loopback 入口是 [host HTTP server](../../runtime-host/host/src/http/server.rs)，private control 在 [runtime-host/host/src/control/](../../runtime-host/host/src/control/) 中只处理 framed wire/ready/EOF/outcome/event loop。业务 handler/adapter 位于对应 owner module；loopback router 只消费 installed `ModuleCatalog` 派生的 route descriptors，不保留 compatibility/business special-case。legacy root compatibility module 已删除，不再注册 `GET /health`、`POST /dispatch`、`POST /lifecycle/restart` 或 `POST /lifecycle/stop`。`ModuleDescriptor.effects` 声明 effect ownership，Host 安装路径把 Foundation `ModuleScope` registrations 映射给 Platform catalog 校验 scoped registrations。team/fleet/session 等业务入口是 owner module descriptors，loopback listener 才是 Host transport extension。Platform loopback outcome 支持 Response/Stream/Upgrade，当前 Host 统一 loopback server 直接写回 session stream 与 fleet terminal upgrade outcome；统一 listener 自身作为 Host transport extension scope 管理。[VERIFY: runtime-host/platform/src/module.rs:141-204] [VERIFY: runtime-host/platform/src/module.rs:239-304] [VERIFY: runtime-host/platform/src/loopback.rs:152-218] [VERIFY: runtime-host/host/src/module_registry/install.rs] [VERIFY: runtime-host/host/src/http/router.rs] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/mod.rs:73-85] [VERIFY: runtime-host/host/src/http/server.rs:20-40] 旧 `runtime-host/composition/*.ts` route composition 已是历史来源，不是当前 active owner。
 
 ## A. transport and child operational surface
 
 | Method | Path | Classification | Notes |
 | --- | --- | --- | --- |
-| `GET` | `/health` | child direct | root child health; outside `/dispatch`. |
-| `POST` | `/dispatch` | child direct | v1 envelope entrypoint. |
-| `POST` | `/lifecycle/restart` | child direct | internal child lifecycle restart. |
-| `POST` | `/lifecycle/stop` | child direct | child stop. |
+| private control | `host.health` | Electron child-private | replaces retired root `GET /health`; not Renderer API. |
+| private control | `host.runtime.snapshot` | Electron child-private | host/private runtime snapshot; not Renderer API. |
+| retired | `GET /health` | retired | legacy root compatibility removed. |
+| retired | `POST /dispatch` | retired | legacy v1 envelope removed; product traffic uses signed loopback module routes. |
+| retired | `POST /lifecycle/restart` | retired | child process restart is Electron `POST /api/runtime-host/restart`; peer lifecycle restart is `/api/runtime-control/lifecycle/restart`. |
+| retired | `POST /lifecycle/stop` | retired | child process stop is `DirectRuntimeHost.stop()`/stdin EOF; peer lifecycle stop is `/api/runtime-control/lifecycle/stop`. |
 | `GET` | `/api/runtime-host/health` | Renderer allowlisted | application health projection. |
-| `GET` | `/api/runtime-host/transport-stats` | Renderer allowlisted | dispatch metrics projection. |
+| `GET` | `/api/runtime-host/transport-stats` | Renderer allowlisted | transport metrics projection. |
 | `GET` | `/api/runtime-host/provider-env-map` | Renderer allowlisted | sanitized projection. |
 | `GET` | `/api/runtime-host/host-bootstrap-settings` | Renderer allowlisted | sanitized projection. |
 | `GET` | `/api/runtime-host/gateway-launch-plan` | Renderer allowlisted | sanitized projection. |
@@ -28,7 +30,7 @@ Renderer public entry 由 Electron [capabilities.ts](../../electron/api/routes/c
 | `GET` | `/api/workbench/bootstrap` | Renderer allowlisted | workbench bootstrap. |
 | `GET` | `/api/plugins/runtime` / `/api/plugins/catalog` | Renderer allowlisted | plugin projections. |
 
-Evidence: [capabilities.ts](../../electron/api/routes/capabilities.ts)、[cron.ts](../../electron/api/routes/cron.ts)、[runtime-host-delivery/control.ts](../../electron/main/runtime-host-delivery/control.ts)、[transport/](../../runtime-host/host/src/transport/)、[control/dispatch.rs](../../runtime-host/host/src/control/dispatch.rs)。
+Evidence: [capabilities.ts](../../electron/api/routes/capabilities.ts)、[cron.ts](../../electron/api/routes/cron.ts)、[runtime-host-delivery/control.ts](../../electron/main/runtime-host-delivery/control.ts)、[private_control.rs](../../runtime-host/host/src/module_registry/private_control.rs)、[http/router.rs](../../runtime-host/host/src/http/router.rs)。
 
 ## B. capability and topology surface
 
@@ -36,7 +38,7 @@ Evidence: [capabilities.ts](../../electron/api/routes/capabilities.ts)、[cron.t
 | --- | --- | --- | --- |
 | `GET` | `/api/capabilities/list` | Renderer allowlisted | capability discovery. |
 | `POST` | `/api/capabilities/describe` | Renderer allowlisted | `{ id, scope }`. |
-| `POST` | `/api/capabilities/execute` | Renderer allowlisted | main business mutation/operation protocol；Rust private control backs team.runtime、skills/plugins and selected OpenClaw operations, but the private command vocabulary is not exposed to Renderer；Toolchain prepare 不走 capability execute，改走 dedicated `/api/toolchain/uv/prepare`；Remote Fleet start/stop/sync 不走 capability execute，直接走 `/api/remote-fleet/*` → signed Rust `/api/fleet`；其他 accepted-only async operation 使用 owner/facade typed operation query/event。 |
+| `POST` | `/api/capabilities/execute` | Renderer allowlisted | main business mutation/operation protocol；business execution 走 Electron route → signed loopback module route → owner module/facade，不走 Rust private control；Toolchain prepare 不走 capability execute，改走 dedicated `/api/toolchain/uv/prepare`；Remote Fleet start/stop/sync 不走 capability execute，直接走 `/api/remote-fleet/*` → signed Rust `/api/fleet`；其他 accepted-only async operation 使用 owner/facade typed operation query/event。 |
 | `GET` | `/api/runtime-adapters/list` | Renderer allowlisted | Runtime Endpoint Directory projection; current Rust surface is fixed local OpenClaw/Matcha peers, not dynamic registry. |
 | `GET` | `/api/runtime-adapters/instances/list` | Renderer allowlisted | Runtime Endpoint Directory projection. |
 | `GET` | `/api/runtime-connectors/list` | Renderer allowlisted | Runtime Endpoint Directory projection. |
@@ -92,7 +94,7 @@ configure/delete 已接入 native config store：非 running 时锁内原子提�
 
 WhatsApp 删除在每次配置提交前按 native 账户继承/覆盖与 Gateway cwd 解析 `authDir`，构造 cleanup plan；提交确认后才清理。managed `credentials/whatsapp` 严格子目录可递归删除，legacy OAuth 根仅清 Baileys 文件；共享目录、外部路径、父根、symlink/reparse escape 与越界 OAuth override 在提交前拒绝。CAS 耗尽返回 `target_rejected`，提交后清理失败返回 `unknown`。离线表单仅投影有依据的标量字段，不以空表单表示成功；微信 `2.4.8` 的真正 channel schema 仅含 `replyProgressMessages`，不混用插件级配置 schema。插件未安装、来源歧义或 schema 不可读仍返回 `unknown`；当前本地 `2026.9.2` 安装包未包含 WhatsApp extension，未验证其离线表单。上述不表示所有 ClawX 边缘行为或真实登录/删除现场已验证。
 
-当前实现依据：`runtime-host/host/src/transport/channel_delete.rs`、`runtime-host/host/src/channel/actor.rs`、`runtime-host/host/src/runtime/adapters/openclaw/ops/channel.rs`、`runtime-host/integrations/openclaw/src/operations/channel_status.rs` 与 `channel_config.rs`、`channel_config/{mutation,credentials}.rs`。
+当前实现依据：`runtime-host/modules/channels/src/adapters/loopback/delete.rs`、`runtime-host/modules/channels/src/owner/actor.rs`、`runtime-host/integrations/openclaw/src/driver/ops/channel.rs`、`runtime-host/integrations/openclaw/src/operations/channel_status.rs` 与 `channel_config.rs`、`channel_config/{mutation,credentials}.rs`。
 
 `/api/provider-models/discover` response 只保留 public model option 字段：`modelId`、`capabilities`、`contextWindow`、`maxTokens`、`timeoutMs`、`aspectRatio`、`resolution`、`quality`；不返回 `source`、`checkedAt`、`apiKey`、`baseUrl`、`headers`、`runtimeModelRef`、`accountId`。
 
@@ -112,8 +114,8 @@ Evidence: [openclaw-routes.ts](../../runtime-host/api/routes/openclaw-routes.ts#
 | `GET` | `/api/platform/runtime/health`, `/api/platform/tools` | Renderer allowlisted |
 | `POST` | `/api/diagnostics/archive`, `/api/diagnostics/archive/download` | Renderer allowlisted; main-owned diagnostics archive receipt/download surface |
 | `POST` | `/api/platform/tools/query` | child direct; not in current public allowlist |
-| `GET` | `/api/toolchain/uv/check` | Renderer allowlisted; Electron projects Rust `host.toolchain.status` to `{ installed }` |
-| `POST` | `/api/toolchain/uv/prepare` | Renderer allowlisted; Electron calls Rust `host.toolchain.prepare` and returns public outcome |
+| `GET` | `/api/toolchain/uv/check` | Renderer allowlisted; Electron projects `toolchainTransport.status()` from modules/toolchain owner loopback to `{ installed }` |
+| `POST` | `/api/toolchain/uv/prepare` | Renderer allowlisted; Electron calls `toolchainTransport.prepare()` and returns public outcome |
 | `GET` | `/api/security`, `/api/security/destructive-rule-catalog`, `/api/security/audit` | Renderer allowlisted |
 | `GET` | `/api/cron/jobs`, `/api/cron/session-history` | Renderer allowlisted |
 | `POST` | `/api/cron/jobs/{create,update,delete,toggle}` | Renderer allowlisted; fixed Cron capability envelope |
@@ -145,7 +147,7 @@ Evidence: [Cron types](../../src/types/cron.ts)、[Cron store](../../src/stores/
 | `GET` | `/api/external-connectors`, `/mcp-server-programs`, `/status` | Renderer allowlisted |
 | `POST` | `/probe`, `/session-status`, `/get`, `/upsert`, `/remove` | Renderer allowlisted；`/session-status` 请求体为 `sessionIdentity` + 可选 `endpointSessionId`，`endpointSessionId` 是 peer runtime session metadata，不参与 Host identity。 |
 
-Evidence: [external-connectors.ts](../../electron/api/routes/external-connectors.ts)、[external.ts](../../electron/main/runtime-host-delivery/transport/connectors/external.ts)、[external_connectors.rs](../../runtime-host/host/src/transport/external_connectors.rs)。
+Evidence: [external-connectors.ts](../../electron/api/routes/external-connectors.ts)、[external.ts](../../electron/main/runtime-host-delivery/transport/connectors/external.ts)、[connectors loopback adapter](../../runtime-host/modules/connectors/src/adapters/loopback/external.rs)。
 
 ### Remote Fleet
 
@@ -153,10 +155,10 @@ Evidence: [external-connectors.ts](../../electron/api/routes/external-connectors
 | --- | --- | --- |
 | `GET` | `/api/remote-fleet/snapshot`, `/metrics`, `/terminal/sessions`, `/list-commands`, `/list-audit-events` | Renderer allowlisted |
 | `POST` | register-connection/delete-connection/register-environment/delete-environment; write credential; remove node; probe/probe-connection; install/revoke agent; deploy/delete environment; drain/retire endpoint; start/stop runtime; sync capabilities; terminal open/reconnect/close | Renderer allowlisted; legacy node registration `/api/remote-fleet/register` 已关闭，不是 public active route；node dispatch receipts (`accepted/completed/rejected/outcomeUnknown`) 与 owner-local begin/terminal receipts 已投影为现有 renderer `command` payload |
-| `WS` | Electron public `/api/remote-fleet/terminal/stream` → unified Rust localhost server Fleet terminal route | Renderer allowlisted WebSocket；route upgrade outcome, not an independent Host-owned listener |
+| `WS` | Electron public `/api/remote-fleet/terminal/stream` → unified Rust loopback server Fleet terminal route | Renderer allowlisted WebSocket；route upgrade outcome, not an independent Host-owned listener |
 | `POST` | `/api/remote-fleet/runtime-agent/ingress` | external RemoteAgent ingress, not Renderer IPC；Electron API server ingress proxy → Rust Fleet transport → Rust handler → FleetHandle core path 已接入 |
 
-Current route/transport evidence: [fleet.ts](../../electron/api/routes/fleet.ts)、[Electron API server](../../electron/api/server.ts)、[fleet transport](../../electron/main/runtime-host-delivery/transport/fleet.ts)、[Rust fleet transport](../../runtime-host/host/src/transport/fleet.rs)、[Rust fleet server](../../runtime-host/host/src/transport/fleet/server.rs)。
+Current route/transport evidence: [fleet.ts](../../electron/api/routes/fleet.ts)、[Electron API server](../../electron/api/server.ts)、[fleet transport](../../electron/main/runtime-host-delivery/transport/fleet.ts)、[Rust fleet module route](../../runtime-host/modules/fleet/src/adapters/loopback/mod.rs)、[host HTTP server](../../runtime-host/host/src/http/server.rs)。
 
 FleetOwner 当前仍保留单 Fleet durable authority；owner-local keyed lanes 已通过 Rust 侧证据，覆盖 terminal provider open、dispatch、connection/environment/resource lifecycle；Remote Fleet mutation payload projection、live recovery、startup Pending replay scanner、query refresh、terminal provider failure owner-local settlement 与 focused tests 已通过；不拆 per-target/per-resource owner。focused fault/backpressure、process restart/terminal replay、package/Windows、SSH bootstrap gates 未全闭合。
 
@@ -177,4 +179,4 @@ Evidence: [gateway-routes.ts](../../runtime-host/api/routes/gateway-routes.ts#L1
 
 ## Route response rule
 
-Route handlers return `{ status, data }`, which child `/dispatch` wraps in the v1 outer envelope. Most `routeResponder.value()` operations become status `200` on success; `routeResponder.result()` preserves an application response’s status. Read-only routes may sanitize secret-like fields. See [route-utils.ts](../../runtime-host/api/routes/route-utils.ts#L51-L180) and [transport.md](transport.md)。
+Rust module route handlers return `platform::loopback::RouteOutcome`; the Host HTTP substrate writes Response/Stream/Upgrade directly. There is no legacy `/dispatch` outer envelope on the Rust final path. Public responses must remain redacted; owner module adapters own DTO decode and projection. See [transport.md](transport.md)。

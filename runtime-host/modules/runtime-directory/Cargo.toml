@@ -1,0 +1,16 @@
+[package]
+name = "runtime-directory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+foundation = { version = "0.1.0", path = "../../foundation" }
+platform = { version = "0.1.0", path = "../../platform" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }

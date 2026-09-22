@@ -3,7 +3,7 @@ use std::{fmt, path::Path, time::Duration};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 
-use environment::CredentialReference;
+use ::provider::CredentialReference;
 
 use crate::lifecycle::state_dir::{CanonicalStateDir, StateDirError};
 

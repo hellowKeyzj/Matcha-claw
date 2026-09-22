@@ -1,9 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import type { RuntimeHostControlOutcome } from '../../main/runtime-host-delivery/control';
+import type { RuntimeControlTransportResponse, RuntimeLogsResponse } from '../../main/runtime-host-delivery/transport/runtime-control';
 import { logger } from '../../utils/logger';
 import { getOpenClawConfigDir } from '../../utils/paths';
-import type { RuntimeHostApiContext } from '../context';
+import type { RuntimeHostTransportContext } from '../context';
 import { sendJson } from '../route-utils';
 
 const DEFAULT_TAIL_LINES = 100;
@@ -47,7 +47,7 @@ export async function handleLogRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: RuntimeHostApiContext,
+  ctx: RuntimeHostTransportContext<'runtimeControlTransport'>,
 ): Promise<boolean> {
   if (url.pathname === '/api/logs' && req.method === 'GET') {
     sendJson(res, 200, { content: await logger.readLogFile(parseTailLines(url)) });
@@ -80,14 +80,13 @@ export async function handleLogRoutes(
 async function handleOpenClawLogs(
   res: ServerResponse,
   url: URL,
-  ctx: RuntimeHostApiContext,
+  ctx: RuntimeHostTransportContext<'runtimeControlTransport'>,
 ): Promise<void> {
   try {
     const cursor = parseCursor(url);
-    const logs = decodeOpenClawLogs(await ctx.runtimeHost.command({
-      name: 'openclaw.logs',
-      input: cursor === undefined ? {} : { cursor },
-    }));
+    const logs = decodeOpenClawLogs(await ctx.runtimeHostTransports.runtimeControlTransport.logs(
+      cursor === undefined ? undefined : { cursor },
+    ));
     if (!logs) {
       sendOpenClawLogsUnavailable(res);
       return;
@@ -98,14 +97,12 @@ async function handleOpenClawLogs(
   }
 }
 
-function decodeOpenClawLogs(outcome: RuntimeHostControlOutcome): OpenClawLogSnapshot | null {
-  if (outcome.kind !== 'succeeded'
-    || !isRecord(outcome.result)
-    || !hasExactKeys(outcome.result, ['result'])) {
+function decodeOpenClawLogs(response: RuntimeControlTransportResponse<RuntimeLogsResponse>): OpenClawLogSnapshot | null {
+  if (response.status !== 200) {
     return null;
   }
 
-  const result = outcome.result.result;
+  const result = response.body.result;
   if (!isRecord(result)
     || !hasExactKeys(result, ['entries', 'cursor', 'reset', 'truncated', 'lifecycleTailEvicted'])
     || !Array.isArray(result.entries)

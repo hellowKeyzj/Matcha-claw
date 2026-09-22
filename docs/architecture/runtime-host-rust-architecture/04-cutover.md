@@ -14,34 +14,35 @@
 
 - route ownership matrix；
 - operation → owner → state source → projection matrix；
-- DirectRuntimeHost/direct transport 与 `/dispatch` 的替代关系；
+- DirectRuntimeHost private control、signed loopback product routes 与已删除 root compatibility 的替代关系；
 - 每个 owner 的旧 writer 删除条件。
 
 此 block 完成前不再扩展 Rust 业务目录。
 
-## Block 1：Rust child Delivery compatibility
+## Block 1：Rust child Delivery final form
 
-Rust 先成为一个可被 Electron 以既有方式调用的 child，不先迁移业务：
+Rust child 的 active delivery 面直落为：
 
 ```text
-/health
-/dispatch
-/lifecycle/restart
-/lifecycle/stop
+DirectRuntimeHost bootstrap/private control
+signed loopback product routes
+Electron-owned child stop/restart
 parent callbacks
 ```
 
+旧 root `/health`、`/dispatch`、`/lifecycle/restart`、`/lifecycle/stop` compatibility island 已删除，不再作为迁移目标。
+
 必须验证：
 
-- v1 envelope success/failure；
-- 1 MB body / 413；
-- 30s/3s/15s/3s timeout；
-- malformed response、404、500、503；
+- bootstrap frame、private control ready、unknown command rejection；
+- `host.health` / `host.runtime.snapshot` redaction；
+- signed route decision binding、expiry、replay/mismatch rejection；
+- product route 30s/default deadline 或 route-local deadline；
 - parent token/version/content-type；
 - event best-effort 与 owner/facade typed query recovery；
 - Electron main-owned route、CLI、webhook、Fleet ingress、terminal WS 不串 owner。
 
-这一步不删除 Electron 的 Rust child process manager；它只替换 child server/owner 的实现。Electron 仍负责该 child 的桌面 lifecycle。
+这一步不删除 Electron 的 Rust child process manager；Electron 仍负责该 child 的桌面 lifecycle。
 
 ## Block 2：Foundation + peer lifecycle composition
 
@@ -60,7 +61,7 @@ Foundation mechanism
 
 先闭合 Rust Host 的最小安全 projection：
 
-- child `/health` 与 application health 分层；
+- Host private health 与 application health 分层；
 - Host admission 与 peer health 分层；
 - safe events、parent callback、host:event；
 - diagnostics archive/receipt/download；
@@ -102,22 +103,22 @@ Renderer session/history request
 2. Gateway health/connection/lifecycle；
 3. channel config/live/login/pairing；
 4. cron definitions/run/receipt/history；
-5. skills/plugins/provider/toolchain 等各自 operation owner；Toolchain prepare 走 dedicated Host path：Renderer `hostToolchainPrepare()` → Electron `/api/toolchain/uv/prepare` → Rust private `host.toolchain.prepare` → `runtime-host/external/toolchain::NativeToolchain`，并等待真实结果。
+5. skills/plugins/provider/toolchain 等各自 operation owner；Toolchain prepare 走 dedicated owner path：Renderer `hostToolchainPrepare()` → Electron `/api/toolchain/uv/prepare` → `toolchainTransport.prepare()` → modules/toolchain owner loopback → `runtime-host/modules/toolchain::NativeToolchain`，并等待真实结果。
 
 每个 operation 必须拆开 config write、apply、ready、observed 和 terminal outcome；不能由 Host 或已删除的 Host-wide generic operation queue 代管。
 
-## Block 6：Environment 子 owner
+## Block 6：独立产品 owner modules
 
-Environment 不是 generic config owner。以下 owner 分别闭合：
+以下能力由已有 `modules/` owner 分别闭合，不设 Environment 聚合 owner：
 
-- connector desired/persisted/applied/global probe/session status；
-- provider account/model/routing/private auth；
-- settings desired/private OpenClaw projection/Gateway apply；
-- security policy/plugin apply/audit/enforcement；
-- license 产品面已退休，不再作为 Environment owner 迁移；
-- toolchain verify/prepare result。
+- `modules/connectors`：desired/persisted/applied/global probe/session status；
+- `modules/provider`：account/model/routing/private auth；
+- `modules/settings`：desired/private OpenClaw projection/Gateway apply；
+- `modules/security`：policy/plugin apply/audit/enforcement；
+- license 产品面已退休，不再迁移；
+- `modules/toolchain`：verify/prepare result。
 
-各 owner 处理自己的 schema migration、secret boundary、Unknown/readback 和 typed operation projection。Toolchain prepare 等需要真实业务结果的调用必须等待 native terminal result；只有 accepted-only operation 才返回 owner-local operationId，并由具体 owner/facade typed operation query/event 恢复。不能把它们合并为一个 `EnvironmentState`。
+各 owner 处理自己的 schema migration、secret boundary、Unknown/readback 和 typed operation projection。Toolchain prepare 等需要真实业务结果的调用必须等待 native terminal result；只有 accepted-only operation 才返回 owner-local operationId，并由具体 owner/facade typed operation query/event 恢复。不能把它们合并为一个 `EnvironmentState`。无消费者的旧 `domains/environment` crate 与聚合 revision/grant/reconciliation 模型退役，不建立 `modules/environment`；这不等于本 block 的功能或 cutover 验证完成。OpenClaw `crate::environment` 安装检查与 Fleet environment 生命周期保留。
 
 ## Block 7：Fleet
 

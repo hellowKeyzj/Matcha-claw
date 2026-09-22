@@ -11,13 +11,9 @@ use std::{
 };
 
 use crate::composition::RuntimeShutdownOutcome;
-use environment::{
-    ProviderAccountId, ProviderAccountStore, ProviderModelCapability, ProviderModelReference,
-    ProviderModelStore, ProviderRoute, ProviderRouting, ProviderRoutingCapability,
-    ProviderRoutingRevision,
-};
-use matcha_agent::lifecycle::{output::StartupDiagnosticCategory, secret::Secret};
+use matcha_agent::{driver::MatchaAgentInput, lifecycle::secret::Secret};
 use openclaw::{
+    driver::OpenClawInput,
     gateway::{auth::GatewaySecret, client::GatewayClientMetadata},
     lifecycle::state_dir::CanonicalStateDir,
 };
@@ -27,17 +23,21 @@ use organization::{
     TeamDefinition, TeamFacts, TeamId, TeamMember, TeamRevision, TeamRole, TriggerFireRequest,
     TriggerRegistration, TriggerSource,
 };
+use provider_module::{
+    ProviderAccountId, ProviderAccountStore, ProviderModelCapability, ProviderModelReference,
+    ProviderModelStore, ProviderRoute, ProviderRouting, ProviderRoutingCapability,
+    ProviderRoutingRevision,
+};
 use serde_json::json;
+use workspace::WorkspaceOps;
 
 use super::*;
 use crate::{
-    composition::admission::HostPhase,
-    diagnostics::{HostLifecycle, RuntimeLifecycle},
-    host_actor::Owner,
-    sessions::model_selection::{
-        NativeEndpoint as SessionModelSelectionNativeEndpoint, SessionModelSelectionCommand,
-        SessionModelSelectionOutcome,
-    },
+    HostLifecycle, RuntimeLifecycle, composition::admission::HostPhase, host_actor::Owner,
+};
+use sessions_module::model_selection::{
+    NativeEndpoint as SessionModelSelectionNativeEndpoint, SessionModelSelectionCommand,
+    SessionModelSelectionOutcome,
 };
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
@@ -134,22 +134,22 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
     let root = TestRoot::new();
     let host_input = host_input(&root);
     let account_id = ProviderAccountId::try_new("local-ollama").expect("account identifier");
-    let account = environment::ProviderAccount::new(
+    let account = provider_module::ProviderAccount::new(
         account_id.clone(),
-        environment::ProviderReference::try_new("provider:ollama").expect("provider reference"),
-        environment::ProviderAccountRevision::try_new(1).expect("account revision"),
-        environment::ProviderAccountConfiguration::try_new(
-            environment::ProviderAccountConfigurationInput {
+        provider_module::ProviderReference::try_new("provider:ollama").expect("provider reference"),
+        provider_module::ProviderAccountRevision::try_new(1).expect("account revision"),
+        provider_module::ProviderAccountConfiguration::try_new(
+            provider_module::ProviderAccountConfigurationInput {
                 label: "Local Ollama".into(),
                 enabled: true,
-                kind: environment::ProviderAccountKind::Chat,
+                kind: provider_module::ProviderAccountKind::Chat,
                 endpoint: Some(
-                    environment::ProviderEndpoint::try_new("http://127.0.0.1:11434/v1")
+                    provider_module::ProviderEndpoint::try_new("http://127.0.0.1:11434/v1")
                         .expect("endpoint"),
                 ),
-                protocol: Some(environment::ProviderApiProtocol::OpenAiResponses),
+                protocol: Some(provider_module::ProviderApiProtocol::OpenAiResponses),
                 media_protocol: None,
-                auth_mode: environment::ProviderAccountAuthMode::Local,
+                auth_mode: provider_module::ProviderAccountAuthMode::Local,
                 credential: None,
                 created_at: "2026-08-02T00:00:00Z".into(),
                 updated_at: "2026-08-02T00:00:00Z".into(),
@@ -167,12 +167,12 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
     let (mut host, _events, handles) = Host::new(host_input).expect("construct host");
     host.start_admission_only().await.expect("start host");
     assert!(matches!(
-        handles.provider.list_provider_accounts().await.unwrap(),
-        crate::provider::accounts::ProviderAccountsDelivery::List(ref accounts)
+        handles.provider.handle().list_provider_accounts().await.unwrap(),
+        provider_module::ProviderAccountsDelivery::List(ref accounts)
             if accounts.len() == 1 && accounts[0].id == "local-ollama"
     ));
 
-    let model = crate::provider::models::ProviderModelDraft {
+    let model = provider_module::ProviderModelDraft {
         model_id: "llama-3.3".into(),
         capabilities: vec![ProviderModelCapability::Chat],
         context_window: Some(128_000),
@@ -185,10 +185,11 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
     assert!(matches!(
         handles
             .provider
+            .handle()
             .replace_provider_models(account_id.as_str().to_owned(), vec![model])
             .await
             .unwrap(),
-        crate::provider::models::ProviderModelReplaceOutcome::DesiredStored { .. }
+        provider_module::ProviderModelReplaceOutcome::DesiredStored { .. }
     ));
     let durable_models = ProviderModelStore::open(
         root.state_parent
@@ -204,11 +205,16 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
         })
         .expect("provider model must be durable")
         .selection_id();
-    let models = handles.provider.list_provider_models().await.unwrap();
+    let models = handles
+        .provider
+        .handle()
+        .list_provider_models()
+        .await
+        .unwrap();
     assert!(
         matches!(
             models,
-            crate::provider::models::ProviderModelListOutcome::Available(ref models)
+            provider_module::ProviderModelListOutcome::Available(ref models)
                 if models.len() == 1
                     && models[0].account_id == "local-ollama"
                     && models[0].model_id == "llama-3.3"
@@ -218,10 +224,11 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
     assert!(matches!(
         handles
             .provider
+            .handle()
             .selectable_provider_models(ProviderModelCapability::Chat)
             .await
             .unwrap(),
-        crate::provider::models::ProviderModelSelectableOutcome::Available(ref models)
+        provider_module::ProviderModelSelectableOutcome::Available(ref models)
             if models.len() == 1
                 && models[0].selection_id == expected_selection_id
     ));
@@ -240,12 +247,16 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
         }]),
     );
 
-    let routing_revision = match handles.provider.list_provider_routing().await.unwrap() {
-        crate::provider::routing::ProviderRoutingListOutcome::Desired(Some(routing)) => {
-            routing.revision + 1
-        }
-        crate::provider::routing::ProviderRoutingListOutcome::Desired(None) => 1,
-        crate::provider::routing::ProviderRoutingListOutcome::Unavailable => {
+    let routing_revision = match handles
+        .provider
+        .handle()
+        .list_provider_routing()
+        .await
+        .unwrap()
+    {
+        provider_module::ProviderRoutingListOutcome::Desired(Some(routing)) => routing.revision + 1,
+        provider_module::ProviderRoutingListOutcome::Desired(None) => 1,
+        provider_module::ProviderRoutingListOutcome::Unavailable => {
             panic!("provider routing should be available")
         }
     };
@@ -264,13 +275,14 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
     .expect("routing");
     let routing_outcome = handles
         .provider
+        .handle()
         .replace_provider_routing(routing)
         .await
         .unwrap();
     assert!(
         matches!(
             routing_outcome,
-            crate::provider::routing::ProviderRoutingReplaceOutcome::DesiredStored { .. }
+            provider_module::ProviderRoutingReplaceOutcome::DesiredStored { .. }
         ),
         "unexpected provider routing outcome: {routing_outcome:?}"
     );
@@ -298,7 +310,7 @@ fn construction_is_atomic_and_does_not_materialize_runtime_files() {
 fn open_claw_client_custody_stays_behind_the_concrete_port() {
     let sources = [
         include_str!("mod.rs"),
-        include_str!("../../runtime/adapters/openclaw/mod.rs"),
+        include_str!("../../../../integrations/openclaw/src/driver/mod.rs"),
         include_str!("session_shutdown.rs"),
         include_str!("shutdown.rs"),
     ];
@@ -308,7 +320,7 @@ fn open_claw_client_custody_stays_behind_the_concrete_port() {
         assert!(!source.contains("session::client::SessionClient"));
     }
     assert!(
-        include_str!("../../runtime/adapters/openclaw/mod.rs")
+        include_str!("../../../../integrations/openclaw/src/driver/instance.rs")
             .contains("gateway: Arc<Mutex<OpenClawGateway>>")
     );
     assert!(!include_str!("mod.rs").contains(concat!(".invalidate", "_session()")));
@@ -401,10 +413,10 @@ async fn auto_openclaw_port_guard_failure_records_start_failure_without_blocking
 }
 
 #[tokio::test]
-async fn diagnostics_facade_requires_a_ready_host_and_closes_after_shutdown() {
+async fn diagnostics_module_requires_a_ready_host_and_closes_after_shutdown() {
     let root = TestRoot::new();
     let (mut host, _events, handles) = Host::new(host_input(&root)).unwrap();
-    let cancellation = crate::diagnostics::DiagnosticsArchiveCancellation::new();
+    let cancellation = ::diagnostics::DiagnosticsArchiveCancellation::new();
 
     assert!(
         handles
@@ -422,7 +434,7 @@ async fn diagnostics_facade_requires_a_ready_host_and_closes_after_shutdown() {
         .unwrap();
     assert_eq!(
         receipt.terminal(),
-        crate::diagnostics::DiagnosticsArchiveTerminal::Completed
+        ::diagnostics::DiagnosticsArchiveTerminal::Completed
     );
     assert!(receipt.entries() > 0);
     assert!(receipt.bytes() > 0);
@@ -432,7 +444,7 @@ async fn diagnostics_facade_requires_a_ready_host_and_closes_after_shutdown() {
     assert!(
         handles
             .diagnostics
-            .collect_archive(crate::diagnostics::DiagnosticsArchiveCancellation::new())
+            .collect_archive(::diagnostics::DiagnosticsArchiveCancellation::new())
             .await
             .is_err()
     );
@@ -444,14 +456,14 @@ async fn matcha_startup_diagnostic_is_projected_once_without_private_details() {
     let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
 
     host.matcha_startup_diagnostics
-        .report(StartupDiagnosticCategory::AppServerReportedError);
+        .report(::diagnostics::RuntimeStartupDiagnostic::AppServerReportedError);
     host.matcha_startup_diagnostics
-        .report(StartupDiagnosticCategory::PortConflict);
+        .report(::diagnostics::RuntimeStartupDiagnostic::PortConflict);
 
     let state = host.state();
     assert_eq!(
         state.matcha().startup_diagnostic(),
-        Some(StartupDiagnosticCategory::AppServerReportedError.into())
+        Some(::diagnostics::RuntimeStartupDiagnostic::AppServerReportedError)
     );
     assert_eq!(
         serde_json::to_value(state).unwrap()["matcha"]["startupDiagnostic"],
@@ -487,18 +499,18 @@ async fn peer_lifecycle_failures_do_not_shut_down_the_host() {
 
 #[test]
 fn successful_openclaw_lifecycle_transitions_recover_only_durable_receipts() {
-    let organization_actor = include_str!("../../organization/actor.rs");
-    let peer_actor = include_str!("../peer/actor.rs");
+    let organization_actor = include_str!("../../../../modules/organization/src/owner/actor.rs");
+    let peer_openclaw = include_str!("../peer/openclaw.rs");
 
     assert_eq!(
-        peer_actor
+        peer_openclaw
             .matches("recover_materialization_receipts().await")
             .count(),
         3
     );
     assert!(organization_actor.contains("async fn recover_materialization_receipts"));
     assert!(organization_actor.contains("materialization_receipt_recovery_teams()"));
-    assert!(organization_actor.contains("ops.recover_team_materialization(request).await"));
+    assert!(organization_actor.contains("runtime.recover_team_materialization(request).await"));
     assert!(organization_actor.contains("confirm_team_materialization(receipt)"));
     assert!(!organization_actor.contains("team::recover_team_materialization("));
 }
@@ -510,22 +522,27 @@ fn peer_lifecycle_commands_are_owned_by_peer_owner_runtime() {
     let peer_command = include_str!("../peer/command.rs");
     let peer_query = include_str!("../peer/query.rs");
     let peer_handle = include_str!("../peer/handle.rs");
-    let runtime_directory = include_str!("../../runtime/directory.rs");
-    let runtime_driver = include_str!("../../runtime/driver.rs");
+    let peer_matcha = include_str!("../peer/matcha.rs");
+    let peer_openclaw = include_str!("../peer/openclaw.rs");
+    let runtime_directory = include_str!("../runtime_ports.rs");
+    let runtime_driver = include_str!("../runtime_ports.rs");
+    let runtime_directory_lifecycle =
+        include_str!("../../../../modules/runtime-directory/src/domain/lifecycle.rs");
+    let runtime_registry = include_str!("../../../../modules/runtime-directory/src/registry.rs");
     let owner_actor = include_str!("../../host_actor/actor.rs");
-    let owners = include_str!("owner_runtime.rs");
+    let owners = include_str!("owners/runtime.rs");
     let shutdown = include_str!("shutdown.rs");
 
-    assert!(owners.contains("crate::runtime::directory::RuntimeDriverDirectory::fixed_peers("));
+    assert!(
+        owners.contains("crate::composition::runtime_ports::RuntimeDriverDirectory::fixed_peers(")
+    );
     assert!(!owners.contains("runtime_directory.register_openclaw"));
     assert!(!owners.contains("runtime_directory.register(matcha_driver)"));
-    assert!(owners.contains("let peer_owner = super::super::peer::PeerOwner::new("));
+    assert!(owners.contains("let peer_owner = crate::composition::peer::PeerOwner::new("));
     assert!(
         owners.contains("let (peer_owner_handle, peer_task) = owner_runtime_system.spawn_owner(")
     );
-    assert!(owners.contains(
-        "foundation::execution::OwnerRuntimeConfig::new(\n            64,\n            super::super::peer::PeerOwner::lane_retention(),"
-    ));
+    assert!(owners.contains("crate::composition::peer::PeerOwner::lane_retention()"));
 
     assert!(host.contains("peer_handle: PeerHandle"));
     assert!(owners.contains("peer: peer_task"));
@@ -539,8 +556,9 @@ fn peer_lifecycle_commands_are_owned_by_peer_owner_runtime() {
     assert!(peer_actor.contains("async fn handle_keyed_command("));
     assert!(peer_actor.contains("shared: Self::Shared,"));
     assert!(peer_actor.contains("key: Self::Key,"));
-    assert!(peer_actor.contains(".lookup(&key)"));
-    assert!(peer_actor.contains("driver.lifecycle_ops()"));
+    assert!(peer_actor.contains(".lookup(key)"));
+    assert!(peer_actor.contains("driver.host_lifecycle_ops()"));
+    assert!(peer_matcha.contains("lifecycle.start().await"));
     for lifecycle_operation in [
         "lifecycle.start().await",
         "lifecycle.stop().await",
@@ -548,27 +566,39 @@ fn peer_lifecycle_commands_are_owned_by_peer_owner_runtime() {
     ] {
         assert!(
             peer_actor.contains(lifecycle_operation),
-            "PeerOwner lifecycle command must use {lifecycle_operation}"
+            "generic peer runtime lifecycle command must use {lifecycle_operation}"
+        );
+        assert!(
+            peer_openclaw.contains(lifecycle_operation),
+            "OpenClaw lifecycle command must use {lifecycle_operation}"
         );
     }
     for lifecycle_command in [
-        "PeerCommand::StartMatcha",
-        "PeerCommand::StopMatcha",
-        "PeerCommand::RestartMatcha",
+        "PeerCommand::StartRuntime",
+        "PeerCommand::StopRuntime",
+        "PeerCommand::RestartRuntime",
         "PeerCommand::StartOpenClaw",
         "PeerCommand::StopOpenClaw",
         "PeerCommand::RestartOpenClaw",
     ] {
         assert!(peer_actor.contains(lifecycle_command));
     }
+    assert!(runtime_directory.contains("drivers: RuntimeDriverRegistry<Arc<dyn RuntimeDriver>>"));
     assert!(runtime_directory.contains("pub(crate) fn lookup("));
-    assert!(runtime_directory.contains("open_claw: Option<Arc<dyn RuntimeDriver>>"));
+    assert!(runtime_directory.contains("RuntimeDriverRegistry::fixed_peers("));
+    assert!(!runtime_directory.contains("open_claw: Option<Arc<dyn RuntimeDriver>>"));
+    assert!(!runtime_directory.contains("matcha_agent: Option<Arc<dyn RuntimeDriver>>"));
     assert!(!runtime_directory.contains("HashMap"));
     assert!(!runtime_directory.contains("pub(crate) fn register_openclaw"));
-    assert!(runtime_driver.contains("pub(crate) trait LifecycleOps"));
-    assert!(runtime_driver.contains("fn start(&self)"));
-    assert!(runtime_driver.contains("fn stop(&self)"));
-    assert!(runtime_driver.contains("fn restart(&self)"));
+    assert!(runtime_registry.contains("pub struct RuntimeDriverDirectory<D>"));
+    assert!(runtime_registry.contains("open_claw: Option<D>"));
+    assert!(runtime_registry.contains("matcha_agent: Option<D>"));
+    assert!(!runtime_driver.contains("pub(crate) trait LifecycleOps"));
+    assert!(runtime_driver.contains("LifecycleOps"));
+    assert!(runtime_directory_lifecycle.contains("pub trait LifecycleOps"));
+    assert!(runtime_directory_lifecycle.contains("fn start(&self)"));
+    assert!(runtime_directory_lifecycle.contains("fn stop(&self)"));
+    assert!(runtime_directory_lifecycle.contains("fn restart(&self)"));
     assert!(
         peer_command.contains("Self::AutostartMatcha")
             && peer_command.contains("Self::AutostartOpenClaw")
@@ -585,16 +615,12 @@ fn peer_lifecycle_commands_are_owned_by_peer_owner_runtime() {
     assert!(
         peer_command.contains("CommandRoute::Keyed(RuntimeDriverIdentity::open_claw().endpoint())")
     );
-    assert!(
-        peer_query.contains(
-            "Self::State { .. } | Self::MatchaStatus { .. } | Self::OpenClawStatus { .. }"
-        )
-    );
+    assert!(peer_query.contains("Self::State { .. } | Self::OpenClawStatus { .. }"));
     assert!(peer_query.contains("QueryRoute::Direct"));
     assert!(
         peer_query.contains("QueryRoute::Keyed(RuntimeDriverIdentity::open_claw().endpoint())")
     );
-    assert!(peer_handle.contains("Directory::from_host_state(&state)"));
+    assert!(peer_handle.contains("runtime_directory::Directory::from_lifecycles("));
     assert!(!peer_handle.contains("snapshot_control().await"));
 
     for removed in [
@@ -686,18 +712,18 @@ async fn team_run_trigger_actor_projects_record_replay_and_conflict() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        recorded.registration,
-        TriggerRegistration::Recorded(request.clone())
+        recorded.registration(),
+        &TriggerRegistration::Recorded(request.clone())
     );
     assert!(matches!(
-        recorded.run,
-        crate::organization::team_run::TeamRunCommandOutcome::Unavailable
+        recorded.run(),
+        &organization::TeamRunCommandOutcome::Unavailable
     ));
 
     let replayed = handle.trigger_fire(request, 3).await.unwrap().unwrap();
     assert_eq!(
-        replayed.registration,
-        TriggerRegistration::Replayed(trigger_fire_request("start", "request:one"))
+        replayed.registration(),
+        &TriggerRegistration::Replayed(trigger_fire_request("start", "request:one"))
     );
 
     let conflicted = handle
@@ -706,14 +732,14 @@ async fn team_run_trigger_actor_projects_record_replay_and_conflict() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        conflicted.registration,
-        TriggerRegistration::ConflictingIdempotencyKey {
+        conflicted.registration(),
+        &TriggerRegistration::ConflictingIdempotencyKey {
             idempotency_key: "request:one".to_owned(),
         }
     );
     assert!(matches!(
-        conflicted.run,
-        crate::organization::team_run::TeamRunCommandOutcome::Unavailable
+        conflicted.run(),
+        &organization::TeamRunCommandOutcome::Unavailable
     ));
 
     assert!(owner.handle().shutdown().await.unwrap().terminal);
@@ -723,7 +749,8 @@ async fn team_run_trigger_actor_projects_record_replay_and_conflict() {
 #[test]
 fn matcha_terminal_readback_stays_out_of_host_and_control_surfaces() {
     let host = include_str!("mod.rs");
-    let receipt_router = include_str!("../../organization/receipt_router.rs");
+    let receipt_router =
+        include_str!("../../../../modules/organization/src/owner/receipt_router.rs");
     let crate_root = include_str!("../../lib.rs");
     let control_wire = include_str!("../../control/wire.rs");
 
@@ -746,12 +773,13 @@ fn matcha_terminal_readback_stays_out_of_host_and_control_surfaces() {
 fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
     let host = include_str!("mod.rs");
     let root_actor = include_str!("../../host_actor/actor.rs");
-    let organization_actor = include_str!("../../organization/actor.rs");
-    let organization_handle = include_str!("../../organization/handle.rs");
-    let supervisor = include_str!("../../organization/supervisor.rs");
-    let run_actor = include_str!("../../organization/run_actor.rs");
-    let receipt_router = include_str!("../../organization/receipt_router.rs");
-    let owners = include_str!("owner_runtime.rs");
+    let organization_actor = include_str!("../../../../modules/organization/src/owner/actor.rs");
+    let organization_handle = include_str!("../../../../modules/organization/src/owner/handle.rs");
+    let supervisor = include_str!("../../../../modules/organization/src/owner/supervisor.rs");
+    let run_actor = include_str!("../../../../modules/organization/src/owner/run_actor.rs");
+    let receipt_router =
+        include_str!("../../../../modules/organization/src/owner/receipt_router.rs");
+    let owners = include_str!("owners/runtime.rs");
 
     assert!(!host.contains("schedule_team_run_ready_nodes"));
     assert!(!root_actor.contains("schedule_team_run_ready_nodes"));
@@ -772,8 +800,8 @@ fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
         )
     );
     assert!(owners.contains("TeamRunCoordinator::spawn"));
-    assert!(owners.contains("admission_changes: admission.subscribe()"));
-    assert!(!host.contains("team_run_coordinator: crate::organization::TeamRunCoordinatorHandle"));
+    assert!(owners.contains("tokio::sync::watch::channel(organization::AdmissionState::Changed)"));
+    assert!(!host.contains("team_run_coordinator: organization::TeamRunCoordinatorHandle"));
     assert!(!host.contains("self.team_run_coordinator.wake()"));
     assert!(!host.contains("PeerMaintenanceHandle"));
     assert!(!host.contains("peer_maintenance"));
@@ -804,16 +832,16 @@ fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
 #[test]
 fn fleet_owner_is_spawned_by_host_owner_runtime_system() {
     let host = include_str!("mod.rs");
-    let owners = include_str!("owner_runtime.rs");
+    let handles = include_str!("handles.rs");
+    let owners = include_str!("owners/runtime.rs");
     let owner_actor = include_str!("../../host_actor/actor.rs");
     let shutdown = include_str!("shutdown.rs");
 
-    assert!(owners.contains(
-        "owner_runtime_system.spawn_owner(
-        fleet,"
-    ));
-    assert!(host.contains("pub fleet: FleetHandle"));
-    assert!(owners.contains("fleet: fleet_task"));
+    assert!(owners.contains("::fleet::spawn_owner("));
+    assert!(owners.contains("organization::spawn_owner("));
+    assert!(handles.contains("pub fleet_module: FleetModule"));
+    assert!(handles.contains("pub organization_module: OrganizationModule"));
+    assert!(owners.contains("module_scope(\"fleet\", fleet_task)"));
     assert!(!host.contains("FLEET_OPERATION_CAPACITY"));
     assert!(!host.contains("fleet_connection_operations"));
     assert!(!host.contains("fleet_lifecycle_operations"));
@@ -956,21 +984,23 @@ fn fleet_audit_count(
 }
 
 #[test]
-fn cron_execution_is_owned_by_cron_facade_operation_handles() {
+fn cron_execution_is_owned_by_cron_module_operation_handles() {
     let host = include_str!("mod.rs");
-    let facade = include_str!("../../facade/cron.rs");
-    let openclaw_cron = include_str!("../../runtime/adapters/openclaw/ops/cron.rs");
-    let control_runtime = include_str!("../../control/dispatch/runtime.rs");
+    let cron_owner = include_str!("../../../../modules/cron/src/owner/actor.rs");
+    let cron_handle = include_str!("../../../../modules/cron/src/api.rs");
+    let openclaw_cron = include_str!("../../../../integrations/openclaw/src/driver/ops/cron.rs");
+    let cron_loopback = include_str!("../../../../modules/cron/src/adapters/loopback/wire.rs");
     let foundation = include_str!("../../../../foundation/src/execution/operation.rs");
     let manual = include_str!("../../../../integrations/openclaw/src/cron/manual.rs");
 
     assert!(!host.contains("cron_operations"));
     assert!(!host.contains("reap_cron_operations"));
-    assert!(facade.contains("OperationHandle"));
-    assert!(facade.contains("operations"));
-    assert!(facade.contains("cancel_operations"));
+    assert!(cron_owner.contains("OperationHandle"));
+    assert!(cron_owner.contains("active_executions"));
+    assert!(cron_handle.contains("cancel_operations"));
     assert!(openclaw_cron.contains("admit_cron_execution"));
-    assert!(control_runtime.contains("CronTriggerResult::Accepted"));
+    assert!(cron_owner.contains("CronTriggerResult::Accepted"));
+    assert!(cron_loopback.contains("CronTriggerResult::Accepted"));
     assert!(manual.contains("CancellationToken"));
     assert!(foundation.contains("cancel_and_join"));
 }
@@ -992,6 +1022,7 @@ fn parent_callback_events_stay_out_of_host_owner_operations() {
 #[test]
 fn host_keeps_business_operations_in_typed_owner_and_facade_entries() {
     let host = include_str!("mod.rs");
+    let handles = include_str!("handles.rs");
     let shutdown = include_str!("shutdown.rs");
     let owner = include_str!("../../host_actor/mod.rs");
     let actor = include_str!("../../host_actor/actor.rs");
@@ -1055,40 +1086,30 @@ fn host_keeps_business_operations_in_typed_owner_and_facade_entries() {
     for handle in [
         "pub peer: PeerHandle",
         "pub session: SessionHandle",
-        "pub provider: ProviderHandle",
-        "pub settings: crate::settings::SettingsHandle",
-        "pub connector: crate::connectors::ConnectorHandle",
-        "pub security: crate::security::SecurityHandle",
-        "pub channel: ChannelHandle",
+        "pub provider: ProviderModule",
+        "pub settings: SettingsModule",
+        "pub connector: ConnectorModule",
+        "pub security: SecurityModule",
+        "pub channel: ChannelModule",
         "pub fleet: FleetHandle",
-        "pub organization: crate::organization::OrganizationHandle",
-        "pub platform_runtime: crate::facade::PlatformRuntimeHandle",
-        "pub platform_tools: crate::facade::PlatformToolsHandle",
-        "pub plugins: crate::facade::PluginsHandle",
-        "pub skills: crate::facade::SkillsHandle",
-        "pub cron: crate::facade::CronHandle",
-        "pub agents: crate::facade::AgentsHandle",
-        "pub task_manager: crate::facade::TaskManagerHandle",
-        "pub workspace: crate::facade::WorkspaceHandle",
-        "pub usage: crate::facade::UsageHandle",
-        "pub diagnostics: crate::facade::DiagnosticsHandle",
+        "pub fleet_module: FleetModule",
+        "pub organization_module: OrganizationModule",
+        "pub organization: organization::OrganizationHandle",
+        "pub platform_tools: PlatformToolsModule",
+        "pub plugins: plugins_module::PluginsModule",
+        "pub skills: skills_module::SkillsModule",
+        "pub cron: CronModule",
+        "pub agents: SubagentsModule",
+        "pub task_manager: TaskModule",
+        "pub workspace: WorkspaceModule",
+        "pub usage: UsageModule",
+        "pub diagnostics: DiagnosticsModule",
     ] {
         assert!(
-            host.contains(handle),
+            handles.contains(handle),
             "HostHandles must expose typed business entry: {handle}"
         );
     }
-}
-
-#[tokio::test]
-async fn usage_history_requires_runtime_admission() {
-    let root = TestRoot::new();
-    let (_host, _events, handles) = Host::new(host_input(&root)).unwrap();
-
-    assert_eq!(
-        handles.usage.recent(10).await,
-        Err(crate::facade::UsageReadError::Unavailable)
-    );
 }
 
 #[tokio::test]
@@ -1133,16 +1154,15 @@ async fn ready_host_rejects_runtime_operations_when_runtimes_are_not_running() {
     host.start().await.unwrap();
 
     assert!(matches!(
-        handles
-            .workspace
-            .read_text("agent:main:test-session", "notes.txt", 2 * 1024 * 1024,),
-        Err(crate::runtime::driver::WorkspaceReadFailure::Unavailable)
+        host.open_claw
+            .read_text("agent:main:test-session", "notes.txt", 2 * 1024 * 1024),
+        Err(workspace::WorkspaceReadFailure::Unavailable)
     ));
     assert!(matches!(
         handles
             .task_manager
             .task_manager(
-                crate::tasks::manager::Command::list(
+                task_manager::TaskCommand::list(
                     "main".into(),
                     "agent:main:test-session".into(),
                     None,
@@ -1150,8 +1170,8 @@ async fn ready_host_rejects_runtime_operations_when_runtimes_are_not_running() {
                 .unwrap(),
             )
             .await,
-        Ok(crate::tasks::manager::Outcome::List(
-            crate::tasks::manager::ReadOutcome::Unavailable
+        Ok(task_manager::TaskOutcome::List(
+            task_manager::TaskReadOutcome::Unavailable
         ))
     ));
     assert_eq!(

@@ -32,7 +32,7 @@ Rust 替换 child 与其内部实现；Renderer/preload contract 不因迁移改
 ```
 
 1. **Renderer 实际消费者优先。** 请求字段、返回字段、错误处理、timeout、轮询和事件消费以 `src/` 调用方为首要证据。
-2. **Electron 是 child 的协议客户端。** Rust 必须兼容 Electron 的 `/dispatch`、`/health`、生命周期和 parent callback 合同。
+2. **Electron 是 child 的协议客户端。** 当前 Rust active path 是 `DirectRuntimeHost` private control + signed loopback product routes；旧 `/dispatch`、`/health`、root lifecycle compatibility endpoints 已废除。
 3. **TS 内部类型不是自动契约。** 只有经过 HTTP、IPC、事件或 CLI 可观察到的字段才进入本基线。
 4. **显式 legacy rejection 也是现有行为。** 已禁用的旧 route 不能被 Rust 悄悄恢复成另一种成功语义。
 5. **`OPEN` 不是设计建议。** 它表示源码、测试或旧文档之间的真实差异；在 Rust 实现前必须显式裁决，不能被默认猜测掩盖。
@@ -51,15 +51,14 @@ Rust 替换 child 与其内部实现；Renderer/preload contract 不因迁移改
 ## 已裁决事项
 
 - Electron `DirectRuntimeHost` 通过 stdio 长度帧写入一次 bootstrap，并等待 Rust private control ready；Renderer 不直接接触该 private control。
-- private control command timeout 上限为 **30s**，frame 上限为 **1MiB**；命令 vocabulary 是固定枚举，不是 HTTP route 透传。
-- Host-owned localhost transports 已收敛为一个 Rust loopback server；业务模块保留各自 handler，SSE/WS 是 route outcome，不是独立 Host-owned listener。OpenClaw gateway、Matcha app-server、MCP stdio 不属于此 server。
-- Capability Directory 与 Runtime Endpoint Directory 已由 Rust 投影 fixed OpenClaw/Matcha local peer surface；availability 可随 readiness 降级，不代表 owner cutover。
-- Electron 主进程 → legacy child `/dispatch` 默认超时采用源码实际值 **30s**；旧 transport 文档的 15s 已修正。
-- `PAYLOAD_TOO_LARGE` 是 legacy child 对超大 dispatch body 的真实 413 响应；Renderer 不需要感知新 API。
-- `INVALID_TRANSPORT_PAYLOAD` 是 Electron 解析非法 child 响应时的本地错误；Rust 不主动返回该码。
-- child health lifecycle 与 Electron process-manager lifecycle 分层处理，不强行统一枚举。
+- private control command timeout 上限为 **120s**，frame 上限为 **1MiB**；wire 只承载 `{ name, input }` 私有命令 envelope，具体 command vocabulary 来自 installed module descriptors/private-control snapshot，不是 HTTP route 透传，也不是业务 command enum。
+- Host-owned loopback transport 已收敛为一个 Rust loopback server；route registry 来自 installed `ModuleCatalog` descriptors，SSE/WS 是 route outcome，不是独立 Host-owned listener。legacy `/health`、`/dispatch`、`/lifecycle/*` compatibility module 已删除；OpenClaw gateway、Matcha app-server、TeamRun MCP stdio 不属于此 server。
+- Capability Catalog 与 Runtime Endpoint Directory 已由 Rust 投影 fixed OpenClaw/Matcha local peer surface；capability descriptors 来自 installed owner module providers，availability 可随 readiness 降级，不代表 owner cutover；capability list/describe 不进入 private control business command。
+- Electron 主进程不再经 legacy child `/dispatch` 进入 Rust；产品请求走 signed loopback module routes，Host-private 状态走 private control。
+- legacy dispatch envelope 的 `PAYLOAD_TOO_LARGE` / `INVALID_TRANSPORT_PAYLOAD` 只保留为历史测试/迁移证据，不是 Rust final-form active contract。
+- Host private health/snapshot 与 Electron process-manager lifecycle 分层处理，不强行统一枚举。
 - **旧 generic RuntimeJob public contract 已删除，不是待办：** 不存在 `runtimeHost.jobGet`、`runtime-job:*`、generic `RuntimeJob*` DTO 或 `job_compatibility`；文档中的这些名称只用于标识已删除项，禁止重新引入。
-- **Toolchain final path 已冻结：** Setup 已退休；Renderer 进入主界面后 lazy 调 `hostToolchainPrepare()`，Electron `POST /api/toolchain/uv/prepare` 调 Rust private `host.toolchain.prepare`，等待 `external/toolchain::NativeToolchain` 真实结果后返回；`GET /api/toolchain/uv/check` 调 `host.toolchain.status` 并只投影 `{ installed }`。
+- **Toolchain final path 已冻结：** Setup 已退休；Renderer 进入主界面后 lazy 调 `hostToolchainPrepare()`，Electron `POST /api/toolchain/uv/prepare` 经 `toolchainTransport.prepare()` 调 modules/toolchain owner loopback，等待 `modules/toolchain::NativeToolchain` 真实结果后返回；`GET /api/toolchain/uv/check` 经 `toolchainTransport.status()` 并只投影 `{ installed }`。
 - **ClawHub marketplace route 不变：** `POST /api/clawhub/search` 由 Rust external `ClawHubRegistryClient` 执行 registry HTTP search，不经 RuntimeDriver 或 OpenClaw Gateway；`POST /api/skills/clawhub/install` 仍经 Skills runtime ops，但底层执行 legacy ClawHub CLI + registry fallback。
 
 ## 当前迁移决定

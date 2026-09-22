@@ -1,8 +1,7 @@
 use std::fmt;
 
-use environment::{
-    ConnectorCatalog,
-    connectors::{Connector, ConnectorKind, McpProgramSource, McpServerProgram, McpTransport},
+use connectors::{
+    Connector, ConnectorCatalog, ConnectorKind, McpProgramSource, McpServerProgram, McpTransport,
 };
 use serde::Serialize;
 
@@ -75,7 +74,7 @@ fn display_name(connector: &Connector) -> String {
 
 #[cfg(test)]
 mod tests {
-    use environment::connectors::{Connector, ConnectorInput, McpServerProgram};
+    use connectors::{Connector, ConnectorInput, McpServerProgram};
 
     use super::*;
 

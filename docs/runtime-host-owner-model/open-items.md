@@ -4,7 +4,7 @@
 
 | ID | 开放项 | 影响 | 关闭所需证据 |
 | --- | --- | --- | --- |
-| `O-01` | Electron 已通过 `DirectRuntimeHost` 启动 Rust executable：stdio bootstrap/private control 为当前 active launch path；仍缺完整 delivery compatibility、restart/fault 与 product route 证明 | 全部 Rust cutover | production launch trace、bootstrap/env/port mapping、private control readiness、graceful stop/restart/fault trace、legacy compatibility route proof |
+| `O-01` | Electron 已通过 `DirectRuntimeHost` 启动 Rust executable：stdio bootstrap/private control 为当前 active launch path；legacy root compatibility 已删除，仍缺 restart/fault 与完整 product route cutover 证明 | 全部 Rust cutover | production launch trace、bootstrap/env/port mapping、private control readiness、graceful stop/restart/fault trace、signed loopback product route proof |
 | `O-02` | Rust → Electron parent callback 的完整事件 wiring 尚未闭合；base URL/token/client/receiver 已接入，但不能替代各 owner payload/恢复证明；generic operation callback 已删除 | shell、gateway event、owner operation event | parent callback recorder + token/timeout/response validation trace + owner-specific typed event/query recovery proof |
 | `O-03` | TS capability execute 与 Rust fixed transports 的最终 authority 和兼容范围 | 所有 capability、scope、target、authorization | Renderer request matrix、Rust response matrix、正式 signed-decision mapping |
 | `O-04` | `policyScope`、`ownerModuleId`、`routeOwnerId` 是否只是 metadata 还是授权边界 | capability security | source + policy decision + negative test proof |
@@ -19,7 +19,7 @@
 | `O-13` | Connector schema v1/v3、secret references、OpenClaw private projection 的最终迁移协议 | external connectors | two-version fixture、secret resolver proof、single-writer cutover plan |
 | `O-14` | Rust connector observed status 是否实现 TS 主动 MCP HTTP probe 语义 | connector management/session status | probe timeout/error/content-type matrix；session Gateway status matrix |
 | `O-15` | Remote Fleet、Team webhook、runtime-agent ingress 的最终 external API owner；RuntimeAgent ingress 已有 Electron proxy → Rust Fleet transport → Rust handler → FleetHandle core path，Remote Fleet mutation payload projection、Fleet keyed lanes、live recovery、startup Pending replay scanner、query refresh、terminal provider failure owner-local settlement 与 focused tests 已通过；仍缺 fault/backpressure、process restart/terminal replay、package/Windows、SSH bootstrap | non-Renderer ingress | separate ingress contract、provider fault/backpressure oracle、process restart/terminal replay、真实 package/Windows artifact execution 与 SSH bootstrap proof |
-| `O-16` | platform/diagnostics 的 process and filesystem ownership | operational APIs；Toolchain process/path owner 已迁到 `runtime-host/external/toolchain`，Foundation 只提供 bounded process/env projection primitives；Renderer lazy prepare → Electron `/api/toolchain/uv/prepare` → Rust private `host.toolchain.prepare` 等待真实结果 | process ownership proof、path/permission/redaction fixture；Toolchain native fault/integration、Windows/package 与旧 owner 清理证据仍未闭合 |
+| `O-16` | platform/diagnostics 的 process and filesystem ownership | operational APIs；Toolchain process/path owner 已迁到 `runtime-host/modules/toolchain`，Foundation 只提供 bounded process/env projection primitives；Renderer lazy prepare → Electron `/api/toolchain/uv/prepare` → modules/toolchain owner loopback 等待真实结果 | process ownership proof、path/permission/redaction fixture；Toolchain native fault/integration、Windows/package 与旧 owner 清理证据仍未闭合 |
 | `O-17` | Rust workspace/crate/module最终边界 | implementation layout | 本目录所有 owner 表关闭到可执行切换块后再设计；不得按现有半成品目录直接扩展 |
 
 ## 关闭规则

@@ -1,10 +1,14 @@
 pub mod auth;
+pub mod capability;
 pub mod client;
 pub(crate) mod config_patch;
 pub(crate) mod connection;
+pub mod control;
 pub mod control_ui;
 pub(crate) mod delivery;
 pub mod device_identity;
 pub(crate) mod dispatcher;
 pub(crate) mod ingress;
+pub mod loopback;
+pub mod request;
 pub mod wire;

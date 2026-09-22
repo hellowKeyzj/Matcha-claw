@@ -28,19 +28,23 @@ pub(super) async fn run(
                 return super::shutdown::requested(&mut host, reply, &mut shutdown).await;
             }
             Next::Event(Some(event)) => {
-                if let super::session_ingest::SessionIngestAction::Shutdown =
-                    super::session_ingest::handle(&host, &event).await
-                {
-                    return super::shutdown::immediate(&mut host).await;
-                }
                 if matches!(
                     event,
                     HostEvent::OpenClawRuntime | HostEvent::MatchaLifecycle(_)
                 ) {
                     state.publish(host.state());
                 }
-                if output.send(event).await.is_err() {
-                    return super::shutdown::immediate(&mut host).await;
+                tokio::select! {
+                    biased;
+                    // A consumed event may be discarded only when leaving for shutdown.
+                    Some(reply) = shutdown.recv() => {
+                        return super::shutdown::requested(&mut host, reply, &mut shutdown).await;
+                    }
+                    result = output.send(event) => {
+                        if result.is_err() {
+                            return super::shutdown::immediate(&mut host).await;
+                        }
+                    }
                 }
             }
             Next::Event(None) => events_open = false,
@@ -110,7 +114,7 @@ mod tests {
         assert!(production.contains("HostEvent::OpenClawRuntime"));
         assert!(production.contains("HostEvent::MatchaLifecycle(_)"));
         assert_eq!(production.matches("state.publish(host.state())").count(), 2);
-        assert!(production.contains("output.send(event).await"));
+        assert!(production.contains("result = output.send(event)"));
     }
 
     #[test]

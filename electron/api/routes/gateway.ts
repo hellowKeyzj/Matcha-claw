@@ -1,9 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import type {
-  RuntimeHostControlOutcome,
-} from '../../main/runtime-host-delivery/control';
 import { RuntimeHostControlError } from '../../main/runtime-host-delivery/control';
-import type { RuntimeHostApiContext } from '../context';
+import type { RuntimeHostApiContext, RuntimeHostTransportContext } from '../context';
 import { readGatewayStatusProjection, unavailableGatewayStatus } from './app';
 import { sendJson } from '../route-utils';
 
@@ -19,11 +16,13 @@ type GatewayLifecycle =
   | 'failed'
   | 'shutDown';
 
+type GatewayApiContext = RuntimeHostApiContext & RuntimeHostTransportContext<'runtimeControlTransport'>;
+
 export async function handleGatewayRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: RuntimeHostApiContext,
+  ctx: GatewayApiContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/gateway/status' && req.method === 'GET') {
     const status = await readGatewayStatusProjection(ctx.runtimeHost)
@@ -74,8 +73,8 @@ export async function handleGatewayRoutes(
 
   if (url.pathname === '/api/gateway/control-ui' && req.method === 'GET') {
     try {
-      const outcome = await ctx.runtimeHost.command({ name: 'openclaw.control-ui.url' });
-      const controlUi = readControlUiResult(outcome);
+      const response = await ctx.runtimeHostTransports.runtimeControlTransport.controlUiUrl();
+      const controlUi = response.status === 200 ? readControlUiResult(response.body) : null;
       if (!controlUi) {
         sendJson(res, 503, { success: false, error: GATEWAY_CONTROL_UI_UNAVAILABLE });
         return true;
@@ -91,15 +90,19 @@ export async function handleGatewayRoutes(
 }
 
 async function handleLifecycleMutation(
-  ctx: RuntimeHostApiContext,
+  ctx: GatewayApiContext,
   res: ServerResponse,
   operation: 'start' | 'stop' | 'restart',
 ): Promise<void> {
   try {
-    const outcome = await ctx.runtimeHost.command({ name: `openclaw.lifecycle.${operation}` });
-    const lifecycle = readGatewayLifecycle(outcome);
+    const response = await ctx.runtimeHostTransports.runtimeControlTransport[operation === 'start'
+      ? 'lifecycleStart'
+      : operation === 'stop'
+        ? 'lifecycleStop'
+        : 'lifecycleRestart']();
+    const lifecycle = response.status === 200 ? readGatewayLifecycle(response.body) : null;
     if (!lifecycle) {
-      sendLifecycleFailure(res, operation, undefined, outcome);
+      sendLifecycleFailure(res, operation, undefined, response.status);
       return;
     }
     sendJson(res, 200, operation === 'restart' && lifecycle === 'waitingToRestart'
@@ -114,25 +117,25 @@ function sendLifecycleFailure(
   res: ServerResponse,
   operation: 'start' | 'stop' | 'restart',
   error: unknown,
-  outcome: RuntimeHostControlOutcome | undefined,
+  status: number | undefined,
 ): void {
-  const unknown = outcome?.kind === 'unknown'
-    || outcome?.kind === 'timed-out'
+  const unknown = status === 503
     || error instanceof RuntimeHostControlError && error.delivery === 'unknown-delivery';
-  const unavailable = outcome?.kind === 'rejected' && outcome.error.code === 'UNAVAILABLE';
+  const unavailable = status === 400 || status === 401 || status === 422;
   sendJson(res, unknown || unavailable ? 503 : 500, {
     success: false,
     error: `Gateway ${operation} ${unknown ? 'outcome is unknown' : unavailable ? 'is unavailable' : 'failed'}`,
   });
 }
 
-function readGatewayLifecycle(outcome: RuntimeHostControlOutcome): GatewayLifecycle | null {
-  if (outcome.kind !== 'succeeded' || !isRecord(outcome.result)) return null;
-  const result = outcome.result.result;
+function readGatewayLifecycle(body: unknown): GatewayLifecycle | null {
+  if (!isRecord(body)) return null;
+  const result = body.result;
   if (!isRecord(result)
     || !hasRequiredKeys(result, ['lifecycle'])
-    || !Object.keys(result).every((key) => ['lifecycle', 'failure', 'startupDiagnostic'].includes(key))
+    || !Object.keys(result).every((key) => ['lifecycle', 'observedAtMs', 'failure', 'startupDiagnostic'].includes(key))
     || !isGatewayLifecycle(result.lifecycle)
+    || (result.observedAtMs !== undefined && (!Number.isSafeInteger(result.observedAtMs) || result.observedAtMs < 0))
     || (result.failure !== undefined && typeof result.failure !== 'string')
     || (result.startupDiagnostic !== undefined && typeof result.startupDiagnostic !== 'string')) {
     return null;
@@ -141,10 +144,10 @@ function readGatewayLifecycle(outcome: RuntimeHostControlOutcome): GatewayLifecy
 }
 
 function readControlUiResult(
-  outcome: RuntimeHostControlOutcome,
+  body: unknown,
 ): { url: string; port: number } | null {
-  if (outcome.kind !== 'succeeded' || !isRecord(outcome.result)) return null;
-  const result = outcome.result.result;
+  if (!isRecord(body)) return null;
+  const result = body.result;
   if (!isRecord(result) || !hasExactKeys(result, ['url']) || typeof result.url !== 'string') return null;
 
   let parsed: URL;

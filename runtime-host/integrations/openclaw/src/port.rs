@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use platform::parent_callback::{ParentCallbackFuture, ParentShellOpenPath};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
@@ -17,6 +18,21 @@ pub use crate::skill::{
     SkillMutationOutcome, SkillReadError, SkillUpdateRequest, SkillUploadBegin, SkillUploadChunk,
     SkillUploadCommit,
 };
+
+#[derive(Clone)]
+pub struct OpenClawDriverParentCallbackHandle {
+    callback: Arc<dyn ParentShellOpenPath>,
+}
+
+impl OpenClawDriverParentCallbackHandle {
+    pub fn new(callback: Arc<dyn ParentShellOpenPath>) -> Self {
+        Self { callback }
+    }
+
+    pub fn open_path<'a>(&'a self, path: std::path::PathBuf) -> ParentCallbackFuture<'a, bool> {
+        self.callback.open_path(path)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SkillUploadOutcome {
@@ -114,6 +130,7 @@ use crate::{
         auth::GatewaySecret,
         client::{GatewayClient, GatewayClientMetadata, GatewayControlReadiness, GatewayEndpoint},
         delivery::{DispatcherError, MutationDelivery},
+        request::{OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest},
         wire::{self, GatewayResponse},
     },
     lifecycle::state_dir::CanonicalStateDir,
@@ -202,6 +219,11 @@ pub struct OpenClawGateway {
 }
 
 #[derive(Clone)]
+pub struct OpenClawGatewayControl {
+    client: Arc<GatewayClient>,
+}
+
+#[derive(Clone)]
 pub struct TeamNativeRunWaiter {
     client: Arc<GatewayClient>,
 }
@@ -210,6 +232,16 @@ pub struct TeamNativeRunWaiter {
 pub struct OpenClawSessionGateway {
     client: Arc<GatewayClient>,
     state_dir: Option<CanonicalStateDir>,
+}
+
+impl OpenClawGatewayControl {
+    pub fn start_supervision(&self) {
+        self.client.start_control_supervision();
+    }
+
+    pub fn take_supervisor(&self) -> Option<crate::gateway::client::GatewayControlSupervisor> {
+        self.client.take_control_supervisor()
+    }
 }
 
 impl TeamNativeRunWaiter {
@@ -228,9 +260,9 @@ impl OpenClawGateway {
         secret: Arc<GatewaySecret>,
         metadata: GatewayClientMetadata,
         events: mpsc::Sender<SessionEvent>,
-        canonical_events: mpsc::Sender<CanonicalIngressResult>,
+        session_events: mpsc::Sender<sessions_module::command::SessionIngressEvent>,
     ) -> Self {
-        let ingest = Arc::new(SessionEventIngest::new(events, canonical_events));
+        let ingest = Arc::new(SessionEventIngest::new(events, session_events));
         let client = GatewayClient::new(endpoint, certificate_fingerprint, secret, metadata)
             .with_event_ingest(ingest);
         Self::with_client(Arc::new(client))
@@ -243,9 +275,9 @@ impl OpenClawGateway {
         metadata: GatewayClientMetadata,
         state_dir: CanonicalStateDir,
         events: mpsc::Sender<SessionEvent>,
-        canonical_events: mpsc::Sender<CanonicalIngressResult>,
+        session_events: mpsc::Sender<sessions_module::command::SessionIngressEvent>,
     ) -> Self {
-        let ingest = Arc::new(SessionEventIngest::new(events, canonical_events));
+        let ingest = Arc::new(SessionEventIngest::new(events, session_events));
         let client = GatewayClient::new_with_state_dir(
             endpoint,
             certificate_fingerprint,
@@ -404,23 +436,17 @@ impl OpenClawGateway {
 
     pub async fn browser_request(
         &self,
-        method: String,
-        path: String,
-        query: Option<Value>,
-        body: Option<Value>,
-        timeout_ms: Option<u64>,
-        target: Option<String>,
-        node: Option<String>,
+        request: OpenClawBrowserGatewayRequest,
     ) -> OpenClawGatewayRequestOutcome {
         let request = match wire::browser_request(
             next_request_id("browser-request"),
-            method,
-            path,
-            query,
-            body,
-            timeout_ms,
-            target,
-            node,
+            request.method,
+            request.path,
+            request.query,
+            request.body,
+            request.timeout_ms,
+            request.target,
+            request.node,
         ) {
             Ok(request) => request,
             Err(_) => return OpenClawGatewayRequestOutcome::Rejected,
@@ -430,17 +456,14 @@ impl OpenClawGateway {
 
     pub async fn mcp_app_request(
         &self,
-        operation_id: String,
-        session_key: String,
-        view_id: String,
-        standalone: Option<bool>,
+        request: OpenClawMcpAppGatewayRequest,
     ) -> OpenClawGatewayRequestOutcome {
         let request = match wire::mcp_app_request(
             next_request_id("mcp-app-request"),
-            operation_id,
-            session_key,
-            view_id,
-            standalone,
+            request.operation_id,
+            request.session_key,
+            request.view_id,
+            request.standalone,
         ) {
             Ok(request) => request,
             Err(_) => return OpenClawGatewayRequestOutcome::Rejected,
@@ -454,6 +477,12 @@ impl OpenClawGateway {
 
     pub fn control_readiness(&self) -> watch::Receiver<u64> {
         self.client.control_readiness()
+    }
+
+    pub fn control(&self) -> OpenClawGatewayControl {
+        OpenClawGatewayControl {
+            client: Arc::clone(&self.client),
+        }
     }
 
     pub fn session_gateway(&self) -> OpenClawSessionGateway {
@@ -651,11 +680,11 @@ impl OpenClawGateway {
 
     pub async fn reconcile_provider_native_configuration(
         &self,
-        accounts: &[environment::ProviderAccount],
-        models: &environment::ProviderModelCatalog,
-        routing: Option<&environment::ProviderRouting>,
-        retired: &[environment::ProviderAccount],
-        required_auth_accounts: &std::collections::BTreeSet<environment::ProviderAccountId>,
+        accounts: &[::provider::ProviderAccount],
+        models: &::provider::ProviderModelCatalog,
+        routing: Option<&::provider::ProviderRouting>,
+        retired: &[::provider::ProviderAccount],
+        required_auth_accounts: &std::collections::BTreeSet<::provider::ProviderAccountId>,
         auth_state_refresh_required: bool,
         now_millis: u64,
     ) -> ProviderNativeConfigurationEvidence {
@@ -1822,14 +1851,14 @@ mod tests {
     async fn gateway_port_debug_excludes_endpoint_and_secret() {
         let identity = ListenerIdentity::generate_loopback().unwrap();
         let (events, _) = mpsc::channel(1);
-        let (canonical_events, _) = mpsc::channel(32);
+        let (session_events, _) = mpsc::channel(32);
         let gateway = OpenClawGateway::new(
             GatewayEndpoint::try_new("127.0.0.1:18789".parse().unwrap()).unwrap(),
             identity.fingerprint(),
             Arc::new(GatewaySecret::new("gateway-port-secret-canary".into()).unwrap()),
             GatewayClientMetadata::try_new("1.0.0".into(), "windows".into()).unwrap(),
             events,
-            canonical_events,
+            session_events,
         );
 
         let debug = format!("{gateway:?}");
@@ -1895,14 +1924,14 @@ mod tests {
             socket.close(None).await.unwrap();
         });
         let (events, _) = mpsc::channel(1);
-        let (canonical_events, _) = mpsc::channel(32);
+        let (session_events, _) = mpsc::channel(32);
         let gateway = OpenClawGateway::new(
             endpoint,
             identity.fingerprint(),
             Arc::new(GatewaySecret::new("port-skill-secret".into()).unwrap()),
             GatewayClientMetadata::try_new("1.0.0".into(), "test".into()).unwrap(),
             events,
-            canonical_events,
+            session_events,
         );
 
         let catalog = gateway.skill_status_catalog().await.unwrap();
@@ -1999,14 +2028,14 @@ mod tests {
             }
         });
         let (events, _) = mpsc::channel(1);
-        let (canonical_events, _) = mpsc::channel(32);
+        let (session_events, _) = mpsc::channel(32);
         let mut gateway = OpenClawGateway::new(
             endpoint,
             identity.fingerprint(),
             Arc::new(GatewaySecret::new("port-task-secret".into()).unwrap()),
             GatewayClientMetadata::try_new("1.0.0".into(), "test".into()).unwrap(),
             events,
-            canonical_events,
+            session_events,
         );
 
         assert!(gateway.list_tasks(task_scope_input()).await.is_ok());
@@ -2151,14 +2180,14 @@ mod tests {
             }
         });
         let (events, _) = mpsc::channel(1);
-        let (canonical_events, _) = mpsc::channel(32);
+        let (session_events, _) = mpsc::channel(32);
         let mut gateway = OpenClawGateway::new(
             endpoint,
             identity.fingerprint(),
             Arc::new(GatewaySecret::new("port-session-secret".into()).unwrap()),
             GatewayClientMetadata::try_new("1.0.0".into(), "test".into()).unwrap(),
             events,
-            canonical_events,
+            session_events,
         );
 
         assert!(
@@ -2238,14 +2267,14 @@ mod tests {
             }
         });
         let (events, _) = mpsc::channel(1);
-        let (canonical_events, _) = mpsc::channel(32);
+        let (session_events, _) = mpsc::channel(32);
         let mut gateway = OpenClawGateway::new(
             endpoint,
             identity.fingerprint(),
             Arc::new(GatewaySecret::new("port-session-not-found-secret".into()).unwrap()),
             GatewayClientMetadata::try_new("1.0.0".into(), "test".into()).unwrap(),
             events,
-            canonical_events,
+            session_events,
         );
 
         let abort = gateway

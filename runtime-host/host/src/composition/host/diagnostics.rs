@@ -1,21 +1,29 @@
-use std::sync::Arc;
+use foundation::{
+    execution::OwnedTask, lifecycle::ModuleScope, process::supervision::SupervisorSnapshot,
+};
 
-use foundation::process::supervision::SupervisorSnapshot;
+use ::diagnostics::{HostLifecycle, HostState, RuntimeState};
 
-use crate::runtime::driver::{RuntimeDriver, RuntimeDriverIdentity};
+use crate::composition::{HostPhase, runtime_ports::RuntimeDriverIdentity};
 
 use super::Host;
 
 impl Host {
-    pub fn state(&self) -> crate::diagnostics::HostState {
+    pub fn state(&self) -> HostState {
         let matcha = self.matcha_lifecycle_snapshot();
         let open_claw = self.open_claw_lifecycle_snapshot();
-        crate::diagnostics::HostState::from_supervisors(
-            self.admission.state().phase(),
-            &matcha,
-            self.matcha_startup_diagnostics.category(),
-            &open_claw,
-            self.openclaw_startup_diagnostics.category(),
+        let phase = self.admission.state().phase();
+        HostState::from_runtime_states(
+            phase == HostPhase::Ready,
+            project_host_lifecycle(phase),
+            RuntimeState::from_snapshot_with_startup_diagnostic(
+                &matcha,
+                self.matcha_startup_diagnostics.category(),
+            ),
+            RuntimeState::from_snapshot_with_startup_diagnostic(
+                &open_claw,
+                self.openclaw_startup_diagnostics.category(),
+            ),
         )
     }
 
@@ -28,17 +36,11 @@ impl Host {
     }
 
     fn matcha_lifecycle_snapshot(&self) -> SupervisorSnapshot {
-        if self.matcha.peer_if_present().is_none() {
-            return self
-                .shutdown_failures
-                .matcha_snapshot()
-                .cloned()
-                .expect("matcha peer absence must retain a terminal snapshot");
-        }
         self.runtime_driver(&RuntimeDriverIdentity::matcha_agent().endpoint())
-            .and_then(RuntimeDriver::lifecycle_ops)
+            .and_then(|driver| driver.host_lifecycle_ops())
+            .map(|lifecycle| lifecycle.snapshot())
+            .or_else(|| self.shutdown_failures.matcha_snapshot())
             .expect("Matcha Agent lifecycle operations must be available")
-            .snapshot()
     }
 
     fn open_claw_lifecycle_snapshot(&self) -> SupervisorSnapshot {
@@ -46,68 +48,145 @@ impl Host {
             return self
                 .shutdown_failures
                 .open_claw_snapshot()
-                .cloned()
                 .expect("OpenClaw owner absence must retain a terminal snapshot");
         }
         self.runtime_driver(&RuntimeDriverIdentity::open_claw().endpoint())
-            .and_then(RuntimeDriver::lifecycle_ops)
+            .and_then(|driver| driver.host_lifecycle_ops())
             .expect("OpenClaw lifecycle operations must be available")
             .snapshot()
     }
 }
 
-pub(super) fn matcha_diagnostic_reporter(
-    diagnostics: crate::diagnostics::MatchaStartupDiagnostics,
-) -> Arc<dyn Fn(matcha_agent::lifecycle::output::StartupDiagnosticCategory) + Send + Sync> {
-    Arc::new(move |category| diagnostics.report(category))
+pub(crate) const fn project_host_lifecycle(phase: HostPhase) -> HostLifecycle {
+    match phase {
+        HostPhase::Created => HostLifecycle::Created,
+        HostPhase::Starting => HostLifecycle::Starting,
+        HostPhase::Ready => HostLifecycle::Ready,
+        HostPhase::ShuttingDown => HostLifecycle::ShuttingDown,
+        HostPhase::ShutDown => HostLifecycle::ShutDown,
+    }
 }
 
-pub(super) fn openclaw_diagnostic_reporter(
-    diagnostics: crate::diagnostics::OpenClawStartupDiagnostics,
-) -> Arc<dyn Fn(openclaw::lifecycle::logs::LifecycleDiagnostic) + Send + Sync> {
-    Arc::new(
-        move |diagnostic: openclaw::lifecycle::logs::LifecycleDiagnostic| {
-            diagnostics.report(diagnostic.category())
-        },
-    )
+pub(super) struct DiagnosticsForwarders<'scope> {
+    scope: &'scope mut ModuleScope,
 }
 
-pub(super) fn forward_openclaw_runtime_changes(
-    mut snapshots: tokio::sync::watch::Receiver<SupervisorSnapshot>,
-    events: tokio::sync::mpsc::Sender<()>,
-) {
-    tokio::spawn(async move {
-        while snapshots.changed().await.is_ok() {
-            if events.send(()).await.is_err() {
-                break;
+impl<'scope> DiagnosticsForwarders<'scope> {
+    pub(super) fn new(scope: &'scope mut ModuleScope) -> Self {
+        Self { scope }
+    }
+
+    pub(super) fn forward_openclaw_runtime_changes(
+        &mut self,
+        mut snapshots: tokio::sync::watch::Receiver<SupervisorSnapshot>,
+        events: tokio::sync::mpsc::Sender<()>,
+    ) {
+        let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    changed = snapshots.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        tokio::select! {
+                            _ = cancellation.cancelled() => break,
+                            sent = events.send(()) => {
+                                if sent.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        }
-    });
+        });
+        self.scope
+            .register_event_subscription("openclaw-runtime", move || async move {
+                let _ = task.cancel_and_join().await;
+            });
+    }
+
+    pub(super) fn forward_matcha_lifecycle_changes(
+        &mut self,
+        mut snapshots: tokio::sync::watch::Receiver<SupervisorSnapshot>,
+        events: tokio::sync::mpsc::Sender<SupervisorSnapshot>,
+    ) {
+        let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    changed = snapshots.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let snapshot = snapshots.borrow().clone();
+                        tokio::select! {
+                            _ = cancellation.cancelled() => break,
+                            sent = events.send(snapshot) => {
+                                if sent.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        self.scope
+            .register_event_subscription("matcha-lifecycle", move || async move {
+                let _ = task.cancel_and_join().await;
+            });
+    }
+
+    pub(super) fn forward_openclaw_runtime_readiness_changes(
+        &mut self,
+        mut readiness: tokio::sync::watch::Receiver<u64>,
+        events: tokio::sync::mpsc::Sender<()>,
+    ) {
+        let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    changed = readiness.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        tokio::select! {
+                            _ = cancellation.cancelled() => break,
+                            sent = events.send(()) => {
+                                if sent.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        self.scope
+            .register_event_subscription("openclaw-readiness", move || async move {
+                let _ = task.cancel_and_join().await;
+            });
+    }
 }
 
-pub(super) fn forward_matcha_lifecycle_changes(
-    mut snapshots: tokio::sync::watch::Receiver<SupervisorSnapshot>,
-    events: tokio::sync::mpsc::Sender<SupervisorSnapshot>,
-) {
-    tokio::spawn(async move {
-        while snapshots.changed().await.is_ok() {
-            let snapshot = snapshots.borrow().clone();
-            if events.send(snapshot).await.is_err() {
-                break;
-            }
-        }
-    });
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub(super) fn forward_openclaw_runtime_readiness_changes(
-    mut readiness: tokio::sync::watch::Receiver<u64>,
-    events: tokio::sync::mpsc::Sender<()>,
-) {
-    tokio::spawn(async move {
-        while readiness.changed().await.is_ok() {
-            if events.send(()).await.is_err() {
-                break;
-            }
+    #[test]
+    fn host_lifecycle_projection_covers_every_admission_phase() {
+        let cases = [
+            (HostPhase::Created, HostLifecycle::Created),
+            (HostPhase::Starting, HostLifecycle::Starting),
+            (HostPhase::Ready, HostLifecycle::Ready),
+            (HostPhase::ShuttingDown, HostLifecycle::ShuttingDown),
+            (HostPhase::ShutDown, HostLifecycle::ShutDown),
+        ];
+
+        for (phase, expected) in cases {
+            assert_eq!(project_host_lifecycle(phase), expected);
         }
-    });
+    }
 }

@@ -104,7 +104,7 @@ describe('runtime-host legacy entrypoint attestation', () => {
 
     expect(hostMain).toContain('async fn main() -> ExitCode');
     expect(mcpMain).toContain('fn main() -> ExitCode');
-    expect(mcpMain).toContain('runtime_host::run_team_run_mcp');
+    expect(mcpMain).toContain('runtime_host::run_matcha_mcp');
     expect(hostManifest).toContain('name = "runtime-host"');
     expect(hostManifest).toContain('name = "runtime-host-mcp"');
     for (const reference of forbiddenLegacyReferences) {

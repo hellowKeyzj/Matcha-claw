@@ -6,7 +6,6 @@ export const MAX_RUNTIME_HOST_CONTROL_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
 const MAX_REQUEST_ID_BYTES = 128;
-const MAX_SESSION_TRACE_ID_BYTES = 256;
 const DEFAULT_MAX_PENDING_COMMANDS = 64;
 
 type RuntimeHostJsonPrimitive = null | boolean | number | string;
@@ -34,76 +33,7 @@ type RuntimeHostPeerLifecycle =
 
 export type RuntimeHostControlCommand =
   | { readonly name: 'host.health' }
-  | { readonly name: 'host.runtime.snapshot' }
-  | { readonly name: 'host.capabilities.list' }
-  | {
-      readonly name: 'host.capabilities.describe';
-      readonly input: {
-        readonly id: string;
-        readonly scope: RuntimeHostJsonObject;
-      };
-    }
-  | {
-      readonly name: 'team.runtime.execute';
-      readonly input: {
-        readonly id: string;
-        readonly operationId: string;
-        readonly scope: RuntimeHostJsonObject;
-        readonly target: RuntimeHostJsonValue;
-        readonly input: RuntimeHostJsonObject;
-        readonly traceId?: string;
-      };
-    }
-  | { readonly name: 'matcha.lifecycle.status' }
-  | { readonly name: 'matcha.lifecycle.start' }
-  | { readonly name: 'matcha.lifecycle.stop' }
-  | { readonly name: 'matcha.lifecycle.restart' }
-  | { readonly name: 'openclaw.lifecycle.status' }
-  | { readonly name: 'openclaw.environment.status' }
-  | { readonly name: 'openclaw.runtime.paths' }
-  | { readonly name: 'openclaw.cli.command' }
-  | { readonly name: 'openclaw.tool-permission.get' }
-  | {
-      readonly name: 'openclaw.tool-permission.set';
-      readonly input: { readonly mode: 'default' | 'fullAccess' };
-    }
-  | { readonly name: 'host.toolchain.status' }
-  | { readonly name: 'host.toolchain.prepare' }
-  | { readonly name: 'openclaw.subagent-templates.list' }
-  | { readonly name: 'openclaw.subagent-templates.get'; readonly input: { readonly id: string } }
-  | { readonly name: 'openclaw.lifecycle.start' }
-  | { readonly name: 'openclaw.lifecycle.stop' }
-  | { readonly name: 'openclaw.lifecycle.restart' }
-  | { readonly name: 'openclaw.logs'; readonly input: { readonly cursor?: number } }
-  | { readonly name: 'openclaw.control.ready' }
-  | { readonly name: 'openclaw.gateway.health' }
-  | { readonly name: 'openclaw.gateway.status' }
-  | { readonly name: 'openclaw.control-ui.url' }
-  | {
-      readonly name: 'openclaw.browser.request';
-      readonly input: {
-        readonly method: string;
-        readonly path: string;
-        readonly query?: RuntimeHostJsonObject;
-        readonly body?: RuntimeHostJsonValue;
-        readonly timeoutMs?: number;
-        readonly target?: 'host' | 'node';
-        readonly node?: string;
-      };
-    }
-  | {
-      readonly name: 'openclaw.mcp-app.request';
-      readonly input: {
-        readonly operationId: string;
-        readonly sessionKey: string;
-        readonly viewId: string;
-        readonly standalone?: boolean;
-      };
-    }
-  | { readonly name: 'openclaw.sessions.patch-model'; readonly input: RuntimeHostJsonObject }
-  | { readonly name: 'openclaw.skills.execute'; readonly input: RuntimeHostJsonObject }
-  | { readonly name: 'openclaw.plugins.execute'; readonly input: RuntimeHostJsonObject }
-  | { readonly name: 'fleet.credentials.write'; readonly input: RuntimeHostJsonObject };
+  | { readonly name: 'host.runtime.snapshot' };
 
 export type RuntimeHostCommandRejectionCode =
   | 'INVALID_INPUT'
@@ -583,193 +513,14 @@ function isRuntimeHostControlCommand(value: RuntimeHostControlCommand): boolean 
   switch (value.name) {
     case 'host.health':
     case 'host.runtime.snapshot':
-    case 'host.capabilities.list':
       return hasExactKeys(value, ['name']);
-    case 'host.capabilities.describe':
-      return isHostCapabilitiesDescribeCommand(value);
-    case 'team.runtime.execute':
-      return isTeamRuntimeExecuteCommand(value);
-    case 'matcha.lifecycle.status':
-    case 'matcha.lifecycle.start':
-    case 'matcha.lifecycle.stop':
-    case 'matcha.lifecycle.restart':
-    case 'openclaw.lifecycle.status':
-    case 'openclaw.environment.status':
-    case 'openclaw.runtime.paths':
-    case 'openclaw.cli.command':
-    case 'openclaw.tool-permission.get':
-    case 'openclaw.subagent-templates.list':
-    case 'openclaw.lifecycle.start':
-    case 'openclaw.lifecycle.stop':
-    case 'openclaw.lifecycle.restart':
-    case 'openclaw.gateway.health':
-    case 'openclaw.gateway.status':
-    case 'openclaw.control-ui.url':
-      return hasExactKeys(value, ['name']);
-    case 'openclaw.browser.request':
-      return isOpenClawBrowserRequestCommand(value);
-    case 'openclaw.mcp-app.request':
-      return isOpenClawMcpAppRequestCommand(value);
-    case 'openclaw.logs':
-      return isOpenClawLogsCommand(value);
-    case 'openclaw.control.ready':
-      return isOpenClawControlReadyCommand(value);
-    case 'openclaw.tool-permission.set':
-      return isOpenClawToolPermissionSetCommand(value);
-    case 'host.toolchain.status':
-    case 'host.toolchain.prepare':
-      return hasExactKeys(value, ['name']);
-    case 'openclaw.subagent-templates.get':
-      return isSubagentTemplateCommand(value);
-    case 'openclaw.sessions.patch-model':
-    case 'openclaw.skills.execute':
-    case 'openclaw.plugins.execute':
-      return hasExactKeys(value, ['name', 'input']) && isJsonObject(value.input);
-    case 'fleet.credentials.write':
-      return isFleetCredentialWriteCommand(value);
     default:
       return false;
   }
 }
 
-function isHostCapabilitiesDescribeCommand(value: Record<string, unknown>): boolean {
-  if (!hasExactKeys(value, ['name', 'input'])
-    || value.name !== 'host.capabilities.describe'
-    || !isRecord(value.input)
-    || !hasExactKeys(value.input, ['id', 'scope'])) {
-    return false;
-  }
-  return isCapabilityIdentity(value.input.id) && isJsonObject(value.input.scope);
-}
-
-function isCapabilityIdentity(value: unknown): value is string {
-  return typeof value === 'string'
-    && value.trim().length > 0
-    && !Array.from(value).some((character) => /\p{Cc}/u.test(character));
-}
-
-function isTeamRuntimeExecuteCommand(value: Record<string, unknown>): boolean {
-  if (!hasExactKeys(value, ['name', 'input'])
-    || value.name !== 'team.runtime.execute'
-    || !isRecord(value.input)
-    || !hasOnlyKeys(value.input, ['id', 'operationId', 'scope', 'target', 'input', 'traceId'])
-    || !['id', 'operationId', 'scope', 'target', 'input'].every((key) => hasOwn(value.input as Record<string, unknown>, key))) {
-    return false;
-  }
-  return value.input.id === 'team.runtime'
-    && isCapabilityIdentity(value.input.operationId)
-    && isJsonObject(value.input.scope)
-    && isJsonValue(value.input.target)
-    && isJsonObject(value.input.input)
-    && (value.input.traceId === undefined || isSessionTraceId(value.input.traceId));
-}
-
-function isFleetCredentialWriteCommand(value: Record<string, unknown>): boolean {
-  if (!hasExactKeys(value, ['name', 'input']) || !isRecord(value.input) || !hasExactKeys(value.input, ['operationId', 'credentialId', 'credentialName', 'plaintextValue'])) return false;
-  return typeof value.input.operationId === 'string' && value.input.operationId.length > 0 && value.input.operationId.length <= 128
-    && typeof value.input.credentialId === 'string' && value.input.credentialId.length > 0 && value.input.credentialId.length <= 128
-    && typeof value.input.credentialName === 'string' && ['sshPassword', 'sshPrivateKey', 'dockerBearerToken', 'kubeBearerToken'].includes(value.input.credentialName)
-    && typeof value.input.plaintextValue === 'string' && value.input.plaintextValue.length > 0 && value.input.plaintextValue.length <= 256 * 1024;
-}
-
-function isSessionTraceId(value: unknown): value is string {
-  return typeof value === 'string'
-    && value.length > 0
-    && value.length <= MAX_SESSION_TRACE_ID_BYTES
-    && !Array.from(value).some((character) => /\p{Cc}/u.test(character));
-}
-
-function isOpenClawControlReadyCommand(value: Record<string, unknown>): boolean {
-  return hasExactKeys(value, ['name']) && value.name === 'openclaw.control.ready';
-}
-
-function isOpenClawLogsCommand(value: Record<string, unknown>): boolean {
-  if (!hasExactKeys(value, ['name', 'input']) || value.name !== 'openclaw.logs' || !isRecord(value.input)) {
-    return false;
-  }
-  return hasExactKeys(value.input, [])
-    || (hasExactKeys(value.input, ['cursor']) && isNonNegativeSafeInteger(value.input.cursor));
-}
-
-function isOpenClawBrowserRequestCommand(value: Record<string, unknown>): boolean {
-  if (!hasExactKeys(value, ['name', 'input'])
-    || value.name !== 'openclaw.browser.request'
-    || !isRecord(value.input)
-    || !hasOnlyKeys(value.input, ['method', 'path', 'query', 'body', 'timeoutMs', 'target', 'node'])
-    || !hasOwn(value.input, 'method')
-    || !hasOwn(value.input, 'path')) {
-    return false;
-  }
-  return isBoundedCommandText(value.input.method)
-    && isBoundedCommandText(value.input.path)
-    && (value.input.query === undefined || isJsonObject(value.input.query))
-    && (value.input.body === undefined || isJsonValue(value.input.body))
-    && (value.input.timeoutMs === undefined || isPositiveSafeInteger(value.input.timeoutMs))
-    && (value.input.target === undefined || value.input.target === 'host' || value.input.target === 'node')
-    && (value.input.node === undefined || (value.input.target === 'node' && isBoundedCommandText(value.input.node)));
-}
-
-function isOpenClawMcpAppRequestCommand(value: Record<string, unknown>): boolean {
-  if (!hasExactKeys(value, ['name', 'input'])
-    || value.name !== 'openclaw.mcp-app.request'
-    || !isRecord(value.input)
-    || !hasOnlyKeys(value.input, ['operationId', 'sessionKey', 'viewId', 'standalone'])
-    || !hasOwn(value.input, 'operationId')
-    || !hasOwn(value.input, 'sessionKey')
-    || !hasOwn(value.input, 'viewId')) {
-    return false;
-  }
-  return isMcpAppOperationId(value.input.operationId)
-    && isBoundedCommandText(value.input.sessionKey)
-    && isBoundedCommandText(value.input.viewId)
-    && (value.input.standalone === undefined || typeof value.input.standalone === 'boolean');
-}
-
-function isMcpAppOperationId(value: unknown): value is string {
-  return isBoundedCommandText(value) && value.startsWith('mcp.app.');
-}
-
-function isBoundedCommandText(value: unknown): value is string {
-  return typeof value === 'string'
-    && value.trim().length > 0
-    && Buffer.byteLength(value, 'utf8') <= 4_096
-    && !Array.from(value).some((character) => /\p{Cc}/u.test(character));
-}
-
-function isOpenClawToolPermissionSetCommand(value: Record<string, unknown>): boolean {
-  return hasExactKeys(value, ['name', 'input'])
-    && value.name === 'openclaw.tool-permission.set'
-    && isRecord(value.input)
-    && hasExactKeys(value.input, ['mode'])
-    && (value.input.mode === 'default' || value.input.mode === 'fullAccess');
-}
-
-function isSubagentTemplateCommand(value: Record<string, unknown>): boolean {
-  return hasExactKeys(value, ['name', 'input'])
-    && value.name === 'openclaw.subagent-templates.get'
-    && isRecord(value.input)
-    && hasExactKeys(value.input, ['id'])
-    && typeof value.input.id === 'string'
-    && value.input.id.trim().length > 0
-    && value.input.id.length <= 128;
-}
-
-function isMutatingCommand(command: RuntimeHostControlCommand): boolean {
-  return command.name === 'matcha.lifecycle.start'
-    || command.name === 'matcha.lifecycle.stop'
-    || command.name === 'matcha.lifecycle.restart'
-    || command.name === 'openclaw.lifecycle.start'
-    || command.name === 'openclaw.lifecycle.stop'
-    || command.name === 'openclaw.lifecycle.restart'
-    || command.name === 'openclaw.tool-permission.set'
-    || command.name === 'host.toolchain.prepare'
-    || command.name === 'openclaw.browser.request'
-    || command.name === 'openclaw.mcp-app.request'
-    || command.name === 'openclaw.sessions.patch-model'
-    || command.name === 'team.runtime.execute'
-    || command.name === 'openclaw.skills.execute'
-    || command.name === 'openclaw.plugins.execute'
-    || command.name === 'fleet.credentials.write';
+function isMutatingCommand(_command: RuntimeHostControlCommand): boolean {
+  return false;
 }
 
 function isRuntimeHostSafeEvent(value: unknown): value is RuntimeHostSafeEvent {
@@ -1010,10 +761,6 @@ function isRejectionCode(value: unknown): value is RuntimeHostCommandRejectionCo
     || value === 'FAILED';
 }
 
-function isJsonObject(value: unknown): value is RuntimeHostJsonObject {
-  return isRecord(value) && isJsonValue(value);
-}
-
 function isJsonValue(value: unknown, seen = new Set<object>()): value is RuntimeHostJsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
   if (typeof value === 'number') return Number.isFinite(value);
@@ -1036,20 +783,12 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
   return keys.length === expected.length && expected.every((key) => hasOwn(value, key));
 }
 
-function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
-
 function hasOwn(value: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isPositiveSafeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
 function isRequestId(value: unknown): value is string {

@@ -6,11 +6,10 @@ This document records static inspection of existing test/document sources. No bu
 
 | Evidence | What it currently proves | Limitation |
 | --- | --- | --- |
-| [runtime-host-transport-v1.contract.test.ts](../../tests/contract/runtime-host-transport-v1.contract.test.ts) | real child startup; root health happy path; v1 version/method rejection; one dispatch success path | does not cover full failure/status matrix or parent callbacks |
-| [runtime-host-api-chain.contract.test.ts](../../tests/contract/runtime-host-api-chain.contract.test.ts) | multiple business APIs travel through real child `/dispatch` | harness primarily checks outer `success`, not all envelope/status invariants |
-| [runtime-host-process-dispatch-envelope.test.ts](../../tests/unit/runtime-host-process-dispatch-envelope.test.ts) | parser version/route/body-size rules | unit-only, not real process wire trace |
-| [runtime-host-process-dispatch-route-handler.test.ts](../../tests/unit/runtime-host-process-dispatch-route-handler.test.ts) | route hit/miss and stats behavior | does not replace end-to-end failure matrix |
-| [runtime-host-process-manager.test.ts](../../tests/unit/runtime-host-process-manager.test.ts) | start/restart/stop/crash recovery and selected local routes | fixture includes legacy surface that must be audited |
+| [runtime-host-delivery/control.ts](../../electron/main/runtime-host-delivery/control.ts) + Rust private control tests | DirectRuntimeHost private control command vocabulary and frame boundary | does not prove every product route E2E |
+| [module_boundary_contract.rs](../../runtime-host/host/tests/module_boundary_contract.rs) | Host final-form removes legacy compatibility module and top-level transport production code | static boundary contract only |
+| [module_platform_contract.rs](../../runtime-host/host/tests/module_platform_contract.rs) | module registry/loopback/private-control platform boundary | static contract only |
+| owner/module focused tests | individual signed loopback route behavior | not a full unchanged-client/package proof |
 
 ## Required compatibility assertion matrix
 
@@ -18,17 +17,15 @@ This document records static inspection of existing test/document sources. No bu
 
 | Case | Required assertion |
 | --- | --- |
-| root health running | HTTP 200; version, `ok`, lifecycle, pid, uptime type/meaning |
-| valid dispatch | HTTP status equals outer `status`; version 1; success/data shape |
-| bad version | 400 / `BAD_REQUEST` |
-| bad method | 400 / `BAD_REQUEST` |
-| route without leading slash | 400 / `BAD_REQUEST` |
-| malformed JSON / empty / null / array / primitive | explicit classified behavior; currently not fully frozen |
-| body size boundary | exact max and max+1; `413 / PAYLOAD_TOO_LARGE` if retained |
-| unknown route | 404 / `NOT_FOUND` |
-| controlled handler exception | 500 / `INTERNAL_ERROR` |
-| invalid child response received by Electron | Electron maps to 502 / `INVALID_TRANSPORT_PAYLOAD` |
-| network/timeout child unavailable | Electron maps to 503 / `UPSTREAM_UNAVAILABLE` |
+| private control ready | Electron observes `ready` after bootstrap frame; timeout is bounded. |
+| `host.health` | returns Host-private safe health projection; no public secret/native raw state. |
+| `host.runtime.snapshot` | returns Host-private safe runtime snapshot; no PID/token/path/raw peer DTO leakage. |
+| unknown private control command | rejected as invalid input. |
+| product route authorization | signed decision binds endpoint/scope/capability/subject/input and rejects mismatch/expiry/replay. |
+| product route response | module adapter returns public DTO projection directly; no `/dispatch` outer envelope. |
+| stream/upgrade route | SSE/WS travels as loopback `RouteOutcome::Stream` / `Upgrade`, not JSON adapter fallback. |
+| unknown loopback route | JSON 404 from Host HTTP substrate. |
+| network/timeout child unavailable | Electron maps through the owning transport's existing public error projection. |
 
 ### Parent callbacks
 
@@ -48,9 +45,9 @@ For every migration owner, trace both TS and Rust through the same unchanged Ren
 
 ```text
 request path/method/body
-→ Electron /dispatch body
-→ child status/outer envelope/data
-→ parent callbacks/events
+→ Electron route owner / signed loopback transport or private control command
+→ Rust module route outcome / private command outcome
+→ parent callbacks/events when applicable
 → Renderer success/error/terminal state
 ```
 
@@ -69,14 +66,11 @@ Run only after code changes / in an environment allowed to create test temp dire
 ```powershell
 pnpm run build:runtime-host-process
 
-pnpm exec vitest run tests/contract/runtime-host-transport-v1.contract.test.ts
-pnpm exec vitest run tests/contract/runtime-host-api-chain.contract.test.ts
+cargo check --manifest-path runtime-host/Cargo.toml -p runtime-host
+cargo test --manifest-path runtime-host/Cargo.toml -p runtime-host --test module_boundary_contract --test module_platform_contract
 
-pnpm exec vitest run `
-  tests/unit/runtime-host-process-dispatch-envelope.test.ts `
-  tests/unit/runtime-host-process-dispatch-route-handler.test.ts `
-  tests/unit/runtime-host-client.test.ts `
-  tests/unit/runtime-host-internal-routes.test.ts
+pnpm exec vitest run tests/unit/runtime-host-delivery-control.test.ts
+pnpm exec vitest run tests/contract/runtime-host-api-chain.contract.test.ts
 ```
 
 Then run the smallest affected Renderer/store tests for the migrated operation owner.
@@ -87,7 +81,7 @@ Then run the smallest affected Renderer/store tests for the migrated operation o
 - Do not snapshot secrets, private tokens, random paths or raw user data.
 - Do not make generic queue internals fixtures for Rust architecture.
 - Capture only externally observable owner-operation/event projection fields needed by current consumers.
-- A test fixture using a removed legacy endpoint is evidence to classify, not permission to recreate that endpoint in Rust.
+- A test fixture using a removed legacy endpoint is historical evidence only, not permission to recreate that endpoint in Rust.
 
 ## Baseline completion criterion
 

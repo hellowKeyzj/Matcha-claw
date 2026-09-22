@@ -1,4 +1,4 @@
-use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _, ser::SerializeMap};
 use serde_json::Value;
 
 pub(crate) const CONTROL_VERSION: u8 = 1;
@@ -126,83 +126,76 @@ impl<'de> Deserialize<'de> for CommandInput {
     }
 }
 
-/// The complete private command vocabulary. HTTP methods, routes, and generic payloads do not
-/// cross this boundary.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "name", rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) enum Command {
-    #[serde(rename = "host.health")]
-    HostHealth {},
-    #[serde(rename = "host.capabilities.list")]
-    HostCapabilitiesList {},
-    #[serde(rename = "host.capabilities.describe")]
-    HostCapabilitiesDescribe { input: CommandInput },
-    #[serde(rename = "host.runtime.snapshot")]
-    HostRuntimeSnapshot {},
-    #[serde(rename = "matcha.lifecycle.status")]
-    MatchaStatus {},
-    #[serde(rename = "matcha.lifecycle.start")]
-    MatchaStart {},
-    #[serde(rename = "matcha.lifecycle.stop")]
-    MatchaStop {},
-    #[serde(rename = "matcha.lifecycle.restart")]
-    MatchaRestart {},
-    #[serde(rename = "openclaw.lifecycle.status")]
-    OpenClawStatus {},
-    #[serde(rename = "openclaw.plugins.catalog")]
-    OpenClawPluginsCatalog {},
-    #[serde(rename = "openclaw.plugins.runtime")]
-    OpenClawPluginsRuntime {},
-    #[serde(rename = "openclaw.plugins.set-enabled")]
-    OpenClawPluginsSetEnabled { input: CommandInput },
-    #[serde(rename = "openclaw.plugins.operation")]
-    OpenClawPluginsOperation { input: CommandInput },
-    #[serde(rename = "openclaw.skills.execute")]
-    OpenClawSkillsExecute { input: CommandInput },
-    #[serde(rename = "team.runtime.execute")]
-    TeamRuntimeExecute { input: CommandInput },
-    #[serde(rename = "openclaw.plugins.execute")]
-    OpenClawPluginsExecute { input: CommandInput },
-    #[serde(rename = "openclaw.environment.status")]
-    OpenClawEnvironmentStatus {},
-    #[serde(rename = "openclaw.runtime.paths")]
-    OpenClawRuntimePaths {},
-    #[serde(rename = "openclaw.cli.command")]
-    OpenClawCliCommand {},
-    #[serde(rename = "openclaw.tool-permission.get")]
-    OpenClawToolPermissionGet {},
-    #[serde(rename = "openclaw.tool-permission.set")]
-    OpenClawToolPermissionSet { input: CommandInput },
-    #[serde(rename = "host.toolchain.status")]
-    HostToolchainStatus {},
-    #[serde(rename = "host.toolchain.prepare")]
-    HostToolchainPrepare {},
-    #[serde(rename = "openclaw.subagent-templates.list")]
-    OpenClawSubagentTemplateCatalog {},
-    #[serde(rename = "openclaw.subagent-templates.get")]
-    OpenClawSubagentTemplate { input: CommandInput },
-    #[serde(rename = "openclaw.lifecycle.start")]
-    OpenClawStart {},
-    #[serde(rename = "openclaw.lifecycle.stop")]
-    OpenClawStop {},
-    #[serde(rename = "openclaw.lifecycle.restart")]
-    OpenClawRestart {},
-    #[serde(rename = "openclaw.logs")]
-    OpenClawLogs { input: CommandInput },
-    #[serde(rename = "openclaw.control.ready")]
-    OpenClawControlReady {},
-    #[serde(rename = "openclaw.gateway.health")]
-    OpenClawGatewayHealth {},
-    #[serde(rename = "openclaw.gateway.status")]
-    OpenClawGatewayStatus {},
-    #[serde(rename = "openclaw.control-ui.url")]
-    OpenClawControlUiUrl {},
-    #[serde(rename = "openclaw.browser.request")]
-    OpenClawBrowserRequest { input: CommandInput },
-    #[serde(rename = "openclaw.mcp-app.request")]
-    OpenClawMcpAppRequest { input: CommandInput },
-    #[serde(rename = "fleet.credentials.write")]
-    FleetCredentialsWrite { input: CommandInput },
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Command {
+    name: String,
+    input: Option<CommandInput>,
+}
+
+impl Command {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn input(&self) -> Option<&CommandInput> {
+        self.input.as_ref()
+    }
+}
+
+impl Serialize for Command {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serialize_command(serializer, &self.name, self.input.as_ref())
+    }
+}
+
+fn serialize_command<S>(
+    serializer: S,
+    name: &str,
+    input: Option<&CommandInput>,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut map = serializer.serialize_map(Some(if input.is_some() { 2 } else { 1 }))?;
+    map.serialize_entry("name", name)?;
+    if let Some(input) = input {
+        map.serialize_entry("input", input)?;
+    }
+    map.end()
+}
+
+fn deserialize_command_input<'de, D>(deserializer: D) -> Result<Option<CommandInput>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    CommandInput::deserialize(deserializer).map(Some)
+}
+
+impl<'de> Deserialize<'de> for Command {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            name: String,
+            #[serde(default, deserialize_with = "deserialize_command_input")]
+            input: Option<CommandInput>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.name.is_empty() {
+            return Err(D::Error::custom("invalid control command name"));
+        }
+        Ok(Self {
+            name: wire.name,
+            input: wire.input,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

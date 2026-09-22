@@ -9,13 +9,16 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+diagnostics-module = { package = "diagnostics", version = "0.1.0", path = "../../modules/diagnostics" }
 base64.workspace = true
 chrono.workspace = true
 foundation = { version = "0.1.0", path = "../../foundation" }
-organization = { version = "0.1.0", path = "../../domains/organization" }
-toolchain = { version = "0.1.0", path = "../../external/toolchain" }
+organization = { version = "0.1.0", path = "../../modules/organization" }
+sessions-module = { package = "sessions", version = "0.1.0", path = "../../modules/sessions" }
+toolchain = { version = "0.1.0", path = "../../modules/toolchain" }
 futures-util.workspace = true
 platform = { version = "0.1.0", path = "../../platform" }
+runtime-directory = { version = "0.1.0", path = "../../modules/runtime-directory" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

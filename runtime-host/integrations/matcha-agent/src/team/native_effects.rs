@@ -13,12 +13,10 @@ use organization::{
     TeamNativeEffectsPort,
 };
 use platform::exchange::InvocationOutcome;
+use sessions_module::command::SessionIngressEvent;
 
 use crate::{
-    peer::{
-        MatchaPeer, RoleSessionError, RoleSessionNativeHandle, RoleSessionPromptHandle,
-        SessionSubscriptionItem,
-    },
+    peer::{MatchaPeer, RoleSessionError, RoleSessionNativeHandle, RoleSessionPromptHandle},
     session::{
         client::AppServerClientError,
         hydration::HydrationWindowRequest,
@@ -284,14 +282,14 @@ impl<'peer> MatchaTeamNativeEffects<'peer> {
 pub struct RoleSessionRenderer {
     session_key: String,
     route_key: String,
-    events: mpsc::Sender<SessionSubscriptionItem>,
+    events: mpsc::Sender<SessionIngressEvent>,
 }
 
 impl RoleSessionRenderer {
     pub fn new(
         session_key: String,
         route_key: String,
-        events: mpsc::Sender<SessionSubscriptionItem>,
+        events: mpsc::Sender<SessionIngressEvent>,
     ) -> Self {
         Self {
             session_key,

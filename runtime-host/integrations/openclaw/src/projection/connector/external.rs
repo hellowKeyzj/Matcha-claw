@@ -3,9 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use environment::{
-    ConnectorCatalog, ConnectorSecretRef, ConnectorSecretResolution, ConnectorSecretResolverPort,
-    connectors::{Connector, ConnectorKind, McpTransport},
+use connectors::{
+    Connector, ConnectorCatalog, ConnectorKind, ConnectorSecretRef, ConnectorSecretResolution,
+    ConnectorSecretResolverPort, McpTransport,
 };
 use futures_util::StreamExt;
 use reqwest::{Client, header};
@@ -486,7 +486,7 @@ fn valid_initialize_response(value: &Value) -> bool {
 mod tests {
     use std::collections::BTreeMap;
 
-    use environment::connectors::ConnectorInput;
+    use connectors::ConnectorInput;
 
     use super::*;
 

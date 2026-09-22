@@ -6,10 +6,10 @@
 
 | 领域 | 当前事实 owner | 主要状态 | 外部效果 | Rust 最终责任 |
 | --- | --- | --- | --- | --- |
-| Electron child process | `LocalProcessRuntime` / `RuntimeHostProcessAdapter` | parent lifecycle、PID、readiness、crash、restart | fork、stop、restart、backoff | 不接管 Electron parent process manager；兼容 child `/health` 和启动语义 |
+| Electron child process | `DirectRuntimeHost` / `RuntimeHostLifecycleOwner` | parent lifecycle、PID、readiness、crash、restart | spawn、stdin EOF stop、forceKill、restart replacement | 不接管 Electron parent process manager；Rust 提供 private control ready 和 EOF shutdown |
 | Electron parent manager | `RuntimeHostManager` | manager lifecycle、child state、gateway bridge、errors | child 编排、parent callback、host event bridge | 不复制；Rust 只提供 parent 所需 child wire 行为 |
-| TS child runtime health | `RuntimeHostStateService` | child lifecycle、uptime、plugin count、transport stats | `/health`、`/api/runtime-host/health` | 提供同一 child health/application projection，不能混入 parent lifecycle |
-| `/dispatch` transport | Electron `RuntimeHostClient` + child dispatch handler | request/response envelope、timeout、body limit、validation | HTTP dispatch、错误映射 | 实现 v1 wire contract；默认 30s、超大 body 413 |
+| Rust Host private health | `host-system-control` private control descriptor | Host admission lifecycle、safe peer projection | `host.health`、`host.runtime.snapshot` | 提供 Host-private projection，不能混入 Electron process-manager lifecycle |
+| Signed loopback product transport | Electron route transports + installed Rust module routes | signed decision、route deadline/body policy、owner DTO decode | HTTP product route、SSE/WS outcome、错误映射 | 由具体 owner module/facade 承接业务；不恢复 legacy `/dispatch` envelope |
 | Parent callback | Electron internal routes + TS `ParentTransportClient` | token、callback acceptance、best-effort event result | shell action、gateway event、owner operation event | 提供同一 loopback callback contract；generic operation callback 已删除，typed operation event 由具体 facade 定义 |
 
 ## 2. Peer runtime 与 session
@@ -49,7 +49,7 @@
 | Security policy | durable policy JSON + security-core/Gateway apply | desired/persisted/applied/observed audit/enforcement | policy write、plugin/Gateway apply | 适配 native policy owner；不以 Rust rule catalog 代替完整 policy owner |
 | Settings | TS `SettingsStoreWorkflow` | desired/persisted/applied/ready | settings write、Gateway apply/restart | 先闭合 runtime data path 和 token private projection，再决定接管 |
 | Platform runtime health | `OpenClawRuntimeDriver` / Gateway bridge | port reachable、connection state、lastError | health check、runtime control | 与 Rust Host admission、OpenClaw control readiness、Gateway live status 分字段映射；不能用 Gateway probe 决定 Host ok |
-| `uv/toolchain` | `runtime-host/external/toolchain::NativeToolchain` + Host `ToolchainHandle` | uv available、Python 3.12 readiness、prepare terminal result | Renderer lazy `hostToolchainPrepare()` → Electron `/api/toolchain/uv/prepare` → Rust private `host.toolchain.prepare`；`/api/toolchain/uv/check` → `host.toolchain.status` → `{ installed }` | OpenClaw 与 matcha-agent 只消费 private env projection；Foundation 只提供 bounded process/env patch primitives；不走 `platform.runtime` capability，不走 OpenClaw business owner |
+| `uv/toolchain` | `runtime-host/modules/toolchain::NativeToolchain` + `ToolchainModule` owner loopback | uv available、Python 3.12 readiness、prepare terminal result | Renderer lazy `hostToolchainPrepare()` → Electron `/api/toolchain/uv/prepare` → `toolchainTransport.prepare()`；`/api/toolchain/uv/check` → `toolchainTransport.status()` → `{ installed }` | OpenClaw 与 matcha-agent 只消费 private env projection；Foundation 只提供 bounded process/env patch primitives；不走 `platform.runtime` capability，不走 OpenClaw business owner，不走 Host private control command |
 | Remote Fleet/Team | Rust Host `organization` / `fleet` domains under `runtime-host` state root；native/remote runtime remains external | endpoint、node、terminal、team run、audit、webhook token、fleet credentials | remote API、WebSocket、webhook、agent ingress | 独立 owner；durable facts/credentials 落在 `%APPDATA%/MatchaClaw/runtime-host`，不能塞入 Host-wide generic operation state、OpenClaw state 或 Matcha app-server state |
 
 ## 5. Foundation 后台执行机制与 owner-local 异步 operation

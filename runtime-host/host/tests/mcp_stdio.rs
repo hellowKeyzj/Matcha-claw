@@ -313,7 +313,7 @@ fn artifact_contains_no_store_opening_or_static_signing_material() {
             "artifact must not contain {forbidden}"
         );
     }
-    assert!(source.contains("runtime_host::run_team_run_mcp"));
+    assert!(source.contains("runtime_host::run_matcha_mcp"));
 }
 
 #[test]

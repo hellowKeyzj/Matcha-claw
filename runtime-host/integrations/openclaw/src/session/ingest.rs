@@ -7,6 +7,7 @@ use std::{
     },
 };
 
+use sessions_module::command::SessionIngressEvent;
 use tokio::sync::mpsc;
 
 use crate::gateway::{
@@ -17,7 +18,7 @@ use crate::gateway::{
 use super::{
     event_router::EventRouter,
     events::{SessionEvent, send_lifecycle},
-    projection::{CanonicalIngressResult, CanonicalRecoveryReason},
+    projection::CanonicalRecoveryReason,
     protocol::{
         ChatState, SessionEventEnvelope, SessionEventKind, SessionKey, decode_session_event,
     },
@@ -152,7 +153,7 @@ fn message_content_length(
 
 /// Consumes a socket's decoded Gateway events, sequences them through the
 /// shared [`Ingress`], and fans each verified event out to the lifecycle sink
-/// and the canonical-delta sink.
+/// and the sessions module ingress.
 pub(crate) struct SessionEventIngest {
     ingress: Arc<Ingress>,
     recovery: mpsc::Sender<IngressRecovery>,
@@ -163,7 +164,7 @@ pub(crate) struct SessionEventIngest {
 impl SessionEventIngest {
     pub(crate) fn new(
         events: mpsc::Sender<SessionEvent>,
-        canonical_events: mpsc::Sender<CanonicalIngressResult>,
+        session_events: mpsc::Sender<SessionIngressEvent>,
     ) -> Self {
         let (ingress, receiver) = Ingress::new(NonZeroUsize::new(INGRESS_CAPACITY).unwrap());
         let (recovery, recoveries) = mpsc::channel(INGRESS_CAPACITY);
@@ -172,7 +173,7 @@ impl SessionEventIngest {
             receiver,
             recoveries,
             events,
-            canonical_events,
+            session_events,
             Arc::clone(&route_keys),
         ));
         Self {
@@ -270,10 +271,10 @@ async fn project_ingress(
     mut receiver: mpsc::Receiver<IngressEvent>,
     mut recoveries: mpsc::Receiver<IngressRecovery>,
     events: mpsc::Sender<SessionEvent>,
-    canonical_events: mpsc::Sender<CanonicalIngressResult>,
+    session_events: mpsc::Sender<SessionIngressEvent>,
     route_keys: Arc<Mutex<HashMap<SessionKey, String>>>,
 ) {
-    let mut router = EventRouter::new(canonical_events);
+    let mut router = EventRouter::new(session_events);
     loop {
         tokio::select! {
             Some(ingress_event) = receiver.recv() => {
@@ -339,12 +340,9 @@ fn clear_route_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{
-        events::TerminalOutcome,
-        projection::{AssistantTurnChunkKind, CanonicalSessionChange},
-        protocol::{ChatEvent, RunId},
-    };
+    use crate::session::protocol::{ChatEvent, RunId};
     use serde_json::json;
+    use sessions_module::state::{RunPhase, SessionChange};
     use tokio::sync::mpsc;
 
     fn session_key() -> SessionKey {
@@ -383,6 +381,7 @@ mod tests {
             }),
             activity: None,
             approval: None,
+            changed: None,
         }
     }
 
@@ -419,8 +418,8 @@ mod tests {
     #[tokio::test]
     async fn messages_subscribe_events_emit_route_bound_delta_and_terminal() {
         let (_events_tx, mut events_rx) = mpsc::channel(8);
-        let (canonical_tx, mut canonical_rx) = mpsc::channel(8);
-        let ingest = Arc::new(SessionEventIngest::new(_events_tx, canonical_tx));
+        let (session_tx, mut session_rx) = mpsc::channel(8);
+        let ingest = Arc::new(SessionEventIngest::new(_events_tx, session_tx));
         let (gateway_tx, gateway_rx) = mpsc::channel(8);
         ingest.register_route(session_key(), "renderer-route:session".to_owned());
         ingest.forward(gateway_rx);
@@ -456,30 +455,28 @@ mod tests {
             .unwrap();
         drop(gateway_tx);
 
-        let produced = canonical_rx.recv().await.expect("delta canonical event");
-        let CanonicalIngressResult::Produced(delta) = produced else {
-            panic!("expected produced delta");
-        };
-        assert_eq!(delta.route_key(), Some("renderer-route:session"));
-        assert_eq!(delta.run_id().unwrap().as_str(), "native-run");
+        let (_, delta) = session_rx
+            .recv()
+            .await
+            .expect("delta session event")
+            .into_parts();
+        assert_eq!(delta.binding.route_key(), Some("renderer-route:session"));
+        assert_eq!(delta.run_id.as_deref(), Some("native-run"));
         assert!(matches!(
-            delta.changes(),
-            [CanonicalSessionChange::AssistantTurnChunk {
-                kind: AssistantTurnChunkKind::Text,
-                text,
-                ..
-            }] if text == "hello"
+            delta.changes.as_slice(),
+            [SessionChange::MessageDelta { text, .. }] if text == "hello"
         ));
 
-        let produced = canonical_rx.recv().await.expect("terminal canonical event");
-        let CanonicalIngressResult::Produced(delta) = produced else {
-            panic!("expected produced terminal");
-        };
-        assert_eq!(delta.route_key(), Some("renderer-route:session"));
+        let (_, terminal) = session_rx
+            .recv()
+            .await
+            .expect("terminal session event")
+            .into_parts();
+        assert_eq!(terminal.binding.route_key(), Some("renderer-route:session"));
         assert!(matches!(
-            delta.changes(),
-            [CanonicalSessionChange::Terminal {
-                outcome: TerminalOutcome::Completed,
+            terminal.changes.as_slice(),
+            [SessionChange::RunPhaseChanged {
+                phase: RunPhase::Completed,
                 ..
             }]
         ));

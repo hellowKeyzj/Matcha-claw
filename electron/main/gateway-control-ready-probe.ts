@@ -1,23 +1,12 @@
 import type {
-  RuntimeHostControlCommandOptions,
-  RuntimeHostControlOutcome,
-} from './runtime-host-delivery/control';
+  RuntimeControlReadyResponse,
+  RuntimeControlTransport,
+} from './runtime-host-delivery/transport/runtime-control';
 
-export interface GatewayControlReadyResponse {
-  readonly ready: boolean;
-  readonly phase: 'ready' | 'starting' | 'unavailable';
-  readonly retryable: boolean;
-}
-
-export interface GatewayControlReadyCommandHost {
-  readonly command: (
-    command: { readonly name: 'openclaw.control.ready' },
-    options?: RuntimeHostControlCommandOptions,
-  ) => Promise<RuntimeHostControlOutcome>;
-}
+export type GatewayControlReadyResponse = RuntimeControlReadyResponse;
 
 export interface GatewayControlReadyProbeDeps {
-  readonly directHost: GatewayControlReadyCommandHost;
+  readonly runtimeControlTransport: Pick<RuntimeControlTransport, 'controlReady'>;
   readonly nowMs: () => number;
   readonly delay: (ms: number) => Promise<void>;
 }
@@ -50,7 +39,7 @@ export async function waitForGatewayControlReady(
       break;
     }
     const status = await readGatewayControlReadyStatus(
-      deps.directHost,
+      deps.runtimeControlTransport,
       Math.min(CONTROL_READY_REQUEST_TIMEOUT_MS, remainingMs),
     );
     if (status.ready) {
@@ -77,23 +66,17 @@ export async function waitForGatewayControlReady(
 }
 
 async function readGatewayControlReadyStatus(
-  directHost: GatewayControlReadyCommandHost,
+  runtimeControlTransport: Pick<RuntimeControlTransport, 'controlReady'>,
   timeoutMs: number,
 ): Promise<GatewayControlReadyResponse> {
-  const outcome = await directHost.command(
-    { name: 'openclaw.control.ready' },
-    { timeoutMs },
-  );
-  if (outcome.kind === 'timed-out') {
-    throw new Error('Gateway control readiness command timed out.');
-  }
-  if (outcome.kind === 'rejected') {
+  const response = await runtimeControlTransport.controlReady({ timeoutMs });
+  if (response.status !== 200) {
     throw new Error('Gateway control readiness command was rejected.');
   }
-  if (!isGatewayControlReadyResponse(outcome.result)) {
+  if (!isGatewayControlReadyResponse(response.body)) {
     throw new Error('Gateway control readiness response was invalid.');
   }
-  return outcome.result;
+  return response.body;
 }
 
 function isGatewayControlReadyResponse(value: unknown): value is GatewayControlReadyResponse {

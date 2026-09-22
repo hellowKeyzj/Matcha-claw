@@ -34,6 +34,7 @@ import {
   createProviderCredentialStatusTransport,
   type ProviderCredentialStatusTransport,
 } from './ipc/provider-private-auth';
+import { createFleetCredentialWriteAdapter } from './ipc/fleet-private';
 
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 const e2eStartupOutcomeKey = '__matchaclawE2EStartupOutcome';
@@ -245,6 +246,9 @@ export async function bootstrapMainApplication(deps: {
         rendererEventRoutes,
         runtimeHostTransports: transportBundle.hostApiTransports,
         providerCredentialStatusTransport,
+        credentialWriteAdapter: createFleetCredentialWriteAdapter(
+          transportBundle.hostApiTransports.fleetCredentialsTransport,
+        ),
       }, undefined, delivery.runtimeHostTransportPort)
     );
 
@@ -252,6 +256,7 @@ export async function bootstrapMainApplication(deps: {
       directRuntimeHost,
       deps.getMainWindow,
       transportBundle.hostApiTransports.providerAccountsTransport,
+      transportBundle.hostApiTransports.fleetCredentialsTransport,
       createDiagnosticsExportDependencies(transportBundle.hostApiTransports.diagnosticsArchiveTransport),
     );
     registerHostEventBridge({

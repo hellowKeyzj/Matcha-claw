@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use environment::{ProviderAccount, ProviderAccountId, ProviderModelCatalog, ProviderRouting};
+use ::provider::{ProviderAccount, ProviderAccountId, ProviderModelCatalog, ProviderRouting};
 
 use crate::{
     lifecycle::state_dir::CanonicalStateDir,

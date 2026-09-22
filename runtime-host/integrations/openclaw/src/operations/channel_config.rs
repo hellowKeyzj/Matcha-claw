@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    future::Future,
     sync::Arc,
     time::Instant,
 };
@@ -21,47 +20,9 @@ mod credentials;
 mod local_schema;
 mod mutation;
 
-tokio::task_local! {
-    static CHANNEL_TRACE: Option<String>;
-}
-
-fn validated_channel_trace(trace_id: Option<String>) -> Option<String> {
-    trace_id.filter(|id| {
-        id.len() == 36
-            && id.bytes().enumerate().all(|(index, byte)| {
-                if matches!(index, 8 | 13 | 18 | 23) {
-                    byte == b'-'
-                } else {
-                    byte.is_ascii_hexdigit()
-                }
-            })
-    })
-}
-
-pub async fn with_channel_trace<F: Future>(trace_id: Option<String>, future: F) -> F::Output {
-    CHANNEL_TRACE
-        .scope(validated_channel_trace(trace_id), future)
-        .await
-}
-
-pub fn current_channel_trace() -> Option<String> {
-    CHANNEL_TRACE.try_with(Clone::clone).ok().flatten()
-}
-
-pub fn with_channel_trace_sync<T>(trace_id: Option<String>, action: impl FnOnce() -> T) -> T {
-    CHANNEL_TRACE.sync_scope(validated_channel_trace(trace_id), action)
-}
-
-/// Callers supply only fixed phase names and safe enum/bool/count/timing summaries.
-pub fn channel_trace(phase: &str, detail: &str) {
-    let trace_id = current_channel_trace();
-    eprintln!(
-        "[startup-trace] source=openclaw-channel traceId={} phase={} detail={}",
-        trace_id.as_deref().unwrap_or("none"),
-        phase,
-        detail
-    );
-}
+pub use platform::trace::{
+    channel_trace, current_channel_trace, with_channel_trace, with_channel_trace_sync,
+};
 
 fn trace_mutation_outcome(phase: &str, started: Instant, outcome: ChannelConfigMutationOutcome) {
     channel_trace(

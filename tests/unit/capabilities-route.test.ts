@@ -195,14 +195,6 @@ const agentToolConfigDescriptor = {
   routeOwnerId: 'openclaw',
 } as const;
 
-function succeeded(result: unknown) {
-  return { kind: 'succeeded' as const, result };
-}
-
-function rejected(code: 'INVALID_INPUT' | 'UNAVAILABLE' | 'CAPACITY_EXHAUSTED' | 'FAILED', message = 'private capability failure') {
-  return { kind: 'rejected' as const, error: { code, message } };
-}
-
 function malformedIncoming(raw: string) {
   return Object.assign(Readable.from([raw]), {
     method: 'POST',
@@ -212,17 +204,17 @@ function malformedIncoming(raw: string) {
 
 describe('capability route sealed projection', () => {
   it('rejects malformed Team runtime requests before dispatch', async () => {
-    const command = vi.fn();
+    const execute = vi.fn();
     const result = response();
 
     await handleCapabilityRoutes(
       incoming({ ...teamRuntimeRequest, input: { teamId: '' } }) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { teamRuntimeTransport: { execute } } } as never,
     );
 
-    expect(command).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
     expect(result.state).toEqual({
       statusCode: 400,
       body: { success: false, error: 'Team runtime request is invalid' },
@@ -230,17 +222,17 @@ describe('capability route sealed projection', () => {
   });
 
   it('dispatches Team runtime requests and preserves succeeded results', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({ success: true, teamId: 'team-1' }));
+    const execute = vi.fn().mockResolvedValue({ status: 200, body: { success: true, teamId: 'team-1' } });
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(teamRuntimeRequest) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { teamRuntimeTransport: { execute } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({ name: 'team.runtime.execute', input: teamRuntimeRequest });
+    expect(execute).toHaveBeenCalledWith(teamRuntimeRequest, undefined);
     expect(result.state).toEqual({ statusCode: 200, body: { success: true, teamId: 'team-1' } });
   });
 
@@ -252,22 +244,22 @@ describe('capability route sealed projection', () => {
       target: { kind: 'team-run', teamId: 'team-1', runId: 'run-1' },
       input: { teamId: 'team-1', runId: 'run-1', view: 'graphSummary' },
     } as const;
-    const command = vi.fn().mockResolvedValue(succeeded({ success: true }));
+    const execute = vi.fn().mockResolvedValue({ status: 200, body: { success: true } });
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(request) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { teamRuntimeTransport: { execute } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({ name: 'team.runtime.execute', input: request });
+    expect(execute).toHaveBeenCalledWith(request, undefined);
     expect(result.state).toEqual({ statusCode: 200, body: { success: true } });
   });
 
-  it('forwards Team runtime trace id only as private control metadata', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({ success: true, teamId: 'team-1' }));
+  it('forwards Team runtime trace id only as private transport metadata', async () => {
+    const execute = vi.fn().mockResolvedValue({ status: 200, body: { success: true, teamId: 'team-1' } });
     const result = response();
     const traceId = 'session-trace:team-runtime:team.runList:trace-1';
 
@@ -275,13 +267,10 @@ describe('capability route sealed projection', () => {
       incoming(teamRuntimeRequest, 'POST', { 'x-matchaclaw-session-trace': traceId }) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { teamRuntimeTransport: { execute } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({
-      name: 'team.runtime.execute',
-      input: { ...teamRuntimeRequest, traceId },
-    });
+    expect(execute).toHaveBeenCalledWith(teamRuntimeRequest, traceId);
     expect(result.state).toEqual({ statusCode: 200, body: { success: true, teamId: 'team-1' } });
   });
 
@@ -320,14 +309,14 @@ describe('capability route sealed projection', () => {
   });
 
   it('rejects unknown Team runtime results without faking success', async () => {
-    const command = vi.fn().mockResolvedValue({ kind: 'unknown', result: { outcome: 'unknown' } });
+    const execute = vi.fn().mockResolvedValue({ status: 503, body: { success: false, error: 'Team runtime operation is unavailable' } });
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(teamRuntimeRequest) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { teamRuntimeTransport: { execute } } } as never,
     );
 
     expect(result.state).toEqual({ statusCode: 503, body: { success: false, error: 'Team runtime operation is unavailable' } });
@@ -341,61 +330,31 @@ describe('capability route sealed projection', () => {
       target: { kind: 'team', teamId: 'team-1' },
       input: { teamId: 'team-1', idempotencyKey: 'resume:team-1' },
     } as const;
-    const command = vi.fn().mockResolvedValue({ kind: 'unknown', result: { teamId: 'team-1', state: 'outcome_unknown' } });
+    const execute = vi.fn().mockResolvedValue({ status: 503, body: { success: false, error: 'Team runtime operation is unavailable' } });
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(request) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { teamRuntimeTransport: { execute } } } as never,
     );
 
     expect(result.state).toEqual({ statusCode: 503, body: { success: false, error: 'Team runtime operation is unavailable' } });
   });
 
-  it.each([
-    ['INVALID_INPUT', 400, 'Team runtime request is invalid'],
-    ['CAPACITY_EXHAUSTED', 409, 'Team runtime operation is unavailable'],
-    ['UNAVAILABLE', 503, 'Team runtime operation is unavailable'],
-    ['FAILED', 500, 'Team runtime operation is unavailable'],
-  ] as const)('projects Team runtime rejection %s', async (code, statusCode, error) => {
-    const command = vi.fn().mockResolvedValue(rejected(code, 'private failure details'));
+  it('projects Team runtime transport failures as unavailable', async () => {
+    const execute = vi.fn().mockRejectedValue(new Error('private transport failure'));
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(teamRuntimeRequest) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { teamRuntimeTransport: { execute } } } as never,
     );
 
-    expect(result.state).toEqual({ statusCode, body: { success: false, error } });
-    expect(JSON.stringify(result.state)).not.toContain('private failure details');
-  });
-
-  it('projects Team runtime timeouts and transport failures as unavailable', async () => {
-    const command = vi.fn()
-      .mockResolvedValueOnce({ kind: 'timed-out' })
-      .mockRejectedValueOnce(new Error('private transport failure'));
-    const timedOut = response();
-    const failed = response();
-
-    await handleCapabilityRoutes(
-      incoming(teamRuntimeRequest) as never,
-      timedOut.raw as never,
-      new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
-    );
-    await handleCapabilityRoutes(
-      incoming(teamRuntimeRequest) as never,
-      failed.raw as never,
-      new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
-    );
-
-    expect(timedOut.state).toEqual({ statusCode: 503, body: { success: false, error: 'Team runtime operation is unavailable' } });
-    expect(failed.state).toEqual({ statusCode: 503, body: { success: false, error: 'Team runtime operation is unavailable' } });
+    expect(result.state).toEqual({ statusCode: 503, body: { success: false, error: 'Team runtime operation is unavailable' } });
   });
 
   it('does not expose UV preparation through generic capability execute', async () => {
@@ -577,20 +536,23 @@ describe('capability route sealed projection', () => {
     expect(JSON.stringify(result.state)).not.toContain('private native detail');
   });
 
-  it('delivers the full capability directory from the typed list command', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({
-      capabilities: [agentSkillConfigDescriptor, agentToolConfigDescriptor, subagentDescriptor, providerRoutingDescriptor, schedulerDescriptor],
-    }));
+  it('delivers the full capability directory from the typed list transport', async () => {
+    const list = vi.fn().mockResolvedValue({
+      status: 200,
+      body: {
+        capabilities: [agentSkillConfigDescriptor, agentToolConfigDescriptor, subagentDescriptor, providerRoutingDescriptor, schedulerDescriptor],
+      },
+    });
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(undefined, 'GET') as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/list'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { list } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({ name: 'host.capabilities.list' });
+    expect(list).toHaveBeenCalledWith();
     expect(result.state).toEqual({
       statusCode: 200,
       body: {
@@ -600,7 +562,7 @@ describe('capability route sealed projection', () => {
   });
 
   it('does not describe a deleted Electron-owned License capability', async () => {
-    const command = vi.fn().mockResolvedValue(rejected('INVALID_INPUT', 'private license detail'));
+    const describe = vi.fn().mockResolvedValue({ status: 404, body: { success: false, error: 'Capability is not available' } });
     const result = response();
     const body = { id: 'license.runtime', scope: { kind: 'app' } };
 
@@ -608,19 +570,18 @@ describe('capability route sealed projection', () => {
       incoming(body) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { describe } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({ name: 'host.capabilities.describe', input: body });
+    expect(describe).toHaveBeenCalledWith(body);
     expect(result.state).toEqual({
       statusCode: 404,
       body: { success: false, error: 'Capability is not available' },
     });
-    expect(JSON.stringify(result.state)).not.toContain('private license detail');
   });
 
   it('delivers a capability description with the exact typed request', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({ capability: schedulerDescriptor }));
+    const describe = vi.fn().mockResolvedValue({ status: 200, body: { capability: schedulerDescriptor } });
     const result = response();
     const body = { id: schedulerDescriptor.id, scope: schedulerScope };
 
@@ -628,18 +589,15 @@ describe('capability route sealed projection', () => {
       incoming(body) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { describe } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({
-      name: 'host.capabilities.describe',
-      input: body,
-    });
+    expect(describe).toHaveBeenCalledWith(body);
     expect(result.state).toEqual({ statusCode: 200, body: { capability: schedulerDescriptor } });
   });
 
   it('delivers the complete subagent descriptor without rebuilding it in Main', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({ capability: subagentDescriptor }));
+    const describe = vi.fn().mockResolvedValue({ status: 200, body: { capability: subagentDescriptor } });
     const result = response();
     const body = { id: subagentDescriptor.id, scope: subagentScope };
 
@@ -647,13 +605,10 @@ describe('capability route sealed projection', () => {
       incoming(body) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { describe } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({
-      name: 'host.capabilities.describe',
-      input: body,
-    });
+    expect(describe).toHaveBeenCalledWith(body);
     expect(result.state).toEqual({ statusCode: 200, body: { capability: subagentDescriptor } });
   });
 
@@ -667,7 +622,7 @@ describe('capability route sealed projection', () => {
       },
     }],
   ])('fails closed when %s is returned', async (_caseName, capability) => {
-    const command = vi.fn().mockResolvedValue(succeeded({ capability }));
+    const describe = vi.fn().mockResolvedValue({ status: 503, body: { success: false, error: 'Capability directory is unavailable' } });
     const result = response();
     const body = { id: schedulerDescriptor.id, scope: schedulerScope };
 
@@ -675,54 +630,19 @@ describe('capability route sealed projection', () => {
       incoming(body) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { describe } } } as never,
     );
 
+    expect(describe).toHaveBeenCalledWith(body);
+    expect(JSON.stringify(result.state)).not.toContain(String(capability.id));
     expect(result.state).toEqual({
       statusCode: 503,
       body: { success: false, error: 'Capability directory is unavailable' },
     });
   });
 
-  it('fails closed for missing or invalid returned descriptor fields', async () => {
-    const missingOperations = { ...schedulerDescriptor } as Record<string, unknown>;
-    delete missingOperations.operations;
-    const invalidScope = {
-      ...schedulerDescriptor,
-      scope: { ...schedulerScope, unexpected: true },
-    };
-    const command = vi.fn()
-      .mockResolvedValueOnce(succeeded({ capability: missingOperations }))
-      .mockResolvedValueOnce(succeeded({ capability: invalidScope }));
-    const missing = response();
-    const invalid = response();
-    const body = { id: schedulerDescriptor.id, scope: schedulerScope };
-
-    await handleCapabilityRoutes(
-      incoming(body) as never,
-      missing.raw as never,
-      new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
-    );
-    await handleCapabilityRoutes(
-      incoming(body) as never,
-      invalid.raw as never,
-      new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
-    );
-
-    expect(missing.state).toEqual({
-      statusCode: 503,
-      body: { success: false, error: 'Capability directory is unavailable' },
-    });
-    expect(invalid.state).toEqual(missing.state);
-  });
-
-  it('fails closed for an outer succeeded outcome with private extra fields', async () => {
-    const command = vi.fn().mockResolvedValue({
-      ...succeeded({ capability: schedulerDescriptor }),
-      privateField: 'native-secret',
-    });
+  it('forwards sealed descriptor validation failures from the directory transport', async () => {
+    const describe = vi.fn().mockResolvedValue({ status: 503, body: { success: false, error: 'Capability directory is unavailable' } });
     const result = response();
     const body = { id: schedulerDescriptor.id, scope: schedulerScope };
 
@@ -730,18 +650,18 @@ describe('capability route sealed projection', () => {
       incoming(body) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { describe } } } as never,
     );
 
+    expect(describe).toHaveBeenCalledWith(body);
     expect(result.state).toEqual({
       statusCode: 503,
       body: { success: false, error: 'Capability directory is unavailable' },
     });
-    expect(JSON.stringify(result.state)).not.toContain('native-secret');
   });
 
   it('maps a valid request with an unavailable scope to the generic not-available response', async () => {
-    const command = vi.fn().mockResolvedValue(rejected('INVALID_INPUT', 'private scope details'));
+    const describe = vi.fn().mockResolvedValue({ status: 404, body: { success: false, error: 'Capability is not available' } });
     const result = response();
     const body = {
       id: schedulerDescriptor.id,
@@ -752,76 +672,59 @@ describe('capability route sealed projection', () => {
       incoming(body) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { describe } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({ name: 'host.capabilities.describe', input: body });
+    expect(describe).toHaveBeenCalledWith(body);
     expect(result.state).toEqual({
       statusCode: 404,
       body: { success: false, error: 'Capability is not available' },
     });
-    expect(JSON.stringify(result.state)).not.toContain('private scope details');
   });
 
-  it('fails closed for malformed directory results and command exceptions', async () => {
-    const command = vi.fn()
-      .mockResolvedValueOnce(succeeded({ capabilities: [{ ...schedulerDescriptor, privateField: true }] }))
-      .mockRejectedValueOnce(new Error('private native error'));
-    const malformed = response();
-    const thrown = response();
+  it('fails closed for directory transport exceptions', async () => {
+    const list = vi.fn().mockRejectedValue(new Error('private native error'));
+    const result = response();
 
     await handleCapabilityRoutes(
       incoming(undefined, 'GET') as never,
-      malformed.raw as never,
+      result.raw as never,
       new URL('http://localhost/api/capabilities/list'),
-      { runtimeHost: { command } } as never,
-    );
-    await handleCapabilityRoutes(
-      incoming(undefined, 'GET') as never,
-      thrown.raw as never,
-      new URL('http://localhost/api/capabilities/list'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { list } } } as never,
     );
 
-    expect(malformed.state).toEqual({
+    expect(result.state).toEqual({
       statusCode: 503,
       body: { success: false, error: 'Capability directory is unavailable' },
     });
-    expect(thrown.state).toEqual(malformed.state);
   });
 
-  it('maps invalid capability rejection to a generic not-available response', async () => {
-    const command = vi.fn().mockResolvedValue(rejected('INVALID_INPUT', 'private scope details'));
+  it('maps invalid capability transport response to a generic not-available response', async () => {
+    const describe = vi.fn().mockResolvedValue({ status: 404, body: { success: false, error: 'Capability is not available' } });
     const result = response();
 
     await handleCapabilityRoutes(
       incoming({ id: 'unknown.capability', scope: schedulerScope }) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { describe } } } as never,
     );
 
     expect(result.state).toEqual({
       statusCode: 404,
       body: { success: false, error: 'Capability is not available' },
     });
-    expect(JSON.stringify(result.state)).not.toContain('private scope details');
   });
 
-  it.each([
-    rejected('UNAVAILABLE'),
-    rejected('CAPACITY_EXHAUSTED'),
-    rejected('FAILED'),
-    { kind: 'timed-out' as const },
-  ])('maps unavailable describe outcomes to a generic response: %p', async (outcome) => {
-    const command = vi.fn().mockResolvedValue(outcome);
+  it('maps unavailable describe transport responses to a generic response', async () => {
+    const describe = vi.fn().mockResolvedValue({ status: 503, body: { success: false, error: 'Capability directory is unavailable' } });
     const result = response();
 
     await handleCapabilityRoutes(
       incoming({ id: schedulerDescriptor.id, scope: schedulerScope }) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { describe } } } as never,
     );
 
     expect(result.state).toEqual({
@@ -830,32 +733,22 @@ describe('capability route sealed projection', () => {
     });
   });
 
-  it('fails closed for malformed describe results and command exceptions', async () => {
-    const command = vi.fn()
-      .mockResolvedValueOnce(succeeded({ capability: { ...schedulerDescriptor, privateField: 'leak' } }))
-      .mockRejectedValueOnce(new Error('private native error'));
-    const malformed = response();
-    const thrown = response();
+  it('fails closed for describe transport exceptions', async () => {
+    const describe = vi.fn().mockRejectedValue(new Error('private native error'));
+    const result = response();
     const body = { id: schedulerDescriptor.id, scope: schedulerScope };
 
     await handleCapabilityRoutes(
       incoming(body) as never,
-      malformed.raw as never,
+      result.raw as never,
       new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
-    );
-    await handleCapabilityRoutes(
-      incoming(body) as never,
-      thrown.raw as never,
-      new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { describe } } } as never,
     );
 
-    expect(malformed.state).toEqual({
+    expect(result.state).toEqual({
       statusCode: 503,
       body: { success: false, error: 'Capability directory is unavailable' },
     });
-    expect(thrown.state).toEqual(malformed.state);
   });
 
   it.each([
@@ -864,17 +757,17 @@ describe('capability route sealed projection', () => {
     { id: 'scheduler.cron\0private', scope: schedulerScope },
     { id: schedulerDescriptor.id, scope: { ...schedulerScope, private: true } },
   ])('rejects malformed describe requests before dispatch: %p', async (body) => {
-    const command = vi.fn();
+    const describe = vi.fn();
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(body) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { describe } } } as never,
     );
 
-    expect(command).not.toHaveBeenCalled();
+    expect(describe).not.toHaveBeenCalled();
     expect(result.state).toEqual({
       statusCode: 404,
       body: { success: false, error: 'Capability is not available' },
@@ -882,17 +775,17 @@ describe('capability route sealed projection', () => {
   });
 
   it('maps malformed describe JSON to the request-failed response', async () => {
-    const command = vi.fn();
+    const describe = vi.fn();
     const result = response();
 
     await handleCapabilityRoutes(
       malformedIncoming('{not-json') as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/describe'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { capabilityDirectoryTransport: { describe } } } as never,
     );
 
-    expect(command).not.toHaveBeenCalled();
+    expect(describe).not.toHaveBeenCalled();
     expect(result.state).toEqual({
       statusCode: 500,
       body: { success: false, error: 'Capability request failed' },
@@ -1054,8 +947,8 @@ describe('capability route sealed projection', () => {
     expect(JSON.stringify([provider.state, task.state])).not.toContain(privateCanary);
   });
 
-  it('forwards OpenClaw browser request envelope fields to the private runtime command', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({ ok: true, count: 2 }));
+  it('forwards OpenClaw browser request envelope fields to the gateway transport', async () => {
+    const execute = vi.fn().mockResolvedValue({ status: 200, body: { ok: true, count: 2 } });
     const result = response();
     const request = {
       id: 'openclaw.browser',
@@ -1077,19 +970,16 @@ describe('capability route sealed projection', () => {
       incoming(request) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { openClawGatewayTransport: { execute } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({
-      name: 'openclaw.browser.request',
-      input: request.input,
-    });
+    expect(execute).toHaveBeenCalledWith(request);
     expect(result.state).toEqual({ statusCode: 200, body: { ok: true, count: 2 } });
   });
 
   it('forwards OpenClaw MCP app requests without writing SessionView', async () => {
     const payload = { lease: { viewId: 'view-1', expiresAtMs: 1 }, url: 'https://mcp.local/view' };
-    const command = vi.fn().mockResolvedValue(succeeded(payload));
+    const execute = vi.fn().mockResolvedValue({ status: 200, body: payload });
     const result = response();
     const request = {
       id: 'openclaw.mcpApp',
@@ -1103,18 +993,10 @@ describe('capability route sealed projection', () => {
       incoming(request) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { openClawGatewayTransport: { execute } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({
-      name: 'openclaw.mcp-app.request',
-      input: {
-        operationId: 'mcp.app.lease',
-        sessionKey: 'session-1',
-        viewId: 'view-1',
-        standalone: true,
-      },
-    });
+    expect(execute).toHaveBeenCalledWith(request);
     expect(result.state).toEqual({ statusCode: 200, body: payload });
   });
 
@@ -1127,27 +1009,27 @@ describe('capability route sealed projection', () => {
     [{ id: 'openclaw.mcpApp', operationId: 'mcp.lease', scope: schedulerScope, target: null, input: { sessionKey: 'session-1', viewId: 'view-1' } }, 'OpenClaw MCP app request is invalid'],
     [{ id: 'openclaw.mcpApp', operationId: 'mcp.app.lease', scope: schedulerScope, target: null, input: { sessionKey: 'session-1', viewId: 'view-1', toolResult: 'secret' } }, 'OpenClaw MCP app request is invalid'],
   ])('rejects malformed OpenClaw browser/MCP envelopes before dispatch: %p', async (request, error) => {
-    const command = vi.fn();
+    const execute = vi.fn();
     const result = response();
 
     await handleCapabilityRoutes(
       incoming(request) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { openClawGatewayTransport: { execute } } } as never,
     );
 
-    expect(command).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
     expect(result.state).toEqual({ statusCode: 400, body: { success: false, error } });
     expect(JSON.stringify(result.state)).not.toContain('secret');
   });
 
-  it('redacts OpenClaw browser and MCP private runtime errors', async () => {
+  it('redacts OpenClaw browser and MCP transport errors', async () => {
     const browser = response();
     const mcp = response();
     const privateCanary = 'raw private payload: html/toolInput/toolResult';
-    const command = vi.fn()
-      .mockResolvedValueOnce(rejected('FAILED', privateCanary))
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ status: 503, body: { success: false, error: privateCanary } })
       .mockRejectedValueOnce(new Error(privateCanary));
 
     await handleCapabilityRoutes(
@@ -1160,7 +1042,7 @@ describe('capability route sealed projection', () => {
       }) as never,
       browser.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { openClawGatewayTransport: { execute } } } as never,
     );
     await handleCapabilityRoutes(
       incoming({
@@ -1172,7 +1054,7 @@ describe('capability route sealed projection', () => {
       }) as never,
       mcp.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { openClawGatewayTransport: { execute } } } as never,
     );
 
     expect(browser.state).toEqual({ statusCode: 503, body: { success: false, error: 'OpenClaw browser request is unavailable' } });
@@ -1230,11 +1112,14 @@ describe('capability route sealed projection', () => {
   });
 
   it('dispatches skill openReadme with raw key and locator fields', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({
-      success: true,
-      content: '# Excel XLSX',
-      filePath: 'C:\\skills\\Excel XLSX\\SKILL.md',
-    }));
+    const execute = vi.fn().mockResolvedValue({
+      status: 200,
+      body: {
+        success: true,
+        content: '# Excel XLSX',
+        filePath: 'C:\\skills\\Excel XLSX\\SKILL.md',
+      },
+    });
     const result = response();
     const request = {
       id: 'skill.management',
@@ -1253,13 +1138,10 @@ describe('capability route sealed projection', () => {
       incoming(request) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { skillsManagementTransport: { execute } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({
-      name: 'openclaw.skills.execute',
-      input: request,
-    });
+    expect(execute).toHaveBeenCalledWith(request);
     expect(result.state).toEqual({
       statusCode: 200,
       body: { success: true, content: '# Excel XLSX', filePath: 'C:\\skills\\Excel XLSX\\SKILL.md' },
@@ -1267,7 +1149,7 @@ describe('capability route sealed projection', () => {
   });
 
   it('dispatches skill operations when the marketplace slug is absent', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({ success: true }));
+    const execute = vi.fn().mockResolvedValue({ status: 200, body: { success: true } });
     const result = response();
     const request = {
       id: 'skill.management',
@@ -1281,22 +1163,66 @@ describe('capability route sealed projection', () => {
       incoming(request) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { skillsManagementTransport: { execute } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({
-      name: 'openclaw.skills.execute',
-      input: request,
-    });
+    expect(execute).toHaveBeenCalledWith(request);
     expect(result.state).toEqual({ statusCode: 200, body: { success: true } });
   });
 
+  it('dispatches plugin.runtime setEnabled through pluginsTransport configuration', async () => {
+    const command = vi.fn();
+    const configuration = vi.fn().mockResolvedValue({ outcome: 'configured' });
+    const result = response();
+    const request = {
+      id: 'plugin.runtime',
+      operationId: 'plugins.setEnabled',
+      scope: schedulerScope,
+      target: { kind: 'plugin', pluginId: 'openclaw-browser' },
+      input: { enabled: true, pluginIds: ['openclaw-browser'] },
+    } as const;
+
+    await handleCapabilityRoutes(
+      incoming(request) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command }, runtimeHostTransports: { pluginsTransport: { configuration } } } as never,
+    );
+
+    expect(configuration).toHaveBeenCalledWith({
+      runtime: 'openclaw',
+      pluginId: 'openclaw-browser',
+      enabled: true,
+    });
+    expect(command).not.toHaveBeenCalled();
+    expect(result.state).toEqual({ statusCode: 200, body: { outcome: 'configured' } });
+  });
+
+  it('rejects malformed plugin.runtime setEnabled before dispatch', async () => {
+    const command = vi.fn();
+    const configuration = vi.fn();
+    const result = response();
+
+    await handleCapabilityRoutes(
+      incoming({
+        id: 'plugin.runtime',
+        operationId: 'plugins.setEnabled',
+        scope: schedulerScope,
+        target: { kind: 'plugin', pluginId: 'openclaw-browser' },
+        input: { enabled: true, pluginIds: ['other-plugin'] },
+      }) as never,
+      result.raw as never,
+      new URL('http://localhost/api/capabilities/execute'),
+      { runtimeHost: { command }, runtimeHostTransports: { pluginsTransport: { configuration } } } as never,
+    );
+
+    expect(configuration).not.toHaveBeenCalled();
+    expect(command).not.toHaveBeenCalled();
+    expect(result.state).toEqual({ statusCode: 400, body: { outcome: 'rejected' } });
+  });
+
   it('projects skill openPath as success only after RuntimeHost resolution', async () => {
-    const command = vi.fn().mockResolvedValue(succeeded({
-      success: true,
-      content: '# Excel XLSX',
-      filePath: 'C:\\skills\\Excel XLSX\\SKILL.md',
-    }));
+    const execute = vi.fn().mockResolvedValue({ status: 200, body: { success: true } });
     const result = response();
     const request = {
       id: 'skill.management',
@@ -1315,13 +1241,10 @@ describe('capability route sealed projection', () => {
       incoming(request) as never,
       result.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      { runtimeHost: { command } } as never,
+      { runtimeHostTransports: { skillsManagementTransport: { execute } } } as never,
     );
 
-    expect(command).toHaveBeenCalledWith({
-      name: 'openclaw.skills.execute',
-      input: request,
-    });
+    expect(execute).toHaveBeenCalledWith(request);
     expect(result.state).toEqual({ statusCode: 200, body: { success: true } });
   });
 });

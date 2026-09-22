@@ -4,12 +4,13 @@ use std::{
     future::Future,
     net::SocketAddr,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
 
+use foundation::execution::OwnedTask;
 use futures_util::{SinkExt, StreamExt};
 use platform::listener_identity::CertificateFingerprint;
 use tokio::net::TcpStream;
@@ -43,6 +44,22 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_CONTROL_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub type GatewaySocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+pub struct GatewayControlSupervisor {
+    client: GatewayClient,
+    task: OwnedTask<()>,
+}
+
+impl GatewayControlSupervisor {
+    fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
+    pub async fn dispose(mut self) {
+        let _ = self.task.cancel_and_join().await;
+        self.client.close_control_connection().await;
+    }
+}
 
 struct ControlDispatcher {
     dispatcher: Dispatcher,
@@ -311,6 +328,7 @@ pub struct GatewayClient {
     control_state: Arc<Mutex<GatewayControlConnectionState>>,
     control_readiness: watch::Sender<u64>,
     control_readiness_sequence: Arc<AtomicU64>,
+    control_supervisor: Arc<StdMutex<Option<GatewayControlSupervisor>>>,
     control_supervisor_started: Arc<AtomicBool>,
     control_ready_trace_emitted: Arc<AtomicBool>,
     state_dir: Option<CanonicalStateDir>,
@@ -363,6 +381,7 @@ impl GatewayClient {
             control_state,
             control_readiness,
             control_readiness_sequence: Arc::new(AtomicU64::new(0)),
+            control_supervisor: Arc::new(StdMutex::new(None)),
             control_supervisor_started: Arc::new(AtomicBool::new(false)),
             control_ready_trace_emitted: Arc::new(AtomicBool::new(false)),
             state_dir,
@@ -444,11 +463,15 @@ impl GatewayClient {
                 | GatewayControlConnectionState::Closed { .. } => None,
             }
         };
-        drop(control);
+        if let Some(control) = control {
+            if let Ok(control) = Arc::try_unwrap(control) {
+                control.dispatcher.close().await;
+            }
+        }
     }
 
     async fn ensure_control_ready(&self) -> Result<(), GatewayClientError> {
-        self.start_control_supervision().await;
+        self.ensure_control_supervision().await;
         loop {
             match self.control_readiness_result().await {
                 Ok(()) => return Ok(()),
@@ -469,27 +492,59 @@ impl GatewayClient {
         }
     }
 
-    async fn start_control_supervision(&self) {
-        {
-            let state = self.control_state.lock().await;
-            if matches!(
-                *state,
-                GatewayControlConnectionState::Ready { .. }
-                    | GatewayControlConnectionState::Closed { .. }
-            ) {
-                return;
-            }
+    pub async fn ensure_control_supervision(&self) {
+        if matches!(
+            *self.control_state.lock().await,
+            GatewayControlConnectionState::Ready { .. }
+                | GatewayControlConnectionState::Closed { .. }
+        ) {
+            return;
         }
+        self.start_control_supervision();
+    }
+
+    pub fn start_control_supervision(&self) {
+        let mut supervisor = self
+            .control_supervisor
+            .lock()
+            .expect("gateway control supervisor lock poisoned");
+        if supervisor
+            .as_ref()
+            .is_some_and(|supervisor| !supervisor.is_finished())
+        {
+            return;
+        }
+        if let Some(next) = self.spawn_control_supervisor() {
+            *supervisor = Some(next);
+        } else {
+            supervisor.take();
+        }
+    }
+
+    pub fn take_control_supervisor(&self) -> Option<GatewayControlSupervisor> {
+        self.control_supervisor
+            .lock()
+            .expect("gateway control supervisor lock poisoned")
+            .take()
+    }
+
+    fn spawn_control_supervisor(&self) -> Option<GatewayControlSupervisor> {
         if self
             .control_supervisor_started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return;
+            return None;
         }
         let client = self.clone();
-        tokio::spawn(async move {
-            client.connect_control_until_ready().await;
+        let (task, _) = OwnedTask::spawn(|cancellation| async move {
+            let cancelled = tokio::select! {
+                _ = cancellation.cancelled() => true,
+                _ = client.connect_control_until_ready() => false,
+            };
+            if cancelled {
+                client.close_control_connection().await;
+            }
             client
                 .control_supervisor_started
                 .store(false, Ordering::Release);
@@ -501,10 +556,14 @@ impl GatewayClient {
                 client.bump_control_readiness();
             }
         });
+        Some(GatewayControlSupervisor {
+            client: self.clone(),
+            task,
+        })
     }
 
     pub async fn control_readiness_snapshot(&self) -> GatewayControlReadiness {
-        self.start_control_supervision().await;
+        self.ensure_control_supervision().await;
         match self.control_readiness_result().await {
             Ok(()) => GatewayControlReadiness::Ready,
             Err(error) => GatewayControlReadiness::from_connection_error(error),
@@ -544,12 +603,11 @@ impl GatewayClient {
             );
             {
                 let mut state = self.control_state.lock().await;
-                if matches!(*state, GatewayControlConnectionState::Closed { .. }) {
-                    self.bump_control_readiness();
-                    return;
-                }
-                if matches!(*state, GatewayControlConnectionState::Ready { .. }) {
-                    self.bump_control_readiness();
+                if matches!(
+                    *state,
+                    GatewayControlConnectionState::Ready { .. }
+                        | GatewayControlConnectionState::Closed { .. }
+                ) {
                     return;
                 }
                 *state = GatewayControlConnectionState::Connecting {

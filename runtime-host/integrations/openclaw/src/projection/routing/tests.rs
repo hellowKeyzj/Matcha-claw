@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use environment::{
+use ::provider::{
     CredentialReference, ProviderAccount, ProviderAccountAuthMode, ProviderAccountConfiguration,
     ProviderAccountConfigurationInput, ProviderAccountId, ProviderAccountKind,
     ProviderAccountRevision, ProviderApiProtocol, ProviderEndpoint, ProviderModel,

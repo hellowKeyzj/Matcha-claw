@@ -1,6 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { RuntimeHostControlOutcome } from '../../main/runtime-host-delivery/control';
-import type { RuntimeHostApiContext } from '../context';
+import type {
+  ToolchainPrepareTransportResponse,
+  ToolchainStatusTransportResponse,
+  ToolchainTransport,
+} from '../../main/runtime-host-delivery/transport/toolchain';
 import { sendJson } from '../route-utils';
 
 const TOOLCHAIN_UNAVAILABLE = { success: false, error: 'Toolchain is unavailable' } as const;
@@ -10,12 +13,12 @@ export async function handleToolchainRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: RuntimeHostApiContext,
+  toolchainTransport: ToolchainTransport,
 ): Promise<boolean> {
   if (url.pathname === '/api/toolchain/uv/check' && req.method === 'GET') {
     try {
       const response = projectToolchainStatusOutcome(
-        await ctx.runtimeHost.command({ name: 'host.toolchain.status' }),
+        await toolchainTransport.status(),
       );
       sendJson(res, response.status, response.body);
     } catch {
@@ -27,7 +30,7 @@ export async function handleToolchainRoutes(
   if (url.pathname === '/api/toolchain/uv/prepare' && req.method === 'POST') {
     try {
       const response = projectToolchainPrepareOutcome(
-        await ctx.runtimeHost.command({ name: 'host.toolchain.prepare' }, { timeoutMs: TOOLCHAIN_PREPARE_TIMEOUT_MS }),
+        await toolchainTransport.prepare(TOOLCHAIN_PREPARE_TIMEOUT_MS),
       );
       sendJson(res, response.status, response.body);
     } catch {
@@ -39,35 +42,21 @@ export async function handleToolchainRoutes(
   return false;
 }
 
-function projectToolchainStatusOutcome(outcome: RuntimeHostControlOutcome): { status: number; body: unknown } {
-  if (outcome.kind !== 'succeeded' || !isRecord(outcome.result)) {
+function projectToolchainStatusOutcome(outcome: ToolchainStatusTransportResponse): { status: number; body: unknown } {
+  if (outcome.status !== 200) {
     return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
   }
-  const result = outcome.result.result;
-  if (!isRecord(result) || !hasExactKeys(result, ['uv', 'python'])) {
-    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
-  }
-  if (!['available', 'unavailable'].includes(String(result.uv))) {
-    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
-  }
-  if (!['ready', 'notReady', 'unknown', 'unavailable', 'unsupported'].includes(String(result.python))) {
-    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
-  }
-  return { status: 200, body: { installed: result.uv === 'available' } };
+  return { status: 200, body: { installed: outcome.body.uv === 'available' } };
 }
 
-function projectToolchainPrepareOutcome(outcome: RuntimeHostControlOutcome): { status: number; body: unknown } {
-  if (outcome.kind !== 'succeeded' || !isRecord(outcome.result)) {
+function projectToolchainPrepareOutcome(outcome: ToolchainPrepareTransportResponse): { status: number; body: unknown } {
+  if (outcome.status !== 200) {
     return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
   }
-  const result = outcome.result.result;
-  if (!isRecord(result) || !hasExactKeys(result, ['outcome'])) {
-    return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
-  }
-  switch (result.outcome) {
+  switch (outcome.body.outcome) {
     case 'ready':
     case 'installed':
-      return { status: 200, body: { success: true, outcome: result.outcome } };
+      return { status: 200, body: { success: true, outcome: outcome.body.outcome } };
     case 'rejected':
       return { status: 409, body: { success: false, error: 'Toolchain preparation was rejected' } };
     case 'unknown':
@@ -75,13 +64,4 @@ function projectToolchainPrepareOutcome(outcome: RuntimeHostControlOutcome): { s
     default:
       return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.prototype.hasOwnProperty.call(value, key));
 }

@@ -1,0 +1,29 @@
+[package]
+name = "organization"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+cron.workspace = true
+foundation = { version = "0.1.0", path = "../../foundation" }
+getrandom.workspace = true
+platform = { version = "0.1.0", path = "../../platform" }
+runtime-directory = { version = "0.1.0", path = "../runtime-directory" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+tempfile = "3.8"
+

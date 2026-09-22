@@ -13,6 +13,7 @@ import { registerHostApiProxyHandlers } from './ipc/hostapi-proxy-ipc';
 import { registerSettingsPrivateProxyHandlers } from './ipc/settings-private-proxy';
 import { registerProviderPrivateAuthHandlers } from './ipc/provider-private-auth';
 import { registerFleetPrivateHandlers } from './ipc/fleet-private';
+import type { FleetCredentialsTransport } from './runtime-host-delivery/transport/fleet-credentials';
 import type { ProviderAccountsTransport } from './runtime-host-delivery/transport/providers/accounts';
 import { registerDiagnosticsExportHandler } from './ipc/diagnostics-export-ipc';
 import type { DiagnosticsExportDependencies } from './ipc/diagnostics-export-ipc';
@@ -35,10 +36,11 @@ export function registerRuntimeIpcHandlers(
   runtimeHost: DirectRuntimeHost,
   getMainWindow: () => BrowserWindow | null,
   providerAccountsTransport: ProviderAccountsTransport,
+  fleetCredentialsTransport: FleetCredentialsTransport,
   diagnosticsExportDependencies: DiagnosticsExportDependencies,
 ): void {
   registerProviderPrivateAuthHandlers(getMainWindow, providerAccountsTransport);
-  registerFleetPrivateHandlers(runtimeHost);
+  registerFleetPrivateHandlers(fleetCredentialsTransport);
   registerDiagnosticsExportHandler(diagnosticsExportDependencies);
   registerGatewayHandlers(runtimeHost);
 }
@@ -47,6 +49,7 @@ export function registerIpcHandlers(
   runtimeHost: DirectRuntimeHost,
   getMainWindow: () => BrowserWindow | null,
   providerAccountsTransport: ProviderAccountsTransport,
+  fleetCredentialsTransport: FleetCredentialsTransport,
   diagnosticsExportDependencies: DiagnosticsExportDependencies,
 ): void {
   registerStaticIpcHandlers(getMainWindow);
@@ -54,6 +57,7 @@ export function registerIpcHandlers(
     runtimeHost,
     getMainWindow,
     providerAccountsTransport,
+    fleetCredentialsTransport,
     diagnosticsExportDependencies,
   );
 }

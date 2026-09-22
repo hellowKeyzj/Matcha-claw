@@ -12,7 +12,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    match runtime_host::run_team_run_mcp(
+    match runtime_host::run_matcha_mcp(
         &config.state_dir,
         BufReader::new(io::stdin().lock()),
         io::stdout().lock(),

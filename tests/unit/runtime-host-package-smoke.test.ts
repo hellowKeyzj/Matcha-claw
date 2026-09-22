@@ -610,7 +610,7 @@ describe('runtime-host package smoke runner', () => {
       bunCacheEvidence: {
         source: 'local-cache',
         target: 'win32-x64',
-        functionalMatch: 'exact-bun-1.3.5-win32-x64-pe',
+        functionalMatch: 'exact-bun-1.4.2-win32-x64-pe',
         independentProvenance: 'unverified',
         supplyChainAttestation: 'not-present',
       },
