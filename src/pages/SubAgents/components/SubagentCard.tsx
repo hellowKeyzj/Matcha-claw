@@ -177,13 +177,13 @@ export function SubagentCard({
   }
 
   return (
-    <AgentResourceCard className="gap-3 p-4">
+    <AgentResourceCard className="gap-4 p-4">
       <div className="min-w-0">
         {identity}
         {description && <p className="mt-4 line-clamp-2 text-sm leading-5 text-muted-foreground">{description}</p>}
       </div>
       <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">{badges}{model}</div>
-      <AgentResourceFooter>
+      <AgentResourceFooter className="py-1">
         <Button
           size="sm"
           variant="ghost"

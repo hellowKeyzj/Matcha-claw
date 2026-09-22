@@ -1,5 +1,4 @@
 mod actor;
-mod session_ingest;
 mod shutdown;
 #[cfg(test)]
 mod tests;

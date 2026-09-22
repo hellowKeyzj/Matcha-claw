@@ -61,16 +61,16 @@ fn generic_runtime_job_contract_and_root_command_module_stay_removed() {
         ("root owner", include_str!("mod.rs")),
         ("root actor", include_str!("actor.rs")),
         ("public crate", include_str!("../lib.rs")),
-        ("control dispatch", include_str!("../control/dispatch.rs")),
+        (
+            "private control registry",
+            include_str!("../module_registry/private_control.rs"),
+        ),
         ("control wire", include_str!("../control/wire.rs")),
         (
-            "capability directory",
-            include_str!("../capabilities/directory.rs"),
+            "capability catalog",
+            include_str!("../module_registry/capability_catalog.rs"),
         ),
-        (
-            "parent callback",
-            include_str!("../transport/runtime/parent_callback.rs"),
-        ),
+        ("parent callback", include_str!("../parent_callback.rs")),
     ];
     for (name, source) in sources {
         for removed in [

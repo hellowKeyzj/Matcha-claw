@@ -9,10 +9,16 @@ runtime-host/
 ├── rust-toolchain.toml
 ├── foundation/
 ├── platform/
-├── domains/
-│   ├── environment/
+├── modules/
+│   ├── provider/
+│   ├── connectors/
+│   ├── settings/
+│   ├── security/
+│   ├── channels/
+│   ├── toolchain/
 │   ├── fleet/
-│   └── organization/
+│   ├── organization/
+│   └── …                       # 其他已落地业务 modules
 ├── external/
 │   └── clawhub/
 ├── integrations/
@@ -59,59 +65,45 @@ Foundation 有两类互补机制：
 ```text
 platform/src/
 ├── lib.rs
-├── identity/
-│   ├── endpoint.rs
-│   ├── session.rs
-│   ├── run.rs
-│   └── ids.rs
+├── capability/
+├── endpoint/
 ├── exchange/
-│   ├── command.rs
-│   ├── correlation.rs
-│   ├── receipt.rs
-│   └── outcome.rs
-├── observation/
-│   ├── state_plane.rs
-│   ├── freshness.rs
-│   └── epoch.rs
-├── event/
-│   ├── envelope.rs
-│   └── cursor.rs
-├── authorization/
-│   └── decision.rs
-└── trust/
-    ├── listener_identity.rs
-    └── pinned_tls.rs
+├── listener_identity.rs
+├── loopback.rs
+├── module.rs
+├── pinned_tls.rs
+└── trace.rs
 ```
 
-Platform 是中性语言和校验工具，不是状态数据库。它不拥有 Session transcript、Approval、Lease、Reconciliation、generic operation 或 Domain state；也不定义 TS capability operation catalog。
+Platform 是中性语言和校验工具，不是状态数据库。当前落地的 module contract 是 `ModuleDescriptor` / `ModuleCatalog`：module 声明 id、provides/requires/effects 与可选 loopback descriptor，Host composition 安装 catalog 后由 loopback router 派生常规模块 routes。[VERIFY: runtime-host/platform/src/module.rs:48-159] [VERIFY: runtime-host/host/src/module_registry/install.rs] [VERIFY: runtime-host/host/src/http/router.rs]
+
+Platform loopback outcome 支持 `Response`、`Stream`、`Upgrade`；Host HTTP substrate 直接写回 session SSE 和 fleet terminal upgrade 等 route outcome。[VERIFY: runtime-host/platform/src/loopback.rs:152-218] [VERIFY: runtime-host/host/src/http/response.rs]
+
+`ModuleScope`/`EffectGuard` 当前在 Foundation lifecycle：`ModuleScope` 注册 disposer/owned task 并按 LIFO dispose，`EffectGuard` 只保存 scope/effect identity；不要把 scoped effects 写成未落地的 Platform catalog 目标。[VERIFY: runtime-host/foundation/src/lifecycle.rs:9-74] [VERIFY: runtime-host/host/src/composition/host/owner_runtime.rs:57-77]
+
+Platform 不拥有 Session transcript、Approval、Lease、Reconciliation、generic operation 或 Domain state；也不定义 TS capability operation catalog。
 
 只有被两个以上真实 consumer 使用的 contract 才上升为 Platform。单一 Integration 的 wire model 留在 Integration。
 
-## 4. Domain crates
+## 4. 业务 owner modules
 
-### Environment
+### Provider / Connectors / Settings / Security
 
-```text
-domains/environment/src/
-├── lib.rs
-├── definition/
-├── connector/
-├── provider/
-├── settings/
-├── security/
-├── license/
-├── toolchain/
-├── ports/
-├── reconcile/
-└── store/
-```
+| Owner | 真实事实源与责任 | 源码 |
+|---|---|---|
+| `modules/provider` | account/model/routing stores、cascade deletion journal、private resolver port | `src/adapters/{account_store,model_store,routing_store,cascade}.rs`、`src/ports.rs` |
+| `modules/connectors` | connector catalog、revision/applied revision、secret refs 与 private resolver | `src/adapters/{store,store_schema,persistence}.rs`、`src/ports.rs` |
+| `modules/settings` | settings desired、revision/correlation、effect settlement | `src/adapters/store.rs`、`src/owner/actor.rs` |
+| `modules/security` | policy desired/effect、operation receipts 与 native security port | `src/adapters/store.rs`、`src/ports.rs` |
 
-这些是 Environment 下的**独立 owner**，不是一个 `EnvironmentState`。每个子 owner 自己决定 desired/persisted/applied/observed、secret projection、apply/readback 和 recovery。若某个子域尚无 Rust consumer，只冻结语义地址，不创建空实现。
+Host composition 分别 spawn 这些已有 modules；`channels` 与 `toolchain` 也有独立 owner，native facts 仍属对应 peer。[VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs]
+
+无消费者的旧 `domains/environment` crate 与聚合 revision/grant/reconciliation 模型退役，不建立 `modules/environment`，也不把这些旧模型伪称迁入业务 owner。各业务 module 保持自己的 desired/persisted/applied/observed、secret projection、apply/readback 与 recovery 语义。OpenClaw `crate::environment` 安装检查和 Fleet environment/resource 生命周期保留。
 
 ### Fleet
 
 ```text
-domains/fleet/src/
+modules/fleet/src/
 ├── lib.rs
 ├── topology/
 ├── target/
@@ -130,7 +122,7 @@ domains/fleet/src/
 ### Organization
 
 ```text
-domains/organization/src/
+modules/organization/src/
 ├── lib.rs
 ├── team/
 ├── run/
@@ -206,7 +198,7 @@ integrations/openclaw/src/
 └── ports.rs
 ```
 
-拥有 OpenClaw/Gateway native protocol、channel/cron/pairing/session facts、private config projection 和 native readback。Environment/Organization port 只能描述 effect；OpenClaw 不成为它们的 durable fact owner。
+拥有 OpenClaw/Gateway native protocol、channel/cron/pairing/session facts、private config projection 和 native readback。各业务 module / Organization port 只能描述 effect；OpenClaw 不成为它们的 durable fact owner。
 
 ## 7. Host crate
 
@@ -216,8 +208,8 @@ host/src/
 ├── lib.rs
 ├── bootstrap/
 ├── composition/
-│   ├── peers.rs
-│   ├── domains.rs
+│   ├── peer/{mod.rs,actor.rs,handle.rs,command.rs,query.rs,status.rs,openclaw.rs,matcha.rs}
+│   ├── host/**
 │   └── shutdown.rs
 ├── owner/
 ├── control/
@@ -241,19 +233,18 @@ Host 只做 composition、admission、command serialization、delivery adapter�
 ## 8. 依赖 DAG
 
 ```text
-foundation       platform       external/clawhub
-    ▲               ▲                 ▲
-    │               │                 │
-environment       fleet       organization
-    ▲               ▲              ▲
-    │               │              │
-    └───────────────┴──────┬───────┘
-                           │ typed ports only
-                    openclaw / matcha-agent
-                           │
-                           ▼
-                      host composition
+Host composition
+  -> provider / connectors / settings / security / fleet / organization modules
+  -> OpenClaw / matcha-agent integrations
+  -> Foundation / Platform / external/clawhub
+
+OpenClaw -> 实际实现的业务 module typed ports + Foundation / Platform
+provider -> connectors / runtime-directory + Foundation / Platform
+connectors / settings / security / fleet -> Foundation / Platform
+organization -> runtime-directory + Foundation / Platform
 ```
+
+这是与本节 owner 相关的依赖摘录，不是所有业务 modules 的完整编译边清单；具体依赖以各 crate `Cargo.toml` 为准。
 
 编译依赖规则：
 

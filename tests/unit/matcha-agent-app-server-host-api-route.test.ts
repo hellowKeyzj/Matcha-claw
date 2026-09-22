@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
-import { RuntimeHostControlError } from '../../electron/main/runtime-host-delivery/control';
 import { handleMatchaAgentAppServerRoutes } from '../../electron/api/routes/matcha-agent-app-server';
+import { MATCHA_AGENT_RUNTIME_ENDPOINT } from '../../electron/main/runtime-host-delivery/transport/runtime-control';
 
 function createRequest(method: string) {
   return Object.assign(Readable.from([]), { method, headers: {} });
@@ -20,30 +20,39 @@ function createResponse() {
   };
 }
 
-function lifecycleOutcome(lifecycle: string) {
-  return { kind: 'succeeded' as const, result: { result: { lifecycle } } };
+function lifecycleResponse(lifecycle: string) {
+  return { status: 200 as const, body: { result: { lifecycle } } };
 }
 
-function statusOutcome(lifecycle: string, ready: boolean) {
+function statusResponse(lifecycle: string) {
   return {
-    kind: 'succeeded' as const,
-    result: { result: { lifecycle, ready, observedAtMs: 1_725_000_000_000 } },
+    status: 200 as const,
+    body: { result: { lifecycle } },
   };
+}
+
+function context(runtimeControlTransport: Record<string, unknown>, command = vi.fn()) {
+  return {
+    runtimeHost: { command },
+    runtimeHostTransports: { runtimeControlTransport },
+  } as never;
 }
 
 describe('Matcha Agent app server Host API routes', () => {
   it('projects the sealed lifecycle status without private process details', async () => {
-    const command = vi.fn().mockResolvedValue(statusOutcome('running', true));
+    const lifecycleStatus = vi.fn().mockResolvedValue(statusResponse('running'));
+    const command = vi.fn();
     const fixture = createResponse();
 
     await expect(handleMatchaAgentAppServerRoutes(
       createRequest('GET') as never,
       fixture.raw as never,
       new URL('http://localhost/api/matcha-agent/app-server/status'),
-      { runtimeHost: { command } } as never,
+      context({ lifecycleStatus }, command),
     )).resolves.toBe(true);
 
-    expect(command).toHaveBeenCalledWith({ name: 'matcha.lifecycle.status' });
+    expect(lifecycleStatus).toHaveBeenCalledWith(MATCHA_AGENT_RUNTIME_ENDPOINT);
+    expect(command).not.toHaveBeenCalledWith({ name: 'matcha.lifecycle.status' });
     expect(fixture.response.statusCode).toBe(200);
     expect(fixture.response.body).toMatchObject({
       processState: 'running',
@@ -56,19 +65,21 @@ describe('Matcha Agent app server Host API routes', () => {
   });
 
   it('rejects unexpected status control results without exposing native details', async () => {
-    const command = vi.fn().mockResolvedValue({
-      kind: 'succeeded',
-      result: { result: { lifecycle: 'running', pid: 4321, path: 'E:/private/matcha' } },
+    const lifecycleStatus = vi.fn().mockResolvedValue({
+      status: 200,
+      body: { result: { lifecycle: 'running', pid: 4321, path: 'E:/private/matcha' } },
     });
+    const command = vi.fn();
     const fixture = createResponse();
 
     await handleMatchaAgentAppServerRoutes(
       createRequest('GET') as never,
       fixture.raw as never,
       new URL('http://localhost/api/matcha-agent/app-server/status'),
-      { runtimeHost: { command } } as never,
+      context({ lifecycleStatus }, command),
     );
 
+    expect(command).not.toHaveBeenCalledWith({ name: 'matcha.lifecycle.status' });
     expect(fixture.response.statusCode).toBe(503);
     expect(fixture.response.body).toEqual({
       success: false,
@@ -78,33 +89,40 @@ describe('Matcha Agent app server Host API routes', () => {
   });
 
   it('accepts a sealed restart result and does not invoke legacy lifecycle commands', async () => {
-    const command = vi.fn().mockResolvedValue(lifecycleOutcome('starting'));
+    const lifecycleRestart = vi.fn().mockResolvedValue(lifecycleResponse('starting'));
+    const command = vi.fn();
     const fixture = createResponse();
 
     await handleMatchaAgentAppServerRoutes(
       createRequest('POST') as never,
       fixture.raw as never,
       new URL('http://localhost/api/matcha-agent/app-server/restart'),
-      { runtimeHost: { command } } as never,
+      context({ lifecycleRestart }, command),
     );
 
-    expect(command).toHaveBeenCalledWith({ name: 'matcha.lifecycle.restart' });
+    expect(lifecycleRestart).toHaveBeenCalledWith(MATCHA_AGENT_RUNTIME_ENDPOINT);
+    expect(command).not.toHaveBeenCalledWith({ name: 'matcha.lifecycle.restart' });
     expect(command).not.toHaveBeenCalledWith({ name: 'matcha.lifecycle.start' });
     expect(fixture.response.statusCode).toBe(200);
     expect(fixture.response.body).toEqual({ success: true });
   });
 
-  it('maps a timed-out restart result to unknown delivery', async () => {
-    const command = vi.fn().mockResolvedValue({ kind: 'timed-out' });
+  it('maps an unavailable restart response to unknown delivery', async () => {
+    const lifecycleRestart = vi.fn().mockResolvedValue({
+      status: 503,
+      body: { success: false, error: 'Runtime control is unavailable' },
+    });
+    const command = vi.fn();
     const fixture = createResponse();
 
     await handleMatchaAgentAppServerRoutes(
       createRequest('POST') as never,
       fixture.raw as never,
       new URL('http://localhost/api/matcha-agent/app-server/restart'),
-      { runtimeHost: { command } } as never,
+      context({ lifecycleRestart }, command),
     );
 
+    expect(command).not.toHaveBeenCalledWith({ name: 'matcha.lifecycle.restart' });
     expect(fixture.response.statusCode).toBe(503);
     expect(fixture.response.body).toEqual({
       success: false,
@@ -112,37 +130,41 @@ describe('Matcha Agent app server Host API routes', () => {
     });
   });
 
-  it('reports uncertain restart delivery without claiming success', async () => {
-    const command = vi.fn().mockRejectedValue(
-      new RuntimeHostControlError('timeout-exceeded', 'unknown-delivery'),
-    );
+  it('reports runtime-control restart failures without claiming success', async () => {
+    const lifecycleRestart = vi.fn().mockRejectedValue(new Error('transport failed'));
+    const command = vi.fn();
     const fixture = createResponse();
 
     await handleMatchaAgentAppServerRoutes(
       createRequest('POST') as never,
       fixture.raw as never,
       new URL('http://localhost/api/matcha-agent/app-server/restart'),
-      { runtimeHost: { command } } as never,
+      context({ lifecycleRestart }, command),
     );
 
-    expect(fixture.response.statusCode).toBe(503);
+    expect(command).not.toHaveBeenCalledWith({ name: 'matcha.lifecycle.restart' });
+    expect(fixture.response.statusCode).toBe(500);
     expect(fixture.response.body).toEqual({
       success: false,
-      error: 'Matcha Agent app server restart outcome is unknown',
+      error: 'Matcha Agent app server restart failed',
     });
   });
 
   it('does not claim other Matcha Agent app-server paths or methods', async () => {
     const command = vi.fn();
+    const lifecycleStatus = vi.fn();
+    const lifecycleRestart = vi.fn();
     const fixture = createResponse();
 
     await expect(handleMatchaAgentAppServerRoutes(
       createRequest('GET') as never,
       fixture.raw as never,
       new URL('http://localhost/api/matcha-agent/app-server/restart'),
-      { runtimeHost: { command } } as never,
+      context({ lifecycleStatus, lifecycleRestart }, command),
     )).resolves.toBe(false);
 
     expect(command).not.toHaveBeenCalled();
+    expect(lifecycleStatus).not.toHaveBeenCalled();
+    expect(lifecycleRestart).not.toHaveBeenCalled();
   });
 });

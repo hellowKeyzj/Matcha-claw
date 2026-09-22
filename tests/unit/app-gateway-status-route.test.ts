@@ -104,6 +104,24 @@ function expectRuntimeSnapshotOnly(command: ReturnType<typeof vi.fn>) {
   expect(command).not.toHaveBeenCalledWith({ name: 'openclaw.gateway.status' });
 }
 
+function runtimeControlTransport() {
+  return {
+    lifecycleStart: vi.fn(),
+    lifecycleStop: vi.fn(),
+    lifecycleRestart: vi.fn(),
+    lifecycleStatus: vi.fn(),
+    controlUiUrl: vi.fn(),
+    gatewayHealth: vi.fn(),
+    gatewayStatus: vi.fn(),
+  };
+}
+
+function expectRuntimeControlTransportUnused(transport: ReturnType<typeof runtimeControlTransport>) {
+  for (const method of Object.values(transport)) {
+    expect(method).not.toHaveBeenCalled();
+  }
+}
+
 describe('app gateway status delivery', () => {
   it('uses one runtime snapshot command and preserves the public status DTO', async () => {
     const command = vi.fn().mockResolvedValue(succeeded(runtimeSnapshot()));
@@ -250,7 +268,30 @@ describe('app gateway status delivery', () => {
     expectRuntimeSnapshotOnly(command);
   });
 
-  it('serves /api/gateway/status from host.runtime.snapshot only', async () => {
+  it.each([
+    ['/api/gateway/status', {
+      processState: 'control_connecting',
+      port: PORTS.OPENCLAW_GATEWAY,
+      gatewayReady: false,
+      healthSummary: 'degraded',
+      transportState: 'reconnecting',
+      portReachable: true,
+      lastAliveAt: 1_725_000_000_050,
+      diagnostics: {
+        consecutiveHeartbeatMisses: 0,
+        consecutiveRpcFailures: 0,
+      },
+      updatedAt: 1_725_000_000_100,
+    }],
+    ['/api/gateway/health', {
+      ok: true,
+      status: 'degraded',
+      detail: 'gateway control channel not ready',
+      portReachable: true,
+      connectionState: 'reconnecting',
+      updatedAt: 1_725_000_000_100,
+    }],
+  ] as const)('serves %s from host.runtime.snapshot only', async (pathname, expectedBody) => {
     const command = vi.fn().mockResolvedValue(succeeded(runtimeSnapshot({
       gateway: {
         availability: 'available',
@@ -264,31 +305,23 @@ describe('app gateway status delivery', () => {
       },
       control: { ready: false, phase: 'starting', retryable: true },
     })));
+    const transport = runtimeControlTransport();
     const fixture = jsonResponse();
 
     await expect(handleGatewayRoutes(
       request('GET'),
       fixture.raw,
-      new URL('http://127.0.0.1/api/gateway/status'),
-      { runtimeHost: { command } } as never,
+      new URL(`http://127.0.0.1${pathname}`),
+      {
+        runtimeHost: { command },
+        runtimeHostTransports: { runtimeControlTransport: transport },
+      } as never,
     )).resolves.toBe(true);
 
     expect(fixture.response.statusCode).toBe(200);
-    expect(fixture.response.body).toEqual({
-      processState: 'control_connecting',
-      port: PORTS.OPENCLAW_GATEWAY,
-      gatewayReady: false,
-      healthSummary: 'degraded',
-      transportState: 'reconnecting',
-      portReachable: true,
-      lastAliveAt: 1_725_000_000_050,
-      diagnostics: {
-        consecutiveHeartbeatMisses: 0,
-        consecutiveRpcFailures: 0,
-      },
-      updatedAt: 1_725_000_000_100,
-    });
+    expect(fixture.response.body).toEqual(expectedBody);
     expectRuntimeSnapshotOnly(command);
+    expectRuntimeControlTransportUnused(transport);
   });
 
   it('keeps the SSE headers and gateway:status event contract', async () => {

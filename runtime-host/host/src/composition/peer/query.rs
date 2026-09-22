@@ -2,12 +2,15 @@ use tokio::sync::oneshot;
 
 use foundation::execution::QueryRoute;
 
+use openclaw::gateway::request::{OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest};
+
 use crate::{
     HostState, RuntimeState,
-    composition::{
-        OpenClawBrowserGatewayRequest, OpenClawLogSnapshot, OpenClawMcpAppGatewayRequest,
+    composition::OpenClawLogSnapshot,
+    composition::runtime_ports::{
+        RuntimeControlFailure, RuntimeControlReadiness, RuntimeDriverIdentity,
+        RuntimeGatewayHealth, RuntimeGatewayStatus, RuntimeLogSnapshot,
     },
-    runtime::driver::RuntimeDriverIdentity,
 };
 
 use super::PeerKey;
@@ -15,9 +18,6 @@ use super::PeerKey;
 pub(crate) enum PeerQuery {
     State {
         reply: oneshot::Sender<HostState>,
-    },
-    MatchaStatus {
-        reply: oneshot::Sender<RuntimeState>,
     },
     OpenClawStatus {
         reply: oneshot::Sender<RuntimeState>,
@@ -47,10 +47,44 @@ pub(crate) enum PeerQuery {
     OpenClawControlUiUrl {
         reply: oneshot::Sender<String>,
     },
-    OpenClawControlLease {
+    OpenClawGatewaySnapshot {
         reply: oneshot::Sender<
-            Result<crate::composition::ControlLease, crate::RequestAdmissionClosed>,
+            Result<
+                crate::composition::OpenClawGatewaySnapshotObservation,
+                crate::RequestAdmissionClosed,
+            >,
         >,
+    },
+    OpenClawControlSnapshot {
+        reply: oneshot::Sender<
+            Result<
+                crate::composition::OpenClawControlSnapshotObservation,
+                crate::RequestAdmissionClosed,
+            >,
+        >,
+    },
+    RuntimeLogs {
+        endpoint: PeerKey,
+        cursor: Option<u64>,
+        reply: oneshot::Sender<Result<RuntimeLogSnapshot, RuntimeControlFailure>>,
+    },
+    RuntimeControlReadiness {
+        endpoint: PeerKey,
+        reply: oneshot::Sender<Result<RuntimeControlReadiness, RuntimeControlFailure>>,
+    },
+    RuntimeGatewayHealth {
+        endpoint: PeerKey,
+        probe: bool,
+        reply: oneshot::Sender<Result<RuntimeGatewayHealth, RuntimeControlFailure>>,
+    },
+    RuntimeGatewayStatus {
+        endpoint: PeerKey,
+        include_channel_summary: bool,
+        reply: oneshot::Sender<Result<RuntimeGatewayStatus, RuntimeControlFailure>>,
+    },
+    RuntimeControlUiUrl {
+        endpoint: PeerKey,
+        reply: oneshot::Sender<Result<String, RuntimeControlFailure>>,
     },
     OpenClawBrowserRequest {
         request: OpenClawBrowserGatewayRequest,
@@ -69,14 +103,18 @@ pub(crate) enum PeerQuery {
 impl PeerQuery {
     pub(crate) fn route_query(&self) -> QueryRoute<PeerKey> {
         match self {
-            Self::State { .. } | Self::MatchaStatus { .. } | Self::OpenClawStatus { .. } => {
-                QueryRoute::Direct
-            }
+            Self::State { .. } | Self::OpenClawStatus { .. } => QueryRoute::Direct,
+            Self::RuntimeLogs { endpoint, .. }
+            | Self::RuntimeControlReadiness { endpoint, .. }
+            | Self::RuntimeGatewayHealth { endpoint, .. }
+            | Self::RuntimeGatewayStatus { endpoint, .. }
+            | Self::RuntimeControlUiUrl { endpoint, .. } => QueryRoute::Keyed(endpoint.clone()),
             Self::OpenClawLogs { .. }
             | Self::OpenClawGatewayHealth { .. }
             | Self::OpenClawGatewayStatus { .. }
             | Self::OpenClawControlUiUrl { .. }
-            | Self::OpenClawControlLease { .. }
+            | Self::OpenClawGatewaySnapshot { .. }
+            | Self::OpenClawControlSnapshot { .. }
             | Self::OpenClawBrowserRequest { .. }
             | Self::OpenClawMcpAppRequest { .. } => {
                 QueryRoute::Keyed(RuntimeDriverIdentity::open_claw().endpoint())

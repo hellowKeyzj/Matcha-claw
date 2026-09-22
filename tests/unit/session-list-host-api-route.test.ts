@@ -128,32 +128,55 @@ describe('session Host API public delivery route', () => {
     });
   });
 
-  it('selects the dedicated Matcha catalog transport by endpoint', async () => {
+  it('maps the Matcha public session catalog to the same lower list transport', async () => {
     const response = createResponse();
     const request = sessionListRequest(matchaEndpoint);
-    const matchaList = vi.fn().mockResolvedValue({
+    const list = vi.fn().mockResolvedValue({
       status: 200,
-      body: { sessions: [{ endpoint: matchaEndpoint, nativeSessionHandle: 'native-session-1' }] },
+      body: {
+        sessions: [{
+          key: 'matcha-agent:matcha:native-session-1',
+          agentId: 'matcha',
+          sessionIdentity: {
+            endpoint: matchaEndpoint,
+            agentId: 'matcha',
+            sessionKey: 'matcha-agent:matcha:native-session-1',
+          },
+          kind: 'session',
+          preferred: false,
+          endpointSessionId: 'native-session-1',
+          protocolId: 'matcha-agent-app-server',
+          runtimeEndpointId: 'matcha-agent-local',
+        }],
+      },
     });
-    const openClawList = vi.fn();
 
     await expect(handleCapabilityRoutes(
       createRequest(request) as never,
       response.raw as never,
       new URL('http://localhost/api/capabilities/execute'),
-      {
-        runtimeHostTransports: {
-          sessionListTransport: { list: openClawList },
-          matchaSessionListTransport: { list: matchaList },
-        },
-      } as never,
+      { runtimeHostTransports: { sessionListTransport: { list } } } as never,
     )).resolves.toBe(true);
 
-    expect(matchaList).toHaveBeenCalledWith(request);
-    expect(openClawList).not.toHaveBeenCalled();
+    expect(list).toHaveBeenCalledWith(request);
     expect(response.state).toEqual({
       statusCode: 200,
-      body: { sessions: [{ endpoint: matchaEndpoint, nativeSessionHandle: 'native-session-1' }] },
+      body: {
+        sessions: [{
+          key: 'matcha-agent:matcha:native-session-1',
+          agentId: 'matcha',
+          sessionIdentity: {
+            endpoint: matchaEndpoint,
+            agentId: 'matcha',
+            sessionKey: 'matcha-agent:matcha:native-session-1',
+          },
+          kind: 'session',
+          preferred: false,
+          endpointSessionId: 'native-session-1',
+          protocolId: 'matcha-agent-app-server',
+          runtimeEndpointId: 'matcha-agent-local',
+        }],
+      },
     });
   });
 

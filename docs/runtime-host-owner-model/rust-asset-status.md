@@ -13,10 +13,10 @@
 | Matcha hydration | `integrations/matcha-agent/src/session/hydration/*` | strict decode、bounded projection、unknown/incomplete | CANDIDATE |
 | Event cursor/projector | `integrations/matcha-agent/src/session/events.rs` | session/run binding、gap/duplicate/stale rejection | CANDIDATE |
 | OpenClaw connector projection | `integrations/openclaw/src/projection/connector/*` | desired/applied projection、readback、safe outcome mapping | CANDIDATE |
-| Revisioned connector store | `domains/environment/src/connector_store.rs` | lock、atomic write、revision、recovery outcome | CANDIDATE |
+| Revisioned connector store | `modules/connectors/src/adapters/store.rs` | lock、atomic write、revision、recovery outcome | CANDIDATE |
 | Typed cron provider | `integrations/openclaw/src/cron/provider.rs` | native cron command mapping and typed unknown outcome | CANDIDATE |
-| Diagnostics archive | `host/src/diagnostics/archive/*` | bounded/redacted/atomic archive and opaque receipt | CANDIDATE |
-| Signed authorization verifier | `host/src/transport/authorization.rs` | signed decision exact binding、expiry、replay protection | CANDIDATE |
+| Diagnostics archive | `runtime-host/modules/diagnostics/src/archive.rs`, `runtime-host/modules/diagnostics/src/archive/*` | bounded/redacted/atomic archive and opaque receipt | CANDIDATE |
+| Signed authorization verifier | owner module loopback adapters using `CapabilityDecisionVerifier` | signed decision exact binding、expiry、replay protection | CANDIDATE |
 
 ## 2. 当前不能当作最终 owner 的资产
 
@@ -24,17 +24,17 @@
 | --- | --- |
 | `host/src/composition/host/mod.rs` | 不能证明 Host 应拥有全部业务事实；它当前是 composition container |
 | `host/src/owner.rs` | 不能证明全局 actor 等于业务 owner；只是 mutation serialization boundary |
-| `host/src/transport/*` | 不能证明这些 fixed transports 已接入 Electron 当前 Host API |
+| `host/src/http/*` | 不能证明业务事实属于 Host；它只是 loopback substrate |
 | `domains/*` | 不能证明当前 domain 划分就是最终 workspace/crate 划分 |
 | `integrations/openclaw/*` | 不能证明 settings/security/license/channel/cron 的完整 native authority 已迁移 |
 | `integrations/matcha-agent/*` | 不能证明 Rust 已拥有 transcript writer 或 canonical UI state |
 | Rust connector status | 不能替代 TS 主动 MCP HTTP probe；当前 HTTP status 会是 `Unknown` |
-| Rust capability directory | 不能替代 TS dynamic descriptor/router；当前与 `control/dispatch.rs` 还有重复与 drift |
+| Rust capability catalog | 不能替代 capability execute/router；当前只投影 installed owner module descriptors 与 list/describe surface |
 | Rust process entrypoint | 不能证明 Electron adapter 已能启动它；当前 Electron 仍启动 Node/TS child |
 
 ## 3. 已确认的 Rust/TS 接缝缺口
 
-1. Electron 当前通过 `DirectRuntimeHost` 启动 Rust executable，使用 stdin/stdout bootstrap/private control readiness；这证明 delivery active path，不证明全部 legacy `/dispatch`/product route cutover。
+1. Electron 当前通过 `DirectRuntimeHost` 启动 Rust executable，使用 stdin/stdout bootstrap/private control readiness；这证明 delivery active path，不证明全部 signed loopback product route cutover。
 2. Rust Host 到 Electron parent callback 的 base URL/token/client/receiver 已接入；session/owner-event payload 与 owner-specific recovery wiring 尚未完整闭合。
 3. Rust provider-models/external-connector transport 会在 Rust control loop 中启动，但 full Electron public route/unchanged-client cutover 尚未证明。
 4. Rust fixed capability descriptors 有两套 construction，内容不一致；TS `bootstrap` scope 也未对齐。

@@ -94,7 +94,7 @@ fn credential_reference_grammar_rejects_unknown_or_non_current_versions_without_
         "credential:v2:anthropic:primary",
         "credential:v1:anthropic:primary/secret-canary",
     ] {
-        let error = environment::CredentialReference::try_new(value).unwrap_err();
+        let error = ::provider::CredentialReference::try_new(value).unwrap_err();
 
         assert_eq!(error.to_string(), "credential reference is invalid");
         assert!(!format!("{error:?} {error}").contains("secret-canary"));
@@ -132,7 +132,7 @@ fn credential_availability_requires_token_to_be_unexpired_at_the_supplied_time()
         &root,
         r#"{"version":1,"profiles":{"openai:default":{"type":"token","provider":"openai","token":"access-token","expires":2000}}}"#,
     );
-    let reference = environment::CredentialReference::try_new("credential:v1:account-id").unwrap();
+    let reference = ::provider::CredentialReference::try_new("credential:v1:account-id").unwrap();
 
     assert!(credential_is_available(&root.state_dir, "openai", &reference, 1_999).unwrap());
     assert!(!credential_is_available(&root.state_dir, "openai", &reference, 2_000).unwrap());
@@ -146,7 +146,7 @@ fn credential_availability_uses_provider_profile_not_credential_reference_id() {
         &root,
         r#"{"version":1,"profiles":{"openai:default":{"type":"api_key","provider":"openai","key":"api-key"}}}"#,
     );
-    let reference = environment::CredentialReference::try_new("credential:v1:account-id").unwrap();
+    let reference = ::provider::CredentialReference::try_new("credential:v1:account-id").unwrap();
 
     assert!(credential_is_available(&root.state_dir, "openai", &reference, 1_999).unwrap());
     assert!(!credential_is_available(&root.state_dir, "anthropic", &reference, 1_999).unwrap());
@@ -159,7 +159,7 @@ fn credential_availability_accepts_native_secret_refs_without_resolving_them() {
         &root,
         r#"{"version":1,"profiles":{"custom-main:default":{"type":"api_key","provider":"custom-main","keyRef":{"source":"env","provider":"custom-main","id":"CUSTOM_MAIN_API_KEY"}}}}"#,
     );
-    let reference = environment::CredentialReference::try_new("credential:v1:custom-main").unwrap();
+    let reference = ::provider::CredentialReference::try_new("credential:v1:custom-main").unwrap();
 
     assert!(credential_is_available(&root.state_dir, "custom-main", &reference, 1_999).unwrap());
 }
@@ -171,7 +171,7 @@ fn credential_availability_accepts_oauth_access_or_refresh_token() {
         &root,
         r#"{"version":1,"profiles":{"openai:access":{"type":"oauth","provider":"openai","access":"access-token"},"anthropic:refresh":{"type":"oauth","provider":"anthropic","refresh":"refresh-token"}}}"#,
     );
-    let reference = environment::CredentialReference::try_new("credential:v1:account-id").unwrap();
+    let reference = ::provider::CredentialReference::try_new("credential:v1:account-id").unwrap();
 
     assert!(credential_is_available(&root.state_dir, "openai", &reference, 1_999).unwrap());
     assert!(credential_is_available(&root.state_dir, "anthropic", &reference, 1_999).unwrap());
@@ -184,7 +184,7 @@ fn malformed_token_profile_fails_closed_without_exposing_profile_contents() {
         &root,
         r#"{"version":1,"profiles":{"openai:default":{"type":"token","provider":"openai","token":"access-secret-canary","expires":"invalid"}}}"#,
     );
-    let reference = environment::CredentialReference::try_new("credential:v1:account-id").unwrap();
+    let reference = ::provider::CredentialReference::try_new("credential:v1:account-id").unwrap();
 
     let error = credential_is_available(&root.state_dir, "openai", &reference, 1_999).unwrap_err();
 

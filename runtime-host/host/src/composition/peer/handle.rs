@@ -1,22 +1,39 @@
 use foundation::execution::OwnerRuntimeHandle;
+use openclaw::gateway::request::{OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest};
+use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::{
     HostState, RuntimeState,
-    composition::{
-        OpenClawBrowserGatewayRequest, OpenClawGatewayPayload, OpenClawLogSnapshot,
-        OpenClawMcpAppGatewayRequest,
+    composition::OpenClawLogSnapshot,
+    composition::runtime_ports::{
+        RuntimeControlFailure, RuntimeControlReadiness, RuntimeGatewayHealth, RuntimeGatewayStatus,
+        RuntimeLogSnapshot,
     },
 };
 
 use super::{
-    PeerCommand, PeerQuery, RestartMatchaError, RestartOpenClawError, StartMatchaError,
-    StartOpenClawError, StopMatchaError, StopOpenClawError,
+    PeerCommand, PeerQuery, RestartOpenClawError, RuntimeRestartCommandError,
+    RuntimeStartCommandError, RuntimeStopCommandError, StartOpenClawError, StopOpenClawError,
 };
 
 #[derive(Clone)]
 pub(crate) struct PeerHandle {
     owner: OwnerRuntimeHandle<PeerCommand, PeerQuery>,
+}
+
+impl runtime_directory::RuntimeEndpointDirectorySource for PeerHandle {
+    fn runtime_endpoint_directory<'a>(
+        &'a self,
+    ) -> runtime_directory::RuntimeEndpointDirectoryFuture<'a> {
+        Box::pin(async move { PeerHandle::runtime_endpoint_directory(self).await })
+    }
+}
+
+impl openclaw::plugins::OpenClawPluginsRestartPort for PeerHandle {
+    fn restart_openclaw_runtime<'a>(&'a self) -> plugins_module::ports::PluginsFuture<'a, bool> {
+        Box::pin(async move { matches!(self.restart_open_claw().await, Ok(Ok(_))) })
+    }
 }
 
 impl PeerHandle {
@@ -30,9 +47,12 @@ impl PeerHandle {
 
     pub(crate) async fn runtime_endpoint_directory(
         &self,
-    ) -> Result<crate::runtime::peers::Directory, ()> {
+    ) -> Result<runtime_directory::Directory, ()> {
         let state = self.state().await?;
-        Ok(crate::runtime::peers::Directory::from_host_state(&state))
+        Ok(runtime_directory::Directory::from_lifecycles(
+            runtime_lifecycle(state.matcha().lifecycle()),
+            runtime_lifecycle(state.open_claw().lifecycle()),
+        ))
     }
 
     pub(crate) async fn request_peer_autostart(
@@ -51,28 +71,6 @@ impl PeerHandle {
                 .map_err(|_| ())?;
         }
         Ok(())
-    }
-
-    pub(crate) async fn matcha_status(&self) -> Result<RuntimeState, ()> {
-        self.request_query(|reply| PeerQuery::MatchaStatus { reply })
-            .await
-    }
-
-    pub(crate) async fn start_matcha(&self) -> Result<Result<RuntimeState, StartMatchaError>, ()> {
-        self.request_command(|reply| PeerCommand::StartMatcha { reply })
-            .await
-    }
-
-    pub(crate) async fn stop_matcha(&self) -> Result<Result<RuntimeState, StopMatchaError>, ()> {
-        self.request_command(|reply| PeerCommand::StopMatcha { reply })
-            .await
-    }
-
-    pub(crate) async fn restart_matcha(
-        &self,
-    ) -> Result<Result<RuntimeState, RestartMatchaError>, ()> {
-        self.request_command(|reply| PeerCommand::RestartMatcha { reply })
-            .await
     }
 
     pub(crate) async fn open_claw_status(&self) -> Result<RuntimeState, ()> {
@@ -98,6 +96,30 @@ impl PeerHandle {
         &self,
     ) -> Result<Result<RuntimeState, RestartOpenClawError>, ()> {
         self.request_command(|reply| PeerCommand::RestartOpenClaw { reply })
+            .await
+    }
+
+    pub(crate) async fn start_runtime(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> Result<Result<RuntimeState, RuntimeStartCommandError>, ()> {
+        self.request_command(|reply| PeerCommand::StartRuntime { endpoint, reply })
+            .await
+    }
+
+    pub(crate) async fn stop_runtime(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> Result<Result<RuntimeState, RuntimeStopCommandError>, ()> {
+        self.request_command(|reply| PeerCommand::StopRuntime { endpoint, reply })
+            .await
+    }
+
+    pub(crate) async fn restart_runtime(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> Result<Result<RuntimeState, RuntimeRestartCommandError>, ()> {
+        self.request_command(|reply| PeerCommand::RestartRuntime { endpoint, reply })
             .await
     }
 
@@ -162,30 +184,89 @@ impl PeerHandle {
             .await
     }
 
-    pub(crate) async fn control_lease(
-        &self,
-    ) -> Result<crate::composition::ControlLease, crate::RequestAdmissionClosed> {
-        self.request_query(|reply| PeerQuery::OpenClawControlLease { reply })
+    pub(crate) async fn open_claw_gateway_snapshot(&self) -> Value {
+        match self
+            .request_query(|reply| PeerQuery::OpenClawGatewaySnapshot { reply })
             .await
-            .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
+        {
+            Ok(Ok(observation)) => observation.observe().await,
+            Ok(Err(_)) | Err(_) => {
+                crate::composition::OpenClawGatewaySnapshotObservation::unavailable()
+            }
+        }
     }
 
-    pub(crate) async fn open_claw_browser_request<Q, B>(
+    pub(crate) async fn open_claw_control_snapshot(&self) -> Value {
+        match self
+            .request_query(|reply| PeerQuery::OpenClawControlSnapshot { reply })
+            .await
+        {
+            Ok(Ok(observation)) => observation.observe().await,
+            Ok(Err(_)) | Err(_) => {
+                crate::composition::OpenClawControlSnapshotObservation::unavailable()
+            }
+        }
+    }
+
+    pub(crate) async fn runtime_logs(
         &self,
-        method: String,
-        path: String,
-        query: Option<Q>,
-        body: Option<B>,
-        timeout_ms: Option<u64>,
-        target: Option<String>,
-        node: Option<String>,
-    ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>
-    where
-        Q: Into<OpenClawGatewayPayload>,
-        B: Into<OpenClawGatewayPayload>,
-    {
-        let request =
-            OpenClawBrowserGatewayRequest::new(method, path, query, body, timeout_ms, target, node);
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        cursor: Option<u64>,
+    ) -> Result<Result<RuntimeLogSnapshot, RuntimeControlFailure>, ()> {
+        self.request_query(|reply| PeerQuery::RuntimeLogs {
+            endpoint,
+            cursor,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn runtime_control_readiness(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> Result<Result<RuntimeControlReadiness, RuntimeControlFailure>, ()> {
+        self.request_query(|reply| PeerQuery::RuntimeControlReadiness { endpoint, reply })
+            .await
+    }
+
+    pub(crate) async fn runtime_gateway_health(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        probe: bool,
+    ) -> Result<Result<RuntimeGatewayHealth, RuntimeControlFailure>, ()> {
+        self.request_query(|reply| PeerQuery::RuntimeGatewayHealth {
+            endpoint,
+            probe,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn runtime_gateway_status(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        include_channel_summary: bool,
+    ) -> Result<Result<RuntimeGatewayStatus, RuntimeControlFailure>, ()> {
+        self.request_query(|reply| PeerQuery::RuntimeGatewayStatus {
+            endpoint,
+            include_channel_summary,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn runtime_control_ui_url(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> Result<Result<String, RuntimeControlFailure>, ()> {
+        self.request_query(|reply| PeerQuery::RuntimeControlUiUrl { endpoint, reply })
+            .await
+    }
+
+    pub(crate) async fn open_claw_browser_request(
+        &self,
+        request: OpenClawBrowserGatewayRequest,
+    ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
         self.request_query(|reply| PeerQuery::OpenClawBrowserRequest { request, reply })
             .await
             .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
@@ -193,13 +274,8 @@ impl PeerHandle {
 
     pub(crate) async fn open_claw_mcp_app_request(
         &self,
-        operation_id: String,
-        session_key: String,
-        view_id: String,
-        standalone: Option<bool>,
+        request: OpenClawMcpAppGatewayRequest,
     ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
-        let request =
-            OpenClawMcpAppGatewayRequest::new(operation_id, session_key, view_id, standalone);
         self.request_query(|reply| PeerQuery::OpenClawMcpAppRequest { request, reply })
             .await
             .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
@@ -224,5 +300,22 @@ impl PeerHandle {
         let (reply, response) = oneshot::channel();
         self.owner.send_query(query(reply)).await.map_err(|_| ())?;
         response.await.map_err(|_| ())
+    }
+}
+
+const fn runtime_lifecycle(
+    lifecycle: crate::RuntimeLifecycle,
+) -> runtime_directory::RuntimeLifecycle {
+    match lifecycle {
+        crate::RuntimeLifecycle::Unavailable => runtime_directory::RuntimeLifecycle::Unavailable,
+        crate::RuntimeLifecycle::Idle => runtime_directory::RuntimeLifecycle::Idle,
+        crate::RuntimeLifecycle::Starting => runtime_directory::RuntimeLifecycle::Starting,
+        crate::RuntimeLifecycle::Running => runtime_directory::RuntimeLifecycle::Running,
+        crate::RuntimeLifecycle::Stopping => runtime_directory::RuntimeLifecycle::Stopping,
+        crate::RuntimeLifecycle::WaitingToRestart => {
+            runtime_directory::RuntimeLifecycle::WaitingToRestart
+        }
+        crate::RuntimeLifecycle::Failed => runtime_directory::RuntimeLifecycle::Failed,
+        crate::RuntimeLifecycle::ShutDown => runtime_directory::RuntimeLifecycle::ShutDown,
     }
 }

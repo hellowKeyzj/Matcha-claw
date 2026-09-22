@@ -6,6 +6,11 @@ const endpoint = {
   runtimeAdapterId: 'openclaw',
   runtimeInstanceId: 'local',
 } as const;
+const matchaEndpoint = {
+  kind: 'native-runtime',
+  runtimeAdapterId: 'matcha-agent',
+  runtimeInstanceId: 'local',
+} as const;
 const request = {
   id: 'session.management',
   operationId: 'sessions.list',
@@ -102,6 +107,41 @@ describe('Electron Main session-list transport', () => {
     await expect(transport.list(request)).resolves.toEqual({
       status: 200,
       body: { sessions: [modeledSession] },
+    });
+  });
+
+  it('accepts Matcha session catalog rows on the same route without dropping projection fields', async () => {
+    const matchaRequest = {
+      id: 'session.management',
+      operationId: 'sessions.list',
+      scope: { kind: 'runtime-instance', endpoint: matchaEndpoint },
+      target: { kind: 'runtime-endpoint' },
+      input: { endpoint: matchaEndpoint },
+    } as const;
+    const matchaSession = {
+      key: 'matcha-agent:matcha:native-session-1',
+      agentId: 'matcha',
+      sessionIdentity: {
+        endpoint: matchaEndpoint,
+        agentId: 'matcha',
+        sessionKey: 'matcha-agent:matcha:native-session-1',
+      },
+      kind: 'session',
+      preferred: false,
+      endpointSessionId: 'native-session-1',
+      protocolId: 'matcha-agent-app-server',
+      runtimeEndpointId: 'matcha-agent-local',
+      updatedAt: 1_728_000_000_000,
+    } as const;
+    const transport = createSessionListTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_101,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => ({ sessions: [matchaSession] }) }),
+    );
+
+    await expect(transport.list(matchaRequest)).resolves.toEqual({
+      status: 200,
+      body: { sessions: [matchaSession] },
     });
   });
 

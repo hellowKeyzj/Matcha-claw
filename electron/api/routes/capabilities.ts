@@ -1,21 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { CapabilityDescriptor } from '../../desktop-contract/capability-descriptor';
 import {
-  buildCapabilityScopeKey,
   validateRuntimeScope,
   type RuntimeScope,
 } from '../../desktop-contract/runtime-address';
-import {
-  type RuntimeHostControlCommand,
-  type RuntimeHostControlOutcome,
-  type RuntimeHostJsonObject,
-  type RuntimeHostJsonValue,
-} from '../../main/runtime-host-delivery/control';
-import {
-  decodeSkillsStatus,
-  projectSkillsStatus,
-} from '../../main/runtime-host-delivery/transport/skills/management';
-import type { HostApiContext, RuntimeHostTransportContext } from '../context';
+import type { RuntimeHostJsonValue } from '../../main/runtime-host-delivery/control';
+import type { RuntimeHostTransportContext } from '../context';
 import { dispatchSessionCapability, type SessionCapabilityRouteDeps } from './sessions';
 import {
   logSessionTrace,
@@ -91,9 +80,17 @@ const OPENCLAW_MCP_APP_UNAVAILABLE = {
   error: 'OpenClaw MCP app request is unavailable',
 } as const;
 type CapabilityRouteContext = SessionCapabilityRouteDeps
-  & Pick<HostApiContext, 'runtimeHost'>
   & RuntimeHostTransportContext<
-    'providerRoutingTransport' | 'taskManagerTransport' | 'workspaceMediaTransport' | 'agentsTransport' | 'cronTransport'
+    | 'capabilityDirectoryTransport'
+    | 'providerRoutingTransport'
+    | 'taskManagerTransport'
+    | 'workspaceMediaTransport'
+    | 'agentsTransport'
+    | 'cronTransport'
+    | 'pluginsTransport'
+    | 'skillsManagementTransport'
+    | 'teamRuntimeTransport'
+    | 'openClawGatewayTransport'
   >;
 
 type TaskOperation =
@@ -121,10 +118,8 @@ export async function handleCapabilityRoutes(
 ): Promise<boolean> {
   if (url.pathname === '/api/capabilities/list' && req.method === 'GET') {
     try {
-      const directory = decodeCapabilityDirectory(
-        await deps.runtimeHost.command({ name: 'host.capabilities.list' }),
-      );
-      sendJson(res, directory ? 200 : 503, directory ?? CAPABILITY_DIRECTORY_UNAVAILABLE);
+      const response = await deps.runtimeHostTransports.capabilityDirectoryTransport.list();
+      sendJson(res, response.status, response.body);
     } catch {
       sendJson(res, 503, CAPABILITY_DIRECTORY_UNAVAILABLE);
     }
@@ -144,20 +139,8 @@ export async function handleCapabilityRoutes(
       return true;
     }
     try {
-      const outcome = await deps.runtimeHost.command({
-        name: 'host.capabilities.describe',
-        input: { id: body.id, scope: body.scope as RuntimeHostJsonObject },
-      });
-      if (isInvalidCapabilityRejection(outcome)) {
-        sendJson(res, 404, CAPABILITY_NOT_AVAILABLE);
-        return true;
-      }
-      const capability = decodeCapabilityDescribe(outcome, body.id, body.scope);
-      sendJson(
-        res,
-        capability ? 200 : 503,
-        capability ? { capability } : CAPABILITY_DIRECTORY_UNAVAILABLE,
-      );
+      const response = await deps.runtimeHostTransports.capabilityDirectoryTransport.describe(body);
+      sendJson(res, response.status, response.body);
     } catch {
       sendJson(res, 503, CAPABILITY_DIRECTORY_UNAVAILABLE);
     }
@@ -263,13 +246,12 @@ export async function handleCapabilityRoutes(
       return true;
     }
     try {
-      logSessionTrace('electron.team.runtime.control.request', traceId, summarizeTeamRuntimeRequest(body));
-      const outcome = await deps.runtimeHost.command({
-        name: 'team.runtime.execute',
-        input: buildTeamRuntimeControlInput(body, traceId ?? undefined),
+      logSessionTrace('electron.team.runtime.transport.request', traceId, summarizeTeamRuntimeRequest(body));
+      const response = await deps.runtimeHostTransports.teamRuntimeTransport.execute(body, traceId ?? undefined);
+      logSessionTrace('electron.team.runtime.transport.response', traceId, {
+        status: response.status,
+        contract: summarizeTeamRuntimeResult(response.body),
       });
-      logSessionTrace('electron.team.runtime.control.response', traceId, summarizeTeamRuntimeOutcome(outcome));
-      const response = projectTeamRuntimeOutcome(outcome);
       logSessionTrace('electron.team.runtime.response', traceId, {
         status: response.status,
         contract: response.status === 200 ? 'operation-result' : 'unavailable',
@@ -283,8 +265,12 @@ export async function handleCapabilityRoutes(
   }
 
   if (body.id === 'skill.management') {
-    const response = await executeSkillManagementCapability(body, deps);
-    sendJson(res, response.status, response.body);
+    try {
+      const response = await deps.runtimeHostTransports.skillsManagementTransport.execute(body);
+      sendJson(res, response.status, response.body);
+    } catch {
+      sendJson(res, 503, { outcome: 'unknown' });
+    }
     return true;
   }
 
@@ -340,41 +326,16 @@ export async function handleCapabilityRoutes(
   return true;
 }
 
-type SkillCapabilityOperation =
-  | 'skills.refreshStatus'
-  | 'skills.updateConfig'
-  | 'skills.updateState'
-  | 'skills.updateBatchState'
-  | 'skills.exportBundles'
-  | 'skills.importBundles'
-  | 'clawhub.openReadme'
-  | 'clawhub.openPath';
-
 const CAPABILITY_REJECTED = { outcome: 'rejected' } as const;
-const SKILL_MANAGEMENT_UNAVAILABLE = { outcome: 'unknown' } as const;
 const PLUGIN_RUNTIME_UNAVAILABLE = { outcome: 'unknown' } as const;
 
-function projectTeamRuntimeOutcome(
-  outcome: RuntimeHostControlOutcome,
-): { status: number; body: unknown } {
-  if (outcome.kind === 'succeeded') return { status: 200, body: outcome.result };
-  if (outcome.kind === 'unknown' || outcome.kind === 'timed-out') {
-    return { status: 503, body: TEAM_RUNTIME_UNAVAILABLE };
-  }
-  const status = outcome.error.code === 'INVALID_INPUT'
-    ? 400
-    : outcome.error.code === 'CAPACITY_EXHAUSTED'
-      ? 409
-      : outcome.error.code === 'UNAVAILABLE'
-        ? 503
-        : 500;
-  return {
-    status,
-    body: outcome.error.code === 'INVALID_INPUT'
-      ? TEAM_RUNTIME_REQUEST_INVALID
-      : TEAM_RUNTIME_UNAVAILABLE,
-  };
-}
+type PluginRuntimeCapabilityRequest = Readonly<{
+  id: 'plugin.runtime';
+  operationId: 'plugins.setEnabled';
+  scope: unknown;
+  target: Readonly<{ kind: 'plugin'; pluginId: string }>;
+  input: Readonly<{ enabled: boolean; pluginIds: [string] }>;
+}>;
 
 type SubagentConfigurationCapabilityId = 'subagent.skills' | 'subagent.tools';
 
@@ -427,30 +388,6 @@ function summarizeTeamRuntimeRequest(body: Record<string, unknown>): Record<stri
   };
 }
 
-function buildTeamRuntimeControlInput(
-  body: Record<string, unknown>,
-  traceId: string | undefined,
-): Extract<RuntimeHostControlCommand, { readonly name: 'team.runtime.execute' }>['input'] {
-  return {
-    id: body.id as string,
-    operationId: body.operationId as string,
-    scope: body.scope as RuntimeHostJsonObject,
-    target: body.target as RuntimeHostJsonValue,
-    input: body.input as RuntimeHostJsonObject,
-    ...(traceId ? { traceId } : {}),
-  };
-}
-
-function summarizeTeamRuntimeOutcome(outcome: RuntimeHostControlOutcome): Record<string, unknown> {
-  if (outcome.kind === 'succeeded') return { outcome: 'succeeded', contract: summarizeTeamRuntimeResult(outcome.result) };
-  if (outcome.kind === 'unknown') return { outcome: 'unknown', contract: summarizeTeamRuntimeResult(outcome.result) };
-  if (outcome.kind === 'timed-out') return { outcome: 'timed-out' };
-  return {
-    outcome: 'rejected',
-    rejectionCode: outcome.error.code,
-  };
-}
-
 function summarizeTeamRuntimeResult(result: unknown): string {
   if (!isRecord(result)) return 'invalid';
   if (typeof result.outcome === 'string') return `outcome:${result.outcome}`;
@@ -469,19 +406,6 @@ function readString(record: Record<string, unknown> | null, key: string): string
   return typeof value === 'string' ? value : null;
 }
 
-function capabilityControlInput(
-  body: Record<string, unknown>,
-  operationId: string,
-): RuntimeHostJsonObject {
-  return {
-    id: body.id as RuntimeHostJsonValue,
-    operationId,
-    scope: body.scope as RuntimeHostJsonValue,
-    target: body.target as RuntimeHostJsonValue,
-    input: body.input as RuntimeHostJsonValue,
-  };
-}
-
 async function executeOpenClawBrowserCapability(
   body: Record<string, unknown>,
   deps: CapabilityRouteContext,
@@ -490,11 +414,8 @@ async function executeOpenClawBrowserCapability(
     return { status: 400, body: OPENCLAW_BROWSER_REQUEST_INVALID };
   }
   try {
-    const outcome = await deps.runtimeHost.command({
-      name: 'openclaw.browser.request',
-      input: body.input as Extract<RuntimeHostControlCommand, { readonly name: 'openclaw.browser.request' }>['input'],
-    });
-    return projectOpenClawGatewayOutcome(outcome, OPENCLAW_BROWSER_REQUEST_INVALID, OPENCLAW_BROWSER_UNAVAILABLE);
+    const response = await deps.runtimeHostTransports.openClawGatewayTransport.execute(body);
+    return projectOpenClawGatewayResponse(response, OPENCLAW_BROWSER_REQUEST_INVALID, OPENCLAW_BROWSER_UNAVAILABLE);
   } catch {
     return { status: 503, body: OPENCLAW_BROWSER_UNAVAILABLE };
   }
@@ -508,54 +429,22 @@ async function executeOpenClawMcpAppCapability(
     return { status: 400, body: OPENCLAW_MCP_APP_REQUEST_INVALID };
   }
   try {
-    const input = body.input as Extract<RuntimeHostControlCommand, { readonly name: 'openclaw.mcp-app.request' }>['input'];
-    const outcome = await deps.runtimeHost.command({
-      name: 'openclaw.mcp-app.request',
-      input: {
-        operationId: body.operationId as string,
-        sessionKey: input.sessionKey,
-        viewId: input.viewId,
-        ...(input.standalone === undefined ? {} : { standalone: input.standalone }),
-      },
-    });
-    return projectOpenClawGatewayOutcome(outcome, OPENCLAW_MCP_APP_REQUEST_INVALID, OPENCLAW_MCP_APP_UNAVAILABLE);
+    const response = await deps.runtimeHostTransports.openClawGatewayTransport.execute(body);
+    return projectOpenClawGatewayResponse(response, OPENCLAW_MCP_APP_REQUEST_INVALID, OPENCLAW_MCP_APP_UNAVAILABLE);
   } catch {
     return { status: 503, body: OPENCLAW_MCP_APP_UNAVAILABLE };
   }
 }
 
-function projectOpenClawGatewayOutcome(
-  outcome: RuntimeHostControlOutcome,
+function projectOpenClawGatewayResponse(
+  response: { status: number; body: unknown },
   invalidBody: unknown,
   unavailableBody: unknown,
 ): { status: number; body: unknown } {
-  if (outcome.kind === 'succeeded') return { status: 200, body: outcome.result };
-  if (outcome.kind === 'rejected' && outcome.error.code === 'INVALID_INPUT') {
-    return { status: 400, body: invalidBody };
-  }
-  if (outcome.kind === 'rejected' && outcome.error.code === 'CAPACITY_EXHAUSTED') {
-    return { status: 409, body: unavailableBody };
-  }
+  if (response.status === 200) return response;
+  if (response.status === 400) return { status: 400, body: invalidBody };
+  if (response.status === 409) return { status: 409, body: unavailableBody };
   return { status: 503, body: unavailableBody };
-}
-
-async function executeSkillManagementCapability(
-  body: Record<string, unknown>,
-  deps: CapabilityRouteContext,
-): Promise<{ status: number; body: unknown }> {
-  const operation = isSkillCapabilityOperation(body.operationId) ? body.operationId : undefined;
-  if (!operation || !isSkillCapabilityRequest(body, operation)) {
-    return { status: 400, body: CAPABILITY_REJECTED };
-  }
-  try {
-    const outcome = await deps.runtimeHost.command({
-      name: 'openclaw.skills.execute',
-      input: capabilityControlInput(body, operation),
-    });
-    return projectSkillCapabilityOutcome(outcome, operation);
-  } catch {
-    return { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
-  }
 }
 
 async function executePluginRuntimeCapability(
@@ -566,20 +455,15 @@ async function executePluginRuntimeCapability(
     return { status: 400, body: CAPABILITY_REJECTED };
   }
   try {
-    const outcome = await deps.runtimeHost.command({
-      name: 'openclaw.plugins.execute',
-      input: capabilityControlInput(body, body.operationId as string),
+    const response = await deps.runtimeHostTransports.pluginsTransport.configuration({
+      runtime: 'openclaw',
+      pluginId: body.target.pluginId,
+      enabled: body.input.enabled,
     });
-    if (outcome.kind === 'succeeded' && isRecord(outcome.result)
-      && hasExactKeys(outcome.result, ['success', 'outcome'])
-      && outcome.result.success === true
-      && outcome.result.outcome === 'configured') {
+    if (response.outcome === 'configured') {
       return { status: 200, body: { outcome: 'configured' } };
     }
-    if (outcome.kind === 'rejected' && outcome.error.code === 'INVALID_INPUT') {
-      return { status: 400, body: { outcome: 'rejected' } };
-    }
-    if (outcome.kind === 'rejected' && outcome.error.code === 'FAILED') {
+    if (response.outcome === 'rejected') {
       return { status: 409, body: { outcome: 'rejected' } };
     }
     return { status: 503, body: PLUGIN_RUNTIME_UNAVAILABLE };
@@ -588,101 +472,7 @@ async function executePluginRuntimeCapability(
   }
 }
 
-function projectSkillCapabilityOutcome(
-  outcome: RuntimeHostControlOutcome,
-  operation: SkillCapabilityOperation,
-): { status: number; body: unknown } {
-  if (outcome.kind === 'unknown') return { status: 503, body: { outcome: 'unknown' } };
-  if (outcome.kind === 'timed-out') return { status: 503, body: { outcome: 'unknown' } };
-  if (outcome.kind === 'rejected') {
-    return { status: outcome.error.code === 'INVALID_INPUT' ? 400 : 503, body: CAPABILITY_REJECTED };
-  }
-  if (!isRecord(outcome.result)) return { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
-  if (operation === 'skills.refreshStatus') {
-    const native = decodeSkillsStatus(outcome.result);
-    return native
-      ? { status: 200, body: projectSkillsStatus(native) }
-      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
-  }
-  if (operation === 'skills.exportBundles') {
-    return isRecord(outcome.result)
-      && hasExactKeys(outcome.result, ['skillBundles'])
-      && Array.isArray(outcome.result.skillBundles)
-      ? { status: 200, body: outcome.result.skillBundles }
-      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
-  }
-  if (operation === 'skills.importBundles') {
-    return isRecord(outcome.result) && hasExactKeys(outcome.result, ['ok']) && outcome.result.ok === true
-      ? { status: 200, body: { ok: true } }
-      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
-  }
-  if (operation === 'clawhub.openReadme') {
-    return isRecord(outcome.result)
-      && hasExactKeys(outcome.result, ['success', 'content', 'filePath'])
-      && outcome.result.success === true
-      && typeof outcome.result.content === 'string'
-      && isAbsolutePath(outcome.result.filePath)
-      ? { status: 200, body: outcome.result }
-      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
-  }
-  if (operation === 'clawhub.openPath') {
-    return isRecord(outcome.result) && outcome.result.success === true
-      ? { status: 200, body: { success: true } }
-      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
-  }
-  return isRecord(outcome.result) && outcome.result.success === true
-    ? { status: 200, body: { success: true } }
-    : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
-}
-
-function isSkillCapabilityOperation(value: unknown): value is SkillCapabilityOperation {
-  return value === 'skills.refreshStatus'
-    || value === 'skills.updateConfig'
-    || value === 'skills.updateState'
-    || value === 'skills.updateBatchState'
-    || value === 'skills.exportBundles'
-    || value === 'skills.importBundles'
-    || value === 'clawhub.openReadme'
-    || value === 'clawhub.openPath';
-}
-
-function isSkillCapabilityRequest(body: Record<string, unknown>, operation: SkillCapabilityOperation): boolean {
-  return hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
-    && body.id === 'skill.management'
-    && body.operationId === operation
-    && isNativeRuntimeScope(body.scope)
-    && isRecord(body.target)
-    && isRecord(body.input)
-    && targetMatchesSkillOperation(body.target, body.input, operation);
-}
-
-function targetMatchesSkillOperation(target: Record<string, unknown>, input: Record<string, unknown>, operation: SkillCapabilityOperation): boolean {
-  if (operation === 'skills.refreshStatus') return hasExactKeys(target, ['kind']) && target.kind === 'none' && hasExactKeys(input, []);
-  if (operation === 'skills.exportBundles') return hasExactKeys(target, ['kind']) && target.kind === 'skill-bundle' && hasExactKeys(input, ['skillKeys']) && isOpenClawSkillKeyArray(input.skillKeys);
-  if (operation === 'skills.importBundles') return hasExactKeys(target, ['kind']) && target.kind === 'skill-bundle' && hasExactKeys(input, ['skillBundles']) && Array.isArray(input.skillBundles);
-  if (operation === 'skills.updateBatchState') return hasExactKeys(target, ['kind']) && target.kind === 'skill' && hasExactKeys(input, ['skillKeys', 'enabled']) && isOpenClawSkillKeyArray(input.skillKeys) && typeof input.enabled === 'boolean';
-  const skillId = skillTargetId(target);
-  if (skillId === null) return false;
-  if (operation === 'skills.updateConfig') return hasExactKeys(input, ['skillKey', 'apiKey', 'env']) && input.skillKey === skillId && typeof input.apiKey === 'string' && isStringRecord(input.env);
-  if (operation === 'skills.updateState') return hasExactKeys(input, ['skillKey', 'enabled']) && input.skillKey === skillId && typeof input.enabled === 'boolean';
-  return input.skillKey === skillId
-    && (input.slug === undefined || input.slug === target.slug)
-    && (input.baseDir === undefined || isAbsolutePath(input.baseDir))
-    && (input.filePath === undefined || isAbsolutePath(input.filePath))
-    && hasOnlyKeys(input, ['skillKey', 'slug', 'baseDir', 'filePath']);
-}
-
-function skillTargetId(target: Record<string, unknown>): string | null {
-  if (!hasOnlyKeys(target, ['kind', 'skillId', 'slug'])
-    || target.kind !== 'skill'
-    || !isOpenClawSkillKey(target.skillId)
-    || (target.slug !== undefined && !isOpenClawSkillKey(target.slug))) {
-    return null;
-  }
-  return target.skillId;
-}
-
-function isPluginCapabilityRequest(body: Record<string, unknown>): boolean {
+function isPluginCapabilityRequest(body: Record<string, unknown>): body is PluginRuntimeCapabilityRequest {
   return hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
     && body.id === 'plugin.runtime'
     && body.operationId === 'plugins.setEnabled'
@@ -773,27 +563,6 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => isNonEmptyText(entry));
 }
 
-function isOpenClawSkillKey(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0 && value.length <= 4_096 && !value.includes('\0');
-}
-
-function isOpenClawSkillKeyArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.length > 0 && value.every(isOpenClawSkillKey);
-}
-
-function isAbsolutePath(value: unknown): value is string {
-  return typeof value === 'string'
-    && value.length > 0
-    && value.length <= 4_096
-    && !value.includes('\0')
-    && (/^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\') || value.startsWith('/'));
-}
-
-function isStringRecord(value: unknown): value is Record<string, string> {
-  return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'string');
-}
-
-
 function decodeCronTriggerJobId(value: unknown): string | null {
   if (!isRecord(value)
     || !hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
@@ -855,187 +624,14 @@ function isCronTriggerSkipReason(value: unknown): value is 'already-running' | '
   return value === 'already-running' || value === 'not-due' || value === 'invalid-spec' || value === 'disabled' || value === 'stopped';
 }
 
-type CapabilityDirectory = Readonly<{
-  capabilities: CapabilityDescriptor[];
-}>;
-
 function isCapabilityDescribeRequest(
   value: unknown,
-): value is { id: string; scope: RuntimeScope & RuntimeHostJsonObject } {
+): value is { id: string; scope: RuntimeScope } {
   return isRecord(value)
     && hasExactKeys(value, ['id', 'scope'])
-    && isCapabilityText(value.id)
+    && isNonEmptyText(value.id)
     && validateRuntimeScope(value.scope) === null;
 }
-
-function decodeCapabilityDirectory(outcome: RuntimeHostControlOutcome): CapabilityDirectory | null {
-  if (!isRecord(outcome)
-    || !hasExactKeys(outcome, ['kind', 'result'])
-    || outcome.kind !== 'succeeded'
-    || !isRecord(outcome.result)
-    || !hasExactKeys(outcome.result, ['capabilities'])
-    || !Array.isArray(outcome.result.capabilities)) {
-    return null;
-  }
-  const capabilities: CapabilityDescriptor[] = [];
-  const ids = new Set<string>();
-  for (const value of outcome.result.capabilities) {
-    const capability = decodeCapabilityDescriptor(value);
-    if (!capability || ids.has(capability.id)) return null;
-    ids.add(capability.id);
-    capabilities.push(capability);
-  }
-  return { capabilities };
-}
-
-function decodeCapabilityDescribe(
-  outcome: RuntimeHostControlOutcome,
-  requestedId: string,
-  requestedScope: RuntimeScope,
-): CapabilityDescriptor | null {
-  if (!isRecord(outcome)
-    || !hasExactKeys(outcome, ['kind', 'result'])
-    || outcome.kind !== 'succeeded'
-    || !isRecord(outcome.result)
-    || !hasExactKeys(outcome.result, ['capability'])) {
-    return null;
-  }
-  const capability = decodeCapabilityDescriptor(outcome.result.capability);
-  return capability
-    && capability.id === requestedId
-    && sameRuntimeScope(capability.scope, requestedScope)
-    ? capability
-    : null;
-}
-
-function isInvalidCapabilityRejection(outcome: RuntimeHostControlOutcome): boolean {
-  return isRecord(outcome)
-    && hasExactKeys(outcome, ['kind', 'error'])
-    && outcome.kind === 'rejected'
-    && isRecord(outcome.error)
-    && hasExactKeys(outcome.error, ['code', 'message'])
-    && outcome.error.code === 'INVALID_INPUT'
-    && typeof outcome.error.message === 'string';
-}
-
-function decodeCapabilityDescriptor(value: unknown): CapabilityDescriptor | null {
-  const allowed = [
-    'id',
-    'kind',
-    'scopeKind',
-    'scope',
-    'targetKinds',
-    'runtimeAdapterId',
-    'runtimeInstanceId',
-    'protocolId',
-    'connectorId',
-    'endpointId',
-    'targetAgentIds',
-    'supportLevel',
-    'availability',
-    'operations',
-    'policyScope',
-    'ownerModuleId',
-    'routeOwnerId',
-  ] as const;
-  const required = [
-    'id',
-    'kind',
-    'scopeKind',
-    'scope',
-    'targetKinds',
-    'supportLevel',
-    'availability',
-    'operations',
-    'policyScope',
-    'ownerModuleId',
-    'routeOwnerId',
-  ] as const;
-  if (!isRecord(value)
-    || !isRecord(value.scope)
-    || !hasOnlyKeys(value, allowed)
-    || !required.every((key) => Object.hasOwn(value, key))
-    || !isCapabilityText(value.id)
-    || !isCapabilityText(value.kind)
-    || !isRuntimeScopeKind(value.scopeKind)
-    || validateRuntimeScope(value.scope) !== null
-    || value.scope.kind !== value.scopeKind
-    || !Array.isArray(value.targetKinds)
-    || !value.targetKinds.every(isCapabilityText)
-    || !isCapabilitySupportLevel(value.supportLevel)
-    || !isCapabilityAvailability(value.availability)
-    || !Array.isArray(value.operations)
-    || !value.operations.every(isCapabilityOperation)
-    || !isCapabilityText(value.policyScope)
-    || !isCapabilityText(value.ownerModuleId)
-    || !isCapabilityText(value.routeOwnerId)
-    || !optionalCapabilityText(value.runtimeAdapterId)
-    || !optionalCapabilityText(value.runtimeInstanceId)
-    || !optionalCapabilityText(value.protocolId)
-    || !optionalCapabilityText(value.connectorId)
-    || !optionalCapabilityText(value.endpointId)
-    || !optionalCapabilityTextArray(value.targetAgentIds)) {
-    return null;
-  }
-  return value as unknown as CapabilityDescriptor;
-}
-
-function isCapabilityOperation(value: unknown): boolean {
-  return isRecord(value)
-    && hasOnlyKeys(value, ['id', 'title', 'targetKind', 'targetRequired'])
-    && Object.hasOwn(value, 'id')
-    && Object.hasOwn(value, 'title')
-    && Object.hasOwn(value, 'targetKind')
-    && isCapabilityText(value.id)
-    && isCapabilityText(value.title)
-    && isCapabilityText(value.targetKind)
-    && (value.targetRequired === undefined || typeof value.targetRequired === 'boolean');
-}
-
-function sameRuntimeScope(left: RuntimeScope, right: RuntimeScope): boolean {
-  try {
-    return buildCapabilityScopeKey(left) === buildCapabilityScopeKey(right);
-  } catch {
-    return false;
-  }
-}
-
-function isRuntimeScopeKind(value: unknown): value is RuntimeScope['kind'] {
-  return value === 'app'
-    || value === 'runtime-instance'
-    || value === 'agent'
-    || value === 'session'
-    || value === 'workspace'
-    || value === 'team-run'
-    || value === 'provider-routing';
-}
-
-function isCapabilitySupportLevel(value: unknown): boolean {
-  return value === 'native'
-    || value === 'projected'
-    || value === 'emulated'
-    || value === 'readonly'
-    || value === 'unsupported';
-}
-
-function isCapabilityAvailability(value: unknown): boolean {
-  return value === 'available' || value === 'unavailable';
-}
-
-function isCapabilityText(value: unknown): value is string {
-  return typeof value === 'string'
-    && value.trim().length > 0
-    && !hasControlCharacter(value);
-}
-
-function optionalCapabilityText(value: unknown): value is string | undefined {
-  return value === undefined || isCapabilityText(value);
-}
-
-function optionalCapabilityTextArray(value: unknown): value is string[] | undefined {
-  return value === undefined || Array.isArray(value) && value.every(isCapabilityText);
-}
-
 
 function isProviderRoutingRequest(value: Record<string, unknown>): boolean {
   if (value.id !== 'provider.routing'

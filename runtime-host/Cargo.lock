@@ -348,6 +348,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "channels"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek 2.2.0",
+ "foundation",
+ "platform",
+ "runtime-directory",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "zeroize",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -405,6 +421,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
+name = "connectors"
+version = "0.1.0"
+dependencies = [
+ "foundation",
+ "futures-util",
+ "platform",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -453,6 +482,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "cron"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "ed25519-dalek 2.2.0",
+ "foundation",
+ "platform",
+ "runtime-directory",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -673,6 +718,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "diagnostics"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek 2.2.0",
+ "foundation",
+ "getrandom 0.3.4",
+ "libc",
+ "platform",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -805,18 +867,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "environment"
-version = "0.1.0"
-dependencies = [
- "foundation",
- "getrandom 0.3.4",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "zeroize",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -901,8 +951,12 @@ dependencies = [
 name = "fleet"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm 0.10.3",
  "base64",
+ "chrono",
  "ed25519-dalek 2.2.0",
+ "foundation",
+ "futures-util",
  "getrandom 0.3.4",
  "platform",
  "reqwest",
@@ -910,7 +964,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -1587,13 +1645,16 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
+ "diagnostics",
  "foundation",
  "futures-util",
  "libc",
  "organization",
  "platform",
+ "runtime-directory",
  "serde",
  "serde_json",
+ "sessions",
  "sha2 0.10.9",
  "tokio",
  "tokio-tungstenite",
@@ -1758,9 +1819,13 @@ name = "openclaw"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "channels",
  "chrono",
+ "clawhub",
+ "connectors",
+ "cron 0.1.0",
+ "diagnostics",
  "ed25519-dalek 2.2.0",
- "environment",
  "foundation",
  "futures-util",
  "getrandom 0.3.4",
@@ -1769,19 +1834,32 @@ dependencies = [
  "libc",
  "organization",
  "platform",
+ "platform-tools",
+ "plugins",
+ "provider",
  "qrcode",
  "reqwest",
+ "runtime-directory",
  "rusqlite",
+ "security",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sessions",
+ "settings",
  "sha2 0.10.9",
+ "skills",
+ "subagents",
+ "task-manager",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
  "tokio-util",
  "toolchain",
+ "usage",
  "windows-sys 0.61.2",
+ "workspace",
  "zeroize",
  "zip",
 ]
@@ -1790,12 +1868,21 @@ dependencies = [
 name = "organization"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
- "cron",
+ "cron 0.17.0",
+ "ed25519-dalek 2.2.0",
+ "foundation",
+ "getrandom 0.3.4",
+ "platform",
+ "runtime-directory",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2021,12 +2108,39 @@ name = "platform"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "ed25519-dalek 2.2.0",
  "rcgen",
  "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "platform-tools"
+version = "0.1.0"
+dependencies = [
+ "foundation",
+ "platform",
+ "runtime-directory",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "plugins"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek 2.2.0",
+ "platform",
+ "runtime-directory",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2134,6 +2248,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "provider"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "connectors",
+ "foundation",
+ "platform",
+ "reqwest",
+ "runtime-directory",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]
@@ -2408,16 +2538,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-directory"
+version = "0.1.0"
+dependencies = [
+ "foundation",
+ "platform",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "runtime-host"
 version = "0.1.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
  "base64",
+ "channels",
  "chrono",
  "clawhub",
+ "connectors",
+ "cron 0.1.0",
+ "diagnostics",
  "ed25519-dalek 2.2.0",
- "environment",
  "fleet",
  "foundation",
  "futures-util",
@@ -2427,17 +2571,30 @@ dependencies = [
  "openclaw",
  "organization",
  "platform",
+ "platform-tools",
+ "plugins",
+ "provider",
  "reqwest",
+ "runtime-directory",
  "russh",
+ "sealed-resource",
+ "security",
  "serde",
  "serde_json",
+ "sessions",
+ "settings",
  "sha2 0.10.9",
+ "skills",
+ "subagents",
+ "task-manager",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
  "toolchain",
+ "usage",
  "windows-sys 0.61.2",
+ "workspace",
  "zeroize",
 ]
 
@@ -2657,6 +2814,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sealed-resource"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm 0.10.3",
+ "base64",
+ "getrandom 0.3.4",
+ "openclaw",
+ "platform",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "skills",
+ "subagents",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "sec1"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2668,6 +2843,19 @@ dependencies = [
  "hybrid-array",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "security"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek 2.2.0",
+ "foundation",
+ "platform",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2752,6 +2940,37 @@ checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
 dependencies = [
  "base16ct",
  "serde",
+]
+
+[[package]]
+name = "sessions"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "base64",
+ "connectors",
+ "ed25519-dalek 2.2.0",
+ "foundation",
+ "getrandom 0.3.4",
+ "organization",
+ "platform",
+ "provider",
+ "runtime-directory",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
+name = "settings"
+version = "0.1.0"
+dependencies = [
+ "foundation",
+ "platform",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2867,6 +3086,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
+name = "skills"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek 2.2.0",
+ "platform",
+ "runtime-directory",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2980,6 +3212,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "subagents"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek 2.2.0",
+ "foundation",
+ "platform",
+ "runtime-directory",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3025,6 +3271,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "task-manager"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek 2.2.0",
+ "foundation",
+ "platform",
+ "runtime-directory",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3186,7 +3446,9 @@ name = "toolchain"
 version = "0.1.0"
 dependencies = [
  "foundation",
+ "platform",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -3339,6 +3601,19 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+]
+
+[[package]]
+name = "usage"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek 2.2.0",
+ "foundation",
+ "platform",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3708,6 +3983,19 @@ dependencies = [
  "ff",
  "group",
  "hybrid-array",
+]
+
+[[package]]
+name = "workspace"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "foundation",
+ "platform",
+ "runtime-directory",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

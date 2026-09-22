@@ -20,7 +20,7 @@ import { handleChannelLoginRoutes } from './routes/channel-login';
 import { handleChannelConfigReadRoutes } from './routes/channel-config-read';
 import { handleChannelPairingRoutes } from './routes/channel-pairing';
 import { handleChannelStatusRoutes } from './routes/channel-status';
-import { handleChatHistoryRoutes } from './routes/chat-history';
+import { handleSessionHistoryRoutes } from './routes/session-history';
 import { handleClawHubSkillRoutes } from './routes/clawhub-skill';
 import { handleCronRoutes } from './routes/cron';
 import { handleDiagnosticsRoutes } from './routes/diagnostics';
@@ -62,7 +62,6 @@ import { handleTeamTriggerRoutes } from './routes/team-trigger';
 import { handleTeamWebhookAuthRoutes } from './routes/team-webhook-auth';
 import { handleToolchainRoutes } from './routes/toolchain';
 import { handleUsageRoutes } from './routes/usage';
-import { createFleetCredentialWriteAdapter } from '../main/ipc/fleet-private';
 import { proxyFleetRuntimeAgentIngress, proxyFleetTerminalStreamUpgrade } from '../main/runtime-host-delivery/transport/fleet';
 import {
   isHostApiProxyWebSocketRoute,
@@ -95,7 +94,7 @@ const routeHandlers: readonly RouteHandler[] = [
   (req, res, url, deps) => handleChannelControlRoutes(req, res, url, deps.runtimeHostTransports.channelControlTransport),
   (req, res, url, deps) => handleChannelPairingRoutes(req, res, url, deps.runtimeHostTransports.channelPairingTransport),
   (req, res, url, deps) => handleChannelStatusRoutes(req, res, url, deps.runtimeHostTransports.channelStatusTransport),
-  (req, res, url, deps) => handleChatHistoryRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleSessionHistoryRoutes(req, res, url, deps),
   (req, res, url, deps) => handleClawHubSkillRoutes(
     req,
     res,
@@ -112,7 +111,7 @@ const routeHandlers: readonly RouteHandler[] = [
     res,
     url,
     deps.runtimeHostTransports.fleetTransport,
-    deps.credentialWriteAdapter ?? createFleetCredentialWriteAdapter(deps.runtimeHost),
+    deps.credentialWriteAdapter,
   ),
   (req, res, url, deps) => handleGatewayRoutes(req, res, url, deps),
   (req, res, url, deps) => handleLogRoutes(req, res, url, deps),
@@ -164,7 +163,7 @@ const routeHandlers: readonly RouteHandler[] = [
     url,
     deps.runtimeHostTransports.teamWebhookAuthTransport,
   ),
-  (req, res, url, deps) => handleToolchainRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleToolchainRoutes(req, res, url, deps.runtimeHostTransports.toolchainTransport),
   (req, res, url, deps) => handleUsageRoutes(req, res, url, deps.runtimeHostTransports.usageTransport),
 ];
 

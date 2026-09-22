@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
+use sessions_module::command::SessionIngressEvent;
 use tokio::sync::mpsc;
 
-use crate::gateway::ingress::GatewayEpoch;
+use crate::{driver::projection::openclaw_session_event, gateway::ingress::GatewayEpoch};
 
 use super::{
     projection::{CanonicalIngressResult, CanonicalRecoveryReason},
@@ -12,14 +13,14 @@ use super::{
 
 pub(crate) struct EventRouter {
     actors: HashMap<SessionKey, SessionReducerActor>,
-    canonical_events: mpsc::Sender<CanonicalIngressResult>,
+    session_events: mpsc::Sender<SessionIngressEvent>,
 }
 
 impl EventRouter {
-    pub(crate) fn new(canonical_events: mpsc::Sender<CanonicalIngressResult>) -> Self {
+    pub(crate) fn new(session_events: mpsc::Sender<SessionIngressEvent>) -> Self {
         Self {
             actors: HashMap::new(),
-            canonical_events,
+            session_events,
         }
     }
 
@@ -38,9 +39,7 @@ impl EventRouter {
             actor.reduce(event, Some(epoch), route_key)
         };
 
-        if let Some(result) = result {
-            let _ = self.canonical_events.send(result).await;
-        }
+        self.send(result).await;
     }
 
     pub(crate) async fn recover(
@@ -55,7 +54,16 @@ impl EventRouter {
             .entry(session_key.clone())
             .or_insert_with(|| SessionReducerActor::new(session_key))
             .recover(epoch, route_key, reason);
-        let _ = self.canonical_events.send(result).await;
+        self.send(Some(result)).await;
+    }
+
+    async fn send(&self, result: Option<CanonicalIngressResult>) {
+        let Some(result) = result else {
+            return;
+        };
+        if let Some(event) = openclaw_session_event(&result) {
+            let _ = self.session_events.send(event).await;
+        }
     }
 }
 
@@ -64,10 +72,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::session::{
-        projection::{AssistantTurnChunkKind, CanonicalSessionChange},
-        protocol::{ChatEvent, ChatState, RunId, SessionEventKind},
-    };
+    use crate::session::protocol::{ChatEvent, ChatState, RunId, SessionEventKind};
+    use sessions_module::state::SessionChange;
 
     fn session_key(value: &str) -> SessionKey {
         SessionKey::try_new(value).unwrap()
@@ -109,61 +115,47 @@ mod tests {
             }),
             activity: None,
             approval: None,
+            changed: None,
         }
     }
 
-    fn produced(result: CanonicalIngressResult) -> super::super::projection::CanonicalSessionDelta {
-        let CanonicalIngressResult::Produced(delta) = result else {
-            panic!("expected produced canonical event");
-        };
-        delta
-    }
-
     #[tokio::test]
-    async fn routes_sessions_independently_and_sends_canonical_events() {
-        let (canonical_events, mut received_events) = mpsc::channel(4);
-        let mut router = EventRouter::new(canonical_events);
+    async fn routes_sessions_independently_and_sends_session_events() {
+        let (session_events, mut received_events) = mpsc::channel(4);
+        let mut router = EventRouter::new(session_events);
 
         router
             .route(
                 chat_delta("agent:main:session-1", "run-1", 1, "one"),
                 gateway_epoch(1),
-                Some("route-1".to_owned()),
+                Some("renderer-route:1".to_owned()),
             )
             .await;
         router
             .route(
                 chat_delta("agent:main:session-2", "run-2", 1, "two"),
                 gateway_epoch(1),
-                Some("route-2".to_owned()),
+                Some("renderer-route:2".to_owned()),
             )
             .await;
         assert_eq!(router.actors.len(), 2);
 
-        let first = produced(received_events.recv().await.unwrap());
-        assert_eq!(first.session_key().as_str(), "agent:main:session-1");
-        assert_eq!(first.route_key(), Some("route-1"));
+        let (identity, first) = received_events.recv().await.unwrap().into_parts();
+        assert_eq!(identity.session_key, "agent:main:session-1");
+        assert_eq!(first.binding.route_key(), Some("renderer-route:1"));
         assert!(matches!(
-            first.changes(),
-            [CanonicalSessionChange::AssistantTurnChunk {
-                run_id,
-                kind: AssistantTurnChunkKind::Text,
-                text,
-                ..
-            }] if run_id.as_str() == "run-1" && text == "one"
+            first.changes.as_slice(),
+            [SessionChange::MessageDelta { run_id: Some(run_id), text, .. }]
+                if run_id == "run-1" && text == "one"
         ));
 
-        let second = produced(received_events.recv().await.unwrap());
-        assert_eq!(second.session_key().as_str(), "agent:main:session-2");
-        assert_eq!(second.route_key(), Some("route-2"));
+        let (identity, second) = received_events.recv().await.unwrap().into_parts();
+        assert_eq!(identity.session_key, "agent:main:session-2");
+        assert_eq!(second.binding.route_key(), Some("renderer-route:2"));
         assert!(matches!(
-            second.changes(),
-            [CanonicalSessionChange::AssistantTurnChunk {
-                run_id,
-                kind: AssistantTurnChunkKind::Text,
-                text,
-                ..
-            }] if run_id.as_str() == "run-2" && text == "two"
+            second.changes.as_slice(),
+            [SessionChange::MessageDelta { run_id: Some(run_id), text, .. }]
+                if run_id == "run-2" && text == "two"
         ));
         assert!(received_events.try_recv().is_err());
     }

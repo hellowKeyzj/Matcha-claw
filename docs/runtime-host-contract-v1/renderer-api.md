@@ -83,7 +83,7 @@ POST /api/capabilities/execute
 | `settings.runtime` | 已从 Renderer capability envelope 退休；Settings 使用扁平 intent `GET /api/settings` + `POST /api/settings/desired`，由 Electron Main 适配到 Rust desired transport | [settings-runtime.ts](../../src/lib/settings-runtime.ts)、[settings-desired.ts](../../electron/api/routes/settings-desired.ts) |
 | `security.runtime` | security operations | [security-runtime.ts](../../src/lib/security-runtime.ts) |
 | `subagent.management` / `subagent.skills` / `subagent.tools` | agent and subagent configuration | [subagents.ts](../../src/stores/subagents.ts)、[agent-skill-config.ts](../../src/stores/agent-skill-config.ts)、[agent-tool-config.ts](../../src/stores/agent-tool-config.ts) |
-| `team.runtime` | team package/run/graph/trigger/role chat/approval/cancel/delete operations；Rust control path已解码为 Organization owner command；TeamRun scheduler/watch/reconciliation 由 Organization coordinator 承接；unsupported legacy projection返回 unavailable/unknown/rejected，不伪造成功 | [team-runtime-client.ts](../../src/services/openclaw/team-runtime-client.ts)、[dispatch.rs](../../runtime-host/host/src/control/dispatch.rs)、[command.rs](../../runtime-host/host/src/organization/command.rs)、[coordinator.rs](../../runtime-host/host/src/organization/coordinator.rs) |
+| `team.runtime` | team package/run/graph/trigger/role chat/approval/cancel/delete operations；Rust Organization module path 已解码为 Organization owner command；TeamRun scheduler/watch/reconciliation 由 Organization coordinator 承接；unsupported legacy projection返回 unavailable/unknown/rejected，不伪造成功 | [team-runtime-client.ts](../../src/services/openclaw/team-runtime-client.ts)、[team_runtime_control.rs](../../runtime-host/modules/organization/src/application/team_runtime_control.rs)、[command.rs](../../runtime-host/modules/organization/src/owner/command.rs)、[coordinator.rs](../../runtime-host/modules/organization/src/owner/coordinator.rs) |
 
 Provider model discovery/import 的 Renderer/Electron public DTO 不扩展：discovery response 仍只允许 `modelId`、`capabilities`、`contextWindow`、`maxTokens`、`timeoutMs`、`aspectRatio`、`resolution`、`quality`；`source`、`checkedAt`、`apiKey`、`baseUrl`、`headers`、`runtimeModelRef`、`accountId` 等 reference/private 字段不得暴露。
 
@@ -103,7 +103,7 @@ Provider model discovery/import 的 Renderer/Electron public DTO 不扩展：dis
 
 `providers:storeAccount` 的 `apiKey` / `token` 仅交给 Main 私密入口；Host account 与 public response 不携带 secret。`cliReuse` 仅用于 Anthropic chat account，既不复制 CLI secret，也不保存 credential reference；`token` 用于 Anthropic / GitHub Copilot chat account。品牌和套餐只表达为现有 account 的 provider / endpoint，不新增 plan owner。
 
-Native 模型发现需要 OpenClaw Gateway 运行，离线返回 `Unavailable`；Host 按 native provider 筛选模型，Zen/Go 的逐模型协议由 native catalog 独占。此处记录契约，不宣称真实登录或 live 模型发现已验证。私密存储链见 [layered-architecture.md](../architecture/layered-architecture.md#63-integration-独占-peer-specific-private-semantics)。来源：[provider_account.rs](../../runtime-host/domains/environment/src/provider_account.rs)、[provider_accounts.rs](../../runtime-host/host/src/transport/provider_accounts.rs)、[provider-private-auth.ts](../../electron/main/ipc/provider-private-auth.ts)、[provider_models/mod.rs](../../runtime-host/integrations/openclaw/src/projection/provider_models/mod.rs)。
+Native 模型发现需要 OpenClaw Gateway 运行，离线返回 `Unavailable`；Host 按 native provider 筛选模型，Zen/Go 的逐模型协议由 native catalog 独占。此处记录契约，不宣称真实登录或 live 模型发现已验证。私密存储链见 [layered-architecture.md](../architecture/layered-architecture.md#63-integration-独占-peer-specific-private-semantics)。来源：[provider account model](../../runtime-host/modules/provider/src/domain/account.rs)、[provider accounts loopback](../../runtime-host/modules/provider/src/adapters/loopback/accounts.rs)、[provider-private-auth.ts](../../electron/main/ipc/provider-private-auth.ts)、[provider_models/mod.rs](../../runtime-host/integrations/openclaw/src/projection/provider_models/mod.rs)。
 
 ## 4. session prompt 的关键兼容语义
 
@@ -136,8 +136,8 @@ Chat transport 进一步固定：调用会传 `deliver: false`、保持 idempote
 | --- | --- | --- | --- |
 | `GET` | `/api/openclaw/{status,ready,dir,config-dir,subagent-templates,workspace-dir,task-workspace-dirs,skills-dir,cli-command,tool-permission-mode}` | [host-api.ts](../../src/lib/host-api.ts#L358-L409)；`tool-permission-mode` 现无 Renderer wrapper | child business route |
 | `PUT` | `/api/openclaw/tool-permission-mode` | 现无 Renderer wrapper；保留为旧 public route contract | child business route |
-| `GET` | `/api/toolchain/uv/check` | [host-api.ts](../../src/lib/host-api.ts#L406-L409) | Electron calls Rust `host.toolchain.status` and returns only `{ installed }` |
-| `POST` | `/api/toolchain/uv/prepare` | [host-api.ts](../../src/lib/host-api.ts#L411-L416) | Electron calls Rust `host.toolchain.prepare` and returns only public outcome |
+| `GET` | `/api/toolchain/uv/check` | [host-api.ts](../../src/lib/host-api.ts#L406-L409) | Electron calls `toolchainTransport.status()` and returns only `{ installed }` |
+| `POST` | `/api/toolchain/uv/prepare` | [host-api.ts](../../src/lib/host-api.ts#L411-L416) | Electron calls `toolchainTransport.prepare()` and returns only public outcome |
 | `GET` | `/api/runtime-{adapters,connectors,endpoints}/...` | [host-api.ts](../../src/lib/host-api.ts#L558-L608) | child topology projection |
 | `POST` | `/api/runtime-connectors/{connect,disconnect}` | [host-api.ts](../../src/lib/host-api.ts#L578-L598) | `LEGACY-REJECTED` by child; Renderer wrapper exists, so replacement must preserve observed rejection unless API migration is separately approved. |
 | `POST` | `/api/gateway/stop` | [gateway.ts](../../src/stores/gateway.ts#L355) | Electron main-owned, not child |

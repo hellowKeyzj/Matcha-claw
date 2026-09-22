@@ -32,7 +32,19 @@ describe('diagnostics routes', () => {
     archive: hoisted.archiveMock,
     download: hoisted.downloadMock,
   };
-  const diagnosticsContext = { runtimeHostTransports: { diagnosticsArchiveTransport } } as never;
+
+  function runtimeLogsResponse(result: unknown) {
+    return { status: 200 as const, body: { result } };
+  }
+
+  function diagnosticsContextWithLogs(logs = vi.fn(), command = vi.fn()) {
+    return {
+      runtimeHost: { command },
+      runtimeHostTransports: { diagnosticsArchiveTransport, runtimeControlTransport: { logs } },
+    } as never;
+  }
+
+  const diagnosticsContext = diagnosticsContextWithLogs();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -40,33 +52,31 @@ describe('diagnostics routes', () => {
   });
 
   it('GET /api/diagnostics/gateway-snapshot projects sealed Rust logs into legacy tails', async () => {
-    const command = vi.fn().mockResolvedValue({
-      kind: 'succeeded',
-      result: {
-        result: {
-          entries: [
-            { source: 'stdout', line: 'startup' },
-            { source: 'stderr', line: 'warning' },
-            { source: 'gateway', line: 'request served' },
-          ],
-          cursor: 17,
-          reset: false,
-          truncated: false,
-          lifecycleTailEvicted: false,
-        },
-      },
-    });
+    const logs = vi.fn().mockResolvedValue(runtimeLogsResponse({
+      entries: [
+        { source: 'stdout', line: 'startup' },
+        { source: 'stderr', line: 'warning' },
+        { source: 'gateway', line: 'request served' },
+      ],
+      cursor: 17,
+      reset: false,
+      truncated: false,
+      lifecycleTailEvicted: false,
+    }));
+    const command = vi.fn();
     const { handleDiagnosticsRoutes } = await import('../../electron/api/routes/diagnostics');
 
     const handled = await handleDiagnosticsRoutes(
       { method: 'GET' } as IncomingMessage,
       {} as ServerResponse,
       new URL('http://127.0.0.1:3210/api/diagnostics/gateway-snapshot'),
-      { runtimeHost: { command }, runtimeHostTransports: { diagnosticsArchiveTransport } } as never,
+      diagnosticsContextWithLogs(logs, command),
     );
 
     expect(handled).toBe(true);
-    expect(command).toHaveBeenCalledWith({ name: 'openclaw.logs', input: {} });
+    expect(logs).toHaveBeenCalledWith();
+    expect(command).toHaveBeenCalledWith({ name: 'host.runtime.snapshot' });
+    expect(command).not.toHaveBeenCalledWith({ name: 'openclaw.logs', input: {} });
     expect(hoisted.readLogFileMock).toHaveBeenCalledWith(200);
     expect(hoisted.sendJsonMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -82,20 +92,22 @@ describe('diagnostics routes', () => {
   });
 
   it('GET /api/diagnostics/gateway-snapshot keeps empty tails for unavailable Rust logs', async () => {
-    const command = vi.fn().mockResolvedValue({
-      kind: 'rejected',
-      error: { code: 'UNAVAILABLE', message: 'private runtime detail' },
+    const logs = vi.fn().mockResolvedValue({
+      status: 503,
+      body: { success: false, error: 'private runtime detail' },
     });
+    const command = vi.fn();
     const { handleDiagnosticsRoutes } = await import('../../electron/api/routes/diagnostics');
 
     await handleDiagnosticsRoutes(
       { method: 'GET' } as IncomingMessage,
       {} as ServerResponse,
       new URL('http://127.0.0.1:3210/api/diagnostics/gateway-snapshot'),
-      { runtimeHost: { command }, runtimeHostTransports: { diagnosticsArchiveTransport } } as never,
+      diagnosticsContextWithLogs(logs, command),
     );
 
-    expect(command).toHaveBeenCalledWith({ name: 'openclaw.logs', input: {} });
+    expect(logs).toHaveBeenCalledWith();
+    expect(command).not.toHaveBeenCalledWith({ name: 'openclaw.logs', input: {} });
     expect(hoisted.sendJsonMock).toHaveBeenCalledWith(
       expect.anything(),
       200,
@@ -105,28 +117,26 @@ describe('diagnostics routes', () => {
   });
 
   it('GET /api/diagnostics/gateway-snapshot rejects malformed Rust logs without leaking fields', async () => {
-    const command = vi.fn().mockResolvedValue({
-      kind: 'succeeded',
-      result: {
-        result: {
-          entries: [{ source: 'gateway', line: 'safe' }],
-          cursor: 0,
-          reset: false,
-          truncated: false,
-          lifecycleTailEvicted: false,
-          path: 'C:\\private\\gateway.log',
-        },
-      },
-    });
+    const logs = vi.fn().mockResolvedValue(runtimeLogsResponse({
+      entries: [{ source: 'gateway', line: 'safe' }],
+      cursor: 0,
+      reset: false,
+      truncated: false,
+      lifecycleTailEvicted: false,
+      path: 'C:\\private\\gateway.log',
+    }));
+    const command = vi.fn();
     const { handleDiagnosticsRoutes } = await import('../../electron/api/routes/diagnostics');
 
     await handleDiagnosticsRoutes(
       { method: 'GET' } as IncomingMessage,
       {} as ServerResponse,
       new URL('http://127.0.0.1:3210/api/diagnostics/gateway-snapshot'),
-      { runtimeHost: { command }, runtimeHostTransports: { diagnosticsArchiveTransport } } as never,
+      diagnosticsContextWithLogs(logs, command),
     );
 
+    expect(logs).toHaveBeenCalledWith();
+    expect(command).not.toHaveBeenCalledWith({ name: 'openclaw.logs', input: {} });
     expect(hoisted.sendJsonMock).toHaveBeenCalledWith(
       expect.anything(),
       200,

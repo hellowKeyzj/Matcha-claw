@@ -15,20 +15,36 @@ path = "src/bin/runtime-host-mcp.rs"
 [dependencies]
 arc-swap = "1.7"
 russh = { version = "0.62.5", default-features = false, features = ["ring", "rsa"] }
-environment = { version = "0.1.0", path = "../domains/environment" }
-fleet = { version = "0.1.0", path = "../domains/fleet" }
+fleet = { version = "0.1.0", path = "../modules/fleet" }
 aes-gcm.workspace = true
 base64.workspace = true
 chrono.workspace = true
+channels = { version = "0.1.0", path = "../modules/channels" }
+security = { version = "0.1.0", path = "../modules/security" }
+settings = { version = "0.1.0", path = "../modules/settings" }
+connectors = { version = "0.1.0", path = "../modules/connectors" }
+cron = { version = "0.1.0", path = "../modules/cron" }
+usage = { version = "0.1.0", path = "../modules/usage" }
+diagnostics = { version = "0.1.0", path = "../modules/diagnostics" }
+task-manager = { version = "0.1.0", path = "../modules/task-manager" }
+subagents = { version = "0.1.0", path = "../modules/subagents" }
+workspace = { version = "0.1.0", path = "../modules/workspace" }
+platform-tools = { version = "0.1.0", path = "../modules/platform-tools" }
+provider-module = { package = "provider", version = "0.1.0", path = "../modules/provider" }
+plugins-module = { package = "plugins", version = "0.1.0", path = "../modules/plugins" }
+skills-module = { package = "skills", version = "0.1.0", path = "../modules/skills" }
+sealed-resource = { version = "0.1.0", path = "../modules/sealed-resource" }
+sessions-module = { package = "sessions", version = "0.1.0", path = "../modules/sessions" }
+runtime-directory = { version = "0.1.0", path = "../modules/runtime-directory" }
 clawhub = { version = "0.1.0", path = "../external/clawhub" }
 foundation = { version = "0.1.0", path = "../foundation" }
-toolchain = { version = "0.1.0", path = "../external/toolchain" }
+toolchain = { version = "0.1.0", path = "../modules/toolchain" }
 futures-util.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 matcha-agent = { version = "0.1.0", path = "../integrations/matcha-agent" }
 openclaw = { version = "0.1.0", path = "../integrations/openclaw" }
-organization = { version = "0.1.0", path = "../domains/organization" }
+organization = { version = "0.1.0", path = "../modules/organization" }
 platform = { version = "0.1.0", path = "../platform" }
 serde.workspace = true
 serde_json.workspace = true

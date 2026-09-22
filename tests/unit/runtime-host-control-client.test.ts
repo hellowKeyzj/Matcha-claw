@@ -447,119 +447,13 @@ describe('runtime-host framed control client', () => {
     expect(event).not.toHaveBeenCalled();
   });
 
-  it('writes the fixed read-only capability directory command', async () => {
+  it('rejects removed runtime-host business stdio commands before writing a control frame', async () => {
     const { client, streams } = createClient();
-    const outcome = client.command({ name: 'host.capabilities.list' });
-    const outbound = outboundCommand(streams.writes[0]);
 
-    expect(outbound.command).toEqual({ name: 'host.capabilities.list' });
-    streams.output.emit('data', readyFrame());
-    streams.output.emit('data', succeededOutcome(outbound.id, { capabilities: [] }));
-    await expect(outcome).resolves.toEqual({ kind: 'succeeded', result: { capabilities: [] } });
-
-    await expect(client.command({
-      name: 'host.capabilities.list',
-      input: {},
-    } as never)).rejects.toMatchObject({
-      kind: 'command-invalid',
-      delivery: 'not-delivered',
-    } satisfies Partial<RuntimeHostControlError>);
-    expect(streams.writes).toHaveLength(1);
-  });
-
-  it('writes the exact read-only capability describe command and preserves the sealed outcome', async () => {
-    const { client, streams } = createClient();
-    const command = client.command({
-      name: 'host.capabilities.describe',
-      input: {
-        id: 'scheduler.cron',
-        scope: {
-          kind: 'runtime-instance',
-          endpoint: {
-            kind: 'native-runtime',
-            runtimeAdapterId: 'openclaw',
-            runtimeInstanceId: 'local',
-          },
-        },
-      },
-    });
-    const outbound = outboundCommand(streams.writes[0]);
-
-    expect(outbound.command).toEqual({
-      name: 'host.capabilities.describe',
-      input: {
-        id: 'scheduler.cron',
-        scope: {
-          kind: 'runtime-instance',
-          endpoint: {
-            kind: 'native-runtime',
-            runtimeAdapterId: 'openclaw',
-            runtimeInstanceId: 'local',
-          },
-        },
-      },
-    });
-    expect(Object.keys(outbound.command as Record<string, unknown>).sort()).toEqual(['input', 'name']);
-    expect(Object.keys((outbound.command as Record<string, unknown>).input as Record<string, unknown>).sort()).toEqual(['id', 'scope']);
-
-    streams.output.emit('data', readyFrame());
-    streams.output.emit('data', succeededOutcome(outbound.id, { capability: { id: 'scheduler.cron' } }));
-    await expect(command).resolves.toEqual({
-      kind: 'succeeded',
-      result: { capability: { id: 'scheduler.cron' } },
-    });
-  });
-
-  it('rejects capability describe schema drift, invalid ids, and non-JSON scopes before writing', async () => {
-    const { client, streams } = createClient();
-    const validScope = { kind: 'app' };
-    const invalidCommands = [
+    for (const command of [
+      { name: 'host.capabilities.list' },
+      { name: 'host.capabilities.describe', input: { id: 'scheduler.cron', scope: { kind: 'app' } } },
       {
-        name: 'host.capabilities.describe',
-        input: { id: 'scheduler.cron', scope: validScope },
-        extra: true,
-      },
-      {
-        name: 'host.capabilities.describe',
-        input: { id: 'scheduler.cron', scope: validScope, extra: true },
-      },
-      { name: 'host.capabilities.describe', input: { id: '', scope: validScope } },
-      { name: 'host.capabilities.describe', input: { id: '   ', scope: validScope } },
-      { name: 'host.capabilities.describe', input: { id: 'scheduler\ncron', scope: validScope } },
-      { name: 'host.capabilities.describe', input: { id: 'scheduler\u0000cron', scope: validScope } },
-      { name: 'host.capabilities.describe', input: { id: 'scheduler.cron', scope: null } },
-      { name: 'host.capabilities.describe', input: { id: 'scheduler.cron', scope: [] } },
-      { name: 'host.capabilities.describe', input: { id: 'scheduler.cron', scope: 'app' } },
-      { name: 'host.capabilities.describe', input: { id: 'scheduler.cron', scope: { kind: 'app', value: BigInt(1) } } },
-    ];
-
-    for (const invalidCommand of invalidCommands) {
-      await expect(client.command(invalidCommand as never)).rejects.toMatchObject({
-        kind: 'command-invalid',
-        delivery: 'not-delivered',
-      } satisfies Partial<RuntimeHostControlError>);
-    }
-    expect(streams.writes).toHaveLength(0);
-  });
-
-  it('writes the exact team runtime execute command and preserves the old envelope', async () => {
-    const { client, streams } = createClient();
-    const command = client.command({
-      name: 'team.runtime.execute',
-      input: {
-        id: 'team.runtime',
-        operationId: 'teams.list',
-        scope: { kind: 'team', teamId: 'team-1' },
-        target: { kind: 'team', id: 'team-1' },
-        input: { includeArchived: false },
-      },
-    });
-    const outbound = outboundCommand(streams.writes[0]);
-
-    expect(outbound).toMatchObject({
-      version: 1,
-      type: 'command',
-      command: {
         name: 'team.runtime.execute',
         input: {
           id: 'team.runtime',
@@ -569,128 +463,30 @@ describe('runtime-host framed control client', () => {
           input: { includeArchived: false },
         },
       },
-    });
-    expect(Object.keys(outbound.command as Record<string, unknown>).sort()).toEqual(['input', 'name']);
-    expect(Object.keys((outbound.command as Record<string, unknown>).input as Record<string, unknown>).sort()).toEqual([
-      'id',
-      'input',
-      'operationId',
-      'scope',
-      'target',
-    ]);
-    expect(JSON.stringify(outbound)).not.toMatch(/method|route|payload/);
-
-    streams.output.emit('data', readyFrame());
-    streams.output.emit('data', succeededOutcome(outbound.id, { accepted: true }));
-    await expect(command).resolves.toEqual({ kind: 'succeeded', result: { accepted: true } });
-  });
-
-  it('accepts team runtime trace id as private control metadata', async () => {
-    const { client, streams } = createClient();
-    const traceId = 'session-trace:team-runtime:team.runList:trace-1';
-    const command = client.command({
-      name: 'team.runtime.execute',
-      input: {
-        id: 'team.runtime',
-        operationId: 'teams.list',
-        scope: { kind: 'team' },
-        target: null,
-        input: {},
-        traceId,
-      },
-    });
-    const outbound = outboundCommand(streams.writes[0]);
-
-    expect((outbound.command as Record<string, unknown>).input).toMatchObject({ traceId });
-    streams.output.emit('data', readyFrame());
-    streams.output.emit('data', succeededOutcome(outbound.id, { accepted: true }));
-    await expect(command).resolves.toEqual({ kind: 'succeeded', result: { accepted: true } });
-  });
-
-  it('rejects team runtime execute schema drift and non-JSON fields before writing', async () => {
-    const { client, streams } = createClient();
-    const validInput = {
-      id: 'team.runtime',
-      operationId: 'teams.list',
-      scope: { kind: 'team' },
-      target: null,
-      input: {},
-    };
-    const cyclic: Record<string, unknown> = {};
-    cyclic.self = cyclic;
-    const invalidCommands = [
-      { name: 'team.runtime.execute', input: validInput, extra: true },
-      { name: 'team.runtime.execute', input: { ...validInput, extra: true } },
-      { name: 'team.runtime.execute', input: { ...validInput, id: 'team.other' } },
-      { name: 'team.runtime.execute', input: { ...validInput, id: '' } },
-      { name: 'team.runtime.execute', input: { ...validInput, operationId: '' } },
-      { name: 'team.runtime.execute', input: { ...validInput, operationId: BigInt(1) } },
-      { name: 'team.runtime.execute', input: { ...validInput, scope: null } },
-      { name: 'team.runtime.execute', input: { ...validInput, scope: { value: BigInt(1) } } },
-      { name: 'team.runtime.execute', input: { ...validInput, target: BigInt(1) } },
-      { name: 'team.runtime.execute', input: { ...validInput, target: cyclic } },
-      { name: 'team.runtime.execute', input: { ...validInput, input: [] } },
-      { name: 'team.runtime.execute', input: { ...validInput, input: { value: BigInt(1) } } },
-      { name: 'team.runtime.execute', input: { ...validInput, traceId: '' } },
-      { name: 'team.runtime.execute', input: { ...validInput, traceId: 'bad\ntrace' } },
-      { name: 'team.runtime.execute', input: { ...validInput, traceId: 'x'.repeat(257) } },
-    ];
-
-    for (const invalidCommand of invalidCommands) {
-      await expect(client.command(invalidCommand as never)).rejects.toMatchObject({
+      { name: 'openclaw.skills.execute', input: { id: 'skill.management' } },
+      { name: 'openclaw.plugins.execute', input: { id: 'plugin.runtime' } },
+      { name: 'openclaw.sessions.patch-model', input: { sessionKey: 'session-1', model: null } },
+      { name: 'matcha.lifecycle.status' },
+      { name: 'matcha.lifecycle.start' },
+      { name: 'matcha.lifecycle.stop' },
+      { name: 'matcha.lifecycle.restart' },
+      { name: 'openclaw.lifecycle.status' },
+      { name: 'openclaw.lifecycle.start' },
+      { name: 'openclaw.lifecycle.stop' },
+      { name: 'openclaw.lifecycle.restart' },
+      { name: 'openclaw.logs', input: {} },
+      { name: 'openclaw.logs', input: { cursor: 1 } },
+      { name: 'openclaw.control.ready' },
+      { name: 'openclaw.gateway.health' },
+      { name: 'openclaw.gateway.status' },
+      { name: 'openclaw.control-ui.url' },
+    ]) {
+      await expect(client.command(command as never)).rejects.toMatchObject({
         kind: 'command-invalid',
         delivery: 'not-delivered',
       } satisfies Partial<RuntimeHostControlError>);
     }
     expect(streams.writes).toHaveLength(0);
-  });
-
-  it('classifies capability describe write failure, timeout, and disconnect as not delivered', async () => {
-    const failedWrite = new ControlStreams();
-    failedWrite.input.write = (chunk, callback) => {
-      failedWrite.writes.push(Buffer.from(chunk));
-      callback(new Error('simulated write failure'));
-      return false;
-    };
-    const failedWriteClient = new RuntimeHostControlClient({
-      stdin: failedWrite.input,
-      stdout: failedWrite.output,
-    });
-    await expect(failedWriteClient.command({
-      name: 'host.capabilities.describe',
-      input: { id: 'scheduler.cron', scope: { kind: 'app' } },
-    })).rejects.toMatchObject({
-      kind: 'write-failed',
-      delivery: 'not-delivered',
-    } satisfies Partial<RuntimeHostControlError>);
-
-    vi.useFakeTimers();
-    try {
-      const timedOut = createClient({ defaultTimeoutMs: 10 });
-      const timeoutCommand = timedOut.client.command({
-        name: 'host.capabilities.describe',
-        input: { id: 'scheduler.cron', scope: { kind: 'app' } },
-      });
-      const timeoutAssertion = expect(timeoutCommand).rejects.toMatchObject({
-        kind: 'timeout-exceeded',
-        delivery: 'not-delivered',
-      } satisfies Partial<RuntimeHostControlError>);
-      await vi.advanceTimersByTimeAsync(10);
-      await timeoutAssertion;
-    } finally {
-      vi.useRealTimers();
-    }
-
-    const disconnected = createClient();
-    const disconnectCommand = disconnected.client.command({
-      name: 'host.capabilities.describe',
-      input: { id: 'scheduler.cron', scope: { kind: 'app' } },
-    });
-    disconnected.streams.output.emit('close');
-    await expect(disconnectCommand).rejects.toMatchObject({
-      kind: 'disconnected',
-      delivery: 'not-delivered',
-    } satisfies Partial<RuntimeHostControlError>);
   });
 
   it('rejects removed private approval commands before writing a control frame', async () => {
@@ -713,136 +509,24 @@ describe('runtime-host framed control client', () => {
     expect(streams.writes).toEqual([]);
   });
 
-  it('encodes Matcha lifecycle commands as exact name-only commands', async () => {
+  it('rejects removed OpenClaw platform commands before writing a control frame', async () => {
     const { client, streams } = createClient();
-    const status = client.command({ name: 'matcha.lifecycle.status' });
-    const start = client.command({ name: 'matcha.lifecycle.start' });
-    const stop = client.command({ name: 'matcha.lifecycle.stop' });
-    const restart = client.command({ name: 'matcha.lifecycle.restart' });
-    const commands = streams.writes.map(outboundCommand);
 
-    expect(commands.map(({ command }) => command)).toEqual([
-      { name: 'matcha.lifecycle.status' },
-      { name: 'matcha.lifecycle.start' },
-      { name: 'matcha.lifecycle.stop' },
-      { name: 'matcha.lifecycle.restart' },
-    ]);
-    for (const outbound of commands) {
-      expect(Object.keys(outbound.command as Record<string, unknown>)).toEqual(['name']);
-      expect(JSON.stringify(outbound.command)).not.toMatch(/input|method|route|pid|port|endpoint|token/);
-    }
-
-    streams.output.emit('data', readyFrame());
-    for (const outbound of commands) {
-      streams.output.emit('data', succeededOutcome(outbound.id, {}));
-    }
-    await expect(Promise.all([status, start, stop, restart])).resolves.toEqual([
-      { kind: 'succeeded', result: {} },
-      { kind: 'succeeded', result: {} },
-      { kind: 'succeeded', result: {} },
-      { kind: 'succeeded', result: {} },
-    ]);
-  });
-
-  it('encodes OpenClaw environment status as an exact name-only command', async () => {
-    const { client, streams } = createClient();
-    const command = client.command({ name: 'openclaw.environment.status' });
-    const outbound = outboundCommand(streams.writes[0]);
-
-    expect(outbound.command).toEqual({ name: 'openclaw.environment.status' });
-    expect(JSON.stringify(outbound.command)).not.toMatch(/input|method|route|path|port|endpoint|token/);
-
-    streams.output.emit('data', readyFrame());
-    streams.output.emit('data', succeededOutcome(outbound.id, {}));
-    await expect(command).resolves.toEqual({ kind: 'succeeded', result: {} });
-  });
-
-  it('encodes the direct toolchain prepare command without rebuilding job state', async () => {
-    const { client, streams } = createClient();
-    const prepare = client.command({ name: 'host.toolchain.prepare' });
-    const [outbound] = streams.writes.map(outboundCommand);
-
-    expect(outbound.command).toEqual({ name: 'host.toolchain.prepare' });
-    expect(Object.keys(outbound.command as Record<string, unknown>)).toEqual(['name']);
-    expect(JSON.stringify(outbound)).not.toMatch(/method|route|payload|native/);
-
-    streams.output.emit('data', readyFrame());
-    streams.output.emit('data', succeededOutcome(outbound.id, { result: { outcome: 'installed' } }));
-
-    await expect(prepare).resolves.toEqual({
-      kind: 'succeeded',
-      result: { result: { outcome: 'installed' } },
-    });
-  });
-
-  it('rejects toolchain prepare input and extra fields before writing', async () => {
-    const { client, streams } = createClient();
-    const invalidCommands = [
-      { name: 'host.toolchain.prepare', input: {} },
-      { name: 'host.toolchain.prepare', extra: true },
-    ];
-
-    for (const command of invalidCommands) {
+    for (const command of [
+      { name: 'openclaw.environment.status' },
+      { name: 'openclaw.runtime.paths' },
+      { name: 'openclaw.cli.command' },
+      { name: 'openclaw.tool-permission.get' },
+      { name: 'openclaw.tool-permission.set', input: { mode: 'default' } },
+      { name: 'openclaw.subagent-templates.list' },
+      { name: 'openclaw.subagent-templates.get', input: { id: 'brand-guardian' } },
+    ]) {
       await expect(client.command(command as never)).rejects.toMatchObject({
         kind: 'command-invalid',
         delivery: 'not-delivered',
       } satisfies Partial<RuntimeHostControlError>);
     }
-    expect(streams.writes).toHaveLength(0);
-  });
-
-  it('classifies toolchain prepare write failure, timeout, and disconnect as unknown delivery', async () => {
-    const failedWrite = new ControlStreams();
-    failedWrite.input.write = (chunk, callback) => {
-      failedWrite.writes.push(Buffer.from(chunk));
-      callback(new Error('simulated write failure'));
-      return false;
-    };
-    const failedWriteClient = new RuntimeHostControlClient({
-      stdin: failedWrite.input,
-      stdout: failedWrite.output,
-    });
-
-    await expect(failedWriteClient.command({ name: 'host.toolchain.prepare' })).rejects.toMatchObject({
-      kind: 'write-failed',
-      delivery: 'unknown-delivery',
-      retryable: false,
-    } satisfies Partial<RuntimeHostControlError>);
-
-    vi.useFakeTimers();
-    try {
-      const timedOut = createClient({ defaultTimeoutMs: 10 });
-      const prepare = timedOut.client.command({ name: 'host.toolchain.prepare' });
-      const assertion = expect(prepare).rejects.toMatchObject({
-        kind: 'timeout-exceeded',
-        delivery: 'unknown-delivery',
-      } satisfies Partial<RuntimeHostControlError>);
-      await vi.advanceTimersByTimeAsync(10);
-      await assertion;
-    } finally {
-      vi.useRealTimers();
-    }
-
-    const disconnected = createClient();
-    const prepare = disconnected.client.command({ name: 'host.toolchain.prepare' });
-    disconnected.streams.output.emit('close');
-    await expect(prepare).rejects.toMatchObject({
-      kind: 'disconnected',
-      delivery: 'unknown-delivery',
-    } satisfies Partial<RuntimeHostControlError>);
-  });
-
-  it('encodes OpenClaw control readiness as an exact name-only command', async () => {
-    const { client, streams } = createClient();
-    const command = client.command({ name: 'openclaw.control.ready' });
-    const outbound = outboundCommand(streams.writes[0]);
-
-    expect(outbound.command).toEqual({ name: 'openclaw.control.ready' });
-    expect(Object.keys(outbound.command as Record<string, unknown>)).toEqual(['name']);
-
-    streams.output.emit('data', readyFrame());
-    streams.output.emit('data', succeededOutcome(outbound.id, {}));
-    await expect(command).resolves.toEqual({ kind: 'succeeded', result: {} });
+    expect(streams.writes).toEqual([]);
   });
 
   it('rejects removed public session queries before writing to private control', async () => {
@@ -855,21 +539,16 @@ describe('runtime-host framed control client', () => {
     expect(streams.writes).toEqual([]);
   });
 
-  it('preserves typed null command input fields without a generic payload channel', async () => {
+  it('rejects removed toolchain business entries before writing to private control', async () => {
     const { client, streams } = createClient();
-    const command = client.command({
-      name: 'openclaw.sessions.patch-model',
-      input: { sessionKey: 'session-1', model: null },
-    });
-    const outbound = outboundCommand(streams.writes[0]);
-    expect(outbound.command).toEqual({
-      name: 'openclaw.sessions.patch-model',
-      input: { sessionKey: 'session-1', model: null },
-    });
 
-    streams.output.emit('data', readyFrame());
-    streams.output.emit('data', succeededOutcome(outbound.id, {}));
-    await expect(command).resolves.toEqual({ kind: 'succeeded', result: {} });
+    for (const command of [{ name: 'host.toolchain.status' }, { name: 'host.toolchain.prepare' }]) {
+      await expect(client.command(command as never)).rejects.toMatchObject({
+        kind: 'command-invalid',
+        delivery: 'not-delivered',
+      } satisfies Partial<RuntimeHostControlError>);
+    }
+    expect(streams.writes).toEqual([]);
   });
 
   it('correlates concurrent command outcomes by id even when stdout reorders them', async () => {
@@ -1027,7 +706,7 @@ describe('runtime-host framed control client', () => {
 
   it('returns distinguishable remote outcomes instead of HTTP status envelopes', async () => {
     const { client, streams } = createClient();
-    const rejected = client.command({ name: 'openclaw.lifecycle.start' });
+    const rejected = client.command({ name: 'host.runtime.snapshot' });
     const timedOut = client.command({ name: 'host.health' });
     const rejectedId = outboundCommand(streams.writes[0]).id;
     const timedOutId = outboundCommand(streams.writes[1]).id;
@@ -1073,173 +752,6 @@ describe('runtime-host framed control client', () => {
     await expect(first).resolves.toEqual({ kind: 'succeeded', result: {} });
   });
 
-  it('rejects schema drift on exact Matcha lifecycle commands before writing', async () => {
-    const { client, streams } = createClient();
-    const schemaDrift = [
-      { input: {} },
-      { request: {} },
-      { method: 'POST' },
-      { route: '/matcha/lifecycle' },
-      { pid: 1 },
-      { port: 1 },
-      { endpoint: 'http://127.0.0.1' },
-      { token: 'must-not-frame' },
-    ];
-
-    for (const name of [
-      'matcha.lifecycle.status',
-      'matcha.lifecycle.start',
-      'matcha.lifecycle.stop',
-      'matcha.lifecycle.restart',
-    ] as const) {
-      for (const extraFields of schemaDrift) {
-        await expect(client.command({ name, ...extraFields } as never)).rejects.toMatchObject({
-          kind: 'command-invalid',
-          delivery: 'not-delivered',
-        } satisfies Partial<RuntimeHostControlError>);
-      }
-    }
-    expect(streams.writes).toHaveLength(0);
-  });
-
-  it('rejects schema drift on exact OpenClaw control readiness before writing', async () => {
-    const { client, streams } = createClient();
-    const schemaDrift = [
-      { input: {} },
-      { request: {} },
-      { method: 'POST' },
-      { route: '/openclaw/control/ready' },
-      { payload: {} },
-      { endpoint: 'http://127.0.0.1' },
-      { port: 1 },
-      { token: 'must-not-frame' },
-    ];
-
-    for (const extraFields of schemaDrift) {
-      await expect(client.command({ name: 'openclaw.control.ready', ...extraFields } as never)).rejects.toMatchObject({
-        kind: 'command-invalid',
-        delivery: 'not-delivered',
-      } satisfies Partial<RuntimeHostControlError>);
-    }
-    expect(streams.writes).toHaveLength(0);
-  });
-
-  it('classifies OpenClaw control readiness write failure, timeout, and disconnect as not delivered', async () => {
-    const failedWrite = new ControlStreams();
-    failedWrite.input.write = (chunk, callback) => {
-      failedWrite.writes.push(Buffer.from(chunk));
-      callback(new Error('simulated write failure'));
-      return false;
-    };
-    const failedWriteClient = new RuntimeHostControlClient({
-      stdin: failedWrite.input,
-      stdout: failedWrite.output,
-    });
-    await expect(failedWriteClient.command({ name: 'openclaw.control.ready' })).rejects.toMatchObject({
-      kind: 'write-failed',
-      delivery: 'not-delivered',
-    } satisfies Partial<RuntimeHostControlError>);
-    expect(failedWrite.writes).toHaveLength(1);
-
-    vi.useFakeTimers();
-    try {
-      const timedOut = createClient({ defaultTimeoutMs: 10 });
-      const timeoutCommand = timedOut.client.command({ name: 'openclaw.control.ready' });
-      const timeoutAssertion = expect(timeoutCommand).rejects.toMatchObject({
-        kind: 'timeout-exceeded',
-        delivery: 'not-delivered',
-      } satisfies Partial<RuntimeHostControlError>);
-      await vi.advanceTimersByTimeAsync(10);
-      await timeoutAssertion;
-      expect(timedOut.streams.writes).toHaveLength(1);
-    } finally {
-      vi.useRealTimers();
-    }
-
-    const disconnected = createClient();
-    const disconnectCommand = disconnected.client.command({ name: 'openclaw.control.ready' });
-    disconnected.streams.output.emit('close');
-    await expect(disconnectCommand).rejects.toMatchObject({
-      kind: 'disconnected',
-      delivery: 'not-delivered',
-    } satisfies Partial<RuntimeHostControlError>);
-    expect(disconnected.streams.writes).toHaveLength(1);
-  });
-
-  it('classifies attempted lifecycle mutation write failures and timeouts as unknown delivery', async () => {
-    for (const name of [
-      'matcha.lifecycle.start',
-      'matcha.lifecycle.stop',
-      'matcha.lifecycle.restart',
-      'openclaw.lifecycle.start',
-      'openclaw.lifecycle.stop',
-      'openclaw.lifecycle.restart',
-    ] as const) {
-      const streams = new ControlStreams();
-      streams.input.write = (chunk, callback) => {
-        streams.writes.push(Buffer.from(chunk));
-        callback(new Error('simulated write failure'));
-        return false;
-      };
-      const client = new RuntimeHostControlClient({ stdin: streams.input, stdout: streams.output });
-
-      await expect(client.command({ name })).rejects.toMatchObject({
-        kind: 'write-failed',
-        delivery: 'unknown-delivery',
-        retryable: false,
-      } satisfies Partial<RuntimeHostControlError>);
-      expect(streams.writes).toHaveLength(1);
-    }
-
-    vi.useFakeTimers();
-    try {
-      for (const name of [
-        'matcha.lifecycle.start',
-        'matcha.lifecycle.stop',
-        'matcha.lifecycle.restart',
-        'openclaw.lifecycle.start',
-        'openclaw.lifecycle.stop',
-        'openclaw.lifecycle.restart',
-      ] as const) {
-        const { client, streams } = createClient({ defaultTimeoutMs: 10 });
-        const command = client.command({ name });
-        const assertion = expect(command).rejects.toMatchObject({
-          kind: 'timeout-exceeded',
-          delivery: 'unknown-delivery',
-          retryable: false,
-        } satisfies Partial<RuntimeHostControlError>);
-
-        await vi.advanceTimersByTimeAsync(10);
-        await assertion;
-        expect(streams.writes).toHaveLength(1);
-      }
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('classifies lifecycle mutation disconnect as unknown delivery', async () => {
-    for (const name of [
-      'matcha.lifecycle.start',
-      'matcha.lifecycle.stop',
-      'matcha.lifecycle.restart',
-      'openclaw.lifecycle.start',
-      'openclaw.lifecycle.stop',
-      'openclaw.lifecycle.restart',
-    ] as const) {
-      const { client, streams } = createClient();
-      const command = client.command({ name });
-      streams.output.emit('close');
-
-      await expect(command).rejects.toMatchObject({
-        kind: 'disconnected',
-        delivery: 'unknown-delivery',
-        retryable: false,
-      } satisfies Partial<RuntimeHostControlError>);
-      expect(streams.writes).toHaveLength(1);
-    }
-  });
-
   it('classifies non-mutating disconnect as not delivered and never forwards secret event fields', async () => {
     const { client, streams } = createClient();
     const command = client.command({ name: 'host.health' });
@@ -1272,15 +784,15 @@ describe('runtime-host framed control client', () => {
     for (const sentinel of sentinels) expect(JSON.stringify(event.mock.calls)).not.toContain(sentinel);
   });
 
-  it('enforces the one MiB outbound frame limit before writing', async () => {
+  it('rejects OpenClaw gateway capability commands before writing a control frame', async () => {
     const { client, streams } = createClient();
     const command = client.command({
-      name: 'openclaw.skills.execute',
-      input: { payload: 'a'.repeat(MAX_RUNTIME_HOST_CONTROL_FRAME_BYTES) },
-    });
+      name: 'openclaw.browser.request',
+      input: { method: 'POST', path: '/browser/request' },
+    } as never);
 
     await expect(command).rejects.toMatchObject({
-      kind: 'frame-too-large',
+      kind: 'command-invalid',
       delivery: 'not-delivered',
     } satisfies Partial<RuntimeHostControlError>);
     expect(streams.writes).toHaveLength(0);

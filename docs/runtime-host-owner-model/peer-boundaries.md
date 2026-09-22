@@ -83,7 +83,7 @@ Rust:
 
 - `/api/capabilities/list|describe|execute` 是否由 Rust 完整兼容；
 - `policyScope`、`ownerModuleId`、`routeOwnerId` 与 signed decision scope 是否有正式映射；
-- full descriptor、endpoint capability summary、Rust peer directory 的 authority 顺序；
+- full descriptor、endpoint capability summary、Runtime Endpoint Directory 的 authority 顺序；`runtime-host/modules/runtime-directory` 负责 public endpoint projection，`PeerHandle` / `PeerOwner` 只提供 OpenClaw/Matcha lifecycle source；
 - `bootstrap` scope 等当前 TS scope 是否需要保留。
 
 ## 5. Host 与 peer state 分层

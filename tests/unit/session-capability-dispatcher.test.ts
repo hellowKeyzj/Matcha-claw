@@ -247,7 +247,7 @@ describe('session capability dispatcher', () => {
       runtimeHostTransports: {
         sessionContentTransport: { load },
         sessionTimelineTransport: { load: timelineLoad, window },
-        matchaSessionListTransport: { list },
+        sessionListTransport: { list },
       },
     } as never);
 
@@ -285,7 +285,7 @@ describe('session capability dispatcher', () => {
       }, {
         runtimeHostTransports: {
           sessionTimelineTransport: { load, window },
-          matchaSessionListTransport: { list },
+          sessionListTransport: { list },
         },
       } as never);
 

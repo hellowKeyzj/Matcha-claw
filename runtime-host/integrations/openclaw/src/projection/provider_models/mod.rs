@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use environment::{
+use ::provider::{
     ProviderAccount, ProviderAccountAuthMode, ProviderAccountKind, ProviderMediaApiProtocol,
     ProviderModel, ProviderModelCapability, ProviderModelCatalog,
 };
@@ -86,12 +86,18 @@ impl ProviderModelRuntimeIdentity {
     }
 
     pub fn runtime_model_ref(&self, kind: ProviderAccountKind, model_id: &str) -> String {
-        match kind {
-            ProviderAccountKind::Chat => format!("{}/{}", self.provider_key, model_id),
-            ProviderAccountKind::Media => {
-                format!("{MEDIA_PLUGIN_ID}/{}/{}", self.provider_key, model_id)
-            }
-        }
+        public_provider_model_ref(&self.provider_key, kind, model_id)
+    }
+}
+
+pub fn public_provider_model_ref(
+    provider_key: &str,
+    kind: ProviderAccountKind,
+    model_id: &str,
+) -> String {
+    match kind {
+        ProviderAccountKind::Chat => format!("{provider_key}/{model_id}"),
+        ProviderAccountKind::Media => format!("{MEDIA_PLUGIN_ID}/{provider_key}/{model_id}"),
     }
 }
 
@@ -150,7 +156,7 @@ impl ProviderModelProjection {
         accounts: &[ProviderAccount],
         catalog: &ProviderModelCatalog,
         retired: &[ProviderAccount],
-        required_auth_accounts: &BTreeSet<environment::ProviderAccountId>,
+        required_auth_accounts: &BTreeSet<::provider::ProviderAccountId>,
         now_millis: u64,
     ) -> Result<ProviderModelProjectionEffect, ProviderModelProjectionError> {
         let plan = Self::build_plan(
@@ -183,7 +189,7 @@ impl ProviderModelProjection {
         accounts: &[ProviderAccount],
         catalog: &ProviderModelCatalog,
         retired: &[ProviderAccount],
-        required_auth_accounts: &BTreeSet<environment::ProviderAccountId>,
+        required_auth_accounts: &BTreeSet<::provider::ProviderAccountId>,
         now_millis: u64,
     ) -> Result<bool, ProviderModelProjectionError> {
         let plan = Self::build_plan(
@@ -202,7 +208,7 @@ impl ProviderModelProjection {
         accounts: &'a [ProviderAccount],
         catalog: &'a ProviderModelCatalog,
         retired: &'a [ProviderAccount],
-        required_auth_accounts: &BTreeSet<environment::ProviderAccountId>,
+        required_auth_accounts: &BTreeSet<::provider::ProviderAccountId>,
         now_millis: u64,
     ) -> Result<ProjectionPlan<'a>, ProviderModelProjectionError> {
         let plan = ProjectionPlan::build(accounts, catalog, retired)?;
@@ -692,29 +698,27 @@ fn provider_protocol(account: &ProviderAccount) -> Option<ProviderProtocol> {
         .protocol()
         .or_else(|| default_provider_protocol(account.provider().as_str()))?
     {
-        environment::ProviderApiProtocol::AnthropicMessages => {
+        ::provider::ProviderApiProtocol::AnthropicMessages => {
             Some(ProviderProtocol::AnthropicMessages)
         }
-        environment::ProviderApiProtocol::GoogleGenerativeAi => {
+        ::provider::ProviderApiProtocol::GoogleGenerativeAi => {
             Some(ProviderProtocol::GoogleGenerativeAi)
         }
-        environment::ProviderApiProtocol::OpenAiCompletions => {
+        ::provider::ProviderApiProtocol::OpenAiCompletions => {
             Some(ProviderProtocol::OpenAiCompletions)
         }
-        environment::ProviderApiProtocol::OpenAiResponses => {
-            Some(ProviderProtocol::OpenAiResponses)
-        }
+        ::provider::ProviderApiProtocol::OpenAiResponses => Some(ProviderProtocol::OpenAiResponses),
     }
 }
 
-pub fn default_provider_protocol(provider: &str) -> Option<environment::ProviderApiProtocol> {
+pub fn default_provider_protocol(provider: &str) -> Option<::provider::ProviderApiProtocol> {
     match provider {
         "provider:anthropic" | "provider:kimi" => {
-            Some(environment::ProviderApiProtocol::AnthropicMessages)
+            Some(::provider::ProviderApiProtocol::AnthropicMessages)
         }
-        "provider:google" => Some(environment::ProviderApiProtocol::GoogleGenerativeAi),
+        "provider:google" => Some(::provider::ProviderApiProtocol::GoogleGenerativeAi),
         "provider:openai" | "provider:github-copilot" => {
-            Some(environment::ProviderApiProtocol::OpenAiResponses)
+            Some(::provider::ProviderApiProtocol::OpenAiResponses)
         }
         "provider:qianfan"
         | "provider:stepfun"
@@ -735,7 +739,7 @@ pub fn default_provider_protocol(provider: &str) -> Option<environment::Provider
         | "provider:siliconflow"
         | "provider:deepseek"
         | "provider:openrouter"
-        | "provider:ollama" => Some(environment::ProviderApiProtocol::OpenAiCompletions),
+        | "provider:ollama" => Some(::provider::ProviderApiProtocol::OpenAiCompletions),
         _ => None,
     }
 }
@@ -1230,7 +1234,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use environment::{
+    use ::provider::{
         CredentialReference, ProviderAccountConfiguration, ProviderAccountConfigurationInput,
         ProviderAccountId, ProviderAccountRevision, ProviderApiProtocol, ProviderEndpoint,
         ProviderModelCapability, ProviderReference,

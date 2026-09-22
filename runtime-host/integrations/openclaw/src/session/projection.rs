@@ -317,6 +317,9 @@ impl fmt::Debug for AssistantTurnSnapshot {
 /// newly observed text; full snapshots keep ordered non-text segments intact.
 #[derive(Clone, Eq, PartialEq)]
 pub enum CanonicalSessionChange {
+    RunStarted {
+        run_id: RunId,
+    },
     AssistantTurnChunk {
         run_id: RunId,
         message_id: Option<MessageId>,
@@ -405,6 +408,7 @@ pub enum CanonicalRunProgress {
 impl fmt::Debug for CanonicalSessionChange {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RunStarted { .. } => formatter.debug_struct("RunStarted").finish(),
             Self::AssistantTurnChunk {
                 kind,
                 text,

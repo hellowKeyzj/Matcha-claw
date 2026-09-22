@@ -9,7 +9,7 @@ const arm64Pe = Buffer.alloc(0x100);
 arm64Pe.writeUInt32LE(0x80, 0x3c);
 arm64Pe.writeUInt16LE(0xaa64, 0x84);
 
-function dependencies({ stdout = '1.3.5\n', status = 0, binary = x64Pe } = {}) {
+function dependencies({ stdout = '1.4.2\n', status = 0, binary = x64Pe } = {}) {
   return {
     existsSync: () => true,
     spawnSync: () => ({ status, stdout }),
@@ -23,7 +23,7 @@ describe('bundled Bun cache', () => {
     expect(localFunctionalBunCacheEvidence({ executablePath: 'C:/cache/bun.exe', targetId: 'win32-x64' }, dependencies())).toEqual({
       source: 'local-cache',
       target: 'win32-x64',
-      functionalMatch: 'exact-bun-1.3.5-win32-x64-pe',
+      functionalMatch: 'exact-bun-1.4.2-win32-x64-pe',
       independentProvenance: 'unverified',
       supplyChainAttestation: 'not-present',
     });
@@ -35,7 +35,7 @@ describe('bundled Bun cache', () => {
     expect(canReuseCachedBun({ executablePath: 'C:/cache/bun.exe', targetId: 'win32-x64' }, dependencies({ binary: arm64Pe }))).toBe(false);
     expect(canReuseCachedBun({ executablePath: 'C:/cache/bun.exe', targetId: 'win32-x64' }, {
       existsSync: () => true,
-      spawnSync: () => ({ status: 0, stdout: '1.3.5\n' }),
+      spawnSync: () => ({ status: 0, stdout: '1.4.2\n' }),
       readFileSync: () => { throw new Error('unreadable'); },
     })).toBe(false);
   });

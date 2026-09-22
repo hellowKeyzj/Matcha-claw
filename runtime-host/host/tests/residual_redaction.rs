@@ -1,10 +1,6 @@
 use std::{fs, path::Path};
 
-const SOURCE_ROOTS: &[&str] = &[
-    "src",
-    "../domains/environment/src",
-    "../integrations/openclaw/src",
-];
+const SOURCE_ROOTS: &[&str] = &["src", "../integrations/openclaw/src"];
 
 #[test]
 fn removed_runtime_job_surface_stays_out_of_production_sources() {

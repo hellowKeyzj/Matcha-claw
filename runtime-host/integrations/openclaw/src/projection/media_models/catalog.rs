@@ -1,6 +1,6 @@
 use std::fmt;
 
-use environment::ProviderModelCapability;
+use ::provider::ProviderModelCapability;
 
 const MAX_MODEL_ID_BYTES: usize = 512;
 const MAX_PROVIDER_KEY_BYTES: usize = 256;

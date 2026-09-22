@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt};
 
-use environment::{
+use ::provider::{
     ProviderAccount, ProviderAccountKind, ProviderModelCatalog,
     ProviderRouting as DesiredProviderRouting, ProviderRoutingCapability,
 };
@@ -358,7 +358,7 @@ fn route_for(
     keys: &BTreeMap<String, String>,
     models: &ProviderModelCatalog,
     capability: ProviderRoutingCapability,
-    route: &environment::ProviderRoute,
+    route: &::provider::ProviderRoute,
     now_millis: u64,
 ) -> Result<ModelRoute, ProviderRoutingProjectionError> {
     let primary = reference_for(
@@ -399,7 +399,7 @@ fn reference_for(
     keys: &BTreeMap<String, String>,
     models: &ProviderModelCatalog,
     capability: ProviderRoutingCapability,
-    reference: &environment::ProviderModelReference,
+    reference: &::provider::ProviderModelReference,
     now_millis: u64,
 ) -> Result<ModelReference, ProviderRoutingProjectionError> {
     let account = accounts
@@ -489,22 +489,22 @@ fn projection_keys(
 
 const fn model_capability(
     capability: ProviderRoutingCapability,
-) -> environment::ProviderModelCapability {
+) -> ::provider::ProviderModelCapability {
     match capability {
-        ProviderRoutingCapability::Chat => environment::ProviderModelCapability::Chat,
+        ProviderRoutingCapability::Chat => ::provider::ProviderModelCapability::Chat,
         ProviderRoutingCapability::ImageUnderstand => {
-            environment::ProviderModelCapability::ImageUnderstand
+            ::provider::ProviderModelCapability::ImageUnderstand
         }
         ProviderRoutingCapability::ImageGenerate => {
-            environment::ProviderModelCapability::ImageGenerate
+            ::provider::ProviderModelCapability::ImageGenerate
         }
         ProviderRoutingCapability::VideoGenerate => {
-            environment::ProviderModelCapability::VideoGenerate
+            ::provider::ProviderModelCapability::VideoGenerate
         }
         ProviderRoutingCapability::MusicGenerate => {
-            environment::ProviderModelCapability::MusicGenerate
+            ::provider::ProviderModelCapability::MusicGenerate
         }
-        ProviderRoutingCapability::Tts => environment::ProviderModelCapability::TextToSpeech,
+        ProviderRoutingCapability::Tts => ::provider::ProviderModelCapability::TextToSpeech,
     }
 }
 

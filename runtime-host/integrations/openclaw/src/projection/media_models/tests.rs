@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use environment::ProviderModelCapability;
+use ::provider::ProviderModelCapability;
 use serde_json::json;
 
 use crate::{

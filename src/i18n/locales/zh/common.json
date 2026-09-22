@@ -2,6 +2,74 @@
     "auth": {
         "boot": {
             "title": "正在检查登录状态"
+        },
+        "title": {
+            "login": "登录 Matcha",
+            "register": "创建账号",
+            "twoFactor": "双重验证"
+        },
+        "description": {
+            "login": "登录账号，继续使用 MatchaClaw。",
+            "register": "创建账号，开始使用 MatchaClaw。",
+            "twoFactor": "请输入身份验证器中的验证码以完成登录。"
+        },
+        "submit": {
+            "login": "登录",
+            "register": "注册",
+            "twoFactor": "验证并登录"
+        },
+        "offline": {
+            "title": "暂时无法登录",
+            "description": "暂时无法连接账号服务，你可以先使用本地功能，稍后再尝试登录。",
+            "hint": "账号服务恢复后，可重试连接并登录。",
+            "retry": "重试连接"
+        },
+        "localEntry": {
+            "offline": "离线进入",
+            "guest": "游客进入",
+            "guestDescription": "先使用本地功能，稍后可随时登录。"
+        },
+        "fields": {
+            "email": "邮箱",
+            "password": "密码",
+            "code": "验证码",
+            "emailCode": "邮箱验证码"
+        },
+        "placeholders": {
+            "password": "请输入密码",
+            "twoFactorCode": "请输入身份验证器中的验证码",
+            "emailCode": "请输入邮箱收到的验证码"
+        },
+        "actions": {
+            "sendVerifyCode": "发送验证码"
+        },
+        "errors": {
+            "emailRequiredForCode": "请先输入邮箱地址。",
+            "registrationClosed": "当前暂未开放注册。"
+        },
+        "notice": {
+            "verifyCodeSent": "验证码已发送，请查收邮件。"
+        },
+        "registrationClosedHint": "当前暂未开放注册，已有账号可直接登录。",
+        "switch": {
+            "hasAccount": "已有账号？",
+            "noAccount": "还没有账号？",
+            "login": "去登录",
+            "register": "去注册",
+            "registrationClosed": "暂未开放注册"
+        },
+        "legal": {
+            "prefix": "继续即表示你同意",
+            "terms": "服务条款",
+            "and": "和",
+            "privacy": "隐私政策",
+            "suffix": "。"
+        },
+        "preview": {
+            "heading": "欢迎使用 MatchaClaw",
+            "copy": "登录账号，开启你的 AI 工作空间。",
+            "offlineHeading": "本地工作，继续进行",
+            "offlineCopy": "账号服务暂时不可用，你仍可进入应用使用本地功能。"
         }
     },
     "sidebar": {

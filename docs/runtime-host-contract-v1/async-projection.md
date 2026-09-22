@@ -31,8 +31,8 @@ Session send
 Toolchain prepare
   -> Renderer lazy hostToolchainPrepare after explicit main-entry
   -> Electron POST /api/toolchain/uv/prepare
-  -> Rust private host.toolchain.prepare
-  -> external/toolchain NativeToolchain waits for the real uv/Python result
+  -> Electron toolchainTransport.prepare()
+  -> modules/toolchain owner loopback waits for the real uv/Python result
 ```
 
 ```text

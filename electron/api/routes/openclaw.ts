@@ -1,7 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import type { RuntimeHostControlOutcome } from '../../main/runtime-host-delivery/control';
-import { RuntimeHostControlError } from '../../main/runtime-host-delivery/control';
-import type { RuntimeHostApiContext } from '../context';
+import { RuntimeHostControlError, type RuntimeHostControlOutcome } from '../../main/runtime-host-delivery/control';
+import type { RuntimeHostApiContext, RuntimeHostTransportContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 
 const ENVIRONMENT_STATUS_UNAVAILABLE = 'OpenClaw environment status is unavailable';
@@ -90,6 +89,7 @@ type TemplateDetail = Readonly<{
 
 type RuntimeStateProjection = Readonly<{
   lifecycle: RuntimeLifecycle;
+  observedAtMs?: number;
   failure?: RuntimeFailure;
   startupDiagnostic?: RuntimeStartupDiagnostic;
 }>;
@@ -144,11 +144,15 @@ type RuntimePaths = Readonly<{
   skillsDirectory: string;
 }>;
 
+type OpenClawApiContext = RuntimeHostApiContext & RuntimeHostTransportContext<
+  'runtimeControlTransport' | 'openClawPlatformTransport'
+>;
+
 export async function handleOpenClawRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: RuntimeHostApiContext,
+  ctx: OpenClawApiContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/openclaw/status' && req.method === 'GET') {
     await handleEnvironmentStatus(ctx, res);
@@ -233,7 +237,7 @@ export async function handleOpenClawRoutes(
   return false;
 }
 
-async function handleEnvironmentStatus(ctx: RuntimeHostApiContext, res: ServerResponse): Promise<void> {
+async function handleEnvironmentStatus(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
   const status = await readEnvironmentStatus(ctx);
   if (!status) {
     sendUnavailable(res, ENVIRONMENT_STATUS_UNAVAILABLE);
@@ -242,7 +246,7 @@ async function handleEnvironmentStatus(ctx: RuntimeHostApiContext, res: ServerRe
   sendJson(res, 200, status);
 }
 
-async function handleReadiness(ctx: RuntimeHostApiContext, res: ServerResponse): Promise<void> {
+async function handleReadiness(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
   const status = await readEnvironmentStatus(ctx);
   if (!status) {
     sendUnavailable(res, READINESS_UNAVAILABLE);
@@ -252,72 +256,72 @@ async function handleReadiness(ctx: RuntimeHostApiContext, res: ServerResponse):
 }
 
 async function handleRuntimePath(
-  ctx: RuntimeHostApiContext,
+  ctx: OpenClawApiContext,
   res: ServerResponse,
   key: Exclude<keyof RuntimePaths, 'taskWorkspaceDirectories'>,
   unavailable: string,
 ): Promise<void> {
   try {
-    const outcome = await ctx.runtimeHost.command({ name: 'openclaw.runtime.paths' });
-    const paths = readRuntimePaths(outcome);
+    const response = await ctx.runtimeHostTransports.openClawPlatformTransport.runtimePaths();
+    const paths = response.status === 200 ? readRuntimePaths(response.body) : null;
     if (!paths) {
-      sendCommandFailure(res, unavailable, outcome);
+      sendTransportFailure(res, unavailable, response.status);
       return;
     }
     sendJson(res, 200, paths[key]);
-  } catch (error) {
-    sendCommandException(res, unavailable, error);
+  } catch {
+    sendUnavailable(res, unavailable);
   }
 }
 
-async function handleRuntimePaths(ctx: RuntimeHostApiContext, res: ServerResponse): Promise<void> {
+async function handleRuntimePaths(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
   try {
-    const outcome = await ctx.runtimeHost.command({ name: 'openclaw.runtime.paths' });
-    const paths = readRuntimePaths(outcome);
+    const response = await ctx.runtimeHostTransports.openClawPlatformTransport.runtimePaths();
+    const paths = response.status === 200 ? readRuntimePaths(response.body) : null;
     if (!paths) {
-      sendCommandFailure(res, TASK_WORKSPACE_DIRECTORIES_UNAVAILABLE, outcome);
+      sendTransportFailure(res, TASK_WORKSPACE_DIRECTORIES_UNAVAILABLE, response.status);
       return;
     }
     sendJson(res, 200, paths.taskWorkspaceDirectories);
-  } catch (error) {
-    sendCommandException(res, TASK_WORKSPACE_DIRECTORIES_UNAVAILABLE, error);
+  } catch {
+    sendUnavailable(res, TASK_WORKSPACE_DIRECTORIES_UNAVAILABLE);
   }
 }
 
-async function handleCliCommand(ctx: RuntimeHostApiContext, res: ServerResponse): Promise<void> {
+async function handleCliCommand(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
   try {
-    const outcome = await ctx.runtimeHost.command({ name: 'openclaw.cli.command' });
-    const command = readCliCommand(outcome);
+    const response = await ctx.runtimeHostTransports.openClawPlatformTransport.cliCommand();
+    const command = response.status === 200 ? readCliCommand(response.body) : null;
     if (!command) {
-      sendCommandFailure(res, CLI_COMMAND_UNAVAILABLE, outcome);
+      sendTransportFailure(res, CLI_COMMAND_UNAVAILABLE, response.status);
       return;
     }
     sendJson(res, 200, { success: true, command });
-  } catch (error) {
-    sendCommandException(res, CLI_COMMAND_UNAVAILABLE, error);
+  } catch {
+    sendUnavailable(res, CLI_COMMAND_UNAVAILABLE);
   }
 }
 
 async function handleToolPermissionMode(
-  ctx: RuntimeHostApiContext,
+  ctx: OpenClawApiContext,
   res: ServerResponse,
 ): Promise<void> {
   try {
-    const outcome = await ctx.runtimeHost.command({ name: 'openclaw.tool-permission.get' });
-    const mode = readToolPermissionMode(outcome);
+    const response = await ctx.runtimeHostTransports.openClawPlatformTransport.toolPermissionMode();
+    const mode = response.status === 200 ? readToolPermissionMode(response.body) : null;
     if (!mode) {
-      sendCommandFailure(res, TOOL_PERMISSION_MODE_UNAVAILABLE, outcome);
+      sendTransportFailure(res, TOOL_PERMISSION_MODE_UNAVAILABLE, response.status);
       return;
     }
     sendJson(res, 200, { mode });
-  } catch (error) {
-    sendCommandException(res, TOOL_PERMISSION_MODE_UNAVAILABLE, error);
+  } catch {
+    sendUnavailable(res, TOOL_PERMISSION_MODE_UNAVAILABLE);
   }
 }
 
 async function handleToolPermissionModeUpdate(
   req: IncomingMessage,
-  ctx: RuntimeHostApiContext,
+  ctx: OpenClawApiContext,
   res: ServerResponse,
 ): Promise<void> {
   let body: unknown;
@@ -334,30 +338,26 @@ async function handleToolPermissionModeUpdate(
   }
 
   try {
-    const outcome = await ctx.runtimeHost.command({
-      name: 'openclaw.tool-permission.set',
-      input: { mode },
-    });
-    if (outcome.kind === 'rejected' && outcome.error.code === 'INVALID_INPUT') {
+    const response = await ctx.runtimeHostTransports.openClawPlatformTransport.setToolPermissionMode({ mode });
+    if (response.status === 400) {
       sendInvalidToolPermissionMode(res);
       return;
     }
-    const result = readToolPermissionModeUpdate(outcome);
+    const result = response.status === 200 ? readToolPermissionModeUpdate(response.body) : null;
     if (!result) {
-      sendCommandFailure(res, TOOL_PERMISSION_MODE_UNAVAILABLE, outcome);
+      sendTransportFailure(res, TOOL_PERMISSION_MODE_UNAVAILABLE, response.status);
       return;
     }
     sendJson(res, 200, { mode: result.mode });
-  } catch (error) {
-    sendCommandException(res, TOOL_PERMISSION_MODE_UNAVAILABLE, error);
+  } catch {
+    sendUnavailable(res, TOOL_PERMISSION_MODE_UNAVAILABLE);
   }
 }
 
-async function handleTemplateCatalog(ctx: RuntimeHostApiContext, res: ServerResponse): Promise<void> {
+async function handleTemplateCatalog(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
   try {
-    const catalog = readTemplateCatalog(
-      await ctx.runtimeHost.command({ name: 'openclaw.subagent-templates.list' }),
-    );
+    const response = await ctx.runtimeHostTransports.openClawPlatformTransport.subagentTemplateCatalog();
+    const catalog = response.status === 200 ? readTemplateCatalog(response.body) : null;
     if (!catalog) {
       sendUnavailable(res, SUBAGENT_TEMPLATES_UNAVAILABLE);
       return;
@@ -369,18 +369,13 @@ async function handleTemplateCatalog(ctx: RuntimeHostApiContext, res: ServerResp
 }
 
 async function handleTemplateDetail(
-  ctx: RuntimeHostApiContext,
+  ctx: OpenClawApiContext,
   res: ServerResponse,
   templateId: string,
 ): Promise<void> {
   try {
-    const detail = readTemplateDetail(
-      await ctx.runtimeHost.command({
-        name: 'openclaw.subagent-templates.get',
-        input: { id: templateId },
-      }),
-      templateId,
-    );
+    const response = await ctx.runtimeHostTransports.openClawPlatformTransport.subagentTemplateDetail({ id: templateId });
+    const detail = response.status === 200 ? readTemplateDetail(response.body, templateId) : null;
     if (!detail) {
       sendUnavailable(res, SUBAGENT_TEMPLATE_UNAVAILABLE);
       return;
@@ -404,9 +399,10 @@ async function handleRuntimeSnapshot(ctx: RuntimeHostApiContext, res: ServerResp
   }
 }
 
-async function handleLifecycleStatus(ctx: RuntimeHostApiContext, res: ServerResponse): Promise<void> {
+async function handleLifecycleStatus(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
   try {
-    const status = readLifecycleStatus(await ctx.runtimeHost.command({ name: 'openclaw.lifecycle.status' }));
+    const response = await ctx.runtimeHostTransports.runtimeControlTransport.lifecycleStatus();
+    const status = response.status === 200 ? readLifecycleStatus(response.body) : null;
     if (!status) {
       sendUnavailable(res, LIFECYCLE_UNAVAILABLE);
       return;
@@ -417,14 +413,14 @@ async function handleLifecycleStatus(ctx: RuntimeHostApiContext, res: ServerResp
   }
 }
 
-async function handleLifecycleRestart(ctx: RuntimeHostApiContext, res: ServerResponse): Promise<void> {
+async function handleLifecycleRestart(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
   try {
-    const outcome = await ctx.runtimeHost.command({ name: 'openclaw.lifecycle.restart' });
-    if (outcome.kind === 'timed-out') {
+    const response = await ctx.runtimeHostTransports.runtimeControlTransport.lifecycleRestart();
+    if (response.status === 503) {
       sendUnavailable(res, LIFECYCLE_RESTART_UNKNOWN);
       return;
     }
-    const status = readLifecycleStatus(outcome);
+    const status = response.status === 200 ? readLifecycleStatus(response.body) : null;
     if (!status) {
       sendJson(res, 500, { success: false, error: LIFECYCLE_RESTART_FAILED });
       return;
@@ -440,8 +436,7 @@ async function handleLifecycleRestart(ctx: RuntimeHostApiContext, res: ServerRes
   }
 }
 
-function readRuntimePaths(outcome: RuntimeHostControlOutcome): RuntimePaths | null {
-  const result = readSucceededResult(outcome);
+function readRuntimePaths(result: unknown): RuntimePaths | null {
   if (!isRecord(result)
     || !hasExactKeys(result, [
       'openclawDirectory',
@@ -471,24 +466,21 @@ function readRuntimePaths(outcome: RuntimeHostControlOutcome): RuntimePaths | nu
   };
 }
 
-function readCliCommand(outcome: RuntimeHostControlOutcome): string | null {
-  const result = readSucceededResult(outcome);
+function readCliCommand(result: unknown): string | null {
   return isRecord(result) && hasExactKeys(result, ['command']) && isCliCommand(result.command)
     ? result.command
     : null;
 }
 
-function readToolPermissionMode(outcome: RuntimeHostControlOutcome): OpenClawToolPermissionMode | null {
-  const result = readSucceededResult(outcome);
+function readToolPermissionMode(result: unknown): OpenClawToolPermissionMode | null {
   return isRecord(result) && hasExactKeys(result, ['mode']) && isToolPermissionMode(result.mode)
     ? result.mode
     : null;
 }
 
 function readToolPermissionModeUpdate(
-  outcome: RuntimeHostControlOutcome,
+  result: unknown,
 ): Readonly<{ mode: OpenClawToolPermissionMode; changed: boolean }> | null {
-  const result = readSucceededResult(outcome);
   return isRecord(result)
     && hasExactKeys(result, ['mode', 'changed'])
     && isToolPermissionMode(result.mode)
@@ -503,18 +495,16 @@ function readToolPermissionModeInput(value: unknown): OpenClawToolPermissionMode
     : null;
 }
 
-async function readEnvironmentStatus(ctx: RuntimeHostApiContext): Promise<EnvironmentStatus | null> {
+async function readEnvironmentStatus(ctx: OpenClawApiContext): Promise<EnvironmentStatus | null> {
   try {
-    return decodeEnvironmentStatus(
-      await ctx.runtimeHost.command({ name: 'openclaw.environment.status' }),
-    );
+    const response = await ctx.runtimeHostTransports.openClawPlatformTransport.environmentStatus();
+    return response.status === 200 ? decodeEnvironmentStatus(response.body) : null;
   } catch {
     return null;
   }
 }
 
-function decodeEnvironmentStatus(outcome: RuntimeHostControlOutcome): EnvironmentStatus | null {
-  const result = readSucceededResult(outcome);
+function decodeEnvironmentStatus(result: unknown): EnvironmentStatus | null {
   if (!isRecord(result)
     || !hasExpectedKeys(result, ['packageExists', 'isBuilt', 'dir'], ['version'])
     || typeof result.packageExists !== 'boolean'
@@ -531,11 +521,10 @@ function decodeEnvironmentStatus(outcome: RuntimeHostControlOutcome): Environmen
   };
 }
 
-function readTemplateCatalog(outcome: RuntimeHostControlOutcome): {
+function readTemplateCatalog(result: unknown): {
   categories: readonly TemplateCategory[];
   templates: readonly TemplateSummary[];
 } | null {
-  const result = readSucceededResult(outcome);
   if (!isRecord(result)
     || !hasExactKeys(result, ['categories', 'templates'])
     || !Array.isArray(result.categories)
@@ -563,10 +552,9 @@ function readTemplateCatalog(outcome: RuntimeHostControlOutcome): {
 }
 
 function readTemplateDetail(
-  outcome: RuntimeHostControlOutcome,
+  result: unknown,
   expectedTemplateId: string,
 ): TemplateDetail | null {
-  const result = readSucceededResult(outcome);
   if (!isRecord(result) || !hasExactKeys(result, ['template'])) {
     return null;
   }
@@ -706,8 +694,9 @@ function readHostState(value: unknown): HostState | null {
 
 function readRuntimeStateProjection(value: unknown): RuntimeStateProjection | null {
   if (!isRecord(value)
-    || !hasExpectedKeys(value, ['lifecycle'], ['failure', 'startupDiagnostic'])
+    || !hasExpectedKeys(value, ['lifecycle'], ['observedAtMs', 'failure', 'startupDiagnostic'])
     || !isRuntimeLifecycle(value.lifecycle)
+    || (hasOwn(value, 'observedAtMs') && !isSafeNonNegativeInteger(value.observedAtMs))
     || (hasOwn(value, 'failure') && !isRuntimeFailure(value.failure))
     || (hasOwn(value, 'startupDiagnostic') && !isRuntimeStartupDiagnostic(value.startupDiagnostic))) {
     return null;
@@ -772,22 +761,15 @@ function readControlSnapshot(value: unknown): ControlSnapshot | null {
   return valid ? { ready: value.ready, phase: value.phase, retryable: value.retryable } : null;
 }
 
-function readLifecycleStatus(outcome: RuntimeHostControlOutcome): LifecycleStatus | null {
-  const result = readSucceededResult(outcome);
-  const state = readRuntimeStateProjection(result);
+function readLifecycleStatus(body: unknown): LifecycleStatus | null {
+  if (!isRecord(body) || !hasExactKeys(body, ['result'])) return null;
+  const state = readRuntimeStateProjection(body.result);
   if (!state) return null;
   return {
     processState: state.lifecycle,
     ...(state.failure ? { failure: state.failure } : {}),
     ...(state.startupDiagnostic ? { startupDiagnostic: state.startupDiagnostic } : {}),
   };
-}
-
-function readSucceededResult(outcome: RuntimeHostControlOutcome): unknown {
-  if (outcome.kind !== 'succeeded' || !isRecord(outcome.result) || !hasExactKeys(outcome.result, ['result'])) {
-    return null;
-  }
-  return outcome.result.result;
 }
 
 function readSubagentTemplateId(pathname: string): string | null | undefined {
@@ -809,36 +791,8 @@ function sendUnavailable(res: ServerResponse, error: string): void {
   sendJson(res, 503, { success: false, error });
 }
 
-function sendCommandFailure(
-  res: ServerResponse,
-  unavailable: string,
-  outcome: RuntimeHostControlOutcome,
-): void {
-  const statusCode = outcome.kind === 'rejected'
-    ? outcome.error.code === 'INVALID_INPUT'
-      ? 400
-      : outcome.error.code === 'FAILED'
-        ? 500
-        : 503
-    : 503;
-  sendJson(res, statusCode, {
-    success: false,
-    error: unavailable,
-  });
-}
-
-function sendCommandException(
-  res: ServerResponse,
-  unavailable: string,
-  error: unknown,
-): void {
-  const unavailableDelivery = error instanceof RuntimeHostControlError
-    && (error.delivery === 'unknown-delivery'
-      || error.kind === 'timeout-exceeded'
-      || error.kind === 'disconnected'
-      || error.kind === 'write-failed'
-      || error.kind === 'pending-capacity-exceeded');
-  sendJson(res, unavailableDelivery ? 503 : 500, {
+function sendTransportFailure(res: ServerResponse, unavailable: string, status: number): void {
+  sendJson(res, status === 400 ? 400 : status === 500 ? 500 : 503, {
     success: false,
     error: unavailable,
   });

@@ -1,3 +1,5 @@
+use platform::capability::CapabilityDecisionVerifier;
+
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -8,9 +10,9 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use matcha_agent::lifecycle::secret::Secret;
 use openclaw::{gateway::client::GatewayClientMetadata, lifecycle::state_dir::CanonicalStateDir};
+use organization::adapters::loopback::trigger::WebhookToken;
 use runtime_host::{
     HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, open_organization_store,
-    transport::{common::authorization::CapabilityDecisionVerifier, team::trigger::WebhookToken},
 };
 use serde::Deserialize;
 use zeroize::Zeroize;

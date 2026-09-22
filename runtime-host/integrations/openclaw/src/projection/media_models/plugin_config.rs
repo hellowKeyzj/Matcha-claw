@@ -77,15 +77,15 @@ fn provider_json(provider: &ProviderModels) -> Value {
     })
 }
 
-fn capability_name(capability: environment::ProviderModelCapability) -> &'static str {
+fn capability_name(capability: ::provider::ProviderModelCapability) -> &'static str {
     match capability {
-        environment::ProviderModelCapability::Chat => "chat",
-        environment::ProviderModelCapability::ImageUnderstand => "imageUnderstand",
-        environment::ProviderModelCapability::ImageGenerate => "imageGenerate",
-        environment::ProviderModelCapability::VideoGenerate => "videoGenerate",
-        environment::ProviderModelCapability::MusicGenerate => "musicGenerate",
-        environment::ProviderModelCapability::TextToSpeech => "tts",
-        environment::ProviderModelCapability::Transcribe => "transcribe",
+        ::provider::ProviderModelCapability::Chat => "chat",
+        ::provider::ProviderModelCapability::ImageUnderstand => "imageUnderstand",
+        ::provider::ProviderModelCapability::ImageGenerate => "imageGenerate",
+        ::provider::ProviderModelCapability::VideoGenerate => "videoGenerate",
+        ::provider::ProviderModelCapability::MusicGenerate => "musicGenerate",
+        ::provider::ProviderModelCapability::TextToSpeech => "tts",
+        ::provider::ProviderModelCapability::Transcribe => "transcribe",
     }
 }
 

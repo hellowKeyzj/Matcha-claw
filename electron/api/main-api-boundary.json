@@ -15,7 +15,7 @@
     "channel-control.ts",
     "channel-pairing.ts",
     "channel-status.ts",
-    "chat-history.ts",
+    "session-history.ts",
     "clawhub-skill.ts",
     "cron.ts",
     "diagnostics.ts",
@@ -102,7 +102,7 @@
     "/api/cron/jobs/delete",
     "/api/cron/jobs/toggle",
     "/api/cron/session-history",
-    "/api/matcha-agent/chat/history",
+    "/api/sessions/history",
     "/api/usage/recent",
     "/api/diagnostics/memory",
     "/api/diagnostics/gateway-snapshot",
@@ -399,7 +399,7 @@
     ],
     [
       "POST",
-      "/api/matcha-agent/chat/history"
+      "/api/sessions/history"
     ],
     [
       "GET",

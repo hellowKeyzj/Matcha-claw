@@ -129,6 +129,8 @@ impl HostAdmission {
                 )
                 .is_ok()
             {
+                self.changes
+                    .send_replace(HostState::from_phase(HostPhase::ShuttingDown));
                 return Ok(());
             }
         }
@@ -167,9 +169,87 @@ impl HostAdmission {
         self.phase
             .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
             .map(|_| {
-                let _ = self.changes.send(HostState::from_phase(to));
+                self.changes.send_replace(HostState::from_phase(to));
             })
             .map_err(decode_phase)
+    }
+}
+
+impl ::cron::CronRequestAdmission for HostAdmission {
+    fn admit_cron_request(&self) -> Result<(), ::cron::CronRequestAdmissionClosed> {
+        self.admit_request()
+            .map_err(|_| ::cron::CronRequestAdmissionClosed)
+    }
+}
+
+impl usage::UsageRequestAdmission for HostAdmission {
+    fn admit_usage_request(&self) -> Result<(), usage::UsageRequestAdmissionClosed> {
+        self.admit_request()
+            .map_err(|_| usage::UsageRequestAdmissionClosed)
+    }
+}
+
+impl ::diagnostics::DiagnosticsRequestAdmission for HostAdmission {
+    fn admit_diagnostics_request(
+        &self,
+    ) -> Result<(), ::diagnostics::DiagnosticsRequestAdmissionClosed> {
+        self.admit_request()
+            .map_err(|_| ::diagnostics::DiagnosticsRequestAdmissionClosed)
+    }
+}
+
+impl task_manager::TaskRequestAdmission for HostAdmission {
+    fn admit_task_request(&self) -> Result<(), task_manager::TaskRequestAdmissionClosed> {
+        self.admit_request()
+            .map_err(|_| task_manager::TaskRequestAdmissionClosed)
+    }
+}
+
+impl subagents::SubagentRequestAdmission for HostAdmission {
+    fn admit_subagent_request(&self) -> Result<(), subagents::SubagentRequestAdmissionClosed> {
+        self.admit_request()
+            .map_err(|_| subagents::SubagentRequestAdmissionClosed)
+    }
+}
+
+impl workspace::WorkspaceRequestAdmission for HostAdmission {
+    fn admit_workspace_request(&self) -> Result<(), workspace::WorkspaceRequestAdmissionClosed> {
+        self.admit_request()
+            .map_err(|_| workspace::WorkspaceRequestAdmissionClosed)
+    }
+}
+
+impl toolchain::ToolchainRequestAdmission for HostAdmission {
+    fn admit_toolchain_request(&self) -> Result<(), toolchain::ToolchainRequestAdmissionClosed> {
+        self.admit_request()
+            .map_err(|_| toolchain::ToolchainRequestAdmissionClosed)
+    }
+}
+
+impl platform_tools::PlatformToolsRequestAdmission for HostAdmission {
+    fn admit_platform_tools_request(
+        &self,
+    ) -> Result<(), platform_tools::PlatformToolsRequestAdmissionClosed> {
+        self.admit_request()
+            .map_err(|_| platform_tools::PlatformToolsRequestAdmissionClosed)
+    }
+}
+
+impl openclaw::platform_runtime::loopback::OpenClawPlatformAdmissionPort for HostAdmission {
+    fn admit_openclaw_platform_request(&self) -> bool {
+        self.admit_request().is_ok()
+    }
+}
+
+impl openclaw::plugins::OpenClawPluginsAdmissionPort for HostAdmission {
+    fn admit_openclaw_plugins_request(&self) -> bool {
+        self.admit_request().is_ok()
+    }
+}
+
+impl openclaw::skill::OpenClawSkillsAdmissionPort for HostAdmission {
+    fn admit_openclaw_skills_request(&self) -> bool {
+        self.admit_request().is_ok()
     }
 }
 
@@ -440,6 +520,28 @@ mod tests {
             Err(RequestAdmissionClosed {
                 phase: HostPhase::ShuttingDown,
             })
+        );
+    }
+
+    #[test]
+    fn late_subscribers_observe_the_current_phase_without_prior_receivers() {
+        let admission = HostAdmission::new();
+
+        admission.begin_start().unwrap();
+        admission.publish_ready().unwrap();
+        let late_ready = admission.subscribe();
+        assert_eq!(late_ready.borrow().phase(), HostPhase::Ready);
+        assert_eq!(
+            late_ready.borrow().request_admission(),
+            RequestAdmission::Accepting
+        );
+
+        admission.begin_shutdown().unwrap();
+        let late_shutdown = admission.subscribe();
+        assert_eq!(late_shutdown.borrow().phase(), HostPhase::ShuttingDown);
+        assert_eq!(
+            late_shutdown.borrow().request_admission(),
+            RequestAdmission::Closed
         );
     }
 

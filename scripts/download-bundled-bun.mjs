@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const ROOT_DIR = path.resolve(dirname(scriptPath), '..');
-export const BUN_VERSION = 'bun-v1.3.5';
+export const BUN_VERSION = 'bun-v1.4.2';
 const BUN_SEMVER = BUN_VERSION.slice('bun-v'.length);
 const BASE_URL = `https://github.com/oven-sh/bun/releases/download/${BUN_VERSION}`;
 const OUTPUT_BASE = path.join(ROOT_DIR, 'resources', 'bin');
@@ -99,7 +99,7 @@ export function localFunctionalBunCacheEvidence({ executablePath, targetId }, de
   return {
     source: 'local-cache',
     target: 'win32-x64',
-    functionalMatch: 'exact-bun-1.3.5-win32-x64-pe',
+    functionalMatch: 'exact-bun-1.4.2-win32-x64-pe',
     independentProvenance: 'unverified',
     supplyChainAttestation: 'not-present',
   };

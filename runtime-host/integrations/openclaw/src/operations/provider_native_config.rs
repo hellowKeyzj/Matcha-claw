@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use environment::{ProviderAccount, ProviderModelCatalog, ProviderRouting};
+use ::provider::{ProviderAccount, ProviderModelCatalog, ProviderRouting};
 use serde_json::{Map, Value};
 use zeroize::Zeroize;
 
@@ -178,7 +178,7 @@ impl ProviderNativeConfigurationOperation {
         models: &ProviderModelCatalog,
         routing: Option<&ProviderRouting>,
         retired: &[ProviderAccount],
-        required_auth_accounts: &BTreeSet<environment::ProviderAccountId>,
+        required_auth_accounts: &BTreeSet<::provider::ProviderAccountId>,
         auth_state_refresh_required: bool,
         now_millis: u64,
     ) -> ProviderNativeConfigurationEvidence {
@@ -773,7 +773,7 @@ fn apply_provider_projection(
     models: &ProviderModelCatalog,
     routing: Option<&ProviderRouting>,
     retired: &[ProviderAccount],
-    required_auth_accounts: &BTreeSet<environment::ProviderAccountId>,
+    required_auth_accounts: &BTreeSet<::provider::ProviderAccountId>,
     now_millis: u64,
 ) -> Result<bool, ProviderProjectionBuildFailure> {
     let models_changed = ProviderModelProjection::apply_to_document(
@@ -1198,7 +1198,7 @@ fn next_request_id(operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use environment::{
+    use ::provider::{
         CredentialReference, ProviderAccountAuthMode, ProviderAccountConfiguration,
         ProviderAccountConfigurationInput, ProviderAccountId, ProviderAccountKind,
         ProviderAccountRevision, ProviderApiProtocol, ProviderEndpoint, ProviderModel,

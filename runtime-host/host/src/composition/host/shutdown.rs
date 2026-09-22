@@ -1,18 +1,27 @@
-use std::fmt;
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+};
 
 use foundation::{
     execution::{
         ObservationRecord, ObservationSink, ShutdownObservation, ShutdownReason, ShutdownStage,
         TraceContext,
     },
+    lifecycle::{EffectRegistration, ModuleScope},
     process::{ShutdownOutcome, supervision::SupervisorSnapshot},
 };
+use platform::module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId};
+
+use matcha_agent::driver::{MatchaAgentInstance, MatchaRuntimeDriver};
+
+use openclaw::driver::OpenClawDriver;
 
 use super::{
     Host, HostTransitionError,
     session_shutdown::{SessionShutdown, SessionShutdownFailure},
 };
-use crate::runtime::adapters::openclaw::owner::PendingSupervisorJoin;
+use openclaw::driver::PendingSupervisorJoin;
 
 impl Host {
     pub async fn shutdown(&mut self) -> Result<ShutdownReport, HostShutdownError> {
@@ -72,8 +81,10 @@ impl Host {
         self.owner_runtime_tasks.cancel_and_join().await;
         observe_shutdown_settle(&observation, "ownerRuntimeTasks", ShutdownReason::Completed);
         shutdown_open_claw_session(self, &observation).await;
-        shutdown_open_claw(self, &observation).await;
-        shutdown_matcha(self, &observation).await;
+        self.runtime_processes.dispose_open_claw().await;
+        self.runtime_processes
+            .dispose_matcha(&mut self.event_sinks)
+            .await;
         if !self.shutdown_failures.all_settled() {
             let failures = self.shutdown_failures.failures();
             let report = self.shutdown_failures.report();
@@ -112,6 +123,117 @@ impl Host {
             Ok(report)
         }
     }
+}
+
+pub(super) struct RuntimeProcessScopes {
+    open_claw: ModuleScope,
+    matcha: ModuleScope,
+    matcha_runtime_driver: Arc<MatchaRuntimeDriver>,
+}
+
+impl RuntimeProcessScopes {
+    pub(super) fn new(
+        open_claw: Arc<OpenClawDriver>,
+        matcha: MatchaAgentInstance,
+        matcha_runtime_driver: Arc<MatchaRuntimeDriver>,
+        observation: ObservationSink,
+        shutdown: &ShutdownState,
+    ) -> Self {
+        Self {
+            open_claw: open_claw_process_scope(
+                open_claw,
+                observation.clone(),
+                Arc::clone(&shutdown.open_claw),
+            ),
+            matcha: matcha_process_scope(matcha, observation, Arc::clone(&shutdown.matcha)),
+            matcha_runtime_driver,
+        }
+    }
+
+    pub(super) fn descriptors() -> [ModuleDescriptor; 2] {
+        [open_claw_process_descriptor(), matcha_process_descriptor()]
+    }
+
+    pub(super) fn effect_registrations(&self) -> Vec<EffectRegistration> {
+        self.open_claw
+            .effect_registrations()
+            .iter()
+            .chain(self.matcha.effect_registrations())
+            .copied()
+            .collect()
+    }
+
+    async fn dispose_open_claw(&mut self) {
+        self.open_claw.dispose_all_lifo().await;
+    }
+
+    async fn dispose_matcha(&mut self, event_sinks: &mut super::events::EventSinks) {
+        self.matcha_runtime_driver.advance_source_epoch();
+        event_sinks.close_matcha();
+        self.matcha.dispose_all_lifo().await;
+    }
+}
+
+const OPEN_CLAW_EFFECTS: &[EffectKind] = &[EffectKind::EventSubscription, EffectKind::Process];
+const OPEN_CLAW_EVENTS: &[&str] = &["gateway-control"];
+const MATCHA_EFFECTS: &[EffectKind] = &[EffectKind::Process];
+const NO_CAPABILITIES: &[CapabilityKey] = &[];
+const NO_ROUTES: &[&str] = &[];
+const NO_EVENTS: &[&str] = &[];
+
+fn open_claw_process_descriptor() -> ModuleDescriptor {
+    ModuleDescriptor::new(
+        ModuleId::new("openclaw"),
+        NO_CAPABILITIES,
+        NO_CAPABILITIES,
+        OPEN_CLAW_EFFECTS,
+        NO_ROUTES,
+        OPEN_CLAW_EVENTS,
+        None,
+    )
+}
+
+fn matcha_process_descriptor() -> ModuleDescriptor {
+    ModuleDescriptor::new(
+        ModuleId::new("matcha-agent"),
+        NO_CAPABILITIES,
+        NO_CAPABILITIES,
+        MATCHA_EFFECTS,
+        NO_ROUTES,
+        NO_EVENTS,
+        None,
+    )
+}
+
+fn open_claw_process_scope(
+    open_claw: Arc<OpenClawDriver>,
+    observation: ObservationSink,
+    state: Arc<Mutex<SlotState>>,
+) -> ModuleScope {
+    let mut scope = ModuleScope::new("openclaw");
+    open_claw.start_control_supervision();
+    let control_supervisor_owner = Arc::clone(&open_claw);
+    scope.register_process("process", move || async move {
+        shutdown_open_claw(open_claw, observation, state).await;
+    });
+    scope.register_event_subscription("gateway-control", move || async move {
+        if let Some(supervisor) = control_supervisor_owner.take_control_supervisor() {
+            supervisor.dispose().await;
+        }
+    });
+    scope
+}
+
+fn matcha_process_scope(
+    matcha: MatchaAgentInstance,
+    observation: ObservationSink,
+    state: Arc<Mutex<SlotState>>,
+) -> ModuleScope {
+    let mut scope = ModuleScope::new("matcha-agent");
+    scope.register_process("process", move || async move {
+        shutdown_matcha(matcha, observation, state).await;
+    });
+    scope
 }
 
 fn shutdown_observation_sink(host: &Host) -> ObservationSink {
@@ -179,118 +301,94 @@ async fn shutdown_open_claw_session(host: &mut Host, observation: &ObservationSi
     observe_shutdown_settle(observation, "openClawSession", reason);
 }
 
-async fn shutdown_open_claw(host: &mut Host, observation: &ObservationSink) {
-    let mut join_started = false;
-    if host.open_claw.owner_if_present().is_none() {
-        observe_shutdown_start(observation, "openClawConfirm");
+async fn shutdown_open_claw(
+    open_claw: Arc<OpenClawDriver>,
+    observation: ObservationSink,
+    shared_state: Arc<Mutex<SlotState>>,
+) {
+    let mut state = SlotState::Pending;
+    let Some(owner) = open_claw.owner_if_present() else {
+        observe_shutdown_start(&observation, "openClawConfirm");
         observe_shutdown_settle(
-            observation,
+            &observation,
             "openClawConfirm",
             ShutdownReason::AlreadyClosed,
         );
-    } else {
-        observe_shutdown_start(observation, "openClawConfirm");
-        let confirmation = host.open_claw.owner().confirm_shutdown().await;
-        observe_shutdown_settle(
-            observation,
-            "openClawConfirm",
-            shutdown_outcome_reason(&confirmation),
-        );
-        match confirmation {
-            Ok(outcome @ ShutdownOutcome::Unresolved { .. }) => {
-                host.shutdown_failures.open_claw = SlotState::Unresolved { outcome };
-            }
-            Ok(outcome) => {
-                let snapshot = host.open_claw.owner().snapshot();
-                observe_shutdown_start(observation, "openClawJoin");
-                join_started = true;
-                let join = host.open_claw.take_owner().begin_join();
-                host.shutdown_failures.open_claw = SlotState::Joining {
-                    snapshot,
-                    outcome,
-                    join,
-                };
-            }
-            Err(_)
-                if !matches!(
-                    host.shutdown_failures.open_claw,
-                    SlotState::Unresolved { .. }
-                ) =>
-            {
-                host.shutdown_failures.open_claw = SlotState::Shutdown;
-            }
-            Err(_) => {}
-        }
-    }
-    let already_settled = matches!(
-        host.shutdown_failures.open_claw,
-        SlotState::JoinFailed { .. } | SlotState::Settled { .. }
-    );
-    let pending_join = matches!(host.shutdown_failures.open_claw, SlotState::Joining { .. });
-    if pending_join && !join_started {
-        observe_shutdown_start(observation, "openClawJoin");
-    }
-    host.shutdown_failures.open_claw.finish_join().await;
-    if already_settled {
-        observe_shutdown_start(observation, "openClawJoin");
-        observe_shutdown_settle(observation, "openClawJoin", ShutdownReason::AlreadyClosed);
-    } else if pending_join || join_started {
-        let reason = host
-            .shutdown_failures
-            .open_claw
-            .settle_reason()
-            .unwrap_or(ShutdownReason::Unresolved);
-        observe_shutdown_settle(observation, "openClawJoin", reason);
-    } else if host.open_claw.owner_if_present().is_none() {
-        observe_shutdown_start(observation, "openClawJoin");
-        observe_shutdown_settle(observation, "openClawJoin", ShutdownReason::AlreadyClosed);
-    }
-}
-
-async fn shutdown_matcha(host: &mut Host, observation: &ObservationSink) {
-    let _ = host
-        .matcha
-        .peer_if_present()
-        .map(|peer| peer.advance_source_epoch());
-    host.event_sinks.close_matcha();
-    if host.matcha.peer_if_present().is_none() {
-        observe_shutdown_start(observation, "matchaConfirm");
-        observe_shutdown_settle(observation, "matchaConfirm", ShutdownReason::AlreadyClosed);
-        observe_shutdown_start(observation, "matchaJoin");
-        observe_shutdown_settle(observation, "matchaJoin", ShutdownReason::AlreadyClosed);
+        observe_shutdown_start(&observation, "openClawJoin");
+        observe_shutdown_settle(&observation, "openClawJoin", ShutdownReason::AlreadyClosed);
+        store_slot_state(&shared_state, SlotState::NoProcess);
         return;
-    }
-    observe_shutdown_start(observation, "matchaConfirm");
-    let confirmation = host.matcha.confirm_shutdown().await;
+    };
+
+    observe_shutdown_start(&observation, "openClawConfirm");
+    let confirmation = owner.confirm_shutdown().await;
     observe_shutdown_settle(
-        observation,
-        "matchaConfirm",
+        &observation,
+        "openClawConfirm",
         shutdown_outcome_reason(&confirmation),
     );
     match confirmation {
         Ok(outcome @ ShutdownOutcome::Unresolved { .. }) => {
-            host.shutdown_failures.matcha = SlotState::Unresolved { outcome };
+            state = SlotState::Unresolved { outcome };
         }
         Ok(outcome) => {
-            let snapshot = host.matcha.snapshot();
-            observe_shutdown_start(observation, "matchaJoin");
-            let peer = host.matcha.take_peer();
-            host.shutdown_failures.matcha = match peer.join().await {
+            let snapshot = owner.snapshot();
+            observe_shutdown_start(&observation, "openClawJoin");
+            let join = open_claw.take_owner().begin_join();
+            state = SlotState::Joining {
+                snapshot,
+                outcome,
+                join,
+            };
+            state.finish_join().await;
+            let reason = state.settle_reason().unwrap_or(ShutdownReason::Unresolved);
+            observe_shutdown_settle(&observation, "openClawJoin", reason);
+        }
+        Err(_) => {
+            state = SlotState::Shutdown;
+        }
+    }
+    store_slot_state(&shared_state, state);
+}
+
+async fn shutdown_matcha(
+    mut matcha: MatchaAgentInstance,
+    observation: ObservationSink,
+    shared_state: Arc<Mutex<SlotState>>,
+) {
+    if matcha.peer_if_present().is_none() {
+        observe_shutdown_start(&observation, "matchaConfirm");
+        observe_shutdown_settle(&observation, "matchaConfirm", ShutdownReason::AlreadyClosed);
+        observe_shutdown_start(&observation, "matchaJoin");
+        observe_shutdown_settle(&observation, "matchaJoin", ShutdownReason::AlreadyClosed);
+        store_slot_state(&shared_state, SlotState::NoProcess);
+        return;
+    }
+    observe_shutdown_start(&observation, "matchaConfirm");
+    let confirmation = matcha.confirm_shutdown().await;
+    observe_shutdown_settle(
+        &observation,
+        "matchaConfirm",
+        shutdown_outcome_reason(&confirmation),
+    );
+    let mut state = match confirmation {
+        Ok(outcome @ ShutdownOutcome::Unresolved { .. }) => SlotState::Unresolved { outcome },
+        Ok(outcome) => {
+            let snapshot = matcha.snapshot();
+            observe_shutdown_start(&observation, "matchaJoin");
+            let peer = matcha.take_peer();
+            let state = match peer.join().await {
                 Ok(()) => SlotState::Settled { snapshot, outcome },
                 Err(_) => SlotState::JoinFailed { snapshot, outcome },
             };
-            let reason = host
-                .shutdown_failures
-                .matcha
-                .settle_reason()
-                .unwrap_or(ShutdownReason::Unresolved);
-            observe_shutdown_settle(observation, "matchaJoin", reason);
+            let reason = state.settle_reason().unwrap_or(ShutdownReason::Unresolved);
+            observe_shutdown_settle(&observation, "matchaJoin", reason);
+            state
         }
-        Err(_) if !matches!(host.shutdown_failures.matcha, SlotState::Unresolved { .. }) => {
-            host.shutdown_failures.matcha = SlotState::Shutdown;
-        }
-        Err(_) => {}
-    }
+        Err(_) => SlotState::Shutdown,
+    };
+    state.finish_join().await;
+    store_slot_state(&shared_state, state);
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -451,57 +549,68 @@ pub enum OwnerShutdownFailure {
 
 pub(super) struct ShutdownState {
     open_claw_session: SessionShutdown,
-    open_claw: SlotState,
-    matcha: SlotState,
+    open_claw: Arc<Mutex<SlotState>>,
+    matcha: Arc<Mutex<SlotState>>,
 }
 
 impl ShutdownState {
-    pub(super) const fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             open_claw_session: SessionShutdown::new(),
-            open_claw: SlotState::Pending,
-            matcha: SlotState::Pending,
+            open_claw: Arc::new(Mutex::new(SlotState::Pending)),
+            matcha: Arc::new(Mutex::new(SlotState::Pending)),
         }
     }
 
-    const fn all_settled(&self) -> bool {
+    fn all_settled(&self) -> bool {
         self.open_claw_session.is_settled()
-            && matches!(
-                self.open_claw,
-                SlotState::JoinFailed { .. } | SlotState::Settled { .. }
-            )
-            && matches!(
-                self.matcha,
-                SlotState::JoinFailed { .. } | SlotState::Settled { .. }
-            )
+            && self.open_claw_slot(SlotState::is_settled)
+            && self.matcha_slot(SlotState::is_settled)
     }
 
-    const fn failures(&self) -> Failures {
+    fn failures(&self) -> Failures {
         Failures {
             open_claw_session: self.open_claw_session.failure(),
-            open_claw: self.open_claw.failure(),
-            matcha: self.matcha.failure(),
+            open_claw: self.open_claw_slot(SlotState::failure),
+            matcha: self.matcha_slot(SlotState::failure),
         }
     }
 
     fn report(&self) -> ShutdownReport {
         ShutdownReport {
-            open_claw: self.open_claw.outcome().map(runtime_shutdown_outcome),
-            matcha: self.matcha.outcome().map(runtime_shutdown_outcome),
+            open_claw: self.open_claw_slot(SlotState::report_outcome),
+            matcha: self.matcha_slot(SlotState::report_outcome),
         }
     }
 
-    pub(super) fn open_claw_snapshot(&self) -> Option<&SupervisorSnapshot> {
-        self.open_claw.snapshot()
+    pub(super) fn open_claw_snapshot(&self) -> Option<SupervisorSnapshot> {
+        self.open_claw_slot(SlotState::snapshot)
     }
 
-    pub(super) fn matcha_snapshot(&self) -> Option<&SupervisorSnapshot> {
-        self.matcha.snapshot()
+    pub(super) fn matcha_snapshot(&self) -> Option<SupervisorSnapshot> {
+        self.matcha_slot(SlotState::snapshot)
+    }
+
+    fn open_claw_slot<T>(&self, read: impl FnOnce(&SlotState) -> T) -> T {
+        let state = self
+            .open_claw
+            .lock()
+            .expect("OpenClaw shutdown state lock poisoned");
+        read(&state)
+    }
+
+    fn matcha_slot<T>(&self, read: impl FnOnce(&SlotState) -> T) -> T {
+        let state = self
+            .matcha
+            .lock()
+            .expect("Matcha shutdown state lock poisoned");
+        read(&state)
     }
 }
 
 enum SlotState {
     Pending,
+    NoProcess,
     Shutdown,
     Unresolved {
         outcome: ShutdownOutcome,
@@ -539,9 +648,16 @@ impl SlotState {
         };
     }
 
+    const fn is_settled(&self) -> bool {
+        matches!(
+            self,
+            Self::NoProcess | Self::JoinFailed { .. } | Self::Settled { .. }
+        )
+    }
+
     const fn failure(&self) -> Option<OwnerShutdownFailure> {
         match self {
-            Self::Pending | Self::Settled { .. } => None,
+            Self::Pending | Self::NoProcess | Self::Settled { .. } => None,
             Self::Shutdown | Self::Unresolved { .. } => Some(OwnerShutdownFailure::Shutdown),
             Self::Joining { .. } | Self::JoinFailed { .. } => Some(OwnerShutdownFailure::Join),
         }
@@ -549,7 +665,7 @@ impl SlotState {
 
     const fn settle_reason(&self) -> Option<ShutdownReason> {
         match self {
-            Self::Settled { .. } => Some(ShutdownReason::Completed),
+            Self::NoProcess | Self::Settled { .. } => Some(ShutdownReason::Completed),
             Self::JoinFailed { .. } => Some(ShutdownReason::JoinFailed),
             Self::Unresolved { .. } => Some(ShutdownReason::Unresolved),
             Self::Shutdown => Some(ShutdownReason::ConfirmationFailed),
@@ -563,18 +679,31 @@ impl SlotState {
             | Self::Joining { outcome, .. }
             | Self::JoinFailed { outcome, .. }
             | Self::Settled { outcome, .. } => Some(outcome),
-            Self::Pending | Self::Shutdown => None,
+            Self::Pending | Self::NoProcess | Self::Shutdown => None,
         }
     }
 
-    const fn snapshot(&self) -> Option<&SupervisorSnapshot> {
+    fn report_outcome(&self) -> Option<RuntimeShutdownOutcome> {
+        match self {
+            Self::NoProcess => Some(RuntimeShutdownOutcome::NoProcess),
+            _ => self.outcome().map(runtime_shutdown_outcome),
+        }
+    }
+
+    fn snapshot(&self) -> Option<SupervisorSnapshot> {
         match self {
             Self::Joining { snapshot, .. }
             | Self::JoinFailed { snapshot, .. }
-            | Self::Settled { snapshot, .. } => Some(snapshot),
-            Self::Pending | Self::Shutdown | Self::Unresolved { .. } => None,
+            | Self::Settled { snapshot, .. } => Some(snapshot.clone()),
+            Self::Pending | Self::NoProcess | Self::Shutdown | Self::Unresolved { .. } => None,
         }
     }
+}
+
+fn store_slot_state(shared_state: &Arc<Mutex<SlotState>>, state: SlotState) {
+    *shared_state
+        .lock()
+        .expect("runtime process shutdown state lock poisoned") = state;
 }
 
 #[cfg(test)]

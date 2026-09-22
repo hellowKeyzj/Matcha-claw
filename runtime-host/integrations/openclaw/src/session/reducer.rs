@@ -14,8 +14,8 @@ use super::{
     protocol::{
         ChatState, MessageActivityLifecycle, MessageId, RunId, RuntimeActivityPhase,
         RuntimeFallbackDetail, RuntimeGuardianNotice, SessionActivityKind, SessionApprovalEvent,
-        SessionApprovalLifecycle, SessionEventEnvelope, SessionEventKind, SessionKey,
-        ToolActivityPhase, ToolId,
+        SessionApprovalLifecycle, SessionChangedPhase, SessionEventEnvelope, SessionEventKind,
+        SessionKey, ToolActivityPhase, ToolId,
     },
 };
 
@@ -189,11 +189,15 @@ struct CanonicalChangeDebugSummary {
     assistant_text_segment_bytes: usize,
     assistant_thinking_segment_count: usize,
     assistant_tool_segment_count: usize,
+    run_started_count: usize,
 }
 
 impl CanonicalChangeDebugSummary {
     fn observe(&mut self, change: &CanonicalSessionChange) {
         match change {
+            CanonicalSessionChange::RunStarted { .. } => {
+                self.run_started_count += 1;
+            }
             CanonicalSessionChange::AssistantTurnSnapshot { snapshot } => {
                 self.assistant_turn_snapshot_count += 1;
                 self.assistant_text_bytes += snapshot.text.len();
@@ -308,6 +312,7 @@ fn trace_canonical_changes(stage: &'static str, changes: &[CanonicalSessionChang
         serde_json::json!({
             "reducerStage": stage,
             "changeCount": changes.len(),
+            "runStartedCount": summary.run_started_count,
             "assistantTurnSnapshotCount": summary.assistant_turn_snapshot_count,
             "assistantTurnChunkCount": summary.assistant_turn_chunk_count,
             "toolActivityCount": summary.tool_activity_count,
@@ -373,7 +378,7 @@ impl SessionReducerActor {
             SessionEventKind::ApprovalRequested | SessionEventKind::ApprovalResolved => {
                 self.reduce_approval(event, source_epoch, route_key)
             }
-            SessionEventKind::Changed => None,
+            SessionEventKind::Changed => self.reduce_changed(event, source_epoch, route_key),
         }
     }
 
@@ -803,6 +808,34 @@ impl SessionReducerActor {
         produce_debugged("approval", event, source_epoch, route_key)
     }
 
+    fn reduce_changed(
+        &mut self,
+        event: SessionEventEnvelope,
+        source_epoch: Option<GatewayEpoch>,
+        route_key: Option<String>,
+    ) -> Option<CanonicalIngressResult> {
+        let changed = event.changed.as_ref()?;
+        if changed.session_key != self.session_key
+            || event.run_id.as_ref() != Some(&changed.run_id)
+            || !matches!(changed.phase, SessionChangedPhase::Start)
+        {
+            return None;
+        }
+        let run_id = changed.run_id.clone();
+        let active = self.active_run_for(run_id.clone());
+        if active.started {
+            return None;
+        }
+        active.started = true;
+        produce_changes_debugged(
+            "session_changed_start",
+            event,
+            source_epoch,
+            route_key,
+            vec![CanonicalSessionChange::RunStarted { run_id }],
+        )
+    }
+
     fn observe_approval(&mut self, approval: &SessionApprovalEvent) {
         let key = approval_key(approval);
         match approval.lifecycle {
@@ -899,6 +932,7 @@ impl SessionReducerActor {
 
 struct ActiveRunState {
     run_id: RunId,
+    started: bool,
     assistant_message_id: Option<MessageId>,
     sent_text: String,
     sent_thought: String,
@@ -911,6 +945,7 @@ impl ActiveRunState {
     fn new(run_id: RunId) -> Self {
         Self {
             run_id,
+            started: false,
             assistant_message_id: None,
             sent_text: String::new(),
             sent_thought: String::new(),
@@ -1477,6 +1512,18 @@ mod tests {
         )
     }
 
+    fn changed_event(sequence: u64, phase: &str) -> SessionEventEnvelope {
+        decode(
+            "sessions.changed",
+            json!({
+                "sessionKey": "agent:main:session-1",
+                "runId": "run-1",
+                "phase": phase
+            }),
+            sequence,
+        )
+    }
+
     fn produced_change(result: Option<CanonicalIngressResult>) -> CanonicalSessionChange {
         let Some(CanonicalIngressResult::Produced(delta)) = result else {
             panic!("expected produced canonical delta");
@@ -1486,6 +1533,43 @@ mod tests {
         assert_eq!(delta.route_key(), Some("route-1"));
         assert_eq!(delta.changes().len(), 1);
         delta.changes()[0].clone()
+    }
+
+    #[test]
+    fn changed_start_projects_run_started_once() {
+        let mut reducer = SessionReducerActor::new(session_key());
+
+        let started = produced_change(reducer.reduce(
+            changed_event(1, "start"),
+            Some(epoch()),
+            Some("route-1".to_owned()),
+        ));
+        assert!(matches!(
+            started,
+            CanonicalSessionChange::RunStarted { run_id } if run_id.as_str() == "run-1"
+        ));
+        assert!(matches!(
+            reducer.active_run.as_ref().map(|run| run.started),
+            Some(true)
+        ));
+        assert!(
+            reducer
+                .reduce(
+                    changed_event(2, "start"),
+                    Some(epoch()),
+                    Some("route-1".to_owned())
+                )
+                .is_none()
+        );
+        assert!(
+            reducer
+                .reduce(
+                    changed_event(3, "end"),
+                    Some(epoch()),
+                    Some("route-1".to_owned())
+                )
+                .is_none()
+        );
     }
 
     #[test]

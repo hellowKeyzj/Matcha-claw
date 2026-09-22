@@ -34,14 +34,13 @@ Electron Delivery
   - main-owned routes / WebSocket proxy
   - Rust child process lifecycle
   - parent callback ingress / event bridge
-        │ 既有 child contract
-        │ /health /dispatch /lifecycle/* / parent callbacks
+        │ active child contract
+        │ DirectRuntimeHost private control / signed loopback product routes / parent callbacks
         ▼
 Rust runtime-host Delivery Adapter
-  - compatibility HTTP ingress
-  - optional private framed control
-  - optional trusted signed product transports
-  - wire DTO decode / auth / error projection
+  - private framed control
+  - trusted signed product transports
+  - installed module route DTO decode / auth / error projection
         ▼
 Host composition + admission + command serialization
   - 只组装 owner
@@ -51,8 +50,9 @@ Host composition + admission + command serialization
   - 不拥有 Domain/native facts
         ├───────────────┬────────────────┬──────────────────┐
         ▼               ▼                ▼                  ▼
-Environment       Fleet            Organization       Peer Integrations
-独立管理 owner    独立管理 owner   Team/TeamRun owner  OpenClaw / Matcha
+业务 owner modules  Fleet            Organization       Peer Integrations
+provider/connectors 独立管理 owner   Team/TeamRun owner  OpenClaw / Matcha
+settings/security
         │               │                │                  │
         └───────────────┴────────────────┴──────────────────┘
                         ▼
@@ -77,19 +77,20 @@ Rust runtime-host -> OpenClaw / matcha-agent peer child
 
 ## 3. 设计裁决
 
-### 3.1 外部 child contract 不改变
+### 3.1 外部 child contract 已裁成 active delivery 面
 
-Rust child 必须提供现有 child 可观察 contract：
+Rust child 当前 active delivery contract 是：
 
-- `GET /health`；
-- `POST /dispatch` v1 envelope；
-- `POST /lifecycle/restart`、`POST /lifecycle/stop`；
-- `/dispatch` 的 1 MB body limit、413 `PAYLOAD_TOO_LARGE`、合法 v1 response envelope；
-- Electron → child `/dispatch` 默认 30s，health 最多 3s；
+- Electron `DirectRuntimeHost` 启动 Rust executable；
+- stdin 写入一次 length-prefixed bootstrap；
+- stdin/stdout private control framed wire 等待 `ready`，并只承载 Host-private command vocabulary；
+- signed loopback product transports 调 installed module routes；
+- Electron child process stop/restart 由 `DirectRuntimeHost` / `RuntimeHostLifecycleOwner` 管理；
+- peer runtime stop/restart 使用 `/api/runtime-control/lifecycle/*` product routes；
 - child → Electron parent 的 shell/gateway callback、token、version、15s/3s timeout 和 best-effort 语义；owner operation typed event 由具体 facade 定义；
-- CLI、Team webhook、Remote Fleet agent ingress、terminal WebSocket 等非 Renderer 入口。
+- CLI、Team webhook、Remote Fleet agent ingress、terminal WebSocket 等非 Renderer 入口分别按所属 owner 验证。
 
-`DirectRuntimeHost`、stdin/stdout framed control 和 signed loopback transports 可以作为 Rust 内部或 Electron Delivery 的实现 seam，但它们不是自动替代 `/dispatch` 的新 public contract。它们与旧 seam 的 active/替代关系必须在同一个 delivery owner block 中用 route matrix 和 unchanged-client trace 证明。
+旧 root `GET /health`、`POST /dispatch`、`POST /lifecycle/restart`、`POST /lifecycle/stop` compatibility island 已删除。Renderer/preload/Electron public API 仍不因该内部 delivery 裁剪而改变。
 
 ### 3.2 Root owner 不是业务 command/fact owner
 
@@ -106,13 +107,13 @@ Host composition 负责 command admission 与 Host-level serialization；product
 
 - OpenClaw config/Gateway/channel/cron；
 - Matcha app-server/session/run/transcript/event；
-- Environment、Fleet、Organization durable facts；
+- `modules/provider`、`modules/connectors`、`modules/settings`、`modules/security` 各自的 durable stores，以及 Fleet、Organization facts；
 - owner-local operation/task/receipt；
 - sealed skill package 由 `runtime-host` host-level concrete owner/facade 管理；OpenClaw 与 matcha-agent 只消费已授权投影或 package artifact，不拥有该包事实。
 
 对 OpenClaw native 配置，`openclaw.json` 只记录 `skills.<key>.enabled` 开关；明文 skill package material 不进入该文件。加密 package material 可落在 `runtime-local` owner-local 目录；需要修改 OpenClaw 源码行为时通过 bundle patch 投递。
 
-不得建立 Host-wide ledger、global fact store 或 Host-wide generic operation owner。
+不得建立 Host-wide ledger、global fact store 或 Host-wide generic operation owner。无消费者的旧 `domains/environment` 聚合模型退役，不建立 `modules/environment`，不把旧 revision/grant/reconciliation 声称为业务模块新增能力；OpenClaw 安装环境与 Fleet environment 生命周期不受影响。
 
 ### 3.3 Capability 是两套边界，不强行合并
 
@@ -151,9 +152,17 @@ job_compatibility
 
 以上名称只用于说明本轮已经删除的旧 public/internal 面；它们不是当前 authority、route、DTO、事件或待办。
 
-真实 operation/task/run 属于具体 owner；提交后是否等待真实业务结果由 owner 语义决定。Toolchain prepare 属于必须等待真实结果的调用：Renderer 进入主界面后 lazy 调 `hostToolchainPrepare()`，Electron `POST /api/toolchain/uv/prepare` 调 Rust private `host.toolchain.prepare`，等待 `runtime-host/external/toolchain::NativeToolchain` native result 后只返回 public outcome。其他只需要提交成功即可继续的慢操作返回 owner-local operationId，并通过该 owner/facade 的 typed query/event 观察完成、失败、进度和 unknown。
+真实 operation/task/run 属于具体 owner；提交后是否等待真实业务结果由 owner 语义决定。Toolchain prepare 属于必须等待真实结果的调用：Renderer 进入主界面后 lazy 调 `hostToolchainPrepare()`，Electron `POST /api/toolchain/uv/prepare` 经 `toolchainTransport.prepare()` 调 modules/toolchain owner loopback，等待 `runtime-host/modules/toolchain::NativeToolchain` native result 后只返回 public outcome。其他只需要提交成功即可继续的慢操作返回 owner-local operationId，并通过该 owner/facade 的 typed query/event 观察完成、失败、进度和 unknown。
 
-### 3.5 Foundation execution 机制保留
+### 3.5 Module platform contract 已落地
+
+Rust platform 当前用 `ModuleDescriptor` 声明 module id、provides/requires/effects 与可选 loopback descriptor；`ModuleCatalog` 同时提供 capability dependency 校验和 scoped effect registration 校验能力：`validate_effects()` 会拒绝 unknown module、未声明 effect 与缺失 scoped effect，可选 loopback descriptor 会自动计入该 module 的 scoped `Route` registration。[VERIFY: runtime-host/platform/src/module.rs:31-99] [VERIFY: runtime-host/platform/src/module.rs:141-204] [VERIFY: runtime-host/platform/src/module.rs:239-304]
+
+当前 Host composition 收集 Foundation `ModuleScope` registrations，`module_registry/install` 调用 `ModuleCatalog::install_with_capabilities_and_effects()` 安装 modules，并输出 installed route registry、private-control snapshot 与 capability catalog projection；loopback router 只消费 installed route descriptors。legacy compatibility module 已删除，不在 router 或 module registry 中保留 root endpoint；Organization/Team、Sessions、Fleet 等业务 HTTP/SSE/WS 入口由各自 module descriptor 注册。普通模块不拥有 Host transport/listener，也不能把 route descriptor 反推为通用 Host registry。[VERIFY: runtime-host/host/src/module_registry/install.rs] [VERIFY: runtime-host/host/src/http/router.rs] [VERIFY: runtime-host/modules/organization/src/adapters/loopback/mod.rs:50-58] [VERIFY: runtime-host/modules/fleet/src/lib.rs:63-74] [VERIFY: runtime-host/modules/fleet/src/adapters/loopback/mod.rs:61-69] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/mod.rs:73-85]
+
+Platform loopback outcome 类型是 `Response`、`Stream`、`Upgrade`；Host 统一 loopback server 直接写回该 outcome，Session events 走 stream，Remote Fleet terminal 走 Fleet module route upgrade。统一 listener 自身作为 Host HTTP extension scope 管理，不归普通模块所有。[VERIFY: runtime-host/platform/src/loopback.rs:152-218] [VERIFY: runtime-host/host/src/http/server.rs:20-40] [VERIFY: runtime-host/host/src/http/server.rs:83-104] [VERIFY: runtime-host/modules/fleet/src/adapters/loopback/mod.rs:120-164] Foundation `ModuleScope` 是运行期 mechanism：注册 disposer/owned task/process/listener/runtime endpoint 并 LIFO dispose，`EffectGuard` 仅保存 scope/effect id；它向 Platform catalog 提供 scoped registration 事实，但不替代 Platform descriptor/effect 契约。[VERIFY: runtime-host/foundation/src/lifecycle.rs:9-74] [VERIFY: runtime-host/foundation/src/lifecycle.rs:131-214] [VERIFY: runtime-host/host/src/composition/host/owner_runtime.rs:55-107]
+
+### 3.6 Foundation execution 机制保留
 
 `foundation::execution` 是 runtime-host 已有的通用后台执行机制，供 Host、Domain 和 Integration 持有自己的异步工作：
 

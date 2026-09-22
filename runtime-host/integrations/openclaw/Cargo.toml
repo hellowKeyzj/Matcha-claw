@@ -12,18 +12,34 @@ path = "src/lib.rs"
 test-support = []
 
 [dependencies]
+diagnostics-module = { package = "diagnostics", version = "0.1.0", path = "../../modules/diagnostics" }
+channels = { version = "0.1.0", path = "../../modules/channels" }
+connectors = { version = "0.1.0", path = "../../modules/connectors" }
 base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
-environment = { version = "0.1.0", path = "../../domains/environment" }
 foundation = { version = "0.1.0", path = "../../foundation" }
-organization = { version = "0.1.0", path = "../../domains/organization" }
-toolchain = { version = "0.1.0", path = "../../external/toolchain" }
+organization = { version = "0.1.0", path = "../../modules/organization" }
+cron = { version = "0.1.0", path = "../../modules/cron" }
+platform-tools = { version = "0.1.0", path = "../../modules/platform-tools" }
+sessions-module = { package = "sessions", version = "0.1.0", path = "../../modules/sessions" }
+subagents = { version = "0.1.0", path = "../../modules/subagents" }
+task-manager = { version = "0.1.0", path = "../../modules/task-manager" }
+toolchain = { version = "0.1.0", path = "../../modules/toolchain" }
+usage = { version = "0.1.0", path = "../../modules/usage" }
+workspace-module = { package = "workspace", version = "0.1.0", path = "../../modules/workspace" }
 futures-util.workspace = true
 getrandom.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 json5.workspace = true
 platform = { version = "0.1.0", path = "../../platform" }
+plugins-module = { package = "plugins", version = "0.1.0", path = "../../modules/plugins" }
+skills-module = { package = "skills", version = "0.1.0", path = "../../modules/skills" }
+settings = { version = "0.1.0", path = "../../modules/settings" }
+security = { version = "0.1.0", path = "../../modules/security" }
+provider = { version = "0.1.0", path = "../../modules/provider" }
+runtime-directory = { version = "0.1.0", path = "../../modules/runtime-directory" }
+clawhub = { version = "0.1.0", path = "../../external/clawhub" }
 qrcode.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 rusqlite.workspace = true
@@ -39,6 +55,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 foundation = { version = "0.1.0", path = "../../foundation", features = ["test-support"] }
+tempfile = "3.8"
 tokio-rustls.workspace = true
 
 [target.'cfg(unix)'.dependencies]

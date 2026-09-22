@@ -7,12 +7,14 @@ const UNAVAILABLE = {
   error: 'Session catalog is unavailable',
 } as const;
 
+type RuntimeEndpoint = Readonly<{
+  kind: 'native-runtime';
+  runtimeAdapterId: 'openclaw' | 'matcha-agent';
+  runtimeInstanceId: 'local';
+}>;
+
 type SessionIdentity = Readonly<{
-  endpoint: Readonly<{
-    kind: 'native-runtime';
-    runtimeAdapterId: 'openclaw';
-    runtimeInstanceId: 'local';
-  }>;
+  endpoint: RuntimeEndpoint;
   agentId: string;
   sessionKey: string;
 }>;
@@ -22,8 +24,11 @@ type SessionSummary = Readonly<{
   agentId: string;
   sessionIdentity: SessionIdentity;
   kind: 'main' | 'session' | 'automation';
+  preferred?: boolean;
   endpointSessionId?: string;
   model?: string;
+  protocolId?: string;
+  runtimeEndpointId?: string;
   updatedAt?: number;
 }>;
 
@@ -36,19 +41,11 @@ type SessionListRequest = Readonly<{
   operationId: 'sessions.list';
   scope: Readonly<{
     kind: 'runtime-instance';
-    endpoint: Readonly<{
-      kind: 'native-runtime';
-      runtimeAdapterId: 'openclaw';
-      runtimeInstanceId: 'local';
-    }>;
+    endpoint: RuntimeEndpoint;
   }>;
   target: Readonly<{ kind: 'runtime-endpoint' }>;
   input: Readonly<{
-    endpoint: Readonly<{
-      kind: 'native-runtime';
-      runtimeAdapterId: 'openclaw';
-      runtimeInstanceId: 'local';
-    }>;
+    endpoint: RuntimeEndpoint;
   }>;
 }>;
 
@@ -109,7 +106,18 @@ function isSessionSummary(value: unknown): value is SessionSummary {
     || !Object.hasOwn(value, 'agentId')
     || !Object.hasOwn(value, 'sessionIdentity')
     || !Object.hasOwn(value, 'kind')
-    || !Object.keys(value).every((key) => ['key', 'agentId', 'sessionIdentity', 'kind', 'endpointSessionId', 'model', 'updatedAt'].includes(key))
+    || !Object.keys(value).every((key) => [
+      'key',
+      'agentId',
+      'sessionIdentity',
+      'kind',
+      'preferred',
+      'endpointSessionId',
+      'model',
+      'protocolId',
+      'runtimeEndpointId',
+      'updatedAt',
+    ].includes(key))
     || typeof value.key !== 'string'
     || typeof value.agentId !== 'string'
     || !isSessionIdentity(value.sessionIdentity)
@@ -117,8 +125,11 @@ function isSessionSummary(value: unknown): value is SessionSummary {
     || !['main', 'session', 'automation'].includes(value.kind)) {
     return false;
   }
-  return (value.endpointSessionId === undefined || typeof value.endpointSessionId === 'string')
+  return (value.preferred === undefined || typeof value.preferred === 'boolean')
+    && (value.endpointSessionId === undefined || typeof value.endpointSessionId === 'string')
     && (value.model === undefined || typeof value.model === 'string')
+    && (value.protocolId === undefined || typeof value.protocolId === 'string')
+    && (value.runtimeEndpointId === undefined || typeof value.runtimeEndpointId === 'string')
     && (value.updatedAt === undefined || typeof value.updatedAt === 'number')
     && value.sessionIdentity.agentId === value.agentId
     && value.sessionIdentity.sessionKey === value.key;
@@ -147,7 +158,8 @@ function isSessionListRequest(value: unknown): value is SessionListRequest {
     && value.operationId === 'sessions.list'
     && isScope(value.scope)
     && isTarget(value.target)
-    && isInput(value.input);
+    && isInput(value.input)
+    && sameEndpoint(value.scope.endpoint, value.input.endpoint);
 }
 
 function isScope(value: unknown): boolean {
@@ -165,10 +177,16 @@ function isInput(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['endpoint']) && isEndpoint(value.endpoint);
 }
 
-function isEndpoint(value: unknown): boolean {
+function isEndpoint(value: unknown): value is RuntimeEndpoint {
   return isRecord(value)
     && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
     && value.kind === 'native-runtime'
-    && value.runtimeAdapterId === 'openclaw'
+    && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
     && value.runtimeInstanceId === 'local';
+}
+
+function sameEndpoint(left: RuntimeEndpoint, right: RuntimeEndpoint): boolean {
+  return left.kind === right.kind
+    && left.runtimeAdapterId === right.runtimeAdapterId
+    && left.runtimeInstanceId === right.runtimeInstanceId;
 }

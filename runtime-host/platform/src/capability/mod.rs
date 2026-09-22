@@ -1,4 +1,10 @@
+mod authorization;
+
 use std::fmt;
+
+pub use authorization::{
+    CapabilityDecisionError, CapabilityDecisionVerifier, VerifiedCapabilityDecision,
+};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CapabilityId(String);

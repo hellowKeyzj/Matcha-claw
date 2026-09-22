@@ -1,4 +1,4 @@
-use environment::ProviderAccount;
+use ::provider::ProviderAccount;
 
 const MINIMAX_PORTAL_PROVIDER_KEY: &str = "minimax-portal";
 const ZAI_PROVIDER_KEY: &str = "zai";

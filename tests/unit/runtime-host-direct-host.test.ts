@@ -345,14 +345,14 @@ describe('launchDirectRuntimeHost', () => {
 
   it('sends lifecycle controls through command frames without changing direct host EOF stop', async () => {
     const { child, host } = await readyHost();
-    const command = host.command({ name: 'openclaw.lifecycle.stop' });
+    const command = host.command({ name: 'host.health' });
     const frame = child.write.mock.calls[1][0] as Uint8Array;
     const request = JSON.parse(Buffer.from(frame.subarray(4)).toString('utf8')) as {
       readonly id: string;
       readonly command: unknown;
     };
 
-    expect(request.command).toEqual({ name: 'openclaw.lifecycle.stop' });
+    expect(request.command).toEqual({ name: 'host.health' });
     expect(child.end).not.toHaveBeenCalled();
     child.stdout.emitData(controlFrame({
       version: 1,

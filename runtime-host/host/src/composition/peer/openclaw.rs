@@ -1,6 +1,6 @@
 use foundation::process::supervision::StartOutcome;
 
-use crate::{RuntimeState, diagnostics::OpenClawStartupDiagnostics, runtime::driver::LifecycleOps};
+use crate::{RuntimeState, composition::runtime_ports::LifecycleOps};
 
 use super::{RestartOpenClawError, StartOpenClawError, StopOpenClawError, actor::PeerShared};
 
@@ -85,13 +85,8 @@ pub(super) async fn apply_prelaunch_projections(shared: &PeerShared) {
     {
         report_configuration_rejected(shared.openclaw_startup_diagnostics());
     }
-    let _ = shared
-        .provider()
-        .prepare_openclaw_private_bootstrap(shared.open_claw().state_dir().clone())
-        .await;
-    if shared.settings().apply_saved_projection().await
-        != crate::settings::DesiredOutcome::Confirmed
-    {
+    let _ = shared.provider().prepare_private_projection().await;
+    if shared.settings().apply_saved_projection().await != settings::DesiredOutcome::Confirmed {
         report_configuration_rejected(shared.openclaw_startup_diagnostics());
     }
     if shared
@@ -110,7 +105,8 @@ pub(super) async fn apply_ready_projections(shared: &PeerShared) {
     }
 }
 
-pub(super) fn report_configuration_rejected(diagnostics: &OpenClawStartupDiagnostics) {
-    diagnostics
-        .report(openclaw::lifecycle::logs::LifecycleDiagnosticCategory::ConfigurationRejected);
+pub(super) fn report_configuration_rejected(
+    diagnostics: &::diagnostics::RuntimeStartupDiagnostics,
+) {
+    diagnostics.report(openclaw::diagnostics::configuration_rejected());
 }

@@ -20,8 +20,10 @@ use foundation::process::{
     },
 };
 use platform::exchange::InvocationOutcome;
+use sessions_module::command::SessionIngressEvent;
 
 use crate::{
+    driver::matcha_session_event,
     lifecycle::secret::Secret,
     session::{
         canonical::{CanonicalSessionReadResult, read as read_canonical_session},
@@ -710,7 +712,7 @@ enum SubscriptionDelivery {
 }
 
 async fn send_renderer_event(
-    events: &mpsc::Sender<SessionSubscriptionItem>,
+    events: &mpsc::Sender<SessionIngressEvent>,
     event: RendererEventEnvelope,
     session_id: SessionId,
     native_cursor: Sequence,
@@ -719,7 +721,10 @@ async fn send_renderer_event(
     let route_key = event.route_key().to_owned();
     let session_key = event.session_key().to_owned();
     let run_id = event.run_id().to_owned();
-    match events.try_send(SessionSubscriptionItem::Event(event)) {
+    let Some(event) = matcha_session_event(SessionSubscriptionItem::Event(event)) else {
+        return SubscriptionDelivery::Sent;
+    };
+    match events.try_send(event) {
         Ok(()) => SubscriptionDelivery::Sent,
         Err(mpsc::error::TrySendError::Closed(_)) => SubscriptionDelivery::Closed,
         Err(mpsc::error::TrySendError::Full(_)) => {
@@ -740,18 +745,21 @@ async fn send_renderer_event(
 }
 
 async fn send_recovery(
-    events: &mpsc::Sender<SessionSubscriptionItem>,
+    events: &mpsc::Sender<SessionIngressEvent>,
     route_key: &str,
     session_key: &str,
     run_id: &str,
     recovery: SessionRecovery,
 ) -> bool {
-    match events.try_send(SessionSubscriptionItem::Recovery {
+    let Some(event) = matcha_session_event(SessionSubscriptionItem::Recovery {
         route_key: route_key.to_owned(),
         session_key: session_key.to_owned(),
         run_id: run_id.to_owned(),
         recovery,
-    }) {
+    }) else {
+        return false;
+    };
+    match events.try_send(event) {
         Ok(()) => true,
         Err(mpsc::error::TrySendError::Closed(_)) => false,
         Err(mpsc::error::TrySendError::Full(item)) => events.send(item).await.is_ok(),
@@ -972,7 +980,7 @@ impl MatchaPeer {
         renderer_session_key: String,
         run_id: RunId,
         route_key: String,
-        events: mpsc::Sender<SessionSubscriptionItem>,
+        events: mpsc::Sender<SessionIngressEvent>,
         trace_id: Option<String>,
     ) -> Result<tokio::task::JoinHandle<()>, RendererSubscriptionError> {
         if !receipt_reading_admitted(self.snapshot().phase()) {
@@ -1282,7 +1290,7 @@ async fn subscribe_renderer_events_raw(
     renderer_session_key: String,
     run_id: RunId,
     route_key: String,
-    events: mpsc::Sender<SessionSubscriptionItem>,
+    events: mpsc::Sender<SessionIngressEvent>,
     trace_id: Option<String>,
 ) -> Result<tokio::task::JoinHandle<()>, RendererSubscriptionError> {
     log_renderer_subscription_trace(
@@ -1556,7 +1564,7 @@ impl MatchaPeerSessionHandle {
         renderer_session_key: String,
         run_id: RunId,
         route_key: String,
-        events: mpsc::Sender<SessionSubscriptionItem>,
+        events: mpsc::Sender<SessionIngressEvent>,
         trace_id: Option<String>,
     ) -> Result<tokio::task::JoinHandle<()>, RendererSubscriptionError> {
         if !receipt_reading_admitted(self.handle.snapshot().phase()) {
@@ -1788,7 +1796,7 @@ impl RoleSessionPromptHandle {
         run_id: RoleRunId,
         renderer_session_key: String,
         route_key: String,
-        events: mpsc::Sender<SessionSubscriptionItem>,
+        events: mpsc::Sender<SessionIngressEvent>,
     ) -> InvocationOutcome<RoleRunId, RoleSessionError> {
         if !receipt_reading_admitted(self.handle.snapshot().phase()) {
             return InvocationOutcome::TargetRejected(RoleSessionError::RuntimeUnavailable);
@@ -2358,9 +2366,9 @@ mod renderer_tests {
         let public_session_key = "matcha-agent:matcha:native-session-1";
         let native_session_id = "native-session-1";
         let (events, mut receiver) = mpsc::channel(1);
-        events
-            .try_send(SessionSubscriptionItem::Event(RendererEventEnvelope::new(
-                "route-1".to_owned(),
+        let event =
+            matcha_session_event(SessionSubscriptionItem::Event(RendererEventEnvelope::new(
+                "renderer-route:1".to_owned(),
                 public_session_key.to_owned(),
                 "run-1".to_owned(),
                 1,
@@ -2371,6 +2379,7 @@ mod renderer_tests {
                 },
             )))
             .unwrap();
+        assert!(events.try_send(event).is_ok());
         let received = tokio::spawn(async move {
             let _ = receiver.recv().await.unwrap();
             receiver.recv().await.unwrap()
@@ -2379,7 +2388,7 @@ mod renderer_tests {
         let delivery = send_renderer_event(
             &events,
             RendererEventEnvelope::new(
-                "route-1".to_owned(),
+                "renderer-route:1".to_owned(),
                 public_session_key.to_owned(),
                 "run-1".to_owned(),
                 2,
@@ -2396,17 +2405,19 @@ mod renderer_tests {
         .await;
 
         assert_eq!(delivery, SubscriptionDelivery::Recovering);
-        assert!(matches!(
-            received.await.unwrap(),
-            SessionSubscriptionItem::Recovery {
-                session_key,
-                recovery: SessionRecovery::RecoveryRequired {
-                    reason: crate::session::recovery::RecoveryReason::EventOverflow,
-                    ..
-                },
-                ..
-            } if session_key == public_session_key
-        ));
+        let (identity, event) = received.await.unwrap().into_parts();
+        assert_eq!(identity.session_key(), public_session_key);
+        assert_eq!(event.binding.session_key(), public_session_key);
+        assert_eq!(event.binding.route_key(), Some("renderer-route:1"));
+        assert_eq!(event.binding.source_epoch(), Some(7));
+        assert_eq!(event.run_id.as_deref(), Some("run-1"));
+        assert_eq!(event.cursor, Some(2));
+        assert_eq!(
+            event.changes,
+            vec![sessions_module::state::SessionChange::RecoveryRequired {
+                reason: sessions_module::state::RecoveryReason::EventOverflow,
+            }],
+        );
     }
 
     #[test]

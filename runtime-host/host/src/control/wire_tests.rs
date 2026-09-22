@@ -17,113 +17,20 @@ fn command(name: &str, input: Option<Value>) -> Value {
 }
 
 #[test]
-fn command_round_trip_is_strict_and_has_no_http_shape() {
+fn command_round_trip_preserves_name_and_input_envelope() {
     let health =
         decode_command_request(command("host.health", None).to_string().as_bytes()).unwrap();
-    let lifecycle = [
-        ("matcha.lifecycle.status", Command::MatchaStatus {}),
-        ("matcha.lifecycle.start", Command::MatchaStart {}),
-        ("matcha.lifecycle.stop", Command::MatchaStop {}),
-        ("matcha.lifecycle.restart", Command::MatchaRestart {}),
-        ("openclaw.lifecycle.status", Command::OpenClawStatus {}),
-        (
-            "openclaw.environment.status",
-            Command::OpenClawEnvironmentStatus {},
-        ),
-        ("openclaw.runtime.paths", Command::OpenClawRuntimePaths {}),
-        ("openclaw.cli.command", Command::OpenClawCliCommand {}),
-        (
-            "openclaw.tool-permission.get",
-            Command::OpenClawToolPermissionGet {},
-        ),
-        ("host.toolchain.status", Command::HostToolchainStatus {}),
-        ("host.toolchain.prepare", Command::HostToolchainPrepare {}),
-        ("openclaw.lifecycle.start", Command::OpenClawStart {}),
-        ("openclaw.lifecycle.stop", Command::OpenClawStop {}),
-        ("openclaw.lifecycle.restart", Command::OpenClawRestart {}),
-        ("openclaw.control.ready", Command::OpenClawControlReady {}),
-    ];
 
     assert_eq!(health.id.as_str(), "command-1");
     assert_eq!(health.timeout, Timeout(1_000));
-    assert_eq!(health.command, Command::HostHealth {});
-    let capabilities = decode_command_request(
-        command("host.capabilities.list", None)
-            .to_string()
-            .as_bytes(),
-    )
-    .unwrap();
-    assert_eq!(capabilities.command, Command::HostCapabilitiesList {});
-    assert_eq!(
-        serde_json::from_slice::<Value>(&encode_command_request(&capabilities).unwrap()).unwrap(),
-        command("host.capabilities.list", None),
-    );
-    let describe = decode_command_request(
-        command(
-            "host.capabilities.describe",
-            Some(json!({
-                "id": "scheduler.cron",
-                "scope": {
-                    "kind": "runtime-instance",
-                    "endpoint": {
-                        "kind": "native-runtime",
-                        "runtimeAdapterId": "openclaw",
-                        "runtimeInstanceId": "local",
-                    },
-                },
-            })),
-        )
-        .to_string()
-        .as_bytes(),
-    )
-    .unwrap();
-    assert_eq!(
-        describe.command,
-        Command::HostCapabilitiesDescribe {
-            input: CommandInput(json!({
-                "id": "scheduler.cron",
-                "scope": {
-                    "kind": "runtime-instance",
-                    "endpoint": {
-                        "kind": "native-runtime",
-                        "runtimeAdapterId": "openclaw",
-                        "runtimeInstanceId": "local",
-                    },
-                },
-            })),
-        }
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&encode_command_request(&describe).unwrap()).unwrap(),
-        command(
-            "host.capabilities.describe",
-            Some(json!({
-                "id": "scheduler.cron",
-                "scope": {
-                    "kind": "runtime-instance",
-                    "endpoint": {
-                        "kind": "native-runtime",
-                        "runtimeAdapterId": "openclaw",
-                        "runtimeInstanceId": "local",
-                    },
-                },
-            })),
-        )
-    );
-    for (name, expected) in lifecycle {
-        let decoded = decode_command_request(command(name, None).to_string().as_bytes()).unwrap();
-        assert_eq!(decoded.command, expected);
-        assert_eq!(
-            serde_json::from_slice::<Value>(&encode_command_request(&decoded).unwrap()).unwrap(),
-            command(name, None),
-        );
-    }
+    assert_eq!(health.command.name(), "host.health");
+    assert!(health.command.input().is_none());
     assert_eq!(
         serde_json::from_slice::<Value>(&encode_command_request(&health).unwrap()).unwrap(),
         command("host.health", None)
     );
 
-    let permission = decode_command_request(
+    let product = decode_command_request(
         command(
             "openclaw.tool-permission.set",
             Some(json!({ "mode": "fullAccess" })),
@@ -132,55 +39,10 @@ fn command_round_trip_is_strict_and_has_no_http_shape() {
         .as_bytes(),
     )
     .unwrap();
+    assert_eq!(product.command.name(), "openclaw.tool-permission.set");
     assert_eq!(
-        permission.command,
-        Command::OpenClawToolPermissionSet {
-            input: CommandInput(json!({ "mode": "fullAccess" })),
-        }
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&encode_command_request(&permission).unwrap()).unwrap(),
-        command(
-            "openclaw.tool-permission.set",
-            Some(json!({ "mode": "fullAccess" })),
-        )
-    );
-
-    let browser = decode_command_request(
-        command(
-            "openclaw.browser.request",
-            Some(
-                json!({ "method": "GET", "path": "/session/view", "body": { "viewId": "view-1" } }),
-            ),
-        )
-        .to_string()
-        .as_bytes(),
-    )
-    .unwrap();
-    assert_eq!(
-        browser.command,
-        Command::OpenClawBrowserRequest {
-            input: CommandInput(
-                json!({ "method": "GET", "path": "/session/view", "body": { "viewId": "view-1" } })
-            ),
-        }
-    );
-    let mcp = decode_command_request(
-        command(
-            "openclaw.mcp-app.request",
-            Some(json!({ "operationId": "mcp.app.open", "sessionKey": "agent:main:session-1", "viewId": "view-1", "standalone": true })),
-        )
-        .to_string()
-        .as_bytes(),
-    )
-    .unwrap();
-    assert_eq!(
-        mcp.command,
-        Command::OpenClawMcpAppRequest {
-            input: CommandInput(
-                json!({ "operationId": "mcp.app.open", "sessionKey": "agent:main:session-1", "viewId": "view-1", "standalone": true })
-            ),
-        }
+        product.command.input().map(|input| &input.0),
+        Some(&json!({ "mode": "fullAccess" }))
     );
 }
 
@@ -199,224 +61,21 @@ fn command_rejects_legacy_http_shape_and_schema_drift() {
             "type": "command",
             "id": "command-1",
             "timeoutMs": 1_000,
-            "command": {
-                "name": "host.capabilities.describe",
-                "method": "POST",
-            },
+            "command": { "name": "host.capabilities.describe", "method": "POST" },
         }),
         json!({
             "version": 1,
             "type": "command",
             "id": "command-1",
             "timeoutMs": 1_000,
-            "command": { "name": "host.capabilities.describe" },
+            "command": { "name": "host.capabilities.describe", "input": null },
         }),
         json!({
             "version": 1,
             "type": "command",
             "id": "command-1",
             "timeoutMs": 1_000,
-            "command": {
-                "name": "host.capabilities.describe",
-                "input": null,
-            },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": {
-                "name": "host.capabilities.describe",
-                "input": [],
-            },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "host.runtime.execute", "input": {} },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.toolchain.install-uv" },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "host.diagnostics.collect" },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "host.diagnostics.cancel" },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "team.human-decision", "input": {
-                "runId": "run:1",
-                "approvalId": "approval:1",
-                "decision": "approve",
-                "idempotencyKey": "decision:1"
-            } },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "matcha.lifecycle.status", "input": {} },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "matcha.lifecycle.start", "input": null },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "matcha.lifecycle.stop", "unexpected": true },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "matcha.lifecycle.restart", "input": [] },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.lifecycle.status", "input": {} },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.environment.status", "path": "/private/openclaw" },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.environment.status", "method": "GET" },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.control.ready", "input": {} },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "sessions.authority.revoke" },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.sessions.list", "input": {} },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.control.ready", "method": "GET" },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.control.ready", "route": "/control/ready" },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.control.ready", "payload": {} },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.control.ready", "endpoint": "http://127.0.0.1" },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.control.ready", "port": 18789 },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.control.ready", "token": "private-token" },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.lifecycle.stop", "unexpected": true },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.lifecycle.restart", "input": null },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.skills.execute", "input": null },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.skills.execute", "input": [], "method": "POST" },
-        }),
-        json!({
-            "version": 1,
-            "type": "command",
-            "id": "command-1",
-            "timeoutMs": 1_000,
-            "command": { "name": "openclaw.skills.execute", "input": {}, "route": "/api/openclaw/chat/send" },
+            "command": { "name": "host.capabilities.describe", "input": [] },
         }),
         json!({
             "version": 1,
@@ -460,6 +119,13 @@ fn command_rejects_legacy_http_shape_and_schema_drift() {
             "timeoutMs": 1_000,
             "command": { "name": "host.health" },
         }),
+        json!({
+            "version": 1,
+            "type": "command",
+            "id": "command-1",
+            "timeoutMs": 1_000,
+            "command": { "name": "" },
+        }),
     ];
 
     for value in cases {
@@ -475,16 +141,19 @@ fn command_rejects_legacy_http_shape_and_schema_drift() {
 }
 
 #[test]
-fn private_control_rejects_public_capability_names() {
+fn command_wire_accepts_unknown_names_for_registry_resolution() {
     for (name, input) in [
         ("environment.create", Some(json!({}))),
         ("environment.replace", Some(json!({}))),
         ("environment.delete", Some(json!({}))),
         ("openclaw.sessions.list", None),
     ] {
+        let request =
+            decode_command_request(command(name, input.clone()).to_string().as_bytes()).unwrap();
+        assert_eq!(request.command.name(), name);
         assert_eq!(
-            decode_command_request(command(name, input).to_string().as_bytes()),
-            Err(WireError::InvalidCommand)
+            request.command.input().map(|input| &input.0),
+            input.as_ref()
         );
     }
 }
@@ -831,9 +500,9 @@ fn private_control_wire_keeps_owner_dtos_and_runtime_seams_private() {
 
 #[test]
 fn session_handle_separates_query_and_mutation_mailboxes() {
-    let handle = include_str!("../sessions/handle.rs");
-    let command = include_str!("../sessions/command.rs");
-    let query = include_str!("../sessions/query.rs");
+    let handle = include_str!("../../../modules/sessions/src/api.rs");
+    let command = include_str!("../../../modules/sessions/src/application/commands.rs");
+    let query = include_str!("../../../modules/sessions/src/application/queries.rs");
 
     assert!(handle.contains("self.owner.send_query(query(reply))"));
     assert!(handle.contains("self.owner\n            .send_command(command(reply))"));
@@ -841,13 +510,12 @@ fn session_handle_separates_query_and_mutation_mailboxes() {
     assert!(!command.contains("SessionQuery"));
 
     for method in [
-        "pub(crate) async fn list_sessions",
-        "pub(crate) async fn get_session",
-        "pub(crate) async fn pending_approvals",
-        "pub(crate) async fn load_timeline",
-        "pub(crate) async fn list_openclaw_sessions",
-        "pub(crate) async fn list_matcha_sessions",
-        "pub(crate) async fn load_matcha_history",
+        "pub async fn list_sessions",
+        "pub async fn get_session",
+        "pub async fn pending_approvals",
+        "pub async fn load_timeline",
+        "pub async fn list_session_catalog",
+        "pub async fn load_session_history",
     ] {
         assert!(
             method_body(handle, method).contains("request_query"),
@@ -855,17 +523,22 @@ fn session_handle_separates_query_and_mutation_mailboxes() {
         );
     }
 
+    assert!(
+        method_body(handle, "pub async fn ensure_session").contains("ensure_bound_session"),
+        "pub async fn ensure_session"
+    );
+
     for method in [
-        "pub(crate) async fn ensure_session",
-        "pub(crate) async fn ingest_event",
-        "pub(crate) async fn evict_session",
-        "pub(crate) async fn create_session",
-        "pub(crate) async fn send_session",
-        "pub(crate) async fn abort_session",
-        "pub(crate) async fn delete_session",
-        "pub(crate) async fn rename_session",
-        "pub(crate) async fn respond_to_approval",
-        "pub(crate) async fn select_model",
+        "pub async fn ensure_bound_session",
+        "pub async fn ingest_event",
+        "pub async fn evict_session",
+        "pub async fn create_session",
+        "pub async fn send_session",
+        "pub async fn abort_session",
+        "pub async fn delete_session",
+        "pub async fn rename_session",
+        "pub async fn respond_to_approval",
+        "pub async fn select_model",
     ] {
         assert!(
             method_body(handle, method).contains("request_command"),
@@ -879,7 +552,7 @@ fn method_body<'a>(source: &'a str, signature: &str) -> &'a str {
         .find(signature)
         .unwrap_or_else(|| panic!("missing SessionHandle method {signature}"));
     let body = &source[start..];
-    match body.find("\n    pub(crate) async fn ") {
+    match body.find("\n    pub async fn ") {
         Some(end) => &body[..end],
         None => body,
     }

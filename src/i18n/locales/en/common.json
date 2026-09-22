@@ -2,6 +2,74 @@
     "auth": {
         "boot": {
             "title": "Checking sign-in status"
+        },
+        "title": {
+            "login": "Sign in to MatchaClaw",
+            "register": "Create an account",
+            "twoFactor": "Two-factor authentication"
+        },
+        "description": {
+            "login": "Sign in to your account to continue using MatchaClaw.",
+            "register": "Create an account to get started with MatchaClaw.",
+            "twoFactor": "Enter the code from your authenticator app to finish signing in."
+        },
+        "submit": {
+            "login": "Sign in",
+            "register": "Register",
+            "twoFactor": "Verify and sign in"
+        },
+        "offline": {
+            "title": "Account service unavailable",
+            "description": "You can use local features for now and try signing in later.",
+            "hint": "Once the account service is available again, retry the connection to sign in.",
+            "retry": "Retry connection"
+        },
+        "localEntry": {
+            "offline": "Continue with local features",
+            "guest": "Continue without signing in",
+            "guestDescription": "Use local features now and sign in whenever you're ready."
+        },
+        "fields": {
+            "email": "Email",
+            "password": "Password",
+            "code": "Verification code",
+            "emailCode": "Email verification code"
+        },
+        "placeholders": {
+            "password": "Enter your password",
+            "twoFactorCode": "Enter your authenticator code",
+            "emailCode": "Enter the code sent to your email"
+        },
+        "actions": {
+            "sendVerifyCode": "Send code"
+        },
+        "errors": {
+            "emailRequiredForCode": "Enter your email address first.",
+            "registrationClosed": "Registration is currently closed."
+        },
+        "notice": {
+            "verifyCodeSent": "Verification code sent. Please check your email."
+        },
+        "registrationClosedHint": "Registration is currently closed. You can sign in with an existing account.",
+        "switch": {
+            "hasAccount": "Already have an account?",
+            "noAccount": "Don't have an account?",
+            "login": "Sign in",
+            "register": "Register",
+            "registrationClosed": "Registration closed"
+        },
+        "legal": {
+            "prefix": "By continuing, you agree to the",
+            "terms": "Terms of Service",
+            "and": "and",
+            "privacy": "Privacy Policy",
+            "suffix": "."
+        },
+        "preview": {
+            "heading": "Welcome to MatchaClaw",
+            "copy": "Sign in to enter your AI workspace.",
+            "offlineHeading": "Keep working locally",
+            "offlineCopy": "The account service is temporarily unavailable. You can still open the app and use local features."
         }
     },
     "sidebar": {

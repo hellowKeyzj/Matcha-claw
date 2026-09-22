@@ -8,15 +8,21 @@ use std::{
     },
 };
 
+use runtime_directory::LifecycleOps as _;
 use serde_json::Value;
+use skills_module::{SkillRuntimeOps as _, projection::clawhub as clawhub_projection};
 
-use crate::gateway::{
-    client::GatewayClient,
-    wire::{self, GatewayResponse},
+use crate::{
+    driver::OpenClawDriver,
+    gateway::{
+        client::GatewayClient,
+        wire::{self, GatewayResponse},
+    },
 };
 
 pub mod bundle;
 mod operations;
+mod provider;
 pub mod readme;
 
 pub use operations::{
@@ -26,6 +32,117 @@ pub use operations::{
     SkillReadError, SkillRequestContext, SkillRequestError, SkillUpdateRequest, SkillUploadBegin,
     SkillUploadChunk, SkillUploadCommit,
 };
+pub use provider::OpenClawSkillProvider;
+
+pub trait OpenClawSkillsAdmissionPort: Send + Sync {
+    fn admit_openclaw_skills_request(&self) -> bool;
+}
+
+#[derive(Clone)]
+pub struct OpenClawSkillsPort {
+    admission: Arc<dyn OpenClawSkillsAdmissionPort>,
+    driver: Arc<OpenClawDriver>,
+    clawhub_registry: clawhub::ClawHubRegistryClient,
+}
+
+impl OpenClawSkillsPort {
+    pub fn new(
+        admission: Arc<dyn OpenClawSkillsAdmissionPort>,
+        driver: Arc<OpenClawDriver>,
+        clawhub_registry: clawhub::ClawHubRegistryClient,
+    ) -> Self {
+        Self {
+            admission,
+            driver,
+            clawhub_registry,
+        }
+    }
+
+    fn open_claw_is_running(&self) -> bool {
+        self.driver.as_ref().readiness()
+    }
+}
+
+impl skills_module::ports::SkillsPort for OpenClawSkillsPort {
+    fn install_clawhub_skill<'a>(
+        &'a self,
+        command: skills_module::install::Command,
+    ) -> skills_module::ports::SkillsFuture<'a, Result<skills_module::install::Outcome, ()>> {
+        Box::pin(async move {
+            if !self.admission.admit_openclaw_skills_request() || !self.open_claw_is_running() {
+                return Ok(skills_module::install::Outcome::Unknown);
+            }
+            Ok(self.driver.install_clawhub_skill(command).await)
+        })
+    }
+
+    fn skill_status<'a>(
+        &'a self,
+    ) -> skills_module::ports::SkillsFuture<'a, Result<skills_module::status::Outcome, ()>> {
+        Box::pin(async move {
+            if !self.admission.admit_openclaw_skills_request() || !self.open_claw_is_running() {
+                return Ok(skills_module::status::Outcome::Unavailable);
+            }
+            Ok(self.driver.skill_status().await)
+        })
+    }
+
+    fn manage_skills<'a>(
+        &'a self,
+        command: skills_module::management::Command,
+    ) -> skills_module::ports::SkillsFuture<'a, Result<skills_module::management::Outcome, ()>>
+    {
+        Box::pin(async move {
+            if !self.admission.admit_openclaw_skills_request() || !self.open_claw_is_running() {
+                return Ok(skills_module::management::Outcome::Unavailable);
+            }
+            Ok(self.driver.manage_skills(command).await)
+        })
+    }
+
+    fn skill_bundles<'a>(
+        &'a self,
+        command: skills_module::bundle::Command,
+    ) -> skills_module::ports::SkillsFuture<'a, Result<skills_module::bundle::Outcome, ()>> {
+        Box::pin(async move {
+            if !self.admission.admit_openclaw_skills_request() {
+                return Ok(skills_module::bundle::Outcome::Unknown);
+            }
+            Ok(self.driver.skill_bundles(command).await)
+        })
+    }
+}
+
+impl skills_module::ports::ClawHubSearchPort for OpenClawSkillsPort {
+    fn search<'a>(
+        &'a self,
+        query: Option<String>,
+        limit: u16,
+    ) -> skills_module::ports::SkillsFuture<'a, Result<Vec<skills_module::ClawHubSearchResult>, ()>>
+    {
+        Box::pin(async move {
+            self.clawhub_registry
+                .search(query.as_deref(), limit)
+                .await
+                .map(|results| {
+                    results
+                        .into_iter()
+                        .map(|result| {
+                            clawhub_projection::project_search_result(
+                                result.slug(),
+                                result.name(),
+                                result.description(),
+                                result.version(),
+                                result.author(),
+                                result.downloads(),
+                                result.stars(),
+                            )
+                        })
+                        .collect()
+                })
+        })
+    }
+}
 
 const SKILLS_STATUS_METHOD: &str = "skills.status";
 const SKILL_STATUS_METHODS: [&str; 1] = [SKILLS_STATUS_METHOD];

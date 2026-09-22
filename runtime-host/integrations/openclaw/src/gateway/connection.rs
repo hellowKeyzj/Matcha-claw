@@ -93,6 +93,21 @@ enum Command {
     Close,
 }
 
+struct ExchangeGuard<'a> {
+    commands: &'a mpsc::Sender<Command>,
+    request_id: Option<String>,
+    receiver: oneshot::Receiver<Result<GatewayResponse, ExchangeFailure>>,
+}
+
+impl Drop for ExchangeGuard<'_> {
+    fn drop(&mut self) {
+        self.receiver.close();
+        if let Some(request_id) = self.request_id.take() {
+            let _ = self.commands.try_send(Command::Cancel { request_id });
+        }
+    }
+}
+
 /// The single owner of a connected gateway socket.
 ///
 /// Callers only interact with the command channel; frame reads and writes are
@@ -164,19 +179,26 @@ impl GatewayConnection {
             }
         }
 
-        match timeout_at(expires_at, receiver).await {
+        let mut guard = ExchangeGuard {
+            commands: &self.commands,
+            request_id: Some(request_id),
+            receiver,
+        };
+        let result = timeout_at(expires_at, &mut guard.receiver).await;
+        if result.is_ok() {
+            guard.request_id = None;
+        }
+        drop(guard);
+        match result {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(ExchangeFailure {
                 error: DispatcherError::ConnectionClosed,
                 sent: sent.load(Ordering::Acquire),
             }),
-            Err(_) => {
-                let _ = self.commands.try_send(Command::Cancel { request_id });
-                Err(ExchangeFailure {
-                    error: DispatcherError::Deadline,
-                    sent: sent.load(Ordering::Acquire),
-                })
-            }
+            Err(_) => Err(ExchangeFailure {
+                error: DispatcherError::Deadline,
+                sent: sent.load(Ordering::Acquire),
+            }),
         }
     }
 
@@ -208,9 +230,21 @@ async fn run_actor(
     let mut pending = Pending::new();
     let mut queued = VecDeque::new();
     let failure = loop {
+        // A full command channel can reject Cancel; closed replies remain authoritative.
+        let previous_pending = pending.len();
+        pending.retain(|_, request| !request.reply.is_closed());
+        if pending.len() != previous_pending {
+            queued.retain(|request_id| pending.contains_key(request_id));
+            if let Err(error) = activate_queued(&mut socket, &mut pending, &mut queued).await {
+                break error;
+            }
+        }
         tokio::select! {
             command = commands.recv() => match command {
                 Some(Command::Request { request, sent, reply }) => {
+                    if reply.is_closed() {
+                        continue;
+                    }
                     let request_id = request.request_id().to_owned();
                     if pending.contains_key(&request_id) || pending.len() >= MAX_PENDING_REQUESTS {
                         let _ = reply.send(Err(ExchangeFailure {
@@ -311,6 +345,10 @@ async fn activate_request(
     let Some(pending_request) = pending.get_mut(request_id) else {
         return Ok(());
     };
+    if pending_request.reply.is_closed() {
+        pending.remove(request_id);
+        return Ok(());
+    }
     let Some(request) = pending_request.request.take() else {
         return Ok(());
     };

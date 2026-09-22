@@ -6,10 +6,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use environment::{
-    ConnectorCatalog, ConnectorSecretRef, ConnectorSecretResolution, ConnectorSecretResolverPort,
-    ConnectorSecretValue,
-    connectors::{Connector, ConnectorInput, ConnectorKind, McpTransport},
+use connectors::{
+    Connector, ConnectorCatalog, ConnectorInput, ConnectorKind, ConnectorSecretRef,
+    ConnectorSecretResolution, ConnectorSecretResolverPort, ConnectorSecretValue, McpTransport,
     unavailable_connector_secret_authority,
 };
 use serde_json::{Value, json};
@@ -36,22 +35,22 @@ impl ConnectorSecretResolverPort for MemoryConnectorSecretResolver {
     fn resolve(
         &self,
         reference: &ConnectorSecretRef,
-    ) -> Result<ConnectorSecretResolution, environment::ConnectorSecretAuthorityPortError> {
+    ) -> Result<ConnectorSecretResolution, connectors::ConnectorSecretAuthorityPortError> {
         let value = match reference.as_str() {
             "credential:v1:stdio-token" => "resolved-stdio-token",
             "credential:v1:http-token" => "resolved-http-token",
             _ => {
                 return Ok(ConnectorSecretResolution::NotFound {
-                    metadata: environment::ConnectorSecretResolutionMetadata {
-                        source: environment::ConnectorSecretSourceStatus::NotFound,
+                    metadata: connectors::ConnectorSecretResolutionMetadata {
+                        source: connectors::ConnectorSecretSourceStatus::NotFound,
                     },
                 });
             }
         };
         Ok(ConnectorSecretResolution::Resolved {
             value: ConnectorSecretValue::from_secret(value).unwrap(),
-            metadata: environment::ConnectorSecretResolutionMetadata {
-                source: environment::ConnectorSecretSourceStatus::Resolved,
+            metadata: connectors::ConnectorSecretResolutionMetadata {
+                source: connectors::ConnectorSecretSourceStatus::Resolved,
             },
         })
     }

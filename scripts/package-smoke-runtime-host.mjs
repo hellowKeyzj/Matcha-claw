@@ -678,7 +678,7 @@ function requireLocalBunCacheEvidence(value) {
   if (
     evidence.source !== 'local-cache' ||
     evidence.target !== 'win32-x64' ||
-    evidence.functionalMatch !== 'exact-bun-1.3.5-win32-x64-pe' ||
+    evidence.functionalMatch !== 'exact-bun-1.4.2-win32-x64-pe' ||
     evidence.independentProvenance !== 'unverified' ||
     evidence.supplyChainAttestation !== 'not-present'
   ) {

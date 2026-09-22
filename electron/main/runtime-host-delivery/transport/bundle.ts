@@ -2,11 +2,15 @@ import type { RuntimeHostTransports } from './host-api-transports';
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { createAgentsTransport } from '../products/agents';
 import { createSettingsDesiredTransport } from '../products/settings/desired';
+import { createCapabilityDirectoryTransport } from './capabilities';
 import { createCronTransport } from './cron';
 import { createDiagnosticsArchiveTransport } from './diagnostics';
+import { createFleetCredentialsTransport } from './fleet-credentials';
 import { createFleetTransport } from './fleet';
 import { createOpenClawMcpServersTransport } from './connectors/openclaw-mcp-servers';
 import { createExternalConnectorsTransport } from './connectors/external';
+import { createOpenClawGatewayTransport } from './openclaw-gateway';
+import { createOpenClawPlatformTransport } from './openclaw-platform';
 import { createPluginsTransport } from './plugins';
 import { createProviderAccountsTransport } from './providers/accounts';
 import { createProviderModelsTransport } from './providers/models';
@@ -20,8 +24,7 @@ import { createSessionContentTransport } from './sessions/content';
 import { createSessionCreateTransport } from './sessions/create';
 import { createSessionDeleteTransport } from './sessions/delete';
 import { createSessionEventsTransport, type SessionEventsTransport } from './sessions/events';
-import { createMatchaAgentHistoryTransport } from './sessions/matcha-history';
-import { createMatchaSessionListTransport } from './sessions/matcha-list';
+import { createSessionHistoryTransport } from './sessions/history';
 import { createSessionListTransport } from './sessions/list';
 import { createSessionModelSelectionTransport } from './sessions/model-selection';
 import { createSessionPermissionTransport } from './sessions/permission';
@@ -40,11 +43,13 @@ import { createTeamGraphTransport } from './teams/graph';
 import { createTeamLifecycleTransport } from './teams/lifecycle';
 import { createManualTeamTransport } from './teams/manual';
 import { createTeamPublicTransport } from './teams/public';
+import { createTeamRuntimeTransport } from './teams/runtime';
 import { createTeamRoleSessionsTransport } from './teams/role-sessions';
 import { createTeamSkillTransport } from './teams/skill';
 import { createTeamTaskBoardTransport } from './teams/task-board';
 import { createTeamTriggerTransport } from './teams/trigger';
 import { createTeamWebhookAuthTransport } from './teams/webhook-auth';
+import { createToolchainTransport } from './toolchain';
 import { createChannelAuthorizationTransport } from './channels/authorization';
 import { createChannelCatalogTransport } from './channels/catalog';
 import { createChannelConfigReadTransport } from './channels/config-read';
@@ -59,6 +64,7 @@ import { createWorkspaceBinaryTransport } from './workspace/read-binary';
 import { createWorkspaceDirectoryTransport } from './workspace/read-directory';
 import { createWorkspaceTextTransport } from './workspace/read-text';
 import { createWorkspaceWriteTransport } from './workspace/write-text';
+import { createRuntimeControlTransport } from './runtime-control';
 import { createRuntimeEndpointDirectoryTransport } from './runtime-directory';
 import { createUsageTransport } from './usage';
 
@@ -92,11 +98,13 @@ export function createRuntimeHostTransportBundle(
 
   const hostApiTransports: RuntimeHostTransports = {
     sessionListTransport: createSessionListTransport(issuer, runtimeHostTransportPort),
+    capabilityDirectoryTransport: createCapabilityDirectoryTransport(issuer, runtimeHostTransportPort),
     runtimeDirectoryTransport: createRuntimeEndpointDirectoryTransport(issuer, runtimeHostTransportPort),
+    runtimeControlTransport: createRuntimeControlTransport(issuer, runtimeHostTransportPort),
     fleetTransport: createFleetTransport(issuer, runtimeHostTransportPort),
+    fleetCredentialsTransport: createFleetCredentialsTransport(issuer, runtimeHostTransportPort),
     sessionContentTransport: createSessionContentTransport(issuer, runtimeHostTransportPort),
     sessionTimelineTransport: createSessionTimelineTransport(issuer, runtimeHostTransportPort),
-    matchaSessionListTransport: createMatchaSessionListTransport(issuer, runtimeHostTransportPort),
     diagnosticsArchiveTransport: createDiagnosticsArchiveTransport(issuer, runtimeHostTransportPort),
     workspaceTextTransport: createWorkspaceTextTransport(issuer, runtimeHostTransportPort),
     workspaceBinaryTransport: createWorkspaceBinaryTransport(issuer, runtimeHostTransportPort),
@@ -136,12 +144,15 @@ export function createRuntimeHostTransportBundle(
     teamTriggerTransport: createTeamTriggerTransport(issuer, runtimeHostTransportPort),
     teamWebhookAuthTransport: createTeamWebhookAuthTransport(issuer, runtimeHostTransportPort),
     teamLifecycleTransport: createTeamLifecycleTransport(issuer, runtimeHostTransportPort),
+    teamRuntimeTransport: createTeamRuntimeTransport(issuer, runtimeHostTransportPort),
     manualTeamTransport: createManualTeamTransport(issuer, runtimeHostTransportPort),
     teamHumanDecisionTransport: createTeamHumanDecisionTransport(issuer, runtimeHostTransportPort),
     providerAccountsTransport: createProviderAccountsTransport(issuer, runtimeHostTransportPort),
     providerModelsTransport: createProviderModelsTransport(issuer, runtimeHostTransportPort),
     externalConnectorsTransport: createExternalConnectorsTransport(issuer, runtimeHostTransportPort),
     openClawMcpServersTransport: createOpenClawMcpServersTransport(issuer, runtimeHostTransportPort),
+    openClawGatewayTransport: createOpenClawGatewayTransport(issuer, runtimeHostTransportPort),
+    openClawPlatformTransport: createOpenClawPlatformTransport(issuer, runtimeHostTransportPort),
     providerRoutingTransport: createProviderRoutingTransport(issuer, runtimeHostTransportPort),
     clawHubSkillInstallTransport: createClawHubSkillInstallTransport(issuer, runtimeHostTransportPort),
     clawHubSkillSearchTransport: createClawHubSkillSearchTransport(issuer, runtimeHostTransportPort),
@@ -149,8 +160,9 @@ export function createRuntimeHostTransportBundle(
     skillsManagementTransport: createSkillsManagementTransport(issuer, runtimeHostTransportPort),
     sealedSkillsTransport: createSealedSkillsTransport(issuer, runtimeHostTransportPort),
     pluginsTransport: createPluginsTransport(issuer, runtimeHostTransportPort),
+    toolchainTransport: createToolchainTransport(issuer, runtimeHostTransportPort),
     usageTransport: createUsageTransport(issuer, runtimeHostTransportPort),
-    matchaAgentHistoryTransport: createMatchaAgentHistoryTransport(issuer, runtimeHostTransportPort),
+    sessionHistoryTransport: createSessionHistoryTransport(issuer, runtimeHostTransportPort),
   };
 
   return {

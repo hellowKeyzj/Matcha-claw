@@ -8,29 +8,30 @@
 
 ### B. Electron ↔ Rust child
 
-这是 runtime-host replacement 的 compatibility boundary：
+这是 runtime-host replacement 的 active delivery boundary：
 
 ```text
 Electron Host API proxy
   -> RuntimeHostManager / Delivery adapter
-  -> Rust child /dispatch
-  -> Rust compatibility decoder
-  -> internal owner command
+  -> DirectRuntimeHost private control 或 signed loopback product route
+  -> Rust installed module route / private-control command
+  -> typed owner/facade command
 ```
 
 必须保留：
 
 | 类型 | contract |
 | --- | --- |
-| readiness | `GET /health`；child lifecycle 与 Electron manager lifecycle 分层 |
-| business ingress | `POST /dispatch`；`version/method/route/payload` v1 envelope |
-| child control | `/lifecycle/restart`、`/lifecycle/stop` |
-| failure | `BAD_REQUEST`、`PAYLOAD_TOO_LARGE`、`NOT_FOUND`、`INTERNAL_ERROR`、`UPSTREAM_UNAVAILABLE` 等稳定映射 |
-| timeout | dispatch 30s；health ≤3s |
+| readiness | `DirectRuntimeHost` 等待 private control `ready`；Host private health 与 Electron manager lifecycle 分层 |
+| Host-private control | `host.health`、`host.runtime.snapshot`；不承载业务 command enum |
+| business ingress | Electron signed loopback product transports 调 installed module routes |
+| child process control | Electron `RuntimeHostLifecycleOwner` / `DirectRuntimeHost` 负责 stdin EOF stop、forceKill、restart replacement |
+| peer lifecycle | `/api/runtime-control/lifecycle/*` product routes；不等同 Rust child PID lifecycle |
+| timeout | private control max 120s；product route 使用 route/transport deadline，Host router 默认 30s |
 | parent callback | shell action 15s；gateway event 3s、best effort、不重试；owner operation typed event 由具体 facade 定义 |
 | callback auth | parent base URL + `x-runtime-host-dispatch-token` + version/content-type validation |
 
-`/dispatch` 是外部 child ingress；内部可以按 owner 分发到 Rust modules，但不能让内部 module 的 HTTP DTO直接取代它。
+旧 root `GET /health`、`POST /dispatch`、`POST /lifecycle/restart`、`POST /lifecycle/stop` compatibility island 已删除；内部 module HTTP DTO 不需要再包进 root dispatch envelope。
 
 ### C. Rust child ↔ native peer
 
@@ -57,29 +58,29 @@ shell 是 request/response effect；gateway 和 owner operation events 是 best-
 
 ## 2. DirectRuntimeHost 与 signed transport 的定位
 
-当前代码中存在 DirectRuntimeHost、bootstrap frame、issuer、verification key 和多个专用 signed loopback transport。这些是**实现证据**，不是自动完成了外部契约替换。
-
-最终允许两种内部路径：
+当前 active delivery 只有一套方向：
 
 ```text
-Compatibility path
-  old Electron Host API / child /dispatch
-  -> Rust compatibility ingress
+Host-private path
+  Electron DirectRuntimeHost
+  -> private framed control
+  -> installed private-control descriptor
 
 Trusted product path
   Electron Delivery issuer
   -> Rust fixed product transport
   -> signed decision verifier
+  -> installed module route
 ```
 
-它们可以并存，但必须满足：
+必须满足：
 
 1. Renderer 仍看到同一 Host API；
 2. 同一 public route 只有一个实际 owner；
-3. direct transport 不绕过 main-owned route boundary；
-4. `/dispatch` 与 direct transport 的同一 operation 有明确映射；
-5. error/status/timeout/event/owner-operation projection 一致；
-6. cutover 后不保留 dual semantic owner。
+3. signed transport 不绕过 main-owned route boundary；
+4. private control 不承载业务命令；
+5. error/status/timeout/event/owner-operation projection 由对应 owner/facade 保持一致；
+6. 不保留 root compatibility semantic owner。
 
 如果某个 direct transport 仅服务新的内部 consumer，应标为 private，不得写入 Renderer contract。
 
@@ -88,17 +89,17 @@ Trusted product path
 每个 route 必须有一行 owner matrix：
 
 ```text
-Renderer allowlisted -> Electron main-owned -> child compatibility -> Rust owner
-child direct only    -> Rust compatibility/direct adapter
+Renderer allowlisted -> Electron main-owned 或 signed loopback product route -> Rust owner
+child-private        -> DirectRuntimeHost private control -> installed private-control descriptor
 external ingress     -> Rust ingress owner / Domain owner
-WebSocket            -> Electron upgrade/proxy -> Rust terminal transport
+WebSocket            -> Electron upgrade/proxy -> Rust terminal module route
 ```
 
 特别处理：
 
 - gateway 同名 route 不能以 child registry 存在推断 public owner；
-- legacy-rejected route 必须继续返回旧拒绝语义；
-- `/api/sessions/*` mutation 已 capability-first，不能把被拒绝 legacy path重新设计成成功 API；
+- retired root compatibility endpoint 不得重新注册；
+- `/api/sessions/*` mutation 已 capability-first，不能把被拒绝 legacy product path重新设计成成功 API；
 - Team webhook、Remote Fleet runtime-agent ingress 与 Renderer API 分开验证；
 - terminal WebSocket 要单独验证 raw upgrade、auth、close、backpressure 和 reconnect。
 

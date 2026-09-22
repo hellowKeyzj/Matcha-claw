@@ -61,7 +61,8 @@ describe('IPC handler registration', () => {
     const getMainWindow = vi.fn(() => null);
     const { registerIpcHandlers } = await import('../../electron/main/ipc-handlers');
 
-    registerIpcHandlers(runtimeHost, getMainWindow, { execute: vi.fn() }, {
+    const fleetCredentialsTransport = { write: vi.fn() };
+    registerIpcHandlers(runtimeHost, getMainWindow, { execute: vi.fn() }, fleetCredentialsTransport, {
       transport: { download: vi.fn() },
       showSaveDialog: vi.fn(),
       writeFile: vi.fn(),
@@ -71,6 +72,7 @@ describe('IPC handler registration', () => {
     expect(mocks.registerHostApiProxyHandlers).toHaveBeenCalledOnce();
     expect(mocks.registerGatewayHandlers).toHaveBeenCalledOnce();
     expect(mocks.registerGatewayHandlers).toHaveBeenCalledWith(runtimeHost);
+    expect(mocks.registerFleetPrivateHandlers).toHaveBeenCalledWith(fleetCredentialsTransport);
     expect(mocks.registerWindowHandlers).toHaveBeenCalledWith(getMainWindow);
   });
 });

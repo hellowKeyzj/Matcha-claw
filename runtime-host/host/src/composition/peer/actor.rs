@@ -6,20 +6,16 @@ use foundation::{
 };
 
 use crate::{
-    composition::admission::HostAdmission,
-    diagnostics::{MatchaStartupDiagnostics, OpenClawStartupDiagnostics},
-    organization::TeamRunCoordinatorHandle,
-    provider::handle::ProviderHandle,
-    runtime::adapters::openclaw::OpenClawInstance,
-    runtime::directory::RuntimeDriverDirectory,
-    runtime::driver::RuntimeStartFailure as DriverStartFailure,
-    security::SecurityHandle,
-    settings::SettingsHandle,
+    composition::admission::HostAdmission, composition::runtime_ports::RuntimeDriverDirectory,
+    composition::runtime_ports::RuntimeStartFailure as DriverStartFailure,
 };
+use organization::TeamRunCoordinatorHandle;
+use provider_module::ProviderHandle;
 
 use super::{
-    PeerCommand, PeerGlobalState, PeerKey, PeerLaneState, PeerQuery, RestartMatchaError,
-    RestartOpenClawError, StartMatchaError, StartOpenClawError, StopMatchaError, StopOpenClawError,
+    PeerCommand, PeerGlobalState, PeerKey, PeerLaneState, PeerQuery, RestartOpenClawError,
+    RuntimeRestartCommandError, RuntimeStartCommandError, RuntimeStopCommandError,
+    StartOpenClawError, StopOpenClawError,
 };
 
 #[derive(Clone)]
@@ -56,12 +52,12 @@ impl PeerStartupState {
 #[derive(Clone)]
 pub(crate) struct PeerShared {
     admission: Arc<HostAdmission>,
-    matcha_startup_diagnostics: MatchaStartupDiagnostics,
-    open_claw: Arc<OpenClawInstance>,
-    openclaw_startup_diagnostics: OpenClawStartupDiagnostics,
+    matcha_startup_diagnostics: ::diagnostics::RuntimeStartupDiagnostics,
+    open_claw: Arc<openclaw::driver::OpenClawDriver>,
+    openclaw_startup_diagnostics: ::diagnostics::RuntimeStartupDiagnostics,
     provider: ProviderHandle,
-    settings: SettingsHandle,
-    security: SecurityHandle,
+    settings: settings::SettingsModule,
+    security: security::SecurityModule,
     team_run: TeamRunCoordinatorHandle,
     runtime_directory: Arc<RuntimeDriverDirectory>,
     open_claw_runtime_events: Option<tokio::sync::mpsc::Sender<()>>,
@@ -74,15 +70,15 @@ impl PeerShared {
         &self.admission
     }
 
-    pub(super) fn matcha_startup_diagnostics(&self) -> &MatchaStartupDiagnostics {
+    pub(super) fn matcha_startup_diagnostics(&self) -> &::diagnostics::RuntimeStartupDiagnostics {
         &self.matcha_startup_diagnostics
     }
 
-    pub(super) fn open_claw(&self) -> &Arc<OpenClawInstance> {
+    pub(super) fn open_claw(&self) -> &Arc<openclaw::driver::OpenClawDriver> {
         &self.open_claw
     }
 
-    pub(super) fn openclaw_startup_diagnostics(&self) -> &OpenClawStartupDiagnostics {
+    pub(super) fn openclaw_startup_diagnostics(&self) -> &::diagnostics::RuntimeStartupDiagnostics {
         &self.openclaw_startup_diagnostics
     }
 
@@ -90,11 +86,11 @@ impl PeerShared {
         &self.provider
     }
 
-    pub(super) fn settings(&self) -> &SettingsHandle {
+    pub(super) fn settings(&self) -> &settings::SettingsModule {
         &self.settings
     }
 
-    pub(super) fn security(&self) -> &SecurityHandle {
+    pub(super) fn security(&self) -> &security::SecurityModule {
         &self.security
     }
 
@@ -138,12 +134,12 @@ pub(crate) struct PeerOwner {
 impl PeerOwner {
     pub(crate) fn new(
         admission: Arc<HostAdmission>,
-        matcha_startup_diagnostics: MatchaStartupDiagnostics,
-        open_claw: Arc<OpenClawInstance>,
-        openclaw_startup_diagnostics: OpenClawStartupDiagnostics,
+        matcha_startup_diagnostics: ::diagnostics::RuntimeStartupDiagnostics,
+        open_claw: Arc<openclaw::driver::OpenClawDriver>,
+        openclaw_startup_diagnostics: ::diagnostics::RuntimeStartupDiagnostics,
         provider: ProviderHandle,
-        settings: SettingsHandle,
-        security: SecurityHandle,
+        settings: settings::SettingsModule,
+        security: security::SecurityModule,
         team_run: TeamRunCoordinatorHandle,
         runtime_directory: Arc<RuntimeDriverDirectory>,
         open_claw_runtime_events: Option<tokio::sync::mpsc::Sender<()>>,
@@ -245,22 +241,13 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, command: PeerCommand
         reject_missing_lifecycle(shared, command);
         return;
     };
-    let Some(lifecycle) = driver.lifecycle_ops() else {
+    let Some(lifecycle) = driver.host_lifecycle_ops() else {
         reject_missing_lifecycle(shared, command);
         return;
     };
     match command {
         PeerCommand::AutostartMatcha => {
             super::matcha::autostart(shared, lifecycle).await;
-        }
-        PeerCommand::StartMatcha { reply } => {
-            let _ = reply.send(super::matcha::start(shared, lifecycle).await);
-        }
-        PeerCommand::StopMatcha { reply } => {
-            let _ = reply.send(super::matcha::stop(shared, lifecycle).await);
-        }
-        PeerCommand::RestartMatcha { reply } => {
-            let _ = reply.send(super::matcha::restart(shared, lifecycle).await);
         }
         PeerCommand::AutostartOpenClaw => {
             super::openclaw::autostart(shared, lifecycle).await;
@@ -274,6 +261,95 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, command: PeerCommand
         PeerCommand::RestartOpenClaw { reply } => {
             let _ = reply.send(super::openclaw::restart(shared, lifecycle).await);
         }
+        PeerCommand::StartRuntime { reply, .. } => {
+            let _ = reply.send(start_runtime(shared, key, lifecycle).await);
+        }
+        PeerCommand::StopRuntime { reply, .. } => {
+            let _ = reply.send(stop_runtime(shared, key, lifecycle).await);
+        }
+        PeerCommand::RestartRuntime { reply, .. } => {
+            let _ = reply.send(restart_runtime(shared, key, lifecycle).await);
+        }
+    }
+}
+
+async fn start_runtime(
+    shared: &PeerShared,
+    key: &PeerKey,
+    lifecycle: &dyn crate::composition::runtime_ports::LifecycleOps,
+) -> Result<crate::RuntimeState, RuntimeStartCommandError> {
+    if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
+        return super::openclaw::start(shared, lifecycle)
+            .await
+            .map_err(|error| match error {
+                StartOpenClawError::AdmissionClosed => RuntimeStartCommandError::AdmissionClosed,
+                StartOpenClawError::RuntimeStart => RuntimeStartCommandError::RuntimeStart,
+            });
+    }
+    if shared.admission().admit_request().is_err() {
+        return Err(RuntimeStartCommandError::AdmissionClosed);
+    }
+    let result = lifecycle.start().await;
+    super::status::runtime_start_result(result)
+        .map(|()| runtime_state(shared, key))
+        .map_err(|_| RuntimeStartCommandError::RuntimeStart)
+}
+
+async fn stop_runtime(
+    shared: &PeerShared,
+    key: &PeerKey,
+    lifecycle: &dyn crate::composition::runtime_ports::LifecycleOps,
+) -> Result<crate::RuntimeState, RuntimeStopCommandError> {
+    if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
+        return super::openclaw::stop(shared, lifecycle)
+            .await
+            .map_err(|error| match error {
+                StopOpenClawError::AdmissionClosed => RuntimeStopCommandError::AdmissionClosed,
+                StopOpenClawError::RuntimeStop => RuntimeStopCommandError::RuntimeStop,
+            });
+    }
+    if shared.admission().admit_request().is_err() {
+        return Err(RuntimeStopCommandError::AdmissionClosed);
+    }
+    let result = lifecycle.stop().await;
+    super::status::runtime_stop_result(result)
+        .map(|()| runtime_state(shared, key))
+        .map_err(|_| RuntimeStopCommandError::RuntimeStop)
+}
+
+async fn restart_runtime(
+    shared: &PeerShared,
+    key: &PeerKey,
+    lifecycle: &dyn crate::composition::runtime_ports::LifecycleOps,
+) -> Result<crate::RuntimeState, RuntimeRestartCommandError> {
+    if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
+        return super::openclaw::restart(shared, lifecycle)
+            .await
+            .map_err(|error| match error {
+                RestartOpenClawError::AdmissionClosed => {
+                    RuntimeRestartCommandError::AdmissionClosed
+                }
+                RestartOpenClawError::RuntimeRestart => RuntimeRestartCommandError::RuntimeRestart,
+            });
+    }
+    if shared.admission().admit_request().is_err() {
+        return Err(RuntimeRestartCommandError::AdmissionClosed);
+    }
+    let result = lifecycle.restart().await;
+    super::status::runtime_restart_result(result)
+        .map(|()| runtime_state(shared, key))
+        .map_err(|_| RuntimeRestartCommandError::RuntimeRestart)
+}
+
+fn runtime_state(shared: &PeerShared, key: &PeerKey) -> crate::RuntimeState {
+    if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::matcha_agent().endpoint() {
+        super::status::matcha_state(shared)
+    } else if *key
+        == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint()
+    {
+        super::status::open_claw_state(shared)
+    } else {
+        unreachable!("registered peer runtime must have a fixed status projection")
     }
 }
 
@@ -281,9 +357,6 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
     match query {
         PeerQuery::State { reply } => {
             let _ = reply.send(super::status::host_state(shared));
-        }
-        PeerQuery::MatchaStatus { reply } => {
-            let _ = reply.send(super::status::matcha_state(shared));
         }
         PeerQuery::OpenClawStatus { reply } => {
             let _ = reply.send(super::status::open_claw_state(shared));
@@ -316,13 +389,47 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
         PeerQuery::OpenClawControlUiUrl { reply } => {
             let _ = reply.send(shared.open_claw().control_ui_url());
         }
-        PeerQuery::OpenClawControlLease { reply } => {
-            let snapshot = super::status::open_claw_lifecycle_snapshot(shared);
+        PeerQuery::OpenClawGatewaySnapshot { reply } => {
             let result = shared
                 .admission()
                 .admit_request()
-                .map(|()| super::status::control_lease_for_snapshot(shared, &snapshot));
+                .map(|()| shared.open_claw().gateway_snapshot_observation());
             let _ = reply.send(result);
+        }
+        PeerQuery::OpenClawControlSnapshot { reply } => {
+            let result = shared
+                .admission()
+                .admit_request()
+                .map(|()| shared.open_claw().control_snapshot_observation());
+            let _ = reply.send(result);
+        }
+        PeerQuery::RuntimeLogs {
+            endpoint,
+            cursor,
+            reply,
+        } => {
+            let _ = reply.send(runtime_logs(shared, endpoint, cursor).await);
+        }
+        PeerQuery::RuntimeControlReadiness { endpoint, reply } => {
+            let _ = reply.send(runtime_control_readiness(shared, endpoint).await);
+        }
+        PeerQuery::RuntimeGatewayHealth {
+            endpoint,
+            probe,
+            reply,
+        } => {
+            let _ = reply.send(runtime_gateway_health(shared, endpoint, probe).await);
+        }
+        PeerQuery::RuntimeGatewayStatus {
+            endpoint,
+            include_channel_summary,
+            reply,
+        } => {
+            let _ =
+                reply.send(runtime_gateway_status(shared, endpoint, include_channel_summary).await);
+        }
+        PeerQuery::RuntimeControlUiUrl { endpoint, reply } => {
+            let _ = reply.send(runtime_control_ui_url(shared, endpoint).await);
         }
         PeerQuery::OpenClawBrowserRequest { request, reply } => {
             let result = match shared.admission().admit_request() {
@@ -346,16 +453,6 @@ fn reject_missing_lifecycle(shared: &PeerShared, command: PeerCommand) {
         PeerCommand::AutostartMatcha => {
             shared.record_matcha_start(Err(DriverStartFailure::Unsupported));
         }
-        PeerCommand::StartMatcha { reply } => {
-            shared.record_matcha_start(Err(DriverStartFailure::Unsupported));
-            let _ = reply.send(Err(StartMatchaError::RuntimeStart));
-        }
-        PeerCommand::StopMatcha { reply } => {
-            let _ = reply.send(Err(StopMatchaError::RuntimeStop));
-        }
-        PeerCommand::RestartMatcha { reply } => {
-            let _ = reply.send(Err(RestartMatchaError::RuntimeRestart));
-        }
         PeerCommand::AutostartOpenClaw => {
             shared.record_open_claw_start(Err(DriverStartFailure::Unsupported));
             shared.notify_open_claw_runtime();
@@ -373,5 +470,101 @@ fn reject_missing_lifecycle(shared: &PeerShared, command: PeerCommand) {
             shared.notify_open_claw_runtime();
             let _ = reply.send(Err(RestartOpenClawError::RuntimeRestart));
         }
+        PeerCommand::StartRuntime { reply, .. } => {
+            let _ = reply.send(Err(RuntimeStartCommandError::RuntimeStart));
+        }
+        PeerCommand::StopRuntime { reply, .. } => {
+            let _ = reply.send(Err(RuntimeStopCommandError::RuntimeStop));
+        }
+        PeerCommand::RestartRuntime { reply, .. } => {
+            let _ = reply.send(Err(RuntimeRestartCommandError::RuntimeRestart));
+        }
     }
+}
+
+async fn runtime_logs(
+    shared: &PeerShared,
+    endpoint: PeerKey,
+    cursor: Option<u64>,
+) -> Result<
+    crate::composition::runtime_ports::RuntimeLogSnapshot,
+    crate::composition::runtime_ports::RuntimeControlFailure,
+> {
+    let driver = runtime_control_driver(shared, &endpoint)?;
+    match driver.runtime_control_ops() {
+        Some(ops) => ops.logs(cursor).await,
+        None => Err(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported),
+    }
+}
+
+async fn runtime_control_readiness(
+    shared: &PeerShared,
+    endpoint: PeerKey,
+) -> Result<
+    crate::composition::runtime_ports::RuntimeControlReadiness,
+    crate::composition::runtime_ports::RuntimeControlFailure,
+> {
+    let driver = runtime_control_driver(shared, &endpoint)?;
+    match driver.runtime_control_ops() {
+        Some(ops) => ops.control_readiness().await,
+        None => Err(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported),
+    }
+}
+
+async fn runtime_gateway_health(
+    shared: &PeerShared,
+    endpoint: PeerKey,
+    probe: bool,
+) -> Result<
+    crate::composition::runtime_ports::RuntimeGatewayHealth,
+    crate::composition::runtime_ports::RuntimeControlFailure,
+> {
+    let driver = runtime_control_driver(shared, &endpoint)?;
+    match driver.runtime_control_ops() {
+        Some(ops) => ops.gateway_health(probe).await,
+        None => Err(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported),
+    }
+}
+
+async fn runtime_gateway_status(
+    shared: &PeerShared,
+    endpoint: PeerKey,
+    include_channel_summary: bool,
+) -> Result<
+    crate::composition::runtime_ports::RuntimeGatewayStatus,
+    crate::composition::runtime_ports::RuntimeControlFailure,
+> {
+    let driver = runtime_control_driver(shared, &endpoint)?;
+    match driver.runtime_control_ops() {
+        Some(ops) => ops.gateway_status(include_channel_summary).await,
+        None => Err(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported),
+    }
+}
+
+async fn runtime_control_ui_url(
+    shared: &PeerShared,
+    endpoint: PeerKey,
+) -> Result<String, crate::composition::runtime_ports::RuntimeControlFailure> {
+    let driver = runtime_control_driver(shared, &endpoint)?;
+    match driver.runtime_control_ops() {
+        Some(ops) => ops.control_ui_url().await,
+        None => Err(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported),
+    }
+}
+
+fn runtime_control_driver(
+    shared: &PeerShared,
+    endpoint: &PeerKey,
+) -> Result<
+    std::sync::Arc<dyn crate::composition::runtime_ports::RuntimeDriver>,
+    crate::composition::runtime_ports::RuntimeControlFailure,
+> {
+    shared
+        .admission()
+        .admit_request()
+        .map_err(|_| crate::composition::runtime_ports::RuntimeControlFailure::Unavailable)?;
+    shared
+        .runtime_directory()
+        .lookup(endpoint)
+        .ok_or(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported)
 }

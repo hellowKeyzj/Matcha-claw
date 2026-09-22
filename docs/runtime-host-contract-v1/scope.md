@@ -16,6 +16,8 @@ Rust child
                  └─ Renderer host-event hub
 ```
 
+Rust 内部 route composition 不改变上述边界：常规模块 route 由 `ModuleDescriptor` / `ModuleCatalog` 的 loopback descriptor 派生；`ModuleDescriptor.effects` 声明 effect ownership，Host 安装路径把 Foundation `ModuleScope` registrations 映射给 Platform catalog 校验 scoped registrations。legacy root compatibility module 已删除；team、fleet、session 等业务入口是 owner module descriptors，loopback listener 才是 Host transport extension；Session SSE 属于 `sessions` 模块 loopback route；普通模块不拥有 Host transport/listener。platform loopback outcome 支持 Response/Stream/Upgrade，Host 统一 loopback server 直接写回该 outcome；统一 listener 自身作为 Host transport extension scope 管理。HTTP substrate 只处理 listener、frame/body policy、route lookup 与 outcome 写回，owner DTO decode 位于具体 module adapter/facade。[VERIFY: runtime-host/platform/src/module.rs:141-204] [VERIFY: runtime-host/platform/src/module.rs:239-304] [VERIFY: runtime-host/platform/src/loopback.rs:152-218] [VERIFY: runtime-host/host/src/module_registry/install.rs] [VERIFY: runtime-host/host/src/http/router.rs] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/mod.rs:73-85] [VERIFY: runtime-host/host/src/http/server.rs:20-40]
+
 `Renderer` 不直接连接 child 端口，也不拥有 child token。Rust 替代的是 child server 与其内部 owner，不是 Host API、preload 或 Renderer client。
 
 ## 四个必须保留的边界
@@ -23,7 +25,7 @@ Rust child
 | 边界 | 迁移要求 | 首要证据 |
 | --- | --- | --- |
 | Renderer ↔ preload/Electron IPC | 不改 channel、参数、返回 envelope、abort 或订阅语义。 | [ipc-contract.ts](../../electron/preload/ipc-contract.ts#L1-L94)、[preload/index.ts](../../electron/preload/index.ts#L15-L96)、[host-api.ts](../../src/lib/host-api.ts#L274-L332) |
-| Electron ↔ child request transport | Renderer-facing Host API 不变；Rust 通过 DirectRuntimeHost private control 或统一 localhost server 上的 signed product route 承接当前 active path，legacy `/dispatch` 只是同一 server 的兼容/历史 route。 | [direct-host.ts](../../electron/main/runtime-host-delivery/direct-host.ts)、[bootstrap.ts](../../electron/main/runtime-host-delivery/bootstrap.ts)、[localhost server](../../runtime-host/host/src/transport/localhost/server.rs)、[runtime-host/host/src/transport/](../../runtime-host/host/src/transport/) |
+| Electron ↔ child request transport | Renderer-facing Host API 不变；Rust 通过 DirectRuntimeHost private control 或统一 loopback server 上的 signed product route 承接当前 active path；legacy `/dispatch` root route 已删除。 | [direct-host.ts](../../electron/main/runtime-host-delivery/direct-host.ts)、[bootstrap.ts](../../electron/main/runtime-host-delivery/bootstrap.ts)、[host HTTP server](../../runtime-host/host/src/http/server.rs)、[module install](../../runtime-host/host/src/module_registry/install.rs) |
 | child ↔ Electron parent callback | Rust 使用 loopback HTTP callback receiver、dispatch token、body 和 best-effort/response语义；终态 active receiver 覆盖 gateway-events，shell-actions 仍按实际接线单独裁决；不保留通用异步 operation callback。 | [parent-callback.ts](../../electron/main/runtime-host-delivery/parent-callback.ts)、[parent_callback.rs](../../runtime-host/host/src/parent_callback.rs) |
 | Electron ↔ child process lifecycle | Rust binary 接受 one-shot bootstrap、private control ready、stdin EOF shutdown、forceKill 与 explicit restart；不再把旧 Node child env/IPC shutdown 当当前 active lifecycle。 | [direct-host.ts](../../electron/main/runtime-host-delivery/direct-host.ts)、[lifecycle-owner.ts](../../electron/main/runtime-host-delivery/lifecycle-owner.ts)、[main.rs](../../runtime-host/host/src/main.rs) |
 
@@ -70,8 +72,8 @@ Electron 的 route boundary 不能与 child 注册表混为一谈。
 | --- | --- | --- | --- |
 | `matcha runtime invoke` 等 CLI | 待裁决 | legacy 直连 `/dispatch` 是历史兼容面；当前 Rust delivery 不把它自动视为 active cutover 证据。 | [routes.md](routes.md)、[open-items.md](open-items.md) |
 | TeamRun webhook | 是 | `POST /api/team-runtime/webhooks/<path>`；Bearer 或 `x-matchaclaw-webhook-token`；Rust Organization/Team owner 仍需外部 ingress cutover proof。 | [routes.md](routes.md) |
-| Remote Fleet runtime-agent ingress | 是 | Electron API server ingress proxy → Rust 统一 localhost server 上的 Fleet route → Rust handler → FleetHandle core path；不是 Renderer IPC，也不是 Host API bearer；`Authorization` 与 enrollment header 必须原样透传到 Rust runtime-host transport route。 | [routes.md](routes.md) |
-| Remote Fleet terminal WebSocket | 是 | Electron 精确代理 `/api/remote-fleet/terminal/stream` 到 Rust 统一 localhost server 的 Fleet terminal route；WS 是 route upgrade outcome，不是独立 Host-owned listener。FleetOwner keyed lanes 已有 Rust 侧证据，覆盖 terminal provider open、dispatch、connection/environment/resource lifecycle；live recovery、query refresh、terminal provider failure owner-local settlement 已通过。 | [routes.md](routes.md)、[lifecycle.md](lifecycle.md) |
+| Remote Fleet runtime-agent ingress | 是 | Electron API server ingress proxy → Rust 统一 loopback server 上的 Fleet route → Rust handler → FleetHandle core path；不是 Renderer IPC，也不是 Host API bearer；`Authorization` 与 enrollment header 必须原样透传到 Rust runtime-host transport route。 | [routes.md](routes.md) |
+| Remote Fleet terminal WebSocket | 是 | Electron 精确代理 `/api/remote-fleet/terminal/stream` 到 Rust 统一 loopback server 的 Fleet terminal route；WS 是 route upgrade outcome，不是独立 Host-owned listener。FleetOwner keyed lanes 已有 Rust 侧证据，覆盖 terminal provider open、dispatch、connection/environment/resource lifecycle；live recovery、query refresh、terminal provider failure owner-local settlement 已通过。 | [routes.md](routes.md)、[lifecycle.md](lifecycle.md) |
 
 ## 不纳入 Rust 最终内部架构的旧机制
 

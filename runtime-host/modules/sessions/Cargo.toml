@@ -1,0 +1,27 @@
+[package]
+name = "sessions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+arc-swap = "1.7"
+connectors = { version = "0.1.0", path = "../connectors" }
+foundation = { version = "0.1.0", path = "../../foundation" }
+getrandom.workspace = true
+organization = { version = "0.1.0", path = "../organization" }
+platform = { version = "0.1.0", path = "../../platform" }
+provider-module = { package = "provider", version = "0.1.0", path = "../provider" }
+runtime-directory = { version = "0.1.0", path = "../runtime-directory" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[dev-dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true

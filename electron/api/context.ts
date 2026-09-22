@@ -38,7 +38,6 @@ export type SessionApiContext = Pick<HostApiContext, 'runtimeHost' | 'rendererEv
   | 'sessionListTransport'
   | 'sessionTimelineTransport'
   | 'sessionContentTransport'
-  | 'matchaSessionListTransport'
   | 'sessionAbortTransport'
   | 'sessionCreateTransport'
   | 'sessionDeleteTransport'
@@ -98,6 +97,6 @@ export type TeamApiContext = RuntimeHostTransportContext<
   | 'teamHumanDecisionTransport'
 >;
 
-export type ChatHistoryApiContext = RuntimeHostTransportContext<'matchaAgentHistoryTransport'>;
+export type SessionHistoryApiContext = RuntimeHostTransportContext<'sessionHistoryTransport'>;
 
 export type LogApiContext = Record<never, never>;
