@@ -1,0 +1,105 @@
+use super::projection::*;
+use super::*;
+
+impl ::cron::CronOps for OpenClawDriver {
+    fn list_cron_jobs<'a>(&'a self) -> ::cron::ports::CronFuture<'a, ::cron::CronListOutcome> {
+        Box::pin(async move {
+            match self.gateway.lock().await.list_cron_jobs().await {
+                Ok(jobs) => ::cron::CronListOutcome::Listed(project_cron_list(jobs)),
+                Err(crate::port::CronReadFailure::Unavailable) => {
+                    ::cron::CronListOutcome::Unavailable
+                }
+                Err(crate::port::CronReadFailure::Rejected) => ::cron::CronListOutcome::Rejected,
+                Err(crate::port::CronReadFailure::Protocol) => ::cron::CronListOutcome::Protocol,
+            }
+        })
+    }
+
+    fn cron_run_history<'a>(
+        &'a self,
+        job_id: String,
+        limit: u64,
+    ) -> ::cron::ports::CronFuture<
+        'a,
+        Result<Vec<::cron::CronRunHistoryReceipt>, ::cron::CronRunHistoryFailure>,
+    > {
+        Box::pin(async move {
+            self.gateway
+                .lock()
+                .await
+                .cron_run_history(job_id, limit)
+                .await
+                .map(|receipts| {
+                    receipts
+                        .into_iter()
+                        .map(project_cron_history_receipt)
+                        .collect()
+                })
+                .map_err(project_cron_history_failure)
+        })
+    }
+
+    fn admit_cron_execution<'a>(
+        &'a self,
+        job_id: String,
+    ) -> ::cron::ports::CronFuture<
+        'a,
+        Result<Result<::cron::CronExecutionAdmission, ::cron::CronTriggerResult>, ()>,
+    > {
+        Box::pin(async move {
+            match self.gateway.lock().await.admit_cron_execution(job_id).await {
+                Ok(Ok(admission)) => project_cron_execution_admission(admission).map(Ok),
+                Ok(Err(outcome)) => Ok(Err(project_cron_trigger_result(outcome))),
+                Err(_) => Err(()),
+            }
+        })
+    }
+
+    fn add_cron_job<'a>(
+        &'a self,
+        command: ::cron::CronCreateCommand,
+    ) -> ::cron::ports::CronFuture<'a, ::cron::CronJobMutationOutcome> {
+        Box::pin(async move {
+            let job = match cron_create_into_gateway(command) {
+                Ok(job) => job,
+                Err(_) => return ::cron::CronJobMutationOutcome::Rejected,
+            };
+            project_cron_mutation(self.gateway.lock().await.add_cron_job(job).await)
+        })
+    }
+
+    fn update_cron_job<'a>(
+        &'a self,
+        command: ::cron::CronUpdateCommand,
+    ) -> ::cron::ports::CronFuture<'a, ::cron::CronJobMutationOutcome> {
+        Box::pin(async move {
+            let (job_id, patch, expected_config_revision) = match cron_update_into_gateway(command)
+            {
+                Ok(parts) => parts,
+                Err(_) => return ::cron::CronJobMutationOutcome::Rejected,
+            };
+            project_cron_mutation(
+                self.gateway
+                    .lock()
+                    .await
+                    .update_cron_job(job_id, patch, expected_config_revision)
+                    .await,
+            )
+        })
+    }
+
+    fn delete_cron_job<'a>(
+        &'a self,
+        command: ::cron::CronDeleteCommand,
+    ) -> ::cron::ports::CronFuture<'a, ::cron::CronDeleteOutcome> {
+        Box::pin(async move {
+            project_cron_delete(
+                self.gateway
+                    .lock()
+                    .await
+                    .remove_cron_job(command.job_id)
+                    .await,
+            )
+        })
+    }
+}

@@ -19,6 +19,19 @@ type SessionIdentity = Readonly<{
   sessionKey: string;
 }>;
 
+type SessionModelIdentity = Readonly<{
+  provider?: string;
+  model: string;
+  ref: string;
+}>;
+
+type SessionModelState = Readonly<{
+  selected?: SessionModelIdentity;
+  active?: SessionModelIdentity;
+  overrideSource?: 'user' | 'auto';
+  selectionId?: string;
+}>;
+
 type SessionSummary = Readonly<{
   key: string;
   agentId: string;
@@ -26,7 +39,7 @@ type SessionSummary = Readonly<{
   kind: 'main' | 'session' | 'automation';
   preferred?: boolean;
   endpointSessionId?: string;
-  model?: string;
+  modelState?: SessionModelState;
   protocolId?: string;
   runtimeEndpointId?: string;
   updatedAt?: number;
@@ -113,7 +126,7 @@ function isSessionSummary(value: unknown): value is SessionSummary {
       'kind',
       'preferred',
       'endpointSessionId',
-      'model',
+      'modelState',
       'protocolId',
       'runtimeEndpointId',
       'updatedAt',
@@ -127,12 +140,30 @@ function isSessionSummary(value: unknown): value is SessionSummary {
   }
   return (value.preferred === undefined || typeof value.preferred === 'boolean')
     && (value.endpointSessionId === undefined || typeof value.endpointSessionId === 'string')
-    && (value.model === undefined || typeof value.model === 'string')
+    && (value.modelState === undefined || isSessionModelState(value.modelState))
     && (value.protocolId === undefined || typeof value.protocolId === 'string')
     && (value.runtimeEndpointId === undefined || typeof value.runtimeEndpointId === 'string')
     && (value.updatedAt === undefined || typeof value.updatedAt === 'number')
     && value.sessionIdentity.agentId === value.agentId
     && value.sessionIdentity.sessionKey === value.key;
+}
+
+function isSessionModelIdentity(value: unknown): value is SessionModelIdentity {
+  return isRecord(value)
+    && requiredKeys(value, ['model', 'ref'])
+    && allowedKeys(value, ['provider', 'model', 'ref'])
+    && typeof value.model === 'string'
+    && typeof value.ref === 'string'
+    && (value.provider === undefined || typeof value.provider === 'string');
+}
+
+function isSessionModelState(value: unknown): value is SessionModelState {
+  return isRecord(value)
+    && allowedKeys(value, ['selected', 'active', 'overrideSource', 'selectionId'])
+    && (value.selected === undefined || isSessionModelIdentity(value.selected))
+    && (value.active === undefined || isSessionModelIdentity(value.active))
+    && (value.overrideSource === undefined || value.overrideSource === 'user' || value.overrideSource === 'auto')
+    && (value.selectionId === undefined || typeof value.selectionId === 'string');
 }
 
 function isSessionIdentity(value: unknown): value is SessionIdentity {
@@ -189,4 +220,12 @@ function sameEndpoint(left: RuntimeEndpoint, right: RuntimeEndpoint): boolean {
   return left.kind === right.kind
     && left.runtimeAdapterId === right.runtimeAdapterId
     && left.runtimeInstanceId === right.runtimeInstanceId;
+}
+
+function requiredKeys(value: Record<string, unknown>, required: readonly string[]): boolean {
+  return required.every((key) => Object.hasOwn(value, key));
+}
+
+function allowedKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
 }

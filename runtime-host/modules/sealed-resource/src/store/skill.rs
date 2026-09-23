@@ -8,7 +8,7 @@ use std::{
 };
 
 use getrandom::fill as random_fill;
-use openclaw::lifecycle::state_dir::CanonicalStateDir;
+use platform::state_dir::CanonicalStateDir;
 use zeroize::Zeroize;
 
 use crate::{

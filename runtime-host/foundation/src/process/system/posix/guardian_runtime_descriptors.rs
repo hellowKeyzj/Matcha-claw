@@ -170,11 +170,17 @@ fn close_from(first: RawFd, limit: RawFd) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn close_from(first: RawFd, _limit: RawFd) -> io::Result<()> {
-    unsafe extern "C" {
-        fn closefrom(lowfd: libc::c_int);
+fn close_from(first: RawFd, limit: RawFd) -> io::Result<()> {
+    let mut descriptor = first;
+    while descriptor < limit {
+        if unsafe { libc::close(descriptor) } == -1 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EBADF) {
+                return Err(error);
+            }
+        }
+        descriptor += 1;
     }
-    unsafe { closefrom(first) };
     Ok(())
 }
 

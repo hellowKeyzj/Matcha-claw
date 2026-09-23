@@ -285,11 +285,6 @@ body {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.01em;
-  transition: transform 0.15s;
-}
-
-.tab-chip:hover {
-  transform: translateY(-1px);
 }
 
 .tab-chip-tabs {
@@ -388,13 +383,12 @@ body {
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 16px 18px;
-  transition: border-color 0.25s, transform 0.15s, box-shadow 0.25s;
+  transition: border-color 0.25s, box-shadow 0.25s;
 }
 
 .card:hover {
   border-color: var(--dim);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
-  transform: translateY(-1px);
 }
 
 .card + .card {
@@ -927,7 +921,6 @@ body {
 .card:hover {
   border-color: rgba(0, 0, 0, 0.16);
   box-shadow: rgba(0, 0, 0, 0.1) 0 10px 20px, rgba(0, 0, 0, 0.05) 0 3px 6px;
-  transform: translateY(-1px);
 }
 
 .tab-chip,

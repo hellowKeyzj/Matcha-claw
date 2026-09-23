@@ -1341,7 +1341,7 @@ export const ChatInput = memo(function ChatInput({
     >
       <div className={`${CHAT_LAYOUT_TOKENS.inputRail} chat-scroll-sync-input-inner`}>
         {reconnecting ? (
-          <div className="mb-2 rounded-full border border-border/45 bg-background/84 px-3 py-1.5 text-xs text-muted-foreground shadow-sm backdrop-blur-sm">
+          <div className="mb-2 rounded-full border border-border/45 bg-background px-3 py-1.5 text-xs text-muted-foreground shadow-none">
             {t('input.gatewayRecoveringNotice')}
           </div>
         ) : null}
@@ -1372,7 +1372,7 @@ export const ChatInput = memo(function ChatInput({
                   {selectedSkills.map((skill) => (
                     <span
                       key={skill.id}
-                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-border/60 bg-background/80 px-2.5 py-1 text-xs font-medium text-foreground shadow-sm backdrop-blur-sm"
+                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-border/60 bg-background px-2.5 py-1 text-xs font-medium text-foreground shadow-none"
                     >
                       {skillManager ? (
                         <button
@@ -2055,7 +2055,7 @@ function AttachmentChip({
   }
 
   return (
-    <div className="inline-flex w-[120px] max-w-full items-center rounded-full border border-border/50 bg-background/84 pr-1 shadow-sm backdrop-blur-sm">
+    <div className="inline-flex w-[120px] max-w-full items-center rounded-full border border-border/50 bg-background pr-1 shadow-none">
       {canOpen ? (
         <button
           type="button"

@@ -10,10 +10,23 @@ const MAX_CHANGE_COUNT = 16;
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const MAX_RENDERER_ROUTE_KEY_BYTES = 128;
 
+export type SessionModelIdentity = Readonly<{
+  provider?: string;
+  model: string;
+  ref: string;
+}>;
+
+export type SessionModelState = Readonly<{
+  selected?: SessionModelIdentity;
+  active?: SessionModelIdentity;
+  overrideSource?: 'user' | 'auto';
+  selectionId?: string;
+}>;
+
 export type SessionView = Readonly<{
   sessionKey: string;
   endpointSessionId: string | null;
-  model: string | null;
+  modelState: SessionModelState | null;
   identity: Readonly<{
     sessionKey: string;
     endpoint: Readonly<{
@@ -174,13 +187,13 @@ export function decodeSessionContentLoadResponse(value: unknown): SessionContent
 export function decodeSessionView(value: unknown): SessionView | null {
   if (!isRecord(value)
     || !hasExactKeys(value, [
-      'sessionKey', 'endpointSessionId', 'model', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
+      'sessionKey', 'endpointSessionId', 'modelState', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
       'runtime', 'window', 'completeness',
     ])
     || typeof value.sessionKey !== 'string'
     || !isSessionKey(value.sessionKey)
     || !isNullableSessionKey(value.endpointSessionId)
-    || !isNullableSessionKey(value.model)
+    || !isNullableSessionModelState(value.modelState)
     || !isSessionIdentity(value.identity)
     || value.identity.sessionKey !== value.sessionKey
     || !isEpoch(value.epoch)
@@ -469,6 +482,25 @@ function isWindow(value: unknown): boolean {
     && typeof value.hasMore === 'boolean'
     && typeof value.hasNewer === 'boolean'
     && typeof value.isAtLatest === 'boolean';
+}
+
+function isSessionModelIdentity(value: unknown): boolean {
+  return isRecord(value)
+    && hasAllowedKeys(value, ['model', 'ref'], ['provider'])
+    && isSessionKey(value.model)
+    && isSessionKey(value.ref)
+    && (value.provider === undefined || isId(value.provider));
+}
+
+function isNullableSessionModelState(value: unknown): boolean {
+  return value === null || (
+    isRecord(value)
+    && hasAllowedKeys(value, [], ['selected', 'active', 'overrideSource', 'selectionId'])
+    && (value.selected === undefined || isSessionModelIdentity(value.selected))
+    && (value.active === undefined || isSessionModelIdentity(value.active))
+    && (value.overrideSource === undefined || value.overrideSource === 'user' || value.overrideSource === 'auto')
+    && (value.selectionId === undefined || isId(value.selectionId))
+  );
 }
 
 function isSessionIdentity(value: unknown): boolean {

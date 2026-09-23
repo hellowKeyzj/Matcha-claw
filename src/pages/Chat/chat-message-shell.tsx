@@ -39,7 +39,7 @@ export function MessageShell({
           isUser
             ? CHAT_LAYOUT_TOKENS.messageAvatarUserOrder
             : CHAT_LAYOUT_TOKENS.messageAvatarAssistantOrder,
-          'border border-border/60 bg-background/85 text-foreground shadow-sm backdrop-blur-sm',
+          'border border-border/60 bg-card text-foreground shadow-sm',
         )}
       >
         {isUser ? (

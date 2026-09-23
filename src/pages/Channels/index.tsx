@@ -338,7 +338,7 @@ export function Channels() {
                   <button
                     key={type}
                     className={cn(
-                      'group relative flex min-h-[148px] flex-col rounded-[1.1rem] border p-4 text-left transition-[background-color,border-color,box-shadow,transform] duration-150 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-whisper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20',
+                      'group relative flex min-h-[148px] flex-col rounded-[1.1rem] border p-4 text-left transition-[background-color,border-color,box-shadow] duration-150 hover:border-foreground/20 hover:shadow-whisper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20',
                       isConfigured
                         ? 'border-emerald-500/45 bg-emerald-500/10'
                         : 'border-border/90 bg-background/35 hover:bg-secondary/60'
@@ -367,7 +367,7 @@ export function Channels() {
                     </div>
                     <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
                       <span>{meta.isPlugin ? t('pluginBadge') : connectionLabel}</span>
-                      <span className="transition-transform group-hover:translate-x-0.5">→</span>
+                      <span>→</span>
                     </div>
                   </button>
                 );

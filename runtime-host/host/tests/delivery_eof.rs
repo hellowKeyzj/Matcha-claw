@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use openclaw::projection::workspace::WorkspaceProjectionFixture;
+use openclaw::workspace::WorkspaceProjectionFixture;
 use serde_json::{Value, json};
 
 #[test]

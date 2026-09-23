@@ -7,4 +7,5 @@ pub mod mcp;
 pub mod module;
 pub mod parent_callback;
 pub mod pinned_tls;
+pub mod state_dir;
 pub mod trace;

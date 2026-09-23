@@ -136,7 +136,7 @@ impl SessionModelSelectionRequest {
         SessionModelSelectionCommand::try_new(
             self.scope.endpoint.parse().ok_or(RequestError::Invalid)?,
             self.input.session_key,
-            None,
+            self.input.endpoint_session_id,
             self.input.model_selection_id,
         )
         .map(|command| command.with_trace_id(trace_id))

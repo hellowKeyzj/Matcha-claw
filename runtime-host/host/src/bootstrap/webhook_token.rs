@@ -15,14 +15,51 @@ const TEMPORARY_FILE_ATTEMPTS: usize = 4;
 
 pub(super) fn load_or_create(state_dir: &Path) -> Result<WebhookToken, BootstrapError> {
     let path = state_dir.join(TOKEN_FILE);
-    match read(&path) {
+    load_or_create_token(
+        &path,
+        token_length(),
+        TEMPORARY_FILE_PREFIX,
+        parse,
+        generate_token,
+    )
+}
+
+fn parse(value: &mut String) -> Result<WebhookToken, BootstrapError> {
+    WebhookToken::try_new(value.as_str()).ok_or(BootstrapError)
+}
+
+fn generate_token() -> Result<GeneratedToken<WebhookToken>, BootstrapError> {
+    let mut value = generate()?;
+    let token = parse(&mut value)?;
+    Ok(GeneratedToken::Parsed { value, token })
+}
+
+pub(super) enum GeneratedToken<T> {
+    Parsed { value: String, token: T },
+    Unparsed(String),
+}
+
+pub(super) fn load_or_create_token<T>(
+    path: &Path,
+    token_length: usize,
+    temporary_file_prefix: &str,
+    parse: impl Fn(&mut String) -> Result<T, BootstrapError> + Copy,
+    generate: impl Fn() -> Result<GeneratedToken<T>, BootstrapError>,
+) -> Result<T, BootstrapError> {
+    match read_token(path, token_length, parse) {
         Ok(token) => Ok(token),
-        Err(ReadError::Missing) => create(&path),
+        Err(ReadError::Missing) => {
+            create_token(path, token_length, temporary_file_prefix, parse, generate)
+        }
         Err(ReadError::Invalid) => Err(BootstrapError),
     }
 }
 
-fn read(path: &Path) -> Result<WebhookToken, ReadError> {
+fn read_token<T>(
+    path: &Path,
+    token_length: usize,
+    parse: impl Fn(&mut String) -> Result<T, BootstrapError>,
+) -> Result<T, ReadError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -32,7 +69,7 @@ fn read(path: &Path) -> Result<WebhookToken, ReadError> {
     };
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
-        || metadata.len() != token_length() as u64
+        || metadata.len() != token_length as u64
     {
         return Err(ReadError::Invalid);
     }
@@ -41,30 +78,51 @@ fn read(path: &Path) -> Result<WebhookToken, ReadError> {
         Ok(value) => value,
         Err(_) => return Err(ReadError::Invalid),
     };
-    let token = WebhookToken::try_new(&value).ok_or(ReadError::Invalid);
+    let token = parse(&mut value).map_err(|_| ReadError::Invalid);
     value.zeroize();
     token
 }
 
-fn create(path: &Path) -> Result<WebhookToken, BootstrapError> {
+fn create_token<T>(
+    path: &Path,
+    token_length: usize,
+    temporary_file_prefix: &str,
+    parse: impl Fn(&mut String) -> Result<T, BootstrapError> + Copy,
+    generate: impl Fn() -> Result<GeneratedToken<T>, BootstrapError>,
+) -> Result<T, BootstrapError> {
     for _ in 0..TEMPORARY_FILE_ATTEMPTS {
-        let mut value = generate()?;
-        let token = WebhookToken::try_new(&value).ok_or(BootstrapError)?;
-        let temporary = temporary_path(path)?;
+        let generated = generate()?;
+        let (mut value, token) = match generated {
+            GeneratedToken::Parsed { value, token } => (value, Some(token)),
+            GeneratedToken::Unparsed(value) => (value, None),
+        };
+        let temporary = temporary_path(path, temporary_file_prefix)?;
         let result = write_new(&temporary, value.as_bytes())
             .and_then(|()| fs::hard_link(&temporary, path))
             .map_err(|error| error.kind());
-        value.zeroize();
         let _ = fs::remove_file(&temporary);
 
         match result {
-            Ok(()) => return Ok(token),
-            Err(std::io::ErrorKind::AlreadyExists) => match read(path) {
-                Ok(token) => return Ok(token),
-                Err(ReadError::Missing) => continue,
-                Err(ReadError::Invalid) => return Err(BootstrapError),
-            },
-            Err(_) => return Err(BootstrapError),
+            Ok(()) => {
+                let token = match token {
+                    Some(token) => Ok(token),
+                    None => parse(&mut value),
+                };
+                value.zeroize();
+                return token;
+            }
+            Err(std::io::ErrorKind::AlreadyExists) => {
+                value.zeroize();
+                match read_token(path, token_length, parse) {
+                    Ok(token) => return Ok(token),
+                    Err(ReadError::Missing) => continue,
+                    Err(ReadError::Invalid) => return Err(BootstrapError),
+                }
+            }
+            Err(_) => {
+                value.zeroize();
+                return Err(BootstrapError);
+            }
         }
     }
     Err(BootstrapError)
@@ -96,7 +154,7 @@ fn generate() -> Result<String, BootstrapError> {
     Ok(value)
 }
 
-fn temporary_path(path: &Path) -> Result<PathBuf, BootstrapError> {
+fn temporary_path(path: &Path, temporary_file_prefix: &str) -> Result<PathBuf, BootstrapError> {
     let mut entropy = [0_u8; 16];
     getrandom::fill(&mut entropy).map_err(|_| BootstrapError)?;
     let mut suffix = String::with_capacity(entropy.len() * 2);
@@ -105,7 +163,7 @@ fn temporary_path(path: &Path) -> Result<PathBuf, BootstrapError> {
         write!(&mut suffix, "{byte:02x}").expect("writing into a string cannot fail");
     }
     entropy.zeroize();
-    Ok(path.with_file_name(format!("{TEMPORARY_FILE_PREFIX}{suffix}")))
+    Ok(path.with_file_name(format!("{temporary_file_prefix}{suffix}")))
 }
 
 fn token_length() -> usize {

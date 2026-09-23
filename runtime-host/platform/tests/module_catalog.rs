@@ -242,6 +242,29 @@ fn rejects_undeclared_route_effect_id() {
 }
 
 #[test]
+fn rejects_installed_loopback_route_without_scoped_registration() {
+    let error = effect_error(
+        vec![routed_descriptor(
+            "channels",
+            &[CHANNEL_ACCOUNT],
+            &["channels.loopback"],
+            vec![route("channels.loopback")],
+        )],
+        &[],
+        &[],
+    );
+
+    assert_eq!(
+        error,
+        ModuleEffectError::MissingScopedEffect {
+            module: ModuleId::new("channels"),
+            effect: EffectKind::Route,
+            effect_id: "channels.loopback",
+        }
+    );
+}
+
+#[test]
 fn rejects_loopback_route_mismatch() {
     let error = effect_error(
         vec![routed_descriptor(
@@ -422,11 +445,18 @@ fn accepts_declared_route_and_event_registrations() {
             event_descriptor("sessions", &[SESSION_STORE], &["sessions.changed"]),
         ],
         &[],
-        &[EffectRegistration::new(
-            ModuleId::new("sessions"),
-            EffectKind::EventSubscription,
-            "sessions.changed",
-        )],
+        &[
+            EffectRegistration::new(
+                ModuleId::new("channels"),
+                EffectKind::Route,
+                "channels.loopback",
+            ),
+            EffectRegistration::new(
+                ModuleId::new("sessions"),
+                EffectKind::EventSubscription,
+                "sessions.changed",
+            ),
+        ],
     )
     .expect("catalog installs with declared route and event effects");
 

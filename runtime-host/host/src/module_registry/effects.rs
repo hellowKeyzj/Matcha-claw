@@ -6,7 +6,6 @@ pub(crate) fn map_scoped_effects(
 ) -> Vec<EffectRegistration> {
     scoped_effects
         .iter()
-        .filter(|registration| registration.kind() != ScopedEffectKind::Route)
         .map(|registration| {
             EffectRegistration::new(
                 ModuleId::new(registration.scope_id()),

@@ -7,18 +7,6 @@ use crate::{RuntimeState, composition::runtime_ports::RuntimeDriverIdentity};
 use super::PeerKey;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StartOpenClawError {
-    AdmissionClosed,
-    RuntimeStart,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StopOpenClawError {
-    AdmissionClosed,
-    RuntimeStop,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeStartCommandError {
     AdmissionClosed,
     RuntimeStart,
@@ -37,22 +25,15 @@ pub(crate) enum RuntimeRestartCommandError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RestartOpenClawError {
-    AdmissionClosed,
-    RuntimeRestart,
+pub(crate) enum AutostartOpenClawError {
+    PeerUnavailable,
+    RuntimeStart,
 }
 
 pub(crate) enum PeerCommand {
     AutostartMatcha,
-    AutostartOpenClaw,
-    StartOpenClaw {
-        reply: oneshot::Sender<Result<RuntimeState, StartOpenClawError>>,
-    },
-    StopOpenClaw {
-        reply: oneshot::Sender<Result<RuntimeState, StopOpenClawError>>,
-    },
-    RestartOpenClaw {
-        reply: oneshot::Sender<Result<RuntimeState, RestartOpenClawError>>,
+    AutostartOpenClaw {
+        reply: oneshot::Sender<Result<RuntimeState, AutostartOpenClawError>>,
     },
     StartRuntime {
         endpoint: PeerKey,
@@ -74,10 +55,7 @@ impl PeerCommand {
             Self::AutostartMatcha => {
                 CommandRoute::Keyed(RuntimeDriverIdentity::matcha_agent().endpoint())
             }
-            Self::AutostartOpenClaw
-            | Self::StartOpenClaw { .. }
-            | Self::StopOpenClaw { .. }
-            | Self::RestartOpenClaw { .. } => {
+            Self::AutostartOpenClaw { .. } => {
                 CommandRoute::Keyed(RuntimeDriverIdentity::open_claw().endpoint())
             }
             Self::StartRuntime { endpoint, .. }

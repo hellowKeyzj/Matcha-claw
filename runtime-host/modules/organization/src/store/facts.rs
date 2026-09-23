@@ -1680,7 +1680,9 @@ impl OrganizationFacts {
         record: EvidenceRecord,
     ) -> Result<RecordOutcome, OrganizationFactsError> {
         match self.evidence.evidence(record.evidence_id()) {
-            Some(existing) if existing == &record => Ok(RecordOutcome::Replayed(existing.clone())),
+            Some(existing) if evidence_replay_matches(existing, &record) => {
+                Ok(RecordOutcome::Replayed(existing.clone()))
+            }
             Some(_) => Err(OrganizationFactsError::ConflictingEvidenceId),
             None => {
                 validate_current_evidence_provenance(&self.runs, &record)?;
@@ -3253,6 +3255,13 @@ fn validate_current_evidence_provenance(
         })
         .then_some(())
         .ok_or(OrganizationFactsError::StaleEvidenceNodeExecution)
+}
+
+fn evidence_replay_matches(existing: &EvidenceRecord, record: &EvidenceRecord) -> bool {
+    existing.evidence_id() == record.evidence_id()
+        && existing.run_id() == record.run_id()
+        && existing.node_execution_id() == record.node_execution_id()
+        && existing.reference() == record.reference()
 }
 
 fn validate_approval_resolution_events(

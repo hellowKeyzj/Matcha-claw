@@ -13,6 +13,7 @@ import {
   resolveChatWorkspaceLayout,
 } from '@/pages/Chat/chat-workspace-layout';
 import { invokeIpc } from '@/lib/api-client';
+import { StableScrollArea } from '@/components/scroll';
 import { useLayoutStore } from '@/stores/layout';
 
 export function MainLayout() {
@@ -158,9 +159,9 @@ export function MainLayout() {
           {isChatRoute ? (
             <ChatWorkspaceHost takeoverMode={chatTakeoverMode} />
           ) : (
-            <div data-page-scroll className="h-full overflow-auto bg-card px-5 py-4 md:px-8 md:py-6">
+            <StableScrollArea data-page-scroll className="h-full overflow-auto overscroll-contain bg-card px-5 py-4 [scrollbar-gutter:stable] md:px-8 md:py-6">
               <Outlet />
-            </div>
+            </StableScrollArea>
           )}
         </main>
       </div>

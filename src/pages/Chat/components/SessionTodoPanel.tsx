@@ -42,7 +42,7 @@ export const SessionTodoPanel = memo(function SessionTodoPanel({
   return (
     <div data-testid="session-todo-panel" className="w-full min-w-0">
       <div className={cn(
-        'ml-auto overflow-hidden border border-border/55 bg-background/95 shadow-[0_14px_40px_rgba(15,23,42,0.10)] backdrop-blur-xl transition-[width]',
+        'ml-auto overflow-hidden border border-border/55 bg-background/95 shadow-sm transition-[width]',
         expanded ? 'w-full max-w-[56rem] rounded-lg' : 'w-fit rounded-full',
       )}>
         <button

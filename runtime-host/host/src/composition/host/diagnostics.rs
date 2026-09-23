@@ -67,108 +67,95 @@ pub(crate) const fn project_host_lifecycle(phase: HostPhase) -> HostLifecycle {
     }
 }
 
-pub(super) struct DiagnosticsForwarders<'scope> {
-    scope: &'scope mut ModuleScope,
+pub(super) fn forward_openclaw_runtime_changes(
+    scope: &mut ModuleScope,
+    mut snapshots: tokio::sync::watch::Receiver<SupervisorSnapshot>,
+    events: tokio::sync::mpsc::Sender<()>,
+) {
+    let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                changed = snapshots.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = cancellation.cancelled() => break,
+                        sent = events.send(()) => {
+                            if sent.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    scope.register_event_subscription("openclaw-runtime", move || async move {
+        let _ = task.cancel_and_join().await;
+    });
 }
 
-impl<'scope> DiagnosticsForwarders<'scope> {
-    pub(super) fn new(scope: &'scope mut ModuleScope) -> Self {
-        Self { scope }
-    }
-
-    pub(super) fn forward_openclaw_runtime_changes(
-        &mut self,
-        mut snapshots: tokio::sync::watch::Receiver<SupervisorSnapshot>,
-        events: tokio::sync::mpsc::Sender<()>,
-    ) {
-        let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
-            loop {
-                tokio::select! {
-                    _ = cancellation.cancelled() => break,
-                    changed = snapshots.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        tokio::select! {
-                            _ = cancellation.cancelled() => break,
-                            sent = events.send(()) => {
-                                if sent.is_err() {
-                                    break;
-                                }
+pub(super) fn forward_matcha_lifecycle_changes(
+    scope: &mut ModuleScope,
+    mut snapshots: tokio::sync::watch::Receiver<SupervisorSnapshot>,
+    events: tokio::sync::mpsc::Sender<SupervisorSnapshot>,
+) {
+    let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                changed = snapshots.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let snapshot = snapshots.borrow().clone();
+                    tokio::select! {
+                        _ = cancellation.cancelled() => break,
+                        sent = events.send(snapshot) => {
+                            if sent.is_err() {
+                                break;
                             }
                         }
                     }
                 }
             }
-        });
-        self.scope
-            .register_event_subscription("openclaw-runtime", move || async move {
-                let _ = task.cancel_and_join().await;
-            });
-    }
+        }
+    });
+    scope.register_event_subscription("matcha-lifecycle", move || async move {
+        let _ = task.cancel_and_join().await;
+    });
+}
 
-    pub(super) fn forward_matcha_lifecycle_changes(
-        &mut self,
-        mut snapshots: tokio::sync::watch::Receiver<SupervisorSnapshot>,
-        events: tokio::sync::mpsc::Sender<SupervisorSnapshot>,
-    ) {
-        let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
-            loop {
-                tokio::select! {
-                    _ = cancellation.cancelled() => break,
-                    changed = snapshots.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        let snapshot = snapshots.borrow().clone();
-                        tokio::select! {
-                            _ = cancellation.cancelled() => break,
-                            sent = events.send(snapshot) => {
-                                if sent.is_err() {
-                                    break;
-                                }
+pub(super) fn forward_openclaw_runtime_readiness_changes(
+    scope: &mut ModuleScope,
+    mut readiness: tokio::sync::watch::Receiver<u64>,
+    events: tokio::sync::mpsc::Sender<()>,
+) {
+    let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                changed = readiness.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = cancellation.cancelled() => break,
+                        sent = events.send(()) => {
+                            if sent.is_err() {
+                                break;
                             }
                         }
                     }
                 }
             }
-        });
-        self.scope
-            .register_event_subscription("matcha-lifecycle", move || async move {
-                let _ = task.cancel_and_join().await;
-            });
-    }
-
-    pub(super) fn forward_openclaw_runtime_readiness_changes(
-        &mut self,
-        mut readiness: tokio::sync::watch::Receiver<u64>,
-        events: tokio::sync::mpsc::Sender<()>,
-    ) {
-        let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
-            loop {
-                tokio::select! {
-                    _ = cancellation.cancelled() => break,
-                    changed = readiness.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        tokio::select! {
-                            _ = cancellation.cancelled() => break,
-                            sent = events.send(()) => {
-                                if sent.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        self.scope
-            .register_event_subscription("openclaw-readiness", move || async move {
-                let _ = task.cancel_and_join().await;
-            });
-    }
+        }
+    });
+    scope.register_event_subscription("openclaw-readiness", move || async move {
+        let _ = task.cancel_and_join().await;
+    });
 }
 
 #[cfg(test)]

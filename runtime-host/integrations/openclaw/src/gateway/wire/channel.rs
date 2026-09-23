@@ -32,7 +32,7 @@ pub(crate) fn channels_status_request(request_id: String) -> Result<RpcRequest, 
 
 pub(crate) fn channel_runtime_request(
     request_id: String,
-    action: crate::operations::channel_login::ChannelRuntimeAction,
+    action: crate::surfaces::channels::gateway::login::ChannelRuntimeAction,
     channel: &str,
     account: Option<&str>,
 ) -> Result<RpcRequest, WireError> {
@@ -105,7 +105,7 @@ pub(crate) fn web_login_wait_request(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NativeLoginProgress {
-    pub(crate) status: crate::operations::channel_login::LoginProgressStatus,
+    pub(crate) status: crate::surfaces::channels::gateway::login::LoginProgressStatus,
     pub(crate) account_id: Option<String>,
     pub(crate) session_key: Option<String>,
     pub(crate) qr_data_url: Option<String>,
@@ -113,7 +113,7 @@ pub(crate) struct NativeLoginProgress {
 
 pub(crate) fn decode_channel_runtime_confirmation(
     response: GatewayResponse,
-    action: crate::operations::channel_login::ChannelRuntimeAction,
+    action: crate::surfaces::channels::gateway::login::ChannelRuntimeAction,
     expected_channel: &str,
 ) -> Result<(String, Option<String>), WireError> {
     let GatewayResponse::Success {
@@ -133,18 +133,20 @@ pub(crate) fn decode_channel_runtime_confirmation(
         .map(str::to_owned)
         .ok_or(WireError::InvalidChannelRuntime)?;
     match action {
-        crate::operations::channel_login::ChannelRuntimeAction::Start
-        | crate::operations::channel_login::ChannelRuntimeAction::Stop => {
+        crate::surfaces::channels::gateway::login::ChannelRuntimeAction::Start
+        | crate::surfaces::channels::gateway::login::ChannelRuntimeAction::Stop => {
             let expected_field = match action {
-                crate::operations::channel_login::ChannelRuntimeAction::Start => "started",
-                crate::operations::channel_login::ChannelRuntimeAction::Stop => "stopped",
-                crate::operations::channel_login::ChannelRuntimeAction::Logout => unreachable!(),
+                crate::surfaces::channels::gateway::login::ChannelRuntimeAction::Start => "started",
+                crate::surfaces::channels::gateway::login::ChannelRuntimeAction::Stop => "stopped",
+                crate::surfaces::channels::gateway::login::ChannelRuntimeAction::Logout => {
+                    unreachable!()
+                }
             };
             if payload.get(expected_field).and_then(Value::as_bool) != Some(true) {
                 return Err(WireError::InvalidChannelRuntime);
             }
         }
-        crate::operations::channel_login::ChannelRuntimeAction::Logout => {
+        crate::surfaces::channels::gateway::login::ChannelRuntimeAction::Logout => {
             if payload.get("cleared").and_then(Value::as_bool) != Some(true) {
                 return Err(WireError::InvalidChannelRuntime);
             }
@@ -167,13 +169,15 @@ pub(crate) fn decode_login_progress(
     let connected = payload.get("connected").and_then(Value::as_bool);
     let qr_data_url = optional_valid_qr(&payload, "qrDataUrl")?;
     let status = match connected {
-        Some(true) => crate::operations::channel_login::LoginProgressStatus::Connected,
+        Some(true) => crate::surfaces::channels::gateway::login::LoginProgressStatus::Connected,
         Some(false) if qr_data_url.is_some() => {
-            crate::operations::channel_login::LoginProgressStatus::Qr
+            crate::surfaces::channels::gateway::login::LoginProgressStatus::Qr
         }
-        Some(false) => crate::operations::channel_login::LoginProgressStatus::Pending,
-        None if qr_data_url.is_some() => crate::operations::channel_login::LoginProgressStatus::Qr,
-        None => crate::operations::channel_login::LoginProgressStatus::Unknown,
+        Some(false) => crate::surfaces::channels::gateway::login::LoginProgressStatus::Pending,
+        None if qr_data_url.is_some() => {
+            crate::surfaces::channels::gateway::login::LoginProgressStatus::Qr
+        }
+        None => crate::surfaces::channels::gateway::login::LoginProgressStatus::Unknown,
     };
     let account_id = payload
         .get("accountId")
@@ -1032,7 +1036,7 @@ mod tests {
     fn channel_runtime_requests_preserve_optional_default_account_semantics() {
         let request = channel_runtime_request(
             "runtime".into(),
-            crate::operations::channel_login::ChannelRuntimeAction::Start,
+            crate::surfaces::channels::gateway::login::ChannelRuntimeAction::Start,
             "whatsapp",
             None,
         )
@@ -1046,15 +1050,15 @@ mod tests {
     fn channel_runtime_confirmation_projects_native_start_stop_and_logout() {
         for (action, payload) in [
             (
-                crate::operations::channel_login::ChannelRuntimeAction::Start,
+                crate::surfaces::channels::gateway::login::ChannelRuntimeAction::Start,
                 json!({"channel":"whatsapp","accountId":"primary","started":true,"nativeExtra":"ignored"}),
             ),
             (
-                crate::operations::channel_login::ChannelRuntimeAction::Stop,
+                crate::surfaces::channels::gateway::login::ChannelRuntimeAction::Stop,
                 json!({"channel":"whatsapp","accountId":"primary","stopped":true,"nativeExtra":"ignored"}),
             ),
             (
-                crate::operations::channel_login::ChannelRuntimeAction::Logout,
+                crate::surfaces::channels::gateway::login::ChannelRuntimeAction::Logout,
                 json!({"channel":"whatsapp","accountId":"primary","cleared":true,"provider": "private"}),
             ),
         ] {
@@ -1065,7 +1069,7 @@ mod tests {
         assert!(
             decode_channel_runtime_confirmation(
                 response(json!({"channel":"whatsapp","accountId":"primary","started":true})),
-                crate::operations::channel_login::ChannelRuntimeAction::Stop,
+                crate::surfaces::channels::gateway::login::ChannelRuntimeAction::Stop,
                 "whatsapp",
             )
             .is_err()
@@ -1131,7 +1135,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             progress.status,
-            crate::operations::channel_login::LoginProgressStatus::Qr
+            crate::surfaces::channels::gateway::login::LoginProgressStatus::Qr
         );
         assert_eq!(progress.account_id.as_deref(), Some("primary"));
         assert_eq!(
@@ -1153,7 +1157,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             connected.status,
-            crate::operations::channel_login::LoginProgressStatus::Connected
+            crate::surfaces::channels::gateway::login::LoginProgressStatus::Connected
         );
         assert_eq!(connected.account_id.as_deref(), Some("primary"));
         assert!(connected.qr_data_url.is_none());
@@ -1167,7 +1171,7 @@ mod tests {
             let progress = decode_login_progress(response(payload), Some("wechat-main")).unwrap();
             assert_eq!(
                 progress.status,
-                crate::operations::channel_login::LoginProgressStatus::Unknown
+                crate::surfaces::channels::gateway::login::LoginProgressStatus::Unknown
             );
             assert!(progress.qr_data_url.is_none());
             assert!(!format!("{progress:?}").contains("private-token"));

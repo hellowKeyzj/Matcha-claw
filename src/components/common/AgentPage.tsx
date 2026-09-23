@@ -109,11 +109,11 @@ export function AgentResourceGrid({ className, ...props }: HTMLAttributes<HTMLDi
 }
 
 export function AgentResourceCard({ className, ...props }: HTMLAttributes<HTMLElement>) {
-  return <article className={cn('group relative flex min-w-0 flex-col overflow-hidden rounded-[1.5rem] border border-border/70 bg-gradient-to-b from-card to-secondary/20 p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_1px_2px_rgba(15,23,42,0.05),0_24px_64px_rgba(15,23,42,0.05)] transition-[border-color,background-color,box-shadow,transform] duration-200 ease-out hover:-translate-y-0.5 hover:border-foreground/15 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.85),0_1px_2px_rgba(15,23,42,0.06),0_30px_72px_rgba(15,23,42,0.07)] focus-within:border-foreground/20 motion-reduce:transform-none motion-reduce:transition-none dark:from-card dark:to-secondary/10 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]', className)} {...props} />;
+  return <article className={cn('group relative flex min-w-0 flex-col overflow-hidden rounded-[1.5rem] border border-border/70 bg-card p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_1px_2px_rgba(15,23,42,0.05)] transition-[border-color,background-color] duration-200 ease-out hover:border-foreground/15 hover:bg-secondary/20 focus-within:border-foreground/20 motion-reduce:transition-none dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]', className)} {...props} />;
 }
 
 export function AgentResourceIcon({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex size-11 shrink-0 items-center justify-center rounded-[1.05rem] border border-border/70 bg-gradient-to-br from-background to-secondary/80 text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_8px_18px_rgba(15,23,42,0.06)] ring-1 ring-background/80 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]', className)} {...props} />;
+  return <div className={cn('flex size-11 shrink-0 items-center justify-center rounded-[1.05rem] border border-border/70 bg-secondary/60 text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.75)] ring-1 ring-background/80 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]', className)} {...props} />;
 }
 
 export function AgentResourcePill({ className, ...props }: HTMLAttributes<HTMLSpanElement>) {

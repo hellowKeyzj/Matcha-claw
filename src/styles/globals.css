@@ -123,13 +123,9 @@
   }
 }
 
-/* Keep scrollbars visually quiet until users interact with a scroll area. */
+/* Keep scrollbars stable and lightweight without hover-driven global restyles. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
-}
-
-*:hover {
   scrollbar-color: hsl(var(--border)) transparent;
 }
 
@@ -143,15 +139,7 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  @apply bg-transparent rounded-full;
-}
-
-*:hover::-webkit-scrollbar-thumb {
-  @apply bg-border;
-}
-
-*:hover::-webkit-scrollbar-thumb:hover {
-  @apply bg-muted-foreground/30;
+  @apply rounded-full bg-border;
 }
 
 .chat-model-picker-viewport {

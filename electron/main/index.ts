@@ -26,6 +26,10 @@ const WINDOWS_APP_USER_MODEL_ID = 'app.matchaclaw.desktop';
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 const requestedUserDataDir = process.env.MATCHACLAW_E2E_USER_DATA_DIR?.trim();
 
+// Chromium's native smooth scrolling causes visible shimmer on Windows in
+// Electron. Renderer-owned stable scrolling restores controlled wheel feel.
+app.commandLine.appendSwitch('disable-smooth-scrolling');
+
 // Disable GPU hardware acceleration globally for maximum stability across
 // all GPU configurations (no GPU, integrated, discrete).
 //

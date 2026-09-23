@@ -1103,6 +1103,21 @@ pub struct ResolvedSessionModel {
     pub model: ModelRef,
     pub agent_runtime: SessionAgentRuntime,
 }
+
+impl ResolvedSessionModel {
+    pub fn model_identity(&self) -> sessions_module::state::SessionModelIdentity {
+        openclaw_model_identity(Some(self.model_provider.as_str()), self.model.as_str())
+    }
+
+    pub fn model_state(&self) -> sessions_module::state::SessionModelState {
+        sessions_module::state::SessionModelState {
+            selected: Some(self.model_identity()),
+            active: None,
+            override_source: Some(sessions_module::state::SessionModelOverrideSource::User),
+            selection_id: None,
+        }
+    }
+}
 impl fmt::Debug for ResolvedSessionModel {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1229,16 +1244,22 @@ impl<'de> Deserialize<'de> for SessionDescribeRow {
 }
 impl SessionDescribeRow {
     /// Rejoins the row's selected model into the canonical `provider/model` runtime ref shared
-    /// with [`crate::projection::ProviderModelRuntimeIdentity::runtime_model_ref`].
+    /// with [`crate::native_config::ProviderModelRuntimeIdentity::runtime_model_ref`].
     pub fn model_ref(&self) -> Option<String> {
+        Some(openclaw_model_ref(self.model_provider.as_deref(), self.model.as_deref()?))
+    }
+
+    pub fn model_state(&self) -> Option<sessions_module::state::SessionModelState> {
         let model = self.model.as_deref()?;
-        let Some(provider) = self.model_provider.as_deref() else {
-            return Some(model.to_owned());
-        };
-        if model.starts_with(provider) && model.as_bytes().get(provider.len()) == Some(&b'/') {
-            return Some(model.to_owned());
-        }
-        Some(format!("{provider}/{model}"))
+        Some(sessions_module::state::SessionModelState {
+            selected: Some(openclaw_model_identity(self.model_provider.as_deref(), model)),
+            active: None,
+            override_source: self.model_override_source.map(|source| match source {
+                SessionModelOverrideSource::User => sessions_module::state::SessionModelOverrideSource::User,
+                SessionModelOverrideSource::Auto => sessions_module::state::SessionModelOverrideSource::Auto,
+            }),
+            selection_id: None,
+        })
     }
 }
 impl fmt::Debug for SessionDescribeRow {
@@ -1324,6 +1345,10 @@ pub struct SessionSummary {
     pub status: Option<String>,
     pub has_active_run: Option<bool>,
     pub model: Option<String>,
+    pub model_provider: Option<String>,
+    pub active_model: Option<String>,
+    pub active_model_provider: Option<String>,
+    pub model_override_source: Option<SessionModelOverrideSource>,
     pub permission_mode: Option<SessionPermissionMode>,
     pub permission_mode_pending: Option<bool>,
 }
@@ -1381,7 +1406,6 @@ impl<'de> Deserialize<'de> for SessionSummary {
             "parentSessionKey",
             "childSessions",
             "responseUsage",
-            "modelProvider",
             "agentRuntime",
             "contextTokens",
             "deliveryContext",
@@ -1420,6 +1444,13 @@ impl<'de> Deserialize<'de> for SessionSummary {
             has_active_run: serde_json::from_value(read("hasActiveRun"))
                 .map_err(D::Error::custom)?,
             model: serde_json::from_value(read("model")).map_err(D::Error::custom)?,
+            model_provider: serde_json::from_value(read("modelProvider"))
+                .map_err(D::Error::custom)?,
+            active_model: serde_json::from_value(read("activeModel")).map_err(D::Error::custom)?,
+            active_model_provider: serde_json::from_value(read("activeModelProvider"))
+                .map_err(D::Error::custom)?,
+            model_override_source: serde_json::from_value(read("modelOverrideSource"))
+                .map_err(D::Error::custom)?,
             permission_mode: session_permission_mode(read("permissionMode"))
                 .map_err(D::Error::custom)?,
             permission_mode_pending: serde_json::from_value(read("permissionModePending"))
@@ -1450,6 +1481,24 @@ fn session_wire_field(
 }
 
 impl SessionSummary {
+    pub fn model_state(&self) -> Option<sessions_module::state::SessionModelState> {
+        let model = self.model.as_deref()?;
+        Some(sessions_module::state::SessionModelState {
+            selected: Some(openclaw_model_identity(self.model_provider.as_deref(), model)),
+            active: self
+                .active_model
+                .as_deref()
+                .map(|active_model| {
+                    openclaw_model_identity(self.active_model_provider.as_deref(), active_model)
+                }),
+            override_source: self.model_override_source.map(|source| match source {
+                SessionModelOverrideSource::User => sessions_module::state::SessionModelOverrideSource::User,
+                SessionModelOverrideSource::Auto => sessions_module::state::SessionModelOverrideSource::Auto,
+            }),
+            selection_id: None,
+        })
+    }
+
     pub fn agent_scoped_catalog_entry(&self) -> Option<AgentScopedSessionSummary> {
         let key = self.key.as_str();
         let agent_id = match key.strip_prefix("agent:") {
@@ -2919,6 +2968,27 @@ pub enum SessionApprovalSource {
 pub enum SessionApprovalLifecycle {
     Requested,
     Resolved,
+}
+
+fn openclaw_model_ref(provider: Option<&str>, model: &str) -> String {
+    let Some(provider) = provider else {
+        return model.to_owned();
+    };
+    if model.starts_with(provider) && model.as_bytes().get(provider.len()) == Some(&b'/') {
+        return model.to_owned();
+    }
+    format!("{provider}/{model}")
+}
+
+fn openclaw_model_identity(
+    provider: Option<&str>,
+    model: &str,
+) -> sessions_module::state::SessionModelIdentity {
+    sessions_module::state::SessionModelIdentity {
+        provider: provider.map(str::to_owned),
+        model: model.to_owned(),
+        model_ref: openclaw_model_ref(provider, model),
+    }
 }
 
 identity!(ToolId, "tool id must be a non-empty string");
@@ -4662,6 +4732,10 @@ mod tests {
             status: Some(TEXT.into()),
             has_active_run: Some(true),
             model: Some(RUN.into()),
+            model_provider: None,
+            active_model: None,
+            active_model_provider: None,
+            model_override_source: None,
             permission_mode: None,
             permission_mode_pending: None,
         };

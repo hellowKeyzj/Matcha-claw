@@ -21,6 +21,15 @@ const matchaEndpoint = {
   runtimeInstanceId: 'local',
 } as const;
 
+const selectedModelState = {
+  selected: { provider: 'anthropic', model: 'claude-opus-4-6', ref: 'anthropic/claude-opus-4-6' },
+} as const;
+
+const succeededModelSelection = {
+  outcome: 'succeeded',
+  modelState: selectedModelState,
+} as const;
+
 function sessionSendRequest(endpoint = openClawEndpoint) {
   const isOpenClaw = endpoint.runtimeAdapterId === 'openclaw';
   const sessionKey = isOpenClaw ? 'agent:main:main' : 'matcha-session-1';
@@ -504,7 +513,7 @@ describe('session capability dispatcher', () => {
 
   it('flattens legacy renderer model selection requests to the native Rust schema', async () => {
     const identity = { endpoint: openClawEndpoint, agentId: 'default', sessionKey: 'agent:default:main' };
-    const select = vi.fn().mockResolvedValue({ status: 200, body: { outcome: 'succeeded' } });
+    const select = vi.fn().mockResolvedValue({ status: 200, body: succeededModelSelection });
 
     const response = await dispatchSessionCapability({
       id: 'session.modelSelection',
@@ -518,7 +527,7 @@ describe('session capability dispatcher', () => {
       },
     }, { runtimeHostTransports: { sessionModelSelectionTransport: { select } } } as never);
 
-    expect(response).toEqual({ status: 200, body: { outcome: 'succeeded' } });
+    expect(response).toEqual({ status: 200, body: succeededModelSelection });
     expect(select).toHaveBeenCalledWith({
       id: 'session.modelSelection',
       operationId: 'sessions.patchModel',
@@ -534,7 +543,7 @@ describe('session capability dispatcher', () => {
 
   it('accepts OpenClaw agent-scoped model selection requests with optional endpointSessionId', async () => {
     const identity = { endpoint: openClawEndpoint, agentId: 'designer-agent', sessionKey: 'agent:designer-agent:main' };
-    const select = vi.fn().mockResolvedValue({ status: 200, body: { outcome: 'succeeded' } });
+    const select = vi.fn().mockResolvedValue({ status: 200, body: succeededModelSelection });
 
     await expect(dispatchSessionCapability({
       id: 'session.modelSelection',
@@ -549,7 +558,7 @@ describe('session capability dispatcher', () => {
       },
     }, { runtimeHostTransports: { sessionModelSelectionTransport: { select } } } as never)).resolves.toEqual({
       status: 200,
-      body: { outcome: 'succeeded' },
+      body: succeededModelSelection,
     });
     expect(select.mock.calls[0]?.[0]).toEqual({
       id: 'session.modelSelection',
@@ -586,7 +595,7 @@ describe('session capability dispatcher', () => {
 
   it('passes Matcha endpointSessionId through model selection without replacing the Host key', async () => {
     const identity = { endpoint: matchaEndpoint, agentId: 'matcha', sessionKey: 'matcha-agent:matcha:native-session-1' };
-    const select = vi.fn().mockResolvedValue({ status: 200, body: { outcome: 'succeeded' } });
+    const select = vi.fn().mockResolvedValue({ status: 200, body: succeededModelSelection });
 
     await expect(dispatchSessionCapability({
       id: 'session.modelSelection',
@@ -601,7 +610,7 @@ describe('session capability dispatcher', () => {
       },
     }, { runtimeHostTransports: { sessionModelSelectionTransport: { select } } } as never)).resolves.toEqual({
       status: 200,
-      body: { outcome: 'succeeded' },
+      body: succeededModelSelection,
     });
     expect(select).toHaveBeenCalledWith({
       id: 'session.modelSelection',

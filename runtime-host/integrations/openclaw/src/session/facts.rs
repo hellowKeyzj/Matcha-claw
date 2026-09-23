@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{
     gateway::ingress::GatewayEpoch,
-    session_window::{self, HistoryError, PageRequest, SessionWindow},
+    session::window::{self, HistoryError, PageRequest, SessionWindow},
 };
 
 use super::protocol::{
@@ -298,7 +298,7 @@ impl BoundedHistoryFacts {
         payload: Value,
         request: PageRequest,
     ) -> Result<NativeFactRead<Self>, HistoryError> {
-        let window = session_window::decode_window(payload.clone(), request)?;
+        let window = window::decode_window(payload.clone(), request)?;
         let envelope = payload.as_object().ok_or(HistoryError::malformed())?;
         let session_key = optional_session_key(envelope.get("sessionKey"))?;
         let native_session_id = optional_native_session_id(envelope.get("sessionId"))?;
@@ -531,6 +531,10 @@ mod tests {
             status: Some("idle".into()),
             has_active_run: Some(false),
             model: Some("provider/model".into()),
+            model_provider: None,
+            active_model: None,
+            active_model_provider: None,
+            model_override_source: None,
             permission_mode: None,
             permission_mode_pending: None,
         }

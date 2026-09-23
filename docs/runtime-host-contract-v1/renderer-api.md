@@ -74,7 +74,7 @@ POST /api/capabilities/execute
 | `session.management` | `sessions.list`、`window`、`delete`、`rename`、`archive`、`unarchive`、`updateStatus`、`switch`、`resume`、`state`、`sessions.permission.get/set` | [host-api.ts](../../src/lib/host-api.ts#L546-L555)、[host-api.ts](../../src/lib/host-api.ts#L822-L1168) |
 | `session.prompt` | `sessions.create`、`load`、`abort`、`prompt`、`sendWithMedia` | [host-api.ts](../../src/lib/host-api.ts#L840-L855)、[host-api.ts](../../src/lib/host-api.ts#L924-L1065) |
 | `session.approval` | `approvals.list`、`approvals.resolve` | [host-api.ts](../../src/lib/host-api.ts#L1000-L1025) |
-| `session.modelSelection` | `sessions.patchModel` | [host-api.ts](../../src/lib/host-api.ts#L1027-L1041) |
+| `session.modelSelection` | `sessions.patchModel`；成功响应返回结构化 `modelState` | [host-api.ts](../../src/lib/host-api.ts#L1421-L1448) |
 | `provider.routing` | provider routing capability projection；provider accounts/models 仍有 direct Host API reads/writes/discovery | [capability-routing.ts](../../src/lib/capability-routing.ts)、[provider-accounts.ts](../../src/lib/provider-accounts.ts)、[provider-models.ts](../../src/lib/provider-models.ts)、[provider-model-catalog.ts](../../src/lib/provider-model-catalog.ts) |
 | `integration.channel` | channel integration operations | [channel-runtime.ts](../../src/lib/channel-runtime.ts) |
 | `skill.management` | skill operations / import / gateway sync | [skills.ts](../../src/stores/skills.ts)、[Skills/index.tsx](../../src/pages/Skills/index.tsx) |
@@ -103,7 +103,7 @@ Provider model discovery/import 的 Renderer/Electron public DTO 不扩展：dis
 
 `providers:storeAccount` 的 `apiKey` / `token` 仅交给 Main 私密入口；Host account 与 public response 不携带 secret。`cliReuse` 仅用于 Anthropic chat account，既不复制 CLI secret，也不保存 credential reference；`token` 用于 Anthropic / GitHub Copilot chat account。品牌和套餐只表达为现有 account 的 provider / endpoint，不新增 plan owner。
 
-Native 模型发现需要 OpenClaw Gateway 运行，离线返回 `Unavailable`；Host 按 native provider 筛选模型，Zen/Go 的逐模型协议由 native catalog 独占。此处记录契约，不宣称真实登录或 live 模型发现已验证。私密存储链见 [layered-architecture.md](../architecture/layered-architecture.md#63-integration-独占-peer-specific-private-semantics)。来源：[provider account model](../../runtime-host/modules/provider/src/domain/account.rs)、[provider accounts loopback](../../runtime-host/modules/provider/src/adapters/loopback/accounts.rs)、[provider-private-auth.ts](../../electron/main/ipc/provider-private-auth.ts)、[provider_models/mod.rs](../../runtime-host/integrations/openclaw/src/projection/provider_models/mod.rs)。
+Native 模型发现需要 OpenClaw Gateway 运行，离线返回 `Unavailable`；Host 按 native provider 筛选模型，Zen/Go 的逐模型协议由 native catalog 独占。此处记录契约，不宣称真实登录或 live 模型发现已验证。私密存储链见 [layered-architecture.md](../architecture/layered-architecture.md#63-integration-独占-peer-specific-private-semantics)。来源：[provider account model](../../runtime-host/modules/provider/src/domain/account.rs)、[provider accounts loopback](../../runtime-host/modules/provider/src/adapters/loopback/accounts.rs)、[provider-private-auth.ts](../../electron/main/ipc/provider-private-auth.ts)、[provider_models/mod.rs](../../runtime-host/integrations/openclaw/src/native_config/provider_models/mod.rs)。
 
 ## 4. session prompt 的关键兼容语义
 
@@ -127,6 +127,8 @@ Native 模型发现需要 OpenClaw Gateway 运行，离线返回 `Unavailable`�
 `sessionIdentity` 是 `endpoint + agentId + sessionKey`；`endpointSessionId` 只是 peer runtime 本地 session id，不参与 Host 侧 identity。
 
 session prompt timeout 是 `10s`，abort `5s`，model patch `15s`。来源：[host-api.ts](../../src/lib/host-api.ts#L33-L47)、[host-api.ts](../../src/lib/host-api.ts#L985-L1065)。
+
+Session catalog/view 的模型事实使用 `modelState`，不再暴露裸 `model` 作为 public session state：`selected` 是用户/会话选择并作为 Chat picker 显示权威，`active` 只表达运行中 fallback 事实，`overrideSource` 为 `user | auto`，`selectionId` 是可选 catalog selection id；`sessions.patchModel` 输入字段仍是 `modelSelectionId`，成功响应必须返回 `{ outcome: "succeeded", modelState }`，Renderer 会先用返回值更新当前 session meta 再异步刷新 catalog。来源：[model.rs](../../runtime-host/modules/sessions/src/domain/model.rs#L106-L132)、[host-api.ts](../../src/lib/host-api.ts#L1421-L1448)、[Chat/index.tsx](../../src/pages/Chat/index.tsx#L1082-L1088)、[Chat/index.tsx](../../src/pages/Chat/index.tsx#L1267-L1281)。
 
 Chat transport 进一步固定：调用会传 `deliver: false`、保持 idempotency key，并把空 message + attachment 转为 fallback prompt。来源：[send-transport.ts](../../src/stores/chat/send-transport.ts)。
 

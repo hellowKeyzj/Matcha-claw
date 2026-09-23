@@ -1,8 +1,4 @@
-use std::{
-    future::Future,
-    pin::Pin,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use platform::module::{
     CapabilityKey, EffectKind, ModuleDescriptor, ModuleId, PrivateControlCatalogSnapshot,
@@ -13,7 +9,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     RuntimeState,
     composition::PeerHandle,
-    control::{CommandOutcome, CommandResult, RejectionCode},
+    control::{CommandOutcome, RejectionCode},
     host_actor::Handle,
 };
 
@@ -30,46 +26,8 @@ const HOST_HEALTH_DESCRIPTOR: PrivateControlDescriptor =
     PrivateControlDescriptor::new(HOST_HEALTH, false);
 const HOST_RUNTIME_SNAPSHOT_DESCRIPTOR: PrivateControlDescriptor =
     PrivateControlDescriptor::new(HOST_RUNTIME_SNAPSHOT, false);
-const HOST_SYSTEM_HANDLERS: &[HostSystemPrivateControlHandler] = &[
-    HostSystemPrivateControlHandler::new(HOST_HEALTH_DESCRIPTOR, host_health),
-    HostSystemPrivateControlHandler::new(HOST_RUNTIME_SNAPSHOT_DESCRIPTOR, runtime_snapshot),
-];
 const COMMANDS: &[PrivateControlDescriptor] =
     &[HOST_HEALTH_DESCRIPTOR, HOST_RUNTIME_SNAPSHOT_DESCRIPTOR];
-
-type HostSystemPrivateControlFuture<'a> = Pin<Box<dyn Future<Output = CommandOutcome> + Send + 'a>>;
-type HostSystemPrivateControlFn =
-    for<'a> fn(&'a Handle, &'a PeerHandle) -> HostSystemPrivateControlFuture<'a>;
-
-#[derive(Clone, Copy)]
-struct HostSystemPrivateControlHandler {
-    descriptor: PrivateControlDescriptor,
-    execute: HostSystemPrivateControlFn,
-}
-
-impl HostSystemPrivateControlHandler {
-    const fn new(
-        descriptor: PrivateControlDescriptor,
-        execute: HostSystemPrivateControlFn,
-    ) -> Self {
-        Self {
-            descriptor,
-            execute,
-        }
-    }
-
-    fn descriptor(self) -> PrivateControlDescriptor {
-        self.descriptor
-    }
-
-    fn execute<'a>(
-        self,
-        owner: &'a Handle,
-        peer: &'a PeerHandle,
-    ) -> HostSystemPrivateControlFuture<'a> {
-        (self.execute)(owner, peer)
-    }
-}
 
 #[derive(Clone)]
 pub(crate) struct PrivateControlRegistry {
@@ -93,10 +51,11 @@ impl PrivateControlRegistry {
         if descriptor.accepts_input() != command.input().is_some() {
             return invalid_input();
         }
-        let Some(handler) = host_system_handler(descriptor) else {
-            return invalid_input();
-        };
-        handler.execute(owner, peer).await
+        match descriptor.name() {
+            HOST_HEALTH => host_health(owner),
+            HOST_RUNTIME_SNAPSHOT => runtime_snapshot(owner, peer).await,
+            _ => invalid_input(),
+        }
     }
 }
 
@@ -113,71 +72,54 @@ pub(crate) fn descriptor() -> ModuleDescriptor {
     )
 }
 
-fn host_system_handler(
-    descriptor: PrivateControlDescriptor,
-) -> Option<HostSystemPrivateControlHandler> {
-    HOST_SYSTEM_HANDLERS.iter().copied().find(|handler| {
-        let handler_descriptor = handler.descriptor();
-        handler_descriptor.name() == descriptor.name()
-            && handler_descriptor.accepts_input() == descriptor.accepts_input()
-    })
-}
-
 fn invalid_input() -> CommandOutcome {
     CommandOutcome::rejected(RejectionCode::InvalidInput, INVALID_INPUT_MESSAGE)
 }
 
-fn host_health<'a>(owner: &'a Handle, _peer: &'a PeerHandle) -> HostSystemPrivateControlFuture<'a> {
-    Box::pin(async move {
-        let state = owner.state();
-        let safe_matcha = runtime_state_json(state.matcha());
-        let safe_open_claw = runtime_state_json(state.open_claw());
-        CommandOutcome::succeeded(CommandResult::private(json!({
-            "state": {
-                "ok": state.ok(),
-                "lifecycle": state.lifecycle(),
-                "matcha": safe_matcha,
-                "openClaw": safe_open_claw,
-            },
-            "health": {
-                "ok": state.ok(),
-                "lifecycle": state.lifecycle(),
-                "matcha": safe_matcha,
-                "openClaw": safe_open_claw,
-            },
-        })))
-    })
+fn host_health(owner: &Handle) -> CommandOutcome {
+    let state = owner.state();
+    let safe_matcha = runtime_state_json(state.matcha());
+    let safe_open_claw = runtime_state_json(state.open_claw());
+    CommandOutcome::succeeded(json!({
+        "state": {
+            "ok": state.ok(),
+            "lifecycle": state.lifecycle(),
+            "matcha": safe_matcha,
+            "openClaw": safe_open_claw,
+        },
+        "health": {
+            "ok": state.ok(),
+            "lifecycle": state.lifecycle(),
+            "matcha": safe_matcha,
+            "openClaw": safe_open_claw,
+        },
+    }))
 }
 
-fn runtime_snapshot<'a>(
-    owner: &'a Handle,
-    peer: &'a PeerHandle,
-) -> HostSystemPrivateControlFuture<'a> {
-    Box::pin(async move {
-        let observed_at_ms = observed_at_ms();
-        let state = owner.state();
-        let gateway = peer.open_claw_gateway_snapshot().await;
-        let control = peer.open_claw_control_snapshot().await;
-        let safe_matcha = runtime_state_json(state.matcha());
-        let safe_open_claw = runtime_state_json(state.open_claw());
-        CommandOutcome::succeeded(CommandResult::private(json!({
-            "state": {
-                "ok": state.ok(),
-                "lifecycle": state.lifecycle(),
-                "matcha": safe_matcha,
-                "openClaw": safe_open_claw,
-            },
-            "health": {
-                "ok": state.ok(),
-                "lifecycle": state.lifecycle(),
-                "matcha": safe_matcha,
-                "openClaw": safe_open_claw,
-            },
-            "gateway": gateway,
-            "control": control,
-            "observedAtMs": observed_at_ms,
-        })))
-    })
+async fn runtime_snapshot(owner: &Handle, peer: &PeerHandle) -> CommandOutcome {
+    let observed_at_ms = observed_at_ms();
+    let state = owner.state();
+    let gateway = peer.open_claw_gateway_snapshot().await;
+    let control = peer.open_claw_control_snapshot().await;
+    let safe_matcha = runtime_state_json(state.matcha());
+    let safe_open_claw = runtime_state_json(state.open_claw());
+    CommandOutcome::succeeded(json!({
+        "state": {
+            "ok": state.ok(),
+            "lifecycle": state.lifecycle(),
+            "matcha": safe_matcha,
+            "openClaw": safe_open_claw,
+        },
+        "health": {
+            "ok": state.ok(),
+            "lifecycle": state.lifecycle(),
+            "matcha": safe_matcha,
+            "openClaw": safe_open_claw,
+        },
+        "gateway": gateway,
+        "control": control,
+        "observedAtMs": observed_at_ms,
+    }))
 }
 
 fn runtime_state_json(state: &RuntimeState) -> Value {

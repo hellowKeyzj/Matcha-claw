@@ -96,8 +96,13 @@ describe('Electron Main session-list transport', () => {
     });
   });
 
-  it('accepts session catalog rows that carry a model', async () => {
-    const modeledSession = { ...session, model: 'provider/selected-model' } as const;
+  it('accepts session catalog rows that carry model state', async () => {
+    const modeledSession = {
+      ...session,
+      modelState: {
+        selected: { provider: 'provider', model: 'selected-model', ref: 'provider/selected-model' },
+      },
+    } as const;
     const transport = createSessionListTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
       34_101,

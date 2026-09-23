@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-    PeerCommand, PeerQuery, RestartOpenClawError, RuntimeRestartCommandError,
-    RuntimeStartCommandError, RuntimeStopCommandError, StartOpenClawError, StopOpenClawError,
+    PeerCommand, PeerQuery, RuntimeRestartCommandError, RuntimeStartCommandError,
+    RuntimeStopCommandError,
 };
 
 #[derive(Clone)]
@@ -32,7 +32,15 @@ impl runtime_directory::RuntimeEndpointDirectorySource for PeerHandle {
 
 impl openclaw::plugins::OpenClawPluginsRestartPort for PeerHandle {
     fn restart_openclaw_runtime<'a>(&'a self) -> plugins_module::ports::PluginsFuture<'a, bool> {
-        Box::pin(async move { matches!(self.restart_open_claw().await, Ok(Ok(_))) })
+        Box::pin(async move {
+            matches!(
+                self.restart_runtime(
+                    runtime_directory::RuntimeDriverIdentity::open_claw().endpoint()
+                )
+                .await,
+                Ok(Ok(_))
+            )
+        })
     }
 }
 
@@ -58,44 +66,24 @@ impl PeerHandle {
     pub(crate) async fn request_peer_autostart(
         &self,
         open_claw_auto_start: bool,
-    ) -> Result<(), ()> {
+    ) -> Result<(), super::AutostartOpenClawError> {
         self.owner
             .send_command(PeerCommand::AutostartMatcha)
             .await
-            .map_err(|_| ())?;
+            .map_err(|_| super::AutostartOpenClawError::PeerUnavailable)?;
 
-        if open_claw_auto_start {
-            self.owner
-                .send_command(PeerCommand::AutostartOpenClaw)
-                .await
-                .map_err(|_| ())?;
+        if !open_claw_auto_start {
+            return Ok(());
         }
-        Ok(())
+
+        self.request_command(|reply| PeerCommand::AutostartOpenClaw { reply })
+            .await
+            .map_err(|_| super::AutostartOpenClawError::PeerUnavailable)?
+            .map(|_| ())
     }
 
     pub(crate) async fn open_claw_status(&self) -> Result<RuntimeState, ()> {
         self.request_query(|reply| PeerQuery::OpenClawStatus { reply })
-            .await
-    }
-
-    pub(crate) async fn start_open_claw(
-        &self,
-    ) -> Result<Result<RuntimeState, StartOpenClawError>, ()> {
-        self.request_command(|reply| PeerCommand::StartOpenClaw { reply })
-            .await
-    }
-
-    pub(crate) async fn stop_open_claw(
-        &self,
-    ) -> Result<Result<RuntimeState, StopOpenClawError>, ()> {
-        self.request_command(|reply| PeerCommand::StopOpenClaw { reply })
-            .await
-    }
-
-    pub(crate) async fn restart_open_claw(
-        &self,
-    ) -> Result<Result<RuntimeState, RestartOpenClawError>, ()> {
-        self.request_command(|reply| PeerCommand::RestartOpenClaw { reply })
             .await
     }
 

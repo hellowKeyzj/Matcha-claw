@@ -158,7 +158,7 @@ function buildSessionNode(record: ChatSessionRecord): ChatSessionRuntimeSessionN
     label: record.meta.label,
     titleSource: record.meta.titleSource,
     displayName: record.meta.displayName ?? null,
-    model: record.meta.model ?? null,
+    modelState: record.meta.modelState,
     thinkingLevel: record.meta.thinkingLevel,
     ...(record.contextTokens ? { contextTokens: record.contextTokens } : {}),
     updatedAt: record.meta.lastActivityAt,

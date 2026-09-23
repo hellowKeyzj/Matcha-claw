@@ -133,7 +133,12 @@ describe('chat model picker', () => {
       },
     ]);
 
-    hostSessionPatchMock.mockResolvedValue({ outcome: 'succeeded' });
+    hostSessionPatchMock.mockResolvedValue({
+      outcome: 'succeeded',
+      modelState: {
+        selected: { provider: 'anthropic', model: 'claude-opus-4-6', ref: 'anthropic/claude-opus-4-6' },
+      },
+    });
 
     useRuntimeHostStore.setState({
       status: {
@@ -248,7 +253,9 @@ describe('chat model picker', () => {
         preferred: true,
         historyStatus: 'ready',
         lastActivityAt: Date.now(),
-        model: 'openai/gpt-5.4',
+        modelState: {
+          selected: { provider: 'openai', model: 'gpt-5.4', ref: 'openai/gpt-5.4' },
+        },
       },
     };
     const sessionRuntimeCatalog = {
@@ -322,7 +329,7 @@ describe('chat model picker', () => {
     fireEvent.keyDown(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }), { key: 'Enter' });
 
     expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('gpt-5.4');
-    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
+    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.modelState?.selected?.ref).toBe('openai/gpt-5.4');
 
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
@@ -335,8 +342,8 @@ describe('chat model picker', () => {
     await waitFor(() => {
       expect(loadSessions).toHaveBeenCalledTimes(1);
     });
-    expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('gpt-5.4');
-    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
+    expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('claude-opus-4-6');
+    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.modelState?.selected?.ref).toBe('anthropic/claude-opus-4-6');
   });
 
   it.each(['target_rejected', 'outcome_unknown'] as const)(
@@ -353,7 +360,7 @@ describe('chat model picker', () => {
       fireEvent.keyDown(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }), { key: 'Enter' });
 
       expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('gpt-5.4');
-      expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
+      expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.modelState?.selected?.ref).toBe('openai/gpt-5.4');
 
       await waitFor(() => {
         expect(hostSessionPatchMock).toHaveBeenCalledWith({
@@ -381,7 +388,7 @@ describe('chat model picker', () => {
         modelSelectionId: 'anthropic/claude-opus-4-6',
       }, { traceId: null });
     });
-    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
+    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.modelState?.selected?.ref).toBe('openai/gpt-5.4');
   });
 
   it('does not show a model picker for sessions without a runtime model', async () => {
@@ -392,7 +399,7 @@ describe('chat model picker', () => {
           ...current,
           meta: {
             ...current.meta,
-            model: null,
+            modelState: null,
           },
         },
       },
@@ -414,7 +421,9 @@ describe('chat model picker', () => {
           ...current,
           meta: {
             ...current.meta,
-            model: 'custom-4ee8e78e/gpt-5.4',
+            modelState: {
+              selected: { provider: 'custom-4ee8e78e', model: 'gpt-5.4', ref: 'custom-4ee8e78e/gpt-5.4' },
+            },
           },
         },
       },

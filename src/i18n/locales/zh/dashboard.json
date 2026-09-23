@@ -1,11 +1,4 @@
 {
-    "gateway": "网关",
-    "uptime": "运行时间",
-    "port": "端口: {{port}}",
-    "pid": "PID: {{pid}}",
-    "sinceRestart": "自上次重启",
-    "gatewayPreparing": "网关正在启动",
-    "gatewayNotRunning": "网关未运行",
     "recentTokenHistory": {
         "title": "最近 Token 消耗",
         "description": "展示最近带有 token 用量记录的 session。",

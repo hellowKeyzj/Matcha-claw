@@ -35,9 +35,15 @@ const runtimeHostTransportPort = 32_111;
 
 describe('session model selection delivery transport', () => {
   it('binds a model-only capability decision to the fixed localhost endpoint', async () => {
+    const succeeded = {
+      outcome: 'succeeded',
+      modelState: {
+        selected: { provider: 'anthropic', model: 'claude-opus-4-6', ref: 'anthropic/claude-opus-4-6' },
+      },
+    } as const;
     const fetcher = vi.fn().mockResolvedValue({
       status: 200,
-      json: async () => ({ outcome: 'succeeded' }),
+      json: async () => succeeded,
     });
     const transport = createSessionModelSelectionTransport(
       createRuntimeHostDeliveryIssuer(),
@@ -47,7 +53,7 @@ describe('session model selection delivery transport', () => {
 
     await expect(transport.select(request)).resolves.toEqual({
       status: 200,
-      body: { outcome: 'succeeded' },
+      body: succeeded,
     });
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:32111/api/sessions/model', expect.objectContaining({
       method: 'POST',

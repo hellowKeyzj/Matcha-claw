@@ -78,6 +78,29 @@ fn contains_forbidden_path(source: &str, crate_name: &str) -> bool {
         .any(|segment| source.contains(&format!("{crate_name}::{segment}")))
 }
 
+fn cargo_manifests(root: impl AsRef<Path>) -> Vec<String> {
+    let root = root.as_ref();
+    if !root.exists() {
+        return Vec::new();
+    }
+    let mut manifests = Vec::new();
+    collect_cargo_manifests(root, &mut manifests);
+    manifests
+}
+
+fn collect_cargo_manifests(path: &Path, manifests: &mut Vec<String>) {
+    let entries = fs::read_dir(path).expect("read manifest directory");
+    for entry in entries {
+        let entry = entry.expect("read manifest entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_cargo_manifests(&path, manifests);
+        } else if path.file_name().and_then(|file_name| file_name.to_str()) == Some("Cargo.toml") {
+            manifests.push(path.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
 fn assert_source_has_no_function_definitions(
     path: impl AsRef<Path>,
     function_names: &[&str],
@@ -561,7 +584,7 @@ fn host_runtime_driver_uses_module_owned_provider_config_contract() {
 
     let provider_ops = fs::read_to_string(
         Path::new(RUNTIME_HOST_ROOT)
-            .join("integrations/openclaw/src/driver/ops/provider_config.rs"),
+            .join("integrations/openclaw/src/surfaces/providers/adapter.rs"),
     )
     .expect("read OpenClaw provider config ops");
 
@@ -582,7 +605,7 @@ fn host_openclaw_skill_ops_implements_skills_module_runtime_contract() {
         fs::read_to_string(Path::new(RUNTIME_HOST_ROOT).join("modules/skills/src/ports.rs"))
             .expect("read skills module ports");
     let openclaw_skill_ops = fs::read_to_string(
-        Path::new(RUNTIME_HOST_ROOT).join("integrations/openclaw/src/driver/ops/skill.rs"),
+        Path::new(RUNTIME_HOST_ROOT).join("integrations/openclaw/src/surfaces/skills/adapter.rs"),
     )
     .expect("read OpenClaw skill ops");
     let mut violations = Vec::new();
@@ -723,8 +746,8 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
             .join("modules/organization/src/adapters/start_gate_send_hook.rs"),
     )
     .expect("read organization send hook");
-    let host_mcp =
-        fs::read_to_string(Path::new(HOST_SRC).join("mcp.rs")).expect("read Host MCP composition");
+    let host_mcp = fs::read_to_string(Path::new(HOST_SRC).join("bin/runtime-host-mcp.rs"))
+        .expect("read Host MCP composition");
     let organization_mcp_tools = fs::read_to_string(
         Path::new(RUNTIME_HOST_ROOT).join("modules/organization/src/adapters/mcp/tools.rs"),
     )
@@ -741,8 +764,8 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
         !host_lib.contains("mod artifacts;")
             && !host_lib.contains("pub mod sealed_resource;")
             && !host_lib.contains("mod organization_adapters;")
-            && host_lib.contains("run_matcha_mcp"),
-        "Host lib must not own migrated second-stage modules while preserving public product MCP export"
+            && !host_lib.contains("mod mcp;"),
+        "Host lib must not own migrated second-stage modules or delegate-only MCP wrapper"
     );
     assert!(
         sealed_module.contains("SealedResourceModule")
@@ -892,6 +915,28 @@ fn host_private_control_does_not_expose_team_runtime_execute() {
             && loopback.contains("team.runtime")
             && loopback.contains("execute_team_runtime_capability_request"),
         "Organization loopback route should own team.runtime execution"
+    );
+}
+
+#[test]
+fn runtime_module_manifests_do_not_path_depend_on_integrations() {
+    let mut violations = Vec::new();
+    for manifest in cargo_manifests(Path::new(RUNTIME_HOST_ROOT).join("modules")) {
+        let source = fs::read_to_string(&manifest).expect("read module manifest");
+        for line in source.lines() {
+            if line.contains("path = \"../../integrations/")
+                || line.contains("path = '../integrations/")
+                || line.contains("path = \"../integrations/")
+            {
+                violations.push(format!("{manifest}: {line}"));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Runtime modules must not depend on integration crates; integrations consume module ports instead:\n{}",
+        violations.join("\n")
     );
 }
 

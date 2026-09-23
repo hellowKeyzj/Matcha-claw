@@ -212,7 +212,7 @@ fn open_at(
 ) -> io::Result<File> {
     use std::os::fd::FromRawFd;
 
-    let descriptor = unsafe { libc::openat(directory, name.as_ptr(), flags, mode) };
+    let descriptor = unsafe { libc::openat(directory, name.as_ptr(), flags, mode as libc::c_uint) };
     if descriptor == -1 {
         Err(io::Error::last_os_error())
     } else {

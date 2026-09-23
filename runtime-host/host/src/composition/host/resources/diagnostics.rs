@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use openclaw::lifecycle::state_dir::CanonicalStateDir;
+use platform::state_dir::CanonicalStateDir;
 
 use crate::composition::host::ConstructionError;
 use ::diagnostics::{

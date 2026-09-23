@@ -32,7 +32,7 @@ const COMPACT_SIDE_RAIL_HEADER = 'inline-flex max-w-full self-start items-center
 const COMPACT_TEXT_BLOCK = 'w-full overflow-hidden rounded-[16px] border border-border/45 bg-muted/55';
 const COMPACT_OUTPUT_SCROLL_AREA = 'max-h-72 overflow-auto overscroll-contain whitespace-pre-wrap break-words outline-none';
 const COMPACT_ICON_TOGGLE = 'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[6px] text-muted-foreground transition-colors hover:text-foreground';
-const COMPACT_STRUCTURED_CARD = 'w-full overflow-hidden rounded-[16px] border border-border/45 bg-background/70 px-3.5 py-3 shadow-sm backdrop-blur-sm';
+const COMPACT_STRUCTURED_CARD = 'w-full overflow-hidden rounded-[16px] border border-border/45 bg-card px-3.5 py-3 shadow-sm';
 const COMPACT_META_CHIP = 'inline-flex max-w-full items-center rounded-full border border-border/45 bg-muted/55 px-2 py-0.5 text-[11px] leading-4 text-muted-foreground';
 
 function imageSrc(img: ChatMessageImage): string | null {
@@ -98,7 +98,7 @@ function ToolActivityTextBlock({
             <button
               type="button"
               aria-label={copied ? '已复制输入' : '复制输入'}
-              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] text-muted-foreground transition-colors hover:bg-background/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] text-muted-foreground transition-colors hover:bg-background/95 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
               onClick={onCopy}
             >
               {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
@@ -883,7 +883,7 @@ function FileCard({
         onMouseDown={handleMouseDown}
         onClick={handleClick}
         title={visiblePath ?? 'Open file'}
-        className="flex max-w-[220px] items-center gap-2 rounded-[16px] border border-border/42 bg-background/72 px-3 py-2 text-left shadow-sm backdrop-blur-sm transition-colors hover:bg-background/84"
+        className="flex max-w-[220px] items-center gap-2 rounded-[16px] border border-border/42 bg-card px-3 py-2 text-left shadow-sm transition-colors hover:bg-background/95"
       >
         <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
         <div className="min-w-0 overflow-hidden">
@@ -895,7 +895,7 @@ function FileCard({
   }
 
   return (
-    <div className="flex max-w-[220px] items-center gap-2 rounded-[16px] border border-border/42 bg-background/72 px-3 py-2 shadow-sm backdrop-blur-sm">
+    <div className="flex max-w-[220px] items-center gap-2 rounded-[16px] border border-border/42 bg-card px-3 py-2 shadow-sm">
       <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
       <div className="min-w-0 overflow-hidden">
         <p className="text-xs font-medium truncate">{file.fileName}</p>
@@ -928,7 +928,7 @@ function ImageThumbnail({
 }) {
   return (
     <div
-      className="group/img relative h-36 w-36 cursor-zoom-in overflow-hidden rounded-[18px] border border-border/42 bg-background/72 shadow-sm backdrop-blur-sm"
+      className="group/img relative h-36 w-36 cursor-zoom-in overflow-hidden rounded-[18px] border border-border/42 bg-card shadow-sm"
       onClick={onPreview}
     >
       <img src={src} alt={fileName} className="w-full h-full object-cover" />
@@ -950,7 +950,7 @@ function ImagePreviewCard({
 }) {
   return (
     <div
-      className="group/img relative max-w-xs cursor-zoom-in overflow-hidden rounded-[18px] border border-border/42 bg-background/68 shadow-sm backdrop-blur-sm"
+      className="group/img relative max-w-xs cursor-zoom-in overflow-hidden rounded-[18px] border border-border/42 bg-card shadow-sm"
       onClick={onPreview}
     >
       <img src={src} alt={fileName} className="block w-full" />

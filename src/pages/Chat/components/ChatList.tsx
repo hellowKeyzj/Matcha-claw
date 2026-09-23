@@ -166,7 +166,7 @@ function SystemInfoRow({ item }: { item: ChatRenderItem }) {
   }
   return (
     <div className="flex justify-center">
-      <div className="max-w-[42rem] rounded-[16px] border border-border/40 bg-background/68 px-3 py-2 text-[12px] text-muted-foreground shadow-sm backdrop-blur-sm">
+      <div className="max-w-[42rem] rounded-[16px] border border-border/40 bg-card px-3 py-2 text-[12px] text-muted-foreground shadow-sm">
         {text}
       </div>
     </div>
@@ -372,7 +372,7 @@ const ChatScrollChrome = memo(function ChatScrollChrome({
           variant="outline"
           size="icon"
           className={cn(
-            'pointer-events-auto h-9 w-9 rounded-full border-border/45 bg-background/90 text-foreground shadow-[0_8px_22px_rgba(15,23,42,0.08)] transition-transform hover:-translate-y-0.5 backdrop-blur-xl supports-[backdrop-filter]:bg-background/82',
+            'pointer-events-auto h-9 w-9 rounded-full border-border/45 bg-background text-foreground shadow-none transition-colors hover:bg-secondary',
             showLoadOlderButton && 'translate-y-1',
           )}
           onClick={scrollChromeStore.runJumpAction}

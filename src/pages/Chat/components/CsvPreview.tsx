@@ -90,7 +90,7 @@ export const CsvPreview = memo(function CsvPreview({
 
   if (!rows) {
     return (
-      <div className="overflow-hidden rounded-[18px] border border-border/45 bg-background/68 shadow-sm backdrop-blur-sm">
+      <div className="overflow-hidden rounded-[18px] border border-border/45 bg-card shadow-sm">
         <div className="flex items-center justify-between border-b border-border/45 px-3 py-2">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <TableProperties className="h-3.5 w-3.5" />
@@ -100,7 +100,7 @@ export const CsvPreview = memo(function CsvPreview({
             type="button"
             variant="ghost"
             size="sm"
-            className="h-7 gap-1.5 rounded-full border border-border/40 bg-background/72 px-2.5 text-[11px] text-muted-foreground shadow-none hover:bg-background/88 hover:text-foreground"
+            className="h-7 gap-1.5 rounded-full border border-border/40 bg-background/95 px-2.5 text-[11px] text-muted-foreground shadow-none hover:bg-background hover:text-foreground"
             onClick={handleCopy}
           >
             {copied ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}

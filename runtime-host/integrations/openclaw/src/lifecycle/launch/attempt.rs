@@ -6,7 +6,7 @@ use foundation::process::{
 };
 
 use super::CanonicalStateDir;
-use crate::lifecycle::state_dir::StateDirHandle;
+use platform::state_dir::StateDirHandle;
 
 #[cfg(unix)]
 mod canonical;

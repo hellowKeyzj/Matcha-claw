@@ -736,11 +736,6 @@ impl ModuleCatalog {
 
         for module in &self.modules {
             validate_module_effect_contract(module, &mut route_owners)?;
-            if let Some(loopback) = module.loopback() {
-                for route in loopback.routes() {
-                    scoped.insert((module.id(), EffectKind::Route, route.id()));
-                }
-            }
         }
 
         for registration in effects {

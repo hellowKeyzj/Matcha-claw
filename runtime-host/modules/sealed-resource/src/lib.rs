@@ -13,3 +13,4 @@ pub use api::{
 };
 pub use domain::{AgentKey, PackageRelativePath, SkillKey};
 pub use ports::{SealedResourceModule, SealedResourceProvisionError};
+pub use store::SealedAgentRuntimeProjection;

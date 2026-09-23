@@ -13,9 +13,8 @@ use organization::TeamRunCoordinatorHandle;
 use provider_module::ProviderHandle;
 
 use super::{
-    PeerCommand, PeerGlobalState, PeerKey, PeerLaneState, PeerQuery, RestartOpenClawError,
+    AutostartOpenClawError, PeerCommand, PeerGlobalState, PeerKey, PeerLaneState, PeerQuery,
     RuntimeRestartCommandError, RuntimeStartCommandError, RuntimeStopCommandError,
-    StartOpenClawError, StopOpenClawError,
 };
 
 #[derive(Clone)]
@@ -249,17 +248,8 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, command: PeerCommand
         PeerCommand::AutostartMatcha => {
             super::matcha::autostart(shared, lifecycle).await;
         }
-        PeerCommand::AutostartOpenClaw => {
-            super::openclaw::autostart(shared, lifecycle).await;
-        }
-        PeerCommand::StartOpenClaw { reply } => {
-            let _ = reply.send(super::openclaw::start(shared, lifecycle).await);
-        }
-        PeerCommand::StopOpenClaw { reply } => {
-            let _ = reply.send(super::openclaw::stop(shared, lifecycle).await);
-        }
-        PeerCommand::RestartOpenClaw { reply } => {
-            let _ = reply.send(super::openclaw::restart(shared, lifecycle).await);
+        PeerCommand::AutostartOpenClaw { reply } => {
+            let _ = reply.send(super::openclaw::autostart(shared, lifecycle).await);
         }
         PeerCommand::StartRuntime { reply, .. } => {
             let _ = reply.send(start_runtime(shared, key, lifecycle).await);
@@ -279,12 +269,7 @@ async fn start_runtime(
     lifecycle: &dyn crate::composition::runtime_ports::LifecycleOps,
 ) -> Result<crate::RuntimeState, RuntimeStartCommandError> {
     if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
-        return super::openclaw::start(shared, lifecycle)
-            .await
-            .map_err(|error| match error {
-                StartOpenClawError::AdmissionClosed => RuntimeStartCommandError::AdmissionClosed,
-                StartOpenClawError::RuntimeStart => RuntimeStartCommandError::RuntimeStart,
-            });
+        return super::openclaw::start(shared, lifecycle).await;
     }
     if shared.admission().admit_request().is_err() {
         return Err(RuntimeStartCommandError::AdmissionClosed);
@@ -301,12 +286,7 @@ async fn stop_runtime(
     lifecycle: &dyn crate::composition::runtime_ports::LifecycleOps,
 ) -> Result<crate::RuntimeState, RuntimeStopCommandError> {
     if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
-        return super::openclaw::stop(shared, lifecycle)
-            .await
-            .map_err(|error| match error {
-                StopOpenClawError::AdmissionClosed => RuntimeStopCommandError::AdmissionClosed,
-                StopOpenClawError::RuntimeStop => RuntimeStopCommandError::RuntimeStop,
-            });
+        return super::openclaw::stop(shared, lifecycle).await;
     }
     if shared.admission().admit_request().is_err() {
         return Err(RuntimeStopCommandError::AdmissionClosed);
@@ -323,14 +303,7 @@ async fn restart_runtime(
     lifecycle: &dyn crate::composition::runtime_ports::LifecycleOps,
 ) -> Result<crate::RuntimeState, RuntimeRestartCommandError> {
     if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
-        return super::openclaw::restart(shared, lifecycle)
-            .await
-            .map_err(|error| match error {
-                RestartOpenClawError::AdmissionClosed => {
-                    RuntimeRestartCommandError::AdmissionClosed
-                }
-                RestartOpenClawError::RuntimeRestart => RuntimeRestartCommandError::RuntimeRestart,
-            });
+        return super::openclaw::restart(shared, lifecycle).await;
     }
     if shared.admission().admit_request().is_err() {
         return Err(RuntimeRestartCommandError::AdmissionClosed);
@@ -453,30 +426,34 @@ fn reject_missing_lifecycle(shared: &PeerShared, command: PeerCommand) {
         PeerCommand::AutostartMatcha => {
             shared.record_matcha_start(Err(DriverStartFailure::Unsupported));
         }
-        PeerCommand::AutostartOpenClaw => {
+        PeerCommand::AutostartOpenClaw { reply } => {
             shared.record_open_claw_start(Err(DriverStartFailure::Unsupported));
             shared.notify_open_claw_runtime();
+            let _ = reply.send(Err(AutostartOpenClawError::RuntimeStart));
         }
-        PeerCommand::StartOpenClaw { reply } => {
-            shared.record_open_claw_start(Err(DriverStartFailure::Unsupported));
-            shared.notify_open_claw_runtime();
-            let _ = reply.send(Err(StartOpenClawError::RuntimeStart));
-        }
-        PeerCommand::StopOpenClaw { reply } => {
-            shared.notify_open_claw_runtime();
-            let _ = reply.send(Err(StopOpenClawError::RuntimeStop));
-        }
-        PeerCommand::RestartOpenClaw { reply } => {
-            shared.notify_open_claw_runtime();
-            let _ = reply.send(Err(RestartOpenClawError::RuntimeRestart));
-        }
-        PeerCommand::StartRuntime { reply, .. } => {
+        PeerCommand::StartRuntime { endpoint, reply } => {
+            if endpoint
+                == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint()
+            {
+                shared.record_open_claw_start(Err(DriverStartFailure::Unsupported));
+                shared.notify_open_claw_runtime();
+            }
             let _ = reply.send(Err(RuntimeStartCommandError::RuntimeStart));
         }
-        PeerCommand::StopRuntime { reply, .. } => {
+        PeerCommand::StopRuntime { endpoint, reply } => {
+            if endpoint
+                == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint()
+            {
+                shared.notify_open_claw_runtime();
+            }
             let _ = reply.send(Err(RuntimeStopCommandError::RuntimeStop));
         }
-        PeerCommand::RestartRuntime { reply, .. } => {
+        PeerCommand::RestartRuntime { endpoint, reply } => {
+            if endpoint
+                == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint()
+            {
+                shared.notify_open_claw_runtime();
+            }
             let _ = reply.send(Err(RuntimeRestartCommandError::RuntimeRestart));
         }
     }

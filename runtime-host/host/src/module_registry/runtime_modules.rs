@@ -6,17 +6,15 @@ use crate::{Host, composition::HostHandles};
 
 use super::CapabilityVerifier;
 
-pub(crate) struct RuntimeModuleInstallPlan {
-    pub(crate) before_capability_catalog: Vec<ModuleDescriptor>,
-    pub(crate) after_capability_catalog: Vec<ModuleDescriptor>,
-    pub(crate) process_modules: [ModuleDescriptor; 2],
-}
-
 pub(crate) fn runtime_module_install_plan(
     handles: &HostHandles,
     verifier: CapabilityVerifier,
     webhook_token: organization::adapters::loopback::trigger::WebhookToken,
-) -> RuntimeModuleInstallPlan {
+) -> (
+    Vec<ModuleDescriptor>,
+    Vec<ModuleDescriptor>,
+    [ModuleDescriptor; 2],
+) {
     let send_hooks = sessions_module::SessionSendHookSet::new(vec![Arc::new(
         crate::composition::host::ports::organization::StartGateSessionSendHook::new(
             handles.organization.clone(),
@@ -34,8 +32,8 @@ pub(crate) fn runtime_module_install_plan(
         dyn openclaw::platform_runtime::loopback::OpenClawPlatformAdmissionPort,
     > = handles.admission.clone();
 
-    RuntimeModuleInstallPlan {
-        before_capability_catalog: vec![
+    (
+        vec![
             handles
                 .organization_module
                 .descriptor(Arc::clone(&verifier), webhook_token),
@@ -69,7 +67,7 @@ pub(crate) fn runtime_module_install_plan(
                 openclaw_platform_admission,
             ),
         ],
-        after_capability_catalog: vec![
+        vec![
             handles.session_module.descriptor(
                 Arc::clone(&verifier),
                 send_hooks,
@@ -90,6 +88,6 @@ pub(crate) fn runtime_module_install_plan(
             handles.platform_tools.descriptor(Arc::clone(&verifier)),
             handles.toolchain.descriptor(Arc::clone(&verifier)),
         ],
-        process_modules: Host::runtime_process_descriptors(),
-    }
+        Host::runtime_process_descriptors(),
+    )
 }

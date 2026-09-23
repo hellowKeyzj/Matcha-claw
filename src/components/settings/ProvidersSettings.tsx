@@ -1076,7 +1076,7 @@ function AddProviderDialog({
       <section
         role="dialog"
         aria-label={t('aiProviders.dialog.title')}
-        className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-xl border bg-background p-6 shadow-xl"
+        className="max-h-[92vh] w-full max-w-4xl overflow-y-auto overscroll-contain rounded-xl border bg-background p-6 shadow-none [scrollbar-gutter:stable]"
       >
         <header className="flex items-start justify-between gap-4">
           <div>

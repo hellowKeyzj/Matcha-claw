@@ -8,7 +8,7 @@ use crate::{
     control::{ControlError, run_loop},
     host_actor,
     module_registry::{
-        install::{InstallModulesInput, install_modules},
+        install::{InstallModulesInput, prepare_module_install},
         private_control::PrivateControlRegistry,
     },
 };
@@ -20,9 +20,10 @@ const TEST_WEBHOOK_TOKEN: &str =
     "mctwh_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 pub(crate) struct RuntimeService {
-    pub(crate) owner: host_actor::Owner,
+    pub(crate) host: Option<Host>,
+    pub(crate) events: Option<crate::composition::HostEvents>,
+    pub(crate) owner: Option<host_actor::Owner>,
     pub(crate) handles: HostHandles,
-    pub(crate) module_effect_registrations: Vec<foundation::lifecycle::EffectRegistration>,
     gateway_auto_start: bool,
 }
 
@@ -32,14 +33,30 @@ pub(crate) async fn start(input: HostInput) -> Result<RuntimeService, ControlErr
     host.start_admission_only()
         .await
         .map_err(|error| ControlError::Start(error.to_string()))?;
-    let module_effect_registrations = host.module_effect_registrations();
-    let owner = host_actor::Owner::spawn(host, events);
     Ok(RuntimeService {
-        owner,
+        host: Some(host),
+        events: Some(events),
+        owner: None,
         handles,
-        module_effect_registrations,
         gateway_auto_start,
     })
+}
+
+impl RuntimeService {
+    pub(crate) fn host_mut(&mut self) -> &mut Host {
+        self.host
+            .as_mut()
+            .expect("Host must remain owned until actor spawn")
+    }
+
+    pub(crate) fn spawn_owner(&mut self) {
+        let host = self.host.take().expect("Host must be spawned once");
+        let events = self
+            .events
+            .take()
+            .expect("Host events must be spawned once");
+        self.owner = Some(host_actor::Owner::spawn(host, events));
+    }
 }
 
 pub(crate) async fn run_private_control<R, W>(
@@ -52,12 +69,15 @@ where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin,
 {
-    let owner_events = runtime
+    let owner = runtime
         .owner
+        .as_mut()
+        .expect("Host owner must be spawned before private control starts");
+    let owner_events = owner
         .take_events()
         .expect("owner event receiver must be taken before control starts");
     run_loop(
-        runtime.owner.handle(),
+        owner.handle(),
         owner_events,
         runtime.handles.peer.clone(),
         private_control,
@@ -87,22 +107,41 @@ where
     let webhook_token =
         organization::adapters::loopback::trigger::WebhookToken::try_new(TEST_WEBHOOK_TOKEN)
             .expect("test webhook token");
-    let installed_modules = match install_modules(InstallModulesInput {
+    let install_plan = prepare_module_install(InstallModulesInput {
         handles: &runtime.handles,
-        scoped_effects: &runtime.module_effect_registrations,
         verifier,
         webhook_token,
-    }) {
-        Ok(modules) => modules,
-        Err(error) => {
-            let _ = super::shutdown::shutdown_host(&mut runtime.owner).await;
-            return Err(ControlError::ModuleInstall(error));
+    });
+    let route_snapshot = install_plan.route_snapshot();
+    let router = crate::http::Router::new(route_snapshot.clone());
+    if let Err(error) = runtime
+        .host_mut()
+        .register_route_effects(&route_snapshot, router)
+    {
+        runtime.spawn_owner();
+        if let Some(owner) = runtime.owner.as_mut() {
+            let _ = super::shutdown::shutdown_host(owner).await;
         }
-    };
-    let (_, private_control_catalog) = installed_modules.into_parts();
+        return Err(ControlError::ModuleInstall(error));
+    }
+    let private_control_catalog =
+        match install_plan.install(&runtime.host_mut().module_effect_registrations()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                runtime.spawn_owner();
+                if let Some(owner) = runtime.owner.as_mut() {
+                    let _ = super::shutdown::shutdown_host(owner).await;
+                }
+                return Err(ControlError::ModuleInstall(error));
+            }
+        };
     let private_control = PrivateControlRegistry::from_snapshot(private_control_catalog);
+    runtime.spawn_owner();
     let result =
         run_private_control(&mut runtime, private_control, control_input, control_output).await;
-    let shutdown = super::shutdown::shutdown_host(&mut runtime.owner).await;
+    let shutdown = match runtime.owner.as_mut() {
+        Some(owner) => super::shutdown::shutdown_host(owner).await,
+        None => Ok(()),
+    };
     result.and(shutdown)
 }

@@ -5,7 +5,7 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::lifecycle::state_dir::{CanonicalStateDir, StateDirError};
+use platform::state_dir::{CanonicalStateDir, StateDirError};
 
 const DEVICE_IDENTITY_FILE_NAME: &str = "device-identity.json";
 const DEVICE_IDENTITY_FILE_LIMIT: usize = 4096;

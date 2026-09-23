@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use openclaw::lifecycle::state_dir::CanonicalStateDir;
+use platform::state_dir::CanonicalStateDir;
 use provider_module::{
     ProviderCascade, locate_provider_legacy_store_candidates, migrate_provider_legacy_stores,
 };

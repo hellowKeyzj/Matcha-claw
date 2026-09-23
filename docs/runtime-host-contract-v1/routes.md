@@ -94,7 +94,7 @@ configure/delete 已接入 native config store：非 running 时锁内原子提�
 
 WhatsApp 删除在每次配置提交前按 native 账户继承/覆盖与 Gateway cwd 解析 `authDir`，构造 cleanup plan；提交确认后才清理。managed `credentials/whatsapp` 严格子目录可递归删除，legacy OAuth 根仅清 Baileys 文件；共享目录、外部路径、父根、symlink/reparse escape 与越界 OAuth override 在提交前拒绝。CAS 耗尽返回 `target_rejected`，提交后清理失败返回 `unknown`。离线表单仅投影有依据的标量字段，不以空表单表示成功；微信 `2.4.8` 的真正 channel schema 仅含 `replyProgressMessages`，不混用插件级配置 schema。插件未安装、来源歧义或 schema 不可读仍返回 `unknown`；当前本地 `2026.9.2` 安装包未包含 WhatsApp extension，未验证其离线表单。上述不表示所有 ClawX 边缘行为或真实登录/删除现场已验证。
 
-当前实现依据：`runtime-host/modules/channels/src/adapters/loopback/delete.rs`、`runtime-host/modules/channels/src/owner/actor.rs`、`runtime-host/integrations/openclaw/src/driver/ops/channel.rs`、`runtime-host/integrations/openclaw/src/operations/channel_status.rs` 与 `channel_config.rs`、`channel_config/{mutation,credentials}.rs`。
+当前实现依据：`runtime-host/modules/channels/src/adapters/loopback/delete.rs`、`runtime-host/modules/channels/src/owner/actor.rs`、`runtime-host/integrations/openclaw/src/surfaces/channels/adapter.rs`、`runtime-host/integrations/openclaw/src/surfaces/channels/gateway/status.rs` 与 `surfaces/channels/gateway/config.rs`、`surfaces/channels/gateway/config/{mutation,credentials}.rs`。
 
 `/api/provider-models/discover` response 只保留 public model option 字段：`modelId`、`capabilities`、`contextWindow`、`maxTokens`、`timeoutMs`、`aspectRatio`、`resolution`、`quality`；不返回 `source`、`checkedAt`、`apiKey`、`baseUrl`、`headers`、`runtimeModelRef`、`accountId`。
 

@@ -1,11 +1,4 @@
 {
-    "gateway": "Gateway",
-    "uptime": "Uptime",
-    "port": "Port: {{port}}",
-    "pid": "PID: {{pid}}",
-    "sinceRestart": "Since last restart",
-    "gatewayPreparing": "Gateway is starting",
-    "gatewayNotRunning": "Gateway not running",
     "recentTokenHistory": {
         "title": "Recent Token Usage",
         "description": "Recent sessions with recorded token usage.",

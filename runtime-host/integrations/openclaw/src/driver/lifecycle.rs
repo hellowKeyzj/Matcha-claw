@@ -69,7 +69,7 @@ impl OpenClawDriver {
 pub async fn prepare_openclaw_lifecycle(
     supervisor: &SupervisorHandle,
     gateway_port: u16,
-    plugins: crate::projection::plugins::PluginProjection,
+    plugins: crate::native_config::plugins::PluginProjection,
     diagnostic_reporter: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
 ) -> Result<(), ()> {
     if supervisor.snapshot().phase() != SupervisorPhase::Running {
@@ -82,7 +82,7 @@ pub async fn prepare_openclaw_lifecycle(
 }
 
 fn prepare_openclaw_plugin_readiness(
-    plugins: crate::projection::plugins::PluginProjection,
+    plugins: crate::native_config::plugins::PluginProjection,
     diagnostic_reporter: &Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
 ) {
     let enabled_ids = match plugins.catalog() {

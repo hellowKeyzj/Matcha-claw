@@ -12,8 +12,7 @@ use runtime_directory::{
 };
 
 pub(crate) use runtime_directory::{
-    LifecycleOps, OwnedRuntimeFuture, RuntimeCapabilityFamily, RuntimeCapabilitySurface,
-    RuntimeControlFailure, RuntimeControlLifecycle, RuntimeControlLifecycleError,
+    LifecycleOps, RuntimeControlFailure, RuntimeControlLifecycle, RuntimeControlLifecycleError,
     RuntimeControlLifecycleFailure, RuntimeControlLifecycleStatus, RuntimeControlOps,
     RuntimeControlReadiness, RuntimeControlStartupDiagnostic, RuntimeDriverIdentity,
     RuntimeGatewayHealth, RuntimeGatewayStatus, RuntimeLifecycleFailure, RuntimeLogSnapshot,
@@ -29,14 +28,9 @@ use crate::{
     },
 };
 
-use organization::{
-    MaterializationOperationOutcome, NativeDeletionEvidence, RoleAbortOutcome, RunRuntimeReceipt,
-    TeamMaterializationRemoval, TeamMaterializationRequest,
-};
-
-pub(crate) trait RuntimeDriver: sessions_module::RuntimeDriver + Send + Sync {
-    fn capability_surface(&self) -> RuntimeCapabilitySurface;
-
+pub(crate) trait RuntimeDriver:
+    sessions_module::RuntimeDriver + organization::OrganizationNativeRuntime + Send + Sync
+{
     fn channel_ops(&self) -> Option<&dyn channels::ports::ChannelOps> {
         None
     }
@@ -46,10 +40,6 @@ pub(crate) trait RuntimeDriver: sessions_module::RuntimeDriver + Send + Sync {
     }
 
     fn subagent_ops(&self) -> Option<&dyn subagents::SubagentOps> {
-        None
-    }
-
-    fn team_ops(&self) -> Option<&dyn TeamOps> {
         None
     }
 
@@ -108,141 +98,6 @@ pub(crate) trait RuntimeDriver: sessions_module::RuntimeDriver + Send + Sync {
     fn settings_ops(&self) -> Option<&dyn ::settings::ports::SettingsOps> {
         None
     }
-}
-
-pub(crate) trait TeamOps: Send + Sync {
-    fn materialize_team(
-        &self,
-        request: TeamMaterializationRequest,
-    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome>;
-
-    fn remove_team(
-        &self,
-        removal: TeamMaterializationRemoval,
-    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome>;
-
-    fn recover_team_materialization(
-        &self,
-        request: TeamMaterializationRequest,
-    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome>;
-
-    fn confirm_team_run_receipt(
-        &self,
-        receipt: RunRuntimeReceipt,
-    ) -> OwnedRuntimeFuture<organization::RuntimeReceiptOutcome>;
-
-    fn abort_role_sessions(
-        &self,
-        bindings: Vec<organization::RoleSessionReceipt>,
-    ) -> OwnedRuntimeFuture<RoleAbortOutcome>;
-
-    fn delete_role_sessions(
-        &self,
-        run_id: organization::GraphRunId,
-        bindings: Vec<organization::RoleSessionReceipt>,
-        abort_first: bool,
-    ) -> OwnedRuntimeFuture<NativeDeletionEvidence>;
-}
-
-pub(crate) struct OrganizationRuntimeDriver {
-    driver: std::sync::Arc<dyn RuntimeDriver>,
-}
-
-impl OrganizationRuntimeDriver {
-    pub(crate) fn new(driver: std::sync::Arc<dyn RuntimeDriver>) -> Self {
-        Self { driver }
-    }
-}
-
-impl organization::OrganizationNativeRuntime for OrganizationRuntimeDriver {
-    fn materialize_team(
-        &self,
-        request: organization::TeamMaterializationRequest,
-    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
-        self.driver.team_ops().map_or_else(
-            || {
-                Box::pin(async { organization::MaterializationOperationOutcome::OutcomeUnknown })
-                    as _
-            },
-            |ops| ops.materialize_team(request),
-        )
-    }
-
-    fn remove_team(
-        &self,
-        removal: organization::TeamMaterializationRemoval,
-    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
-        self.driver.team_ops().map_or_else(
-            || {
-                Box::pin(async { organization::MaterializationOperationOutcome::OutcomeUnknown })
-                    as _
-            },
-            |ops| ops.remove_team(removal),
-        )
-    }
-
-    fn recover_team_materialization(
-        &self,
-        request: organization::TeamMaterializationRequest,
-    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
-        self.driver.team_ops().map_or_else(
-            || {
-                Box::pin(async { organization::MaterializationOperationOutcome::OutcomeUnknown })
-                    as _
-            },
-            |ops| ops.recover_team_materialization(request),
-        )
-    }
-
-    fn confirm_team_run_receipt(
-        &self,
-        receipt: organization::RunRuntimeReceipt,
-    ) -> OwnedRuntimeFuture<organization::RuntimeReceiptOutcome> {
-        self.driver.team_ops().map_or_else(
-            || Box::pin(async { organization::RuntimeReceiptOutcome::OutcomeUnknown }) as _,
-            |ops| ops.confirm_team_run_receipt(receipt),
-        )
-    }
-
-    fn abort_role_sessions(
-        &self,
-        bindings: Vec<organization::RoleSessionReceipt>,
-    ) -> OwnedRuntimeFuture<organization::RoleAbortOutcome> {
-        self.driver.team_ops().map_or_else(
-            || Box::pin(async { organization::RoleAbortOutcome::OutcomeUnknown }) as _,
-            |ops| ops.abort_role_sessions(bindings),
-        )
-    }
-
-    fn delete_role_sessions(
-        &self,
-        run_id: organization::GraphRunId,
-        bindings: Vec<organization::RoleSessionReceipt>,
-        abort_first: bool,
-    ) -> OwnedRuntimeFuture<organization::NativeDeletionEvidence> {
-        self.driver.team_ops().map_or_else(
-            || Box::pin(async { organization::NativeDeletionEvidence::OutcomeUnknown }) as _,
-            |ops| ops.delete_role_sessions(run_id, bindings, abort_first),
-        )
-    }
-
-    fn installed_skill_names(&self) -> OwnedRuntimeFuture<Option<Vec<String>>> {
-        let driver = self.driver.clone();
-        Box::pin(async move {
-            let Some(ops) = driver.skill_ops() else {
-                return None;
-            };
-            ops.installed_skill_names().await
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RuntimeOperationFailure {
-    Unsupported,
-    Unavailable,
-    TargetRejected,
-    Unknown,
 }
 
 pub(crate) struct RuntimeDriverDirectory {
@@ -378,7 +233,7 @@ impl provider_module::ProviderRuntimeIdentityOps for RuntimeDriverDirectory {
         &self,
         accounts: &[provider_module::ProviderAccount],
     ) -> Result<Vec<provider_module::ProviderRuntimeIdentity>, ()> {
-        openclaw::projection::provider_models::public_provider_model_identities(accounts)
+        openclaw::provider::public_provider_model_identities(accounts)
             .map(|identities| {
                 identities
                     .into_iter()
@@ -397,7 +252,7 @@ impl provider_module::ProviderRuntimeIdentityOps for RuntimeDriverDirectory {
         &self,
         account: &provider_module::ProviderAccount,
     ) -> Result<provider_module::ProviderRuntimeIdentity, ()> {
-        openclaw::projection::provider_models::public_provider_model_identity(account)
+        openclaw::provider::public_provider_model_identity(account)
             .map(|identity| {
                 provider_module::ProviderRuntimeIdentity::new(
                     account.id().as_str(),
@@ -413,11 +268,7 @@ impl provider_module::ProviderRuntimeIdentityOps for RuntimeDriverDirectory {
         kind: provider_module::ProviderAccountKind,
         model_id: &str,
     ) -> String {
-        openclaw::projection::provider_models::public_provider_model_ref(
-            identity.provider_key(),
-            kind,
-            model_id,
-        )
+        openclaw::provider::public_provider_model_ref(identity.provider_key(), kind, model_id)
     }
 }
 
@@ -427,18 +278,13 @@ impl organization::OrganizationRuntimeDirectory for RuntimeDriverDirectory {
         endpoint: &organization::RuntimeEndpointReference,
     ) -> Option<Arc<dyn organization::OrganizationNativeRuntime>> {
         let identity = RuntimeDriverIdentity::from_reference(endpoint.as_str())?;
-        self.lookup(&identity.endpoint()).map(|driver| {
-            Arc::new(OrganizationRuntimeDriver::new(driver))
-                as Arc<dyn organization::OrganizationNativeRuntime>
-        })
+        self.lookup(&identity.endpoint())
+            .map(|driver| driver as Arc<dyn organization::OrganizationNativeRuntime>)
     }
 
     fn open_claw_runtime(&self) -> Option<Arc<dyn organization::OrganizationNativeRuntime>> {
         self.lookup(&RuntimeDriverIdentity::open_claw().endpoint())
-            .map(|driver| {
-                Arc::new(OrganizationRuntimeDriver::new(driver))
-                    as Arc<dyn organization::OrganizationNativeRuntime>
-            })
+            .map(|driver| driver as Arc<dyn organization::OrganizationNativeRuntime>)
     }
 }
 
@@ -475,14 +321,6 @@ impl RuntimeDriverDirectory {
             return None;
         }
         self.drivers.lookup(endpoint)
-    }
-
-    pub(crate) fn all_drivers(&self) -> impl Iterator<Item = Arc<dyn RuntimeDriver>> + '_ {
-        if self.is_closed() {
-            Vec::new().into_iter()
-        } else {
-            self.drivers.all_drivers().collect::<Vec<_>>().into_iter()
-        }
     }
 
     pub(crate) fn security_driver(&self) -> Option<Arc<dyn RuntimeDriver>> {
@@ -719,75 +557,12 @@ const fn runtime_control_startup_diagnostic(
 }
 
 impl RuntimeDriver for MatchaRuntimeDriver {
-    fn capability_surface(&self) -> RuntimeCapabilitySurface {
-        RuntimeCapabilitySurface::matcha_agent()
-    }
-
-    fn team_ops(&self) -> Option<&dyn TeamOps> {
-        Some(self)
-    }
-
     fn host_lifecycle_ops(&self) -> Option<&dyn LifecycleOps> {
         Some(self)
     }
 }
 
-impl TeamOps for MatchaRuntimeDriver {
-    fn materialize_team(
-        &self,
-        request: organization::TeamMaterializationRequest,
-    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
-        organization::OrganizationNativeRuntime::materialize_team(self, request)
-    }
-
-    fn remove_team(
-        &self,
-        removal: organization::TeamMaterializationRemoval,
-    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
-        organization::OrganizationNativeRuntime::remove_team(self, removal)
-    }
-
-    fn recover_team_materialization(
-        &self,
-        request: organization::TeamMaterializationRequest,
-    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
-        organization::OrganizationNativeRuntime::recover_team_materialization(self, request)
-    }
-
-    fn confirm_team_run_receipt(
-        &self,
-        receipt: organization::RunRuntimeReceipt,
-    ) -> OwnedRuntimeFuture<organization::RuntimeReceiptOutcome> {
-        organization::OrganizationNativeRuntime::confirm_team_run_receipt(self, receipt)
-    }
-
-    fn abort_role_sessions(
-        &self,
-        bindings: Vec<organization::RoleSessionReceipt>,
-    ) -> OwnedRuntimeFuture<organization::RoleAbortOutcome> {
-        organization::OrganizationNativeRuntime::abort_role_sessions(self, bindings)
-    }
-
-    fn delete_role_sessions(
-        &self,
-        run_id: organization::GraphRunId,
-        bindings: Vec<organization::RoleSessionReceipt>,
-        abort_first: bool,
-    ) -> OwnedRuntimeFuture<organization::NativeDeletionEvidence> {
-        organization::OrganizationNativeRuntime::delete_role_sessions(
-            self,
-            run_id,
-            bindings,
-            abort_first,
-        )
-    }
-}
-
 impl RuntimeDriver for OpenClawDriver {
-    fn capability_surface(&self) -> RuntimeCapabilitySurface {
-        RuntimeCapabilitySurface::open_claw()
-    }
-
     fn channel_ops(&self) -> Option<&dyn channels::ports::ChannelOps> {
         Some(self)
     }
@@ -797,10 +572,6 @@ impl RuntimeDriver for OpenClawDriver {
     }
 
     fn subagent_ops(&self) -> Option<&dyn subagents::SubagentOps> {
-        Some(self)
-    }
-
-    fn team_ops(&self) -> Option<&dyn TeamOps> {
         Some(self)
     }
 
@@ -858,56 +629,5 @@ impl RuntimeDriver for OpenClawDriver {
 
     fn settings_ops(&self) -> Option<&dyn ::settings::ports::SettingsOps> {
         Some(self)
-    }
-}
-
-impl TeamOps for OpenClawDriver {
-    fn materialize_team(
-        &self,
-        request: organization::TeamMaterializationRequest,
-    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
-        organization::OrganizationNativeRuntime::materialize_team(self, request)
-    }
-
-    fn remove_team(
-        &self,
-        removal: organization::TeamMaterializationRemoval,
-    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
-        organization::OrganizationNativeRuntime::remove_team(self, removal)
-    }
-
-    fn recover_team_materialization(
-        &self,
-        request: organization::TeamMaterializationRequest,
-    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
-        organization::OrganizationNativeRuntime::recover_team_materialization(self, request)
-    }
-
-    fn confirm_team_run_receipt(
-        &self,
-        receipt: organization::RunRuntimeReceipt,
-    ) -> OwnedRuntimeFuture<organization::RuntimeReceiptOutcome> {
-        organization::OrganizationNativeRuntime::confirm_team_run_receipt(self, receipt)
-    }
-
-    fn abort_role_sessions(
-        &self,
-        bindings: Vec<organization::RoleSessionReceipt>,
-    ) -> OwnedRuntimeFuture<organization::RoleAbortOutcome> {
-        organization::OrganizationNativeRuntime::abort_role_sessions(self, bindings)
-    }
-
-    fn delete_role_sessions(
-        &self,
-        run_id: organization::GraphRunId,
-        bindings: Vec<organization::RoleSessionReceipt>,
-        abort_first: bool,
-    ) -> OwnedRuntimeFuture<organization::NativeDeletionEvidence> {
-        organization::OrganizationNativeRuntime::delete_role_sessions(
-            self,
-            run_id,
-            bindings,
-            abort_first,
-        )
     }
 }

@@ -1,15 +1,15 @@
 use std::{path::PathBuf, sync::Arc};
 
-use openclaw::lifecycle::state_dir::CanonicalStateDir;
 use platform::module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId};
+use platform::state_dir::CanonicalStateDir;
 use skills_module::projection::sealed as skill_projection;
 
 use crate::{
     api::{SealedResourceError, SealedResourceRead},
     domain::{AgentKey, PackageRelativePath, SkillKey},
     store::{
-        SealedAgentPackageExport, SealedAgentStore, SealedSkillCatalog, SealedSkillCatalogEntry,
-        SealedSkillStore,
+        SealedAgentPackageExport, SealedAgentRuntimeProjection, SealedAgentStore,
+        SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillStore,
     },
 };
 
@@ -52,16 +52,17 @@ impl SealedResourceModule {
 
     pub fn openclaw(
         state_dir: CanonicalStateDir,
+        agent_runtime: Arc<dyn SealedAgentRuntimeProjection>,
         skill_private_root: PathBuf,
         agent_private_root: PathBuf,
         runtime_token: Option<Arc<str>>,
     ) -> Result<Self, SealedResourceProvisionError> {
         let skill_store = Arc::new(
-            SealedSkillStore::openclaw(state_dir.clone(), skill_private_root)
+            SealedSkillStore::openclaw(state_dir, skill_private_root)
                 .map_err(|_| SealedResourceProvisionError::Skills)?,
         );
         let agent_store = Arc::new(
-            SealedAgentStore::openclaw(state_dir, agent_private_root)
+            SealedAgentStore::openclaw(agent_runtime, agent_private_root)
                 .map_err(|_| SealedResourceProvisionError::Agents)?,
         );
         Ok(Self::new(skill_store, agent_store, runtime_token))

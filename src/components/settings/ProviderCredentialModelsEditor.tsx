@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Loader2, Plus, Sparkles, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { StableScrollArea } from '@/components/scroll';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
@@ -383,7 +384,7 @@ function ProviderCredentialModelsEditorInner(props: {
 
   return (
     <section className="overflow-hidden rounded-lg border border-border/80 bg-background">
-      <div className={cn('flex flex-wrap items-center justify-between gap-2 bg-muted/25 px-3 py-2.5', open && 'border-b border-border/70')}>
+      <div className={cn('flex flex-wrap items-center justify-between gap-2 bg-muted px-3 py-2.5', open && 'border-b border-border/70')}>
         <button
           type="button"
           className="flex items-center gap-2 text-left"
@@ -443,7 +444,7 @@ function ProviderCredentialModelsEditorInner(props: {
           ) : rows.length === 0 ? (
             <p className="px-3 py-4 text-xs text-muted-foreground">{t('providerModels.group.empty')}</p>
           ) : (
-            <div className="max-h-[360px] overflow-y-auto">
+            <StableScrollArea className="max-h-[360px] overflow-y-auto overscroll-contain bg-background [scrollbar-gutter:stable]">
               {rows.map((row, index) => (
                 <ProviderModelDraftRow
                   key={`${credential.id}-${index}`}
@@ -459,7 +460,7 @@ function ProviderCredentialModelsEditorInner(props: {
                   t={t}
                 />
               ))}
-            </div>
+            </StableScrollArea>
           )}
 
           {(localError || error) ? (
@@ -468,7 +469,7 @@ function ProviderCredentialModelsEditorInner(props: {
             <p className="border-t border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">{warning}</p>
           ) : null}
           {dirty ? (
-            <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-2 border-t border-border/70 bg-background/95 px-3 py-2 shadow-[0_-8px_24px_rgba(0,0,0,0.08)] backdrop-blur supports-[backdrop-filter]:bg-background/85">
+            <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-2 border-t border-border/70 bg-background px-3 py-2">
               <span className="text-xs font-medium text-muted-foreground">
                 {t('providerModels.pending.summary', { count: pendingChangeCount })}
               </span>
@@ -557,7 +558,7 @@ function ProviderDiscoveredModelsPanel(props: {
       ) : models.length === 0 ? (
         <p className="text-xs text-muted-foreground">{t('providerModels.discovery.empty')}</p>
       ) : (
-        <div className="max-h-[240px] space-y-1 overflow-y-auto pr-1">
+        <StableScrollArea className="max-h-[240px] space-y-1 overflow-y-auto overscroll-contain bg-background pr-1 [scrollbar-gutter:stable]">
           {models.map((model) => {
             const capabilities = filterAllowedModelCapabilities(credential, model.capabilities, vendor);
             const duplicate = existingModelIds.has(model.modelId);
@@ -595,7 +596,7 @@ function ProviderDiscoveredModelsPanel(props: {
               </label>
             );
           })}
-        </div>
+        </StableScrollArea>
       )}
     </div>
   );

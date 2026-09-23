@@ -7,6 +7,7 @@ import {
   getSessionRuntime,
   getSessionItems,
   toMs,
+  areSessionModelStatesEquivalent,
 } from './store-state-helpers';
 
 const EMPTY_CHAT_SESSIONS: ChatSession[] = [];
@@ -117,7 +118,7 @@ function areChatSessionsEqual(left: ChatSession | undefined, right: ChatSession)
     && (left.titleSource ?? null) === (right.titleSource ?? null)
     && (left.displayName ?? null) === (right.displayName ?? null)
     && (left.thinkingLevel ?? null) === (right.thinkingLevel ?? null)
-    && (left.model ?? null) === (right.model ?? null)
+    && areSessionModelStatesEquivalent(left.modelState, right.modelState)
     && (left.contextTokens?.totalTokens ?? null) === (right.contextTokens?.totalTokens ?? null)
     && (left.contextTokens?.totalTokensFresh ?? null) === (right.contextTokens?.totalTokensFresh ?? null)
     && (left.contextTokens?.contextTokens ?? null) === (right.contextTokens?.contextTokens ?? null)
@@ -166,7 +167,7 @@ export function readSessionsFromState(
       titleSource: meta.titleSource,
       displayName: normalizeAutomaticSessionTitle(meta.displayName) ?? sessionKey,
       thinkingLevel: meta.thinkingLevel ?? undefined,
-      model: normalizeSessionLabel(meta.model) ?? undefined,
+      modelState: meta.modelState ?? undefined,
       contextTokens: state.loadedSessions[sessionKey]?.contextTokens,
       updatedAt: typeof meta.lastActivityAt === 'number' ? meta.lastActivityAt : undefined,
     } satisfies ChatSession;

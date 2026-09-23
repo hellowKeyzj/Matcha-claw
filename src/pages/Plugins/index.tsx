@@ -123,7 +123,7 @@ export function PluginsPage() {
           ))}
         </AgentResourceGrid>
       ) : visiblePlugins.length === 0 ? (
-        <div className="flex min-h-80 flex-col items-center justify-center gap-5 rounded-[1.75rem] border border-border/70 bg-gradient-to-b from-card to-secondary/20 p-8 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_24px_64px_rgba(15,23,42,0.04)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+        <div className="flex min-h-80 flex-col items-center justify-center gap-5 rounded-[1.75rem] border border-border/70 bg-card p-8 text-center shadow-none">
           <AgentResourceIcon className="size-16 rounded-[1.25rem]"><Box className="size-7" /></AgentResourceIcon>
           <p className="text-sm text-muted-foreground">{t(catalog.length === 0 ? 'plugins:catalog.empty' : 'plugins:catalog.noResults')}</p>
         </div>

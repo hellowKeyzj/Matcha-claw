@@ -288,7 +288,10 @@ fn cli_command_response(driver: &OpenClawDriver) -> Response {
 
 fn tool_permission_get_response(driver: &OpenClawDriver) -> Response {
     match driver.tool_permission_mode() {
-        Ok(mode) => Response::json(200, project_mode(crate::tool_permission::Mode::from(mode))),
+        Ok(mode) => Response::json(
+            200,
+            project_mode(crate::surfaces::tooling::tool_permission::Mode::from(mode)),
+        ),
         Err(_) => unavailable(),
     }
 }
@@ -304,8 +307,8 @@ fn tool_permission_set_response(driver: &OpenClawDriver, body: &[u8]) -> Respons
     };
     match driver.set_tool_permission_mode(mode.into()) {
         Ok(effect) => Response::json(200, project_set_mode(mode, effect.into())),
-        Err(crate::projection::tool_permission::Error::Unavailable) => unavailable(),
-        Err(crate::projection::tool_permission::Error::Unknown) => failed(),
+        Err(crate::native_config::tool_permission::Error::Unavailable) => unavailable(),
+        Err(crate::native_config::tool_permission::Error::Unknown) => failed(),
     }
 }
 

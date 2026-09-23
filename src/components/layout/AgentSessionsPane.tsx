@@ -801,7 +801,7 @@ const IdentityBeacon = memo(function IdentityBeacon({
         type="button"
         data-testid="agent-session-identity-beacon"
         className={cn(
-          'flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground transition-[transform,color] hover:-translate-y-0.5 hover:text-foreground active:translate-y-0',
+          'flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground',
           switchboardOpen && 'text-foreground',
         )}
         onClick={onOpenSwitchboard}
@@ -820,7 +820,7 @@ const IdentityBeacon = memo(function IdentityBeacon({
       <button
         type="button"
         data-testid="agent-session-new-current"
-        className="flex h-6 w-6 items-center justify-center text-muted-foreground/80 transition-[transform,color,opacity] hover:-translate-y-0.5 hover:scale-110 hover:text-foreground active:translate-y-0 active:scale-100 disabled:cursor-not-allowed disabled:opacity-35"
+        className="flex h-6 w-6 items-center justify-center text-muted-foreground/80 transition-[color,opacity] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
         onClick={onNewSession}
         disabled={disabledNewSession}
         aria-label={newSessionLabel}

@@ -278,7 +278,7 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
           ? session.titleSource
           : undefined,
         displayName: typeof session.displayName === 'string' ? session.displayName : undefined,
-        model: normalizeCatalogString(session.model) ?? undefined,
+        modelState: session.modelState,
         contextTokens: session.contextTokens,
         updatedAt: parseSessionUpdatedAtMs(session.updatedAt),
       })).filter((session): session is ChatSession => session != null),
@@ -789,7 +789,7 @@ async function executeLoadSessionsNow(
         titleSource: session.titleSource ?? currentMeta.titleSource,
         displayName: normalizeCatalogString(session.displayName) ?? currentMeta.displayName ?? null,
         thinkingLevel: normalizeCatalogString(session.thinkingLevel) ?? currentMeta.thinkingLevel,
-        model: normalizeCatalogString(session.model) ?? currentMeta.model ?? null,
+        modelState: session.modelState ?? currentMeta.modelState,
         lastActivityAt: typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)
           ? session.updatedAt
           : currentMeta.lastActivityAt,

@@ -28,12 +28,12 @@ export const StructuredTablePreview = memo(function StructuredTablePreview({
   }, [copyText]);
 
   return (
-    <div className="overflow-hidden rounded-[18px] border border-border/45 bg-background/68 shadow-sm backdrop-blur-sm">
+    <div className="overflow-hidden rounded-[18px] border border-border/45 bg-card shadow-sm">
       {copyText ? (
         <div className="flex items-center justify-end border-b border-border/45 px-2 py-1.5">
           <button
             type="button"
-            className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent text-muted-foreground transition-colors hover:border-border/40 hover:bg-background/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
+            className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent text-muted-foreground transition-colors hover:border-border/40 hover:bg-background/95 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
             aria-label={copyAriaLabel}
             onClick={handleCopy}
           >
@@ -43,7 +43,7 @@ export const StructuredTablePreview = memo(function StructuredTablePreview({
       ) : null}
       <div className="max-h-[28rem] overflow-auto">
         <table className="min-w-full border-collapse text-left text-[11px]">
-          <thead className="sticky top-0 bg-background/92 backdrop-blur">
+          <thead className="sticky top-0 bg-background">
             <tr>
               {normalizedHeader.map((cell, index) => (
                 <th

@@ -22,6 +22,7 @@ import {
   User,
   FolderOpen,
 } from 'lucide-react';
+import { StableScrollArea } from '@/components/scroll';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
@@ -29,6 +30,7 @@ import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
@@ -163,32 +165,170 @@ const HISTORY_STRATEGY_SORT_LABEL_KEY: Record<HistoryStrategySortKey, string> = 
   p99Ms: 'developer.telemetrySortP99',
 };
 
-type RuntimeStatusPanelProps = {
+type RuntimeStatusTone = 'success' | 'pending' | 'warning' | 'destructive' | 'neutral';
+
+type RuntimeStatusVariant = 'success' | 'outline' | 'destructive' | 'secondary';
+
+type RuntimeStatusAction = {
+  id: string;
+  label: string;
+  icon: 'refresh' | 'logs';
+  onClick: () => void;
+  disabled?: boolean;
+  loading?: boolean;
+};
+
+type RuntimeStatusItem = {
+  id: string;
   title: string;
-  description: string;
-  badges: ReactNode;
-  actions: ReactNode;
+  status: string;
+  tone: RuntimeStatusTone;
+  actions: RuntimeStatusAction[];
+  activity?: ReactNode;
   details?: ReactNode;
 };
 
-function RuntimeStatusPanel({ title, description, badges, actions, details }: RuntimeStatusPanelProps) {
+const RUNTIME_STATUS_TONE_CLASS_NAMES: Record<RuntimeStatusTone, { dot: string; pill: string }> = {
+  success: {
+    dot: 'bg-emerald-500 ring-4 ring-emerald-500/10',
+    pill: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200',
+  },
+  pending: {
+    dot: 'bg-amber-500 ring-4 ring-amber-500/10',
+    pill: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200',
+  },
+  warning: {
+    dot: 'bg-orange-500 ring-4 ring-orange-500/10',
+    pill: 'border-orange-200 bg-orange-50 text-orange-700 dark:border-orange-500/20 dark:bg-orange-500/10 dark:text-orange-200',
+  },
+  destructive: {
+    dot: 'bg-destructive ring-4 ring-destructive/10',
+    pill: 'border-destructive/25 bg-destructive/10 text-destructive',
+  },
+  neutral: {
+    dot: 'bg-muted-foreground ring-4 ring-muted',
+    pill: 'border-border bg-secondary text-muted-foreground',
+  },
+};
+
+function RuntimeStatusDot({ tone }: { tone: RuntimeStatusTone }) {
   return (
-    <div className="space-y-3 rounded-lg border border-border/60 bg-background/40 p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <Label>{title}</Label>
-          <p className="text-sm text-muted-foreground">{description}</p>
+    <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full', RUNTIME_STATUS_TONE_CLASS_NAMES[tone].dot)} />
+  );
+}
+
+function RuntimeStatusPill({ tone, children }: { tone: RuntimeStatusTone; children: ReactNode }) {
+  return (
+    <span className={cn('inline-flex items-center rounded-[var(--radius-pill)] border px-2.5 py-1 text-xs font-medium', RUNTIME_STATUS_TONE_CLASS_NAMES[tone].pill)}>
+      {children}
+    </span>
+  );
+}
+
+function RuntimeStatusActionIcon({ action }: { action: RuntimeStatusAction }) {
+  if (action.loading) {
+    return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
+  }
+  if (action.icon === 'logs') {
+    return <FileText className="h-3.5 w-3.5" />;
+  }
+  return <RefreshCw className="h-3.5 w-3.5" />;
+}
+
+function RuntimeStatusActionButton({ action }: { action: RuntimeStatusAction }) {
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="h-8 w-20 justify-center px-3 text-xs shadow-none"
+      onClick={action.onClick}
+      disabled={action.disabled}
+    >
+      <RuntimeStatusActionIcon action={action} />
+      {action.label}
+    </Button>
+  );
+}
+
+function RuntimeStatusList({ items }: { items: RuntimeStatusItem[] }) {
+  return (
+    <div className="overflow-hidden rounded-[1rem] border border-border/80 bg-background/45" role="list">
+      {items.map((item, index) => (
+        <div
+          key={item.id}
+          role="listitem"
+          className={cn(
+            'grid gap-3 px-4 py-3.5 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center',
+            index > 0 && 'border-t border-border/70',
+          )}
+        >
+          <div className="flex min-w-0 items-center gap-3">
+            <RuntimeStatusDot tone={item.tone} />
+            <span className="truncate text-sm font-medium tracking-[-0.01em] text-foreground">{item.title}</span>
+          </div>
+          <div className="sm:justify-self-end">
+            <RuntimeStatusPill tone={item.tone}>{item.status}</RuntimeStatusPill>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 sm:justify-self-end">
+            {item.activity}
+            {item.actions.map((action) => <RuntimeStatusActionButton key={action.id} action={action} />)}
+          </div>
+          {item.details ? <div className="space-y-2 sm:col-span-3 sm:pl-5">{item.details}</div> : null}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {actions}
-        </div>
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        {badges}
-      </div>
-      {details ? <div className="space-y-2">{details}</div> : null}
+      ))}
     </div>
   );
+}
+
+function runtimeStatusToneForVariant(variant: RuntimeStatusVariant): RuntimeStatusTone {
+  if (variant === 'success') return 'success';
+  if (variant === 'destructive') return 'destructive';
+  if (variant === 'outline') return 'pending';
+  return 'neutral';
+}
+
+function runtimeHostStatusTone(status: string): RuntimeStatusTone {
+  if (status === 'running') return 'success';
+  if (status === 'starting' || status === 'restarting' || status === 'stopping') return 'pending';
+  if (status === 'degraded') return 'warning';
+  if (status === 'stopped' || status === 'error') return 'destructive';
+  return 'neutral';
+}
+
+function summarizeRuntimeStatusTone(items: RuntimeStatusItem[]): RuntimeStatusTone {
+  if (items.some((item) => item.tone === 'destructive')) return 'destructive';
+  if (items.some((item) => item.tone === 'warning')) return 'warning';
+  if (items.some((item) => item.tone === 'pending')) return 'pending';
+  if (items.length > 0 && items.every((item) => item.tone === 'success')) return 'success';
+  return 'neutral';
+}
+
+function runtimeHostStatusLabel(status: string, t: (key: string) => string): string {
+  switch (status) {
+    case 'running':
+      return t('plugins:state.hostRunning');
+    case 'starting':
+      return t('plugins:state.hostStarting');
+    case 'restarting':
+      return t('plugins:state.hostRestarting');
+    case 'stopping':
+      return t('plugins:state.hostStopping');
+    case 'degraded':
+      return t('plugins:state.hostDegraded');
+    case 'stopped':
+    case 'error':
+      return t('plugins:state.hostStopped');
+    default:
+      return status;
+  }
+}
+
+function runtimeStatusSummaryLabel(tone: RuntimeStatusTone, t: (key: string) => string): string {
+  if (tone === 'success') return t('gateway.runtimeSummaryReady');
+  if (tone === 'pending') return t('gateway.runtimeSummaryPending');
+  if (tone === 'warning' || tone === 'destructive') return t('gateway.runtimeSummaryIssue');
+  return t('gateway.runtimeSummaryUnknown');
 }
 
 function formatIsoTime(timestamp: number): string {
@@ -281,7 +421,6 @@ export function Settings() {
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const setDevModeUnlocked = useSettingsStore((state) => state.setDevModeUnlocked);
 
-  const gatewayStatus = useGatewayStore((state) => state.status);
   const runtimeHostEventState = useGatewayStore((state) => state.runtimeHost);
   const runtimeEndpoints = useRuntimeEndpointsStore((state) => state.endpoints);
   const runtimeEndpointsStatus = useRuntimeEndpointsStore((state) => state.status);
@@ -952,8 +1091,6 @@ export function Settings() {
     }
   }, [loadMatchaAgentAppServerStatus, t]);
 
-  const matchaAgentAppServerPort = matchaAgentAppServerStatus?.port ?? t('gateway.unknown');
-  const matchaAgentAppServerPid = matchaAgentAppServerStatus?.pid ?? t('gateway.unknown');
   const matchaAgentAppServerStatusError = matchaAgentAppServerStatus?.lastError || matchaAgentAppServerError;
 
   useEffect(() => {
@@ -981,6 +1118,140 @@ export function Settings() {
       toast.error(t('plugins:errors.restartFailed'));
     }
   }, [restartHostAction, t]);
+
+  const openClawEndpointTone = runtimeStatusToneForVariant(openClawEndpointBadgeVariant);
+  const runtimeHostTone = runtimeHostStatusTone(effectiveRuntimeHostStatus);
+  const matchaAgentAppServerTone = runtimeStatusToneForVariant(matchaAgentAppServerBadgeVariant);
+  const shouldShowRuntimeHostDetails = Boolean(
+    showRuntimeHostError && runtimeHostEventState.error
+    || runtimeHostEventState.restartCount > 0
+    || runtimeHostRecoveredAt,
+  );
+  const runtimeHostDetails = shouldShowRuntimeHostDetails
+    ? (
+      <>
+        {showRuntimeHostError && runtimeHostEventState.error && (
+          <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
+            {runtimeHostEventState.error}
+          </p>
+        )}
+        {runtimeHostEventState.restartCount > 0 && (
+          <p className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-700">
+            {t('plugins:runtime.recoveredNotice', { count: runtimeHostEventState.restartCount })}
+          </p>
+        )}
+        {runtimeHostRecoveredAt && (
+          <p className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-700">
+            {t('plugins:runtime.recoveredAt', { time: runtimeHostRecoveredAt })}
+          </p>
+        )}
+      </>
+    )
+    : undefined;
+  const runtimeStatusItems: RuntimeStatusItem[] = [
+    {
+      id: 'runtime-host',
+      title: t('gateway.runtimeHostRuntimeLabel'),
+      status: runtimeHostStatusLabel(effectiveRuntimeHostStatus, t),
+      tone: runtimeHostTone,
+      activity: refreshing && !manualRuntimeRefreshing ? (
+        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          {t('common:status.loading')}
+        </span>
+      ) : undefined,
+      actions: [
+        {
+          id: 'restart',
+          label: mutatingAction === 'restart' ? t('plugins:runtime.busy') : t('plugins:runtime.restart'),
+          icon: 'refresh',
+          onClick: () => void restartRuntimeHost(),
+          disabled: manualRuntimeRefreshing || mutating,
+        },
+        {
+          id: 'refresh',
+          label: manualRuntimeRefreshing ? t('plugins:runtime.busy') : t('common:actions.refresh'),
+          icon: 'refresh',
+          onClick: () => void refreshRuntimeHostStatus(),
+          disabled: manualRuntimeRefreshing || mutating,
+          loading: manualRuntimeRefreshing,
+        },
+      ],
+      details: runtimeHostDetails,
+    },
+    {
+      id: 'openclaw',
+      title: t('gateway.openclawRuntimeLabel'),
+      status: openClawEndpointStatus,
+      tone: openClawEndpointTone,
+      actions: [
+        {
+          id: 'restart',
+          label: t('common:actions.restart'),
+          icon: 'refresh',
+          onClick: restartGateway,
+        },
+        {
+          id: 'logs',
+          label: t('gateway.logs'),
+          icon: 'logs',
+          onClick: handleShowOpenClawLogs,
+        },
+      ],
+      details: showOpenClawLogs ? (
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="text-sm font-medium">{t('gateway.openclawLogs')}</p>
+            <div className="flex gap-2">
+              <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={handleOpenOpenClawLogDir}>
+                <ExternalLink className="h-3 w-3" />
+                {t('gateway.openFolder')}
+              </Button>
+              <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setShowOpenClawLogs(false)}>
+                {t('common:actions.close')}
+              </Button>
+            </div>
+          </div>
+          <StableScrollArea className="max-h-60 overflow-auto overscroll-contain rounded bg-background/60 [scrollbar-gutter:stable]">
+            <pre className="whitespace-pre-wrap p-3 font-mono text-xs text-muted-foreground">
+              {openClawLogContent || t('chat:noLogs')}
+            </pre>
+          </StableScrollArea>
+        </div>
+      ) : undefined,
+    },
+    {
+      id: 'matcha-agent-app-server',
+      title: t('gateway.localServiceRuntimeLabel'),
+      status: matchaAgentAppServerStatusLabel,
+      tone: matchaAgentAppServerTone,
+      actions: [
+        {
+          id: 'restart',
+          label: t('common:actions.restart'),
+          icon: 'refresh',
+          onClick: () => void restartMatchaAgentAppServer(),
+          disabled: matchaAgentAppServerLoading || matchaAgentAppServerRestarting,
+          loading: matchaAgentAppServerRestarting,
+        },
+        {
+          id: 'refresh',
+          label: t('common:actions.refresh'),
+          icon: 'refresh',
+          onClick: () => void loadMatchaAgentAppServerStatus(),
+          disabled: matchaAgentAppServerLoading || matchaAgentAppServerRestarting,
+          loading: matchaAgentAppServerLoading,
+        },
+      ],
+      details: matchaAgentAppServerStatusError ? (
+        <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
+          {matchaAgentAppServerStatusError}
+        </p>
+      ) : undefined,
+    },
+  ];
+  const runtimeStatusSummaryTone = summarizeRuntimeStatusTone(runtimeStatusItems);
+  const runtimeStatusSummary = runtimeStatusSummaryLabel(runtimeStatusSummaryTone, t);
 
   const sectionItems: Array<{ key: SettingsSectionKey; label: string }> = [
     { key: 'gateway', label: t('gateway.runtimeTitle') },
@@ -1330,186 +1601,16 @@ export function Settings() {
       {/* Gateway */}
       {activeSection === 'gateway' && (
       <Card className="order-1">
-        <CardHeader>
+        <CardHeader className="flex-row items-center justify-between gap-3 space-y-0">
           <CardTitle>{t('gateway.runtimeTitle')}</CardTitle>
-          <CardDescription>{t('gateway.runtimeDescription')}</CardDescription>
+          <div className="flex items-center gap-2 rounded-[var(--radius-pill)] border border-border/80 bg-background/60 px-3 py-1.5">
+            <span className="text-xs font-medium text-muted-foreground">{runtimeStatusSummary}</span>
+            <RuntimeStatusDot tone={runtimeStatusSummaryTone} />
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="space-y-3">
-            <RuntimeStatusPanel
-              title={t('gateway.openclawStatus')}
-              description={t('gateway.openclawDescription')}
-              badges={(
-                <>
-                  <Badge variant={openClawEndpointBadgeVariant}>
-                    {openClawEndpointStatus}
-                  </Badge>
-                  <Badge variant="outline">{t('gateway.port')}: {gatewayStatus.port}</Badge>
-                </>
-              )}
-              actions={(
-                <>
-                  <Button variant="outline" size="sm" className="w-24 justify-center" onClick={restartGateway}>
-                    <RefreshCw className="h-4 w-4 mr-2" />
-                    {t('common:actions.restart')}
-                  </Button>
-                  <Button variant="outline" size="sm" className="w-24 justify-center" onClick={handleShowOpenClawLogs}>
-                    <FileText className="h-4 w-4 mr-2" />
-                    {t('gateway.logs')}
-                  </Button>
-                </>
-              )}
-              details={showOpenClawLogs ? (
-                <div className="p-4 rounded-lg bg-black/10 dark:bg-black/40 border border-border">
-                  <div className="flex items-center justify-between mb-2">
-                    <p className="font-medium text-sm">{t('gateway.openclawLogs')}</p>
-                    <div className="flex gap-2">
-                      <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={handleOpenOpenClawLogDir}>
-                        <ExternalLink className="h-3 w-3 mr-1" />
-                        {t('gateway.openFolder')}
-                      </Button>
-                      <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setShowOpenClawLogs(false)}>
-                        {t('common:actions.close')}
-                      </Button>
-                    </div>
-                  </div>
-                  <pre className="text-xs text-muted-foreground bg-background/50 p-3 rounded max-h-60 overflow-auto whitespace-pre-wrap font-mono">
-                    {openClawLogContent || t('chat:noLogs')}
-                  </pre>
-                </div>
-              ) : null}
-            />
+          <RuntimeStatusList items={runtimeStatusItems} />
 
-            <RuntimeStatusPanel
-              title={t('gateway.runtimeHostStatus')}
-              description={t('gateway.runtimeHostDescription')}
-              badges={(
-                <>
-                  {effectiveRuntimeHostStatus === 'running' && (
-                    <Badge variant="success">{t('plugins:state.hostRunning')}</Badge>
-                  )}
-                  {effectiveRuntimeHostStatus === 'starting' && (
-                    <Badge variant="outline">{t('plugins:state.hostStarting')}</Badge>
-                  )}
-                  {effectiveRuntimeHostStatus === 'restarting' && (
-                    <Badge variant="outline">{t('plugins:state.hostRestarting')}</Badge>
-                  )}
-                  {effectiveRuntimeHostStatus === 'stopping' && (
-                    <Badge variant="outline">{t('plugins:state.hostStopping')}</Badge>
-                  )}
-                  {effectiveRuntimeHostStatus === 'degraded' && (
-                    <Badge variant="secondary">{t('plugins:state.hostDegraded')}</Badge>
-                  )}
-                  {(effectiveRuntimeHostStatus === 'stopped' || effectiveRuntimeHostStatus === 'error') && (
-                    <Badge variant="destructive">{t('plugins:state.hostStopped')}</Badge>
-                  )}
-                </>
-              )}
-              actions={(
-                <>
-                  {refreshing && !manualRuntimeRefreshing ? (
-                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      {t('common:status.loading')}
-                    </span>
-                  ) : null}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="w-24 justify-center"
-                    onClick={() => void restartRuntimeHost()}
-                    disabled={manualRuntimeRefreshing || mutating}
-                  >
-                    <RefreshCw className="h-4 w-4 mr-2" />
-                    {mutatingAction === 'restart' ? t('plugins:runtime.busy') : t('plugins:runtime.restart')}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="w-24 justify-center"
-                    onClick={() => void refreshRuntimeHostStatus()}
-                    disabled={manualRuntimeRefreshing || mutating}
-                  >
-                    {manualRuntimeRefreshing ? t('plugins:runtime.busy') : t('plugins:runtime.refresh')}
-                  </Button>
-                </>
-              )}
-              details={(
-                <>
-                  {showRuntimeHostError && runtimeHostEventState.error && (
-                    <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
-                      {runtimeHostEventState.error}
-                    </p>
-                  )}
-                  {runtimeHostEventState.restartCount > 0 && (
-                    <p className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-700">
-                      {t('plugins:runtime.recoveredNotice', { count: runtimeHostEventState.restartCount })}
-                    </p>
-                  )}
-                  {runtimeHostRecoveredAt && (
-                    <p className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-700">
-                      {t('plugins:runtime.recoveredAt', { time: runtimeHostRecoveredAt })}
-                    </p>
-                  )}
-                </>
-              )}
-            />
-
-            <RuntimeStatusPanel
-              title={t('gateway.matchaAgentAppServerStatus')}
-              description={t('gateway.matchaAgentAppServerDescription')}
-              badges={(
-                <>
-                  <Badge variant={matchaAgentAppServerBadgeVariant}>
-                    {matchaAgentAppServerStatusLabel}
-                  </Badge>
-                  <Badge variant="outline">{t('gateway.port')}: {matchaAgentAppServerPort}</Badge>
-                  <Badge variant="outline">{t('gateway.pid')}: {matchaAgentAppServerPid}</Badge>
-                </>
-              )}
-              actions={(
-                <>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="w-24 justify-center"
-                    onClick={() => void restartMatchaAgentAppServer()}
-                    disabled={matchaAgentAppServerLoading || matchaAgentAppServerRestarting}
-                  >
-                    {matchaAgentAppServerRestarting ? (
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : (
-                      <RefreshCw className="h-4 w-4 mr-2" />
-                    )}
-                    {t('common:actions.restart')}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="w-24 justify-center"
-                    onClick={() => void loadMatchaAgentAppServerStatus()}
-                    disabled={matchaAgentAppServerLoading || matchaAgentAppServerRestarting}
-                  >
-                    {matchaAgentAppServerLoading ? (
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : (
-                      <RefreshCw className="h-4 w-4 mr-2" />
-                    )}
-                    {t('common:actions.refresh')}
-                  </Button>
-                </>
-              )}
-              details={matchaAgentAppServerStatusError ? (
-                <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
-                  {matchaAgentAppServerStatusError}
-                </p>
-              ) : null}
-            />
-          </div>
 
           <Separator />
 
@@ -1920,7 +2021,7 @@ export function Settings() {
                     </div>
                   </div>
 
-                  <div className="max-h-72 overflow-auto rounded-md border border-border/50 bg-muted/20">
+                  <StableScrollArea className="max-h-72 overflow-auto overscroll-contain rounded-md border border-border/50 bg-muted/20 [scrollbar-gutter:stable]">
                     {telemetryByEvent.length > 0 && (
                       <div className="border-b border-border/50 bg-background/70 p-2">
                         <p className="mb-2 text-[11px] font-semibold text-muted-foreground">
@@ -1997,7 +2098,7 @@ export function Settings() {
                           ))
                       )}
                     </div>
-                  </div>
+                  </StableScrollArea>
                 </div>
               )}
             </div>

@@ -1,3 +1,4 @@
+use platform::state_dir::CanonicalStateDir;
 use std::{
     fs,
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
@@ -15,7 +16,6 @@ use matcha_agent::{driver::MatchaAgentInput, lifecycle::secret::Secret};
 use openclaw::{
     driver::OpenClawInput,
     gateway::{auth::GatewaySecret, client::GatewayClientMetadata},
-    lifecycle::state_dir::CanonicalStateDir,
 };
 use organization::{
     DeliveryLedgerSnapshot, GraphDefinition, GraphRunFacts, GraphRunId, GraphState, MemberId,
@@ -49,7 +49,6 @@ struct TestRoot {
     openclaw_dir: PathBuf,
     openclaw_port: u16,
     matcha_port: u16,
-    cron_transport_port: u16,
 }
 
 impl TestRoot {
@@ -88,14 +87,13 @@ impl TestRoot {
         ] {
             fs::write(template_directory.join(name), "template").unwrap();
         }
-        let [openclaw_port, matcha_port, cron_transport_port] = unused_ports();
+        let [openclaw_port, matcha_port] = unused_ports();
         Self {
             matcha_storage_parent,
             state_parent,
             openclaw_dir,
             openclaw_port,
             matcha_port,
-            cron_transport_port,
             base,
         }
     }
@@ -386,27 +384,24 @@ async fn openclaw_prelaunch_projection_failure_does_not_block_host_startup() {
 }
 
 #[tokio::test]
-async fn auto_openclaw_port_guard_failure_records_start_failure_without_blocking_host_ready() {
+async fn auto_openclaw_port_guard_failure_returns_start_failure_without_blocking_host_ready() {
     let root = TestRoot::new();
     let port_guard = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, root.openclaw_port))
         .expect("occupy OpenClaw gateway port");
-    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, handles) = Host::new(host_input(&root)).unwrap();
 
-    host.start().await.unwrap();
+    host.start_admission_only().await.unwrap();
 
+    assert_eq!(
+        handles.peer.request_peer_autostart(true).await.unwrap_err(),
+        super::super::peer::AutostartOpenClawError::RuntimeStart
+    );
     assert_eq!(host.admission_state().phase(), HostPhase::Ready);
     assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if host.open_claw_start_failure() == Some(RuntimeStartFailure::CompletionFailed) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("OpenClaw autostart failure must be recorded");
-    assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
+    assert_eq!(
+        host.open_claw_start_failure(),
+        Some(RuntimeStartFailure::CompletionFailed)
+    );
 
     drop(port_guard);
     host.shutdown().await.unwrap();
@@ -481,15 +476,25 @@ async fn peer_lifecycle_failures_do_not_shut_down_the_host() {
     host.start_admission_only().await.unwrap();
 
     assert_eq!(
-        handles.peer.stop_open_claw().await.unwrap().unwrap_err(),
-        super::super::peer::StopOpenClawError::RuntimeStop
+        handles
+            .peer
+            .stop_runtime(RuntimeDriverIdentity::open_claw().endpoint())
+            .await
+            .unwrap()
+            .unwrap_err(),
+        super::super::peer::RuntimeStopCommandError::RuntimeStop
     );
     assert_eq!(host.admission_state().phase(), HostPhase::Ready);
     assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
 
     assert_eq!(
-        handles.peer.restart_open_claw().await.unwrap().unwrap_err(),
-        super::super::peer::RestartOpenClawError::RuntimeRestart
+        handles
+            .peer
+            .restart_runtime(RuntimeDriverIdentity::open_claw().endpoint())
+            .await
+            .unwrap()
+            .unwrap_err(),
+        super::super::peer::RuntimeRestartCommandError::RuntimeRestart
     );
     assert_eq!(host.admission_state().phase(), HostPhase::Ready);
     assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
@@ -577,9 +582,6 @@ fn peer_lifecycle_commands_are_owned_by_peer_owner_runtime() {
         "PeerCommand::StartRuntime",
         "PeerCommand::StopRuntime",
         "PeerCommand::RestartRuntime",
-        "PeerCommand::StartOpenClaw",
-        "PeerCommand::StopOpenClaw",
-        "PeerCommand::RestartOpenClaw",
     ] {
         assert!(peer_actor.contains(lifecycle_command));
     }
@@ -988,10 +990,11 @@ fn cron_execution_is_owned_by_cron_module_operation_handles() {
     let host = include_str!("mod.rs");
     let cron_owner = include_str!("../../../../modules/cron/src/owner/actor.rs");
     let cron_handle = include_str!("../../../../modules/cron/src/api.rs");
-    let openclaw_cron = include_str!("../../../../integrations/openclaw/src/driver/ops/cron.rs");
+    let openclaw_cron =
+        include_str!("../../../../integrations/openclaw/src/surfaces/cron/adapters/runtime.rs");
     let cron_loopback = include_str!("../../../../modules/cron/src/adapters/loopback/wire.rs");
     let foundation = include_str!("../../../../foundation/src/execution/operation.rs");
-    let manual = include_str!("../../../../integrations/openclaw/src/cron/manual.rs");
+    let manual = include_str!("../../../../integrations/openclaw/src/surfaces/cron/manual.rs");
 
     assert!(!host.contains("cron_operations"));
     assert!(!host.contains("reap_cron_operations"));
@@ -1277,13 +1280,12 @@ fn host_input(root: &TestRoot) -> HostInput {
         app_log_dir: root.state_parent.join("userdata-logs"),
         parent_callback_base_url: "http://127.0.0.1:34100".into(),
         parent_callback_dispatch_token: "test-parent-dispatch-token".into(),
-        cron_transport_port: root.cron_transport_port,
         runtime_observation: crate::RuntimeObservationConfig::off(),
     }
 }
 
-fn unused_ports() -> [u16; 3] {
-    let listeners = std::array::from_fn::<_, 3, _>(|_| {
+fn unused_ports() -> [u16; 2] {
+    let listeners = std::array::from_fn::<_, 2, _>(|_| {
         TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("reserve test port")
     });
     listeners.map(|listener| listener.local_addr().expect("read test port").port())

@@ -29,15 +29,15 @@ const OPENCLAW_PLATFORM_LOOPBACK: &str =
     include_str!("../../integrations/openclaw/src/platform_runtime/loopback.rs");
 const HOST_ADMISSION: &str = include_str!("../src/composition/admission.rs");
 const OPENCLAW_TOOL_PERMISSION: &str =
-    include_str!("../../integrations/openclaw/src/tool_permission.rs");
+    include_str!("../../integrations/openclaw/src/surfaces/tooling/tool_permission.rs");
 const OPENCLAW_PROVIDER_OPS: &str =
-    include_str!("../../integrations/openclaw/src/driver/ops/provider_config.rs");
+    include_str!("../../integrations/openclaw/src/surfaces/providers/adapter.rs");
 const OPENCLAW_CHANNEL_OPS: &str =
-    include_str!("../../integrations/openclaw/src/driver/ops/channel.rs");
+    include_str!("../../integrations/openclaw/src/surfaces/channels/adapter.rs");
 const OPENCLAW_CONNECTOR_OPS: &str =
-    include_str!("../../integrations/openclaw/src/driver/ops/connector.rs");
+    include_str!("../../integrations/openclaw/src/surfaces/connectors/adapters/runtime.rs");
 const OPENCLAW_SETTINGS_OPS: &str =
-    include_str!("../../integrations/openclaw/src/driver/ops/settings.rs");
+    include_str!("../../integrations/openclaw/src/surfaces/settings/adapters/runtime.rs");
 
 fn without_whitespace(source: &str) -> String {
     source
@@ -149,11 +149,11 @@ fn openclaw_platform_loopback_owns_product_routes_without_host_platform_ops() {
         "Host admission should preserve request admission semantics without owning OpenClaw platform DTOs"
     );
     assert!(
-        OPENCLAW_TOOL_PERMISSION.contains("From<projection::tool_permission::Mode>")
+        OPENCLAW_TOOL_PERMISSION.contains("From<native_config::tool_permission::Mode>")
             && OPENCLAW_TOOL_PERMISSION
-                .contains("From<Mode> for projection::tool_permission::Mode")
-            && OPENCLAW_TOOL_PERMISSION.contains("From<projection::tool_permission::Effect>")
-            && OPENCLAW_TOOL_PERMISSION.contains("From<projection::tool_permission::Error>"),
+                .contains("From<Mode> for native_config::tool_permission::Mode")
+            && OPENCLAW_TOOL_PERMISSION.contains("From<native_config::tool_permission::Effect>")
+            && OPENCLAW_TOOL_PERMISSION.contains("From<native_config::tool_permission::Error>"),
         "openclaw integration must own tool_permission projection/effect/error mapping"
     );
 }
@@ -307,9 +307,10 @@ fn host_http_router_runs_only_installed_route_descriptors() {
         );
     }
     assert!(
-        HOST_HTTP_ROUTER.contains("Vec<platform::loopback::ModuleDescriptor>")
-            && HOST_HTTP_ROUTER.contains("RouteRegistry::new(input.routes)")
-            && HOST_HTTP_ROUTER.contains("routes.route(request)"),
+        HOST_HTTP_ROUTER.contains("Arc<RwLock<Vec<platform::loopback::ModuleDescriptor>>>")
+            && HOST_HTTP_ROUTER
+                .contains("pub(crate) fn new(routes: Vec<platform::loopback::ModuleDescriptor>)")
+            && HOST_HTTP_ROUTER.contains("route.dispatch(request).await"),
         "Host HTTP router must execute installed route descriptors from the module registry"
     );
 }
@@ -324,10 +325,12 @@ fn app_service_installs_modules_through_module_registry_install() {
         "app service must not keep a module_bundle install shim"
     );
     assert!(
-        app_service.contains("install_modules(InstallModulesInput{")
-            && app_service.contains("installed_modules.into_parts()")
-            && app_service.contains("RouterInput{routes:modules}"),
-        "app service must call module_registry install and pass the installed route registry into the router"
+        app_service.contains("prepare_module_install(InstallModulesInput{")
+            && app_service.contains("register_route_effects(&route_snapshot,router.clone())")
+            && app_service.contains(
+                "install_plan.install(&runtime.host_mut().module_effect_registrations())"
+            ),
+        "app service must prepare descriptors, register scoped route disposers, then install with scoped effects"
     );
     assert!(
         module_registry_install.contains("pub(crate)structInstallModulesInput")
@@ -356,7 +359,7 @@ fn module_registry_install_is_the_only_host_module_install_entry() {
         }
         for residue in [
             "pub(crate) struct InstallModulesInput",
-            "pub(crate) fn install_modules(",
+            "pub(crate) fn prepare_module_install(",
             "ModuleCatalog::install_with_capabilities_and_effects(",
             "ModuleCatalog::install_with_capabilities(",
         ] {
@@ -433,13 +436,18 @@ fn module_registry_install_collects_owner_scope_effect_registrations() {
         "Host owner runtime must expose ModuleScope effect registrations"
     );
     assert!(
-        app_service.contains("host.module_effect_registrations()")
-            && app_service.contains("&runtime.module_effect_registrations"),
-        "app service must pass owner scoped registrations into module_registry/install"
+        app_service.contains("register_route_effects(&route_snapshot,router.clone())")
+            && app_service.contains("runtime.host_mut().module_effect_registrations()"),
+        "app service must register route scopes before passing scoped registrations into module_registry/install"
     );
     assert!(
         MODULE_REGISTRY_EFFECTS.contains("EffectRegistration::new("),
         "module_registry/effects must project owner scoped effects into platform EffectRegistration"
+    );
+    assert!(
+        !MODULE_REGISTRY_INSTALL.contains("append_installed_route_effects")
+            && !MODULE_REGISTRY_INSTALL.contains("EffectKind::Route"),
+        "module_registry/install must not synthesize route registrations outside ModuleScope"
     );
 }
 

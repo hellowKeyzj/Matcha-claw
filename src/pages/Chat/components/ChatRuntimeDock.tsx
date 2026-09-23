@@ -15,14 +15,14 @@ export function ChatErrorBanner({
 }) {
   return (
     <div className={CHAT_LAYOUT_TOKENS.runtimeDockRail}>
-      <div className="flex items-center justify-between gap-3 rounded-[22px] border border-destructive/14 bg-background/92 px-4 py-3 shadow-[0_10px_30px_rgba(220,38,38,0.045)] backdrop-blur-xl">
+      <div className="flex items-center justify-between gap-3 rounded-[22px] border border-destructive/14 bg-background/95 px-4 py-3 shadow-sm">
         <p className="flex items-center gap-2 text-sm text-destructive">
           <AlertCircle className="h-4 w-4" />
           {error}
         </p>
         <button
           onClick={onDismiss}
-          className="rounded-full border border-destructive/16 bg-background/80 px-2.5 py-1 text-[11px] text-destructive/72 transition-colors hover:bg-background/90 hover:text-destructive"
+          className="rounded-full border border-destructive/16 bg-background/95 px-2.5 py-1 text-[11px] text-destructive/72 transition-colors hover:bg-background hover:text-destructive"
         >
           {dismissLabel}
         </button>
@@ -81,7 +81,7 @@ export function ChatRuntimeStatusDock({
 
   return (
     <div className={CHAT_LAYOUT_TOKENS.runtimeDockRail} data-testid="chat-runtime-status-dock">
-      <div className="flex min-h-11 items-center gap-3 rounded-[18px] border border-border/55 bg-background/94 px-3 py-2 shadow-[0_12px_34px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:shadow-[0_16px_44px_rgba(0,0,0,0.24)]">
+      <div className="flex min-h-11 items-center gap-3 rounded-[18px] border border-border/55 bg-background/95 px-3 py-2 shadow-sm">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-border/55 bg-card text-muted-foreground shadow-sm">
           {compacting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : guardian ? <ShieldCheck className="h-3.5 w-3.5" /> : <Sparkles className="h-3.5 w-3.5" />}
         </span>
@@ -130,7 +130,7 @@ function decisionButtonClassName(decision: ApprovalDecision): string {
     return 'border-foreground bg-foreground text-background hover:bg-foreground/90';
   }
   if (decision === 'allow-always') {
-    return 'border-border/55 bg-background/78 text-foreground hover:bg-secondary';
+    return 'border-border/55 bg-background/95 text-foreground hover:bg-secondary';
   }
   return 'border-transparent bg-transparent text-muted-foreground hover:bg-destructive/8 hover:text-destructive';
 }
@@ -151,7 +151,7 @@ export function ChatApprovalDock({
 
   return (
     <div className={CHAT_LAYOUT_TOKENS.runtimeDockRail} data-testid="chat-approval-dock">
-      <div className="flex min-h-12 items-center gap-3 rounded-[18px] border border-border/55 bg-background/94 px-3 py-2 shadow-[0_12px_34px_rgba(15,23,42,0.10)] backdrop-blur-xl dark:shadow-[0_16px_44px_rgba(0,0,0,0.28)]">
+      <div className="flex min-h-12 items-center gap-3 rounded-[18px] border border-border/55 bg-background/95 px-3 py-2 shadow-sm">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-border/55 bg-card text-muted-foreground shadow-sm">
           {approval ? <ShieldCheck className="h-3.5 w-3.5" /> : <Loader2 className="h-3.5 w-3.5 animate-spin" />}
         </span>

@@ -368,4 +368,8 @@ impl ModuleDescriptor {
     pub fn routes(&self) -> &[RouteDescriptor] {
         &self.routes
     }
+
+    pub fn unregister_route(&mut self, route_id: &'static str) {
+        self.routes.retain(|route| route.id() != route_id);
+    }
 }

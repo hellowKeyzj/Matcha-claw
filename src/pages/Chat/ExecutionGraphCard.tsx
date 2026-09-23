@@ -38,7 +38,7 @@ function StepDetailCard({ step }: { step: SessionExecutionGraphStep }) {
         'min-w-0 flex-1',
         isFlatRow
           ? 'px-0 py-0'
-          : 'rounded-[18px] border border-border/45 bg-background/68 px-3 py-2.5 shadow-sm backdrop-blur-sm',
+          : 'rounded-[18px] border border-border/45 bg-card px-3 py-2.5 shadow-sm',
       )}
     >
       <button
@@ -62,7 +62,7 @@ function StepDetailCard({ step }: { step: SessionExecutionGraphStep }) {
               </p>
             )}
             {showStatusPill && (
-              <span className="shrink-0 whitespace-nowrap rounded-full border border-border/40 bg-background/82 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              <span className="shrink-0 whitespace-nowrap rounded-full border border-border/40 bg-card px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                 {t(`taskPanel.stepStatus.${step.status}`)}
               </span>
             )}
@@ -83,7 +83,7 @@ function StepDetailCard({ step }: { step: SessionExecutionGraphStep }) {
         )}
       </button>
       {step.detail && expanded && (
-        <div className="mt-3 rounded-[14px] border border-border/40 bg-background/74 px-3 py-2">
+        <div className="mt-3 rounded-[14px] border border-border/40 bg-card px-3 py-2">
           <pre className="whitespace-pre-wrap break-words text-[12px] leading-5 text-muted-foreground">
             {step.detail}
           </pre>
@@ -133,7 +133,7 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
   return (
     <div
       data-testid="chat-execution-graph"
-      className="w-full rounded-[22px] border border-border/45 bg-background/62 px-4 py-4 shadow-[0_10px_30px_rgba(15,23,42,0.05)] backdrop-blur-sm"
+      className="w-full rounded-[22px] border border-border/45 bg-card px-4 py-4 shadow-sm"
     >
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -148,7 +148,7 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
         <span
           className={cn(
             'rounded-full border px-2.5 py-1 text-[11px] font-medium',
-            active ? 'border-primary/20 bg-primary/8 text-primary' : 'border-border/40 bg-background/78 text-foreground/70',
+            active ? 'border-primary/20 bg-primary/8 text-primary' : 'border-border/40 bg-card text-foreground/70',
           )}
         >
           {active ? t('executionGraph.status.active') : t('executionGraph.status.previous')}
@@ -176,7 +176,7 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
               <Bot className="h-4 w-4" />
             </div>
           </div>
-          <div className="min-w-0 flex-1 rounded-[18px] border border-primary/15 bg-primary/6 px-3 py-2.5 shadow-sm backdrop-blur-sm">
+          <div className="min-w-0 flex-1 rounded-[18px] border border-primary/15 bg-primary/8 px-3 py-2.5 shadow-sm">
             <div className="flex items-center gap-2 text-sm font-medium text-foreground">
               <GitBranch className="h-4 w-4 text-primary" />
               <span>{t('executionGraph.agentRun', { agent: agentLabel })}</span>
@@ -237,7 +237,7 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
         ))}
 
         {artifactFiles.length > 0 ? (
-          <div className="rounded-[18px] border border-border/45 bg-background/60 px-3 py-3">
+          <div className="rounded-[18px] border border-border/45 bg-card px-3 py-3">
             <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
               <FileCode2 className="h-3.5 w-3.5" />
               <span>{t('executionGraph.generatedFiles', { count: artifactFiles.length })}</span>
@@ -253,7 +253,7 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
                     onPointerDown={(event) => handleOpenArtifactByPointer(event, file)}
                     onMouseDown={(event) => handleOpenArtifactByMouseDown(event, file)}
                     onClick={(event) => handleOpenArtifactByClick(event, file)}
-                    className="flex w-full items-center justify-between gap-3 rounded-[14px] border border-border/45 bg-background/78 px-3 py-2 text-left transition-colors hover:bg-muted/45"
+                    className="flex w-full items-center justify-between gap-3 rounded-[14px] border border-border/45 bg-background/95 px-3 py-2 text-left transition-colors hover:bg-muted/45"
                   >
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium text-foreground">{file.fileName}</p>
@@ -263,7 +263,7 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
                       <span className="text-[11px] text-muted-foreground">
                         +{file.lineStats.added} / -{file.lineStats.removed}
                       </span>
-                      <span className="inline-flex items-center gap-1 rounded-full border border-border/40 bg-background/82 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-border/40 bg-card px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                         {openAsDiff ? <GitCompare className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
                         {openAsDiff ? t('executionGraph.openChanges') : t('executionGraph.openPreview')}
                       </span>

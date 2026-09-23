@@ -31,6 +31,14 @@ const requiredDistributionFiles = Object.freeze([
   'usr/bin/msys-2.0.dll',
 ]);
 
+const packagingIncompatibleLinkPaths = Object.freeze([
+  'dev/fd',
+  'dev/stderr',
+  'dev/stdin',
+  'dev/stdout',
+  'etc/mtab',
+]);
+
 export function parseGitForWindowsDownloadArgs(args) {
   if (args.length === 0) return { arch: process.arch, reuseFunctionalLocalCache: false };
   if (args.length !== 2 && args.length !== 3) {
@@ -130,6 +138,12 @@ async function resolveExtractedDistribution(stagingDir) {
   }
 }
 
+export async function removePackagingIncompatibleLinks(distributionDir, fileSystem = fs) {
+  for (const relativePath of packagingIncompatibleLinkPaths) {
+    await fileSystem.rm(join(distributionDir, relativePath), { force: true });
+  }
+}
+
 async function writeDistributionNotice(distributionDir, plan) {
   const notice = [
     `Git for Windows ${version} (${plan.arch})`,
@@ -179,6 +193,7 @@ export async function downloadGitForWindows(plan) {
   }
 
   if (plan.reuseFunctionalLocalCache && plan.arch === 'x64' && canReusePortableGitDistribution(plan.distributionDir)) {
+    await removePackagingIncompatibleLinks(plan.distributionDir);
     console.log(`[download-bundled-git-bash] using existing validated PortableGit distribution: ${plan.distributionDir}`);
     return;
   }
@@ -196,6 +211,7 @@ export async function downloadGitForWindows(plan) {
     await fs.mkdir(stagingDir, { recursive: true });
     await extractGitForWindows(plan.archivePath, stagingDir);
     const extractedDistribution = await resolveExtractedDistribution(stagingDir);
+    await removePackagingIncompatibleLinks(extractedDistribution);
     await writeDistributionNotice(extractedDistribution, plan);
     await publishPortableGitDistribution({
       extractedDistribution,

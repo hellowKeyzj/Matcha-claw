@@ -421,7 +421,11 @@ impl SessionShared {
                     endpoint,
                     entry.key.clone(),
                     Some(entry.endpoint_session_id.clone()),
-                    entry.model.clone(),
+                    entry
+                        .model_state
+                        .as_ref()
+                        .and_then(|model_state| model_state.selected_ref())
+                        .map(str::to_owned),
                     default_model,
                 ) else {
                     return Box::pin(async { None });
@@ -616,7 +620,7 @@ impl SessionShared {
             .await
             .map_err(session_model_runtime_failure)?;
         match ops.select_session_model(model_runtime).await {
-            SessionModelSelectionOutcome::Succeeded => Ok(()),
+            SessionModelSelectionOutcome::Succeeded { .. } => Ok(()),
             outcome => Err(session_model_runtime_failure(outcome)),
         }
     }
@@ -1716,7 +1720,7 @@ fn connector_secret_to_string(
 
 fn session_model_runtime_failure(outcome: SessionModelSelectionOutcome) -> SessionSendOutcome {
     match outcome {
-        SessionModelSelectionOutcome::Succeeded => SessionSendOutcome::Unknown,
+        SessionModelSelectionOutcome::Succeeded { .. } => SessionSendOutcome::Unknown,
         SessionModelSelectionOutcome::TargetRejected {
             reason: SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable,
             ..

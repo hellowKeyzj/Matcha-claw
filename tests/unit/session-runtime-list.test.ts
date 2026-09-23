@@ -20,7 +20,9 @@ vi.mock('@/lib/host-api', () => ({
       kind: 'session',
       endpointSessionId: 'direct-session',
       updatedAt: 42,
-      model: 'provider/private-default-model',
+      modelState: {
+        selected: { provider: 'provider', model: 'private-default-model', ref: 'provider/private-default-model' },
+      },
     }],
   })),
 }));
@@ -36,18 +38,20 @@ describe('runtime session list', () => {
       kind: 'session',
       endpointSessionId: 'direct-session',
       preferred: false,
-      model: 'provider/private-default-model',
+      modelState: {
+        selected: { provider: 'provider', model: 'private-default-model', ref: 'provider/private-default-model' },
+      },
       updatedAt: 42,
     }]);
   });
 
-  it('does not synthesize catalog metadata while preserving the native model', async () => {
+  it('does not synthesize catalog metadata while preserving the native model state', async () => {
     const { listSessions } = await import('@/services/runtime/session-runtime');
 
     const [session] = await listSessions({ endpoint: sessionIdentity.endpoint });
 
     expect(session).not.toHaveProperty('label');
     expect(session).not.toHaveProperty('displayName');
-    expect(session.model).toBe('provider/private-default-model');
+    expect(session.modelState?.selected?.ref).toBe('provider/private-default-model');
   });
 });

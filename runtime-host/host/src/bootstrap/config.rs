@@ -9,8 +9,9 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use matcha_agent::lifecycle::secret::Secret;
-use openclaw::{gateway::client::GatewayClientMetadata, lifecycle::state_dir::CanonicalStateDir};
+use openclaw::gateway::client::GatewayClientMetadata;
 use organization::adapters::loopback::trigger::WebhookToken;
+use platform::state_dir::CanonicalStateDir;
 use runtime_host::{
     HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, open_organization_store,
 };
@@ -104,7 +105,6 @@ impl Bootstrap {
                 app_log_dir: self.app_log_dir,
                 parent_callback_base_url: self.parent_callback_base_url,
                 parent_callback_dispatch_token: self.parent_callback_dispatch_token,
-                cron_transport_port: runtime_host_transport_port,
                 runtime_observation: self.runtime_observation,
             },
             verifier,

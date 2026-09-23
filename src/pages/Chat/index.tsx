@@ -33,6 +33,7 @@ import {
   createEmptySessionRecord,
   getPendingApprovals,
   getSessionApprovalStatus,
+  patchSessionMeta,
 } from '@/stores/chat/store-state-helpers';
 import { hasVisibleRuntimeError } from '@/stores/chat/runtime-error-view';
 import { resolveSessionOperationTarget } from '@/stores/chat/session-identity';
@@ -1078,10 +1079,12 @@ export function Chat({ isActive = true }: ChatProps) {
     }, TRANSIENT_RUNTIME_ERROR_BANNER_DELAY_MS);
     return () => window.clearTimeout(timeout);
   }, [currentSession.runtime, gatewayStatus.lastIssue, localizedRuntimeError]);
+  const currentSessionModelReference = currentSession.meta.modelState?.selectionId
+    ?? currentSession.meta.modelState?.selected?.ref
+    ?? '';
   const currentSessionModelEntry = useMemo(() => {
-    return resolveModelCatalogEntry(availableModels, currentSession.meta.model);
-  }, [availableModels, currentSession.meta.model]);
-  const currentSessionModelReference = currentSession.meta.model?.trim() ?? '';
+    return resolveModelCatalogEntry(availableModels, currentSessionModelReference);
+  }, [availableModels, currentSessionModelReference]);
   const currentSessionModelId = currentSessionModelEntry?.id ?? currentSessionModelReference;
   const contextUsage = useMemo(() => buildChatContextUsageViewModel({
     snapshot: currentSession.contextTokens,
@@ -1125,7 +1128,7 @@ export function Chat({ isActive = true }: ChatProps) {
     />
   ) : null;
   const workspaceUnavailableBanner = currentWorkspaceUnavailable ? (
-    <div className="mx-auto w-full max-w-[56rem] rounded-[22px] border border-yellow-500/24 bg-yellow-500/8 px-4 py-3 shadow-[0_10px_30px_rgba(234,179,8,0.08)] backdrop-blur-xl">
+    <div className="mx-auto w-full max-w-[56rem] rounded-[22px] border border-yellow-500/24 bg-card px-4 py-3 shadow-sm">
       <div className="flex items-start gap-3 text-left">
         <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-yellow-600" />
         <div className="min-w-0">
@@ -1138,7 +1141,7 @@ export function Chat({ isActive = true }: ChatProps) {
               type="button"
               variant="outline"
               size="sm"
-              className="mt-3 h-8 rounded-full border-yellow-500/28 bg-background/60 px-3 text-xs text-foreground hover:bg-background"
+              className="mt-3 h-8 rounded-full border-yellow-500/28 bg-background/95 px-3 text-xs text-foreground hover:bg-background"
               disabled={workspaceRecoveryPending}
               onClick={() => {
                 void handleChooseWorkspaceForCurrentAgent();
@@ -1270,6 +1273,11 @@ export function Chat({ isActive = true }: ChatProps) {
       if (result.outcome !== 'succeeded') {
         throw new Error(result.outcome);
       }
+      useChatStore.setState((state) => ({
+        loadedSessions: patchSessionMeta(state, currentSessionRecordKey, {
+          modelState: result.modelState,
+        }),
+      }));
       void loadSessions();
     } catch (error) {
       logSessionTrace('model-selection.error', traceId, summarizeError(error));

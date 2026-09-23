@@ -64,10 +64,11 @@ Compare shape and semantics, not literal dynamic values.
 Run only after code changes / in an environment allowed to create test temp directories:
 
 ```powershell
-pnpm run build:runtime-host-process
+node scripts/build-runtime-host-native.mjs --platform win32 --arch x64
 
 cargo check --manifest-path runtime-host/Cargo.toml -p runtime-host
 cargo test --manifest-path runtime-host/Cargo.toml -p runtime-host --test module_boundary_contract --test module_platform_contract
+pnpm run check:runtime-host-crate-dag
 
 pnpm exec vitest run tests/unit/runtime-host-delivery-control.test.ts
 pnpm exec vitest run tests/contract/runtime-host-api-chain.contract.test.ts

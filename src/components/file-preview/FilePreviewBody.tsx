@@ -3,6 +3,7 @@ import { Check, Copy, ExternalLink, FolderOpen } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { StableScrollArea } from '@/components/scroll';
 import { Button } from '@/components/ui/button';
 import { CsvPreview } from '@/pages/Chat/components/CsvPreview';
 import { buildLineDiff } from '@/lib/line-diff';
@@ -79,7 +80,7 @@ function toBlobObjectUrl(data: string, mimeType: string): string {
 function renderPlainDiff(file: ArtifactPreviewTarget) {
   const diffRows = buildLineDiff(file.baseline ?? '', file.content ?? '');
   return (
-    <div className="overflow-auto rounded-[18px] border border-border/45 bg-background/68 p-3 shadow-sm backdrop-blur-sm">
+    <div className="overflow-auto rounded-[18px] border border-border/45 bg-background p-3 shadow-sm">
       <pre className="text-[12px] leading-6 text-foreground/90">
         {diffRows.map((row, index) => (
           <div
@@ -119,7 +120,7 @@ function PreviewFallbackAction({
 }) {
   return (
     <div className={cn('flex h-full items-center justify-center px-6 py-8', className)}>
-      <div className="max-w-md rounded-[18px] border border-border/45 bg-background/68 p-5 text-center shadow-sm backdrop-blur-sm">
+      <div className="max-w-md rounded-[18px] border border-border/45 bg-background p-5 text-center shadow-sm">
         <p className="text-sm text-foreground">{label}</p>
         <p className="mt-2 text-sm text-muted-foreground">{description}</p>
         <div className="mt-4 flex items-center justify-center gap-2">
@@ -382,9 +383,9 @@ export function FilePreviewBody({
         );
       }
       return (
-        <div className="h-full min-h-0 overflow-auto p-3">
+        <StableScrollArea className="h-full min-h-0 overflow-auto p-3">
           {renderPlainDiff(file)}
-        </div>
+        </StableScrollArea>
       );
     }
 
@@ -447,13 +448,13 @@ export function FilePreviewBody({
         );
       }
       return (
-        <div className="flex h-full min-h-0 items-center justify-center overflow-auto bg-[hsl(var(--muted)/0.3)] p-4">
+        <StableScrollArea className="flex h-full min-h-0 items-center justify-center overflow-auto bg-[hsl(var(--muted)/0.3)] p-4">
           <img
             src={binaryState.objectUrl}
             alt={file.fileName}
             className="max-h-full max-w-full rounded-lg border border-border/45 bg-background shadow-sm"
           />
-        </div>
+        </StableScrollArea>
       );
     }
 
@@ -478,9 +479,9 @@ export function FilePreviewBody({
     if (file.contentType === 'sheet' && file.ext === '.csv') {
       const csvText = textState.status === 'ready' ? textState.content : (file.content ?? '');
       return (
-        <div className="h-full min-h-0 overflow-auto p-3">
+        <StableScrollArea className="h-full min-h-0 overflow-auto p-3">
           <CsvPreview csv={csvText} />
-        </div>
+        </StableScrollArea>
       );
     }
 
@@ -502,13 +503,13 @@ export function FilePreviewBody({
     if (file.contentType === 'text') {
       const text = textState.status === 'ready' ? textState.content : (file.content ?? '');
       return (
-        <div className="h-full min-h-0 overflow-auto p-3">
-          <div className="overflow-hidden rounded-[18px] border border-border/45 bg-background/68 shadow-sm backdrop-blur-sm">
+        <StableScrollArea className="h-full min-h-0 overflow-auto p-3">
+          <div className="overflow-hidden rounded-[18px] border border-border/45 bg-background shadow-sm">
             <pre className="overflow-auto px-4 py-3 text-[12px] leading-6 text-foreground/90">
               {text}
             </pre>
           </div>
-        </div>
+        </StableScrollArea>
       );
     }
 

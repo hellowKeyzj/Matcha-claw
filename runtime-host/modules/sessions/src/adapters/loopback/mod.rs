@@ -19,6 +19,7 @@ use crate::{
     events::SessionDeltaStream,
     send_hook::SessionSendHookSet,
     session_catalog::{SessionCatalogCommand, SessionCatalogEntry, SessionCatalogOutcome},
+    state::SessionModelState,
 };
 
 pub(crate) mod abort;
@@ -349,7 +350,7 @@ struct Session {
     session_identity: SessionIdentity,
     kind: PublicSessionKind,
     endpoint_session_id: String,
-    model: Option<String>,
+    model_state: Option<SessionModelState>,
     updated_at: Option<u64>,
     preferred: Option<bool>,
     protocol_id: Option<String>,
@@ -364,8 +365,8 @@ fn session_value(session: &Session) -> Value {
         "kind": public_session_kind_value(session.kind),
         "endpointSessionId": &session.endpoint_session_id,
     });
-    if let Some(model) = &session.model {
-        value["model"] = serde_json::json!(model);
+    if let Some(model_state) = &session.model_state {
+        value["modelState"] = serde_json::json!(model_state);
     }
     if let Some(updated_at) = session.updated_at {
         value["updatedAt"] = serde_json::json!(updated_at);
@@ -429,7 +430,7 @@ fn project_session(session: SessionCatalogEntry) -> Option<Session> {
         agent_id: session.agent_id,
         kind,
         endpoint_session_id: session.endpoint_session_id,
-        model: session.model,
+        model_state: session.model_state,
         updated_at: session.updated_at,
         preferred: session.preferred,
         protocol_id: session.protocol_id,
@@ -560,7 +561,7 @@ mod tests {
             key,
             agent_id,
             endpoint_session_id,
-            model: None,
+            model_state: None,
             updated_at,
             preferred: None,
             protocol_id: None,

@@ -58,16 +58,14 @@ where
             eprintln!(
                 "[startup-trace] source=runtime-host phase=openclaw-autostart-request detail=requesting-peer-autostart gateway_auto_start={gateway_auto_start}"
             );
-            let result = peer.request_peer_autostart(gateway_auto_start).await;
-            eprintln!(
-                "[startup-trace] source=runtime-host phase=openclaw-autostart-result detail=peer-autostart-request-finished success={} error={}",
-                result.is_ok(),
-                if result.is_ok() {
-                    ""
-                } else {
-                    "peer owner unavailable"
-                }
-            );
+            match peer.request_peer_autostart(gateway_auto_start).await {
+                Ok(()) => eprintln!(
+                    "[startup-trace] source=runtime-host phase=openclaw-autostart-result detail=peer-autostart-finished success=true error="
+                ),
+                Err(error) => eprintln!(
+                    "[startup-trace] source=runtime-host phase=openclaw-autostart-result detail=peer-autostart-finished success=false error={error:?}"
+                ),
+            }
         }
     });
 

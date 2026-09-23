@@ -86,6 +86,12 @@ jobs:
       - name: Check trait boundary
         run: pnpm run check:trait-boundary
 
+      - name: Check runtime-host crate DAG
+        run: pnpm run check:runtime-host-crate-dag
+
+      - name: Run runtime-host architecture contracts
+        run: pnpm run test:runtime-host:contract
+
       - name: Run contract tests
         run: pnpm run test:contract
 

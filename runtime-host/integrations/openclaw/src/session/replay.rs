@@ -1,3 +1,4 @@
+use platform::state_dir::CanonicalStateDir;
 use std::{fmt, path::PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -5,8 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     gateway::{ingress::GatewayEpoch, wire::GatewayEvent},
-    lifecycle::state_dir::CanonicalStateDir,
-    session_window::{Message, PageRequest, WindowRange, decode_transcript_event_message},
+    session::window::{Message, PageRequest, WindowRange, decode_transcript_event_message},
 };
 
 use super::{
@@ -381,14 +381,14 @@ fn replay_source_range(total_source_events: usize, request: PageRequest) -> Wind
         .unwrap_or(total_source_events)
         .min(total_source_events);
     match request.direction() {
-        crate::session_window::Direction::Latest => WindowRange::new(
+        crate::session::window::Direction::Latest => WindowRange::new(
             total_source_events.saturating_sub(request.limit()),
             total_source_events,
         ),
-        crate::session_window::Direction::Older => {
+        crate::session::window::Direction::Older => {
             WindowRange::new(offset.saturating_sub(request.limit()), offset)
         }
-        crate::session_window::Direction::Newer => WindowRange::new(
+        crate::session::window::Direction::Newer => WindowRange::new(
             offset,
             offset
                 .saturating_add(request.limit())
@@ -1158,17 +1158,17 @@ mod tests {
             [
                 CanonicalSessionChange::TranscriptMessage { message: user },
                 CanonicalSessionChange::TranscriptMessage { message: assistant }
-            ] if user.role() == crate::session_window::MessageRole::User
+            ] if user.role() == crate::session::window::MessageRole::User
                 && user.message_id() == Some("user-1")
                 && user.sequence() == Some(2)
                 && user.text() == "question"
-                && assistant.role() == crate::session_window::MessageRole::Assistant
+                && assistant.role() == crate::session::window::MessageRole::Assistant
                 && assistant.message_id() == Some("message-1")
                 && assistant.parent_id() == Some("user-1")
                 && assistant.run_id() == Some("run-1")
                 && assistant.sequence() == Some(3)
                 && assistant.text() == "answer"
-                && assistant.content().iter().any(|content| matches!(content, crate::session_window::MessageContent::Thinking { text } if text == "plan"))
+                && assistant.content().iter().any(|content| matches!(content, crate::session::window::MessageContent::Thinking { text } if text == "plan"))
         ));
     }
 

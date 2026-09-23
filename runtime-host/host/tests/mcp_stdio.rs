@@ -8,12 +8,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use openclaw::lifecycle::state_dir::CanonicalStateDir;
 use organization::{
     DeliveryLedgerSnapshot, GraphDefinition, GraphRunFacts, GraphRunId, GraphState, MemberId,
     NodeDefinition, NodeId, OrganizationFacts, RoleAssignment, RoleId, RoleKind, TeamDefinition,
     TeamFacts, TeamId, TeamMember, TeamRevision, TeamRole,
 };
+use platform::state_dir::CanonicalStateDir;
 use serde_json::{Value, json};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -313,7 +313,8 @@ fn artifact_contains_no_store_opening_or_static_signing_material() {
             "artifact must not contain {forbidden}"
         );
     }
-    assert!(source.contains("runtime_host::run_matcha_mcp"));
+    assert!(source.contains("ToolCatalog::new"));
+    assert!(source.contains("organization::team_run_mcp_provider"));
 }
 
 #[test]

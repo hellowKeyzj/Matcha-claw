@@ -1,3 +1,4 @@
+pub(crate) mod adapters;
 pub mod assembler;
 pub(crate) mod event_router;
 pub mod events;
@@ -9,6 +10,7 @@ pub mod protocol;
 pub(crate) mod reducer;
 pub mod replay;
 pub(crate) mod trace;
+pub mod window;
 
 pub use projection::CanonicalIngressResult;
 pub use replay::{

@@ -9,6 +9,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
+import { StableScrollArea } from '@/components/scroll';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -197,6 +198,12 @@ export function TasksPage() {
   const [taskListViewportHeight, setTaskListViewportHeight] = useState(0);
   const scopedTasksRequestSeqRef = useRef(0);
   const taskListScrollRef = useRef<HTMLDivElement | null>(null);
+  const getTaskListScrollElement = useCallback(() => {
+    if (taskListScrollRef.current?.isConnected) return taskListScrollRef.current;
+    const element = document.querySelector<HTMLDivElement>('[data-task-list-scroll="true"]');
+    taskListScrollRef.current = element;
+    return element;
+  }, []);
   const activeTab = resolveTaskCenterTab(searchParams.get('tab'));
   const gatewayOperational = isGatewayOperational(gatewayStatus);
   const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
@@ -459,7 +466,7 @@ export function TasksPage() {
   useEffect(() => {
     const rafId = window.requestAnimationFrame(() => {
       setTaskListScrollTop(0);
-      const scroller = taskListScrollRef.current;
+      const scroller = getTaskListScrollElement();
       if (scroller) {
         scroller.scrollTop = 0;
       }
@@ -467,7 +474,7 @@ export function TasksPage() {
     return () => {
       window.cancelAnimationFrame(rafId);
     };
-  }, [taskListResetKey]);
+  }, [getTaskListScrollElement, taskListResetKey]);
 
   useEffect(() => {
     const rafId = window.requestAnimationFrame(() => {
@@ -493,7 +500,7 @@ export function TasksPage() {
       };
     }
 
-    const element = taskListScrollRef.current;
+    const element = getTaskListScrollElement();
     if (!element) {
       return;
     }
@@ -522,7 +529,7 @@ export function TasksPage() {
         window.cancelAnimationFrame(rafId);
       }
     };
-  }, [activeTab, shouldUseVirtualTaskList, showTaskContent]);
+  }, [activeTab, getTaskListScrollElement, shouldUseVirtualTaskList, showTaskContent]);
 
   const visibleTasks = useMemo(
     () => filteredTasks.slice(0, visibleTaskCount),
@@ -563,7 +570,7 @@ export function TasksPage() {
     if (visibleTaskCount >= filteredTasks.length) {
       return;
     }
-    const container = taskListScrollRef.current;
+    const container = getTaskListScrollElement();
     if (!container) {
       return;
     }
@@ -576,6 +583,7 @@ export function TasksPage() {
     activeTab,
     appendVisibleTasks,
     filteredTasks.length,
+    getTaskListScrollElement,
     shouldUseVirtualTaskList,
     taskHeavyContentReady,
     visibleTaskCount,
@@ -875,7 +883,7 @@ export function TasksPage() {
           <TaskCenterSurface>
             {!showTaskContent ? (
               <div className="grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)]">
-                <div className="h-[70vh] overflow-hidden border-b lg:border-b-0 lg:border-r">
+                <div className="h-[70vh] overflow-hidden border-b bg-card lg:border-b-0 lg:border-r">
                   {Array.from({ length: 6 }).map((_, index) => (
                     <div key={`task-initial-placeholder-${index}`} className="h-24 border-b px-4 py-3">
                       <div className="h-4 w-4/5 animate-pulse rounded bg-muted" />
@@ -884,7 +892,7 @@ export function TasksPage() {
                     </div>
                   ))}
                 </div>
-                <div className="h-[70vh] space-y-3 p-5">
+                <div className="h-[70vh] space-y-3 bg-card p-5">
                   <div className="h-4 w-40 animate-pulse rounded bg-muted" />
                   <div className="h-16 w-full animate-pulse rounded bg-muted" />
                   <div className="h-20 w-full animate-pulse rounded bg-muted" />
@@ -894,11 +902,11 @@ export function TasksPage() {
               <TaskCenterEmptyState icon={ListTodo} title={t('empty')} />
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)]">
-                <div className="flex h-[70vh] min-w-0 flex-col overflow-hidden border-b lg:border-b-0 lg:border-r">
+                <div className="flex h-[70vh] min-w-0 flex-col overflow-hidden border-b bg-card lg:border-b-0 lg:border-r">
                   <CardHeader className="shrink-0 border-b px-4 py-4">
                     <CardTitle className="text-sm">{t('listTitle')}</CardTitle>
                   </CardHeader>
-                  <div ref={taskListScrollRef} className="min-h-0 flex-1 overflow-y-auto" onScroll={handleTaskListScroll}>
+                  <StableScrollArea data-task-list-scroll="true" className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-card [scrollbar-gutter:stable]" onScroll={handleTaskListScroll}>
                     {shouldUseVirtualTaskList && virtualWindow.topSpacerHeight > 0 ? (
                       <div aria-hidden style={{ height: virtualWindow.topSpacerHeight }} />
                     ) : null}
@@ -942,10 +950,10 @@ export function TasksPage() {
                         </Button>
                       </div>
                     )}
-                  </div>
+                  </StableScrollArea>
                 </div>
 
-                <div className="flex h-[70vh] min-w-0 flex-col overflow-hidden">
+                <div className="flex h-[70vh] min-w-0 flex-col overflow-hidden bg-card">
                   <CardHeader className="shrink-0 p-5">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -967,67 +975,69 @@ export function TasksPage() {
                       ) : null}
                     </div>
                   </CardHeader>
-                  <CardContent className="min-h-0 flex-1 overflow-y-auto px-5 pb-5">
-                    {!selectedTask ? (
-                      <p className="text-sm text-muted-foreground">{t('selectTask')}</p>
-                    ) : (
-                      <div className="space-y-4 text-sm">
-                        <div className="flex items-center gap-2">
-                          <Badge variant={statusVariant(selectedTask.status)}>{selectedTask.status}</Badge>
-                          <span className="text-sm text-muted-foreground">
-                            {selectedTask.owner || t('detail.unassigned', { defaultValue: 'Unassigned' })}
-                          </span>
-                        </div>
+                  <StableScrollArea className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-card [scrollbar-gutter:stable]">
+                    <CardContent className="px-5 pb-5">
+                      {!selectedTask ? (
+                        <p className="text-sm text-muted-foreground">{t('selectTask')}</p>
+                      ) : (
+                        <div className="space-y-4 text-sm">
+                          <div className="flex items-center gap-2">
+                            <Badge variant={statusVariant(selectedTask.status)}>{selectedTask.status}</Badge>
+                            <span className="text-sm text-muted-foreground">
+                              {selectedTask.owner || t('detail.unassigned', { defaultValue: 'Unassigned' })}
+                            </span>
+                          </div>
 
-                        <div className="space-y-3 border-t pt-4">
-                          <p className="text-sm font-medium text-muted-foreground">
-                            {t('detail.description', { defaultValue: 'Description' })}
-                          </p>
-                          <p className="whitespace-pre-wrap text-sm text-foreground">
-                            {selectedTask.description || '-'}
-                          </p>
-                        </div>
-
-                        <div className="space-y-3 border-t pt-4">
-                          <div className="flex items-center justify-between">
+                          <div className="space-y-3 border-t pt-4">
                             <p className="text-sm font-medium text-muted-foreground">
-                              {t('detail.dependencies', { defaultValue: 'Dependencies' })}
+                              {t('detail.description', { defaultValue: 'Description' })}
+                            </p>
+                            <p className="whitespace-pre-wrap text-sm text-foreground">
+                              {selectedTask.description || '-'}
                             </p>
                           </div>
-                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                            <div>
-                              <p className="text-xs text-muted-foreground">
-                                {t('detail.blockedBy', { defaultValue: 'Blocked By' })}
-                              </p>
-                              <p className="mt-1 break-all text-sm">
-                                {selectedTask.blockedBy.length > 0 ? selectedTask.blockedBy.join(', ') : '-'}
+
+                          <div className="space-y-3 border-t pt-4">
+                            <div className="flex items-center justify-between">
+                              <p className="text-sm font-medium text-muted-foreground">
+                                {t('detail.dependencies', { defaultValue: 'Dependencies' })}
                               </p>
                             </div>
-                            <div>
-                              <p className="text-xs text-muted-foreground">
-                                {t('detail.blocks', { defaultValue: 'Blocks' })}
-                              </p>
-                              <p className="mt-1 break-all text-sm">
-                                {selectedTask.blocks.length > 0 ? selectedTask.blocks.join(', ') : '-'}
-                              </p>
+                            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                              <div>
+                                <p className="text-xs text-muted-foreground">
+                                  {t('detail.blockedBy', { defaultValue: 'Blocked By' })}
+                                </p>
+                                <p className="mt-1 break-all text-sm">
+                                  {selectedTask.blockedBy.length > 0 ? selectedTask.blockedBy.join(', ') : '-'}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-xs text-muted-foreground">
+                                  {t('detail.blocks', { defaultValue: 'Blocks' })}
+                                </p>
+                                <p className="mt-1 break-all text-sm">
+                                  {selectedTask.blocks.length > 0 ? selectedTask.blocks.join(', ') : '-'}
+                                </p>
+                              </div>
                             </div>
-                          </div>
-                          <div className="grid grid-cols-1 gap-3 border-t pt-3 md:grid-cols-2">
-                            <div>
-                              <p className="text-xs text-muted-foreground">{t('createdAt')}</p>
-                              <p className="mt-1 text-sm">{formatDateTime(selectedTask.createdAt)}</p>
-                            </div>
-                            <div>
-                              <p className="text-xs text-muted-foreground">
-                                {t('detail.updatedAt', { defaultValue: 'Updated' })}
-                              </p>
-                              <p className="mt-1 text-sm">{formatDateTime(selectedTask.updatedAt)}</p>
+                            <div className="grid grid-cols-1 gap-3 border-t pt-3 md:grid-cols-2">
+                              <div>
+                                <p className="text-xs text-muted-foreground">{t('createdAt')}</p>
+                                <p className="mt-1 text-sm">{formatDateTime(selectedTask.createdAt)}</p>
+                              </div>
+                              <div>
+                                <p className="text-xs text-muted-foreground">
+                                  {t('detail.updatedAt', { defaultValue: 'Updated' })}
+                                </p>
+                                <p className="mt-1 text-sm">{formatDateTime(selectedTask.updatedAt)}</p>
+                              </div>
                             </div>
                           </div>
                         </div>
-                      </div>
-                    )}
-                  </CardContent>
+                      )}
+                    </CardContent>
+                  </StableScrollArea>
                 </div>
               </div>
             )}

@@ -11,12 +11,10 @@ import {
   KeyRound,
   ListTodo,
   Users,
-  ShieldCheck,
   ChevronLeft,
   ChevronRight,
   Terminal,
   ExternalLink,
-  Network,
   CreditCard,
   Info,
   LogIn,
@@ -833,10 +831,8 @@ export function Sidebar({
       ? [{ to: '/teams', icon: <Users className="h-5 w-5" />, label: t('sidebar.teams') }]
       : []),
     { to: '/providers', icon: <KeyRound className="h-5 w-5" />, label: t('settings:aiProviders.title') },
-    { to: '/remote-fleet', icon: <Network className="h-5 w-5" />, label: t('sidebar.remoteFleet') },
     { to: '/channels', icon: <Radio className="h-5 w-5" />, label: t('sidebar.channels') },
     { to: '/dashboard', icon: <Home className="h-5 w-5" />, label: t('sidebar.dashboard') },
-    { to: '/security', icon: <ShieldCheck className="h-5 w-5" />, label: t('sidebar.security') },
   ];
 
   const prefetchNavPath = useCallback((path: string) => {

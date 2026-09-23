@@ -5,6 +5,18 @@ import type { TaskSnapshotEvent } from './task-snapshot';
 
 export type SessionCatalogKind = 'main' | 'subsession' | 'session' | 'automation';
 export type SessionCatalogTitleSource = 'user' | 'assistant' | 'none';
+export type SessionModelOverrideSource = 'user' | 'auto';
+export type SessionModelIdentity = {
+  provider?: string;
+  model: string;
+  ref: string;
+};
+export type SessionModelState = {
+  selected?: SessionModelIdentity;
+  active?: SessionModelIdentity;
+  overrideSource?: SessionModelOverrideSource;
+  selectionId?: string;
+};
 
 export interface SessionWindowStateSnapshot {
   totalItemCount: number;
@@ -50,7 +62,7 @@ export interface SessionCatalogItem {
   label?: string;
   titleSource?: SessionCatalogTitleSource;
   displayName?: string;
-  model?: string;
+  modelState?: SessionModelState;
   contextTokens?: SessionContextTokenSnapshot;
   updatedAt?: number;
 }
@@ -266,7 +278,7 @@ export type SessionWireWindow = {
 export type SessionView = {
   sessionKey: string;
   endpointSessionId: string | null;
-  model: string | null;
+  modelState: SessionModelState | null;
   identity: SessionWireIdentity;
   epoch: number;
   seq: number;
@@ -311,6 +323,7 @@ export type SessionDelta = {
 export type SessionProjectionSnapshot = {
   sessionKey: string;
   endpointSessionId: string | null;
+  modelState: SessionModelState | null;
   identity: SessionWireIdentity;
   epoch: number;
   seq: number;
@@ -353,6 +366,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const keys = Object.keys(value);
   return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function hasAllowedKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[]): boolean {
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key))
+    && Object.keys(value).every((key) => allowed.has(key));
 }
 
 function isSafeInteger(value: unknown): value is number {
@@ -433,6 +452,34 @@ function decodeFact<T>(value: unknown, decode: (value: unknown) => T | null): Se
   }
   const facts = decode(value.incomplete.facts);
   return facts === null ? null : { incomplete: { facts, gaps: [...value.incomplete.gaps] } };
+}
+
+function decodeModelIdentity(value: unknown): SessionModelIdentity | null {
+  if (!isRecord(value) || !hasAllowedKeys(value, ['model', 'ref'], ['provider'])) return null;
+  if (!isNonEmptyIdentifier(value.model, MAX_SESSION_KEY_BYTES)
+    || !isNonEmptyIdentifier(value.ref, MAX_SESSION_KEY_BYTES)
+    || (value.provider !== undefined && !isNonEmptyIdentifier(value.provider))) return null;
+  return {
+    ...(value.provider === undefined ? {} : { provider: value.provider }),
+    model: value.model,
+    ref: value.ref,
+  };
+}
+
+function decodeModelState(value: unknown): SessionModelState | null {
+  if (!isRecord(value) || !hasAllowedKeys(value, [], ['selected', 'active', 'overrideSource', 'selectionId'])) return null;
+  const selected = value.selected === undefined ? undefined : decodeModelIdentity(value.selected);
+  const active = value.active === undefined ? undefined : decodeModelIdentity(value.active);
+  if ((value.selected !== undefined && !selected)
+    || (value.active !== undefined && !active)
+    || (value.overrideSource !== undefined && value.overrideSource !== 'user' && value.overrideSource !== 'auto')
+    || (value.selectionId !== undefined && !isNonEmptyIdentifier(value.selectionId))) return null;
+  return {
+    ...(selected ? { selected } : {}),
+    ...(active ? { active } : {}),
+    ...(value.overrideSource === undefined ? {} : { overrideSource: value.overrideSource }),
+    ...(value.selectionId === undefined ? {} : { selectionId: value.selectionId }),
+  };
 }
 
 function decodeIdentity(value: unknown): SessionWireIdentity | null {
@@ -785,8 +832,9 @@ function isRecoveryReason(value: unknown): value is SessionRecoveryReason {
 }
 
 function decodeView(value: unknown): SessionView | null {
-  if (!isRecord(value) || !hasExactKeys(value, ['sessionKey', 'endpointSessionId', 'model', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness'])) return null;
+  if (!isRecord(value) || !hasExactKeys(value, ['sessionKey', 'endpointSessionId', 'modelState', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness'])) return null;
   const identity = decodeIdentity(value.identity);
+  const modelState = value.modelState === null ? null : decodeModelState(value.modelState);
   const items = decodeFact(value.items, (facts) => Array.isArray(facts) && facts.length <= MAX_ITEMS && facts.every((item) => decodeItem(item) !== null) ? facts.map((item) => decodeItem(item)!) : null);
   const tools = decodeFact(value.tools, (facts) => Array.isArray(facts) && facts.length <= MAX_TOOLS && facts.every((item) => decodeTool(item) !== null) ? facts.map((item) => decodeTool(item)!) : null);
   const approvals = decodeFact(value.approvals, (facts) => Array.isArray(facts) && facts.length <= MAX_APPROVALS && facts.every((item) => decodeApproval(item) !== null) ? facts.map((item) => decodeApproval(item)!) : null);
@@ -795,13 +843,13 @@ function decodeView(value: unknown): SessionView | null {
   const completeness = decodeCompleteness(value.completeness);
   if (!identity || !isNonEmptyIdentifier(value.sessionKey, MAX_SESSION_KEY_BYTES)
     || (value.endpointSessionId !== null && !isNonEmptyIdentifier(value.endpointSessionId, MAX_SESSION_KEY_BYTES))
-    || (value.model !== null && !isNonEmptyIdentifier(value.model, MAX_SESSION_KEY_BYTES))
+    || (value.modelState !== null && !modelState)
     || identity.sessionKey !== value.sessionKey
     || !isSafeInteger(value.epoch) || value.epoch < 1 || value.epoch > MAX_SAFE_INTEGER
     || !isSafeInteger(value.seq) || value.seq < 0 || value.seq > MAX_SAFE_INTEGER
     || !isSafeInteger(value.cursor) || value.cursor < 0 || value.cursor > MAX_SAFE_INTEGER
     || !items || !tools || !approvals || !runtime || !window || !completeness) return null;
-  return { sessionKey: value.sessionKey, endpointSessionId: value.endpointSessionId, model: value.model, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
+  return { sessionKey: value.sessionKey, endpointSessionId: value.endpointSessionId, modelState, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
 }
 
 function decodeDelta(value: unknown): SessionDelta | null {

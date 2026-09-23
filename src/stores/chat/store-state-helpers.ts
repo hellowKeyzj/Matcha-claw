@@ -580,6 +580,22 @@ export function reconcileSessionItems(
   return changed ? [...reconciled, ...preservedReceipts] : currentItems;
 }
 
+export function areSessionModelStatesEquivalent(
+  left: ChatSessionMetaState['modelState'] | ChatSession['modelState'],
+  right: ChatSessionMetaState['modelState'] | ChatSession['modelState'],
+): boolean {
+  return left === right || (
+    (left?.overrideSource ?? null) === (right?.overrideSource ?? null)
+    && (left?.selectionId ?? null) === (right?.selectionId ?? null)
+    && (left?.selected?.provider ?? null) === (right?.selected?.provider ?? null)
+    && (left?.selected?.model ?? null) === (right?.selected?.model ?? null)
+    && (left?.selected?.ref ?? null) === (right?.selected?.ref ?? null)
+    && (left?.active?.provider ?? null) === (right?.active?.provider ?? null)
+    && (left?.active?.model ?? null) === (right?.active?.model ?? null)
+    && (left?.active?.ref ?? null) === (right?.active?.ref ?? null)
+  );
+}
+
 export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[]): boolean {
   if (left === right) {
     return true;
@@ -602,7 +618,7 @@ export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[])
       || (a.titleSource ?? null) !== (b.titleSource ?? null)
       || (a.displayName ?? null) !== (b.displayName ?? null)
       || (a.thinkingLevel ?? null) !== (b.thinkingLevel ?? null)
-      || (a.model ?? null) !== (b.model ?? null)
+      || !areSessionModelStatesEquivalent(a.modelState, b.modelState)
       || (a.updatedAt ?? null) !== (b.updatedAt ?? null)
     ) {
       return false;
@@ -684,7 +700,7 @@ export function createEmptySessionMeta(): ChatSessionMetaState {
     titleSource: 'none',
     manualLabel: false,
     displayName: null,
-    model: null,
+    modelState: null,
     lastActivityAt: null,
     historyStatus: 'idle',
     thinkingLevel: null,
@@ -721,7 +737,7 @@ function areSessionMetaEquivalent(left: ChatSessionMetaState, right: ChatSession
     && left.titleSource === right.titleSource
     && (left.manualLabel === true) === (right.manualLabel === true)
     && left.displayName === right.displayName
-    && left.model === right.model
+    && areSessionModelStatesEquivalent(left.modelState, right.modelState)
     && left.lastActivityAt === right.lastActivityAt
     && left.historyStatus === right.historyStatus
     && left.thinkingLevel === right.thinkingLevel;
@@ -1114,7 +1130,7 @@ export function patchSessionSnapshot(
     titleSource: nextTitleSource,
     manualLabel: hasManualLabel,
     displayName: catalog.displayName ?? current.meta.displayName,
-    model: catalog.model ?? current.meta.model ?? null,
+    modelState: catalog.modelState ?? current.meta.modelState,
     lastActivityAt: typeof catalog.updatedAt === 'number' ? toMs(catalog.updatedAt) : current.meta.lastActivityAt,
   };
   const nextImageGenerationRuntime = deriveSessionImageGenerationPendingStateFromItems(
@@ -1545,7 +1561,7 @@ function applyDecodedSessionView(
       protocolId: null,
       runtimeEndpointId: nextIdentity.endpoint.runtimeInstanceId,
       endpointSessionId: view.endpointSessionId,
-      model: view.model ?? current.meta.model,
+      modelState: view.modelState ?? current.meta.modelState,
       sessionIdentity: nextIdentity,
     } : current.meta;
     const nextItems = reconcileSessionItems(current.items, projectSessionViewItems(view));

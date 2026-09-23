@@ -26,7 +26,6 @@ use openclaw::{
         logs::LifecycleDiagnostic,
         recovery::OpenClawStartRecovery,
         restart::OpenClawRestartPolicy,
-        state_dir::CanonicalStateDir,
         stdio::OpenClawStdioActivation,
     },
     port::{
@@ -38,7 +37,7 @@ use openclaw::{
         SessionModelPatchParams, SessionsListParams,
     },
 };
-use platform::listener_identity::ListenerIdentity;
+use platform::{listener_identity::ListenerIdentity, state_dir::CanonicalStateDir};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,

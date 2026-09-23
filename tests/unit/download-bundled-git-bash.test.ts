@@ -10,6 +10,7 @@ import {
   gitForWindowsTargets,
   parseGitForWindowsDownloadArgs,
   publishPortableGitDistribution,
+  removePackagingIncompatibleLinks,
 } from '../../scripts/download-bundled-git-bash.mjs';
 
 const temporaryRoots: string[] = [];
@@ -97,6 +98,25 @@ describe('Git for Windows delivery', () => {
 
     rmSync(join(root, requiredFile));
     await expect(assertPortableGitLayout(root)).rejects.toThrow(requiredFile);
+  });
+
+  it('removes pseudo-files that make 7-Zip packaging fail', async () => {
+    const root = createTemporaryRoot();
+    const removed: string[] = [];
+
+    await removePackagingIncompatibleLinks(root, {
+      rm: async (path: string) => {
+        removed.push(path.slice(root.length + 1));
+      },
+    });
+
+    expect(removed).toEqual([
+      join('dev', 'fd'),
+      join('dev', 'stderr'),
+      join('dev', 'stdin'),
+      join('dev', 'stdout'),
+      join('etc', 'mtab'),
+    ]);
   });
 
   it('replaces the previous distribution only after the new one is ready', async () => {

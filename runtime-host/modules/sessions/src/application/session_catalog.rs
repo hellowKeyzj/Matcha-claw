@@ -28,7 +28,7 @@ pub struct SessionCatalogEntry {
     pub key: String,
     pub agent_id: String,
     pub endpoint_session_id: String,
-    pub model: Option<String>,
+    pub model_state: Option<crate::state::SessionModelState>,
     pub updated_at: Option<u64>,
     pub preferred: Option<bool>,
     pub protocol_id: Option<String>,
@@ -47,7 +47,13 @@ pub fn catalog_model_refs(catalog: &SessionCatalog) -> Vec<(usize, String)> {
         .sessions
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| entry.model.clone().map(|model| (index, model)))
+        .filter_map(|(index, entry)| {
+            entry
+                .model_state
+                .as_ref()
+                .and_then(|model_state| model_state.selected_ref())
+                .map(|model| (index, model.to_owned()))
+        })
         .collect()
 }
 
@@ -76,13 +82,14 @@ pub fn stale_catalog_agents(stale: &[(usize, String)]) -> Vec<String> {
     agents
 }
 
-/// Applies model-ref corrections, leaving every other catalog entry field untouched.
+/// Applies selected model corrections, leaving every other catalog entry field untouched.
 pub fn correct_catalog_models(
     mut catalog: SessionCatalog,
     corrections: Vec<(usize, Option<String>)>,
 ) -> SessionCatalog {
     for (index, model) in corrections {
-        catalog.sessions[index].model = model;
+        catalog.sessions[index].model_state = model
+            .and_then(|model| crate::state::SessionModelState::selected_from_ref(model).ok());
     }
     catalog
 }
@@ -162,7 +169,9 @@ mod tests {
             key: key.to_owned(),
             agent_id: agent_id.to_owned(),
             endpoint_session_id: format!("{key}:native"),
-            model: model.map(str::to_owned),
+            model_state: model
+                .map(str::to_owned)
+                .and_then(|model| crate::state::SessionModelState::selected_from_ref(model).ok()),
             updated_at: Some(7),
             preferred: None,
             protocol_id: None,
@@ -213,7 +222,10 @@ mod tests {
         assert_eq!(default_lookups.into_inner(), vec!["agent-a".to_owned()]);
         assert_eq!(reconciled.sessions[0], original.sessions[0]);
         assert_eq!(
-            reconciled.sessions[1].model.as_deref(),
+            reconciled.sessions[1]
+                .model_state
+                .as_ref()
+                .and_then(crate::state::SessionModelState::selected_ref),
             Some("openai/gpt-5")
         );
         assert_eq!(reconciled.sessions[1].key, original.sessions[1].key);
@@ -226,6 +238,6 @@ mod tests {
             original.sessions[1].updated_at
         );
         assert_eq!(reconciled.sessions[2], original.sessions[2]);
-        assert_eq!(reconciled.sessions[2].model, None);
+        assert_eq!(reconciled.sessions[2].model_state, None);
     }
 }

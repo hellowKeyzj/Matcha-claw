@@ -1,11 +1,4 @@
 {
-    "gateway": "ゲートウェイ",
-    "uptime": "稼働時間",
-    "port": "ポート: {{port}}",
-    "pid": "PID: {{pid}}",
-    "sinceRestart": "前回の再起動から",
-    "gatewayPreparing": "ゲートウェイを起動中",
-    "gatewayNotRunning": "ゲートウェイが停止中",
     "recentTokenHistory": {
         "title": "最近のトークン使用量",
         "description": "トークン使用量が記録された最近のセッションを表示します。",

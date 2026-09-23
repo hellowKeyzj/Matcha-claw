@@ -3,10 +3,6 @@ mod instance;
 mod lifecycle;
 pub mod runtime_control_route;
 mod runtime_driver;
-mod session_adapter;
-mod session_ops;
-mod session_timeline;
-mod team_ops;
 
 use platform::exchange::InvocationOutcome;
 use runtime_directory::{

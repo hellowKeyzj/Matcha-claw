@@ -190,7 +190,7 @@ export async function listSessions(
     ...(session.label ? { label: session.label } : {}),
     ...(session.titleSource ? { titleSource: session.titleSource } : {}),
     ...(session.displayName ? { displayName: session.displayName } : {}),
-    ...(session.model ? { model: session.model } : {}),
+    ...(session.modelState ? { modelState: session.modelState } : {}),
     ...(session.contextTokens ? { contextTokens: session.contextTokens } : {}),
     ...(typeof session.updatedAt === 'number' ? { updatedAt: session.updatedAt } : {}),
   }));

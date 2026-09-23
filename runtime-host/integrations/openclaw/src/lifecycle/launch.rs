@@ -15,9 +15,12 @@ use zeroize::Zeroizing;
 
 use crate::gateway::auth::GatewaySecret;
 
-use super::{channel_bootstrap, state_dir::CanonicalStateDir};
+use platform::state_dir::CanonicalStateDir;
+
+use super::channel_bootstrap;
 
 mod attempt;
+mod stale_gateway_lock;
 
 use attempt::PreparedAttempt;
 
@@ -25,7 +28,6 @@ const ELECTRON_RUN_AS_NODE: &str = "ELECTRON_RUN_AS_NODE";
 const PATH_ENV: &str = "PATH";
 #[cfg(windows)]
 const SYSTEM_ROOT: &str = "SystemRoot";
-#[cfg(windows)]
 const OPENCLAW_GATEWAY_PORT: &str = "OPENCLAW_GATEWAY_PORT";
 const OPENCLAW_GATEWAY_TOKEN: &str = "OPENCLAW_GATEWAY_TOKEN";
 const OPENCLAW_EXEC_SHELL_SNAPSHOT: &str = "OPENCLAW_EXEC_SHELL_SNAPSHOT";
@@ -111,7 +113,7 @@ impl OpenClawLaunchInput {
         };
         factory.validate_spec()?;
         #[cfg(windows)]
-        crate::projection::config_store::OpenClawConfigStore::new(factory.state_dir.clone())
+        crate::native_config::config_store::OpenClawConfigStore::new(factory.state_dir.clone())
             .ensure_canonical_document()
             .map_err(|_| LaunchError::InvalidInput)?;
         Ok(factory)
@@ -147,6 +149,8 @@ pub struct LaunchFactory {
 
 impl LaunchFactory {
     fn prepare_attempt(&mut self) -> Result<PreparedAttempt, LaunchFailure> {
+        stale_gateway_lock::remove_stale_gateway_lock_artifacts(&self.state_dir)
+            .map_err(|_| LaunchFailure::ResourceUnavailable)?;
         let skip_channels = channel_bootstrap::skip_channels(&self.state_dir)
             .map_err(|_| LaunchFailure::ResourceUnavailable)?;
         #[cfg(unix)]

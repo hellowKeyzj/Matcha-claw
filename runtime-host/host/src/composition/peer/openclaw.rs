@@ -1,27 +1,37 @@
-use foundation::process::supervision::StartOutcome;
-
 use crate::{RuntimeState, composition::runtime_ports::LifecycleOps};
 
-use super::{RestartOpenClawError, StartOpenClawError, StopOpenClawError, actor::PeerShared};
+use super::{
+    AutostartOpenClawError, RuntimeRestartCommandError, RuntimeStartCommandError,
+    RuntimeStopCommandError, actor::PeerShared,
+};
 
-pub(super) async fn autostart(shared: &PeerShared, lifecycle: &dyn LifecycleOps) {
+pub(super) async fn autostart(
+    shared: &PeerShared,
+    lifecycle: &dyn LifecycleOps,
+) -> Result<RuntimeState, AutostartOpenClawError> {
     apply_prelaunch_projections(shared).await;
     let result = lifecycle.start().await;
-    let start_succeeded = matches!(&result, Ok(StartOutcome::Started));
-    shared.record_open_claw_start(result);
-    if start_succeeded {
-        apply_ready_projections(shared).await;
-        shared.team_run().recover_materialization_receipts().await;
+    shared.record_open_claw_start(result.clone());
+    match super::status::runtime_start_result(result) {
+        Ok(()) => {
+            apply_ready_projections(shared).await;
+            shared.team_run().recover_materialization_receipts().await;
+            shared.notify_open_claw_runtime();
+            Ok(super::status::open_claw_state(shared))
+        }
+        Err(_) => {
+            shared.notify_open_claw_runtime();
+            Err(AutostartOpenClawError::RuntimeStart)
+        }
     }
-    shared.notify_open_claw_runtime();
 }
 
 pub(super) async fn start(
     shared: &PeerShared,
     lifecycle: &dyn LifecycleOps,
-) -> Result<RuntimeState, StartOpenClawError> {
+) -> Result<RuntimeState, RuntimeStartCommandError> {
     if shared.admission().admit_request().is_err() {
-        return Err(StartOpenClawError::AdmissionClosed);
+        return Err(RuntimeStartCommandError::AdmissionClosed);
     }
     apply_prelaunch_projections(shared).await;
     let result = lifecycle.start().await;
@@ -35,7 +45,7 @@ pub(super) async fn start(
         }
         Err(_) => {
             shared.notify_open_claw_runtime();
-            Err(StartOpenClawError::RuntimeStart)
+            Err(RuntimeStartCommandError::RuntimeStart)
         }
     }
 }
@@ -43,23 +53,23 @@ pub(super) async fn start(
 pub(super) async fn stop(
     shared: &PeerShared,
     lifecycle: &dyn LifecycleOps,
-) -> Result<RuntimeState, StopOpenClawError> {
+) -> Result<RuntimeState, RuntimeStopCommandError> {
     if shared.admission().admit_request().is_err() {
-        return Err(StopOpenClawError::AdmissionClosed);
+        return Err(RuntimeStopCommandError::AdmissionClosed);
     }
     let result = lifecycle.stop().await;
     shared.notify_open_claw_runtime();
     super::status::runtime_stop_result(result)
         .map(|()| super::status::open_claw_state(shared))
-        .map_err(|_| StopOpenClawError::RuntimeStop)
+        .map_err(|_| RuntimeStopCommandError::RuntimeStop)
 }
 
 pub(super) async fn restart(
     shared: &PeerShared,
     lifecycle: &dyn LifecycleOps,
-) -> Result<RuntimeState, RestartOpenClawError> {
+) -> Result<RuntimeState, RuntimeRestartCommandError> {
     if shared.admission().admit_request().is_err() {
-        return Err(RestartOpenClawError::AdmissionClosed);
+        return Err(RuntimeRestartCommandError::AdmissionClosed);
     }
     apply_prelaunch_projections(shared).await;
     let result = lifecycle.restart().await;
@@ -72,7 +82,7 @@ pub(super) async fn restart(
         }
         Err(_) => {
             shared.notify_open_claw_runtime();
-            Err(RestartOpenClawError::RuntimeRestart)
+            Err(RuntimeRestartCommandError::RuntimeRestart)
         }
     }
 }

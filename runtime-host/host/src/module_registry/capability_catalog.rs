@@ -16,14 +16,7 @@ use platform::{
 use runtime_directory::{RuntimeCapabilitySurface, RuntimeDriverIdentity};
 use serde_json::{Map, Value, json};
 
-use crate::control::{CommandInput, CommandOutcome, CommandResult, RejectionCode};
-
 use super::CapabilityVerifier;
-
-const INVALID_INPUT_MESSAGE: &str = "Runtime Host command input is invalid.";
-const UNKNOWN_CAPABILITY_MESSAGE: &str = "Capability descriptor is not available.";
-const INVALID_SCOPE_MESSAGE: &str = "Capability scope is invalid.";
-const SCOPE_NOT_AVAILABLE_MESSAGE: &str = "Capability scope is not available.";
 const MODULE_ID: PlatformModuleId = PlatformModuleId::new("capability-catalog");
 const PROVIDES: &[CapabilityKey] = &[CapabilityKey::new("capability.catalog")];
 const REQUIRES: &[CapabilityKey] = &[];
@@ -70,23 +63,6 @@ impl CapabilityCatalog {
         );
     }
 
-    pub(crate) fn list(&self) -> CommandOutcome {
-        CommandOutcome::succeeded(CommandResult::public(self.list_projection()))
-    }
-
-    pub(crate) fn describe(&self, input: CommandInput) -> CommandOutcome {
-        match self.describe_projection(input.into_value()) {
-            DescribeProjection::Available(capability) => {
-                CommandOutcome::succeeded(CommandResult::public(json!({
-                    "capability": capability
-                })))
-            }
-            DescribeProjection::InvalidInput(message) => {
-                CommandOutcome::rejected(RejectionCode::InvalidInput, message)
-            }
-        }
-    }
-
     fn list_projection(&self) -> Value {
         json!({ "capabilities": self.installed_catalog().installed_capabilities() })
     }
@@ -94,14 +70,14 @@ impl CapabilityCatalog {
     fn describe_projection(&self, input: Value) -> DescribeProjection {
         let request: DescribeRequest = match serde_json::from_value::<DescribeRequest>(input) {
             Ok(request) if !is_identity_value(&Value::String(request.id.clone())) => {
-                return DescribeProjection::InvalidInput(INVALID_INPUT_MESSAGE);
+                return DescribeProjection::InvalidInput;
             }
             Ok(request) => request,
-            Err(_) => return DescribeProjection::InvalidInput(INVALID_INPUT_MESSAGE),
+            Err(_) => return DescribeProjection::InvalidInput,
         };
 
         if !is_runtime_scope(&request.scope) {
-            return DescribeProjection::InvalidInput(INVALID_SCOPE_MESSAGE);
+            return DescribeProjection::InvalidInput;
         }
 
         match self
@@ -114,12 +90,8 @@ impl CapabilityCatalog {
                 DescribeProjection::Available(descriptor)
             }
             CapabilityDescribeOutcome::Available(_)
-            | CapabilityDescribeOutcome::ScopeNotAvailable => {
-                DescribeProjection::InvalidInput(SCOPE_NOT_AVAILABLE_MESSAGE)
-            }
-            CapabilityDescribeOutcome::UnknownCapability => {
-                DescribeProjection::InvalidInput(UNKNOWN_CAPABILITY_MESSAGE)
-            }
+            | CapabilityDescribeOutcome::ScopeNotAvailable
+            | CapabilityDescribeOutcome::UnknownCapability => DescribeProjection::InvalidInput,
         }
     }
 
@@ -224,7 +196,7 @@ async fn handle_describe(
         DescribeProjection::Available(capability) => {
             Response::json(200, json!({ "capability": capability }))
         }
-        DescribeProjection::InvalidInput(_) => Response::json(404, capability_not_available()),
+        DescribeProjection::InvalidInput => Response::json(404, capability_not_available()),
     }
 }
 
@@ -285,7 +257,7 @@ struct DescribeRequest {
 
 enum DescribeProjection {
     Available(Value),
-    InvalidInput(&'static str),
+    InvalidInput,
 }
 
 fn capability_supported_for_scope(id: &str, scope: &Value) -> bool {

@@ -224,7 +224,7 @@ export function sessionView(
   return {
     sessionKey,
     endpointSessionId: options.endpointSessionId ?? null,
-    model: null,
+    modelState: null,
     identity: wireIdentity(options.identity ?? sessionFixtureIdentity(sessionKey)),
     epoch: options.epoch ?? 1,
     seq: options.seq ?? 0,

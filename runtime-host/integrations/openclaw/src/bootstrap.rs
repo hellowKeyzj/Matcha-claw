@@ -1,17 +1,14 @@
+use platform::state_dir::CanonicalStateDir;
 use std::collections::BTreeSet;
 
 use ::provider::{ProviderAccount, ProviderAccountId, ProviderModelCatalog, ProviderRouting};
 
-use crate::{
-    lifecycle::state_dir::CanonicalStateDir,
-    projection::{
-        provider_models::{
-            ProviderModelProjection, ProviderModelProjectionEffect, ProviderModelProjectionError,
-        },
-        routing::{
-            ProviderRoutingProjection, ProviderRoutingProjectionEffect,
-            ProviderRoutingProjectionError,
-        },
+use crate::native_config::{
+    provider_models::{
+        ProviderModelProjection, ProviderModelProjectionEffect, ProviderModelProjectionError,
+    },
+    routing::{
+        ProviderRoutingProjection, ProviderRoutingProjectionEffect, ProviderRoutingProjectionError,
     },
 };
 

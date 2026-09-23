@@ -38,6 +38,19 @@ type Endpoint = Readonly<{
   runtimeInstanceId: 'local';
 }>;
 
+type SessionModelIdentity = Readonly<{
+  provider?: string;
+  model: string;
+  ref: string;
+}>;
+
+type SessionModelState = Readonly<{
+  selected?: SessionModelIdentity;
+  active?: SessionModelIdentity;
+  overrideSource?: 'user' | 'auto';
+  selectionId?: string;
+}>;
+
 export type SessionModelSelectionRequest = Readonly<{
   id: 'session.modelSelection';
   operationId: 'sessions.patchModel';
@@ -55,9 +68,9 @@ export type SessionModelSelectionRequest = Readonly<{
   }>;
 }>;
 
-export type SessionModelSelectionResponse = Readonly<{
-  outcome: 'succeeded' | 'target_rejected' | 'outcome_unknown';
-}>;
+export type SessionModelSelectionResponse =
+  | Readonly<{ outcome: 'succeeded'; modelState: SessionModelState }>
+  | Readonly<{ outcome: 'target_rejected' | 'outcome_unknown' }>;
 
 export type SessionModelSelectionTransportResponse = Readonly<{
   status: 200 | 400 | 422 | 503;
@@ -153,11 +166,30 @@ export function createSessionModelSelectionTransport(
 }
 
 function isSessionModelSelectionResponse(value: unknown): value is SessionModelSelectionResponse {
+  if (!isRecord(value) || typeof value.outcome !== 'string') return false;
+  if (value.outcome === 'succeeded') {
+    return hasExactKeys(value, ['outcome', 'modelState']) && isSessionModelState(value.modelState);
+  }
+  return hasExactKeys(value, ['outcome'])
+    && (value.outcome === 'target_rejected' || value.outcome === 'outcome_unknown');
+}
+
+function isSessionModelIdentity(value: unknown): value is SessionModelIdentity {
   return isRecord(value)
-    && hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'succeeded'
-      || value.outcome === 'target_rejected'
-      || value.outcome === 'outcome_unknown');
+    && requiredKeys(value, ['model', 'ref'])
+    && allowedKeys(value, ['provider', 'model', 'ref'])
+    && typeof value.model === 'string'
+    && typeof value.ref === 'string'
+    && (value.provider === undefined || typeof value.provider === 'string');
+}
+
+function isSessionModelState(value: unknown): value is SessionModelState {
+  return isRecord(value)
+    && allowedKeys(value, ['selected', 'active', 'overrideSource', 'selectionId'])
+    && (value.selected === undefined || isSessionModelIdentity(value.selected))
+    && (value.active === undefined || isSessionModelIdentity(value.active))
+    && (value.overrideSource === undefined || value.overrideSource === 'user' || value.overrideSource === 'auto')
+    && (value.selectionId === undefined || typeof value.selectionId === 'string');
 }
 
 function summarizeRequestShape(value: unknown) {
@@ -239,4 +271,12 @@ function hasAllowedKeys(
   const allowed = new Set([...required, ...optional]);
   return required.every((key) => Object.hasOwn(value, key))
     && Object.keys(value).every((key) => allowed.has(key));
+}
+
+function requiredKeys(value: Record<string, unknown>, required: readonly string[]): boolean {
+  return required.every((key) => Object.hasOwn(value, key));
+}
+
+function allowedKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
 }

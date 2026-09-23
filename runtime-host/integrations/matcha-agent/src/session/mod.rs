@@ -1,3 +1,4 @@
+pub(crate) mod adapters;
 pub mod approval;
 pub mod canonical;
 pub mod catalog;

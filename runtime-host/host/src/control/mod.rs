@@ -6,6 +6,6 @@ pub(crate) mod wire;
 pub use r#loop::ControlError;
 pub(crate) use r#loop::run_loop;
 pub(crate) use wire::{
-    CommandInput, CommandOutcome, CommandResult, CronExecutionId, RejectionCode,
-    SafeCronExecutionStatus, SafeEvent, SafeRuntimeLifecycle,
+    CommandInput, CommandOutcome, CronExecutionId, RejectionCode, SafeCronExecutionStatus,
+    SafeEvent, SafeRuntimeLifecycle,
 };

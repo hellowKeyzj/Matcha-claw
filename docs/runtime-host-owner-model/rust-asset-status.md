@@ -12,9 +12,9 @@
 | Matcha protocol client | `integrations/matcha-agent/src/session/client/*` | session/load/transcript/snapshot/replay/subscribe client | CANDIDATE |
 | Matcha hydration | `integrations/matcha-agent/src/session/hydration/*` | strict decode、bounded projection、unknown/incomplete | CANDIDATE |
 | Event cursor/projector | `integrations/matcha-agent/src/session/events.rs` | session/run binding、gap/duplicate/stale rejection | CANDIDATE |
-| OpenClaw connector projection | `integrations/openclaw/src/projection/connector/*` | desired/applied projection、readback、safe outcome mapping | CANDIDATE |
+| OpenClaw connector projection | `integrations/openclaw/src/native_config/connector/*` | desired/applied projection、readback、safe outcome mapping | CANDIDATE |
 | Revisioned connector store | `modules/connectors/src/adapters/store.rs` | lock、atomic write、revision、recovery outcome | CANDIDATE |
-| Typed cron provider | `integrations/openclaw/src/cron/provider.rs` | native cron command mapping and typed unknown outcome | CANDIDATE |
+| Typed cron provider | `integrations/openclaw/src/surfaces/cron/provider.rs` | native cron command mapping and typed unknown outcome | CANDIDATE |
 | Diagnostics archive | `runtime-host/modules/diagnostics/src/archive.rs`, `runtime-host/modules/diagnostics/src/archive/*` | bounded/redacted/atomic archive and opaque receipt | CANDIDATE |
 | Signed authorization verifier | owner module loopback adapters using `CapabilityDecisionVerifier` | signed decision exact binding、expiry、replay protection | CANDIDATE |
 

@@ -12,7 +12,6 @@ use tokio_util::sync::CancellationToken;
 use super::{
     RouteOutcome, Router,
     request::{finish_request, read_head},
-    response::write_response,
 };
 
 const HOST_HTTP_EXTENSION_SCOPE_ID: &str = "host.http";
@@ -31,14 +30,14 @@ impl Server {
         })
     }
 
-    pub(crate) fn into_scoped_extension(self) -> ScopedServer {
+    pub(crate) fn into_scoped_extension(self) -> ModuleScope {
         let mut scope = ModuleScope::new(HOST_HTTP_EXTENSION_SCOPE_ID);
         let (task, handle) = OwnedTask::spawn(|cancellation| self.run(cancellation));
         scope.register_owned_task(task);
         scope.register_listener(HTTP_LISTENER_EFFECT_ID, move || async move {
             handle.cancel();
         });
-        ScopedServer { scope }
+        scope
     }
 
     async fn run(self, cancellation: CancellationToken) -> io::Result<()> {
@@ -71,24 +70,14 @@ impl Server {
     }
 }
 
-pub(crate) struct ScopedServer {
-    scope: ModuleScope,
-}
-
-impl ScopedServer {
-    pub(crate) async fn dispose_all_lifo(&mut self) {
-        self.scope.dispose_all_lifo().await;
-    }
-}
-
 async fn serve(mut stream: TcpStream, router: Arc<Router>) -> io::Result<()> {
     let parts = match read_head(&mut stream).await? {
         Ok(parts) => parts,
-        Err(response) => return write_response(RouteOutcome::Response(response), stream).await,
+        Err(response) => return RouteOutcome::Response(response).write(stream).await,
     };
-    let deadline = router.deadline(&parts.head);
-    let policy = router.body_policy(&parts.head);
-    let timeout_response = router.timeout_response(Some(&parts.head));
+    let deadline = router.deadline(&parts.head).await;
+    let policy = router.body_policy(&parts.head).await;
+    let timeout_response = router.timeout_response(Some(&parts.head)).await;
     let outcome = match deadline {
         RouteDeadline::Request(deadline) => {
             match timeout(deadline, async {
@@ -113,5 +102,5 @@ async fn serve(mut stream: TcpStream, router: Arc<Router>) -> io::Result<()> {
             }
         }
     };
-    write_response(outcome, stream).await
+    outcome.write(stream).await
 }

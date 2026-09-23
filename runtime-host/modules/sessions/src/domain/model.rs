@@ -64,6 +64,73 @@ impl SessionProvider {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionModelOverrideSource {
+    User,
+    Auto,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionModelIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    pub model: String,
+    #[serde(rename = "ref")]
+    pub model_ref: String,
+}
+
+impl SessionModelIdentity {
+    pub fn try_new(
+        provider: Option<String>,
+        model: impl Into<String>,
+        model_ref: impl Into<String>,
+    ) -> Result<Self, SessionStateError> {
+        let identity = Self {
+            provider,
+            model: model.into(),
+            model_ref: model_ref.into(),
+        };
+        valid_session_model_identity(&identity)
+            .then_some(identity)
+            .ok_or(SessionStateError::InvalidFacts)
+    }
+
+    pub fn from_ref(model_ref: impl Into<String>) -> Result<Self, SessionStateError> {
+        let model_ref = model_ref.into();
+        Self::try_new(None, model_ref.clone(), model_ref)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionModelState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<SessionModelIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<SessionModelIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_source: Option<SessionModelOverrideSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection_id: Option<String>,
+}
+
+impl SessionModelState {
+    pub fn selected_ref(&self) -> Option<&str> {
+        self.selected.as_ref().map(|model| model.model_ref.as_str())
+    }
+
+    pub fn selected_from_ref(model_ref: impl Into<String>) -> Result<Self, SessionStateError> {
+        Ok(Self {
+            selected: Some(SessionModelIdentity::from_ref(model_ref)?),
+            active: None,
+            override_source: None,
+            selection_id: None,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionEndpoint {
@@ -510,7 +577,7 @@ impl SessionFacts {
 pub struct SessionView {
     pub session_key: String,
     pub endpoint_session_id: Option<String>,
-    pub model: Option<String>,
+    pub model_state: Option<SessionModelState>,
     pub identity: SessionIdentity,
     pub epoch: u64,
     pub seq: u64,
@@ -533,7 +600,7 @@ impl Serialize for SessionView {
         struct Wire<'a> {
             session_key: &'a str,
             endpoint_session_id: Option<&'a str>,
-            model: Option<&'a str>,
+            model_state: Option<&'a SessionModelState>,
             identity: &'a SessionIdentity,
             epoch: u64,
             seq: u64,
@@ -549,7 +616,7 @@ impl Serialize for SessionView {
         Wire {
             session_key: &self.session_key,
             endpoint_session_id: self.endpoint_session_id.as_deref(),
-            model: self.model.as_deref(),
+            model_state: self.model_state.as_ref(),
             identity: &self.identity,
             epoch: self.epoch,
             seq: self.seq,
@@ -575,7 +642,7 @@ impl<'de> Deserialize<'de> for SessionView {
         struct Wire {
             session_key: String,
             endpoint_session_id: Option<String>,
-            model: Option<String>,
+            model_state: Option<SessionModelState>,
             identity: SessionIdentity,
             epoch: u64,
             seq: u64,
@@ -592,7 +659,7 @@ impl<'de> Deserialize<'de> for SessionView {
         let view = Self {
             session_key: wire.session_key,
             endpoint_session_id: wire.endpoint_session_id,
-            model: wire.model,
+            model_state: wire.model_state,
             identity: wire.identity,
             epoch: wire.epoch,
             seq: wire.seq,
@@ -632,6 +699,10 @@ impl SessionView {
                 .endpoint_session_id
                 .as_deref()
                 .is_some_and(|value| !valid_id_with_limit(value, MAX_SESSION_KEY_BYTES))
+            || self
+                .model_state
+                .as_ref()
+                .is_some_and(|model_state| !valid_session_model_state(model_state))
             || !valid_identity(&self.identity)
             || !valid_epoch(self.epoch)
             || self.seq > MAX_SAFE_INTEGER
@@ -1288,7 +1359,7 @@ impl SessionState {
         SessionView {
             session_key: self.identity.session_key.clone(),
             endpoint_session_id: self.endpoint_session_id.clone(),
-            model: None,
+            model_state: None,
             identity: self.identity.clone(),
             epoch: self.epoch,
             seq: self.seq,
@@ -2695,6 +2766,30 @@ fn valid_identity(identity: &SessionIdentity) -> bool {
         && identity.agent_id.as_deref().is_none_or(valid_id)
 }
 
+fn valid_session_model_state(model_state: &SessionModelState) -> bool {
+    model_state
+        .selected
+        .as_ref()
+        .is_none_or(valid_session_model_identity)
+        && model_state
+            .active
+            .as_ref()
+            .is_none_or(valid_session_model_identity)
+        && model_state
+            .selection_id
+            .as_deref()
+            .is_none_or(|selection_id| valid_id_with_limit(selection_id, MAX_SESSION_KEY_BYTES))
+}
+
+fn valid_session_model_identity(identity: &SessionModelIdentity) -> bool {
+    identity
+        .provider
+        .as_deref()
+        .is_none_or(|provider| valid_id_with_limit(provider, MAX_SESSION_KEY_BYTES))
+        && valid_id_with_limit(&identity.model, MAX_SESSION_KEY_BYTES)
+        && valid_id_with_limit(&identity.model_ref, MAX_SESSION_KEY_BYTES)
+}
+
 fn valid_endpoint(endpoint: &SessionEndpoint) -> bool {
     valid_id(&endpoint.kind) && valid_id(&endpoint.runtime_instance_id)
 }
@@ -3196,7 +3291,7 @@ mod tests {
         let view = SessionView {
             session_key: "session-1".to_owned(),
             endpoint_session_id: Some("endpoint-session-1".to_owned()),
-            model: None,
+            model_state: None,
             identity: identity(),
             epoch: 1,
             seq: 1,

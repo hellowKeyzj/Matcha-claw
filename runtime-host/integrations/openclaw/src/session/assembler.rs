@@ -9,7 +9,7 @@ use super::{
     },
     protocol::{MessageId, SessionKey},
 };
-use crate::session_window::{Message, MessageContent, MessageRole, OmittedContentKind};
+use crate::session::window::{Message, MessageContent, MessageRole, OmittedContentKind};
 use std::fmt;
 
 /// Canonical role mapping for a native history message.
@@ -764,6 +764,10 @@ mod tests {
             status: Some("idle".into()),
             has_active_run: Some(true),
             model: Some("provider/model".into()),
+            model_provider: None,
+            active_model: None,
+            active_model_provider: None,
+            model_override_source: None,
             permission_mode: None,
             permission_mode_pending: None,
         }

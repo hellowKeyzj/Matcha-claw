@@ -1,3 +1,4 @@
+use platform::state_dir::CanonicalStateDir;
 use std::{
     collections::HashSet,
     fmt,
@@ -25,7 +26,6 @@ use tokio_tungstenite::{
 
 use crate::{
     gateway::device_identity::{DeviceConnectPayloadContext, load_or_create_device_identity},
-    lifecycle::state_dir::CanonicalStateDir,
     session::{ingest::SessionEventIngest, protocol::SessionKey},
 };
 

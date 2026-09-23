@@ -3,10 +3,8 @@ mod composition;
 mod control;
 mod host_actor;
 mod http;
-mod mcp;
 mod module_registry;
 mod parent_callback;
-mod public_string;
 
 pub use ::diagnostics::{
     HostLifecycle, HostState, RuntimeFailure, RuntimeLifecycle, RuntimeObservationConfig,
@@ -22,7 +20,6 @@ pub use composition::{
     ShutdownFailures, ShutdownReport,
 };
 pub use control::ControlError;
-pub use mcp::{MatchaMcpConstructionError, run_matcha_mcp};
 pub use organization::{
     TeamDecisionCompositionError, TeamDecisionFacade, TeamDecisionReceiptProjection,
     TeamDecisionRequest, TeamGraphContextOutcome, TeamGraphContextRequest,

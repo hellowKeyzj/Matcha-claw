@@ -290,6 +290,91 @@ fn each_attempt_rereads_the_canonical_channel_configuration() {
 }
 
 #[test]
+fn prepare_attempt_removes_dead_owner_gateway_locks() {
+    let root = TestRoot::new();
+    fs::write(
+        root.path().join(CANONICAL_CONFIG_FILE),
+        br#"{"channels":{"feishu":{"appId":"app-id"}}}"#,
+    )
+    .unwrap();
+    let lock_dir = root.path().join("tmp").join("openclaw");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let lock = lock_dir.join("gateway.d904640d.lock");
+    let coordinator = lock_dir.join("gateway.d904640d.lock.sqlite");
+    let reclaim = lock_dir.join("gateway.d904640d.lock.reclaim");
+    fs::write(&lock, br#"{"pid":999999999}"#).unwrap();
+    fs::write(&coordinator, b"stale coordinator").unwrap();
+    fs::write(&reclaim, b"1").unwrap();
+    let mut launch = input(&root).try_into_launch_factory().unwrap();
+
+    launch.prepare_attempt().unwrap();
+
+    assert!(!lock.exists());
+    assert!(coordinator.exists());
+    assert!(!reclaim.exists());
+}
+
+#[test]
+fn prepare_attempt_removes_orphan_gateway_reclaim_guards() {
+    let root = TestRoot::new();
+    fs::write(
+        root.path().join(CANONICAL_CONFIG_FILE),
+        br#"{"channels":{"feishu":{"appId":"app-id"}}}"#,
+    )
+    .unwrap();
+    let lock_dir = root.path().join("tmp").join("openclaw");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let coordinator = lock_dir.join("gateway.state.lock.sqlite");
+    let reclaim = lock_dir.join("gateway.state.lock.reclaim");
+    fs::write(&coordinator, b"sqlite coordinator is not a file-lock guard").unwrap();
+    fs::create_dir(&reclaim).unwrap();
+    let mut launch = input(&root).try_into_launch_factory().unwrap();
+
+    launch.prepare_attempt().unwrap();
+
+    assert!(coordinator.exists());
+    assert!(!reclaim.exists());
+}
+
+#[test]
+fn prepare_attempt_preserves_live_gateway_locks() {
+    let root = TestRoot::new();
+    fs::write(
+        root.path().join(CANONICAL_CONFIG_FILE),
+        br#"{"channels":{"feishu":{"appId":"app-id"}}}"#,
+    )
+    .unwrap();
+    let lock_dir = root.path().join("tmp").join("openclaw");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let lock = lock_dir.join("gateway.d904640d.lock");
+    fs::write(&lock, format!(r#"{{"pid":{}}}"#, std::process::id())).unwrap();
+    let mut launch = input(&root).try_into_launch_factory().unwrap();
+
+    launch.prepare_attempt().unwrap();
+
+    assert!(lock.exists());
+}
+
+#[test]
+fn prepare_attempt_preserves_non_gateway_dead_owner_locks() {
+    let root = TestRoot::new();
+    fs::write(
+        root.path().join(CANONICAL_CONFIG_FILE),
+        br#"{"channels":{"feishu":{"appId":"app-id"}}}"#,
+    )
+    .unwrap();
+    let lock_dir = root.path().join("tmp").join("openclaw");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let lock = lock_dir.join("gateway.state.lock");
+    fs::write(&lock, br#"{"pid":999999999,"role":"skill-workshop-apply"}"#).unwrap();
+    let mut launch = input(&root).try_into_launch_factory().unwrap();
+
+    launch.prepare_attempt().unwrap();
+
+    assert!(lock.exists());
+}
+
+#[test]
 fn malformed_canonical_config_fails_closed_without_materializing_an_attempt() {
     for contents in [b"not-json".as_slice(), br#"[]"#] {
         let root = TestRoot::new();

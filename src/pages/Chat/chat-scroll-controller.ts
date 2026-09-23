@@ -1,4 +1,5 @@
 import type { MouseEventHandler, RefObject, TouchEventHandler, WheelEventHandler } from 'react';
+import { handleStableWheel } from '@/components/scroll/stable-scroll-core';
 import {
   INITIAL_SCOPE_STATE,
   bottomScrollTop,
@@ -83,6 +84,52 @@ const DISABLED_CONTROLLER_CONFIG: ChatScrollControllerConfig = {
   setChromePhase: () => {},
   viewportRef: DISABLED_VIEWPORT_REF,
 };
+
+const NESTED_WHEEL_TARGET_SELECTOR = [
+  'textarea',
+  '[data-radix-scroll-area-viewport]',
+  '[data-tool-output-scroll="true"]',
+  '[data-chat-composer-wheel-local="true"]',
+  'pre',
+  'code',
+  '[role="listbox"]',
+  '[role="menu"]',
+  '[role="dialog"]',
+].join(',');
+
+function canElementScrollWheelDelta(element: HTMLElement, deltaY: number): boolean {
+  if (deltaY > 0) {
+    return element.scrollTop + element.clientHeight < element.scrollHeight - 1;
+  }
+  if (deltaY < 0) {
+    return element.scrollTop > 1;
+  }
+  return false;
+}
+
+function shouldLetNestedScrollableConsumeWheel(event: WheelEvent, viewport: HTMLElement): boolean {
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (!target || target === viewport || !viewport.contains(target)) {
+    return false;
+  }
+  for (let element: HTMLElement | null = target; element && element !== viewport; element = element.parentElement) {
+    if (element.matches(NESTED_WHEEL_TARGET_SELECTOR) && canElementScrollWheelDelta(element, event.deltaY)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function handleStableWheelDelta(deltaY: number, viewport: HTMLElement): boolean {
+  return handleStableWheel({
+    ctrlKey: false,
+    defaultPrevented: false,
+    deltaMode: 0,
+    deltaY,
+    preventDefault: () => {},
+    target: viewport.firstElementChild ?? viewport,
+  } as unknown as WheelEvent, viewport);
+}
 
 function ensureScopeState(
   scopeKey: string,
@@ -274,10 +321,16 @@ export function createChatScrollController(): ChatScrollController {
   };
 
   const handleViewportWheel: WheelEventHandler<HTMLDivElement> = (event) => {
-    handleWheelDelta(event?.deltaY ?? 0);
+    const config = getConfig();
+    const viewport = config.viewportRef.current;
+    if (!config.enabled || !viewport || shouldLetNestedScrollableConsumeWheel(event.nativeEvent, viewport)) {
+      return;
+    }
+    noteWheelIntent(event.nativeEvent.deltaY);
+    handleStableWheel(event.nativeEvent, viewport);
   };
 
-  function handleWheelDelta(deltaY: number) {
+  function noteWheelIntent(deltaY: number) {
     const config = getConfig();
     if (!config.enabled || !Number.isFinite(deltaY) || deltaY === 0) {
       return;
@@ -294,9 +347,11 @@ export function createChatScrollController(): ChatScrollController {
     if (!config.enabled || !viewport || !Number.isFinite(deltaY) || deltaY === 0) {
       return;
     }
-    handleWheelDelta(deltaY);
-    viewport.scrollTop += deltaY;
-    handleViewportScroll();
+    noteWheelIntent(deltaY);
+    if (!handleStableWheelDelta(deltaY, viewport)) {
+      viewport.scrollTop += deltaY;
+      handleViewportScroll();
+    }
   };
 
   const prepareElementAnchorRestore = (anchorElement: HTMLElement) => {

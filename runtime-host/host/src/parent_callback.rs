@@ -355,24 +355,18 @@ impl fmt::Display for ParentSessionUpdateAvailability {
     }
 }
 
-pub struct ParentCallbackClient {
-    inner: Arc<ParentCallbackClientInner>,
-}
+pub type ParentCallbackClient = ParentCallbackHandle;
 
 #[derive(Clone)]
 pub struct ParentCallbackHandle {
-    inner: Arc<ParentCallbackClientInner>,
-}
-
-struct ParentCallbackClientInner {
     http_client: Client,
-    parent_api_base_url: Url,
-    dispatch_token: String,
+    parent_api_base_url: Arc<Url>,
+    dispatch_token: Arc<str>,
     shell_action_timeout: Duration,
     notification_timeout: Duration,
 }
 
-impl ParentCallbackClient {
+impl ParentCallbackHandle {
     pub fn new(
         parent_api_base_url: impl AsRef<str>,
         dispatch_token: impl AsRef<str>,
@@ -416,47 +410,12 @@ impl ParentCallbackClient {
         notification_timeout: Duration,
     ) -> Self {
         Self {
-            inner: Arc::new(ParentCallbackClientInner {
-                http_client,
-                parent_api_base_url,
-                dispatch_token,
-                shell_action_timeout,
-                notification_timeout,
-            }),
+            http_client,
+            parent_api_base_url: Arc::new(parent_api_base_url),
+            dispatch_token: Arc::from(dispatch_token),
+            shell_action_timeout,
+            notification_timeout,
         }
-    }
-
-    pub fn handle(&self) -> ParentCallbackHandle {
-        ParentCallbackHandle {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-
-    pub async fn request_parent_shell_action(
-        &self,
-        action: ParentShellAction,
-        payload: Option<Value>,
-    ) -> Result<ParentShellActionResponse, ParentCallbackError> {
-        self.inner
-            .request_parent_shell_action(action, payload)
-            .await
-    }
-
-    pub async fn emit_parent_gateway_event(
-        &self,
-        event_name: ParentGatewayEventName,
-        payload: Value,
-    ) -> Result<ParentCallbackDeliveryReceipt, ParentCallbackError> {
-        self.inner
-            .emit_parent_gateway_event(event_name, payload)
-            .await
-    }
-
-    pub async fn emit_parent_session_update(
-        &self,
-        availability: ParentSessionUpdateAvailability,
-    ) -> Result<ParentCallbackDeliveryReceipt, ParentCallbackError> {
-        self.inner.emit_parent_session_update(availability).await
     }
 }
 
@@ -486,39 +445,9 @@ impl ParentCallbackHandle {
     ) -> Self {
         ParentCallbackClient::new(parent_api_base_url, dispatch_token)
             .expect("test parent callback must be valid")
-            .handle()
     }
 
     pub async fn request_parent_shell_action(
-        &self,
-        action: ParentShellAction,
-        payload: Option<Value>,
-    ) -> Result<ParentShellActionResponse, ParentCallbackError> {
-        self.inner
-            .request_parent_shell_action(action, payload)
-            .await
-    }
-
-    pub async fn emit_parent_gateway_event(
-        &self,
-        event_name: ParentGatewayEventName,
-        payload: Value,
-    ) -> Result<ParentCallbackDeliveryReceipt, ParentCallbackError> {
-        self.inner
-            .emit_parent_gateway_event(event_name, payload)
-            .await
-    }
-
-    pub async fn emit_parent_session_update(
-        &self,
-        availability: ParentSessionUpdateAvailability,
-    ) -> Result<ParentCallbackDeliveryReceipt, ParentCallbackError> {
-        self.inner.emit_parent_session_update(availability).await
-    }
-}
-
-impl ParentCallbackClientInner {
-    async fn request_parent_shell_action(
         &self,
         action: ParentShellAction,
         payload: Option<Value>,
@@ -544,7 +473,7 @@ impl ParentCallbackClientInner {
             .map_err(|reason| ParentCallbackError::InvalidResponse { endpoint, reason })
     }
 
-    async fn emit_parent_gateway_event(
+    pub async fn emit_parent_gateway_event(
         &self,
         event_name: ParentGatewayEventName,
         payload: Value,
@@ -564,7 +493,7 @@ impl ParentCallbackClientInner {
         Ok(ParentCallbackDeliveryReceipt { endpoint })
     }
 
-    async fn emit_parent_session_update(
+    pub async fn emit_parent_session_update(
         &self,
         availability: ParentSessionUpdateAvailability,
     ) -> Result<ParentCallbackDeliveryReceipt, ParentCallbackError> {
@@ -586,7 +515,7 @@ impl ParentCallbackClientInner {
         self.http_client
             .post(self.endpoint_url(endpoint))
             .header("Content-Type", "application/json")
-            .header(DISPATCH_TOKEN_HEADER, self.dispatch_token.as_str())
+            .header(DISPATCH_TOKEN_HEADER, self.dispatch_token.as_ref())
             .timeout(timeout)
             .body(body)
             .send()
@@ -916,7 +845,6 @@ mod tests {
         let private_base_url = "http://127.0.0.1:34100";
         let private_dispatch_token = "parent-dispatch-secret";
         let client = ParentCallbackClient::new(private_base_url, private_dispatch_token).unwrap();
-        let handle = client.handle();
 
         let projected = [
             format!(
@@ -956,7 +884,6 @@ mod tests {
             assert!(!value.contains(private_dispatch_token));
         }
 
-        drop(handle);
         drop(client);
     }
 

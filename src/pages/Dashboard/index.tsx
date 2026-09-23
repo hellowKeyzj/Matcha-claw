@@ -4,8 +4,6 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Activity,
-  Clock,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -17,13 +15,12 @@ import { Button } from '@/components/ui/button';
 import { useGatewayStore } from '@/stores/gateway';
 import { useDashboardUsageStore } from '@/stores/dashboard-usage';
 import { useDashboardUiStore } from '@/stores/dashboard-ui';
-import { StatusBadge } from '@/components/common/StatusBadge';
 import { FeedbackState } from '@/components/common/FeedbackState';
 import { scheduleIdleReady } from '@/lib/idle-ready';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { trackUiEvent } from '@/lib/telemetry';
 import { useTranslation } from 'react-i18next';
-import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import {
   filterUsageHistoryByWindow,
   groupUsageHistory,
@@ -42,10 +39,8 @@ type UsageSessionDetailViewState =
 export function Dashboard() {
   const { t } = useTranslation('dashboard');
   const gatewayStatus = useGatewayStore((state) => state.status);
-  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
 
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
-  const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
   const usageFetchMaxAttempts = window.electron?.platform === 'win32'
     ? WINDOWS_USAGE_FETCH_MAX_ATTEMPTS
     : DEFAULT_USAGE_FETCH_MAX_ATTEMPTS;
@@ -70,7 +65,6 @@ export function Dashboard() {
   const setUsageGroupBy = useDashboardUiStore((state) => state.setUsageGroupBy);
   const setUsageWindow = useDashboardUiStore((state) => state.setUsageWindow);
   const setUsagePage = useDashboardUiStore((state) => state.setUsagePage);
-  const [uptime, setUptime] = useState(0);
   const [expandedUsageSessionId, setExpandedUsageSessionId] = useState<string | null>(null);
 
   // Track page view on mount only.
@@ -212,78 +206,8 @@ export function Dashboard() {
     }
   };
 
-  // Update uptime periodically
-  useEffect(() => {
-    const updateUptime = () => {
-      if (document.visibilityState !== 'visible') {
-        return;
-      }
-      if (gatewayStatus.connectedAt) {
-        const nextValue = Math.floor((Date.now() - gatewayStatus.connectedAt) / 1000);
-        setUptime((prev) => (prev === nextValue ? prev : nextValue));
-      } else {
-        setUptime((prev) => (prev === 0 ? prev : 0));
-      }
-    };
-
-    // Update immediately
-    updateUptime();
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        updateUptime();
-      }
-    };
-
-    // Update every second
-    const interval = setInterval(updateUptime, 1000);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, [gatewayStatus.connectedAt]);
-
   return (
     <div className="space-y-6">
-      {/* Status Cards */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {/* Gateway Status */}
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">{t('gateway')}</CardTitle>
-            <Activity className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-2">
-              <StatusBadge status={gatewayStatus.processState} />
-            </div>
-            {isGatewayRunning && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                {t('port', { port: gatewayStatus.port })} | {t('pid', { pid: gatewayStatus.pid || 'N/A' })}
-              </p>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Uptime */}
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">{t('uptime')}</CardTitle>
-            <Clock className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {uptime > 0 ? formatUptime(uptime) : '—'}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {isGatewayRunning ? t('sinceRestart') : gatewayPreparing ? t('gatewayPreparing') : t('gatewayNotRunning')}
-            </p>
-          </CardContent>
-        </Card>
-      </div>
-
       {!dashboardHeavyContentReady ? (
         <>
           <Card>
@@ -394,19 +318,19 @@ export function Dashboard() {
               </div>
 
               <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-                <div className="rounded-lg border bg-muted/20 p-3">
+                <div className="rounded-lg border border-border/80 bg-secondary p-3">
                   <p className="text-xs text-muted-foreground">{t('recentTokenHistory.totalTokens')}</p>
                   <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.totalTokens)}</p>
                 </div>
-                <div className="rounded-lg border bg-muted/20 p-3">
+                <div className="rounded-lg border border-border/80 bg-secondary p-3">
                   <p className="text-xs text-muted-foreground">{t('recentTokenHistory.inputShort')}</p>
                   <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.inputTokens)}</p>
                 </div>
-                <div className="rounded-lg border bg-muted/20 p-3">
+                <div className="rounded-lg border border-border/80 bg-secondary p-3">
                   <p className="text-xs text-muted-foreground">{t('recentTokenHistory.outputShort')}</p>
                   <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.outputTokens)}</p>
                 </div>
-                <div className="rounded-lg border bg-muted/20 p-3">
+                <div className="rounded-lg border border-border/80 bg-secondary p-3">
                   <p className="text-xs text-muted-foreground">{t('recentTokenHistory.cacheShort')}</p>
                   <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.cacheTokens)}</p>
                 </div>
@@ -556,23 +480,6 @@ export function Dashboard() {
   );
 }
 
-/**
- * Format uptime in human-readable format
- */
-function formatUptime(seconds: number): string {
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-
-  if (days > 0) {
-    return `${days}d ${hours}h`;
-  } else if (hours > 0) {
-    return `${hours}h ${minutes}m`;
-  } else {
-    return `${minutes}m`;
-  }
-}
-
 function formatTokenCount(value: number): string {
   return Intl.NumberFormat().format(value);
 }
@@ -607,7 +514,7 @@ function UsageSessionDetails({
 }) {
   if (detail.status === 'idle' || detail.status === 'loading') {
     return (
-      <div className="mt-3 flex items-center gap-2 rounded-md bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+      <div className="mt-3 flex items-center gap-2 rounded-md border border-border/80 bg-card px-3 py-2 text-xs text-muted-foreground">
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
         {loadingLabel}
       </div>
@@ -624,7 +531,7 @@ function UsageSessionDetails({
 
   if (detail.entries.length === 0) {
     return (
-      <div className="mt-3 rounded-md bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+      <div className="mt-3 rounded-md border border-border/80 bg-card px-3 py-2 text-xs text-muted-foreground">
         {emptyLabel}
       </div>
     );
@@ -635,7 +542,7 @@ function UsageSessionDetails({
       {detail.entries.map((entry, index) => (
         <div
           key={entry.messageId || entry.eventId || `${entry.sessionId}-${entry.timestamp}-${index}`}
-          className="rounded-md bg-muted/30 px-3 py-2"
+          className="rounded-md border border-border/80 bg-card px-3 py-2"
         >
           <div className="flex items-center justify-between gap-3 text-xs">
             <span className="truncate text-muted-foreground">{formatUsageTimestamp(entry.timestamp)}</span>

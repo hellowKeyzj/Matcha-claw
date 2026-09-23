@@ -4,7 +4,7 @@ use foundation::{
     execution::{OwnedTask, OwnerRuntimeSystem},
     lifecycle::{EffectRegistration, ModuleScope},
 };
-use openclaw::lifecycle::state_dir::CanonicalStateDir;
+use platform::state_dir::CanonicalStateDir;
 
 use ::cron::CronModule;
 use ::diagnostics::DiagnosticsModule;
@@ -87,6 +87,16 @@ impl OwnerRuntimeTasks {
             .find(|scope| scope.id() == module_id)
     }
 
+    pub(in crate::composition::host) fn route_scope_mut(
+        &mut self,
+        module_id: &'static str,
+    ) -> Option<&mut ModuleScope> {
+        if module_id == "organization" {
+            return Some(&mut self.organization.scope);
+        }
+        self.module_scope_mut(module_id)
+    }
+
     fn cancel_module_scope(&self, module_id: &'static str) {
         if let Some(scope) = self
             .module_scopes
@@ -128,10 +138,12 @@ fn runtime_directory_scope(
     scope
 }
 
+fn route_only_scope(id: &'static str) -> ModuleScope {
+    ModuleScope::new(id)
+}
+
 fn capability_catalog_scope() -> ModuleScope {
-    let mut scope = ModuleScope::new("capability-catalog");
-    scope.register_route("capability-catalog.loopback", || async {});
-    scope
+    route_only_scope("capability-catalog")
 }
 
 pub(in crate::composition::host) struct RuntimeOwners {
@@ -452,12 +464,17 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
                 module_scope("usage", usage_task),
                 module_scope("diagnostics", diagnostics_task),
                 runtime_directory_scope(Arc::clone(&runtime_directory)),
+                route_only_scope("runtime-control"),
                 capability_catalog_scope(),
+                route_only_scope("openclaw-gateway"),
+                route_only_scope("openclaw-platform"),
                 module_scope("task-manager", task_manager_task),
                 module_scope("subagents", subagents_task),
                 module_scope("workspace", workspace_task),
                 module_scope("toolchain", toolchain_task),
                 module_scope("platform-tools", platform_tools_task),
+                route_only_scope("plugins"),
+                route_only_scope("skills"),
             ],
             organization: OrganizationRuntime {
                 scope: organization_scope,

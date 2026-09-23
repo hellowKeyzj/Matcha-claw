@@ -31,6 +31,7 @@ import {
   type SessionCatalogItem,
   type SessionContentLoadResult,
   type SessionListResult,
+  type SessionModelState,
   type SessionView,
   type SessionWireIdentity,
 } from '../types/session/snapshot';
@@ -1417,9 +1418,9 @@ export async function hostSessionResolveApproval(
   });
 }
 
-export type HostSessionModelSelectionResult = Readonly<{
-  outcome: 'succeeded' | 'target_rejected' | 'outcome_unknown';
-}>;
+export type HostSessionModelSelectionResult =
+  | Readonly<{ outcome: 'succeeded'; modelState: SessionModelState }>
+  | Readonly<{ outcome: 'target_rejected' | 'outcome_unknown' }>;
 
 export async function hostSessionPatch(
   payload: {

@@ -549,7 +549,8 @@ mod tests {
 
     use foundation::process::TerminationFailure;
 
-    use crate::{gateway::auth::GatewaySecret, lifecycle::state_dir::CanonicalStateDir};
+    use crate::gateway::auth::GatewaySecret;
+    use platform::state_dir::CanonicalStateDir;
 
     use super::*;
 

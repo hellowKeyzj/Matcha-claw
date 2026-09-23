@@ -6,14 +6,21 @@ use std::{
     process::ExitCode,
 };
 
+use platform::mcp::{ToolCatalog, run_stdio};
+
 fn main() -> ExitCode {
     let Ok(config) = TeamRunMcpInvocation::parse() else {
         eprintln!("runtime-host-mcp: artifact configuration is invalid");
         return ExitCode::FAILURE;
     };
 
-    match runtime_host::run_matcha_mcp(
-        &config.state_dir,
+    let Ok(provider) = organization::team_run_mcp_provider(&config.state_dir) else {
+        return ExitCode::FAILURE;
+    };
+    let catalog = ToolCatalog::new(vec![Box::new(provider)]);
+
+    match run_stdio(
+        catalog,
         BufReader::new(io::stdin().lock()),
         io::stdout().lock(),
     ) {

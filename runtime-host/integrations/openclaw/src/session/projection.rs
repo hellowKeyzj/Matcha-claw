@@ -14,7 +14,7 @@ use super::{
         SessionSummary, ToolActivityPhase, ToolId,
     },
 };
-use crate::session_window::Message;
+use crate::session::window::Message;
 
 #[derive(Clone, Eq, PartialEq)]
 pub enum CanonicalIngressResult {
@@ -1274,6 +1274,10 @@ mod tests {
             status: Some("idle".into()),
             has_active_run: Some(false),
             model: Some("provider/model".into()),
+            model_provider: None,
+            active_model: None,
+            active_model_provider: None,
+            model_override_source: None,
             permission_mode: None,
             permission_mode_pending: None,
         }

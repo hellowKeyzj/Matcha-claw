@@ -7,7 +7,7 @@ use crate::{
     HostInput,
     control::ControlError,
     module_registry::{
-        install::{InstallModulesInput, install_modules},
+        install::{InstallModulesInput, prepare_module_install},
         private_control::PrivateControlRegistry,
     },
 };
@@ -47,7 +47,7 @@ where
         .await
         .is_err()
     {
-        let _ = shutdown_host(&mut runtime.owner).await;
+        let _ = shutdown_runtime(&mut runtime).await;
         return Err(ControlError::Transport("provider credential resolver"));
     }
     let provider_private_resolver = Arc::new(provider_private_resolver);
@@ -59,7 +59,7 @@ where
         .await
         .is_err()
     {
-        let _ = shutdown_host(&mut runtime.owner).await;
+        let _ = shutdown_runtime(&mut runtime).await;
         return Err(ControlError::Transport("session credential resolver"));
     }
     if runtime
@@ -70,7 +70,7 @@ where
         .await
         .is_err()
     {
-        let _ = shutdown_host(&mut runtime.owner).await;
+        let _ = shutdown_runtime(&mut runtime).await;
         return Err(ControlError::Transport("connector credential resolver"));
     }
 
@@ -81,33 +81,53 @@ where
         .await
         .map_err(|_| ControlError::Transport("security emergency recovery"))?;
     let verifier = Arc::new(tokio::sync::Mutex::new(verifier));
-    let installed_modules = match install_modules(InstallModulesInput {
+    let install_plan = prepare_module_install(InstallModulesInput {
         handles: &runtime.handles,
-        scoped_effects: &runtime.module_effect_registrations,
         verifier: Arc::clone(&verifier),
         webhook_token,
-    }) {
-        Ok(modules) => modules,
-        Err(error) => {
-            let _ = shutdown_host(&mut runtime.owner).await;
-            return Err(ControlError::ModuleInstall(error));
-        }
-    };
-    let (modules, private_control_catalog) = installed_modules.into_parts();
+    });
+    let route_snapshot = install_plan.route_snapshot();
+    let router = crate::http::Router::new(route_snapshot.clone());
+    if let Err(error) = runtime
+        .host_mut()
+        .register_route_effects(&route_snapshot, router.clone())
+    {
+        let _ = shutdown_runtime(&mut runtime).await;
+        return Err(ControlError::ModuleInstall(error));
+    }
+    let private_control_catalog =
+        match install_plan.install(&runtime.host_mut().module_effect_registrations()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let _ = shutdown_runtime(&mut runtime).await;
+                return Err(ControlError::ModuleInstall(error));
+            }
+        };
     let private_control = PrivateControlRegistry::from_snapshot(private_control_catalog);
-    let router = crate::http::Router::new(crate::http::RouterInput { routes: modules });
     let http_server = match crate::http::Server::bind(runtime_host_transport_port, router).await {
         Ok(transport) => transport,
         Err(_) => {
-            let _ = shutdown_host(&mut runtime.owner).await;
+            let _ = shutdown_runtime(&mut runtime).await;
             return Err(ControlError::Transport("http server"));
         }
     };
+    runtime.spawn_owner();
     let mut http_server = http_server.into_scoped_extension();
     let result =
         runtime::run_private_control(&mut runtime, private_control, control_input, control_output)
             .await;
     http_server.dispose_all_lifo().await;
-    let shutdown = shutdown_host(&mut runtime.owner).await;
+    let shutdown = shutdown_runtime(&mut runtime).await;
     result.and(shutdown)
+}
+
+async fn shutdown_runtime(runtime: &mut runtime::RuntimeService) -> Result<(), ControlError> {
+    if runtime.owner.is_none() {
+        runtime.spawn_owner();
+    }
+    let owner = runtime
+        .owner
+        .as_mut()
+        .expect("runtime owner must be spawned");
+    shutdown_host(owner).await
 }

@@ -9,9 +9,9 @@
             "twoFactor": "双重验证"
         },
         "description": {
-            "login": "登录账号，继续使用 MatchaClaw。",
-            "register": "创建账号，开始使用 MatchaClaw。",
-            "twoFactor": "请输入身份验证器中的验证码以完成登录。"
+            "login": "登录账号，继续使用 MatchaClaw",
+            "register": "创建账号，开始使用 MatchaClaw",
+            "twoFactor": "请输入身份验证器中的验证码以完成登录"
         },
         "submit": {
             "login": "登录",
@@ -19,15 +19,15 @@
             "twoFactor": "验证并登录"
         },
         "offline": {
-            "title": "暂时无法登录",
-            "description": "暂时无法连接账号服务，你可以先使用本地功能，稍后再尝试登录。",
-            "hint": "账号服务恢复后，可重试连接并登录。",
-            "retry": "重试连接"
+            "title": "无法登录",
+            "description": "账号服务不可用",
+            "hint": "稍后再试",
+            "retry": "重试"
         },
         "localEntry": {
             "offline": "离线进入",
             "guest": "游客进入",
-            "guestDescription": "先使用本地功能，稍后可随时登录。"
+            "guestDescription": "先使用本地功能，稍后可随时登录"
         },
         "fields": {
             "email": "邮箱",
@@ -44,13 +44,13 @@
             "sendVerifyCode": "发送验证码"
         },
         "errors": {
-            "emailRequiredForCode": "请先输入邮箱地址。",
-            "registrationClosed": "当前暂未开放注册。"
+            "emailRequiredForCode": "请先输入邮箱地址",
+            "registrationClosed": "当前暂未开放注册"
         },
         "notice": {
-            "verifyCodeSent": "验证码已发送，请查收邮件。"
+            "verifyCodeSent": "验证码已发送，请查收邮件"
         },
-        "registrationClosedHint": "当前暂未开放注册，已有账号可直接登录。",
+        "registrationClosedHint": "当前暂未开放注册，已有账号可直接登录",
         "switch": {
             "hasAccount": "已有账号？",
             "noAccount": "还没有账号？",
@@ -63,13 +63,13 @@
             "terms": "服务条款",
             "and": "和",
             "privacy": "隐私政策",
-            "suffix": "。"
+            "suffix": ""
         },
         "preview": {
             "heading": "欢迎使用 MatchaClaw",
-            "copy": "登录账号，开启你的 AI 工作空间。",
-            "offlineHeading": "本地工作，继续进行",
-            "offlineCopy": "账号服务暂时不可用，你仍可进入应用使用本地功能。"
+            "copy": "登录后同步账号",
+            "offlineHeading": "继续本地使用",
+            "offlineCopy": "账号暂不可用"
         }
     },
     "sidebar": {

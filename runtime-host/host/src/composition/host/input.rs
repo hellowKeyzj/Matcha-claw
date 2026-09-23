@@ -13,6 +13,5 @@ pub struct HostInput {
     pub app_log_dir: std::path::PathBuf,
     pub parent_callback_base_url: String,
     pub parent_callback_dispatch_token: String,
-    pub cron_transport_port: u16,
     pub runtime_observation: ::diagnostics::RuntimeObservationConfig,
 }

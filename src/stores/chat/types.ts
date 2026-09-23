@@ -6,6 +6,7 @@ import type {
 } from '../../../electron/desktop-contract/runtime-address';
 import type {
   SessionContextTokenSnapshot,
+  SessionModelState,
 } from '../../types/session/snapshot';
 import type {
   SessionRenderAttachedFile,
@@ -66,7 +67,7 @@ export interface ChatSession {
   titleSource?: SessionCatalogTitleSource;
   displayName?: string;
   thinkingLevel?: string;
-  model?: string;
+  modelState?: SessionModelState;
   contextTokens?: SessionContextTokenSnapshot;
   updatedAt?: number;
 }
@@ -207,7 +208,7 @@ export interface ChatSessionMetaState {
   titleSource: SessionCatalogTitleSource;
   manualLabel?: boolean;
   displayName?: string | null;
-  model?: string | null;
+  modelState: SessionModelState | null;
   lastActivityAt: number | null;
   historyStatus: ChatSessionHistoryStatus;
   thinkingLevel: string | null;
@@ -259,7 +260,7 @@ export interface ChatSessionRuntimeSessionNode {
   label: string | null;
   titleSource: SessionCatalogTitleSource;
   displayName: string | null;
-  model: string | null;
+  modelState: SessionModelState | null;
   thinkingLevel: string | null;
   contextTokens?: SessionContextTokenSnapshot;
   updatedAt: number | null;

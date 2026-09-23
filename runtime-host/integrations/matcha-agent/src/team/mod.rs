@@ -1,3 +1,4 @@
+pub(crate) mod adapters;
 mod native_effects;
 
 pub use native_effects::{

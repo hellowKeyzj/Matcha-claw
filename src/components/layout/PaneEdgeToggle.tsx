@@ -37,7 +37,7 @@ export function PaneEdgeToggle({
         variant="ghost"
         size="icon"
         className={cn(
-          'pointer-events-none absolute top-1/2 h-14 w-[6px] -translate-y-1/2 rounded-[var(--radius-pill)] border border-border/70 bg-card/98 p-0 text-muted-foreground opacity-0 shadow-none transition-all duration-150 hover:bg-secondary/80 hover:text-foreground',
+          'pointer-events-none absolute top-1/2 h-14 w-[6px] -translate-y-1/2 rounded-[var(--radius-pill)] border border-border/70 bg-card/98 p-0 text-muted-foreground opacity-0 shadow-none transition-[background-color,border-color,color,opacity] duration-150 hover:bg-secondary/80 hover:text-foreground',
           isLeft ? 'left-0' : 'right-0',
           'group-hover:pointer-events-auto group-hover:opacity-100 hover:border-border',
         )}

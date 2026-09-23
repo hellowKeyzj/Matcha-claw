@@ -5,12 +5,11 @@ use std::{
     io,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use getrandom::fill as random_fill;
-use openclaw::lifecycle::state_dir::CanonicalStateDir;
 use zeroize::Zeroize;
 
 use crate::{
@@ -30,17 +29,17 @@ const MAX_PACKAGE_FILE_BYTES: u64 = 256 * 1024;
 const AGENT_BOOTSTRAP_FILES: &[&str] = &["AGENTS.md", "SOUL.md", "USER.md", "MEMORY.md"];
 const REQUIRED_AGENT_BOOTSTRAP_FILE: &str = "AGENTS.md";
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 struct SealedAgentRoot {
     target: SealedAgentTarget,
-    state_dir: CanonicalStateDir,
+    runtime: Arc<dyn SealedAgentRuntimeProjection>,
 }
 
 impl SealedAgentRoot {
-    fn openclaw(state_dir: CanonicalStateDir) -> Self {
+    fn openclaw(runtime: Arc<dyn SealedAgentRuntimeProjection>) -> Self {
         Self {
             target: SealedAgentTarget::OpenClaw,
-            state_dir,
+            runtime,
         }
     }
 
@@ -50,70 +49,33 @@ impl SealedAgentRoot {
 
     fn workspace_directory(&self, agent_key: &AgentKey) -> Result<PathBuf, SealedResourceError> {
         let session_key = openclaw_agent_session_key(agent_key)?;
-        let directory = openclaw::workspace::OpenClawWorkspaceAccess::new(self.state_dir.clone())
-            .trusted_workspace_directory(&session_key)
-            .map_err(|_| SealedResourceError::Unknown)?;
-        let path = PathBuf::from(directory.as_str());
-        path.is_absolute()
-            .then_some(path)
-            .ok_or(SealedResourceError::Rejected)
+        self.runtime.workspace_directory(&session_key)
     }
 
     fn maintenance_workspace_directories(&self) -> Result<Vec<PathBuf>, SealedResourceError> {
-        openclaw::workspace::OpenClawWorkspaceAccess::new(self.state_dir.clone())
-            .maintenance_workspace_directories()
-            .map(|directories| {
-                directories
-                    .into_iter()
-                    .map(|directory| PathBuf::from(directory.as_str()))
-                    .collect()
-            })
-            .map_err(|_| SealedResourceError::Unknown)
+        self.runtime.maintenance_workspace_directories()
     }
 
-    fn install_projection(&self) -> SealedAgentInstallProjection {
-        match self.target {
-            SealedAgentTarget::OpenClaw => SealedAgentInstallProjection::OpenClaw {
-                state_dir: self.state_dir.clone(),
-            },
-        }
-    }
-}
-
-enum SealedAgentInstallProjection {
-    OpenClaw { state_dir: CanonicalStateDir },
-}
-
-impl SealedAgentInstallProjection {
     fn ensure_agent_entry(
         &self,
         agent_key: &AgentKey,
         workspace: &Path,
     ) -> Result<(), SealedResourceError> {
-        match self {
-            Self::OpenClaw { state_dir } => {
-                openclaw::projection::sealed_agent_config::ensure_sealed_agent_config(
-                    state_dir.clone(),
-                    agent_key.as_str(),
-                    workspace,
-                )
-                .map_err(sealed_agent_config_error)
-            }
-        }
+        self.runtime
+            .ensure_agent_entry(agent_key.as_str(), workspace)
     }
 }
 
-fn sealed_agent_config_error(
-    error: openclaw::projection::sealed_agent_config::SealedAgentConfigError,
-) -> SealedResourceError {
-    match error {
-        openclaw::projection::sealed_agent_config::SealedAgentConfigError::Rejected => {
-            SealedResourceError::Rejected
-        }
-        openclaw::projection::sealed_agent_config::SealedAgentConfigError::Unavailable => {
-            SealedResourceError::Unknown
-        }
-    }
+pub trait SealedAgentRuntimeProjection: Send + Sync {
+    fn workspace_directory(&self, session_key: &str) -> Result<PathBuf, SealedResourceError>;
+
+    fn maintenance_workspace_directories(&self) -> Result<Vec<PathBuf>, SealedResourceError>;
+
+    fn ensure_agent_entry(
+        &self,
+        agent_key: &str,
+        workspace: &Path,
+    ) -> Result<(), SealedResourceError>;
 }
 
 impl fmt::Debug for SealedAgentRoot {
@@ -121,7 +83,7 @@ impl fmt::Debug for SealedAgentRoot {
         formatter
             .debug_struct("SealedAgentRoot")
             .field("target", &self.target)
-            .field("state_dir", &"[REDACTED]")
+            .field("runtime", &"[REDACTED]")
             .finish()
     }
 }
@@ -220,10 +182,10 @@ impl SealedAgentStore {
     }
 
     pub fn openclaw(
-        state_dir: CanonicalStateDir,
+        runtime: Arc<dyn SealedAgentRuntimeProjection>,
         private_root: PathBuf,
     ) -> Result<Self, SealedResourceError> {
-        Self::new(SealedAgentRoot::openclaw(state_dir), private_root)
+        Self::new(SealedAgentRoot::openclaw(runtime), private_root)
     }
 
     pub fn catalog(&self) -> Result<SealedAgentCatalog, SealedResourceError> {
@@ -370,7 +332,6 @@ impl SealedAgentStore {
         };
         if let Err(error) = self
             .root
-            .install_projection()
             .ensure_agent_entry(package.agent_key(), &workspace)
         {
             let _ = fs::remove_file(installed_path);
@@ -769,28 +730,91 @@ fn set_private_mode(_path: &Path, _directory: bool) -> Result<(), SealedResource
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io, path::Path};
-
-    use serde_json::{Value, json};
+    use std::{
+        collections::BTreeMap,
+        fs, io,
+        path::{Path, PathBuf},
+        sync::{Arc, Mutex},
+    };
 
     use super::*;
+
+    struct FakeAgentRuntime {
+        workspaces: Mutex<BTreeMap<String, PathBuf>>,
+        maintenance_workspaces: Mutex<Vec<PathBuf>>,
+        reject_ensure: Mutex<bool>,
+        ensured_entries: Mutex<Vec<(String, PathBuf)>>,
+    }
+
+    impl FakeAgentRuntime {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                workspaces: Mutex::new(BTreeMap::new()),
+                maintenance_workspaces: Mutex::new(Vec::new()),
+                reject_ensure: Mutex::new(false),
+                ensured_entries: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn add_agent_workspace(&self, agent_key: &str, workspace: PathBuf) {
+            self.workspaces
+                .lock()
+                .unwrap()
+                .insert(format!("agent:{agent_key}:sealed-agent"), workspace);
+        }
+
+        fn add_maintenance_workspace(&self, workspace: PathBuf) {
+            self.maintenance_workspaces.lock().unwrap().push(workspace);
+        }
+
+        fn reject_ensure(&self) {
+            *self.reject_ensure.lock().unwrap() = true;
+        }
+
+        fn ensured_entries(&self) -> Vec<(String, PathBuf)> {
+            self.ensured_entries.lock().unwrap().clone()
+        }
+    }
+
+    impl SealedAgentRuntimeProjection for FakeAgentRuntime {
+        fn workspace_directory(&self, session_key: &str) -> Result<PathBuf, SealedResourceError> {
+            self.workspaces
+                .lock()
+                .unwrap()
+                .get(session_key)
+                .cloned()
+                .ok_or(SealedResourceError::NotFound)
+        }
+
+        fn maintenance_workspace_directories(&self) -> Result<Vec<PathBuf>, SealedResourceError> {
+            Ok(self.maintenance_workspaces.lock().unwrap().clone())
+        }
+
+        fn ensure_agent_entry(
+            &self,
+            agent_key: &str,
+            workspace: &Path,
+        ) -> Result<(), SealedResourceError> {
+            if *self.reject_ensure.lock().unwrap() {
+                return Err(SealedResourceError::Rejected);
+            }
+            self.ensured_entries
+                .lock()
+                .unwrap()
+                .push((agent_key.to_owned(), workspace.to_path_buf()));
+            Ok(())
+        }
+    }
 
     #[test]
     fn read_file_returns_session_metering_binding() {
         let root = tempfile::tempdir().unwrap();
-        let state_dir = CanonicalStateDir::provision(root.path().join("state")).unwrap();
+        let runtime = FakeAgentRuntime::new();
         let workspace = root.path().join("reviewer-workspace");
         fs::create_dir(&workspace).unwrap();
         fs::write(workspace.join("AGENTS.md"), "agent instructions").unwrap();
-        fs::write(
-            state_dir.as_path().join("openclaw.json"),
-            serde_json::to_vec(&json!({
-                "agents": {"list": [{"id": "reviewer", "workspace": workspace}]}
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let store = SealedAgentStore::openclaw(state_dir, root.path().join("private")).unwrap();
+        runtime.add_agent_workspace("reviewer", workspace);
+        let store = SealedAgentStore::openclaw(runtime, root.path().join("private")).unwrap();
         let agent_key = AgentKey::parse("reviewer").unwrap();
         store
             .export_plain_workspace_package(agent_key.clone())
@@ -810,9 +834,9 @@ mod tests {
     }
 
     #[test]
-    fn install_package_path_creates_openclaw_agent_config_without_plaintext_bootstrap_files() {
+    fn install_package_path_ensures_runtime_entry_without_plaintext_bootstrap_files() {
         let root = tempfile::tempdir().unwrap();
-        let source_state = CanonicalStateDir::provision(root.path().join("source-state")).unwrap();
+        let source_runtime = FakeAgentRuntime::new();
         let source_workspace = root.path().join("source-workspace");
         fs::create_dir(&source_workspace).unwrap();
         fs::write(
@@ -820,23 +844,18 @@ mod tests {
             "source agent instructions",
         )
         .unwrap();
-        fs::write(
-            source_state.as_path().join("openclaw.json"),
-            serde_json::to_vec(&json!({
-                "agents": { "entries": { "writer": { "workspace": source_workspace } } }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        source_runtime.add_agent_workspace("writer", source_workspace);
         let private = root.path().join("private");
-        let source = SealedAgentStore::openclaw(source_state, private.clone()).unwrap();
+        let source = SealedAgentStore::openclaw(source_runtime, private.clone()).unwrap();
         let agent_key = AgentKey::parse("writer").unwrap();
         let package = source
             .export_plain_workspace_package(agent_key.clone())
             .unwrap();
 
-        let target_state = CanonicalStateDir::provision(root.path().join("target-state")).unwrap();
-        let target = SealedAgentStore::openclaw(target_state.clone(), private).unwrap();
+        let target_runtime = FakeAgentRuntime::new();
+        let target_workspace = root.path().join("target-workspace");
+        target_runtime.add_agent_workspace("writer", target_workspace.clone());
+        let target = SealedAgentStore::openclaw(target_runtime.clone(), private).unwrap();
         let entry = target
             .install_package_path(package.package_path().to_owned())
             .unwrap();
@@ -853,21 +872,11 @@ mod tests {
                 .content(),
             b"source agent instructions"
         );
-        let config = read_config(target_state.as_path());
-        let workspace = PathBuf::from(
-            config["agents"]["entries"]["writer"]["workspace"]
-                .as_str()
-                .unwrap(),
-        );
-        assert!(workspace.is_absolute());
+        let workspace = fs::canonicalize(target_workspace).unwrap();
         assert_eq!(
-            openclaw::workspace::OpenClawWorkspaceAccess::new(target_state)
-                .trusted_workspace_directory("agent:writer:sealed-agent")
-                .unwrap()
-                .as_str(),
-            workspace.to_str().unwrap()
+            target_runtime.ensured_entries(),
+            vec![("writer".to_owned(), workspace.clone())]
         );
-        assert_eq!(config["agents"]["entries"]["writer"]["skipBootstrap"], true);
         assert_plaintext_bootstrap_absent(&workspace);
         assert_eq!(sealed_packages(&workspace).len(), 1);
     }
@@ -875,7 +884,7 @@ mod tests {
     #[test]
     fn catalog_rejects_sealed_agent_package_file_links() {
         let root = tempfile::tempdir().unwrap();
-        let state_dir = CanonicalStateDir::provision(root.path().join("state")).unwrap();
+        let runtime = FakeAgentRuntime::new();
         let workspace = root.path().join("writer-workspace");
         let target = root.path().join("target.matcha-agentpkg");
         fs::create_dir(&workspace).unwrap();
@@ -883,15 +892,8 @@ mod tests {
         if !create_file_link(&target, &workspace.join("linked.matcha-agentpkg")).unwrap() {
             return;
         }
-        fs::write(
-            state_dir.as_path().join("openclaw.json"),
-            serde_json::to_vec(&json!({
-                "agents": { "entries": { "writer": { "workspace": workspace } } }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let store = SealedAgentStore::openclaw(state_dir, root.path().join("private")).unwrap();
+        runtime.add_maintenance_workspace(workspace);
+        let store = SealedAgentStore::openclaw(runtime, root.path().join("private")).unwrap();
 
         assert_eq!(store.catalog().unwrap_err(), SealedResourceError::Rejected);
     }
@@ -899,14 +901,14 @@ mod tests {
     #[test]
     fn install_package_path_rejects_oversized_package_before_reading() {
         let root = tempfile::tempdir().unwrap();
-        let state_dir = CanonicalStateDir::provision(root.path().join("state")).unwrap();
+        let runtime = FakeAgentRuntime::new();
         let package_path = root.path().join("oversized.matcha-agentpkg");
         fs::write(
             &package_path,
             vec![0_u8; (MAX_PACKAGE_FILE_BYTES + 1) as usize],
         )
         .unwrap();
-        let store = SealedAgentStore::openclaw(state_dir, root.path().join("private")).unwrap();
+        let store = SealedAgentStore::openclaw(runtime, root.path().join("private")).unwrap();
 
         assert_eq!(
             store.install_package_path(package_path).unwrap_err(),
@@ -917,7 +919,7 @@ mod tests {
     #[test]
     fn contains_agents_reads_sealed_state_in_one_catalog_pass() {
         let root = tempfile::tempdir().unwrap();
-        let state_dir = CanonicalStateDir::provision(root.path().join("state")).unwrap();
+        let runtime = FakeAgentRuntime::new();
         let writer_workspace = root.path().join("writer-workspace");
         let reviewer_workspace = root.path().join("reviewer-workspace");
         fs::create_dir(&writer_workspace).unwrap();
@@ -928,18 +930,11 @@ mod tests {
             "reviewer instructions",
         )
         .unwrap();
-        fs::write(
-            state_dir.as_path().join("openclaw.json"),
-            serde_json::to_vec(&json!({
-                "agents": { "entries": {
-                    "writer": { "workspace": writer_workspace },
-                    "reviewer": { "workspace": reviewer_workspace }
-                } }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let store = SealedAgentStore::openclaw(state_dir, root.path().join("private")).unwrap();
+        runtime.add_agent_workspace("writer", writer_workspace.clone());
+        runtime.add_agent_workspace("reviewer", reviewer_workspace.clone());
+        runtime.add_maintenance_workspace(writer_workspace);
+        runtime.add_maintenance_workspace(reviewer_workspace);
+        let store = SealedAgentStore::openclaw(runtime, root.path().join("private")).unwrap();
         store
             .export_plain_workspace_package(AgentKey::parse("writer").unwrap())
             .unwrap();
@@ -972,9 +967,9 @@ mod tests {
     }
 
     #[test]
-    fn install_package_path_removes_installed_package_when_config_update_fails() {
+    fn install_package_path_removes_installed_package_when_runtime_projection_update_fails() {
         let root = tempfile::tempdir().unwrap();
-        let source_state = CanonicalStateDir::provision(root.path().join("source-state")).unwrap();
+        let source_runtime = FakeAgentRuntime::new();
         let source_workspace = root.path().join("source-workspace");
         fs::create_dir(&source_workspace).unwrap();
         fs::write(
@@ -982,38 +977,22 @@ mod tests {
             "source agent instructions",
         )
         .unwrap();
-        fs::write(
-            source_state.as_path().join("openclaw.json"),
-            serde_json::to_vec(&json!({
-                "agents": { "entries": { "writer": { "workspace": source_workspace } } }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        source_runtime.add_agent_workspace("writer", source_workspace);
         let private = root.path().join("private");
-        let source = SealedAgentStore::openclaw(source_state, private.clone()).unwrap();
+        let source = SealedAgentStore::openclaw(source_runtime, private.clone()).unwrap();
         let package = source
             .export_plain_workspace_package(AgentKey::parse("writer").unwrap())
             .unwrap();
 
-        let target_state = CanonicalStateDir::provision(root.path().join("target-state")).unwrap();
+        let target_runtime = FakeAgentRuntime::new();
         let writer_workspace = root
             .path()
             .join("target-state")
             .join("workspace-subagents")
             .join("writer");
-        fs::write(
-            target_state.as_path().join("openclaw.json"),
-            serde_json::to_vec(&json!({
-                "agents": { "list": [
-                    { "id": "writer", "workspace": writer_workspace },
-                    { "id": "writer", "workspace": writer_workspace },
-                ] }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let target = SealedAgentStore::openclaw(target_state, private).unwrap();
+        target_runtime.add_agent_workspace("writer", writer_workspace.clone());
+        target_runtime.reject_ensure();
+        let target = SealedAgentStore::openclaw(target_runtime, private).unwrap();
 
         assert_eq!(
             target
@@ -1026,9 +1005,9 @@ mod tests {
     }
 
     #[test]
-    fn install_package_path_preserves_existing_openclaw_config_when_ensuring_agent() {
+    fn install_package_path_preserves_existing_workspace_material_when_ensuring_agent() {
         let root = tempfile::tempdir().unwrap();
-        let source_state = CanonicalStateDir::provision(root.path().join("source-state")).unwrap();
+        let source_runtime = FakeAgentRuntime::new();
         let source_workspace = root.path().join("source-workspace");
         fs::create_dir(&source_workspace).unwrap();
         fs::write(
@@ -1036,57 +1015,35 @@ mod tests {
             "source agent instructions",
         )
         .unwrap();
-        fs::write(
-            source_state.as_path().join("openclaw.json"),
-            serde_json::to_vec(&json!({
-                "agents": { "entries": { "writer": { "workspace": source_workspace } } }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        source_runtime.add_agent_workspace("writer", source_workspace);
         let private = root.path().join("private");
-        let source = SealedAgentStore::openclaw(source_state, private.clone()).unwrap();
+        let source = SealedAgentStore::openclaw(source_runtime, private.clone()).unwrap();
         let package = source
             .export_plain_workspace_package(AgentKey::parse("writer").unwrap())
             .unwrap();
 
-        let target_state = CanonicalStateDir::provision(root.path().join("target-state")).unwrap();
-        let main_workspace = root.path().join("main-workspace");
-        fs::create_dir(&main_workspace).unwrap();
-        fs::write(
-            target_state.as_path().join("openclaw.json"),
-            serde_json::to_vec(&json!({
-                "agents": {
-                    "defaults": { "skipBootstrap": true },
-                    "entries": { "main": { "workspace": main_workspace, "default": true } }
-                },
-                "messages": { "locale": "zh" }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let target = SealedAgentStore::openclaw(target_state.clone(), private).unwrap();
+        let target_runtime = FakeAgentRuntime::new();
+        let target_workspace = root.path().join("target-workspace");
+        fs::create_dir(&target_workspace).unwrap();
+        fs::write(target_workspace.join("keep.txt"), "keep").unwrap();
+        target_runtime.add_agent_workspace("writer", target_workspace.clone());
+        let target = SealedAgentStore::openclaw(target_runtime.clone(), private).unwrap();
 
         target
             .install_package_path(package.package_path().to_owned())
             .unwrap();
 
-        let config = read_config(target_state.as_path());
-        assert_eq!(config["messages"]["locale"], "zh");
-        assert_eq!(config["agents"]["defaults"]["skipBootstrap"], true);
+        let workspace = fs::canonicalize(target_workspace).unwrap();
         assert_eq!(
-            config["agents"]["entries"]["main"]["workspace"],
-            main_workspace.to_str().unwrap()
+            fs::read_to_string(workspace.join("keep.txt")).unwrap(),
+            "keep"
         );
-        assert_eq!(config["agents"]["entries"]["main"]["default"], true);
-        let writer_workspace = PathBuf::from(
-            config["agents"]["entries"]["writer"]["workspace"]
-                .as_str()
-                .unwrap(),
+        assert_eq!(
+            target_runtime.ensured_entries(),
+            vec![("writer".to_owned(), workspace.clone())]
         );
-        assert!(writer_workspace.is_absolute());
-        assert_eq!(config["agents"]["entries"].as_object().unwrap().len(), 2);
-        assert_plaintext_bootstrap_absent(&writer_workspace);
+        assert_plaintext_bootstrap_absent(&workspace);
+        assert_eq!(sealed_packages(&workspace).len(), 1);
     }
 
     fn assert_plaintext_bootstrap_absent(workspace: &Path) {
@@ -1117,10 +1074,6 @@ mod tests {
     #[cfg(windows)]
     fn create_file_link(target: &Path, link: &Path) -> io::Result<bool> {
         Ok(std::os::windows::fs::symlink_file(target, link).is_ok())
-    }
-
-    fn read_config(path: &Path) -> Value {
-        serde_json::from_slice(&fs::read(path.join("openclaw.json")).unwrap()).unwrap()
     }
 
     fn decode_binding(binding: &str) -> serde_json::Value {

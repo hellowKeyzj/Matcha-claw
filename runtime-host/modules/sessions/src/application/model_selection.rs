@@ -1,5 +1,7 @@
 use serde::{Serialize, Serializer};
 
+use crate::state::SessionModelState;
+
 pub use super::endpoint::NativeEndpoint;
 
 const MAX_MODEL_SELECTION_ID_BYTES: usize = 4096;
@@ -50,6 +52,7 @@ pub struct MatchaSessionModelRuntimeCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRuntimeModelFacts {
     pub current_model: Option<String>,
+    pub model_state: Option<SessionModelState>,
     pub agent_id: Option<String>,
     pub model_override_source: Option<SessionRuntimeModelSource>,
 }
@@ -352,7 +355,7 @@ impl SessionModelSelectionRejection {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionModelSelectionOutcome {
-    Succeeded,
+    Succeeded { model_state: SessionModelState },
     TargetRejected {
         reason: SessionModelSelectionRejection,
         diagnostic: Option<SessionModelSelectionDiagnostic>,
@@ -418,20 +421,41 @@ impl Serialize for SessionModelSelectionOutcome {
         S: Serializer,
     {
         match self {
-            Self::Succeeded => OutcomeTag::Succeeded,
-            Self::TargetRejected { .. } => OutcomeTag::TargetRejected,
-            Self::OutcomeUnknown => OutcomeTag::OutcomeUnknown,
-            Self::Unsupported => OutcomeTag::Unsupported,
-            Self::Unavailable => OutcomeTag::Unavailable,
+            Self::Succeeded { model_state } => SucceededOutcomeTag::new(model_state).serialize(serializer),
+            Self::TargetRejected { .. } => OutcomeTag::TargetRejected.serialize(serializer),
+            Self::OutcomeUnknown => OutcomeTag::OutcomeUnknown.serialize(serializer),
+            Self::Unsupported => OutcomeTag::Unsupported.serialize(serializer),
+            Self::Unavailable => OutcomeTag::Unavailable.serialize(serializer),
         }
-        .serialize(serializer)
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SucceededOutcomeTag<'a> {
+    #[serde(rename = "outcome")]
+    outcome: SucceededOutcome,
+    model_state: &'a SessionModelState,
+}
+
+impl<'a> SucceededOutcomeTag<'a> {
+    fn new(model_state: &'a SessionModelState) -> Self {
+        Self {
+            outcome: SucceededOutcome::Succeeded,
+            model_state,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SucceededOutcome {
+    Succeeded,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 enum OutcomeTag {
-    Succeeded,
     TargetRejected,
     OutcomeUnknown,
     Unsupported,

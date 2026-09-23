@@ -24,11 +24,6 @@ const INSTALL_PLAN_HOST_CAPABILITIES: &[CapabilityKey] = &[
     CapabilityKey::new("host.observation"),
 ];
 
-pub(crate) struct SystemModuleInstallPlan {
-    pub(crate) capability_catalog: ModuleDescriptor,
-    pub(crate) private_control: ModuleDescriptor,
-}
-
 pub(crate) fn install_plan_capabilities() -> &'static [CapabilityKey] {
     INSTALL_PLAN_HOST_CAPABILITIES
 }
@@ -36,9 +31,9 @@ pub(crate) fn install_plan_capabilities() -> &'static [CapabilityKey] {
 pub(crate) fn system_module_install_plan(
     verifier: CapabilityVerifier,
     capability_catalog: CapabilityCatalog,
-) -> SystemModuleInstallPlan {
-    SystemModuleInstallPlan {
-        capability_catalog: capability_catalog.descriptor(verifier),
-        private_control: private_control::descriptor(),
-    }
+) -> (ModuleDescriptor, ModuleDescriptor) {
+    (
+        capability_catalog.descriptor(verifier),
+        private_control::descriptor(),
+    )
 }

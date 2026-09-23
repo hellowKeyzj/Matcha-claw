@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import { Bot, CheckCircle2, FileCode2, Flag, GitMerge, UserCheck, Zap, type LucideIcon } from 'lucide-react';
+import { StableScrollArea } from '@/components/scroll';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import type {
   TeamGraphEdgeAction,
@@ -842,6 +843,12 @@ export function TeamRunGraphCanvas({
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [nodeSizes, setNodeSizes] = useState<Record<string, NodeSize>>({});
   const canvasScrollerRef = useRef<HTMLDivElement | null>(null);
+  const getCanvasScroller = useCallback(() => {
+    if (canvasScrollerRef.current?.isConnected) return canvasScrollerRef.current;
+    const element = document.querySelector<HTMLDivElement>('[data-team-graph-canvas="true"]');
+    canvasScrollerRef.current = element;
+    return element;
+  }, []);
   const nodeElementsRef = useRef<Record<string, HTMLDivElement | null>>({});
   const suppressClickNodeIdRef = useRef<string | null>(null);
 
@@ -1200,7 +1207,7 @@ export function TeamRunGraphCanvas({
   const handleAddNode = async (kind: TeamGraphCanvasNodeKind): Promise<void> => {
     const paletteItem = NODE_PALETTE.find((item) => item.kind === kind)!;
     const nodeId = createProjectionNodeId(kind);
-    const position = nextNodePosition(positionedNodes, nodeSizes, readCanvasViewport(canvasScrollerRef.current));
+    const position = nextNodePosition(positionedNodes, nodeSizes, readCanvasViewport(getCanvasScroller()));
     const node: TeamGraphNodeRecord = {
       nodeId,
       kind,
@@ -1314,7 +1321,7 @@ export function TeamRunGraphCanvas({
       </div>
 
       <div className="grid gap-3 2xl:grid-cols-[minmax(0,1.7fr)_24rem]">
-        <div ref={canvasScrollerRef} className="relative min-h-[520px] overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner">
+        <StableScrollArea data-team-graph-canvas="true" className="relative min-h-[520px] overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner">
           <div
             aria-label={labels.workflowCanvas}
             className="relative rounded-xl"
@@ -1380,7 +1387,7 @@ export function TeamRunGraphCanvas({
                       strokeLinecap="round"
                       strokeDasharray={edgeVisual.dashArray}
                       markerEnd={`url(#${edgeVisual.markerId})`}
-                      className="pointer-events-none transition-all"
+                      className="pointer-events-none"
                     />
                     {shouldShowEdgeLabel ? (
                       <foreignObject x={labelX - 54} y={labelY - 12} width="108" height="26">
@@ -1437,7 +1444,7 @@ export function TeamRunGraphCanvas({
                   onPointerDown={(event) => handleNodePointerDown(event, node)}
                   onPointerMove={handleNodePointerMove}
                   onPointerUp={handleNodePointerUp}
-                  className={`absolute cursor-grab overflow-hidden rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 active:cursor-grabbing ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
+                  className={`absolute cursor-grab overflow-hidden rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 active:cursor-grabbing ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
                   style={{ left: node.x, top: node.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT }}
                 >
                   <div className={`h-1 w-full ${visual.accentClassName}`} />
@@ -1483,12 +1490,12 @@ export function TeamRunGraphCanvas({
               );
             })}
           </div>
-        </div>
+        </StableScrollArea>
 
         <aside className="space-y-3">
           <div className="rounded-xl border border-border/80 bg-card p-3 shadow-sm">
             <div className="text-sm font-medium">{labels.nodePalette}</div>
-            <div className="mt-3 max-h-[17rem] space-y-2 overflow-y-auto pr-1 text-xs">
+            <StableScrollArea className="mt-3 max-h-[17rem] space-y-2 overflow-y-auto pr-1 text-xs">
               {NODE_PALETTE.map((item) => {
                 const visual = NODE_VISUALS[item.kind];
                 const PaletteIcon = visual.Icon;
@@ -1496,12 +1503,12 @@ export function TeamRunGraphCanvas({
                   <button
                     key={item.kind}
                     type="button"
-                    className={`group relative flex w-full items-center gap-3 overflow-hidden rounded-[18px] border p-3 text-left text-foreground shadow-sm shadow-slate-900/10 transition hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/15 disabled:cursor-not-allowed disabled:opacity-60 ${visual.paletteClassName}`}
+                    className={`group relative flex w-full items-center gap-3 overflow-hidden rounded-[18px] border p-3 text-left text-foreground shadow-sm shadow-slate-900/10 transition hover:shadow-md hover:shadow-slate-900/15 disabled:cursor-not-allowed disabled:opacity-60 ${visual.paletteClassName}`}
                     onClick={() => void handleAddNode(item.kind)}
                     disabled={isSaving}
                   >
                     <span className={`absolute inset-y-0 left-0 w-1 ${visual.accentClassName}`} />
-                    <span className={`grid h-11 w-11 shrink-0 place-items-center border border-border/90 ${visual.iconClassName} ${visual.iconShape} transition group-hover:scale-105`}>
+                    <span className={`grid h-11 w-11 shrink-0 place-items-center border border-border/90 ${visual.iconClassName} ${visual.iconShape}`}>
                       <PaletteIcon className={`h-4 w-4 ${item.kind === 'join' ? '-rotate-45' : ''}`} />
                     </span>
                     <span className="min-w-0 flex-1">
@@ -1517,7 +1524,7 @@ export function TeamRunGraphCanvas({
                   </button>
                 );
               })}
-            </div>
+            </StableScrollArea>
           </div>
 
 

@@ -2,7 +2,7 @@ use std::{fmt, str};
 
 use serde_json::{Map, Value};
 
-use super::state_dir::CanonicalStateDir;
+use platform::state_dir::CanonicalStateDir;
 
 const CANONICAL_CONFIG_FILE: &str = "openclaw.json";
 const CONFIG_LIMIT_BYTES: usize = 1024 * 1024;

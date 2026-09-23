@@ -5,6 +5,5 @@ pub mod port_guard;
 pub mod readiness;
 pub mod recovery;
 pub mod restart;
-pub mod state_dir;
 pub mod stdio;
 pub mod stop;

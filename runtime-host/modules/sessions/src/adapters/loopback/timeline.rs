@@ -357,7 +357,7 @@ mod tests {
         SessionView {
             session_key: "session-1".to_owned(),
             endpoint_session_id: None,
-            model: None,
+            model_state: None,
             identity: SessionIdentity::new(
                 "session-1",
                 SessionProvider::OpenClaw,

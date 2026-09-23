@@ -9,11 +9,11 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
 const buttonVariants = cva(
-  'inline-flex min-w-0 max-w-full items-center justify-center gap-2 overflow-hidden text-ellipsis whitespace-nowrap rounded-[var(--radius-pill)] border border-transparent text-sm font-medium tracking-[-0.01em] ring-offset-background transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/15 focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:shadow-[var(--shadow-focus)] disabled:pointer-events-none disabled:opacity-45',
+  'inline-flex min-w-0 max-w-full items-center justify-center gap-2 overflow-hidden text-ellipsis whitespace-nowrap rounded-[var(--radius-pill)] border border-transparent text-sm font-medium tracking-[-0.01em] ring-offset-background transition-[background-color,border-color,color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/15 focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:shadow-[var(--shadow-focus)] disabled:pointer-events-none disabled:opacity-45',
   {
     variants: {
       variant: {
-        default: 'bg-primary text-primary-foreground shadow-whisper hover:bg-primary/92 hover:shadow-elevated',
+        default: 'bg-primary text-primary-foreground shadow-whisper hover:bg-primary/92',
         destructive:
           'bg-destructive text-destructive-foreground shadow-whisper hover:bg-destructive/90',
         outline:

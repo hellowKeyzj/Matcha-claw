@@ -5,7 +5,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
 };
 
-use crate::lifecycle::state_dir::StateDirHandle;
+use platform::state_dir::StateDirHandle;
 
 const CANONICAL_CONFIG_FILE: &[u8] = b"openclaw.json\0";
 const EMPTY_DOCUMENT: &[u8] = b"{}\n";
@@ -60,7 +60,7 @@ fn create_temporary_file(directory: &OwnedFd) -> Result<TemporaryFile, ()> {
                 directory.as_raw_fd(),
                 name.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                TEMPORARY_MODE,
+                TEMPORARY_MODE as libc::c_uint,
             )
         };
         if descriptor >= 0 {
@@ -145,7 +145,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use crate::lifecycle::state_dir::CanonicalStateDir;
+    use platform::state_dir::CanonicalStateDir;
 
     use super::*;
 

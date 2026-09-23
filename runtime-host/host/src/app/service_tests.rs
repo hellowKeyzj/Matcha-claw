@@ -1,3 +1,4 @@
+use platform::state_dir::CanonicalStateDir;
 use std::{
     fs,
     net::TcpListener,
@@ -12,8 +13,7 @@ use std::{
 use matcha_agent::lifecycle::secret::Secret;
 use openclaw::{
     gateway::{auth::GatewaySecret, client::GatewayClientMetadata},
-    lifecycle::state_dir::CanonicalStateDir,
-    projection::workspace::WorkspaceProjectionFixture,
+    workspace::WorkspaceProjectionFixture,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -74,7 +74,6 @@ async fn control_service_emits_bounded_host_health_and_shuts_down_on_eof() {
     input.matcha.bun_executable = root.base.join("missing-matcha-bun");
     input.open_claw.electron_image = root.base.join("missing-openclaw-image");
     input.open_claw.port = free_local_port();
-    input.cron_transport_port = free_local_port();
     disable_openclaw_autostart(&input);
     let (mut parent_input, control_input) = duplex(8 * 1024);
     let (control_output, mut parent_output) = duplex(8 * 1024);
@@ -395,7 +394,6 @@ fn host_input(root: &TestRoot) -> HostInput {
         app_log_dir: root.state_parent.join("userdata-logs"),
         parent_callback_base_url: "http://127.0.0.1:34100".into(),
         parent_callback_dispatch_token: "test-parent-dispatch-token".into(),
-        cron_transport_port: 18_791,
         runtime_observation: RuntimeObservationConfig::off(),
     }
 }

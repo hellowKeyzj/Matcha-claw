@@ -265,36 +265,23 @@ pub(crate) struct CommandRejection {
 #[cfg_attr(test, derive(Deserialize))]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum CommandOutcome {
-    Succeeded { result: CommandResult },
-    Unknown { result: CommandResult },
+    Succeeded { result: Value },
+    Unknown { result: Value },
     Rejected { error: CommandRejection },
     TimedOut,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(untagged)]
-pub(crate) enum CommandResult {
-    Public(PublicControlJson),
-    Private(PrivateControlJson),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[cfg_attr(test, derive(Deserialize))]
-#[serde(transparent)]
-pub(crate) struct PublicControlJson(Value);
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[cfg_attr(test, derive(Deserialize))]
-#[serde(transparent)]
-pub(crate) struct PrivateControlJson(Value);
-
 impl CommandOutcome {
-    pub(crate) fn succeeded(result: CommandResult) -> Self {
-        Self::Succeeded { result }
+    pub(crate) fn succeeded(result: impl Into<Value>) -> Self {
+        Self::Succeeded {
+            result: result.into(),
+        }
     }
 
-    pub(crate) fn unknown(result: CommandResult) -> Self {
-        Self::Unknown { result }
+    pub(crate) fn unknown(result: impl Into<Value>) -> Self {
+        Self::Unknown {
+            result: result.into(),
+        }
     }
 
     pub(crate) fn rejected(code: RejectionCode, message: &'static str) -> Self {
@@ -308,68 +295,6 @@ impl CommandOutcome {
 
     pub(crate) const fn timed_out() -> Self {
         Self::TimedOut
-    }
-}
-
-impl CommandResult {
-    pub(crate) fn public(value: impl Into<Value>) -> Self {
-        Self::Public(PublicControlJson::new(value))
-    }
-
-    pub(crate) fn private(value: impl Into<Value>) -> Self {
-        Self::Private(PrivateControlJson::new(value))
-    }
-
-    pub(crate) fn as_value(&self) -> &Value {
-        match self {
-            Self::Public(value) => value.as_value(),
-            Self::Private(value) => value.as_value(),
-        }
-    }
-
-    pub(crate) fn into_value(self) -> Value {
-        match self {
-            Self::Public(value) => value.into_value(),
-            Self::Private(value) => value.into_value(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl<'de> Deserialize<'de> for CommandResult {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Ok(Self::private(Value::deserialize(deserializer)?))
-    }
-}
-
-impl PublicControlJson {
-    pub(crate) fn new(value: impl Into<Value>) -> Self {
-        Self(value.into())
-    }
-
-    fn as_value(&self) -> &Value {
-        &self.0
-    }
-
-    fn into_value(self) -> Value {
-        self.0
-    }
-}
-
-impl PrivateControlJson {
-    pub(crate) fn new(value: impl Into<Value>) -> Self {
-        Self(value.into())
-    }
-
-    fn as_value(&self) -> &Value {
-        &self.0
-    }
-
-    fn into_value(self) -> Value {
-        self.0
     }
 }
 

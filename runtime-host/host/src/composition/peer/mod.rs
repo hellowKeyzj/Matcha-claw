@@ -8,8 +8,8 @@ mod status;
 
 pub(crate) use actor::{PeerOwner, PeerStartupState};
 pub(crate) use command::{
-    PeerCommand, RestartOpenClawError, RuntimeRestartCommandError, RuntimeStartCommandError,
-    RuntimeStopCommandError, StartOpenClawError, StopOpenClawError,
+    AutostartOpenClawError, PeerCommand, RuntimeRestartCommandError, RuntimeStartCommandError,
+    RuntimeStopCommandError,
 };
 pub(crate) use handle::PeerHandle;
 pub(crate) use query::PeerQuery;

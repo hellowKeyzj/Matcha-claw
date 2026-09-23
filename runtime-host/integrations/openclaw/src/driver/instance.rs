@@ -11,6 +11,8 @@ use foundation::process::{ProcessContainment, supervise};
 use platform::{listener_identity::ListenerIdentity, parent_callback::ParentShellOpenPath};
 use tokio::sync::{Mutex, mpsc, watch};
 
+use platform::state_dir::CanonicalStateDir;
+
 use crate::{
     gateway::{
         auth::GatewaySecret,
@@ -22,7 +24,6 @@ use crate::{
         logs::{LifecycleDiagnostic, LifecycleDiagnosticState, LifecycleLogBuffer},
         recovery::{DoctorRepairError, OpenClawDoctorRepair, OpenClawStartRecovery},
         restart::OpenClawRestartPolicy,
-        state_dir::CanonicalStateDir,
         stdio::OpenClawStdioActivation,
     },
     port::{
@@ -62,10 +63,11 @@ pub struct OpenClawDriver {
     pub control_readiness: watch::Receiver<u64>,
     pub lifecycle_logs: LifecycleLogBuffer,
     pub parent_callback: OpenClawDriverParentCallbackHandle,
-    pub workspace: crate::workspace::OpenClawWorkspaceAccess,
-    pub matcha_workspace_templates: crate::projection::workspace::MatchaWorkspaceTemplateDirectory,
-    pub workspace_context: Option<crate::projection::workspace::WorkspaceContextDirectory>,
-    pub usage: crate::usage::UsageProjection,
+    pub workspace: crate::surfaces::workspace::OpenClawWorkspaceAccess,
+    pub matcha_workspace_templates:
+        crate::native_config::workspace::MatchaWorkspaceTemplateDirectory,
+    pub workspace_context: Option<crate::native_config::workspace::WorkspaceContextDirectory>,
+    pub usage: crate::surfaces::usage::UsageProjection,
     pub electron_image: PathBuf,
     pub working_directory: PathBuf,
     pub state_dir: CanonicalStateDir,
@@ -74,8 +76,8 @@ pub struct OpenClawDriver {
     pub openclaw_dir: PathBuf,
     pub managed_plugin_root: PathBuf,
     pub companion_skill_source_root: PathBuf,
-    pub subagent_templates: crate::projection::subagent_templates::SubagentTemplateDirectory,
-    pub weixin_login: crate::operations::weixin_login::WeixinLogin,
+    pub subagent_templates: crate::native_config::subagent_templates::SubagentTemplateDirectory,
+    pub weixin_login: crate::surfaces::channels::gateway::weixin_login::WeixinLogin,
 }
 
 pub struct PreparedOpenClaw {
@@ -87,9 +89,10 @@ pub struct PreparedOpenClaw {
     pub openclaw_dir: PathBuf,
     pub managed_plugin_root: PathBuf,
     pub companion_skill_source_root: PathBuf,
-    pub subagent_templates: crate::projection::subagent_templates::SubagentTemplateDirectory,
-    pub matcha_workspace_templates: crate::projection::workspace::MatchaWorkspaceTemplateDirectory,
-    pub workspace_context: Option<crate::projection::workspace::WorkspaceContextDirectory>,
+    pub subagent_templates: crate::native_config::subagent_templates::SubagentTemplateDirectory,
+    pub matcha_workspace_templates:
+        crate::native_config::workspace::MatchaWorkspaceTemplateDirectory,
+    pub workspace_context: Option<crate::native_config::workspace::WorkspaceContextDirectory>,
     endpoint: GatewayEndpoint,
     pub state_dir: CanonicalStateDir,
     pub secret: Arc<GatewaySecret>,
@@ -102,17 +105,17 @@ pub struct PreparedOpenClaw {
 }
 
 impl OpenClawDriver {
-    pub fn installation_status(&self) -> Option<crate::projection::installation::Status> {
-        crate::projection::installation::Status::inspect(&self.openclaw_dir)
+    pub fn installation_status(&self) -> Option<crate::native_config::installation::Status> {
+        crate::native_config::installation::Status::inspect(&self.openclaw_dir)
     }
 
     pub fn runtime_paths(
         &self,
     ) -> Result<
-        crate::projection::runtime_paths::RuntimePaths,
-        crate::projection::runtime_paths::RuntimePathsError,
+        crate::native_config::runtime_paths::RuntimePaths,
+        crate::native_config::runtime_paths::RuntimePathsError,
     > {
-        crate::projection::runtime_paths::RuntimePaths::inspect(
+        crate::native_config::runtime_paths::RuntimePaths::inspect(
             &self.openclaw_dir,
             &self.state_dir,
             &self.workspace,
@@ -122,29 +125,33 @@ impl OpenClawDriver {
     pub fn cli_command(
         &self,
     ) -> Result<
-        crate::projection::runtime_paths::CliCommand,
-        crate::projection::runtime_paths::CliCommandError,
+        crate::native_config::runtime_paths::CliCommand,
+        crate::native_config::runtime_paths::CliCommandError,
     > {
-        crate::projection::runtime_paths::CliCommand::inspect(&self.openclaw_dir)
+        crate::native_config::runtime_paths::CliCommand::inspect(&self.openclaw_dir)
     }
 
     pub fn tool_permission_mode(
         &self,
-    ) -> Result<crate::projection::tool_permission::Mode, crate::projection::tool_permission::Error>
-    {
-        crate::projection::tool_permission::Mode::read(self.state_dir.clone())
+    ) -> Result<
+        crate::native_config::tool_permission::Mode,
+        crate::native_config::tool_permission::Error,
+    > {
+        crate::native_config::tool_permission::Mode::read(self.state_dir.clone())
     }
 
     pub fn set_tool_permission_mode(
         &self,
-        mode: crate::projection::tool_permission::Mode,
-    ) -> Result<crate::projection::tool_permission::Effect, crate::projection::tool_permission::Error>
-    {
+        mode: crate::native_config::tool_permission::Mode,
+    ) -> Result<
+        crate::native_config::tool_permission::Effect,
+        crate::native_config::tool_permission::Error,
+    > {
         mode.apply(self.state_dir.clone())
     }
 
-    pub fn plugins(&self) -> crate::projection::plugins::PluginProjection {
-        crate::projection::plugins::PluginProjection::new(
+    pub fn plugins(&self) -> crate::native_config::plugins::PluginProjection {
+        crate::native_config::plugins::PluginProjection::new(
             self.state_dir.clone(),
             self.companion_skill_source_root.clone(),
             self.managed_plugin_root.clone(),
@@ -173,10 +180,10 @@ impl OpenClawDriver {
     pub fn subagent_template_catalog(
         &self,
     ) -> Result<
-        crate::projection::subagent_templates::Catalog,
-        crate::projection::subagent_templates::SubagentTemplateError,
+        crate::native_config::subagent_templates::Catalog,
+        crate::native_config::subagent_templates::SubagentTemplateError,
     > {
-        crate::projection::subagent_templates::SubagentTemplateCatalog::list(
+        crate::native_config::subagent_templates::SubagentTemplateCatalog::list(
             &self.subagent_templates,
         )
     }
@@ -185,10 +192,10 @@ impl OpenClawDriver {
         &self,
         id: &str,
     ) -> Result<
-        crate::projection::subagent_templates::Detail,
-        crate::projection::subagent_templates::SubagentTemplateError,
+        crate::native_config::subagent_templates::Detail,
+        crate::native_config::subagent_templates::SubagentTemplateError,
     > {
-        crate::projection::subagent_templates::SubagentTemplateCatalog::detail(
+        crate::native_config::subagent_templates::SubagentTemplateCatalog::detail(
             &self.subagent_templates,
             id,
         )
@@ -218,37 +225,39 @@ impl OpenClawDriver {
         let team_run_mcp_state_dir = input.team_run_mcp_state_dir.clone();
         let state_dir = input.state_dir.clone();
         let subagent_templates =
-            crate::projection::subagent_templates::SubagentTemplateDirectory::try_new(
+            crate::native_config::subagent_templates::SubagentTemplateDirectory::try_new(
                 input.subagent_template_dir.clone(),
             )
             .map_err(|_| {
                 ConstructionError::WorkspaceProjection(
-                    crate::projection::workspace::WorkspaceProjectionError::TemplateUnavailable,
+                    crate::native_config::workspace::WorkspaceProjectionError::TemplateUnavailable,
                 )
             })?;
         let matcha_workspace_templates =
-            crate::projection::workspace::MatchaWorkspaceTemplateDirectory::from_runtime_layout(
+            crate::native_config::workspace::MatchaWorkspaceTemplateDirectory::from_runtime_layout(
                 &input.working_directory,
                 &input.openclaw_dir,
             )
             .map_err(ConstructionError::WorkspaceProjection)?;
         let workspace_context =
-            crate::projection::workspace::WorkspaceContextDirectory::from_runtime_layout(
+            crate::native_config::workspace::WorkspaceContextDirectory::from_runtime_layout(
                 &input.working_directory,
                 &input.openclaw_dir,
             )
             .map_err(ConstructionError::WorkspaceProjection)?;
-        crate::projection::settings::ensure_default_session_idle(state_dir.clone())
+        crate::native_config::settings::ensure_default_session_idle(state_dir.clone())
             .map_err(ConstructionError::Projection)?;
-        crate::projection::control_ui::ensure_matcha_operator_device_auth_policy(state_dir.clone())
-            .map_err(ConstructionError::ControlUiPolicy)?;
+        crate::native_config::control_ui::ensure_matcha_operator_device_auth_policy(
+            state_dir.clone(),
+        )
+        .map_err(ConstructionError::ControlUiPolicy)?;
         if !matches!(
-            crate::projection::connector::preset::project_preset_team_run_mcp_server(
+            crate::native_config::connector::preset::project_preset_team_run_mcp_server(
                 state_dir.clone(),
                 &team_run_mcp_executable,
                 &team_run_mcp_state_dir,
             ),
-            crate::projection::connector::external::ConnectorProjectionEffect::Written { .. }
+            crate::native_config::connector::external::ConnectorProjectionEffect::Written { .. }
         ) {
             return Err(ConstructionError::PresetMcpProjection);
         }
@@ -332,15 +341,16 @@ impl PreparedOpenClaw {
         session_events: mpsc::Sender<sessions_module::command::SessionIngressEvent>,
         parent_callback: Arc<dyn ParentShellOpenPath>,
     ) -> Result<OpenClawDriver, ConstructionError> {
-        let pairing = crate::operations::channel_pairing::ChannelPairingOperation::try_new(
-            self.electron_image.clone(),
-            self.entry.clone(),
-            self.openclaw_dir.clone(),
-            self.state_dir.as_path().to_owned(),
-        )
-        .expect("prepared OpenClaw pairing command inputs must be absolute");
+        let pairing =
+            crate::surfaces::channels::gateway::pairing::ChannelPairingOperation::try_new(
+                self.electron_image.clone(),
+                self.entry.clone(),
+                self.openclaw_dir.clone(),
+                self.state_dir.as_path().to_owned(),
+            )
+            .expect("prepared OpenClaw pairing command inputs must be absolute");
         let credentials =
-            crate::operations::channel_credentials::ChannelCredentialsOperation::try_new(
+            crate::surfaces::channels::gateway::credentials::ChannelCredentialsOperation::try_new(
                 self.electron_image.clone(),
                 self.entry.clone(),
                 self.openclaw_dir.clone(),
@@ -405,9 +415,11 @@ impl PreparedOpenClaw {
             OpenClawRestartPolicy,
         );
 
-        let workspace = crate::workspace::OpenClawWorkspaceAccess::new(self.state_dir.clone());
-        let weixin_login =
-            crate::operations::weixin_login::WeixinLogin::new(self.state_dir.clone());
+        let workspace =
+            crate::surfaces::workspace::OpenClawWorkspaceAccess::new(self.state_dir.clone());
+        let weixin_login = crate::surfaces::channels::gateway::weixin_login::WeixinLogin::new(
+            self.state_dir.clone(),
+        );
         let control_ui_url = self.control_ui_url;
         Ok(OpenClawDriver {
             owner: StdMutex::new(Some(SupervisorOwner::new(supervisor))),
@@ -441,9 +453,9 @@ pub enum ConstructionError {
     Endpoint(GatewayClientError),
     ListenerIdentity,
     ControlUiUrl(ControlUiUrlError),
-    ControlUiPolicy(crate::projection::control_ui::Error),
-    WorkspaceProjection(crate::projection::workspace::WorkspaceProjectionError),
-    Projection(crate::projection::settings::SettingsProjectionError),
+    ControlUiPolicy(crate::native_config::control_ui::Error),
+    WorkspaceProjection(crate::native_config::workspace::WorkspaceProjectionError),
+    Projection(crate::native_config::settings::SettingsProjectionError),
     PresetMcpProjection,
     Launch(LaunchError),
     DoctorRepair(DoctorRepairError),
