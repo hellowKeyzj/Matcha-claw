@@ -6,7 +6,7 @@ import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph, createDraftCurrentConversation } from '@/stores/chat/session-runtime-graph';
 import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import type { ChatCurrentConversation } from '@/stores/chat/types';
-import type { AgentScope, RuntimeEndpointRef, SessionIdentity } from '../../electron/desktop-contract/runtime-address';
+import type { AgentScope, RuntimeEndpointRef, SessionIdentity } from '../../src/types/desktop/runtime-address';
 import { completeFact, sessionView, windowView } from './helpers/session-fixtures';
 
 const hostSessionNewMock = vi.fn();
@@ -65,6 +65,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       protocolId: 'openclaw-v4',
       runtimeEndpointId: 'openclaw-local',
       sessionIdentity,
+      ownership: { kind: 'ordinary' as const },
       kind: sessionKey.endsWith(':main') ? 'main' : 'session',
       preferred: sessionKey.endsWith(':main'),
       ...overrides?.meta,

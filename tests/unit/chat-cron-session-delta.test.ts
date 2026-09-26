@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSessionIdentityKey } from '../../electron/desktop-contract/runtime-address';
+import { buildSessionIdentityKey } from '../../src/types/desktop/runtime-address';
 import {
   applySessionDelta,
   applySessionView,

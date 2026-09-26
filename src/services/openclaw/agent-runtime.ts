@@ -3,7 +3,7 @@ import { fetchLatestAssistantSnapshot } from '@/services/runtime/session-runtime
 import type {
   AgentScope,
   SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 
 interface AgentRunResult {
   runId?: unknown;

@@ -1,5 +1,5 @@
-import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
-import { isSessionOwnership, type SessionOwnership } from '../../../electron/desktop-contract/session-ownership';
+import type { SessionIdentity } from '../desktop/runtime-address';
+import { isSessionOwnership, type SessionOwnership } from '../desktop/session-ownership';
 import type { SessionRenderItem } from './render-item';
 import type { SessionRuntimeStateSnapshot } from './runtime-state';
 import type { TaskSnapshotEvent } from './task-snapshot';

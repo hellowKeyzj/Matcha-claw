@@ -38,7 +38,7 @@ import type {
 } from '@/stores/chat';
 import type {
   SessionIdentity,
-} from '../../../../electron/desktop-contract/runtime-address';
+} from '../../../types/desktop/runtime-address';
 import type { WorkspaceFileContext } from '@/lib/host-api';
 import type { GeneratedFile } from '@/lib/generated-files';
 

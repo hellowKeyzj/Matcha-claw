@@ -2,10 +2,11 @@ import { hostSessionPrompt } from '@/lib/host-api';
 import {
   logSessionTrace,
   summarizeIdentifier,
+  summarizeSessionIdentity,
 } from '@/lib/session-trace';
 import type {
   SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import { decodeSessionProjectionEvent, type SessionProjectionEvent } from '../../types/session/update-event';
 import type { ChatSendAttachment } from './types';
 
@@ -34,14 +35,7 @@ export async function sendChatTransport(
   logSessionTrace('send.transport.request', params.traceId, {
     sessionKey: summarizeIdentifier(params.sessionIdentity.sessionKey),
     endpointSessionId: summarizeIdentifier(params.endpointSessionId),
-    sessionIdentity: {
-      endpoint: {
-        runtimeAdapterId: params.sessionIdentity.endpoint.runtimeAdapterId,
-        runtimeInstanceId: params.sessionIdentity.endpoint.runtimeInstanceId,
-      },
-      agentId: summarizeIdentifier(params.sessionIdentity.agentId),
-      sessionKey: summarizeIdentifier(params.sessionIdentity.sessionKey),
-    },
+    sessionIdentity: summarizeSessionIdentity(params.sessionIdentity),
     idempotencyKey: summarizeIdentifier(params.idempotencyKey),
     messageLength: params.message.length,
     attachmentCount: attachments.length,

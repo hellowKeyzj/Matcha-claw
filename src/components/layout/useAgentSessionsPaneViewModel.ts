@@ -13,7 +13,7 @@ import type {
   ChatSessionRuntimeEndpointNode,
   ChatSessionRuntimeEndpointTarget,
 } from '@/stores/chat/types';
-import type { AgentScope } from '../../../electron/desktop-contract/runtime-address';
+import type { AgentScope } from '../../types/desktop/runtime-address';
 import {
   buildAgentSessionSwitchboardModel,
   isAgentSessionSwitchboardAutomationSession,

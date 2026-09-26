@@ -14,9 +14,9 @@ import {
   type RuntimeEndpointRef,
   type RuntimeScope,
   type SessionIdentity,
-} from '../../electron/desktop-contract/runtime-address';
-import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
-import type { CapabilityDescriptor } from '../../electron/desktop-contract/capability-descriptor';
+} from '../types/desktop/runtime-address';
+import type { CapabilityTarget } from '../types/desktop/capability-target';
+import type { CapabilityDescriptor } from '../types/desktop/capability-descriptor';
 import type { RuntimeAdapterInstanceSummary, RuntimeAdapterSummary, RuntimeConnectorEndpointLifecycleResult, RuntimeConnectorSummary, RuntimeEndpointSummary } from '../types/runtime-topology';
 import {
   logSessionTrace,

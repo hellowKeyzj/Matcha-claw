@@ -10,7 +10,7 @@ import { FilePreviewBody, type FilePreviewMode } from './FilePreviewBody';
 import { resolveWorkspaceRelativePath, type ArtifactPreviewTarget } from './types';
 import type {
   SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 
 interface WorkspaceBrowserBodyProps {
   rootPath: string | null;

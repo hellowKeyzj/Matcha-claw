@@ -1,9 +1,9 @@
-import type { CapabilityDescriptor } from '../../../desktop-contract/capability-descriptor';
+import type { CapabilityDescriptor } from '../../../../src/types/desktop/capability-descriptor';
 import {
   buildCapabilityScopeKey,
   validateRuntimeScope,
   type RuntimeScope,
-} from '../../../desktop-contract/runtime-address';
+} from '../../../../src/types/desktop/runtime-address';
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from './client';
 

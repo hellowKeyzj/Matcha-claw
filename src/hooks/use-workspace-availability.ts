@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { hostFileListDir } from '@/lib/host-api';
-import type { SessionIdentity } from '../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../types/desktop/runtime-address';
 
 export type WorkspaceAvailability = 'checking' | 'available' | 'unavailable';
 

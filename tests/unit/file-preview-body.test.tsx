@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { FilePreviewBody } from '@/components/file-preview/FilePreviewBody';
 import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
-import type { SessionIdentity } from '../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../../src/types/desktop/runtime-address';
 
 const hostFileReadTextMock = vi.fn();
 const hostFileReadBinaryMock = vi.fn();

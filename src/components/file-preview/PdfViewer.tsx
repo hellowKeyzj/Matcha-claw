@@ -5,7 +5,7 @@ import { hostFileReadBinary } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
 import type {
   SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 
 const PDF_MAX_BYTES = 50 * 1024 * 1024;
 const PDF_VIEWER_PARAMS = 'toolbar=0&navpanes=0&scrollbar=1&view=FitH&zoom=page-width';

@@ -6,7 +6,7 @@ import {
   projectSessionViewItems,
   reconcileSessionItems,
 } from '@/stores/chat/store-state-helpers';
-import { buildSessionIdentityKey } from '../../electron/desktop-contract/runtime-address';
+import { buildSessionIdentityKey } from '../../src/types/desktop/runtime-address';
 import type { SessionWireItem } from '@/types/session/snapshot';
 import type { SessionRenderItem } from '@/types/session/render-item';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Task, TaskListSnapshot } from '@/services/openclaw/task-manager-client';
-import type { SessionIdentity } from '../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../../src/types/desktop/runtime-address';
 
 function createOpenClawTestSessionIdentity(sessionKey: string, agentId = 'main'): SessionIdentity {
   return {

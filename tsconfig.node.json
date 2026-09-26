@@ -28,5 +28,5 @@
       "@electron/e2e-fixture-loader": ["electron/main/e2e-fixture-loader.noop.ts"]
     }
   },
-  "include": ["electron", "vite.config.ts"]
+  "include": ["electron", "src/types/desktop", "vite.config.ts"]
 }

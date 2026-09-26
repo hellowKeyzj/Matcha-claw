@@ -12,7 +12,7 @@ import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph } from '@/stores/chat/session-runtime-graph';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
-import type { RuntimeEndpointRef } from '../../electron/desktop-contract/runtime-address';
+import type { RuntimeEndpointRef } from '../../src/types/desktop/runtime-address';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 
@@ -24,11 +24,10 @@ const useChatStore = realUseChatStore;
 
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
+  const t = (key: string) => key;
   return {
     ...actual,
-    useTranslation: () => ({
-      t: (key: string) => key,
-    }),
+    useTranslation: () => ({ t }),
   };
 });
 
@@ -549,6 +548,7 @@ describe('chat 顶层订阅收口', () => {
           ...state.loadedSessions,
           'agent:main:main': buildSessionRecord({
             sessionKey: 'agent:main:main',
+            meta: state.loadedSessions['agent:main:main']!.meta,
             messages: [
               {
                 id: 'assistant-1',

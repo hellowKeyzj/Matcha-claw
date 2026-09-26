@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareAppVersions, isUpdateVersionNewer } from '../../electron/desktop-contract/update-version';
+import { compareAppVersions, isUpdateVersionNewer } from '../../src/types/desktop/update-version';
 
 describe('update version comparison', () => {
   it('treats lower and equal release versions as not newer', () => {

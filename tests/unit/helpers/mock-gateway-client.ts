@@ -1,6 +1,6 @@
 import { vi } from 'vitest';
 import * as hostApiModule from '@/lib/host-api';
-import type { RuntimeEndpointRef, RuntimeScope } from '../../../electron/desktop-contract/runtime-address';
+import type { RuntimeEndpointRef, RuntimeScope } from '../../../src/types/desktop/runtime-address';
 
 type GatewayRpcEnvelope<TResult = unknown> = {
   success: boolean;

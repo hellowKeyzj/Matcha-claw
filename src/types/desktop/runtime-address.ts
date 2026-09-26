@@ -291,7 +291,8 @@ export function scopeContainsSessionIdentity(scope: RuntimeScope, identity: Sess
     case 'runtime-instance':
     case 'workspace':
     case 'team-run': return runtimeEndpointsEqual(scope.endpoint, identity.endpoint);
-    case 'app': return false;
+    case 'app':
+    case 'provider-routing': return false;
   }
 }
 

@@ -12,7 +12,7 @@ import {
   buildSessionIdentityKey,
   type RuntimeEndpointRef,
   type SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import { buildSessionOperationTarget, type SessionOperationTarget } from './session-operation-target';
 export type { SessionOperationTarget } from './session-operation-target';
 import type { SessionRenderItem } from '../../types/session/render-item';

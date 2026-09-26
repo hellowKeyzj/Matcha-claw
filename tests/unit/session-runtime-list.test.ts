@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildSessionIdentityKey } from '../../electron/desktop-contract/runtime-address';
+import { buildSessionIdentityKey } from '../../src/types/desktop/runtime-address';
 
 const sessionIdentity = {
   endpoint: {

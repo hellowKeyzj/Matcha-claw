@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { hostSessionContentLoad } from '@/lib/host-api';
-import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../../types/desktop/runtime-address';
 import type { SessionLargeTextMetadata } from '../../types/session/tool-card';
 
 const LARGE_TEXT_CHUNK_LIMIT = 64 * 1024;

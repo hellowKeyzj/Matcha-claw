@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import type {
   SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import { invokeIpc } from '@/lib/api-client';
 import { useSkillsStore } from '@/stores/skills';
 import { cn } from '@/lib/utils';

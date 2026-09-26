@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { ExternalConnectorsTransport } from '../../main/runtime-host-delivery/transport/connectors/external';
-import { validateSessionIdentity } from '../../desktop-contract/runtime-address';
+import { validateSessionIdentity } from '../../../src/types/desktop/runtime-address';
 import { parseJsonBody, sendJson } from '../route-utils';
 
 const INVALID = {

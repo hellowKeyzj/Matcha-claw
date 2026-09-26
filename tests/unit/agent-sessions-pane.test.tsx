@@ -21,8 +21,8 @@ import {
   type AgentScope,
   type RuntimeEndpointRef,
   type SessionIdentity,
-} from '../../electron/desktop-contract/runtime-address';
-import type { SessionOwnership } from '../../electron/desktop-contract/session-ownership';
+} from '../../src/types/desktop/runtime-address';
+import type { SessionOwnership } from '../../src/types/desktop/session-ownership';
 import {
   createOpenClawTestSessionIdentity,
   openClawTestRuntimeEndpoint,

@@ -3,7 +3,7 @@ import { buildSessionRuntimeGraph } from './session-runtime-graph';
 import {
   buildSessionIdentityKey,
   type SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import type {
   ApprovalStatus,
   ApprovalItem,
@@ -1595,7 +1595,7 @@ function applyDecodedSessionView(
       runtimeScopeKey: buildRuntimeScopeKey(nextIdentity.endpoint),
       agentId: nextIdentity.agentId,
       protocolId: null,
-      runtimeEndpointId: nextIdentity.endpoint.runtimeInstanceId,
+      runtimeEndpointId: view.identity.endpoint.runtimeInstanceId,
       endpointSessionId: view.endpointSessionId,
       modelState: view.modelState ?? current.meta.modelState,
       sessionIdentity: nextIdentity,

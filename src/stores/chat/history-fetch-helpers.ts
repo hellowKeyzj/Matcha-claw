@@ -5,7 +5,7 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
-import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../../types/desktop/runtime-address';
 import {
   decodeSessionView,
   type SessionFact,

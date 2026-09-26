@@ -1,7 +1,7 @@
 import { memo } from 'react';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 import { useLargeTextContent } from './large-text-loader';
-import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../../types/desktop/runtime-address';
 import type { SessionLargeTextMetadata } from '../../types/session/tool-card';
 
 interface UserMessageBodyProps {

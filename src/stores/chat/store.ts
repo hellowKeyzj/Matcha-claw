@@ -57,7 +57,7 @@ import {
   buildSessionIdentityKey,
   type AgentScope,
   type RuntimeEndpointRef,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import type { RuntimeEndpointSummary } from '../../types/runtime-topology';
 import { finishChatRunTelemetry } from './telemetry';
 import { buildRuntimeErrorDismissMarker } from './runtime-error-view';

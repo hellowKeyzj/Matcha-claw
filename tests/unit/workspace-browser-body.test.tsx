@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { WorkspaceBrowserBody } from '@/components/file-preview/WorkspaceBrowserBody';
-import type { SessionIdentity } from '../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../../src/types/desktop/runtime-address';
 
 const sessionIdentity: SessionIdentity = {
   endpoint: {

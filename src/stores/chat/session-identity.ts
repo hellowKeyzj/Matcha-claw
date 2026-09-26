@@ -7,7 +7,7 @@ import {
   type RuntimeEndpointRef,
   type RuntimeScope,
   type SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import type { ChatStoreState } from './types';
 import { getSessionMeta } from './store-state-helpers';
 import {

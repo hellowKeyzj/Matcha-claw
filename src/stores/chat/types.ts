@@ -1,10 +1,10 @@
 import type { ResourceStatusState } from '@/lib/resource-state';
-import type { SessionOwnership } from '../../../electron/desktop-contract/session-ownership';
+import type { SessionOwnership } from '../../types/desktop/session-ownership';
 import type {
   AgentScope,
   RuntimeEndpointRef,
   SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import type {
   SessionContextTokenSnapshot,
   SessionModelState,

@@ -1,7 +1,7 @@
 import type {
   AgentScope,
   RuntimeEndpointRef,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import {
   isSessionRuntimeEndpointReady,
   isSessionRuntimeEndpointStarting,

@@ -1,4 +1,4 @@
-import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../../types/desktop/runtime-address';
 
 export interface SessionOperationTarget {
   sessionKey: string;

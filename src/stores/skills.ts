@@ -9,7 +9,7 @@ import {
 } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
 import type { Skill, MarketplaceSkill, SkillMissingCategory, SkillMissingRequirements, SkillUnavailableReason } from '../types/skill';
-import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
+import type { CapabilityTarget } from '../types/desktop/capability-target';
 import type { LocalSkillImportPayload } from '@/services/local-path-picker';
 
 type GatewaySkillMissing = {

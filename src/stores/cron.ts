@@ -10,7 +10,7 @@ import {
 } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { CronJob, CronJobCreateInput, CronJobUpdateInput } from '../types/cron';
-import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
+import type { CapabilityTarget } from '../types/desktop/capability-target';
 
 interface CronState {
   jobs: CronJob[];

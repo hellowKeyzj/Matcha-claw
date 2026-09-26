@@ -3,7 +3,7 @@ import { hostApiFetch } from '@/lib/host-api';
 import {
   buildSessionIdentityKey,
   type SessionIdentity,
-} from '../../electron/desktop-contract/runtime-address';
+} from '../types/desktop/runtime-address';
 
 export type SessionConnectorStatusResultType =
   | 'connected'

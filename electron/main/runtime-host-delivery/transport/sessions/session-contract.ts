@@ -1,4 +1,4 @@
-import { isSessionOwnership, type SessionOwnership } from '../../../../desktop-contract/session-ownership';
+import { isSessionOwnership, type SessionOwnership } from '../../../../../src/types/desktop/session-ownership';
 
 const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_ID_BYTES = 256;

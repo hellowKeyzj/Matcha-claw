@@ -4,7 +4,7 @@ import {
   runtimeEndpointStatusLabel,
   useRuntimeEndpointsStore,
 } from '@/stores/runtime-endpoints';
-import { buildRuntimeEndpointKey } from '../../electron/desktop-contract/runtime-address';
+import { buildRuntimeEndpointKey } from '../../src/types/desktop/runtime-address';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
 
 const hostRuntimeEndpointsListMock = vi.fn();

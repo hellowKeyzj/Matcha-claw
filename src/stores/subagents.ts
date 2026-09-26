@@ -2,11 +2,11 @@ import { create } from 'zustand';
 import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 import {
   agentScope,
-} from '../../electron/desktop-contract/runtime-address';
+} from '../types/desktop/runtime-address';
 import type {
   AgentScope,
-} from '../../electron/desktop-contract/runtime-address';
-import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
+} from '../types/desktop/runtime-address';
+import type { CapabilityTarget } from '../types/desktop/capability-target';
 import { buildLineDiff } from '@/lib/line-diff';
 import {
   createErrorResourceState,

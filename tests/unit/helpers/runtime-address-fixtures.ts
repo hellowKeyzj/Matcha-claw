@@ -1,4 +1,4 @@
-import type { RuntimeEndpointRef, SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import type { RuntimeEndpointRef, SessionIdentity } from '../../../src/types/desktop/runtime-address';
 
 export const openClawTestRuntimeEndpoint: RuntimeEndpointRef = {
   kind: 'native-runtime',

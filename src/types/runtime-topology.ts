@@ -1,4 +1,4 @@
-import type { RuntimeEndpointRef } from '../../electron/desktop-contract/runtime-address';
+import type { RuntimeEndpointRef } from './desktop/runtime-address';
 import type { GatewayTransportIssue } from './session/runtime-state';
 
 export interface RuntimeProtocolSummary {

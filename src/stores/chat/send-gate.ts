@@ -7,7 +7,7 @@ import type {
   ChatStoreState,
 } from './types';
 import { isRunActive } from './types';
-import type { RuntimeEndpointRef, SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import type { RuntimeEndpointRef, SessionIdentity } from '../../types/desktop/runtime-address';
 
 export type { ChatSendGate } from './types';
 

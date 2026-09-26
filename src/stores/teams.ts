@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware';
 import { useChatStore } from '@/stores/chat';
 import { buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
 import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types';
-import { buildSessionIdentityKey, type SessionIdentity } from '../../electron/desktop-contract/runtime-address';
+import { buildSessionIdentityKey, type SessionIdentity } from '../types/desktop/runtime-address';
 import {
   cancelTeamRun,
   cancelTeamRunProposal,

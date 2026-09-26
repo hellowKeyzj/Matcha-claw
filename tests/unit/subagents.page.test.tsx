@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -9,7 +9,7 @@ import { useAgentToolConfigStore, __resetAgentToolConfigStoreInternalCachesForTe
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 import { __resetSubagentTemplateCatalogCacheForTest } from '@/services/openclaw/subagent-template-catalog';
-import type { AgentScope, RuntimeEndpointRef, RuntimeScope } from '../../electron/desktop-contract/runtime-address';
+import type { AgentScope, RuntimeEndpointRef, RuntimeScope } from '../../src/types/desktop/runtime-address';
 
 vi.mock('sonner', () => ({
   toast: {
@@ -155,7 +155,7 @@ function renderSubagentsPage(initialEntries: string[] = ['/subagents']) {
 }
 
 async function openCreateDialog(): Promise<void> {
-  const button = await screen.findByRole('button', { name: 'New Subagent' });
+  const button = await screen.findByRole('button', { name: 'New Agent' });
   await waitFor(() => expect(button).toBeEnabled());
   fireEvent.click(button);
 }
@@ -166,13 +166,15 @@ async function openAgentActionMenu(agentId: string): Promise<void> {
   fireEvent.pointerDown(button, { button: 0, ctrlKey: false });
 }
 
-async function clickAgentAction(agentId: string, action: 'Export' | 'Edit' | 'Delete'): Promise<void> {
+async function clickAgentAction(agentId: string, action: 'Export' | 'Delete'): Promise<void> {
   await openAgentActionMenu(agentId);
   fireEvent.click(await screen.findByRole('menuitem', { name: action }));
 }
 
 async function openEditDialog(agentId: string): Promise<void> {
-  await clickAgentAction(agentId, 'Edit');
+  const button = await screen.findByRole('button', { name: `Edit ${agentId}` });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
   await screen.findByRole('dialog', { name: 'Edit Subagent' });
 }
 
@@ -228,7 +230,15 @@ describe('subagents page', () => {
   const cancelDraft = vi.fn().mockResolvedValue(undefined);
   const loadPersistedFilesForAgent = vi.fn().mockResolvedValue({});
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   beforeEach(() => {
+    vi.stubGlobal('IntersectionObserver', class {
+      observe() {}
+      disconnect() {}
+    });
     __resetSubagentTemplateCatalogCacheForTest();
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke.mockReset();
@@ -509,7 +519,7 @@ describe('subagents page', () => {
 
     expect(screen.getByTestId('subagent-card-grid')).toBeInTheDocument();
     expect(screen.getByText('Alpha')).toBeInTheDocument();
-    expect(screen.queryByText('agent-alpha')).toBeNull();
+    expect(screen.getByText('agent-alpha')).toBeInTheDocument();
     expect(screen.getByText('gpt-main')).toBeInTheDocument();
     expect(screen.getByText('gpt-4o-mini')).toBeInTheDocument();
     expect(screen.getByText('Handles supplier research and sourcing workflows.')).toBeInTheDocument();
@@ -784,8 +794,7 @@ describe('subagents page', () => {
     });
 
     renderSubagentsPage();
-    await openEditDialog('agent-alpha');
-    fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
+    await screen.findByRole('dialog', { name: 'Edit Subagent' });
 
     expect(screen.getByRole('button', { name: 'Generating...' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Confirm Apply Draft' })).toBeInTheDocument();
@@ -794,20 +803,8 @@ describe('subagents page', () => {
 
   it('calls edit/delete actions for non-main agent', async () => {
     const { container } = renderSubagentsPage();
-    const clickMenuItem = (label: string) => {
-      const item = Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'))
-        .find((entry) => entry.textContent?.trim() === label);
-      expect(item).toBeTruthy();
-      fireEvent.click(item!);
-    };
-    const openMenu = async () => {
-      const button = await screen.findByLabelText('More actions agent-alpha');
-      fireEvent.pointerDown(button, { button: 0, ctrlKey: false });
-    };
 
-    await openMenu();
-    clickMenuItem('Edit');
-    await screen.findByText('Edit Subagent');
+    await openEditDialog('agent-alpha');
     expect(screen.getByText('Avatar')).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText('avatar-style-botttsNeutral'));
     const avatarButtons = container.querySelectorAll<HTMLButtonElement>('button[aria-label^="pick-avatar-"]');
@@ -823,8 +820,7 @@ describe('subagents page', () => {
       expect(screen.queryByText('Edit Subagent')).toBeNull();
     });
 
-    await openMenu();
-    clickMenuItem('Delete');
+    await clickAgentAction('agent-alpha', 'Delete');
     await screen.findByText('Delete agent-alpha');
     fireEvent.click(screen.getByText('Delete'));
 
@@ -923,8 +919,8 @@ describe('subagents page', () => {
 
     expect(screen.getByText('Sealed')).toBeInTheDocument();
     expect(screen.getAllByText('Package').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Edit sealed-agent' })).toBeDisabled();
     await openAgentActionMenu('sealed-agent');
-    expect(screen.getByRole('menuitem', { name: 'Edit' })).toHaveAttribute('data-disabled');
     expect(screen.getByRole('menuitem', { name: 'Export' })).toHaveAttribute('data-disabled');
     expect(screen.getByRole('menuitem', { name: 'Export Package' })).not.toHaveAttribute('data-disabled');
 
@@ -1288,9 +1284,8 @@ describe('subagents page', () => {
 
     renderSubagentsPage();
 
-    const expandTemplatesButton = await screen.findByRole('button', { name: 'Expand Template Library' });
-    fireEvent.click(expandTemplatesButton);
-    const loadTemplateButton = await screen.findByRole('button', { name: 'Load Template' });
+    fireEvent.mouseDown(screen.getByRole('tab', { name: /^Template Library/ }), { button: 0, ctrlKey: false });
+    const loadTemplateButton = await screen.findByRole('button', { name: 'View template' });
     await waitFor(() => expect(loadTemplateButton).toBeEnabled());
     fireEvent.click(loadTemplateButton);
 
@@ -1325,8 +1320,8 @@ describe('subagents page', () => {
 
     expect(screen.queryByRole('button', { name: 'Manage main' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Chat main' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Edit main' })).toBeEnabled();
     await openAgentActionMenu('main');
-    expect(screen.getByRole('menuitem', { name: 'Edit' })).toBeEnabled();
     expect(screen.getByRole('menuitem', { name: 'Delete' })).toHaveAttribute('data-disabled');
   });
 
@@ -1357,11 +1352,9 @@ describe('subagents page', () => {
     renderSubagentsPage();
 
     expect(screen.getByRole('button', { name: 'Chat agent-no-model' })).toBeDisabled();
-    await openAgentActionMenu('agent-no-model');
-    const editItem = screen.getByRole('menuitem', { name: 'Edit' });
-    expect(editItem).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Edit agent-no-model' })).toBeEnabled();
 
-    fireEvent.click(editItem);
+    await openEditDialog('agent-no-model');
     fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
     expect(loadPersistedFilesForAgent).toHaveBeenCalledWith('agent-no-model');
     expect(screen.getByRole('dialog', { name: 'Edit Subagent' })).toBeInTheDocument();
@@ -1377,7 +1370,7 @@ describe('subagents page', () => {
     unmount();
     renderSubagentsPage();
 
-    expect(screen.getByLabelText('Prompt')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Prompt')).toBeInTheDocument();
   });
 
   it('shows apply success feedback and hides apply buttons when draft is cleared', async () => {
@@ -1390,8 +1383,7 @@ describe('subagents page', () => {
     });
 
     renderSubagentsPage();
-    await openEditDialog('agent-alpha');
-    fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
+    await screen.findByRole('dialog', { name: 'Edit Subagent' });
 
     expect(screen.getByText('Draft applied successfully.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Generate Diff Preview' })).toBeNull();
@@ -1503,12 +1495,8 @@ describe('subagents page', () => {
 
     renderSubagentsPage();
 
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Expand Template Library' })).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Expand Template Library' }));
-    const loadTemplateButton = await screen.findByRole('button', { name: 'Load Template' });
+    fireEvent.mouseDown(screen.getByRole('tab', { name: /^Template Library/ }), { button: 0, ctrlKey: false });
+    const loadTemplateButton = await screen.findByRole('button', { name: 'View template' });
     await waitFor(() => expect(loadTemplateButton).toBeEnabled());
     fireEvent.click(loadTemplateButton);
 
@@ -1558,7 +1546,7 @@ describe('subagents page', () => {
 
     renderSubagentsPage();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Expand Template Library' }));
+    fireEvent.mouseDown(screen.getByRole('tab', { name: /^Template Library/ }), { button: 0, ctrlKey: false });
 
     const firstTemplateTitle = await screen.findByText('Template 1');
     const templateGrid = firstTemplateTitle.closest('.grid');
@@ -1567,7 +1555,7 @@ describe('subagents page', () => {
     expect(templateGrid?.className).toContain('grid-cols-1');
     expect(templateGrid?.className).toContain('md:grid-cols-2');
     expect(templateGrid?.className).toContain('xl:grid-cols-3');
-    expect(templateGrid?.parentElement?.className).toContain('max-h-[56vh]');
-    expect(templateGrid?.parentElement?.className).toContain('overflow-y-auto');
+    expect(firstTemplateTitle.closest('article')?.parentElement).toBe(templateGrid);
+    expect(templateGrid?.children).toHaveLength(9);
   });
 });

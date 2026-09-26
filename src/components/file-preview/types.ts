@@ -1,7 +1,7 @@
 import type { AttachedFileMeta } from '@/stores/chat';
 import type {
   SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import {
   classifyFileContentType,
   extnameOf,

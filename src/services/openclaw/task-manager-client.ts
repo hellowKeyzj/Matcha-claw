@@ -3,7 +3,7 @@ import {
   buildSessionIdentityKey,
   sessionScope,
   type SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
 

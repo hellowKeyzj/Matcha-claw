@@ -1,5 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
-import { validateSessionIdentity } from '../../../../desktop-contract/runtime-address';
+import { validateSessionIdentity } from '../../../../../src/types/desktop/runtime-address';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
 const UNAVAILABLE = {

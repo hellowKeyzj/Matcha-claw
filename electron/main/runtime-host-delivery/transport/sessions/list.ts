@@ -1,4 +1,4 @@
-import { isSessionOwnership, type SessionOwnership } from '../../../../desktop-contract/session-ownership';
+import { isSessionOwnership, type SessionOwnership } from '../../../../../src/types/desktop/session-ownership';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 

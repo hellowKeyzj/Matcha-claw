@@ -2,7 +2,7 @@ import {
   buildCapabilityScopeKey,
   validateRuntimeScope,
   type RuntimeScope,
-} from '../../desktop-contract/runtime-address';
+} from '../../../src/types/desktop/runtime-address';
 
 export const TEAM_RUNTIME_CAPABILITY_ID = 'team.runtime';
 

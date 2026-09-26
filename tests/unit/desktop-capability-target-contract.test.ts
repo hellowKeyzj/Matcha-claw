@@ -7,7 +7,7 @@ import {
   nativeRuntimeEndpoint,
   teamRunScope,
   workspaceScope,
-} from '../../electron/desktop-contract/runtime-address';
+} from '../../src/types/desktop/runtime-address';
 const endpoint = nativeRuntimeEndpoint({ runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' });
 const identity = { endpoint, agentId: 'agent:primary', sessionKey: 'session:primary' };
 

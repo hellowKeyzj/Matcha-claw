@@ -1,4 +1,4 @@
-import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../../../src/types/desktop/runtime-address';
 import type {
   SessionChange,
   SessionCompleteness,

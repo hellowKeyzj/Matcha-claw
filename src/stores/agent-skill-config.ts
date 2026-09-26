@@ -9,8 +9,8 @@ import {
 } from '@/lib/session-trace';
 import type {
   AgentScope,
-} from '../../electron/desktop-contract/runtime-address';
-import type { CapabilityTarget } from '../../electron/desktop-contract/capability-target';
+} from '../types/desktop/runtime-address';
+import type { CapabilityTarget } from '../types/desktop/capability-target';
 
 const SUBAGENT_SKILLS_CAPABILITY_ID = 'subagent.skills';
 

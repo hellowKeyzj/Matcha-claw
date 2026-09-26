@@ -47,7 +47,7 @@ import {
   hostOpenClawGetSkillsDir,
   resolveSingleCapabilityScope,
 } from '@/lib/host-api';
-import type { CapabilityTarget } from '../../../electron/desktop-contract/capability-target';
+import type { CapabilityTarget } from '../../types/desktop/capability-target';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';

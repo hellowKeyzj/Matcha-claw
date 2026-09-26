@@ -62,7 +62,7 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
-import { isSessionOwnership } from '../../../electron/desktop-contract/session-ownership';
+import { isSessionOwnership } from '../../types/desktop/session-ownership';
 import { useComposerDraftStore } from '../composer-drafts';
 import { isSessionRuntimeEndpointStarting, useRuntimeEndpointsStore } from '../runtime-endpoints';
 import type { StoreHistoryCache } from './history-cache';
@@ -70,7 +70,7 @@ import type {
   AgentScope,
   RuntimeEndpointRef,
   SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import type {
   ChatCurrentConversation,
   ChatSession,

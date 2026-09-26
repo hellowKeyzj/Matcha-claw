@@ -5,7 +5,7 @@ import type {
   ChatSession,
   ChatSessionRuntimeEndpointNode,
 } from '@/stores/chat/types';
-import { buildSessionIdentityKey, type SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import { buildSessionIdentityKey, type SessionIdentity } from '../../types/desktop/runtime-address';
 
 export type AgentSessionSwitchboardSessionBucketId = 'today' | 'within_7_days' | 'within_30_days' | 'older';
 export type AgentSessionSwitchboardIdentityKind = 'agent' | 'team' | 'empty';

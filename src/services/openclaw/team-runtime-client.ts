@@ -5,8 +5,8 @@ import {
   summarizeError,
   summarizeIdentifier,
 } from '@/lib/session-trace';
-import type { RuntimeEndpointRef, SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
-import type { CapabilityTarget } from '../../../electron/desktop-contract/capability-target';
+import type { RuntimeEndpointRef, SessionIdentity } from '../../types/desktop/runtime-address';
+import type { CapabilityTarget } from '../../types/desktop/capability-target';
 
 export type TeamRunStatus = 'created' | 'provisioning' | 'waiting_for_user' | 'running' | 'paused' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
 

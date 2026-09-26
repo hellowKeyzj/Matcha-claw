@@ -23,7 +23,7 @@ import { hostFileStat, hostWorkspaceMediaThumbnail, type WorkspaceFileContext } 
 import { DIRECTORY_MIME_TYPE, resolveWorkspaceRelativePath } from '@/components/file-preview/types';
 import type {
   SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import {
   containsTodoToolDebugSignal,
   logRendererTodoToolDebug,

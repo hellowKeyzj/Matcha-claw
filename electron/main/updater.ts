@@ -11,7 +11,7 @@ import { BrowserWindow, app, ipcMain } from 'electron';
 import { logger } from '../utils/logger';
 import { EventEmitter } from 'events';
 import { setQuitting } from './app-state';
-import { isUpdateVersionNewer } from '../desktop-contract/update-version';
+import { isUpdateVersionNewer } from '../../src/types/desktop/update-version';
 
 export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';

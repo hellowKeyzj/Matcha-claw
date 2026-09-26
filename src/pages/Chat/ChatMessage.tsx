@@ -8,7 +8,7 @@ import {
   UserMessageMetaBar,
   type MessageLightboxState,
 } from './chat-message-parts';
-import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../../types/desktop/runtime-address';
 
 export const ChatMessage = memo(function ChatMessage({
   item,

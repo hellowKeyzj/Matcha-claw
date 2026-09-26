@@ -9,7 +9,7 @@ import { useSessionConnectorStatusStore, type SessionConnectorStatus, type Sessi
 import {
   buildSessionIdentityKey,
   type SessionIdentity,
-} from '../../../../electron/desktop-contract/runtime-address';
+} from '../../../types/desktop/runtime-address';
 
 interface ChatSessionConnectorStatusProps {
   readonly sessionIdentity: SessionIdentity | null;

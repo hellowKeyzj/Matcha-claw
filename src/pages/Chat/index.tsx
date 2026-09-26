@@ -20,7 +20,7 @@ import { useComposerDraftStore, clampComposerDraftSelection, type ComposerDraftS
 import type { GatewayTransportIssue } from '../../types/session/runtime-state';
 import type {
   SessionIdentity,
-} from '../../../electron/desktop-contract/runtime-address';
+} from '../../types/desktop/runtime-address';
 import type {
   SessionRenderItem,
 } from '../../types/session/render-item';

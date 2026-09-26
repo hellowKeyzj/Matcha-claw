@@ -1,4 +1,4 @@
-import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../desktop/runtime-address';
 import type {
   SessionAssistantTurnSegment,
   SessionLargeTextMetadata,

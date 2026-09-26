@@ -24,7 +24,7 @@ import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
 import type { WorkspaceFileContext } from '@/lib/host-api';
 import type {
   SessionIdentity,
-} from '../../../../electron/desktop-contract/runtime-address';
+} from '../../../types/desktop/runtime-address';
 import type { DerivedPlanStatus } from '@/stores/chat/task-snapshot-store';
 import type { TaskInboxTask } from '../useChatSidePanelController';
 

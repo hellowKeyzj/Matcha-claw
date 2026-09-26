@@ -3,7 +3,7 @@ import { useChatStore } from '@/stores/chat';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import type { ApprovalItem } from '@/stores/chat/types';
-import type { SessionIdentity } from '../../electron/desktop-contract/runtime-address';
+import type { SessionIdentity } from '../../src/types/desktop/runtime-address';
 
 function createMatchaAgentTestSessionIdentity(
   sessionKey = 'agent:main:main',
@@ -151,7 +151,6 @@ describe('chat approvals store actions', () => {
 
     expect(hostSessionResolveApprovalMock).toHaveBeenCalledWith({
       id: 'approval-1',
-      sessionKey: 'main',
       endpointSessionId: 'native-session-1',
       sessionIdentity,
       decision: 'allow-once',
@@ -238,7 +237,6 @@ describe('chat approvals store actions', () => {
 
     expect(hostSessionResolveApprovalMock).toHaveBeenCalledWith({
       id: 'approval-1',
-      sessionKey: 'agent:test:main',
       endpointSessionId: 'native-session-1',
       sessionIdentity,
       decision: 'allow-once',

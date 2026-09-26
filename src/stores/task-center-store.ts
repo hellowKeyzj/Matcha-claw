@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import {
   buildSessionIdentityKey,
   type SessionIdentity,
-} from '../../electron/desktop-contract/runtime-address';
+} from '../types/desktop/runtime-address';
 import {
   isTaskManagementAvailable,
   listTaskSnapshot,

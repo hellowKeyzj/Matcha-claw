@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   validateRuntimeScope,
   type RuntimeScope,
-} from '../../desktop-contract/runtime-address';
+} from '../../../src/types/desktop/runtime-address';
 import type { RuntimeHostJsonValue } from '../../main/runtime-host-delivery/control';
 import type { RuntimeHostTransportContext } from '../context';
 import { dispatchSessionCapability, type SessionCapabilityRouteDeps } from './sessions';
