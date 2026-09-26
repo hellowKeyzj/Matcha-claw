@@ -1,6 +1,7 @@
 import type { SessionRenderToolCard, SessionRenderToolStatusKind } from '../../../types/session/tool-card';
 import type { ToolActivityTone, ToolActivityViewModel } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
+import { matchKnownToolName, normalizeToolName } from './types';
 
 type FileOperation = 'create' | 'update';
 
@@ -24,15 +25,6 @@ interface FileToolProjection {
   providedDiffStat: DiffStat | null;
   outputText: string | null;
 }
-
-const FILE_TOOL_NAMES = new Set([
-  'write',
-  'edit',
-  'multiedit',
-  'notebookedit',
-  'filewrite',
-  'fileedit',
-]);
 
 const MAX_EXPANDED_TEXT_LENGTH = 6000;
 const MAX_DIFF_FILE_LIST_LENGTH = 20;
@@ -164,10 +156,6 @@ function inferOperation(toolName: string, projection: FileToolProjection): FileO
     return 'create';
   }
   return 'update';
-}
-
-function normalizeToolName(name: string): string {
-  return name.replace(/[^a-z0-9]/gi, '').toLowerCase();
 }
 
 function readPathFrom(value: unknown): string | null {
@@ -535,8 +523,8 @@ function buildTextBlocks(projection: FileToolProjection): ToolActivityViewModel[
 }
 
 export function isFileToolActivityName(name: string): boolean {
-  const normalized = normalizeToolName(name);
-  return FILE_TOOL_NAMES.has(normalized)
+  const normalized = name.replace(/[^a-z0-9]/gi, '').toLowerCase();
+  return matchKnownToolName(normalizeToolName(name)) === 'file'
     || /^openclaw.*(create|update|write|edit).*file/.test(normalized)
     || /^openclaw.*file.*(create|update|write|edit)/.test(normalized);
 }

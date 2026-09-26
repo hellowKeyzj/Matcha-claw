@@ -1520,6 +1520,7 @@ export function Chat({ isActive = true }: ChatProps) {
             sidePanelOpen={chatWindowDock.sidePanelExpanded}
             unfinishedTaskCount={unfinishedTaskCount}
             onToggleSidePanel={chatWindowDock.toggleSidePanel}
+            todoPanel={<SessionTodoPanel sessionKey={currentSessionRecordKey} />}
           />
         )}
         viewportPane={(
@@ -1578,7 +1579,6 @@ export function Chat({ isActive = true }: ChatProps) {
             }}
           />
         ) : null}
-        todoPanel={<SessionTodoPanel sessionKey={currentSessionRecordKey} />}
         input={inputNode}
       />
     </AssistantPendingLabelProvider>

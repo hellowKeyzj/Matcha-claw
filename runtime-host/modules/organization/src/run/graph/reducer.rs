@@ -63,6 +63,7 @@ pub enum ReduceError {
     TriggerNotArmed(NodeId),
     StaleGraphIdentity,
     InvalidGraphPatch,
+    InvalidSettlementEvent,
     StaleFence {
         node_id: NodeId,
     },
@@ -142,7 +143,7 @@ pub fn reduce(mut state: GraphState, event: GraphEvent) -> Result<GraphState, Re
         GraphEvent::ReworkRequested {
             node_id,
             requested_at,
-        } => rework_node(&mut state, &node_id, Vec::new(), requested_at)?,
+        } => super::rework::request(&mut state, &node_id, requested_at)?,
         GraphEvent::TriggerFired { node_id, fired_at } => {
             fire_trigger(&mut state, &node_id, fired_at)?
         }
@@ -158,6 +159,66 @@ pub fn reduce(mut state: GraphState, event: GraphEvent) -> Result<GraphState, Re
             &operations,
             patched_at,
         )?,
+    }
+    Ok(state)
+}
+
+/// Records a trusted native terminal fact without advancing the current graph.
+/// Ordinary graph events must continue to use `reduce` and its current-fence check.
+pub fn settle_superseded_attempt(
+    mut state: GraphState,
+    event: GraphEvent,
+) -> Result<GraphState, ReduceError> {
+    let (node_id, fence, status, output_port, now) = match event {
+        GraphEvent::NodeCompleted {
+            node_id,
+            fence,
+            output_port,
+            completed_at,
+        } => (
+            node_id,
+            fence,
+            AttemptStatus::Completed,
+            Some(output_port),
+            completed_at,
+        ),
+        GraphEvent::NodeFailed {
+            node_id,
+            fence,
+            output_port,
+            failed_at,
+        } => (
+            node_id,
+            fence,
+            AttemptStatus::Failed,
+            Some(output_port),
+            failed_at,
+        ),
+        GraphEvent::NodeCancelled {
+            node_id,
+            fence,
+            cancelled_at,
+        } => (node_id, fence, AttemptStatus::Cancelled, None, cancelled_at),
+        _ => return Err(ReduceError::InvalidSettlementEvent),
+    };
+    if state.current_attempt(&node_id).is_none() {
+        return Err(ReduceError::UnknownNode(node_id));
+    }
+    let attempt = state
+        .superseded_attempt_mut(&node_id, &fence)
+        .ok_or_else(|| ReduceError::StaleFence {
+            node_id: node_id.clone(),
+        })?;
+    if !attempt.status().accepts_outcome() || now < attempt.updated_at() {
+        return Err(ReduceError::InvalidTransition {
+            node_id,
+            status: attempt.status(),
+        });
+    }
+    if let Some(output_port) = output_port {
+        attempt.resolve(status, output_port, now);
+    } else {
+        attempt.transition_to(status, now);
     }
     Ok(state)
 }
@@ -181,6 +242,7 @@ fn apply_graph_patch(
     let mut nodes = definition.nodes().to_vec();
     let mut edges = definition.edges().to_vec();
     let mut metadata = state.metadata().clone();
+    let mut layout = state.layout().clone();
     for operation in operations {
         match operation {
             GraphPatchOperation::AddNode(node) => {
@@ -204,6 +266,7 @@ fn apply_graph_patch(
                 edges.retain(|edge| {
                     edge.source_node_id() != node_id && edge.target_node_id() != node_id
                 });
+                layout.remove_node(node_id);
             }
             GraphPatchOperation::AddEdge(edge) => {
                 if edges.iter().any(|existing| existing.id() == edge.id()) {
@@ -223,6 +286,12 @@ fn apply_graph_patch(
                     return Err(ReduceError::InvalidGraphPatch);
                 };
                 edges.remove(index);
+            }
+            GraphPatchOperation::SetNodePosition { node_id, position } => {
+                if !nodes.iter().any(|node| node.id() == node_id) {
+                    return Err(ReduceError::InvalidGraphPatch);
+                }
+                layout.set_node_position(node_id.clone(), *position);
             }
             GraphPatchOperation::SetMetadata { key, value } => {
                 metadata.insert(key.clone(), value.clone());
@@ -294,7 +363,7 @@ fn apply_graph_patch(
             .cmp(&right.enqueued_at())
             .then_with(|| left.node_id().cmp(right.node_id()))
     });
-    *state = GraphState::from_durable(definition, metadata, executions, ready_queue);
+    *state = GraphState::from_durable(definition, metadata, layout, executions, ready_queue);
     Ok(())
 }
 
@@ -351,6 +420,16 @@ fn resolve_outcome(
         .filter(|edge| edge.source_port() == output_port)
         .cloned()
         .collect::<Vec<_>>();
+    if let Err(error) = super::rework::reopen(state, &source_attempt, &edges, now) {
+        if !matches!(error, ReduceError::AttemptLimitExceeded { .. }) {
+            return Err(error);
+        }
+        state
+            .current_attempt_mut(&node_id)
+            .expect("source node remains present")
+            .resolve(AttemptStatus::Failed, output_port, now);
+        return Ok(());
+    }
     for edge in edges {
         let receipt = receipt_for(&edge, &source_attempt, now);
         match edge.action() {
@@ -358,7 +437,7 @@ fn resolve_outcome(
                 activate_node(state, edge.target_node_id(), receipt, now)?
             }
             EdgeAction::Gate => activate_gate_if_satisfied(state, edge.target_node_id(), now)?,
-            EdgeAction::Rework => rework_node(state, edge.target_node_id(), vec![receipt], now)?,
+            EdgeAction::Rework => {}
         }
     }
     Ok(())
@@ -441,36 +520,6 @@ fn fire_trigger(state: &mut GraphState, node_id: &NodeId, now: u64) -> Result<()
     Ok(())
 }
 
-fn rework_node(
-    state: &mut GraphState,
-    node_id: &NodeId,
-    inputs: Vec<InputReceipt>,
-    now: u64,
-) -> Result<(), ReduceError> {
-    let node = state
-        .definition()
-        .node(node_id)
-        .cloned()
-        .ok_or_else(|| ReduceError::UnknownNode(node_id.clone()))?;
-    let current = state
-        .current_attempt(node_id)
-        .expect("definition nodes always have an execution history")
-        .clone();
-    let attempt = NodeAttempt::create(
-        node_id.clone(),
-        node.kind(),
-        next_attempt_number(&node, current.number())?,
-        AttemptStatus::Ready,
-        AttemptReason::Rework,
-        inputs,
-        now,
-    );
-    state.remove_ready_item(node_id);
-    state.append_attempt(node_id, attempt.clone());
-    state.enqueue(&attempt, now);
-    Ok(())
-}
-
 fn activate_node(
     state: &mut GraphState,
     node_id: &NodeId,
@@ -542,7 +591,7 @@ fn activate_gate_if_satisfied(
     Ok(())
 }
 
-fn receipt_for(edge: &EdgeDefinition, source: &NodeAttempt, now: u64) -> InputReceipt {
+pub(super) fn receipt_for(edge: &EdgeDefinition, source: &NodeAttempt, now: u64) -> InputReceipt {
     InputReceipt::new(
         edge.id().clone(),
         edge.action(),
@@ -570,7 +619,7 @@ fn require_current_fence_mut<'a>(
     Ok(attempt)
 }
 
-fn next_attempt_number(
+pub(super) fn next_attempt_number(
     node: &NodeDefinition,
     current: NonZeroU32,
 ) -> Result<NonZeroU32, ReduceError> {

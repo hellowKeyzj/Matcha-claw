@@ -101,7 +101,8 @@ pub use events::SessionDeltaSource;
 pub use owner::actor::{SessionOwnerInput, SessionSnapshot};
 pub use ports::{
     LifecycleOps, RuntimeDriver, RuntimeDriverIdentity, RuntimeOperationFailure, SessionFuture,
-    SessionOpenOps, SessionOps, SessionRuntimeDirectory,
+    SessionOpenOps, SessionOps, SessionOwnershipQuery, SessionOwnershipReader,
+    SessionRuntimeDirectory,
 };
 pub use runtime_error::{RequestAdmissionClosed, RuntimeSessionError};
 pub use send_hook::{
@@ -167,6 +168,7 @@ pub fn spawn_owner(
     let runtime_directory = Arc::clone(&input.runtime_directory);
     let (owner, _snapshot) = SessionOwner::new(
         input.runtime_directory,
+        input.ownership_reader,
         input.provider_handle,
         input.session_delta,
         input.terminal_hook,

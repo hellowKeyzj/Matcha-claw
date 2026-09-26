@@ -141,6 +141,11 @@ pub enum GraphPatchOperation {
     RemoveEdge {
         edge_id: String,
     },
+    SetNodePosition {
+        node_id: String,
+        x: i64,
+        y: i64,
+    },
     SetMetadata {
         key: OpaqueId,
         value: MetadataValue,
@@ -236,6 +241,7 @@ fn graph_patch_operation_has_valid_identity(operation: &GraphPatchOperation) -> 
                 && is_graph_patch_identity(target_node_id)
         }
         GraphPatchOperation::RemoveEdge { edge_id } => is_graph_patch_identity(edge_id),
+        GraphPatchOperation::SetNodePosition { node_id, .. } => is_graph_patch_identity(node_id),
         GraphPatchOperation::SetMetadata { .. } => true,
     }
 }

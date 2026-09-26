@@ -1,3 +1,4 @@
+import { isSessionOwnership, type SessionOwnership } from '../../../../desktop-contract/session-ownership';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
@@ -36,6 +37,7 @@ type SessionSummary = Readonly<{
   key: string;
   agentId: string;
   sessionIdentity: SessionIdentity;
+  ownership: SessionOwnership | null;
   kind: 'main' | 'session' | 'automation';
   preferred?: boolean;
   endpointSessionId?: string;
@@ -118,11 +120,13 @@ function isSessionSummary(value: unknown): value is SessionSummary {
     || !Object.hasOwn(value, 'key')
     || !Object.hasOwn(value, 'agentId')
     || !Object.hasOwn(value, 'sessionIdentity')
+    || !Object.hasOwn(value, 'ownership')
     || !Object.hasOwn(value, 'kind')
     || !Object.keys(value).every((key) => [
       'key',
       'agentId',
       'sessionIdentity',
+      'ownership',
       'kind',
       'preferred',
       'endpointSessionId',
@@ -134,6 +138,7 @@ function isSessionSummary(value: unknown): value is SessionSummary {
     || typeof value.key !== 'string'
     || typeof value.agentId !== 'string'
     || !isSessionIdentity(value.sessionIdentity)
+    || (value.ownership !== null && !isSessionOwnership(value.ownership))
     || typeof value.kind !== 'string'
     || !['main', 'session', 'automation'].includes(value.kind)) {
     return false;

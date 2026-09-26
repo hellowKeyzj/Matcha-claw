@@ -115,7 +115,7 @@ function isSuccess(value: unknown, operation: Operation): boolean {
   if (operation === 'tasks.list') return isSnapshot(value);
   if (operation === 'tasks.get') return hasExactKeys(value, ['task']) && isTask(value.task);
   if (operation === 'todos.get') return isTodoSnapshot(value);
-  if (operation === 'todos.write') return (hasExactKeys(value, ['outcome', 'snapshot']) && value.outcome === 'applied' && isTodoSnapshot(value.snapshot))
+  if (operation === 'todos.write') return (hasExactKeys(value, ['outcome', 'snapshot']) && value.outcome === 'applied' && isTodoSnapshot(value.snapshot) && isTimestamp(value.snapshot.updatedAt))
     || isClosedMutation(value);
   if (operation === 'tasks.create') {
     return (hasExactKeys(value, ['outcome', 'task', 'snapshot']) && value.outcome === 'applied'
@@ -132,8 +132,10 @@ function isSnapshot(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['tasks', 'todos']) && Array.isArray(value.tasks) && value.tasks.every(isTask)
     && Array.isArray(value.todos) && value.todos.every(isTodo);
 }
-function isTodoSnapshot(value: unknown): boolean {
-  return isRecord(value) && hasExactKeys(value, ['todos', 'updatedAt']) && Array.isArray(value.todos) && value.todos.every(isTodo) && isTimestamp(value.updatedAt);
+function isTodoSnapshot(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && Object.keys(value).every((key) => ['todos', 'updatedAt'].includes(key))
+    && Array.isArray(value.todos) && value.todos.every(isTodo)
+    && (!Object.hasOwn(value, 'updatedAt') || isTimestamp(value.updatedAt));
 }
 function isTask(value: unknown): boolean {
   if (!isRecord(value) || !isString(value.id) || !isString(value.subject) || !isString(value.description)

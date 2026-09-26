@@ -284,7 +284,10 @@ pub fn project_config_read_effect(
 ) -> channels::config_read::Outcome {
     match effect {
         port::ChannelConfigReadEffect::Values(projection) => {
-            match channels::config_read::Projection::from_source(projection.values().clone()) {
+            match channels::config_read::Projection::from_source(
+                projection.values().clone(),
+                projection.agent_id().map(str::to_owned),
+            ) {
                 Ok(projection) => channels::config_read::Outcome::Values(projection),
                 Err(()) => channels::config_read::Outcome::Unknown,
             }

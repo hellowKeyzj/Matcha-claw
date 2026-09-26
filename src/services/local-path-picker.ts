@@ -40,6 +40,15 @@ export async function pickLocalDirectory(options: LocalPathPickerOptions = {}): 
   }));
 }
 
+export async function pickLocalFile(options: LocalPathPickerOptions = {}): Promise<string | null> {
+  return readSelectedPath(await invokeIpc<LocalPathPickerResult>('dialog:open', {
+    title: options.title,
+    defaultPath: options.defaultPath,
+    buttonLabel: options.buttonLabel,
+    properties: ['openFile'],
+  }));
+}
+
 export async function pickLocalArchive(options: LocalPathPickerOptions = {}): Promise<string | null> {
   return readSelectedPath(await invokeIpc<LocalPathPickerResult>('dialog:open', {
     title: options.title,

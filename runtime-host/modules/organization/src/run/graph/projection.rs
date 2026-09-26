@@ -152,9 +152,6 @@ fn graph_status(state: &GraphState) -> GraphStatus {
     if statuses.contains(&AttemptStatus::Cancelled) {
         return GraphStatus::Cancelled;
     }
-    if all_end_nodes_completed {
-        return GraphStatus::Completed;
-    }
     if statuses.contains(&AttemptStatus::Failed) {
         return GraphStatus::Failed;
     }
@@ -164,14 +161,15 @@ fn graph_status(state: &GraphState) -> GraphStatus {
     if statuses.contains(&AttemptStatus::Waiting) {
         return GraphStatus::Waiting;
     }
-    if statuses
-        .iter()
-        .all(|status| *status == AttemptStatus::Completed)
-    {
-        return GraphStatus::Completed;
-    }
     if !state.ready_queue().is_empty() {
         return GraphStatus::Ready;
+    }
+    if all_end_nodes_completed
+        || statuses
+            .iter()
+            .all(|status| *status == AttemptStatus::Completed)
+    {
+        return GraphStatus::Completed;
     }
     GraphStatus::Pending
 }

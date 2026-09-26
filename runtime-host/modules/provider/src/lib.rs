@@ -3,6 +3,7 @@ mod api;
 mod application;
 pub mod capability;
 pub mod domain;
+pub mod llm_client;
 mod owner;
 mod persistence;
 pub mod ports;
@@ -46,7 +47,11 @@ pub use application::receipts::{
     ProviderSessionModelSelection, ProviderSessionModelSelectionOutcome,
     ProviderSessionRuntimeModelsOutcome, SelectableProviderModelView,
 };
-pub use application::{InvalidProviderAccountDraft, ProviderAccountDraft};
+pub use application::{
+    InvalidProviderAccountDraft, ProviderAccountDraft, ProviderTextGenerationModelLimits,
+    ProviderTextGenerationModelLimitsOutcome, ProviderTextGenerationModelLimitsRequest,
+    ProviderTextGenerationOutcome, ProviderTextGenerationRequest,
+};
 pub use owner::actor::ProviderOwnerInput;
 pub use ports::{
     DiscoveredProviderModel, ProviderAppliedStatus, ProviderConfigOps, ProviderConfigWriteEffect,

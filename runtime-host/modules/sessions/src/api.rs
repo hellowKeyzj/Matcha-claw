@@ -118,7 +118,10 @@ impl SessionHandle {
             .lookup(input.endpoint())
             .ok_or(InvalidSessionCreate)?;
         let ops = driver.session_ops().ok_or(InvalidSessionCreate)?;
-        ops.admission().prepare_create(input, now_ms)
+        ops.admission()
+            .prepare_create(input, now_ms, |agent_id, endpoint_session_id| {
+                ops.agent_scoped_session_key(agent_id, endpoint_session_id)
+            })
     }
 
     pub async fn create_session(

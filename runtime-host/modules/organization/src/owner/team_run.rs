@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::application::{review, team_message};
+use crate::application::review;
 
 use organization::{
     ActivityClaim, ActivityFailure, ActivityId, ActivityKind, ActivityPhase,
@@ -17,6 +17,7 @@ use organization::{
     TeamTriggerFireRequestError, TerminalObservationOutcome, TombstoneOutcome, TriggerFireRequest,
     TriggerRegistration, TriggerSource, next_cron_slot_after, plan_due_cron_trigger,
     query_team_run,
+    run::graph::GraphLayout,
     run::lifecycle::GraphRunLifecycleState,
     run::scheduler::{NodePromptRetryDueQuery, NodePromptRetryDueQueryOutcome},
 };
@@ -416,13 +417,18 @@ impl TeamRunOwner {
             .facts()
             .team(team_id)
             .ok_or(StoreFault::InvalidFacts)?;
-        let template = persisted_graph_template(store.facts(), team_id)
-            .unwrap_or_else(|| default_graph_template(team_id, team.definition().name()));
+        let (template, layout) = persisted_graph_template(store.facts(), team_id)
+            .unwrap_or_else(|| {
+                (
+                    default_graph_template(team_id, team.definition().name()),
+                    GraphLayout::empty(),
+                )
+            });
         let definition = instantiate_graph_template(&template, run_id, idempotency_key)?;
         GraphRunFacts::new(
             team_id.clone(),
             team.revision(),
-            GraphState::initialize(definition, created_at),
+            GraphState::initialize_with_layout(definition, layout, created_at),
             None,
         )
         .map_err(|_| StoreFault::InvalidFacts)
@@ -1154,6 +1160,15 @@ impl TeamRunOwner {
         observed_at: u64,
     ) -> Result<TeamRunTerminalObservationOutcome, StoreFault> {
         let run_id = target.graph_run_id().clone();
+        let observed_at = store
+            .facts()
+            .deliveries()
+            .delivery(target.delivery_id())
+            .and_then(|delivery| match delivery.phase() {
+                DeliveryPhase::TerminalObserved { observation } => Some(observation.observed_at()),
+                _ => None,
+            })
+            .unwrap_or(observed_at);
         let observation = store.observe_native_terminal(target, native_terminal, observed_at)?;
         let team = store
             .facts()
@@ -1180,48 +1195,78 @@ pub(crate) struct TeamRunTerminalObservationOutcome {
     pub(crate) run: TeamRunCommandOutcome,
 }
 
-fn parse_native_settled_team_message(
-    settled: &NativeRunSettled,
-) -> Result<team_message::TeamMessage, StoreFault> {
-    let Some(final_assistant_text) = settled.final_assistant_text.as_deref() else {
-        return Err(StoreFault::InvalidFacts);
-    };
-    team_message::parse_team_message(final_assistant_text).map_err(|_| StoreFault::InvalidFacts)
-}
-
 pub(crate) fn resolve_native_settled_output(
     store: &mut OrganizationStore,
-    team_run: &TeamRunOwner,
     run_id: &GraphRunId,
     delivery_id: &DeliveryId,
     settled: NativeRunSettled,
     resolved_at: u64,
 ) -> Result<TeamNodeTerminalResult, StoreFault> {
-    let message = parse_native_settled_team_message(&settled)?;
-    let delivery = store
+    let target = store
+        .native_terminal_target(delivery_id)
+        .filter(|target| target.graph_run_id() == run_id)
+        .ok_or(StoreFault::InvalidFacts)?;
+    if settled.status == NativeTerminalStatus::Cancelled {
+        return Ok(TeamNodeTerminalResult::Recorded);
+    }
+    let resolved_at = store
         .facts()
         .deliveries()
         .delivery(delivery_id)
-        .ok_or(StoreFault::InvalidFacts)?;
-    let node_execution_id =
-        organization::run::event::OpaqueId::try_new(delivery.facts().node_execution_id.clone())
+        .and_then(|delivery| match delivery.phase() {
+            DeliveryPhase::TerminalObserved { observation } => match observation.resolution() {
+                organization::run::delivery::TerminalObservationResolution::GraphResolved(
+                    resolution,
+                ) => Some(resolution.resolved_at()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or(resolved_at);
+    let receipt = organization::AuthorizedGraphResolutionReceipt::try_new(format!(
+        "native-settled:{}",
+        delivery_id.as_str()
+    ))
+    .map_err(|_| StoreFault::InvalidFacts)?;
+    let outcome = match settled.final_assistant_text {
+        Some(text) => store.resolve_native_run_output(target, receipt, text, resolved_at)?,
+        None if matches!(
+            settled.status,
+            NativeTerminalStatus::Failed | NativeTerminalStatus::Interrupted
+        ) =>
+        {
+            let resolution = organization::AuthorizedGraphResolution::new(
+                receipt,
+                delivery_id.clone(),
+                run_id.as_str(),
+                match store
+                    .facts()
+                    .deliveries()
+                    .delivery(delivery_id)
+                    .map(|delivery| delivery.phase())
+                {
+                    Some(DeliveryPhase::TerminalObserved { observation }) => {
+                        observation.fence().clone()
+                    }
+                    _ => return Err(StoreFault::InvalidFacts),
+                },
+                organization::AuthorizedGraphOutcome::Failed,
+                "failed",
+                resolved_at,
+            )
             .map_err(|_| StoreFault::InvalidFacts)?;
-    let event = if settled.status == NativeTerminalStatus::Completed {
-        "complete"
-    } else {
-        "reject"
+            store.apply_authorized_graph_resolution(resolution)?
+        }
+        None => return Err(StoreFault::InvalidFacts),
     };
-    team_run.resolve_node_terminal(
-        store,
-        run_id,
-        &node_execution_id,
-        event,
-        None,
-        message.summary(),
-        Some(message.output_port()),
-        &format!("native-settled:{}", delivery_id.as_str()),
-        resolved_at,
-    )
+    Ok(match outcome {
+        organization::AuthorizedGraphResolutionOutcome::Recorded => {
+            TeamNodeTerminalResult::Recorded
+        }
+        organization::AuthorizedGraphResolutionOutcome::Replayed => {
+            TeamNodeTerminalResult::Replayed
+        }
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1297,11 +1342,11 @@ fn team_run_activity_error(error: ActivityExecutionRequestError) -> TeamRunActiv
 fn persisted_graph_template(
     facts: &organization::OrganizationFacts,
     team_id: &TeamId,
-) -> Option<GraphDefinition> {
+) -> Option<(GraphDefinition, GraphLayout)> {
     facts
         .runs()
         .filter(|run| run.team() == team_id)
-        .map(|run| run.graph().definition().clone())
+        .map(|run| (run.graph().definition().clone(), run.graph().layout().clone()))
         .next()
 }
 
@@ -1458,7 +1503,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            persisted_graph_template(&facts, &first_team),
+            persisted_graph_template(&facts, &first_team).map(|(definition, _)| definition),
             Some(first_definition.clone())
         );
         assert_eq!(
@@ -1510,7 +1555,7 @@ mod tests {
         };
 
         assert_eq!(
-            parse_native_settled_team_message(&settled),
+            settled.final_assistant_text.ok_or(StoreFault::InvalidFacts),
             Err(StoreFault::InvalidFacts)
         );
     }
@@ -1520,15 +1565,17 @@ mod tests {
         let settled = NativeRunSettled {
             status: NativeTerminalStatus::Completed,
             final_assistant_text: Some(
-                "<team_message>{\"summary\":\"old\",\"output_port\":\"old\",\"payload\":{}}</team_message><team_message>{\"summary\":\"new\",\"output_port\":\"done\",\"payload\":{}}</team_message>"
+                "<team_message>{\"summary\":\"旧摘要\",\"decision\":\"old\",\"dispatch\":[]}</team_message><team_message>{\"summary\":\"新摘要\",\"decision\":\"done\",\"dispatch\":[]}</team_message>"
                     .to_owned(),
             ),
         };
 
-        let message = parse_native_settled_team_message(&settled).unwrap();
+        let message =
+            organization::TeamNodeOutput::parse(settled.final_assistant_text.unwrap()).unwrap();
 
-        assert_eq!(message.summary(), "new");
-        assert_eq!(message.output_port(), "done");
+        assert_eq!(message.summary(), "新摘要");
+        assert_eq!(message.decision(), "done");
+        assert_eq!(message.dispatch(), &[]);
     }
 
     fn facts(materialization: Option<MaterializationReceipt>) -> OrganizationFacts {

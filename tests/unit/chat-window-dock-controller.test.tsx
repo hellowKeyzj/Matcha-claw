@@ -69,7 +69,24 @@ describe('chat window dock controller', () => {
     expect(invokeIpcMock).toHaveBeenCalledWith('window:setRightDockWidth', 526, { currentDockWidth: 0 });
   });
 
-  it('keeps the main column locked while external window resizing expands the docked panel', async () => {
+  it('remembers the applied width when Electron clamps the opening dock width', async () => {
+    invokeIpcMock.mockResolvedValue({ appliedWidth: 326 });
+    const setPanelWidth = vi.fn();
+
+    const { result, rerender } = renderController({ setPanelWidth });
+
+    rerender({ panelOpen: true });
+    setWindowInnerWidth(1526);
+    window.dispatchEvent(new Event('resize'));
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('open');
+    });
+    expect(result.current.sidePanelWidth).toBe(320);
+    expect(setPanelWidth).toHaveBeenLastCalledWith(320);
+  });
+
+  it('keeps the main column locked and remembers the visible width while external window resizing expands the docked panel', async () => {
     invokeIpcMock.mockResolvedValue({ appliedWidth: 526 });
     const setPanelWidth = vi.fn();
 
@@ -97,7 +114,7 @@ describe('chat window dock controller', () => {
         baseWidth: 1200,
       });
     });
-    expect(setPanelWidth).not.toHaveBeenCalled();
+    expect(setPanelWidth).toHaveBeenLastCalledWith(720);
   });
 
   it('shrinks the docked panel before shrinking the main column on external window narrowing', async () => {

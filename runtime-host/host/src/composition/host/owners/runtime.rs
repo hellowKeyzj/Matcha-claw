@@ -15,6 +15,7 @@ use subagents::SubagentsModule;
 use task_manager::TaskModule;
 use toolchain::ToolchainModule;
 use usage::UsageModule;
+use wiki::WikiModule;
 use workspace::WorkspaceModule;
 
 use crate::composition::runtime_ports::{RuntimeDriver, RuntimeDriverIdentity};
@@ -163,6 +164,7 @@ pub(in crate::composition::host) struct RuntimeOwners {
     pub(in crate::composition::host) task_manager: TaskModule,
     pub(in crate::composition::host) subagents: SubagentsModule,
     pub(in crate::composition::host) workspace: WorkspaceModule,
+    pub(in crate::composition::host) wiki: WikiModule,
     pub(in crate::composition::host) toolchain: ToolchainModule,
     pub(in crate::composition::host) platform_tools: PlatformToolsModule,
     pub(in crate::composition::host) security: security::SecurityModule,
@@ -326,6 +328,11 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             runtime_directory: Arc::clone(&runtime_directory)
                 as Arc<dyn sessions_module::SessionRuntimeDirectory>,
             provider_handle: provider_handle.clone(),
+            ownership_reader: Arc::new(
+                super::super::ports::organization::OrganizationSessionOwnership::new(
+                    organization_handle.clone(),
+                ),
+            ),
             session_delta,
             terminal_hook: Some(
                 Arc::clone(&session_terminal) as Arc<dyn sessions_module::SessionTerminalHook>
@@ -379,6 +386,18 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             runtime_directory: runtime_directory.clone(),
         },
     );
+    let vector_index = wiki::index::LocalWikiVectorIndex::load_default()
+        .map(|index| Arc::new(index) as Arc<dyn wiki::index::WikiVectorIndex>)
+        .ok();
+    let (wiki, wiki_task) = wiki::spawn_owner(
+        &owner_runtime_system,
+        wiki::WikiOwnerInput::new(runtime_state_dir.clone())
+            .with_vector_index(vector_index)
+            .with_ingest_llm(Some(Arc::new(
+                super::super::ports::ProviderWikiIngestLlm::new(provider_handle.clone()),
+            ))),
+    )
+    .map_err(|_| ConstructionError::Wiki)?;
     let (toolchain, toolchain_task) = toolchain::spawn_owner(
         &owner_runtime_system,
         toolchain::ToolchainOwnerInput {
@@ -395,13 +414,11 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         },
     );
 
-    let activity_executor = Arc::new(
-        super::super::ports::organization::HostTeamActivityExecutor::new(
-            Arc::clone(&admission),
-            session_handle.clone(),
-            Arc::clone(&runtime_directory),
-        ),
-    );
+    let activity_executor = Arc::new(super::super::ports::organization::TeamSessionExecutor::new(
+        Arc::clone(&admission),
+        session_handle.clone(),
+        Arc::clone(&runtime_directory),
+    ));
     let (admission_changes_tx, admission_changes) =
         tokio::sync::watch::channel(organization::AdmissionState::Changed);
     drop(admission_changes_tx);
@@ -471,6 +488,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
                 module_scope("task-manager", task_manager_task),
                 module_scope("subagents", subagents_task),
                 module_scope("workspace", workspace_task),
+                module_scope("wiki", wiki_task),
                 module_scope("toolchain", toolchain_task),
                 module_scope("platform-tools", platform_tools_task),
                 route_only_scope("plugins"),
@@ -495,6 +513,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         task_manager,
         subagents,
         workspace,
+        wiki,
         toolchain,
         platform_tools,
         security,

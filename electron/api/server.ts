@@ -62,6 +62,7 @@ import { handleTeamTriggerRoutes } from './routes/team-trigger';
 import { handleTeamWebhookAuthRoutes } from './routes/team-webhook-auth';
 import { handleToolchainRoutes } from './routes/toolchain';
 import { handleUsageRoutes } from './routes/usage';
+import { handleWikiRoutes } from './routes/wiki';
 import { proxyFleetRuntimeAgentIngress, proxyFleetTerminalStreamUpgrade } from '../main/runtime-host-delivery/transport/fleet';
 import {
   isHostApiProxyWebSocketRoute,
@@ -165,6 +166,7 @@ const routeHandlers: readonly RouteHandler[] = [
   ),
   (req, res, url, deps) => handleToolchainRoutes(req, res, url, deps.runtimeHostTransports.toolchainTransport),
   (req, res, url, deps) => handleUsageRoutes(req, res, url, deps.runtimeHostTransports.usageTransport),
+  (req, res, url, deps) => handleWikiRoutes(req, res, url, deps.runtimeHostTransports.wikiTransport),
 ];
 
 export type HostApiConnection = Readonly<{

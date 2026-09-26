@@ -1,0 +1,145 @@
+mod adapters;
+mod api;
+mod application;
+pub mod archive;
+pub mod capability;
+mod domain;
+pub mod embedding;
+pub mod index;
+mod ingest;
+mod owner;
+pub mod ports;
+pub mod preprocess;
+pub mod vector;
+
+use std::sync::Arc;
+
+use foundation::execution::{OwnedTask, OwnerRuntimeConfig, OwnerRuntimeSystem};
+use platform::{
+    capability::CapabilityDecisionVerifier,
+    module::{CapabilityDescriptorProvider, CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
+};
+use tokio::sync::Mutex;
+
+pub use api::WikiHandle;
+use owner::actor::WikiOwner;
+
+const MODULE_ID: ModuleId = ModuleId::new("wiki");
+const PROVIDES: &[CapabilityKey] = &[CapabilityKey::new("wiki")];
+const REQUIRES: &[CapabilityKey] = &[CapabilityKey::new("runtime.wiki")];
+const ROUTES: &[&str] = &["wiki.loopback"];
+const EVENTS: &[&str] = &[];
+const EFFECTS: &[EffectKind] = &[
+    EffectKind::OwnerTask,
+    EffectKind::Route,
+    EffectKind::FilesystemRead,
+    EffectKind::FilesystemWrite,
+];
+
+pub use domain::{
+    WikiApplyGeneratedPagesInput, WikiApplyGeneratedPagesReceipt, WikiCancelSourceTaskInput,
+    WikiCreateProjectInput, WikiDeleteSourceInput, WikiDeleteSourceReceipt, WikiFailure,
+    WikiFileEntry, WikiFilesInput, WikiFilesReceipt, WikiGeneratedPageInput, WikiGraphEdge,
+    WikiGraphNode, WikiGraphReceipt, WikiImportFolderInput, WikiImportFolderReceipt,
+    WikiImportSourceInput, WikiImportSourceReceipt, WikiLayoutStatus, WikiOpenProjectInput,
+    WikiPathSelector, WikiProjectRecord, WikiProjectRegistry, WikiProjectSelector,
+    WikiProjectTemplateView, WikiProjectTemplatesReceipt, WikiProjectView, WikiProjectsReceipt,
+    WikiReadBinaryInput, WikiReadBinaryReceipt, WikiReadInput, WikiReadReceipt,
+    WikiRefreshSourcesReceipt, WikiRetrieveContextInput, WikiReviewClearResolvedInput,
+    WikiReviewDismissInput, WikiReviewItem, WikiReviewOption, WikiReviewResolveInput,
+    WikiReviewType, WikiReviewsReceipt, WikiRevision, WikiSearchHit, WikiSearchInput,
+    WikiSearchReceipt, WikiSourceMoveReceipt, WikiSourceSkip, WikiSourceTask, WikiSourceTaskKind,
+    WikiSourceTaskStatus, WikiSourceTasksReceipt, WikiSourceWatchConfig,
+    WikiSourceWatchConfigInput, WikiSourceWatchConfigReceipt, WikiStatusReceipt, WikiWriteInput,
+    WikiWriteReceipt,
+};
+pub use owner::actor::WikiOwnerInput;
+pub use ports::{
+    WikiFuture, WikiIngestImageCaptionRequest, WikiIngestImageCaptionResponse, WikiIngestLlm,
+    WikiIngestLlmMessage, WikiIngestLlmModelLimits, WikiIngestLlmOptions, WikiIngestLlmRequest,
+    WikiIngestLlmResponse, WikiIngestLlmRole, WikiRequestAdmission, WikiRequestAdmissionClosed,
+};
+
+pub fn wiki_mcp_provider(
+    state_dir: &std::path::Path,
+) -> Result<impl platform::mcp::ToolProvider + use<>, WikiFailure> {
+    adapters::mcp::WikiMcpFacade::open(state_dir)
+}
+
+#[derive(Clone)]
+pub struct WikiModule {
+    handle: WikiHandle,
+}
+
+impl WikiModule {
+    fn new(handle: WikiHandle) -> Self {
+        Self { handle }
+    }
+
+    pub fn handle(&self) -> &WikiHandle {
+        &self.handle
+    }
+
+    pub fn descriptor(&self, verifier: Arc<Mutex<CapabilityDecisionVerifier>>) -> ModuleDescriptor {
+        ModuleDescriptor::with_capabilities(
+            MODULE_ID,
+            PROVIDES,
+            REQUIRES,
+            EFFECTS,
+            ROUTES,
+            EVENTS,
+            Some(self.loopback_descriptor(verifier)),
+            Some(CapabilityDescriptorProvider::new(
+                capability::listed,
+                capability::describe,
+            )),
+        )
+    }
+
+    fn loopback_descriptor(
+        &self,
+        verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    ) -> platform::loopback::ModuleDescriptor {
+        adapters::loopback::descriptor(adapters::loopback::Dependencies::new(
+            verifier,
+            self.handle.clone(),
+        ))
+    }
+}
+
+pub fn spawn_owner(
+    system: &OwnerRuntimeSystem,
+    input: WikiOwnerInput,
+) -> Result<(WikiModule, OwnedTask<()>), WikiFailure> {
+    let (source_watch_control, source_watch_receiver) =
+        owner::source_watcher::SourceWatchControl::channel();
+    let owner = WikiOwner::new(input, source_watch_control.clone())?;
+    let (handle, mut owner_task) = system.spawn_owner(
+        owner,
+        OwnerRuntimeConfig::new(32, WikiOwner::lane_retention()),
+    );
+    let handle = WikiHandle::new(handle);
+    let mut source_watch_task =
+        owner::source_watcher::spawn(handle.clone(), source_watch_control, source_watch_receiver);
+    let (task, _) = OwnedTask::spawn(|cancellation| async move {
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                source_watch_task.cancel();
+                owner_task.cancel();
+                let _ = source_watch_task.join().await;
+                let _ = owner_task.join().await;
+            }
+            result = &mut source_watch_task => {
+                let _ = result;
+                owner_task.cancel();
+                let _ = owner_task.join().await;
+            }
+            result = &mut owner_task => {
+                let _ = result;
+                source_watch_task.cancel();
+                let _ = source_watch_task.join().await;
+            }
+        }
+    });
+    Ok((WikiModule::new(handle), task))
+}

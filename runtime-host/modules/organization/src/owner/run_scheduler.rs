@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use organization::{
-    ActivityId, ActivityKind, ActivityPhase, ActivityTarget, GraphRunId, GraphRunLifecycleState,
-    NodeId, OrganizationStore, RoleId, RoleSessionReceipt, RunStartGate, StoreFault,
+    ActivityId, ActivityKind, ActivityPhase, ActivityRequest, ActivityTarget, DeliveryPhase,
+    GraphRunFacts, GraphRunId, GraphRunLifecycleState, NodeId, OrganizationStore, RoleId,
+    RoleSessionReceipt, RunStartGate, StoreFault, TeamNodeOutput,
 };
 
 use runtime_directory::RuntimeDriverIdentity;
@@ -77,14 +78,17 @@ pub(crate) fn schedule_ready_nodes(
         )) {
             continue;
         }
-        let activity = item
-            .bind_activity_target(
+        let activity = compose_activity_prompt(
+            store,
+            &run,
+            item.bind_activity_target(
                 ActivityTarget::new(binding.session_ref().as_str().to_owned())
                     .map_err(|_| StoreFault::InvalidFacts)?,
                 now,
                 node.max_attempts().get(),
             )
-            .map_err(|_| StoreFault::InvalidFacts)?;
+            .map_err(|_| StoreFault::InvalidFacts)?,
+        )?;
         match store.register_activity_and_start_attempt(activity, now)? {
             organization::ActivityRegistrationOutcome::Recorded(activity)
             | organization::ActivityRegistrationOutcome::Replayed(activity) => {
@@ -97,6 +101,126 @@ pub(crate) fn schedule_ready_nodes(
         }
     }
     Ok(activity_ids)
+}
+
+fn compose_activity_prompt(
+    store: &OrganizationStore,
+    run: &GraphRunFacts,
+    request: ActivityRequest,
+) -> Result<ActivityRequest, StoreFault> {
+    let ActivityKind::AgentTask {
+        task_id,
+        role_id,
+        session_ref,
+        prompt: _,
+    } = &request.activity_kind
+    else {
+        return Ok(request);
+    };
+    let node = run
+        .graph()
+        .definition()
+        .node(&request.node_id)
+        .ok_or(StoreFault::InvalidFacts)?;
+    let upstream = upstream_prompt_contexts(store, run, &request, role_id);
+    let prompt = organization::run::scheduler::compose_agent_task_prompt_with_upstream_context(
+        run.graph().definition(),
+        node,
+        base_prompt(node).ok_or(StoreFault::InvalidFacts)?,
+        &upstream,
+    )
+    .ok_or(StoreFault::InvalidFacts)?;
+    Ok(ActivityRequest {
+        activity_kind: ActivityKind::AgentTask {
+            task_id: task_id.clone(),
+            role_id: role_id.clone(),
+            session_ref: session_ref.clone(),
+            prompt,
+        },
+        ..request
+    })
+}
+
+fn base_prompt(node: &organization::NodeDefinition) -> Option<&str> {
+    match node.kind() {
+        organization::NodeKind::Work => node.work_assignment().map(|work| work.prompt()),
+        organization::NodeKind::Review => node.review_assignment().map(|review| review.prompt()),
+        organization::NodeKind::Start
+        | organization::NodeKind::HumanDecision
+        | organization::NodeKind::ScriptReview
+        | organization::NodeKind::Join
+        | organization::NodeKind::End => None,
+    }
+}
+
+fn upstream_prompt_contexts<'a>(
+    store: &'a OrganizationStore,
+    run: &GraphRunFacts,
+    request: &ActivityRequest,
+    role_id: &str,
+) -> Vec<organization::run::scheduler::UpstreamPromptContext<'a>> {
+    let Some(attempt) = run.graph().current_attempt(&request.node_id) else {
+        return Vec::new();
+    };
+    attempt
+        .inputs()
+        .iter()
+        .filter(|input| {
+            includes_upstream_result(run.graph().definition(), &request.node_id, input.edge_id())
+        })
+        .filter_map(|input| upstream_output(store, run, input.source_fence()))
+        .map(
+            |output| organization::run::scheduler::UpstreamPromptContext {
+                summary: output.summary(),
+                tasks: output
+                    .dispatch()
+                    .iter()
+                    .filter(|dispatch| dispatch.role_id() == role_id)
+                    .map(|dispatch| dispatch.task())
+                    .collect(),
+            },
+        )
+        .collect()
+}
+
+fn includes_upstream_result(
+    definition: &organization::GraphDefinition,
+    node_id: &NodeId,
+    edge_id: &organization::EdgeId,
+) -> bool {
+    definition
+        .incoming_edges(node_id)
+        .any(|edge| edge.id() == edge_id && edge.payload().include_upstream_result())
+}
+
+fn upstream_output<'a>(
+    store: &'a OrganizationStore,
+    run: &GraphRunFacts,
+    source_fence: &organization::ExecutionFence,
+) -> Option<&'a TeamNodeOutput> {
+    store
+        .facts()
+        .deliveries()
+        .deliveries()
+        .filter(|delivery| {
+            delivery.facts().run_id == run.run_id().as_str()
+                && delivery.facts().node_execution_id == source_fence.node_execution_id().as_str()
+        })
+        .filter_map(|delivery| match delivery.phase() {
+            DeliveryPhase::TerminalObserved { observation } => match observation.resolution() {
+                organization::run::delivery::TerminalObservationResolution::GraphResolved(_) => observation.output(),
+                organization::run::delivery::TerminalObservationResolution::AwaitingAuthorizedGraphResolution
+                | organization::run::delivery::TerminalObservationResolution::NodeCancelled => None,
+            },
+            DeliveryPhase::Pending
+            | DeliveryPhase::Delivering(_)
+            | DeliveryPhase::RetryScheduled { .. }
+            | DeliveryPhase::Delivered { .. }
+            | DeliveryPhase::Failed { .. }
+            | DeliveryPhase::OutcomeUnknown { .. }
+            | DeliveryPhase::Cancelled { .. } => None,
+        })
+        .next()
 }
 
 pub(crate) fn active_run_session_slots(
@@ -247,8 +371,11 @@ pub(crate) fn activity_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use organization::EndpointSessionId;
     use organization::{
-        EndpointSessionId, ManagedAgentReference, RoleSessionRef, RuntimeEndpointReference, TeamId,
+        EdgeAction, EdgeDefinition, EdgeId, EdgePayloadPolicy, ExecutorPolicy, GraphDefinition,
+        GraphRunId, ManagedAgentReference, NodeDefinition, NodeId, RoleId, RoleSessionRef,
+        RuntimeEndpointReference, TeamId, WorkAssignment,
     };
 
     #[test]
@@ -263,6 +390,74 @@ mod tests {
                 .unwrap();
 
         assert_eq!(selected, &second);
+    }
+
+    #[test]
+    fn upstream_context_respects_edge_payload_policy() {
+        let source = NodeId::new("source");
+        let target = NodeId::new("target");
+        let disabled = EdgeDefinition::new(
+            EdgeId::new("disabled"),
+            source.clone(),
+            "completed",
+            target.clone(),
+            "input",
+            EdgeAction::Activate,
+        )
+        .with_payload(EdgePayloadPolicy::new(false));
+        let enabled = EdgeDefinition::new(
+            EdgeId::new("enabled"),
+            source.clone(),
+            "completed",
+            target.clone(),
+            "input",
+            EdgeAction::Activate,
+        );
+        let definition = GraphDefinition::new(
+            "graph:test",
+            "plan:test",
+            GraphRunId::new("run:test"),
+            "upstream filter",
+            vec![
+                NodeDefinition::work(
+                    source,
+                    "source",
+                    std::num::NonZeroU32::new(1).unwrap(),
+                    WorkAssignment::typed(
+                        "task:source",
+                        "source prompt",
+                        ExecutorPolicy::team_role("leader"),
+                        None,
+                        None,
+                    ),
+                ),
+                NodeDefinition::work(
+                    target.clone(),
+                    "target",
+                    std::num::NonZeroU32::new(1).unwrap(),
+                    WorkAssignment::typed(
+                        "task:target",
+                        "target prompt",
+                        ExecutorPolicy::team_role("leader"),
+                        None,
+                        None,
+                    ),
+                ),
+            ],
+            vec![disabled, enabled],
+        )
+        .unwrap();
+
+        assert!(!includes_upstream_result(
+            &definition,
+            &target,
+            &EdgeId::new("disabled")
+        ));
+        assert!(includes_upstream_result(
+            &definition,
+            &target,
+            &EdgeId::new("enabled")
+        ));
     }
 
     #[test]

@@ -251,6 +251,30 @@ impl ProviderOwner {
             ProviderQuery::ListRouting { reply } => {
                 let _ = reply.send(list_provider_routing_for_snapshot(&self.snapshot));
             }
+            ProviderQuery::TextGenerationModelLimits { request, reply } => {
+                let outcome = self.models.text_generation_model_limits(
+                    self.runtime_directory.as_ref(),
+                    &self.cascade,
+                    request,
+                );
+                let _ = reply.send(outcome);
+            }
+            ProviderQuery::GenerateText {
+                request,
+                cancellation,
+                reply,
+            } => {
+                let outcome = self
+                    .models
+                    .generate_text(
+                        self.runtime_directory.as_ref(),
+                        &self.cascade,
+                        request,
+                        cancellation,
+                    )
+                    .await;
+                let _ = reply.send(outcome);
+            }
             ProviderQuery::SelectSessionModel {
                 endpoint,
                 session_key,
@@ -563,6 +587,12 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, query: Provider
         }
         ProviderQuery::DiscoverModels { reply, .. } => {
             let _ = reply.send(crate::ProviderModelDiscoverOutcome::Unavailable);
+        }
+        ProviderQuery::TextGenerationModelLimits { reply, .. } => {
+            let _ = reply.send(crate::ProviderTextGenerationModelLimitsOutcome::Rejected);
+        }
+        ProviderQuery::GenerateText { reply, .. } => {
+            let _ = reply.send(crate::ProviderTextGenerationOutcome::Unavailable);
         }
         ProviderQuery::SelectSessionModel { reply, .. }
         | ProviderQuery::SelectMatchaSessionModelRuntime { reply, .. }

@@ -10,17 +10,13 @@ use super::{
     NativeRunReceiptReference, NativeTerminalStatus, RegisterDeliveryError, RegisterOutcome,
     RestoreDeliveryError, RestoreLedgerError, TerminalObservationError, TerminalObservationOutcome,
     TerminalObservationResolution, TerminalObservationSnapshot, TerminalObservationSnapshotInput,
-    begin_delivery, dispatch_delivery, observe_native_terminal, recover_interrupted_delivery,
-    register_delivery, resolve_authorized_graph_outcome, settle_delivery,
+    begin_delivery, observe_native_terminal, recover_interrupted_delivery, register_delivery,
+    resolve_authorized_graph_outcome, settle_delivery,
 };
-use crate::ports::{
-    DeliveryReceiptReference, DeliveryReference, DeliveryRejection, EndpointSessionId,
-    IdempotencyKey, ManagedAgentReference, PromptDeliveryOutcome, PromptDeliveryPort,
-    PromptDeliveryRequest, PromptDispatchPayload, RoleSessionReceipt, RuntimeEndpointReference,
-};
+use crate::ports::{DeliveryReceiptReference, EndpointSessionId};
 use crate::{
     AttemptStatus, EdgeAction, EdgeDefinition, GraphDefinition, GraphEvent, GraphRunId, GraphState,
-    GraphStatus, NodeDefinition, NodeId, RoleId, TeamId, project, reduce,
+    GraphStatus, NodeDefinition, NodeId, project, reduce,
 };
 
 fn request(delivery_id: &str, max_attempts: u32) -> DeliveryRequest {
@@ -45,17 +41,6 @@ fn claim(delivery: &mut Delivery, now: u64) -> DeliveryClaim {
         DeliveryStart::Claimed(claim) => claim,
         other => panic!("expected a claim, got {other:?}"),
     }
-}
-
-fn binding() -> RoleSessionReceipt {
-    RoleSessionReceipt::new(
-        TeamId::try_new("team-release").unwrap(),
-        GraphRunId::new("run-01"),
-        RoleId::try_new("role-lead").unwrap(),
-        crate::RoleSessionRef::initial(),
-        ManagedAgentReference::try_new("agent-lead").unwrap(),
-        RuntimeEndpointReference::try_new("endpoint-primary").unwrap(),
-    )
 }
 
 fn running_graph() -> GraphState {
@@ -112,7 +97,7 @@ fn graph_with_edge() -> GraphState {
         vec![EdgeDefinition::new(
             crate::EdgeId::new("edge-review-end"),
             source.clone(),
-            "approved",
+            "completed",
             target,
             "done",
             EdgeAction::Finish,
@@ -159,26 +144,6 @@ fn matcha_session() -> EndpointSessionId {
 
 fn matcha_native_run() -> NativeRunReceiptReference {
     NativeRunReceiptReference::try_new("matcha-native-run-correlation-canary").unwrap()
-}
-
-struct RecordingDeliveryPort {
-    outcome: Result<PromptDeliveryOutcome, ()>,
-    requests: Vec<(DeliveryReference, IdempotencyKey)>,
-}
-
-impl PromptDeliveryPort for RecordingDeliveryPort {
-    type Error = ();
-
-    fn deliver(
-        &mut self,
-        request: PromptDeliveryRequest,
-    ) -> Result<PromptDeliveryOutcome, Self::Error> {
-        self.requests.push((
-            request.delivery().clone(),
-            request.idempotency_key().clone(),
-        ));
-        self.outcome.clone()
-    }
 }
 
 #[test]
@@ -637,189 +602,6 @@ fn stale_receipt_cannot_resolve_a_later_retry_claim() {
 }
 
 #[test]
-fn dispatch_preserves_the_claim_identity_and_records_an_external_receipt() {
-    let mut delivery = Delivery::request(request("delivery-01", 2)).unwrap();
-    let active_claim = claim(&mut delivery, 1_000);
-    let mut port = RecordingDeliveryPort {
-        outcome: Ok(PromptDeliveryOutcome::Delivered {
-            receipt: DeliveryReceiptReference::try_new("receipt-01").unwrap(),
-        }),
-        requests: Vec::new(),
-    };
-
-    assert_eq!(
-        dispatch_delivery(
-            &mut delivery,
-            &active_claim,
-            binding(),
-            PromptDispatchPayload::try_new("review the release").unwrap(),
-            1_001,
-            2_000,
-            &mut port,
-        ),
-        Ok(DeliveryResolution::Delivered),
-    );
-    assert_eq!(
-        port.requests,
-        vec![(
-            DeliveryReference::try_new("delivery-01").unwrap(),
-            IdempotencyKey::try_new("team-run:run-01:node-review:attempt:1").unwrap(),
-        )],
-    );
-    assert_eq!(
-        delivery.phase(),
-        &DeliveryPhase::Delivered {
-            receipt: DeliveryReceiptReference::try_new("receipt-01").unwrap(),
-            native_correlation: None,
-            accepted_at: 1_001,
-        },
-    );
-}
-
-#[test]
-fn dispatch_port_failure_is_outcome_unknown_and_never_retries_automatically() {
-    let mut delivery = Delivery::request(request("delivery-01", 2)).unwrap();
-    let active_claim = claim(&mut delivery, 1_000);
-    let mut port = RecordingDeliveryPort {
-        outcome: Err(()),
-        requests: Vec::new(),
-    };
-
-    assert_eq!(
-        dispatch_delivery(
-            &mut delivery,
-            &active_claim,
-            binding(),
-            PromptDispatchPayload::try_new("review the release").unwrap(),
-            1_001,
-            2_000,
-            &mut port,
-        ),
-        Ok(DeliveryResolution::OutcomeUnknown),
-    );
-    assert_eq!(
-        begin_delivery(&mut delivery, 2_000),
-        DeliveryStart::Terminal(DeliveryPhase::OutcomeUnknown { observed_at: 1_001 }),
-    );
-}
-
-#[test]
-fn prompt_outcome_unknown_is_terminal_and_never_counts_as_delivered() {
-    let mut delivery = Delivery::request(request("delivery-01", 2)).unwrap();
-    let active_claim = claim(&mut delivery, 1_000);
-    let mut port = RecordingDeliveryPort {
-        outcome: Ok(PromptDeliveryOutcome::OutcomeUnknown),
-        requests: Vec::new(),
-    };
-
-    assert_eq!(
-        dispatch_delivery(
-            &mut delivery,
-            &active_claim,
-            binding(),
-            PromptDispatchPayload::try_new("review the release").unwrap(),
-            1_001,
-            2_000,
-            &mut port,
-        ),
-        Ok(DeliveryResolution::OutcomeUnknown),
-    );
-    assert_eq!(port.requests.len(), 1);
-    assert_eq!(
-        begin_delivery(&mut delivery, 2_000),
-        DeliveryStart::Terminal(DeliveryPhase::OutcomeUnknown { observed_at: 1_001 }),
-    );
-    assert!(!matches!(delivery.phase(), DeliveryPhase::Delivered { .. }));
-}
-
-#[test]
-fn stale_claim_is_rejected_before_dispatching_to_the_port() {
-    let mut delivery = Delivery::request(request("delivery-01", 2)).unwrap();
-    let first_claim = claim(&mut delivery, 1_000);
-    settle_delivery(
-        &mut delivery,
-        &first_claim,
-        DeliveryReceipt::Rejected {
-            failure: DeliveryFailure::Unavailable,
-            observed_at: 1_001,
-        },
-        2_000,
-    )
-    .unwrap();
-    let active_claim = claim(&mut delivery, 31_001);
-    let mut port = RecordingDeliveryPort {
-        outcome: Ok(PromptDeliveryOutcome::Rejected {
-            rejection: DeliveryRejection::Retryable,
-        }),
-        requests: Vec::new(),
-    };
-
-    assert_eq!(
-        dispatch_delivery(
-            &mut delivery,
-            &first_claim,
-            binding(),
-            PromptDispatchPayload::try_new("review the release").unwrap(),
-            2_001,
-            3_000,
-            &mut port,
-        ),
-        Err(DeliveryReceiptError::StaleClaim {
-            delivery_id: DeliveryId::new("delivery-01").unwrap(),
-        }),
-    );
-    assert!(port.requests.is_empty());
-    assert_eq!(delivery.active_claim(), Some(&active_claim));
-}
-
-#[test]
-fn retryable_and_permanent_port_rejections_map_to_distinct_delivery_outcomes() {
-    let mut retryable = Delivery::request(request("delivery-01", 2)).unwrap();
-    let retry_claim = claim(&mut retryable, 1_000);
-    let mut retry_port = RecordingDeliveryPort {
-        outcome: Ok(PromptDeliveryOutcome::Rejected {
-            rejection: DeliveryRejection::Retryable,
-        }),
-        requests: Vec::new(),
-    };
-
-    assert_eq!(
-        dispatch_delivery(
-            &mut retryable,
-            &retry_claim,
-            binding(),
-            PromptDispatchPayload::try_new("review the release").unwrap(),
-            1_001,
-            2_000,
-            &mut retry_port,
-        ),
-        Ok(DeliveryResolution::RetryScheduled { retry_at: 31_001 }),
-    );
-
-    let mut permanent = Delivery::request(request("delivery-02", 2)).unwrap();
-    let permanent_claim = claim(&mut permanent, 1_000);
-    let mut permanent_port = RecordingDeliveryPort {
-        outcome: Ok(PromptDeliveryOutcome::Rejected {
-            rejection: DeliveryRejection::Permanent,
-        }),
-        requests: Vec::new(),
-    };
-
-    assert_eq!(
-        dispatch_delivery(
-            &mut permanent,
-            &permanent_claim,
-            binding(),
-            PromptDispatchPayload::try_new("review the release").unwrap(),
-            1_001,
-            2_000,
-            &mut permanent_port,
-        ),
-        Ok(DeliveryResolution::Failed),
-    );
-}
-
-#[test]
 fn generic_delivered_receipt_cannot_record_a_matcha_terminal_observation() {
     let mut delivery = Delivery::request(request("delivery-01", 2)).unwrap();
     let active_claim = claim(&mut delivery, 1_000);
@@ -1052,7 +834,7 @@ fn authorized_graph_resolution_routes_only_an_explicit_fenced_output_receipt() {
         "run-01",
         fence,
         AuthorizedGraphOutcome::Completed,
-        "approved",
+        "completed",
         1_011,
     )
     .unwrap();
@@ -1069,7 +851,7 @@ fn authorized_graph_resolution_routes_only_an_explicit_fenced_output_receipt() {
     assert_eq!(projection.nodes[0].current.status, AttemptStatus::Completed);
     assert_eq!(
         projection.nodes[0].current.output_port.as_deref(),
-        Some("approved")
+        Some("completed")
     );
     assert_eq!(projection.nodes[1].current.status, AttemptStatus::Ready);
 }
@@ -1098,7 +880,7 @@ fn authorized_graph_resolution_rejects_cancelled_and_conflicting_or_stale_receip
         "run-01",
         fence,
         AuthorizedGraphOutcome::Completed,
-        "approved",
+        "completed",
         1_011,
     )
     .unwrap();
@@ -1133,7 +915,7 @@ fn authorized_graph_resolution_rejects_cancelled_and_conflicting_or_stale_receip
         "run-01",
         mismatched_fence,
         AuthorizedGraphOutcome::Completed,
-        "approved",
+        "completed",
         1_011,
     )
     .unwrap();
@@ -1207,7 +989,7 @@ fn authorized_graph_resolution_rejects_cancelled_and_conflicting_or_stale_receip
         "other-run",
         fence,
         AuthorizedGraphOutcome::Completed,
-        "approved",
+        "completed",
         1_009,
     )
     .unwrap();

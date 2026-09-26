@@ -17,7 +17,6 @@ import {
 import type { SessionRenderAssistantBubbleToolResult, SessionRenderToolCard } from '../../types/session/tool-card';
 import { isOpenClawTool, readBrowserTabPreview, readMcpAppPreview } from './tool-renderers/openclaw-details';
 import { openChatRuntimeSurface, type ChatRuntimeSurfaceDescriptor } from './useChatSidePanelController';
-import { formatDuration } from './message-utils';
 import { extractArtifactRefsFromAssistantText } from './artifact-paths';
 import { sanitizeAssistantDisplayText } from '@/stores/chat/message-display';
 import { hostFileStat, hostWorkspaceMediaThumbnail, type WorkspaceFileContext } from '@/lib/host-api';
@@ -215,6 +214,13 @@ function resolveReplyDurationEndAt(item: ChatAssistantTurnItem, now: number): nu
   return undefined;
 }
 
+function formatReplyDurationSeconds(durationMs: number): string | undefined {
+  if (!Number.isFinite(durationMs) || durationMs < 1000) {
+    return undefined;
+  }
+  return `${Math.floor(durationMs / 1000)}秒`;
+}
+
 function getReplyDurationLabel(input: {
   item: ChatAssistantTurnItem;
   replyStartedAt?: number;
@@ -231,8 +237,11 @@ function getReplyDurationLabel(input: {
   if (endedAt < startedAt) {
     return undefined;
   }
-  const durationLabel = formatDuration(endedAt - startedAt);
-  return durationLabel ? `回复耗时 ${durationLabel}` : undefined;
+  const durationLabel = formatReplyDurationSeconds(endedAt - startedAt);
+  if (!durationLabel) {
+    return undefined;
+  }
+  return isActiveReplyStatus(input.item.status) ? `等待响应… ${durationLabel}` : `已完成，耗时 ${durationLabel}`;
 }
 
 export const ChatAssistantTurn = memo(function ChatAssistantTurn({
@@ -478,12 +487,6 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
         assistantAvatarStyle={item.assistantPresentation?.avatarStyle}
         userAvatarImageUrl={userAvatarImageUrl}
       >
-        {replyDurationLabel ? (
-          <div className="mb-1 text-[11px] leading-4 text-muted-foreground/70 select-none">
-            {replyDurationLabel}
-          </div>
-        ) : null}
-
         {renderParts.map((part) => {
           if (part.kind === 'tool-group') {
             return (
@@ -562,7 +565,9 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
 
         {pendingMode ? <AssistantPendingIndicator mode={pendingMode} /> : null}
 
-        {plainText && <AssistantMessageMetaBar text={plainText} timestamp={item.createdAt} />}
+        {(plainText || replyDurationLabel) ? (
+          <AssistantMessageMetaBar text={plainText} timestamp={item.createdAt} statusLabel={replyDurationLabel} />
+        ) : null}
       </MessageShell>
 
       {lightboxImg && (

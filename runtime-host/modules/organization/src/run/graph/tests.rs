@@ -1,5 +1,7 @@
 use std::num::NonZeroU32;
 
+mod rework;
+
 use super::{
     AttemptId, AttemptStatus, DefinitionError, DependencyMetadata, DurableRestoreError, EdgeAction,
     EdgeDefinition, EdgeId, EdgePayloadPolicy, ExecutionFence, ExecutorPolicy, GraphDefinition,
@@ -202,7 +204,7 @@ fn rich_definition() -> GraphDefinition {
             edge(
                 "review-typed-join",
                 "review",
-                "approved",
+                "completed",
                 "typed-join",
                 EdgeAction::Gate,
             ),
@@ -1003,4 +1005,245 @@ fn rejects_cyclic_activation_graphs() {
     .unwrap_err();
 
     assert!(matches!(error, DefinitionError::ActivationCycle(_)));
+}
+
+#[test]
+fn validates_agent_node_edge_ports_and_rework_action() {
+    let work_default = GraphDefinition::new(
+        "graph-work-default",
+        "plan-work-default",
+        GraphRunId::new("run-work-default"),
+        "Work default",
+        vec![
+            NodeDefinition::work(
+                node("work"),
+                "Work",
+                attempts(),
+                WorkAssignment::new("task-work", "role-work"),
+            ),
+            NodeDefinition::control(node("end"), NodeKind::End, "End", attempts()),
+        ],
+        vec![edge(
+            "work-end",
+            "work",
+            "default",
+            "end",
+            EdgeAction::Finish,
+        )],
+    )
+    .unwrap_err();
+    assert_eq!(
+        work_default,
+        DefinitionError::InvalidWorkEdgeSourcePort {
+            edge_id: EdgeId::new("work-end"),
+            source_port: "default".into(),
+        }
+    );
+
+    let completed_rework = GraphDefinition::new(
+        "graph-completed-rework",
+        "plan-completed-rework",
+        GraphRunId::new("run-completed-rework"),
+        "Completed rework",
+        vec![
+            NodeDefinition::work(
+                node("work"),
+                "Work",
+                attempts(),
+                WorkAssignment::new("task-work", "role-work"),
+            ),
+            NodeDefinition::work(
+                node("target"),
+                "Target",
+                attempts(),
+                WorkAssignment::new("task-target", "role-target"),
+            ),
+        ],
+        vec![edge(
+            "completed-rework",
+            "work",
+            "completed",
+            "target",
+            EdgeAction::Rework,
+        )],
+    )
+    .unwrap_err();
+    assert_eq!(
+        completed_rework,
+        DefinitionError::InvalidCompletedEdgeAction(EdgeId::new("completed-rework"))
+    );
+
+    let rework_activate = GraphDefinition::new(
+        "graph-rework-activate",
+        "plan-rework-activate",
+        GraphRunId::new("run-rework-activate"),
+        "Rework activate",
+        vec![
+            NodeDefinition::review(
+                node("review"),
+                "Review",
+                attempts(),
+                ReviewAssignment::new("role-review", "review prompt"),
+            ),
+            NodeDefinition::work(
+                node("target"),
+                "Target",
+                attempts(),
+                WorkAssignment::new("task-target", "role-target"),
+            ),
+        ],
+        vec![edge(
+            "rework-activate",
+            "review",
+            "rework",
+            "target",
+            EdgeAction::Activate,
+        )],
+    )
+    .unwrap_err();
+    assert_eq!(
+        rework_activate,
+        DefinitionError::InvalidReworkEdgeAction(EdgeId::new("rework-activate"))
+    );
+
+    let review_approved = GraphDefinition::new(
+        "graph-review-approved",
+        "plan-review-approved",
+        GraphRunId::new("run-review-approved"),
+        "Review approved",
+        vec![
+            NodeDefinition::review(
+                node("review"),
+                "Review",
+                attempts(),
+                ReviewAssignment::new("role-review", "review prompt"),
+            ),
+            NodeDefinition::work(
+                node("target"),
+                "Target",
+                attempts(),
+                WorkAssignment::new("task-target", "role-target"),
+            ),
+        ],
+        vec![edge(
+            "review-approved",
+            "review",
+            "approved",
+            "target",
+            EdgeAction::Activate,
+        )],
+    )
+    .unwrap_err();
+    assert_eq!(
+        review_approved,
+        DefinitionError::InvalidReviewEdgeSourcePort {
+            edge_id: EdgeId::new("review-approved"),
+            source_port: "approved".into(),
+        }
+    );
+
+    let valid = GraphDefinition::new(
+        "graph-review-valid",
+        "plan-review-valid",
+        GraphRunId::new("run-review-valid"),
+        "Review valid",
+        vec![
+            NodeDefinition::review(
+                node("review"),
+                "Review",
+                attempts(),
+                ReviewAssignment::new("role-review", "review prompt"),
+            ),
+            NodeDefinition::work(
+                node("work"),
+                "Work",
+                attempts(),
+                WorkAssignment::new("task-work", "role-work"),
+            ),
+        ],
+        vec![
+            edge(
+                "review-work",
+                "review",
+                "completed",
+                "work",
+                EdgeAction::Activate,
+            ),
+            edge(
+                "review-rework",
+                "review",
+                "rework",
+                "work",
+                EdgeAction::Rework,
+            ),
+        ],
+    );
+    assert!(valid.is_ok());
+}
+
+#[test]
+fn keeps_control_node_internal_ports_available() {
+    let definition = GraphDefinition::new(
+        "graph-control-ports",
+        "plan-control-ports",
+        GraphRunId::new("run-control-ports"),
+        "Control ports",
+        vec![
+            NodeDefinition::start(node("start"), "Start", attempts(), None),
+            NodeDefinition::control(
+                node("human-decision"),
+                NodeKind::HumanDecision,
+                "Decision",
+                attempts(),
+            ),
+            NodeDefinition::control(
+                node("script-review"),
+                NodeKind::ScriptReview,
+                "Script review",
+                attempts(),
+            ),
+            NodeDefinition::control(node("join"), NodeKind::Join, "Join", attempts()),
+            NodeDefinition::control(node("end"), NodeKind::End, "End", attempts()),
+        ],
+        vec![
+            edge(
+                "start-decision",
+                "start",
+                "completed",
+                "human-decision",
+                EdgeAction::Activate,
+            ),
+            edge(
+                "decision-approved",
+                "human-decision",
+                "approved",
+                "script-review",
+                EdgeAction::Activate,
+            ),
+            edge(
+                "decision-rejected",
+                "human-decision",
+                "rejected",
+                "end",
+                EdgeAction::Finish,
+            ),
+            edge(
+                "decision-aborted",
+                "human-decision",
+                "aborted",
+                "end",
+                EdgeAction::Finish,
+            ),
+            edge(
+                "script-approved",
+                "script-review",
+                "approved",
+                "join",
+                EdgeAction::Gate,
+            ),
+            edge("join-end", "join", "joined", "end", EdgeAction::Finish),
+        ],
+    );
+
+    assert!(definition.is_ok());
 }

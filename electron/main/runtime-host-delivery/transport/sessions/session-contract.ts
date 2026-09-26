@@ -1,3 +1,5 @@
+import { isSessionOwnership, type SessionOwnership } from '../../../../desktop-contract/session-ownership';
+
 const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_ID_BYTES = 256;
 const MAX_CONTENT_REF_BYTES = 512;
@@ -25,6 +27,7 @@ export type SessionModelState = Readonly<{
 
 export type SessionView = Readonly<{
   sessionKey: string;
+  ownership: SessionOwnership | null;
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
   identity: Readonly<{
@@ -187,11 +190,12 @@ export function decodeSessionContentLoadResponse(value: unknown): SessionContent
 export function decodeSessionView(value: unknown): SessionView | null {
   if (!isRecord(value)
     || !hasExactKeys(value, [
-      'sessionKey', 'endpointSessionId', 'modelState', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
+      'sessionKey', 'ownership', 'endpointSessionId', 'modelState', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
       'runtime', 'window', 'completeness',
     ])
     || typeof value.sessionKey !== 'string'
     || !isSessionKey(value.sessionKey)
+    || (value.ownership !== null && !isSessionOwnership(value.ownership))
     || !isNullableSessionKey(value.endpointSessionId)
     || !isNullableSessionModelState(value.modelState)
     || !isSessionIdentity(value.identity)

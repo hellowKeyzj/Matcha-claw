@@ -62,6 +62,7 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
+import { isSessionOwnership } from '../../../electron/desktop-contract/session-ownership';
 import { useComposerDraftStore } from '../composer-drafts';
 import { isSessionRuntimeEndpointStarting, useRuntimeEndpointsStore } from '../runtime-endpoints';
 import type { StoreHistoryCache } from './history-cache';
@@ -77,7 +78,7 @@ import type {
   ChatSessionRuntimeGraph,
   ChatStoreState,
 } from './types';
-import { isRunActive } from './types';
+import { isOrdinarySessionCandidate, isRunActive } from './types';
 
 const SESSION_CATALOG_NOT_READY_RETRY_MS = 1200;
 const SESSION_CATALOG_ENDPOINT_TIMEOUT_MS = 30000;
@@ -260,6 +261,9 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
       timeout,
     ]);
     const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
+    if (rawSessions.some((session) => session.ownership !== null && !isSessionOwnership(session.ownership))) {
+      throw new Error('Invalid session catalog ownership');
+    }
     return {
       target,
       sessions: rawSessions.map((session) => normalizeCatalogSession({
@@ -269,6 +273,7 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
         runtimeEndpointId: typeof session.runtimeEndpointId === 'string' ? session.runtimeEndpointId : undefined,
         endpointSessionId: typeof session.endpointSessionId === 'string' ? session.endpointSessionId : undefined,
         sessionIdentity: session.sessionIdentity,
+        ownership: session.ownership,
         kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'automation'
           ? session.kind
           : undefined,
@@ -391,8 +396,9 @@ function findRememberedSessionKeyForRuntimeEndpoint(
   endpoint: RuntimeEndpointRef,
 ): string | null {
   const sessionKey = state.lastSelectedSessionKeyByRuntimeScopeKey[buildRuntimeScopeKey(endpoint)];
-  const identity = sessionKey ? state.loadedSessions[sessionKey]?.meta.sessionIdentity : null;
-  return identity && sameRuntimeEndpointScope(identity.endpoint, endpoint) ? sessionKey : null;
+  const meta = sessionKey ? state.loadedSessions[sessionKey]?.meta : null;
+  return meta?.sessionIdentity && isOrdinarySessionCandidate(meta)
+    && sameRuntimeEndpointScope(meta.sessionIdentity.endpoint, endpoint) ? sessionKey : null;
 }
 
 function findPreferredSessionKeyForRuntimeEndpoint(
@@ -407,7 +413,7 @@ function findPreferredSessionKeyForRuntimeEndpoint(
   if (currentSessionKey) {
     for (const agent of endpointNode.agents) {
       const currentSession = agent.sessions.find((session) => session.sessionRecordKey === currentSessionKey);
-      if (currentSession) {
+      if (currentSession && isOrdinarySessionCandidate(currentSession)) {
         return currentSession.sessionRecordKey;
       }
     }
@@ -424,9 +430,14 @@ function findExistingSessionKeyForRuntimeEndpoint(
   state: ChatStoreState,
   endpoint: RuntimeEndpointRef,
 ): string | null {
+  if (state.currentConversation?.kind === 'session'
+    && sameRuntimeEndpointScope(state.currentConversation.endpoint, endpoint)) {
+    return state.currentConversation.sessionRecordKey;
+  }
   return findRememberedSessionKeyForRuntimeEndpoint(state, endpoint)
     ?? findPreferredSessionKeyForRuntimeEndpoint(state.sessionRuntimeGraph, endpoint, state.currentSessionKey)
-    ?? readSessionsFromState(state).find((session) => sameRuntimeEndpointScope(session.sessionIdentity.endpoint, endpoint))?.key
+    ?? readSessionsFromState(state).find((session) => isOrdinarySessionCandidate(session)
+      && sameRuntimeEndpointScope(session.sessionIdentity.endpoint, endpoint))?.key
     ?? null;
 }
 
@@ -509,7 +520,7 @@ function resolveCurrentConversationAfterSessionCatalogLoad(input: {
     const rememberedConversation = rememberedSessionKey
       ? buildCurrentConversationForSessionKey(input.loadedSessions, rememberedSessionKey)
       : null;
-    if (rememberedConversation) {
+    if (rememberedConversation?.agentId === previousConversation.agentId) {
       return rememberedConversation;
     }
     const session = findPreferredSessionForAgent(input.graph, previousConversation.endpoint, previousConversation.agentId);
@@ -731,11 +742,12 @@ async function executeLoadSessionsNow(
     const currentMatchesContext = !contextTarget || (currentMeta.sessionIdentity
       ? sameRuntimeEndpointScope(currentMeta.sessionIdentity.endpoint, contextTarget.endpoint)
       : false);
-    shouldKeepMissingCurrent = currentMatchesContext && !contextCatalogLoaded && shouldKeepMissingCurrentSession(
-      nextSessionKey,
-      stateSnapshot,
-      contextSessions.length,
-    );
+    shouldKeepMissingCurrent = currentMeta.ownership?.kind === 'team'
+      || (currentMatchesContext && !contextCatalogLoaded && shouldKeepMissingCurrentSession(
+        nextSessionKey,
+        stateSnapshot,
+        contextSessions.length,
+      ));
     if (!shouldKeepMissingCurrent) {
       nextSessionKey = '';
     }
@@ -783,6 +795,7 @@ async function executeLoadSessionsNow(
         protocolId: normalizeCatalogString(session.protocolId) ?? currentMeta.protocolId,
         runtimeEndpointId: normalizeCatalogString(session.runtimeEndpointId) ?? currentMeta.runtimeEndpointId,
         sessionIdentity: session.sessionIdentity,
+        ownership: session.ownership,
         kind: session.kind ?? currentMeta.kind,
         preferred: session.preferred ?? currentMeta.preferred,
         label: explicitLabel && explicitLabel !== session.key && explicitLabel !== session.sessionIdentity.sessionKey ? explicitLabel : currentMeta.label,
@@ -866,7 +879,11 @@ async function executeLoadSessionsNow(
   });
 }
 
-export function executeOpenAgentConversation(input: CreateStoreSessionActionsInput, agentId: string): void {
+export function executeOpenAgentConversation(
+  input: CreateStoreSessionActionsInput,
+  agentId: string,
+  endpoint?: RuntimeEndpointRef,
+): void {
   const { get, set } = input;
   const normalized = agentId.trim();
   if (!normalized) {
@@ -874,13 +891,18 @@ export function executeOpenAgentConversation(input: CreateStoreSessionActionsInp
   }
   const traceId = createSessionTraceId('open-agent');
   const state = get();
-  const contextEndpoint = state.currentConversation?.endpoint
+  const contextEndpoint = endpoint
+    ?? state.currentConversation?.endpoint
     ?? getSessionMeta(state, state.currentSessionKey).sessionIdentity?.endpoint
     ?? state.sessionRuntimeCatalog.defaultSessionPromptScope?.endpoint;
   if (!contextEndpoint) {
     return;
   }
-  const preferredSession = findPreferredSessionForAgent(state.sessionRuntimeGraph, contextEndpoint, normalized);
+  const preferredSession = findPreferredSessionForAgent(
+    state.sessionRuntimeGraph,
+    contextEndpoint,
+    normalized,
+  );
   logSessionTrace('open-agent.request', traceId, {
     agentId: summarizeIdentifier(normalized),
     preferredSessionKey: summarizeIdentifier(preferredSession?.sessionRecordKey),
@@ -1296,10 +1318,8 @@ export function executeForgetAgentSessions(input: CreateStoreSessionActionsInput
     if (currentWasRemoved || currentConversationWasRemoved) {
       const endpoint = removedCurrentEndpoint;
       const next = endpoint
-        ? readSessionsFromState({ loadedSessions }).find((session) => sameRuntimeEndpointScope(
-            session.sessionIdentity.endpoint,
-            endpoint,
-          ))
+        ? readSessionsFromState({ loadedSessions }).find((session) => isOrdinarySessionCandidate(session)
+          && sameRuntimeEndpointScope(session.sessionIdentity.endpoint, endpoint))
         : null;
       const targetRuntime = endpoint ? findRuntimeTargetForEndpoint(readSessionRuntimeTargets(stateValue), endpoint) : null;
       nextSessionKey = next?.key ?? '';
@@ -1373,10 +1393,8 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
     if (currentSessionKey === key) {
       clearHistoryPoll();
       clearErrorRecoveryTimer();
-      const next = remainingSessions.find((session) => sameRuntimeEndpointScope(
-        session.sessionIdentity.endpoint,
-        target.sessionIdentity.endpoint,
-      ));
+      const next = remainingSessions.find((session) => isOrdinarySessionCandidate(session)
+        && sameRuntimeEndpointScope(session.sessionIdentity.endpoint, target.sessionIdentity.endpoint));
       set((state) => {
         const loadedSessions = removeSessionRecord(state, key);
         const targetRuntime = findRuntimeTargetForEndpoint(readSessionRuntimeTargets(state), target.sessionIdentity.endpoint);

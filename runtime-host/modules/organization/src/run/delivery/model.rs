@@ -345,6 +345,11 @@ impl AuthorizedGraphResolution {
         self.outcome
     }
 
+    pub(super) fn with_outcome(mut self, outcome: AuthorizedGraphOutcome) -> Self {
+        self.outcome = outcome;
+        self
+    }
+
     pub fn output_port(&self) -> &str {
         &self.output_port
     }
@@ -383,10 +388,14 @@ const MAX_TEAM_MESSAGE_SUMMARY_BYTES: usize = 512;
 pub struct TeamNodeOutput {
     final_assistant_text: String,
     summary: String,
-    output_port: String,
-    payload: Value,
-    outcome: Option<String>,
-    status: Option<String>,
+    decision: String,
+    dispatch: Vec<TeamNodeOutputDispatch>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TeamNodeOutputDispatch {
+    role_id: String,
+    task: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -397,7 +406,7 @@ pub enum TeamNodeOutputError {
     UnexpectedField(String),
     InvalidField(&'static str),
     InvalidSummary,
-    UnsafeOutputPort,
+    UnsafeDecision,
 }
 
 impl TeamNodeOutput {
@@ -412,26 +421,24 @@ impl TeamNodeOutput {
     pub fn restore(
         final_assistant_text: impl Into<String>,
         summary: impl Into<String>,
-        output_port: impl Into<String>,
-        payload: Value,
-        outcome: Option<String>,
-        status: Option<String>,
+        decision: impl Into<String>,
+        dispatch: Vec<TeamNodeOutputDispatch>,
     ) -> Result<Self, TeamNodeOutputError> {
         let final_assistant_text = final_assistant_text.into();
         if final_assistant_text.trim().is_empty() {
             return Err(TeamNodeOutputError::MissingEnvelope);
         }
         let summary = validate_summary(summary.into())?;
-        let output_port = validate_output_port(output_port.into())?;
-        let outcome = outcome.map(validate_optional_message_string).transpose()?;
-        let status = status.map(validate_optional_message_string).transpose()?;
+        let decision = validate_decision(decision.into())?;
+        for item in &dispatch {
+            validate_dispatch_string(&item.role_id, "role_id")?;
+            validate_dispatch_string(&item.task, "task")?;
+        }
         Ok(Self {
             final_assistant_text,
             summary,
-            output_port,
-            payload,
-            outcome,
-            status,
+            decision,
+            dispatch,
         })
     }
 
@@ -440,29 +447,14 @@ impl TeamNodeOutput {
             return Err(TeamNodeOutputError::InvalidField("root"));
         };
         for field in object.keys() {
-            if !matches!(
-                field.as_str(),
-                "summary" | "output_port" | "payload" | "outcome" | "status"
-            ) {
+            if !matches!(field.as_str(), "summary" | "decision" | "dispatch") {
                 return Err(TeamNodeOutputError::UnexpectedField(field.clone()));
             }
         }
         let summary = required_message_string(object, "summary")?;
-        let output_port = required_message_string(object, "output_port")?;
-        let payload = object
-            .get("payload")
-            .cloned()
-            .ok_or(TeamNodeOutputError::MissingField("payload"))?;
-        let outcome = optional_message_string(object, "outcome")?;
-        let status = optional_message_string(object, "status")?;
-        Self::restore(
-            final_assistant_text,
-            summary,
-            output_port,
-            payload,
-            outcome,
-            status,
-        )
+        let decision = required_message_string(object, "decision")?;
+        let dispatch = required_dispatch(object.get("dispatch"))?;
+        Self::restore(final_assistant_text, summary, decision, dispatch)
     }
 
     pub fn final_assistant_text(&self) -> &str {
@@ -473,20 +465,33 @@ impl TeamNodeOutput {
         &self.summary
     }
 
-    pub fn output_port(&self) -> &str {
-        &self.output_port
+    pub fn decision(&self) -> &str {
+        &self.decision
     }
 
-    pub fn payload(&self) -> &Value {
-        &self.payload
+    pub fn dispatch(&self) -> &[TeamNodeOutputDispatch] {
+        &self.dispatch
+    }
+}
+
+impl TeamNodeOutputDispatch {
+    pub fn new(
+        role_id: impl Into<String>,
+        task: impl Into<String>,
+    ) -> Result<Self, TeamNodeOutputError> {
+        let role_id = role_id.into();
+        let task = task.into();
+        validate_dispatch_string(&role_id, "role_id")?;
+        validate_dispatch_string(&task, "task")?;
+        Ok(Self { role_id, task })
     }
 
-    pub fn outcome(&self) -> Option<&str> {
-        self.outcome.as_deref()
+    pub fn role_id(&self) -> &str {
+        &self.role_id
     }
 
-    pub fn status(&self) -> Option<&str> {
-        self.status.as_deref()
+    pub fn task(&self) -> &str {
+        &self.task
     }
 }
 
@@ -496,10 +501,8 @@ impl fmt::Debug for TeamNodeOutput {
             .debug_struct("TeamNodeOutput")
             .field("final_assistant_text", &"<redacted>")
             .field("summary", &"<redacted>")
-            .field("output_port", &"<redacted>")
-            .field("payload", &"<redacted>")
-            .field("outcome", &self.outcome.as_ref().map(|_| "<redacted>"))
-            .field("status", &self.status.as_ref().map(|_| "<redacted>"))
+            .field("decision", &"<redacted>")
+            .field("dispatch", &self.dispatch.len())
             .finish()
     }
 }
@@ -526,15 +529,33 @@ fn required_message_string(
     }
 }
 
-fn optional_message_string(
-    object: &serde_json::Map<String, Value>,
-    field: &'static str,
-) -> Result<Option<String>, TeamNodeOutputError> {
-    match object.get(field) {
-        Some(Value::String(value)) => Ok(Some(validate_optional_message_string(value.to_owned())?)),
-        Some(_) => Err(TeamNodeOutputError::InvalidField(field)),
-        None => Ok(None),
+fn required_dispatch(
+    value: Option<&Value>,
+) -> Result<Vec<TeamNodeOutputDispatch>, TeamNodeOutputError> {
+    let Some(Value::Array(items)) = value else {
+        return match value {
+            Some(_) => Err(TeamNodeOutputError::InvalidField("dispatch")),
+            None => Err(TeamNodeOutputError::MissingField("dispatch")),
+        };
+    };
+    let mut dispatch = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(object) = item.as_object() else {
+            return Err(TeamNodeOutputError::InvalidField("dispatch"));
+        };
+        for field in object.keys() {
+            if !matches!(field.as_str(), "role_id" | "task") {
+                return Err(TeamNodeOutputError::UnexpectedField(format!(
+                    "dispatch.{field}"
+                )));
+            }
+        }
+        dispatch.push(TeamNodeOutputDispatch::new(
+            required_message_string(object, "role_id")?,
+            required_message_string(object, "task")?,
+        )?);
     }
+    Ok(dispatch)
 }
 
 fn validate_summary(summary: String) -> Result<String, TeamNodeOutputError> {
@@ -547,21 +568,18 @@ fn validate_summary(summary: String) -> Result<String, TeamNodeOutputError> {
     Ok(summary)
 }
 
-fn validate_output_port(output_port: String) -> Result<String, TeamNodeOutputError> {
-    if output_port.trim().is_empty() || !is_safe_output_port(&output_port) {
-        return Err(TeamNodeOutputError::UnsafeOutputPort);
+fn validate_decision(decision: String) -> Result<String, TeamNodeOutputError> {
+    if decision.trim().is_empty() || !is_safe_output_port(&decision) {
+        return Err(TeamNodeOutputError::UnsafeDecision);
     }
-    Ok(output_port)
+    Ok(decision)
 }
 
-fn validate_optional_message_string(value: String) -> Result<String, TeamNodeOutputError> {
-    if value.trim().is_empty()
-        || value.len() > MAX_TEAM_MESSAGE_SUMMARY_BYTES
-        || value.chars().any(char::is_control)
-    {
-        return Err(TeamNodeOutputError::InvalidField("message"));
+fn validate_dispatch_string(value: &str, field: &'static str) -> Result<(), TeamNodeOutputError> {
+    if value.trim().is_empty() {
+        return Err(TeamNodeOutputError::InvalidField(field));
     }
-    Ok(value)
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -923,6 +941,22 @@ impl Delivery {
             native_correlation,
             accepted_at,
         };
+    }
+
+    pub(crate) fn confirm_unknown_native_delivery(
+        &mut self,
+        receipt: DeliveryReceiptReference,
+        correlation: NativeDeliveryCorrelation,
+    ) -> bool {
+        let DeliveryPhase::OutcomeUnknown { observed_at } = self.phase else {
+            return false;
+        };
+        self.phase = DeliveryPhase::Delivered {
+            receipt,
+            native_correlation: Some(correlation),
+            accepted_at: observed_at,
+        };
+        true
     }
 
     pub(crate) fn mark_terminal_observed(&mut self, observation: TerminalObservation) {

@@ -191,6 +191,7 @@ pub enum OrganizationCommand {
     },
     TeamMessageTerminalObserved {
         native_run_id: String,
+        delivery_context: Option<(DeliveryId, crate::EndpointSessionId)>,
         status: organization::NativeTerminalStatus,
         final_assistant_text: Option<String>,
         settled_at: u64,

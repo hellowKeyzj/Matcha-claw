@@ -36,9 +36,9 @@ export function createTeamRuntimeTransport(
         body: withTrace(request, traceId),
       });
       if (response?.status === 200) return { status: 200, body: response.body };
-      if (response?.status === 400) return { status: 400, body: INVALID };
-      if (response?.status === 500) return { status: 500, body: UNAVAILABLE };
-      return { status: 503, body: UNAVAILABLE };
+      if (response?.status === 400) return { status: 400, body: response.body ?? INVALID };
+      if (response?.status === 500) return { status: 500, body: response.body ?? UNAVAILABLE };
+      return { status: 503, body: response?.body ?? UNAVAILABLE };
     },
   };
 }

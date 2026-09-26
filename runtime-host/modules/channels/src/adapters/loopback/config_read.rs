@@ -88,7 +88,7 @@ impl Delivery {
 
     pub fn body(&self) -> Value {
         match self {
-            Self::Outcome(Outcome::Values(projection)) => json!({ "values": projection.values() }),
+            Self::Outcome(Outcome::Values(projection)) => json!(projection),
             Self::Outcome(Outcome::TargetRejected) => {
                 json!({"success": false, "error": "Channel configuration request was rejected"})
             }
@@ -222,10 +222,14 @@ mod tests {
     #[test]
     fn delivery_keeps_rejection_unavailability_and_unknown_distinct() {
         let projection =
-            Projection::from_source(BTreeMap::from([("enabled".into(), "true".into())])).unwrap();
+            Projection::from_source(BTreeMap::from([("enabled".into(), "true".into())]), None)
+                .unwrap();
         let success = Delivery::Outcome(Outcome::Values(projection));
         assert_eq!(success.status_code(), 200);
-        assert_eq!(success.body(), json!({"values": {"enabled": "true"}}));
+        assert_eq!(
+            success.body(),
+            json!({"values": {"enabled": "true"}, "agentId": null})
+        );
 
         let rejected = Delivery::Outcome(Outcome::TargetRejected);
         assert_eq!(rejected.status_code(), 400);

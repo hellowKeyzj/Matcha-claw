@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use organization::{ActivityExecutionOutcome, ActivityExecutionRequest};
 use runtime_directory::RuntimeDriverIdentity;
@@ -16,6 +16,66 @@ use crate::{
     composition::runtime_ports::RuntimeDriverDirectory,
     composition::{HostAdmission, RequestAdmission},
 };
+
+pub(crate) struct OrganizationSessionOwnership {
+    organization: organization::OrganizationHandle,
+}
+
+impl OrganizationSessionOwnership {
+    pub(crate) fn new(organization: organization::OrganizationHandle) -> Self {
+        Self { organization }
+    }
+}
+
+impl sessions_module::ports::SessionOwnershipReader for OrganizationSessionOwnership {
+    fn lookup<'a>(
+        &'a self,
+        queries: Vec<sessions_module::ports::SessionOwnershipQuery>,
+    ) -> sessions_module::ports::SessionFuture<
+        'a,
+        Option<HashMap<platform::endpoint::runtime_address::SessionIdentity, SessionSourceBinding>>,
+    > {
+        Box::pin(async move {
+            let receipts = self.organization.role_session_receipts().await.ok()?.ok()?;
+            let mut bindings = HashMap::with_capacity(receipts.len());
+            for receipt in &receipts {
+                let runtime = RuntimeDriverIdentity::from_reference(receipt.endpoint().as_str())?;
+                // Matcha addresses native sessions globally; its catalog's default agent is not ownership.
+                let agent = if runtime == RuntimeDriverIdentity::matcha_agent() {
+                    None
+                } else {
+                    Some(receipt.agent().as_str())
+                };
+                bindings.insert(
+                    (
+                        runtime.endpoint(),
+                        agent,
+                        receipt.endpoint_session_id().as_str(),
+                    ),
+                    receipt,
+                );
+            }
+            let mut ownership = HashMap::new();
+            for query in queries {
+                let agent =
+                    if query.identity.endpoint() == &RuntimeDriverIdentity::matcha_agent().endpoint() {
+                        None
+                    } else {
+                        Some(query.identity.agent_id())
+                    };
+                if let Some(receipt) = bindings.get(&(
+                    query.identity.endpoint().clone(),
+                    agent,
+                    query.endpoint_session_id.as_str(),
+                )) {
+                    let binding = SessionSourceBinding::team_from_receipt(receipt);
+                    ownership.insert(query.identity, binding);
+                }
+            }
+            Some(ownership)
+        })
+    }
+}
 
 pub(crate) struct OrganizationSessionTerminal {
     inner: organization::OrganizationSessionTerminal<SessionSourceBinding>,
@@ -56,6 +116,9 @@ impl SessionTerminalHook for OrganizationSessionTerminal {
                 route_key: snapshot.route_key,
                 source_binding: snapshot.source_binding,
                 native_run_id: snapshot.native_run_id,
+                delivery_context: snapshot
+                    .delivery_context
+                    .map(|context| (context.delivery_id, context.endpoint_session_id)),
                 phase: run_phase(snapshot.phase),
                 final_assistant_text: snapshot.final_assistant_text,
             });
@@ -157,13 +220,13 @@ impl SessionSendHookState for StartGateSendState {
 }
 
 #[derive(Clone)]
-pub(in crate::composition::host) struct HostTeamActivityExecutor {
+pub(in crate::composition::host) struct TeamSessionExecutor {
     admission: Arc<HostAdmission>,
     session: sessions_module::SessionHandle,
     runtime_directory: Arc<RuntimeDriverDirectory>,
 }
 
-impl HostTeamActivityExecutor {
+impl TeamSessionExecutor {
     pub(in crate::composition::host) fn new(
         admission: Arc<HostAdmission>,
         session: sessions_module::SessionHandle,
@@ -246,22 +309,6 @@ const fn start_gate_native_endpoint(
     }
 }
 
-fn rendered_session_key(
-    identity: RuntimeDriverIdentity,
-    agent_id: &str,
-    endpoint_session_id: &str,
-) -> Option<String> {
-    match identity {
-        value if value == RuntimeDriverIdentity::open_claw() => {
-            Some(format!("agent:{agent_id}:{endpoint_session_id}"))
-        }
-        value if value == RuntimeDriverIdentity::matcha_agent() => {
-            Some(format!("matcha-agent:{agent_id}:{endpoint_session_id}"))
-        }
-        _ => None,
-    }
-}
-
 fn session_provider_from_identity(identity: RuntimeDriverIdentity) -> SessionProvider {
     if identity == RuntimeDriverIdentity::open_claw() {
         SessionProvider::OpenClaw
@@ -270,12 +317,13 @@ fn session_provider_from_identity(identity: RuntimeDriverIdentity) -> SessionPro
     }
 }
 
-impl organization::TeamActivityExecutor for HostTeamActivityExecutor {
+impl organization::TeamActivityExecutor for TeamSessionExecutor {
     fn execute(
         &self,
         request: ActivityExecutionRequest,
     ) -> runtime_directory::OwnedRuntimeFuture<ActivityExecutionOutcome> {
         let session = self.session.clone();
+        let runtime_directory = Arc::clone(&self.runtime_directory);
         Box::pin(async move {
             let delivery = request.delivery_request().clone();
             let binding = request.binding().clone();
@@ -283,8 +331,13 @@ impl organization::TeamActivityExecutor for HostTeamActivityExecutor {
             else {
                 return ActivityExecutionOutcome::Unknown;
             };
-            let Some(session_key) = rendered_session_key(
-                identity,
+            let Some(driver) = runtime_directory.lookup(&identity.endpoint()) else {
+                return ActivityExecutionOutcome::Unknown;
+            };
+            let Some(session_ops) = driver.session_ops() else {
+                return ActivityExecutionOutcome::Unknown;
+            };
+            let Some(session_key) = session_ops.agent_scoped_session_key(
                 binding.agent().as_str(),
                 binding.endpoint_session_id().as_str(),
             ) else {

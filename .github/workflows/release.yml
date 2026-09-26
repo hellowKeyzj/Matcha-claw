@@ -114,6 +114,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Download bundled protoc
+        run: pnpm run protoc:download
+
       - name: Prepare Windows bundled runtime dependencies
         if: matrix.platform == 'win'
         run: pnpm run prep:win-binaries

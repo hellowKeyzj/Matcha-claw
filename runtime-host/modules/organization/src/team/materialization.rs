@@ -50,6 +50,7 @@ pub struct ManualTeamRoleBinding {
     member_name: String,
     agent: ManagedAgentReference,
     leader: bool,
+    tools: Vec<String>,
 }
 
 impl ManualTeamRoleBinding {
@@ -68,7 +69,13 @@ impl ManualTeamRoleBinding {
             member_name,
             agent,
             leader,
+            tools: Vec::new(),
         })
+    }
+
+    pub fn with_tools(mut self, tools: Vec<String>) -> Self {
+        self.tools = tools;
+        self
     }
 }
 
@@ -113,7 +120,8 @@ pub fn compile_team_skill_materialization(
             .map_err(|_| TeamMaterializationError::Invalid)?;
         agents.push(
             RoleAgentMaterialization::managed(role.clone(), package_role.id())
-                .map_err(|_| TeamMaterializationError::Invalid)?,
+                .map_err(|_| TeamMaterializationError::Invalid)?
+                .with_tools(package_role.tools().to_vec()),
         );
         assignments.push(RoleAssignment::new(member.member_id().clone(), role));
         members.push(member);
@@ -176,10 +184,10 @@ pub fn compile_manual_team_materialization(
             member.member_id().clone(),
             binding.role.clone(),
         ));
-        agents.push(RoleAgentMaterialization::external(
-            binding.role,
-            binding.agent,
-        ));
+        agents.push(
+            RoleAgentMaterialization::external(binding.role, binding.agent)
+                .with_tools(binding.tools),
+        );
         members.push(member);
         team_roles.push(team_role);
     }

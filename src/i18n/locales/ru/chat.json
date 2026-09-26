@@ -122,6 +122,8 @@
     }
   },
   "todoPanel": {
+    "title": "Список задач",
+    "progress": "Прогресс",
     "summary": "Задачи {{completed}}/{{total}}",
     "expand": "Развернуть список задач",
     "collapse": "Свернуть список задач",

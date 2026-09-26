@@ -17,5 +17,6 @@ runtime-directory = { version = "0.1.0", path = "../runtime-directory" }
 reqwest.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
+tokio-util.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

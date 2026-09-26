@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::run::event::{MetadataValue, OpaqueId};
 
 use super::{
-    EdgeDefinition, EdgeId, GraphEvent, GraphState, NodeDefinition, NodeId, NodeKind, ReduceError,
+    EdgeDefinition, EdgeId, GraphEvent, GraphState, NodeDefinition, NodeId, NodeKind, NodePosition,
+    ReduceError,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -14,7 +15,14 @@ pub enum GraphPatchOperation {
     AddEdge(EdgeDefinition),
     ReplaceEdge(EdgeDefinition),
     RemoveEdge(EdgeId),
-    SetMetadata { key: OpaqueId, value: MetadataValue },
+    SetNodePosition {
+        node_id: NodeId,
+        position: NodePosition,
+    },
+    SetMetadata {
+        key: OpaqueId,
+        value: MetadataValue,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,7 +103,7 @@ pub fn apply(
     )
     .map_err(map_reduce_error)?;
 
-    validate_metadata_projection(state, patch, &patched)?;
+    validate_metadata_and_layout_projection(state, patch, &patched)?;
     Ok(patched)
 }
 
@@ -202,6 +210,11 @@ fn validate_operations(
                     return Err(GraphPatchError::UnknownEdge(edge_id.clone()));
                 }
             }
+            GraphPatchOperation::SetNodePosition { node_id, .. } => {
+                if !node_kinds.contains_key(node_id) {
+                    return Err(GraphPatchError::UnknownNode(node_id.clone()));
+                }
+            }
             GraphPatchOperation::SetMetadata { key, .. } => {
                 if key.as_str().trim().is_empty() {
                     return Err(GraphPatchError::InvalidDefinition);
@@ -265,18 +278,32 @@ fn validate_edge_payload<'a>(
     Ok(())
 }
 
-fn validate_metadata_projection(
+fn validate_metadata_and_layout_projection(
     state: &GraphState,
     patch: &GraphPatch,
     patched: &GraphState,
 ) -> Result<(), GraphPatchError> {
-    let mut expected = state.metadata().clone();
+    let mut expected_metadata = state.metadata().clone();
+    let mut expected_layout = state.layout().clone();
     for operation in &patch.operations {
-        if let GraphPatchOperation::SetMetadata { key, value } = operation {
-            expected.insert(key.clone(), value.clone());
+        match operation {
+            GraphPatchOperation::RemoveNode(node_id) => {
+                expected_layout.remove_node(node_id);
+            }
+            GraphPatchOperation::SetNodePosition { node_id, position } => {
+                expected_layout.set_node_position(node_id.clone(), *position);
+            }
+            GraphPatchOperation::SetMetadata { key, value } => {
+                expected_metadata.insert(key.clone(), value.clone());
+            }
+            GraphPatchOperation::AddNode(_)
+            | GraphPatchOperation::ReplaceNode(_)
+            | GraphPatchOperation::AddEdge(_)
+            | GraphPatchOperation::ReplaceEdge(_)
+            | GraphPatchOperation::RemoveEdge(_) => {}
         }
     }
-    if patched.metadata() != &expected {
+    if patched.metadata() != &expected_metadata || patched.layout() != &expected_layout {
         return Err(GraphPatchError::InvalidDefinition);
     }
     Ok(())
@@ -286,6 +313,7 @@ fn map_reduce_error(error: ReduceError) -> GraphPatchError {
     match error {
         ReduceError::StaleGraphIdentity => GraphPatchError::StaleRevision,
         ReduceError::InvalidGraphPatch
+        | ReduceError::InvalidSettlementEvent
         | ReduceError::UnknownNode(_)
         | ReduceError::TriggerNotArmed(_)
         | ReduceError::StaleFence { .. }

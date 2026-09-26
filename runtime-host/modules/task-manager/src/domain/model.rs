@@ -408,11 +408,11 @@ impl TaskCreateReceipt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TodoSnapshot {
     todos: Vec<Todo>,
-    updated_at: u64,
+    updated_at: Option<u64>,
 }
 
 impl TodoSnapshot {
-    pub fn new(todos: Vec<Todo>, updated_at: u64) -> Self {
+    pub fn new(todos: Vec<Todo>, updated_at: Option<u64>) -> Self {
         Self { todos, updated_at }
     }
 
@@ -420,7 +420,7 @@ impl TodoSnapshot {
         &self.todos
     }
 
-    pub fn updated_at(&self) -> u64 {
+    pub fn updated_at(&self) -> Option<u64> {
         self.updated_at
     }
 }

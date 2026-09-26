@@ -8,8 +8,22 @@ impl SessionOps for MatchaRuntimeDriver {
         SessionAdmission::new(
             identity.endpoint(),
             sessions_module::state::SessionProvider::MatchaAgent,
-            Some(identity.runtime_adapter_id()),
         )
+    }
+
+    fn agent_scoped_session_key(
+        &self,
+        agent_id: &str,
+        endpoint_session_id: &str,
+    ) -> Option<String> {
+        let identity = RuntimeDriverIdentity::matcha_agent();
+        let session_id = SessionId::try_new(endpoint_session_id.to_owned()).ok()?;
+        Some(format!(
+            "{}:{}:{}",
+            identity.runtime_adapter_id(),
+            agent_id,
+            session_id.as_str()
+        ))
     }
 
     fn abort_session<'a>(
@@ -284,8 +298,10 @@ pub(super) async fn select_session_model_with_handle(
         };
     let outcome = match session.set_session_model(params).await {
         InvocationOutcome::Succeeded(_) => SessionModelSelectionOutcome::Succeeded {
-            model_state: sessions_module::state::SessionModelState::selected_from_ref(model.as_str())
-                .expect("validated Matcha session model ref builds model state"),
+            model_state: sessions_module::state::SessionModelState::selected_from_ref(
+                model.as_str(),
+            )
+            .expect("validated Matcha session model ref builds model state"),
         },
         InvocationOutcome::TargetRejected(
             crate::session::client::AppServerClientError::SessionNotFound,
@@ -403,6 +419,7 @@ pub(super) async fn load_session_catalog(
                         ),
                         agent_id: identity.default_agent_id().to_owned(),
                         endpoint_session_id,
+                        ownership: None,
                         model_state: None,
                         updated_at: session.updated_at(),
                         preferred: Some(false),

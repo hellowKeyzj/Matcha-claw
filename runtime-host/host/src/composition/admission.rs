@@ -219,6 +219,13 @@ impl workspace::WorkspaceRequestAdmission for HostAdmission {
     }
 }
 
+impl wiki::WikiRequestAdmission for HostAdmission {
+    fn admit_wiki_request(&self) -> Result<(), wiki::WikiRequestAdmissionClosed> {
+        self.admit_request()
+            .map_err(|_| wiki::WikiRequestAdmissionClosed)
+    }
+}
+
 impl toolchain::ToolchainRequestAdmission for HostAdmission {
     fn admit_toolchain_request(&self) -> Result<(), toolchain::ToolchainRequestAdmissionClosed> {
         self.admit_request()

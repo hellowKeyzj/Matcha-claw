@@ -355,7 +355,9 @@ impl SessionModelSelectionRejection {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionModelSelectionOutcome {
-    Succeeded { model_state: SessionModelState },
+    Succeeded {
+        model_state: SessionModelState,
+    },
     TargetRejected {
         reason: SessionModelSelectionRejection,
         diagnostic: Option<SessionModelSelectionDiagnostic>,
@@ -421,7 +423,9 @@ impl Serialize for SessionModelSelectionOutcome {
         S: Serializer,
     {
         match self {
-            Self::Succeeded { model_state } => SucceededOutcomeTag::new(model_state).serialize(serializer),
+            Self::Succeeded { model_state } => {
+                SucceededOutcomeTag::new(model_state).serialize(serializer)
+            }
             Self::TargetRejected { .. } => OutcomeTag::TargetRejected.serialize(serializer),
             Self::OutcomeUnknown => OutcomeTag::OutcomeUnknown.serialize(serializer),
             Self::Unsupported => OutcomeTag::Unsupported.serialize(serializer),

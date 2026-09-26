@@ -19,6 +19,7 @@ const INSTALL_PLAN_HOST_CAPABILITIES: &[CapabilityKey] = &[
     CapabilityKey::new("runtime.task-manager"),
     CapabilityKey::new("runtime.subagents"),
     CapabilityKey::new("runtime.workspace"),
+    CapabilityKey::new("runtime.wiki"),
     CapabilityKey::new("runtime.platform-tools"),
     CapabilityKey::new("external.toolchain.native"),
     CapabilityKey::new("host.observation"),

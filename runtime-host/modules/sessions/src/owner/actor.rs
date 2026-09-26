@@ -7,6 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use super::session_ownership;
 use arc_swap::ArcSwap;
 use connectors::{
     ConnectorSecretRef, ConnectorSecretResolution, ConnectorSecretResolverPort,
@@ -18,7 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::ports::{
     LifecycleOps, RuntimeDriver, RuntimeDriverIdentity, RuntimeOperationFailure,
-    SessionRuntimeDirectory,
+    SessionOwnershipReader, SessionRuntimeDirectory,
 };
 use crate::{
     abort::SessionAbortOutcome,
@@ -39,7 +40,7 @@ use crate::{
     },
     query::SessionQuery,
     rename::SessionRenameOutcome,
-    send::{SessionSendCommand, SessionSendOutcome},
+    send::{SessionDeliveryContext, SessionSendCommand, SessionSendOutcome},
     session_catalog::{
         self, SessionCatalog, SessionCatalogCommand, SessionCatalogEntry, SessionCatalogOutcome,
     },
@@ -68,6 +69,7 @@ pub struct SessionOwner {
 
 pub struct SessionOwnerInput {
     pub runtime_directory: Arc<dyn SessionRuntimeDirectory>,
+    pub ownership_reader: Arc<dyn SessionOwnershipReader>,
     pub provider_handle: ProviderHandle,
     pub session_delta: Option<SessionDeltaSource>,
     pub terminal_hook: Option<Arc<dyn SessionTerminalHook>>,
@@ -76,6 +78,7 @@ pub struct SessionOwnerInput {
 #[derive(Clone)]
 pub struct SessionShared {
     runtime_directory: Arc<dyn SessionRuntimeDirectory>,
+    ownership_reader: Arc<dyn SessionOwnershipReader>,
     provider_handle: ProviderHandle,
     private_resolver: Arc<StdMutex<Arc<dyn ConnectorSecretResolverPort>>>,
     snapshot: Arc<ArcSwap<SessionSnapshot>>,
@@ -89,10 +92,14 @@ pub struct SessionLane {
     state: Option<SessionState>,
 }
 
+#[cfg(test)]
+mod tests;
+
 static NEXT_SESSION_EPOCH: AtomicU64 = AtomicU64::new(1);
 impl SessionOwner {
     pub fn new(
         runtime_directory: Arc<dyn SessionRuntimeDirectory>,
+        ownership_reader: Arc<dyn SessionOwnershipReader>,
         provider_handle: ProviderHandle,
         session_delta: Option<SessionDeltaSource>,
         terminal_hook: Option<Arc<dyn SessionTerminalHook>>,
@@ -102,6 +109,7 @@ impl SessionOwner {
         })));
         let shared = SessionShared {
             runtime_directory,
+            ownership_reader,
             provider_handle,
             private_resolver: Arc::new(StdMutex::new(Arc::new(
                 provider_module::Resolver::disabled(),
@@ -163,56 +171,72 @@ impl SessionShared {
         self.snapshot.store(Arc::new(SessionSnapshot { states }));
     }
 
-    fn emit_session_delta(&self, delta: &SessionDelta, state: &SessionState) {
+    fn terminal_snapshots(
+        delta: &SessionDelta,
+        state: &mut SessionState,
+    ) -> Vec<SessionRunTerminalSnapshot> {
+        if !state.is_team_source() {
+            return Vec::new();
+        }
+        delta
+            .changes
+            .iter()
+            .filter_map(|change| {
+                let SessionChange::RunPhaseChanged { run_id, phase } = change else {
+                    return None;
+                };
+                if !crate::state::terminal_run_phase(*phase) {
+                    return None;
+                }
+                Some(SessionRunTerminalSnapshot {
+                    provider: state.identity().provider(),
+                    session_key: delta.session_key.clone(),
+                    route_key: delta.route_key.clone(),
+                    source_binding: state.source_binding().clone(),
+                    native_run_id: run_id.clone(),
+                    delivery_context: state.run_delivery_contexts.remove(run_id),
+                    phase: *phase,
+                    final_assistant_text: state.assistant_text_for_run_id(run_id),
+                })
+            })
+            .collect()
+    }
+
+    fn emit_session_delta(&self, delta: &SessionDelta, terminals: Vec<SessionRunTerminalSnapshot>) {
         if let Some(source) = &self.session_delta {
             source.publish(delta.clone());
         }
-        if !state.is_team_source() {
-            return;
-        }
-        let Some(hook) = &self.terminal_hook else {
-            return;
-        };
-        for change in &delta.changes {
-            let SessionChange::RunPhaseChanged { run_id, phase } = change else {
-                continue;
-            };
-            if !crate::state::terminal_run_phase(*phase) {
-                continue;
+        self.emit_terminals(terminals);
+    }
+
+    fn emit_terminals(&self, terminals: Vec<SessionRunTerminalSnapshot>) {
+        if let Some(hook) = &self.terminal_hook {
+            for terminal in terminals {
+                hook.run_terminal(terminal);
             }
-            let Some(final_assistant_text) = state.assistant_text_for_run_id(run_id) else {
-                continue;
-            };
-            hook.run_terminal(SessionRunTerminalSnapshot {
-                provider: state.identity().provider(),
-                session_key: delta.session_key.clone(),
-                route_key: delta.route_key.clone(),
-                source_binding: state.source_binding().clone(),
-                native_run_id: run_id.clone(),
-                phase: *phase,
-                final_assistant_text: Some(final_assistant_text),
-            });
         }
     }
 
-    fn emit_hydrated_terminals(&self, state: &SessionState) {
+    fn hydrated_terminal_snapshots(state: &mut SessionState) -> Vec<SessionRunTerminalSnapshot> {
         if !state.is_team_source() {
-            return;
+            return Vec::new();
         }
-        let Some(hook) = &self.terminal_hook else {
-            return;
-        };
-        for (run_id, final_assistant_text) in state.final_assistant_texts_by_run() {
-            hook.run_terminal(SessionRunTerminalSnapshot {
-                provider: state.identity().provider(),
-                session_key: state.identity().session_key().to_owned(),
-                route_key: None,
-                source_binding: state.source_binding().clone(),
-                native_run_id: run_id,
-                phase: RunPhase::Completed,
-                final_assistant_text: Some(final_assistant_text),
-            });
-        }
+        state
+            .final_assistant_texts_by_run()
+            .into_iter()
+            .map(
+                |(run_id, final_assistant_text)| SessionRunTerminalSnapshot {
+                    provider: state.identity().provider(),
+                    session_key: state.identity().session_key().to_owned(),
+                    route_key: None,
+                    source_binding: state.source_binding().clone(),
+                    delivery_context: state.run_delivery_contexts.remove(&run_id),
+                    native_run_id: run_id,
+                    phase: RunPhase::Completed,
+                    final_assistant_text: Some(final_assistant_text),
+                },
+            )
+            .collect()
     }
 
     async fn clear_snapshot_state(&self, lane_key: &str) -> bool {
@@ -223,22 +247,32 @@ impl SessionShared {
         removed
     }
 
-    fn list_session_views(&self) -> Vec<SessionView> {
-        self.snapshot
+    async fn list_session_views(&self) -> Vec<SessionView> {
+        let mut views = self
+            .snapshot
             .load()
             .states
             .values()
             .map(|state| state.view())
-            .collect()
+            .collect::<Vec<_>>();
+        session_ownership::enrich_views(self.ownership_reader.as_ref(), &mut views).await;
+        views
     }
 
-    fn get_session_view(&self, session_key: &str) -> Option<SessionView> {
-        self.snapshot
+    async fn get_session_view(&self, session_key: &str) -> Option<SessionView> {
+        let mut view = self
+            .snapshot
             .load()
             .states
             .values()
             .find(|state| state.identity().session_key() == session_key)
-            .map(|state| state.view())
+            .map(|state| state.view())?;
+        session_ownership::enrich_views(
+            self.ownership_reader.as_ref(),
+            std::slice::from_mut(&mut view),
+        )
+        .await;
+        Some(view)
     }
 
     fn running_driver(
@@ -369,6 +403,7 @@ impl SessionShared {
         } else if endpoint == RuntimeDriverIdentity::matcha_agent().endpoint() {
             self.store_catalog_bindings(&catalog).await;
         }
+        session_ownership::enrich_catalog(self.ownership_reader.as_ref(), &mut catalog).await;
         SessionCatalogOutcome::Listed(catalog)
     }
 
@@ -641,10 +676,10 @@ impl SessionShared {
     async fn handle_global_query(&self, query: SessionQuery) {
         match query {
             SessionQuery::ListSessions { reply } => {
-                let _ = reply.send(self.list_session_views());
+                let _ = reply.send(self.list_session_views().await);
             }
             SessionQuery::GetSession { session_key, reply } => {
-                let _ = reply.send(self.get_session_view(&session_key));
+                let _ = reply.send(self.get_session_view(&session_key).await);
             }
             SessionQuery::Catalog { command, reply } => {
                 let outcome = self.handle_session_catalog(command).await;
@@ -856,6 +891,7 @@ impl SessionLane {
                 event.run_id,
                 event.cursor,
                 event.changes,
+                None,
             )
             .await;
         Self::map_apply_result(result)
@@ -872,6 +908,7 @@ impl SessionLane {
         run_id: Option<String>,
         native_cursor: Option<u64>,
         changes: Vec<SessionChange>,
+        delivery_context: Option<SessionDeliveryContext>,
     ) -> crate::state::SessionApplyResult {
         let state = match self.event_state(shared, session_key, provider, identity, source_binding)
         {
@@ -880,12 +917,16 @@ impl SessionLane {
         };
 
         let mut next = state;
+        if let (Some(run_id), Some(context)) = (&run_id, delivery_context) {
+            next.run_delivery_contexts.insert(run_id.clone(), context);
+        }
         let result = next.apply_native_bound(binding, run_id, native_cursor, changes);
 
         if let crate::state::SessionApplyResult::Applied(delta) = &result {
+            let terminals = SessionShared::terminal_snapshots(delta, &mut next);
             self.state = Some(next.clone());
-            shared.store_snapshot_state(next.clone()).await;
-            shared.emit_session_delta(delta, &next);
+            shared.store_snapshot_state(next).await;
+            shared.emit_session_delta(delta, terminals);
         }
 
         result
@@ -913,9 +954,10 @@ impl SessionLane {
         let result = next.apply_native_recovery_bound(binding, run_id, native_cursor, reason);
 
         if let crate::state::SessionApplyResult::Applied(delta) = &result {
+            let terminals = SessionShared::terminal_snapshots(delta, &mut next);
             self.state = Some(next.clone());
-            shared.store_snapshot_state(next.clone()).await;
-            shared.emit_session_delta(delta, &next);
+            shared.store_snapshot_state(next).await;
+            shared.emit_session_delta(delta, terminals);
         }
 
         result
@@ -1136,12 +1178,13 @@ impl SessionLane {
             timeline::Outcome::Complete(view) | timeline::Outcome::Incomplete(view) => view,
             timeline::Outcome::Unavailable(_) => return,
         };
-        let Some(state) = state_from_view_seeded(view, self.state.as_ref()) else {
+        let Some(mut state) = state_from_view_seeded(view, self.state.as_ref()) else {
             return;
         };
+        let terminals = SessionShared::hydrated_terminal_snapshots(&mut state);
         self.state = Some(state.clone());
-        shared.store_snapshot_state(state.clone()).await;
-        shared.emit_hydrated_terminals(&state);
+        shared.store_snapshot_state(state).await;
+        shared.emit_terminals(terminals);
     }
 
     async fn handle_create(
@@ -1167,12 +1210,17 @@ impl SessionLane {
             return SessionCreateOutcome::Unknown;
         };
         match ops.create_session(command, shared.epoch).await {
-            SessionCreateOutcome::Succeeded(view) => {
+            SessionCreateOutcome::Succeeded(mut view) => {
                 let Some(state) = state_from_view(&view) else {
                     return SessionCreateOutcome::Unknown;
                 };
                 self.state = Some(state.clone());
                 shared.store_snapshot_state(state).await;
+                session_ownership::enrich_views(
+                    shared.ownership_reader.as_ref(),
+                    std::slice::from_mut(&mut view),
+                )
+                .await;
                 SessionCreateOutcome::Succeeded(view)
             }
             outcome => outcome,
@@ -1188,6 +1236,7 @@ impl SessionLane {
         let session_key = command.session_key.clone();
         let route_key = command.route_key.clone();
         let source_binding = command.source_binding.clone();
+        let delivery_context = command.delivery_context.clone();
         let failure_run_id = match command.endpoint {
             crate::send::NativeEndpoint::OpenClawLocal => None,
             crate::send::NativeEndpoint::MatchaAgentLocal => {
@@ -1209,6 +1258,7 @@ impl SessionLane {
                     binding,
                     &outcome,
                     failure_run_id,
+                    None,
                 )
                 .await;
                 return outcome;
@@ -1237,6 +1287,7 @@ impl SessionLane {
             binding,
             &outcome,
             failure_run_id,
+            delivery_context,
         )
         .await;
         outcome
@@ -1252,6 +1303,7 @@ impl SessionLane {
         binding: Option<SessionEventBinding>,
         outcome: &SessionSendOutcome,
         failure_run_id: Option<String>,
+        delivery_context: Option<SessionDeliveryContext>,
     ) {
         let (Some(identity), Some(binding)) = (identity, binding) else {
             return;
@@ -1259,6 +1311,12 @@ impl SessionLane {
         let (run_id, runtime) = match send_outcome_runtime(outcome, failure_run_id) {
             Some(projection) => projection,
             None => return,
+        };
+        let delivery_context = match outcome {
+            SessionSendOutcome::Queued { .. } | SessionSendOutcome::Succeeded { .. } => {
+                delivery_context
+            }
+            _ => None,
         };
         let _ = self
             .apply_changes_to_state(
@@ -1271,6 +1329,7 @@ impl SessionLane {
                 run_id,
                 None,
                 vec![SessionChange::RuntimeChanged { runtime }],
+                delivery_context,
             )
             .await;
     }
@@ -1447,20 +1506,22 @@ impl SessionLane {
     async fn handle_query(&mut self, shared: &SessionShared, query: SessionQuery) {
         match query {
             SessionQuery::ListSessions { reply } => {
-                let _ = reply.send(shared.list_session_views());
+                let _ = reply.send(shared.list_session_views().await);
             }
             SessionQuery::GetSession { session_key, reply } => {
-                let _ = reply.send(shared.get_session_view(&session_key));
+                let _ = reply.send(shared.get_session_view(&session_key).await);
             }
             SessionQuery::PendingApprovals { command, reply } => {
                 let outcome = shared.handle_pending_approvals(command).await;
                 let _ = reply.send(outcome);
             }
             SessionQuery::Timeline { command, reply } => {
-                let outcome = match self.bind_matcha_timeline_command(shared, command) {
+                let mut outcome = match self.bind_matcha_timeline_command(shared, command) {
                     Ok(command) => shared.handle_timeline(command).await,
                     Err(outcome) => outcome,
                 };
+                session_ownership::enrich_timeline(shared.ownership_reader.as_ref(), &mut outcome)
+                    .await;
                 self.store_timeline_outcome(shared, &outcome).await;
                 let _ = reply.send(outcome);
             }
@@ -1526,10 +1587,10 @@ impl OwnerSpec for SessionOwner {
     async fn handle_direct_query(shared: Self::Shared, query: Self::Query) {
         match query {
             SessionQuery::ListSessions { reply } => {
-                let _ = reply.send(shared.list_session_views());
+                let _ = reply.send(shared.list_session_views().await);
             }
             SessionQuery::GetSession { session_key, reply } => {
-                let _ = reply.send(shared.get_session_view(&session_key));
+                let _ = reply.send(shared.get_session_view(&session_key).await);
             }
             query => query.send_unavailable(),
         }
@@ -1817,11 +1878,16 @@ fn state_from_view_seeded(
     let source_binding = previous
         .map(|state| state.source_binding().clone())
         .unwrap_or_else(SessionSourceBinding::ordinary);
-    SessionState::from_view_parts(view.identity.clone(), view.epoch, seq, cursor, facts)
-        .ok()?
-        .with_source_binding(source_binding)
-        .with_endpoint_session_id(view.endpoint_session_id.clone())
-        .ok()
+    let mut state =
+        SessionState::from_view_parts(view.identity.clone(), view.epoch, seq, cursor, facts)
+            .ok()?
+            .with_source_binding(source_binding)
+            .with_endpoint_session_id(view.endpoint_session_id.clone())
+            .ok()?;
+    if let Some(previous) = previous {
+        state.run_delivery_contexts = previous.run_delivery_contexts.clone();
+    }
+    Some(state)
 }
 
 fn catalog_state(entry: &SessionCatalogEntry, epoch: u64) -> Option<SessionState> {

@@ -1,17 +1,13 @@
 use crate::{
-    ports::{
-        DeliveryReference, DeliveryRejection, EndpointSessionId, IdempotencyKey,
-        PromptDeliveryOutcome, PromptDeliveryPort, PromptDeliveryRequest, PromptDispatchPayload,
-        RoleSessionReceipt,
-    },
+    ports::EndpointSessionId,
     run::graph::{ExecutionFence, GraphRunId, GraphState, NodeId},
 };
 
 use super::{
-    AuthorizedGraphOutcome, AuthorizedGraphResolution, Delivery, DeliveryClaim, DeliveryFailure,
-    DeliveryId, DeliveryPhase, DeliveryReceipt, DeliveryRequest, DeliveryRequestError,
+    AuthorizedGraphOutcome, AuthorizedGraphResolution, Delivery, DeliveryClaim, DeliveryId,
+    DeliveryPhase, DeliveryReceipt, DeliveryRequest, DeliveryRequestError,
     NativeDeliveryCorrelation, NativeRunReceiptReference, NativeTerminalStatus, TeamNodeOutput,
-    TeamNodeOutputError, TerminalObservation, TerminalObservationResolution, delivery_retry_at,
+    TerminalObservation, TerminalObservationResolution, delivery_retry_at,
 };
 
 struct TerminalObservationInput<'a> {
@@ -259,11 +255,27 @@ pub(crate) fn observe_native_terminal(
     }
 
     let node_id = NodeId::new(delivery.facts().node_id.clone());
-    let current = graph
-        .current_attempt(&node_id)
+    let history = graph
+        .executions()
+        .get(&node_id)
         .ok_or(TerminalObservationError::NodeMismatch)?;
-    let current_fence = current.fence().clone();
-    if current_fence.node_execution_id().as_str() != delivery.facts().node_execution_id {
+    let attempt = history
+        .attempts()
+        .iter()
+        .find(|attempt| {
+            attempt.fence().node_execution_id().as_str() == delivery.facts().node_execution_id
+        })
+        .ok_or(TerminalObservationError::StaleFence)?;
+    let current_fence = attempt.fence().clone();
+    let superseded = history.current().fence() != &current_fence;
+    if superseded
+        && !matches!(
+            attempt.status(),
+            crate::AttemptStatus::Ready
+                | crate::AttemptStatus::Running
+                | crate::AttemptStatus::Waiting
+        )
+    {
         return Err(TerminalObservationError::StaleFence);
     }
     let observation = terminal_observation(TerminalObservationInput {
@@ -290,14 +302,19 @@ pub(crate) fn observe_native_terminal(
             waiting_at: observed_at,
         },
     };
-    let reduced = crate::reduce(graph.clone(), event).map_err(|error| match error {
-        crate::ReduceError::StaleFence { .. } => TerminalObservationError::StaleFence,
+    let reduced = if superseded {
+        if native_terminal == NativeTerminalStatus::Cancelled {
+            crate::run::graph::settle_superseded_attempt(graph.clone(), event)
+        } else {
+            // The native fact is durable, but only its authorized output can settle history.
+            Ok(graph.clone())
+        }
+    } else {
+        crate::reduce(graph.clone(), event)
+    }
+    .map_err(|error| match error {
         crate::ReduceError::UnknownNode(_) => TerminalObservationError::NodeMismatch,
-        crate::ReduceError::InvalidTransition { .. }
-        | crate::ReduceError::TriggerNotArmed(_)
-        | crate::ReduceError::AttemptLimitExceeded { .. }
-        | crate::ReduceError::StaleGraphIdentity
-        | crate::ReduceError::InvalidGraphPatch => TerminalObservationError::StaleFence,
+        _ => TerminalObservationError::StaleFence,
     })?;
 
     let outcome = match observation.resolution() {
@@ -333,18 +350,17 @@ fn terminal_observation_matches_graph(
     };
     match observation.resolution() {
         TerminalObservationResolution::AwaitingAuthorizedGraphResolution => {
-            graph
-                .current_attempt(&node_id)
-                .is_some_and(|current| current.fence() == observation.fence())
-                && attempt.status() == crate::AttemptStatus::Waiting
+            let current = history.current().fence() == observation.fence();
+            (attempt.status() == crate::AttemptStatus::Waiting
+                || (!current
+                    && matches!(
+                        attempt.status(),
+                        crate::AttemptStatus::Ready | crate::AttemptStatus::Running
+                    )))
                 && attempt.output_port().is_none()
         }
         TerminalObservationResolution::NodeCancelled => {
-            graph
-                .current_attempt(&node_id)
-                .is_some_and(|current| current.fence() == observation.fence())
-                && attempt.status() == crate::AttemptStatus::Cancelled
-                && attempt.output_port().is_none()
+            attempt.status() == crate::AttemptStatus::Cancelled && attempt.output_port().is_none()
         }
         TerminalObservationResolution::GraphResolved(resolution) => {
             resolution.delivery_id() == observation.delivery_id()
@@ -360,18 +376,9 @@ pub(crate) fn resolve_native_run_output(
     delivery: &mut Delivery,
     graph: &mut GraphState,
     receipt: crate::AuthorizedGraphResolutionReceipt,
-    final_assistant_text: String,
+    output: TeamNodeOutput,
     resolved_at: u64,
 ) -> Result<AuthorizedGraphResolutionOutcome, NativeRunOutputResolutionError> {
-    let output = TeamNodeOutput::parse(final_assistant_text).map_err(|error| match error {
-        TeamNodeOutputError::MissingEnvelope
-        | TeamNodeOutputError::InvalidJson
-        | TeamNodeOutputError::MissingField(_)
-        | TeamNodeOutputError::UnexpectedField(_)
-        | TeamNodeOutputError::InvalidField(_)
-        | TeamNodeOutputError::InvalidSummary
-        | TeamNodeOutputError::UnsafeOutputPort => NativeRunOutputResolutionError::InvalidOutput,
-    })?;
     let observation = match delivery.phase() {
         DeliveryPhase::TerminalObserved { observation } => observation.clone(),
         _ => {
@@ -395,7 +402,7 @@ pub(crate) fn resolve_native_run_output(
         observation.graph_run_id(),
         observation.fence().clone(),
         outcome,
-        output.output_port(),
+        output.decision(),
         resolved_at,
     )
     .map_err(|_| NativeRunOutputResolutionError::InvalidOutput)?;
@@ -447,14 +454,24 @@ fn resolve_authorized_graph_outcome_with_output(
         .ok_or(AuthorizedGraphResolutionError::StaleFence)?;
     match observation.resolution() {
         TerminalObservationResolution::GraphResolved(existing) => {
-            if existing != &resolution
+            let replay = if resolution.outcome() == AuthorizedGraphOutcome::Completed
+                && existing.outcome() == AuthorizedGraphOutcome::Failed
+                && resolution.output_port() == "rework"
+            {
+                resolution
+                    .clone()
+                    .with_outcome(AuthorizedGraphOutcome::Failed)
+            } else {
+                resolution.clone()
+            };
+            if existing != &replay
                 || output
                     .as_ref()
                     .is_some_and(|output| Some(output) != observation.output())
             {
                 return Err(AuthorizedGraphResolutionError::ConflictingResolution);
             }
-            return graph_matches_resolution(attempt, &resolution)
+            return graph_matches_resolution(attempt, existing)
                 .then_some(AuthorizedGraphResolutionOutcome::Replayed)
                 .ok_or(AuthorizedGraphResolutionError::GraphStateMismatch);
         }
@@ -466,13 +483,20 @@ fn resolve_authorized_graph_outcome_with_output(
     let current = graph
         .current_attempt(&node_id)
         .ok_or(AuthorizedGraphResolutionError::NodeMismatch)?;
-    if current.fence() != observation.fence() {
-        return Err(AuthorizedGraphResolutionError::StaleFence);
-    }
-    if current.status() != crate::AttemptStatus::Waiting || current.output_port().is_some() {
+    let superseded = current.fence() != observation.fence();
+    if attempt.output_port().is_some()
+        || !(attempt.status() == crate::AttemptStatus::Waiting
+            || (superseded
+                && matches!(
+                    attempt.status(),
+                    crate::AttemptStatus::Ready | crate::AttemptStatus::Running
+                )))
+    {
         return Err(AuthorizedGraphResolutionError::GraphStateMismatch);
     }
-    require_output_port_routes_or_terminal(graph, &node_id, resolution.output_port())?;
+    if resolution.outcome() == AuthorizedGraphOutcome::Completed {
+        require_source_port_routes_or_terminal(graph, &node_id, resolution.output_port())?;
+    }
     let event = match resolution.outcome() {
         AuthorizedGraphOutcome::Completed => crate::GraphEvent::NodeCompleted {
             node_id,
@@ -487,17 +511,27 @@ fn resolve_authorized_graph_outcome_with_output(
             failed_at: resolution.resolved_at(),
         },
     };
-    let reduced = crate::reduce(graph.clone(), event).map_err(|error| match error {
+    let reduced = if superseded {
+        crate::run::graph::settle_superseded_attempt(graph.clone(), event)
+    } else {
+        crate::reduce(graph.clone(), event)
+    }
+    .map_err(|error| match error {
         crate::ReduceError::StaleFence { .. } => AuthorizedGraphResolutionError::StaleFence,
         crate::ReduceError::UnknownNode(_) => AuthorizedGraphResolutionError::NodeMismatch,
-        crate::ReduceError::InvalidTransition { .. }
-        | crate::ReduceError::TriggerNotArmed(_)
-        | crate::ReduceError::AttemptLimitExceeded { .. }
-        | crate::ReduceError::StaleGraphIdentity
-        | crate::ReduceError::InvalidGraphPatch => {
-            AuthorizedGraphResolutionError::GraphStateMismatch
-        }
+        _ => AuthorizedGraphResolutionError::GraphStateMismatch,
     })?;
+    let settled = reduced.executions()[&NodeId::new(observation.node_id())]
+        .attempts()
+        .iter()
+        .find(|attempt| attempt.fence() == resolution.fence())
+        .ok_or(AuthorizedGraphResolutionError::StaleFence)?;
+    let effective_outcome = match settled.status() {
+        crate::AttemptStatus::Completed => AuthorizedGraphOutcome::Completed,
+        crate::AttemptStatus::Failed => AuthorizedGraphOutcome::Failed,
+        _ => return Err(AuthorizedGraphResolutionError::GraphStateMismatch),
+    };
+    let resolution = resolution.with_outcome(effective_outcome);
     let DeliveryPhase::TerminalObserved { observation } = &mut delivery.phase else {
         unreachable!("delivery phase was matched before graph reduction")
     };
@@ -506,7 +540,7 @@ fn resolve_authorized_graph_outcome_with_output(
     Ok(AuthorizedGraphResolutionOutcome::Recorded)
 }
 
-fn require_output_port_routes_or_terminal(
+fn require_source_port_routes_or_terminal(
     graph: &GraphState,
     node_id: &NodeId,
     output_port: &str,
@@ -574,57 +608,4 @@ pub fn recover_interrupted_delivery(delivery: &mut Delivery, observed_at: u64) -
     DeliveryRecovery::Unchanged {
         phase: delivery.phase().clone(),
     }
-}
-
-pub fn dispatch_delivery<P: PromptDeliveryPort>(
-    delivery: &mut Delivery,
-    claim: &DeliveryClaim,
-    binding: RoleSessionReceipt,
-    payload: PromptDispatchPayload,
-    observed_at: u64,
-    retry_at: u64,
-    port: &mut P,
-) -> Result<DeliveryResolution, DeliveryReceiptError> {
-    let active_claim =
-        delivery
-            .active_claim()
-            .ok_or_else(|| DeliveryReceiptError::NotDelivering {
-                phase: delivery.phase().clone(),
-            })?;
-    if active_claim != claim {
-        return Err(DeliveryReceiptError::StaleClaim {
-            delivery_id: claim.delivery_id().clone(),
-        });
-    }
-
-    let delivery_reference = DeliveryReference::try_new(claim.delivery_id().as_str())
-        .expect("a validated delivery identity must be a valid delivery reference");
-    let idempotency_key = IdempotencyKey::try_new(delivery.facts().idempotency_key.clone())
-        .expect("a validated delivery idempotency key must be a valid idempotency key");
-    let request = PromptDeliveryRequest::new(delivery_reference, binding, idempotency_key, payload);
-
-    let receipt = match port.deliver(request) {
-        Ok(PromptDeliveryOutcome::Delivered { receipt }) => DeliveryReceipt::Accepted {
-            receipt,
-            native_correlation: None,
-            accepted_at: observed_at,
-        },
-        Ok(PromptDeliveryOutcome::Rejected {
-            rejection: DeliveryRejection::Permanent,
-        }) => DeliveryReceipt::Rejected {
-            failure: DeliveryFailure::PolicyRejected,
-            observed_at,
-        },
-        Ok(PromptDeliveryOutcome::Rejected {
-            rejection: DeliveryRejection::Retryable,
-        }) => DeliveryReceipt::Rejected {
-            failure: DeliveryFailure::Unavailable,
-            observed_at,
-        },
-        Ok(PromptDeliveryOutcome::OutcomeUnknown) | Err(_) => {
-            DeliveryReceipt::OutcomeUnknown { observed_at }
-        }
-    };
-
-    settle_delivery(delivery, claim, receipt, retry_at)
 }

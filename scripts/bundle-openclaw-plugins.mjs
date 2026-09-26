@@ -82,11 +82,6 @@ const PLUGINS = [
     pluginId: target.pluginId,
     runtimeFiles: target.runtimeFiles,
   })),
-  {
-    npmName: '@larksuite/openclaw-lark',
-    pluginId: 'feishu-openclaw-plugin',
-    sdkRootImportReplacement: 'openclaw/plugin-sdk/core',
-  },
 ];
 
 function readJson(filePath) {
@@ -235,7 +230,7 @@ function listPackages(nodeModulesDir) {
   return result;
 }
 
-function bundleOnePlugin({ npmName, pluginId, sdkRootImportReplacement }) {
+function bundleOnePlugin({ npmName, pluginId }) {
   const pkgPath = path.join(NODE_MODULES, ...npmName.split('/'));
   if (!fs.existsSync(pkgPath)) {
     throw new Error(`Missing dependency "${npmName}". Run pnpm install first.`);
@@ -296,41 +291,8 @@ function bundleOnePlugin({ npmName, pluginId, sdkRootImportReplacement }) {
   }
 
   patchPluginId(outputDir, pluginId);
-  if (sdkRootImportReplacement) {
-    rewriteSdkRootImports(outputDir, sdkRootImportReplacement);
-  }
 
   echo`   ✅ ${pluginId}: copied ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
-}
-
-function rewriteSdkRootImports(pluginDir, replacement) {
-  const stack = [pluginDir];
-  let patched = 0;
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    for (const entry of fs.readdirSync(normWin(current), { withFileTypes: true })) {
-      if (entry.name === 'node_modules') continue;
-      const entryPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(entryPath);
-        continue;
-      }
-      if (!entry.isFile() || !['.js', '.mjs', '.cjs'].includes(path.extname(entry.name))) {
-        continue;
-      }
-      const content = fs.readFileSync(normWin(entryPath), 'utf8');
-      const rewritten = content.replace(/(['"])openclaw\/plugin-sdk\1/g, `$1${replacement}$1`);
-      if (rewritten === content) continue;
-      fs.writeFileSync(normWin(entryPath), rewritten, 'utf8');
-      patched += 1;
-    }
-  }
-
-  if (patched === 0) {
-    throw new Error(`Expected root OpenClaw SDK import to rewrite in ${pluginDir}.`);
-  }
-  echo`   🩹 Rewriting root SDK import -> ${replacement} (${patched} file(s))`;
 }
 
 function patchPluginId(pluginDir, expectedId) {

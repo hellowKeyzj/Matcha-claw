@@ -15,11 +15,11 @@ use crate::{
 
 use super::protocol::{
     self, ChatAbortParams, ChatAbortResult, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
-    ChatSendResult, SessionCreateParams, SessionCreateResult, SessionDeleteParams,
-    SessionDeleteResult, SessionDescribeParams, SessionDescribeRow, SessionLabelPatchParams,
-    SessionLabelPatchResult, SessionModelPatchParams, SessionModelPatchResult,
-    SessionPermissionMode, SessionPermissionPatchParams, SessionPermissionProjection,
-    SessionsListParams, SessionsListResult,
+    ChatSendResult, SessionAbortParams, SessionAbortResult, SessionCreateParams,
+    SessionCreateResult, SessionDeleteParams, SessionDeleteResult, SessionDescribeParams,
+    SessionDescribeRow, SessionLabelPatchParams, SessionLabelPatchResult, SessionModelPatchParams,
+    SessionModelPatchResult, SessionPermissionMode, SessionPermissionPatchParams,
+    SessionPermissionProjection, SessionsListParams, SessionsListResult,
 };
 
 static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -131,6 +131,19 @@ impl SessionOperation {
         Ok(self
             .mutate(request, |response| {
                 protocol::decode_chat_abort_result(&request_id, response)
+            })
+            .await)
+    }
+
+    pub(crate) async fn abort_session(
+        &self,
+        params: SessionAbortParams,
+    ) -> Result<InvocationOutcome<SessionAbortResult, OperationError>, OperationError> {
+        let request_id = next_request_id("sessions-abort")?;
+        let request = request(&request_id, protocol::SESSIONS_ABORT_METHOD, params)?;
+        Ok(self
+            .mutate(request, |response| {
+                protocol::decode_session_abort_result(&request_id, response)
             })
             .await)
     }

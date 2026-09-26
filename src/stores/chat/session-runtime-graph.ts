@@ -26,6 +26,7 @@ import {
   buildSessionRecordKey,
   sameRuntimeEndpointScope,
 } from './session-identity';
+import { isOrdinarySessionCandidate } from './types';
 
 export const EMPTY_SESSION_RUNTIME_GRAPH: ChatSessionRuntimeGraph = { endpoints: [] };
 
@@ -153,6 +154,7 @@ function buildSessionNode(record: ChatSessionRecord): ChatSessionRuntimeSessionN
     sessionRecordKey: buildSessionRecordKey(identity),
     endpointSessionId: record.meta.endpointSessionId,
     sessionIdentity: identity,
+    ownership: record.meta.ownership,
     kind: record.meta.kind,
     preferred: record.meta.preferred,
     label: record.meta.label,
@@ -188,15 +190,8 @@ function resolveEndpointDefaultAgentId(endpoint: RuntimeEndpointAccumulator): st
   return endpoint.target?.defaultSessionPromptScope.agentId ?? null;
 }
 
-function isInteractiveSession(session: ChatSessionRuntimeSessionNode): boolean {
-  return session.kind !== 'automation';
-}
-
 function resolvePreferredSessionKey(sessions: ChatSessionRuntimeSessionNode[]): string | null {
-  const interactiveSessions = sessions.filter(isInteractiveSession);
-  return interactiveSessions.find((session) => session.preferred)?.sessionRecordKey
-    ?? interactiveSessions[0]?.sessionRecordKey
-    ?? null;
+  return sessions.find(isOrdinarySessionCandidate)?.sessionRecordKey ?? null;
 }
 
 export function buildSessionRuntimeGraph(
@@ -258,8 +253,7 @@ export function findPreferredSessionForAgent(
   if (!agentNode) {
     return null;
   }
-  const interactiveSessions = agentNode.sessions.filter(isInteractiveSession);
-  return interactiveSessions.find((session) => session.preferred) ?? interactiveSessions[0] ?? null;
+  return agentNode.sessions.find(isOrdinarySessionCandidate) ?? null;
 }
 
 export function resolveCurrentConversationRuntimeState(input: {

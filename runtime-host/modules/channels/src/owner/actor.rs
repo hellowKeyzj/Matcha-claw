@@ -367,19 +367,19 @@ async fn handle_keyed_command(
             ..
         } => {
             lane.insert_login_config(key.clone(), agent_id.clone(), config);
-            let effect = execute_owner_mutation(
-                shared,
-                lane,
-                key,
+            let effect = execute_mutation(
+                shared.runtime_directory.as_ref(),
+                key.clone(),
                 ChannelMutation::LoginStart { force, timeout_ms },
                 CancellationToken::new(),
             )
             .await;
-            let outcome = match effect {
-                ChannelMutationEffect::Login(outcome) => Ok(outcome),
+            let outcome = match &effect {
+                ChannelMutationEffect::Login(outcome) => Ok(outcome.clone()),
                 _ => Err(ChannelOwnerUnavailable),
             };
             let _ = reply.send(outcome);
+            finalize_login_effect_after_delivery(shared, lane, key, effect).await;
         }
         ChannelCommand::LoginWait {
             key,
@@ -395,14 +395,20 @@ async fn handle_keyed_command(
                 session_key,
                 current_qr_data_url,
             };
-            let effect = execute_owner_mutation(shared, lane, key, mutation, cancellation.clone());
+            let effect = execute_mutation(
+                shared.runtime_directory.as_ref(),
+                key.clone(),
+                mutation,
+                cancellation.clone(),
+            );
             tokio::select! {
                 effect = effect => {
-                    let outcome = match effect {
-                        ChannelMutationEffect::Login(outcome) => Ok(outcome),
+                    let outcome = match &effect {
+                        ChannelMutationEffect::Login(outcome) => Ok(outcome.clone()),
                         _ => Err(ChannelOwnerUnavailable),
                     };
                     let _ = reply.send(outcome);
+                    finalize_login_effect_after_delivery(shared, lane, key, effect).await;
                 }
                 _ = cancellation.cancelled() => {
                     channel_trace("channel.login.wait", "outcome=cancelled");
@@ -526,6 +532,31 @@ async fn finalize_login_effect(
         lane.settle_login_effect(&key, &effect);
         return effect;
     };
+    let finalize_effect = execute_login_finalization(shared, config_key, agent_id, config).await;
+    project_finalization(finalize_effect, connected_outcome)
+}
+
+async fn finalize_login_effect_after_delivery(
+    shared: ChannelShared,
+    lane: &mut ChannelLaneState,
+    key: ChannelKey,
+    effect: ChannelMutationEffect,
+) {
+    let Some((config_key, agent_id, config, _)) = check_login_finalization(lane, &key, &effect)
+    else {
+        channel_trace("channel.login.finalize", "outcome=skipped");
+        lane.settle_login_effect(&key, &effect);
+        return;
+    };
+    let _ = execute_login_finalization(shared, config_key, agent_id, config).await;
+}
+
+async fn execute_login_finalization(
+    shared: ChannelShared,
+    config_key: ChannelKey,
+    agent_id: Option<String>,
+    config: Zeroizing<Vec<u8>>,
+) -> ChannelMutationEffect {
     let mut span = ChannelTraceSpan::begin("channel.login.finalize");
     let finalize_effect = execute_mutation(
         shared.runtime_directory.as_ref(),
@@ -535,7 +566,7 @@ async fn finalize_login_effect(
     )
     .await;
     span.finish(finalize_effect.trace_outcome());
-    project_finalization(finalize_effect, connected_outcome)
+    finalize_effect
 }
 
 fn check_login_finalization(

@@ -1,0 +1,214 @@
+{
+  "common": {
+    "cancel": "Отмена",
+    "choose": "Выбрать",
+    "current": "Текущая",
+    "delete": "Удалить",
+    "empty": "Нет записей",
+    "folder": "Папка",
+    "name": "Название",
+    "optional": "Необязательно",
+    "template": "Шаблон",
+    "refresh": "Обновить",
+    "settings": "Настройки"
+  },
+  "home": {
+    "title": "Библиотека",
+    "search": "Поиск",
+    "myLibraries": "Мои материалы",
+    "recent": "Недавние",
+    "newLibrary": "Создать библиотеку",
+    "dialogDescription": "Выберите папку. Matcha создаст в ней структуру библиотеки.",
+    "folderPlaceholder": "Выберите папку библиотеки",
+    "table": {
+      "name": "Название",
+      "location": "Расположение",
+      "lastOpened": "Последний доступ"
+    }
+  },
+  "templates": {
+    "research": {
+      "name": "Исследование",
+      "description": "Для глубокого исследования с отслеживанием гипотез, методики и заметок."
+    },
+    "reading": {
+      "name": "Чтение",
+      "description": "Для персонажей, тем, сюжетных линий и заметок по главам книги."
+    },
+    "personal": {
+      "name": "Личное развитие",
+      "description": "Для целей, привычек, рефлексии и дневниковых записей о развитии."
+    },
+    "business": {
+      "name": "Бизнес",
+      "description": "Для встреч, решений, проектов и контекста участников команды."
+    },
+    "general": {
+      "name": "Универсальный",
+      "description": "Минимальная структура: пустая библиотека для любой цели."
+    }
+  },
+  "workspace": {
+    "tabs": {
+      "wiki": "Wiki",
+      "sources": "Источники",
+      "search": "Поиск",
+      "graph": "Граф"
+    },
+    "library": "Библиотека",
+    "scan": "Сканировать"
+  },
+  "content": {
+    "selectPage": "Выберите страницу",
+    "previewUnavailable": "Предпросмотр недоступен",
+    "inlineUnsupported": "Встроенный предпросмотр не поддерживается",
+    "inlineUnsupportedDescription": "Файл {{type}} можно оставить в библиотеке.",
+    "save": "Сохранить",
+    "embed": "Индексировать"
+  },
+  "sources": {
+    "title": "Источники",
+    "subtitle": "{{sources}} источников · {{records}} записей",
+    "importFile": "Импортировать файл",
+    "folder": "Папка",
+    "backToSources": "Источники",
+    "refreshSources": "Обновить источники",
+    "scanSources": "Сканировать источники",
+    "settingsTitle": "Настройки источников",
+    "settingsSubtitle": "Управление отслеживанием источников, импортом и разбором PDF.",
+    "watchTitle": "Следить за папкой источников",
+    "watchDescription": "Отслеживать изменения файлов в каталоге источников. Если выключено, обновление выполняется только при ручном сканировании или импорте.",
+    "autoImportTitle": "Автоматически импортировать новые файлы",
+    "autoImportDescription": "Автоматически добавлять новые файлы, обнаруженные наблюдателем. Если выключено, изменения только записываются и требуют ручного импорта или сканирования.",
+    "captionTitle": "Подписи к изображениям",
+    "captionDescription": "Создавать подписи к изображениям при импорте. По умолчанию выключено. Текущая параллельность: {{concurrency}}.",
+    "generationModelTitle": "Модель генерации",
+    "generationModelDescription": "Используется для превращения источников в Wiki-страницы. Показаны только модели с поддержкой чата.",
+    "captionModelTitle": "Модель подписей к изображениям",
+    "captionModelDescription": "Используется для подписей к изображениям. Показаны только модели с пониманием изображений; если подписи выключены, выбор необязателен.",
+    "modelNone": "Не выбрано",
+    "modelInvalidOption": "Настроенная модель больше недоступна",
+    "modelStatus": {
+      "loading": "Проверка моделей",
+      "unavailable": "Модели недоступны",
+      "unconfigured": "Модели не настроены",
+      "invalid": "Модель недействительна",
+      "ready": "Модели готовы"
+    },
+    "mineruTitle": "Разбор PDF через MinerU",
+    "mineruDescription": "Использовать MinerU для разбора PDF, когда он доступен.",
+    "mineruBasicTitle": "Основные настройки",
+    "mineruBasicDescription": "Включить разбор PDF и выбрать backend по умолчанию.",
+    "mineruEnabledTitle": "Включить разбор",
+    "mineruEnabledDescription": "Использовать MinerU для разбора PDF, когда он доступен.",
+    "mineruCloudTitle": "Облачный разбор",
+    "mineruCloudDescription": "Настройте облачный token и версию модели.",
+    "mineruLocalTitle": "Локальный разбор",
+    "mineruLocalDescription": "Настройте локальный сервис, backend разбора и параметры обработки.",
+    "mineruBackendTitle": "Backend MinerU",
+    "mineruBackendDescription": "Выберите облачный или локальный разбор MinerU.",
+    "mineruTokenTitle": "Облачный token",
+    "mineruTokenDescription": "Token доступен только для записи; показывается только состояние настройки.",
+    "tokenConfigured": "Настроен",
+    "tokenNotConfigured": "Не настроен",
+    "tokenPlaceholder": "Введите новый token",
+    "mineruModelVersionTitle": "Версия облачной модели",
+    "mineruModelVersionDescription": "Версия модели для облачного разбора MinerU.",
+    "mineruLocalEndpointTitle": "Локальный endpoint",
+    "mineruLocalEndpointDescription": "Базовый адрес локального сервиса MinerU.",
+    "mineruLocalTokenTitle": "Локальный token",
+    "mineruLocalTokenDescription": "Локальный token доступен только для записи; показывается только состояние настройки.",
+    "mineruLocalBackendTitle": "Локальный backend",
+    "mineruLocalBackendDescription": "Backend для локального разбора MinerU.",
+    "mineruLocalEffortTitle": "Локальное усилие",
+    "mineruLocalEffortDescription": "Уровень обработки для локального VLM-разбора.",
+    "mineruLocalParseMethodTitle": "Локальный метод разбора",
+    "mineruLocalParseMethodDescription": "Метод разбора для локального MinerU.",
+    "mineruLocalLanguageTitle": "Локальный язык",
+    "mineruLocalLanguageDescription": "Языковая подсказка для локального MinerU.",
+    "mineruLocalFormulaTitle": "Разбор формул",
+    "mineruLocalFormulaDescription": "Включить разбор формул в локальном MinerU.",
+    "mineruLocalTableTitle": "Разбор таблиц",
+    "mineruLocalTableDescription": "Включить разбор таблиц в локальном MinerU.",
+    "mineruLocalImageAnalysisTitle": "Анализ изображений",
+    "mineruLocalImageAnalysisDescription": "Включить анализ изображений в локальном MinerU.",
+    "mineruLocalServerUrlTitle": "Локальный server URL",
+    "mineruLocalServerUrlDescription": "Необязательный service URL для локального MinerU.",
+    "outputLanguageTitle": "Язык вывода",
+    "outputLanguageDescription": "Язык для Wiki-контента, создаваемого из импортированных источников. Auto следует источнику.",
+    "documents": "Документы-источники",
+    "emptyDocuments": "Нет документов-источников",
+    "activityLog": "Журнал обработки",
+    "refreshRecords": "Обновить записи",
+    "emptyRecords": "Нет записей обработки",
+    "receipt": "{{label}}: импортировано {{imported}} · удалено {{deleted}} · перемещено {{moved}} · пропущено {{skipped}}"
+  },
+  "search": {
+    "title": "Поиск",
+    "placeholder": "Поиск",
+    "action": "Искать",
+    "contextAction": "Контекст",
+    "results": "Результаты",
+    "context": "Контекст",
+    "noResults": "Нет результатов",
+    "noContext": "Нет контекста"
+  },
+  "graph": {
+    "title": "Граф",
+    "subtitle": "{{nodes}} узлов · {{edges}} связей",
+    "load": "Загрузить",
+    "embed": "Индексировать",
+    "empty": "Граф отсутствует",
+    "nodes": "Узлы",
+    "edges": "Связи",
+    "emptyNodes": "Нет узлов",
+    "emptyEdges": "Нет связей"
+  },
+  "activity": {
+    "pending": "Ожидает",
+    "tasks": "Задачи",
+    "failed": "Ошибки",
+    "running": "Выполняется",
+    "refresh": "Обновить активность",
+    "details": "Детали активности",
+    "emptyTasks": "Нет задач"
+  },
+  "tree": {
+    "empty": "Нет файлов",
+    "emptyDirectory": "Пусто"
+  },
+  "preview": {
+    "tooLarge": "Файл слишком большой для встроенного предпросмотра",
+    "notFound": "Файл не найден",
+    "invalidPath": "Недопустимый путь",
+    "unavailable": "Не удалось прочитать файл"
+  },
+  "actions": {
+    "pickLibraryTitle": "Выберите папку библиотеки",
+    "useFolder": "Использовать эту папку",
+    "openedLibrary": "Библиотека открыта",
+    "createdLibrary": "Библиотека создана",
+    "switchedLibrary": "Библиотека переключена",
+    "savedPage": "Страница сохранена",
+    "rescanned": "Повторное сканирование выполнено",
+    "importFileReceipt": "Импорт файла",
+    "pickSourceFileTitle": "Выберите файл-источник",
+    "importFileButton": "Импортировать файл",
+    "importedSource": "Источник импортирован",
+    "importFolderReceipt": "Импорт папки",
+    "pickSourceFolderTitle": "Выберите папку источников",
+    "importFolderButton": "Импортировать папку",
+    "importedFolder": "Папка импортирована",
+    "deleteSourceReceipt": "Удаление источника",
+    "deletedSource": "Источник удалён",
+    "refreshSourcesReceipt": "Обновление источников",
+    "refreshedSources": "Источники обновлены",
+    "updatedSourceWatch": "Наблюдение за источниками обновлено",
+    "embeddedPage": "Индексирование страницы запущено",
+    "appliedGeneratedPages": "Сгенерированное содержимое применено",
+    "failed": "{{label}}: ошибка"
+  },
+  "time": {
+    "unrecorded": "Не записано"
+  }
+}

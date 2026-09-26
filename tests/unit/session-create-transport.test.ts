@@ -30,6 +30,15 @@ const matchaRequest = {
   input: { endpoint: matchaEndpoint, agentId: 'main', endpointSessionId: 'matcha-session-1' },
 } as const;
 
+const ordinaryOwnership = { kind: 'ordinary' } as const;
+const teamOwnership = {
+  kind: 'team',
+  teamId: 'team-1',
+  teamRunId: 'team-run-1',
+  roleId: 'role-1',
+  sessionRef: 'agent:main:session-1',
+} as const;
+
 const openClawView = sessionView('agent:main:session-1', {
   identity: {
     endpoint,
@@ -44,6 +53,12 @@ const matchaView = sessionView('matcha-session-1', {
     sessionKey: 'matcha-session-1',
   },
 });
+
+function omitOwnership<T extends { ownership: unknown }>(value: T): Omit<T, 'ownership'> {
+  const { ownership: _ownership, ...withoutOwnership } = value;
+  void _ownership;
+  return withoutOwnership;
+}
 
 describe('Electron Main session-create transport', () => {
   it('signs and projects the sealed succeeded outcome', async () => {
@@ -69,6 +84,31 @@ describe('Electron Main session-create transport', () => {
       headers: expect.objectContaining({ Authorization: 'Bearer signed-decision' }),
       body: JSON.stringify(request),
     }));
+  });
+
+  it.each([
+    ['null', null],
+    ['ordinary', ordinaryOwnership],
+    ['team', teamOwnership],
+  ] as const)('projects the sealed succeeded outcome with %s ownership', async (_name, ownership) => {
+    const view = sessionView('agent:main:session-1', {
+      identity: {
+        endpoint,
+        agentId: 'main',
+        sessionKey: 'agent:main:session-1',
+      },
+      ownership,
+    });
+    const transport = createSessionCreateTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_101,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => view }),
+    );
+
+    await expect(transport.create(request)).resolves.toEqual({
+      status: 200,
+      body: view,
+    });
   });
 
   it('accepts the known Matcha native endpoint and preserves its native session key', async () => {
@@ -117,11 +157,15 @@ describe('Electron Main session-create transport', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('maps private native failures and malformed DTOs to fixed unavailable', async () => {
+  it.each([
+    ['missing ownership', 200, omitOwnership(openClawView)],
+    ['invalid team ownership', 200, { ...openClawView, ownership: { ...teamOwnership, roleId: '' } }],
+    ['private native failure', 500, { private: 'native detail' }],
+  ])('maps %s to fixed unavailable', async (_name, status, body) => {
     const transport = createSessionCreateTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
       34_101,
-      vi.fn().mockResolvedValue({ status: 500, json: async () => ({ private: 'native detail' }) }),
+      vi.fn().mockResolvedValue({ status, json: async () => body }),
     );
 
     const response = await transport.create(request);

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
     fmt,
     hash::{Hash, Hasher},
     mem,
@@ -577,6 +577,7 @@ impl SessionFacts {
 pub struct SessionView {
     pub session_key: String,
     pub endpoint_session_id: Option<String>,
+    pub ownership: Option<SessionSourceBinding>,
     pub model_state: Option<SessionModelState>,
     pub identity: SessionIdentity,
     pub epoch: u64,
@@ -600,6 +601,7 @@ impl Serialize for SessionView {
         struct Wire<'a> {
             session_key: &'a str,
             endpoint_session_id: Option<&'a str>,
+            ownership: Option<&'a SessionSourceBinding>,
             model_state: Option<&'a SessionModelState>,
             identity: &'a SessionIdentity,
             epoch: u64,
@@ -616,6 +618,7 @@ impl Serialize for SessionView {
         Wire {
             session_key: &self.session_key,
             endpoint_session_id: self.endpoint_session_id.as_deref(),
+            ownership: self.ownership.as_ref(),
             model_state: self.model_state.as_ref(),
             identity: &self.identity,
             epoch: self.epoch,
@@ -642,6 +645,7 @@ impl<'de> Deserialize<'de> for SessionView {
         struct Wire {
             session_key: String,
             endpoint_session_id: Option<String>,
+            ownership: Option<SessionSourceBinding>,
             model_state: Option<SessionModelState>,
             identity: SessionIdentity,
             epoch: u64,
@@ -659,6 +663,7 @@ impl<'de> Deserialize<'de> for SessionView {
         let view = Self {
             session_key: wire.session_key,
             endpoint_session_id: wire.endpoint_session_id,
+            ownership: wire.ownership,
             model_state: wire.model_state,
             identity: wire.identity,
             epoch: wire.epoch,
@@ -1161,6 +1166,66 @@ pub enum SessionSourceBinding {
     Team(SessionTeamSourceBinding),
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum SessionSourceBindingWire<T> {
+    Ordinary,
+    Team {
+        team_id: T,
+        team_run_id: T,
+        role_id: T,
+        session_ref: T,
+    },
+}
+
+impl Serialize for SessionSourceBinding {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let wire = match self {
+            Self::Ordinary => SessionSourceBindingWire::Ordinary,
+            Self::Team(binding) => SessionSourceBindingWire::Team {
+                team_id: binding.team_id.as_str(),
+                team_run_id: binding.team_run_id.as_str(),
+                role_id: binding.role_id.as_str(),
+                session_ref: binding.session_ref.as_str(),
+            },
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionSourceBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match SessionSourceBindingWire::<String>::deserialize(deserializer)? {
+            SessionSourceBindingWire::Ordinary => Ok(Self::Ordinary),
+            SessionSourceBindingWire::Team {
+                team_id,
+                team_run_id,
+                role_id,
+                session_ref,
+            } => Ok(Self::Team(SessionTeamSourceBinding {
+                team_id: TeamId::try_new(team_id)
+                    .map_err(|_| D::Error::custom("invalid team id"))?,
+                team_run_id: GraphRunId::new(team_run_id),
+                role_id: RoleId::try_new(role_id)
+                    .map_err(|_| D::Error::custom("invalid role id"))?,
+                session_ref: RoleSessionRef::try_new(session_ref)
+                    .map_err(|_| D::Error::custom("invalid role session ref"))?,
+            })),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionTeamSourceBinding {
     team_id: TeamId,
@@ -1188,6 +1253,12 @@ impl SessionSourceBinding {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionDeliveryContext {
+    pub delivery_id: organization::DeliveryId,
+    pub endpoint_session_id: organization::EndpointSessionId,
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionState {
     identity: SessionIdentity,
@@ -1203,6 +1274,7 @@ pub struct SessionState {
     window: SessionFact<SessionWindow>,
     completeness: SessionCompleteness,
     terminal_run_ids: HashSet<String>,
+    pub(crate) run_delivery_contexts: HashMap<String, SessionDeliveryContext>,
     host_source_epoch: Option<u64>,
     native_source_epoch: Option<u64>,
     native_cursor: Option<u64>,
@@ -1261,6 +1333,7 @@ impl SessionState {
             window: facts.window,
             completeness: facts.completeness,
             terminal_run_ids,
+            run_delivery_contexts: HashMap::new(),
             host_source_epoch: None,
             native_source_epoch: None,
             native_cursor: None,
@@ -1359,6 +1432,7 @@ impl SessionState {
         SessionView {
             session_key: self.identity.session_key.clone(),
             endpoint_session_id: self.endpoint_session_id.clone(),
+            ownership: None,
             model_state: None,
             identity: self.identity.clone(),
             epoch: self.epoch,
@@ -3291,6 +3365,7 @@ mod tests {
         let view = SessionView {
             session_key: "session-1".to_owned(),
             endpoint_session_id: Some("endpoint-session-1".to_owned()),
+            ownership: None,
             model_state: None,
             identity: identity(),
             epoch: 1,
@@ -4863,6 +4938,7 @@ mod tests {
         let invalid = serde_json::json!({
             "sessionKey": "session-1",
             "endpointSessionId": null,
+            "ownership": null,
             "identity": {
                 "sessionKey": "session-1",
                 "endpoint": {

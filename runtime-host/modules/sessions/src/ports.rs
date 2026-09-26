@@ -1,6 +1,6 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
-use platform::endpoint::runtime_address::RuntimeEndpoint;
+use platform::endpoint::runtime_address::{RuntimeEndpoint, SessionIdentity};
 pub use runtime_directory::{LifecycleOps, RuntimeDriverIdentity};
 
 use crate::{
@@ -17,12 +17,26 @@ use crate::{
     session_catalog::{SessionCatalogCommand, SessionCatalogOutcome},
     session_history::{SessionHistoryCommand, SessionHistoryFailure, SessionHistoryOutcome},
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
-    state::SessionView,
+    state::{SessionSourceBinding, SessionView},
     timeline::{self, ContentCommand, ContentOutcome},
 };
 
 pub type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type OwnedRuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+pub struct SessionOwnershipQuery {
+    pub identity: SessionIdentity,
+    pub endpoint_session_id: String,
+}
+
+pub trait SessionOwnershipReader: Send + Sync {
+    /// A successful map contains Team bindings only; absence means Ordinary.
+    /// None means ownership could not be read, not that the sessions are Ordinary.
+    fn lookup<'a>(
+        &'a self,
+        queries: Vec<SessionOwnershipQuery>,
+    ) -> SessionFuture<'a, Option<HashMap<SessionIdentity, SessionSourceBinding>>>;
+}
 
 pub trait SessionRuntimeDirectory: Send + Sync {
     fn lookup(&self, endpoint: &RuntimeEndpoint) -> Option<Arc<dyn RuntimeDriver>>;
@@ -46,6 +60,14 @@ pub trait RuntimeDriver: Send + Sync {
 
 pub trait SessionOps: Send + Sync {
     fn admission(&self) -> SessionAdmission;
+
+    fn agent_scoped_session_key(
+        &self,
+        _agent_id: &str,
+        _endpoint_session_id: &str,
+    ) -> Option<String> {
+        None
+    }
 
     fn abort_session<'a>(
         &'a self,

@@ -20,6 +20,7 @@ use organization::{
             GraphEdgeAction, GraphNodeKind, GraphPatch as EventGraphPatch,
             GraphPatchOperation as EventGraphPatchOperation, InvalidEventInput, OpaqueId,
         },
+        graph::NodePosition,
         public_projection::TeamRunPublicSnapshotQueryOutcome,
         scheduler::NodePromptRetryDueQueryOutcome,
     },
@@ -169,6 +170,13 @@ fn team_event_graph_patch_operation(operation: &GraphPatchOperation) -> EventGra
         GraphPatchOperation::RemoveEdge(edge_id) => EventGraphPatchOperation::RemoveEdge {
             edge_id: edge_id.as_str().to_owned(),
         },
+        GraphPatchOperation::SetNodePosition { node_id, position } => {
+            EventGraphPatchOperation::SetNodePosition {
+                node_id: node_id.as_str().to_owned(),
+                x: position.x(),
+                y: position.y(),
+            }
+        }
         GraphPatchOperation::SetMetadata { key, value } => EventGraphPatchOperation::SetMetadata {
             key: key.clone(),
             value: value.clone(),
@@ -838,7 +846,18 @@ fn decode_manual_team_member_provision(
         .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
     let agent = organization::ManagedAgentReference::try_new(agent_id.to_owned())
         .map_err(|_| TeamRuntimeDecodeError::InvalidInput)?;
+    let tools = member
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|tool| !tool.is_empty())
+        .map(str::to_owned)
+        .collect();
     organization::ManualTeamRoleBinding::try_new(role, member_name.to_owned(), agent, leader)
+        .map(|binding| binding.with_tools(tools))
         .map_err(|_| TeamRuntimeDecodeError::InvalidInput)
 }
 
@@ -1609,7 +1628,7 @@ fn decode_team_graph_node(
         .unwrap_or(node_id.as_str())
         .to_owned();
     let config = node.get("config").and_then(Value::as_object);
-    let max_attempts = decode_team_graph_node_max_attempts(node, config);
+    let max_attempts = decode_team_graph_node_max_attempts(node, config)?;
     let kind =
         decode_team_graph_node_kind(node.get("kind").and_then(Value::as_str).unwrap_or("work"))?;
     match kind {
@@ -1698,13 +1717,18 @@ fn decode_team_graph_node_kind(
 fn decode_team_graph_node_max_attempts(
     node: &serde_json::Map<String, Value>,
     config: Option<&serde_json::Map<String, Value>>,
-) -> std::num::NonZeroU32 {
-    node.get("maxAttempts")
+) -> Result<std::num::NonZeroU32, TeamRuntimeDecodeError> {
+    let Some(value) = node
+        .get("maxAttempts")
         .or_else(|| config.and_then(|config| config.get("maxAttempts")))
-        .and_then(Value::as_u64)
+    else {
+        return Ok(std::num::NonZeroU32::MIN);
+    };
+    value
+        .as_u64()
         .and_then(|value| u32::try_from(value).ok())
         .and_then(std::num::NonZeroU32::new)
-        .unwrap_or_else(|| std::num::NonZeroU32::new(1).expect("nonzero"))
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)
 }
 
 fn decode_team_graph_role_id(node: &serde_json::Map<String, Value>) -> Option<&str> {
@@ -1874,6 +1898,19 @@ fn decode_team_graph_patch_value(
                         .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
                 ),
             )),
+            "set_node_position" => {
+                operations.push(organization::GraphPatchOperation::SetNodePosition {
+                    node_id: organization::NodeId::new(
+                        graph_string_field(operation, "nodeId")
+                            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+                    ),
+                    position: decode_team_graph_node_position(
+                        operation
+                            .get("position")
+                            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+                    )?,
+                })
+            }
             "set_metadata" => decode_team_graph_metadata_patch(operation, &mut operations)?,
             _ => return Err(TeamRuntimeDecodeError::Unavailable),
         }
@@ -1891,6 +1928,21 @@ fn decode_team_graph_patch_value(
         operations,
         now_millis(),
     ))
+}
+
+fn decode_team_graph_node_position(value: &Value) -> Result<NodePosition, TeamRuntimeDecodeError> {
+    let position = value
+        .as_object()
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    let x = position
+        .get("x")
+        .and_then(Value::as_i64)
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    let y = position
+        .get("y")
+        .and_then(Value::as_i64)
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    Ok(NodePosition::new(x, y))
 }
 
 fn decode_team_graph_metadata_patch(
@@ -2073,6 +2125,41 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn graph_node_attempt_budget_is_explicit_and_never_silently_repaired() {
+        for budget in [json!(1), json!(3), json!(u32::MAX)] {
+            let node = decode_team_graph_node(&json!({
+                "nodeId": "work", "kind": "work", "maxAttempts": budget,
+            }))
+            .unwrap();
+            assert_eq!(
+                u64::from(node.max_attempts().get()),
+                budget.as_u64().unwrap()
+            );
+        }
+        for budget in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!(4294967296_u64),
+            json!("3"),
+            Value::Null,
+        ] {
+            assert!(
+                decode_team_graph_node(&json!({
+                    "nodeId": "work", "kind": "work", "maxAttempts": budget,
+                }))
+                .is_err()
+            );
+        }
+        assert_eq!(
+            decode_team_graph_node(&json!({ "nodeId": "work" }))
+                .unwrap()
+                .max_attempts(),
+            std::num::NonZeroU32::MIN,
+        );
     }
 
     #[test]

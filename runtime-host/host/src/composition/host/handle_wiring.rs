@@ -22,6 +22,7 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> H
         session_delta_source,
         start_gate_registry,
     } = input;
+    let runtime_directory = Arc::clone(&owners.runtime_directory);
     let toolchain_handle = owners.toolchain.clone();
     let platform_tools_handle = owners.platform_tools.clone();
     let plugins_adapter = Arc::new(openclaw::plugins::OpenClawPluginsPort::new(
@@ -44,6 +45,7 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> H
     let agents_handle = owners.subagents.clone();
     let task_manager_handle = owners.task_manager.clone();
     let workspace_handle = owners.workspace.clone();
+    let wiki_handle = owners.wiki.clone();
     let usage_handle = owners.usage.clone();
     let diagnostics_handle = owners.diagnostics.clone();
 
@@ -71,10 +73,12 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> H
         agents: agents_handle,
         task_manager: task_manager_handle,
         workspace: workspace_handle,
+        wiki: wiki_handle,
         usage: usage_handle,
         diagnostics: diagnostics_handle,
         observation: runtime_observation.sink(),
         session_delta_source,
         start_gate_registry,
+        runtime_directory,
     }
 }

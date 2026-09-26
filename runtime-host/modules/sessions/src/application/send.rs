@@ -1,7 +1,6 @@
 use serde::Serialize;
 
-use organization::{DeliveryId, EndpointSessionId};
-
+pub use super::state::SessionDeliveryContext;
 use super::state::SessionSourceBinding;
 
 pub use super::endpoint::NativeEndpoint;
@@ -38,12 +37,6 @@ impl Attachment {
     fn decoded_bytes(&self) -> usize {
         canonical_base64_decoded_len(&self.content).unwrap_or(usize::MAX)
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionDeliveryContext {
-    pub delivery_id: DeliveryId,
-    pub endpoint_session_id: EndpointSessionId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

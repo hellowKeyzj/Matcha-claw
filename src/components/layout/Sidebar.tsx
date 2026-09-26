@@ -21,6 +21,7 @@ import {
   LogOut,
   Palette,
   UserPlus,
+  BookOpen,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useLayoutStore } from '@/stores/layout';
@@ -832,6 +833,7 @@ export function Sidebar({
       : []),
     { to: '/providers', icon: <KeyRound className="h-5 w-5" />, label: t('settings:aiProviders.title') },
     { to: '/channels', icon: <Radio className="h-5 w-5" />, label: t('sidebar.channels') },
+    { to: '/wiki', icon: <BookOpen className="h-5 w-5" />, label: 'Wiki' },
     { to: '/dashboard', icon: <Home className="h-5 w-5" />, label: t('sidebar.dashboard') },
   ];
 

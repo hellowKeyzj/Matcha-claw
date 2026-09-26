@@ -60,8 +60,16 @@ const REQUIRED_PLUGIN_MIRRORS = [
   },
   {
     pluginId: 'openclaw-lark',
-    dir: 'feishu-openclaw-plugin',
+    dir: 'openclaw-lark',
     scanSdkImports: true,
+    requiredFiles: [
+      'dist/index.mjs',
+      'dist/secret-contract-api.mjs',
+      'dist/config-schema.mjs',
+      'secret-contract-api.js',
+      'skills',
+      'LICENSE',
+    ],
   },
   {
     pluginId: 'matchaclaw-media',

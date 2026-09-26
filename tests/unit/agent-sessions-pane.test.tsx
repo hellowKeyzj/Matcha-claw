@@ -22,6 +22,7 @@ import {
   type RuntimeEndpointRef,
   type SessionIdentity,
 } from '../../electron/desktop-contract/runtime-address';
+import type { SessionOwnership } from '../../electron/desktop-contract/session-ownership';
 import {
   createOpenClawTestSessionIdentity,
   openClawTestRuntimeEndpoint,
@@ -126,6 +127,7 @@ function createSessionRecord(input?: {
   sessionKey?: string;
   agentId?: string | null;
   sessionIdentity?: SessionIdentity;
+  ownership?: SessionOwnership | null;
   messages?: RawMessage[];
   label?: string | null;
   displayName?: string | null;
@@ -144,6 +146,7 @@ function createSessionRecord(input?: {
       protocolId: null,
       runtimeEndpointId: 'local',
       sessionIdentity,
+      ownership: input?.ownership === undefined ? { kind: 'ordinary' } : input.ownership,
       kind: sessionKey.endsWith(':main') ? 'main' : 'session',
       preferred: sessionKey.endsWith(':main'),
       label: input?.label ?? null,
@@ -444,7 +447,7 @@ describe('agent sessions pane', () => {
     renderPane();
     fireEvent.click(screen.getByTestId('agent-item-test'));
 
-    expect(switchSession).toHaveBeenCalledWith(ordinaryKey);
+    expect(switchSession).toHaveBeenCalledWith(ordinaryKey, null);
   });
 
   it('agent 只有 automation 会话时，点击 agent 进入可发送草稿态', () => {
@@ -611,7 +614,7 @@ describe('agent sessions pane', () => {
     expect(screen.getByText('自动化运行结果')).toBeInTheDocument();
   });
 
-  it('会话 tab 展示已知 Team role 会话，并过滤未 hydrate 的 reserved 本地会话', () => {
+  it('会话 tab 保留 Team role 记录但普通入口不显示', () => {
     const now = Date.now();
     const bindingRoleIdentity = createSessionIdentity('agent:test:session-canonical-binding-role', 'test');
     const runListRoleIdentity = createSessionIdentity('agent:test:session-canonical-run-list-role', 'test');
@@ -684,6 +687,13 @@ describe('agent sessions pane', () => {
         [recordKeyForSession('agent:test:session-canonical-binding-role', bindingRoleIdentity)]: createSessionRecord({
           sessionKey: 'agent:test:session-canonical-binding-role',
           sessionIdentity: bindingRoleIdentity,
+          ownership: {
+            kind: 'team',
+            teamId: 'team-1',
+            teamRunId: 'teamrun-binding',
+            roleId: 'researcher',
+            sessionRef: 'agent:test:session-canonical-binding-role',
+          },
           historyStatus: 'ready',
           label: 'Team binding role history',
           lastActivityAt: now,
@@ -691,6 +701,13 @@ describe('agent sessions pane', () => {
         [recordKeyForSession('agent:test:session-canonical-run-list-role', runListRoleIdentity)]: createSessionRecord({
           sessionKey: 'agent:test:session-canonical-run-list-role',
           sessionIdentity: runListRoleIdentity,
+          ownership: {
+            kind: 'team',
+            teamId: 'team-1',
+            teamRunId: 'teamrun-run-list',
+            roleId: 'researcher',
+            sessionRef: 'agent:test:session-canonical-run-list-role',
+          },
           historyStatus: 'ready',
           label: 'Team run list role history',
           lastActivityAt: now - 60_000,
@@ -712,27 +729,30 @@ describe('agent sessions pane', () => {
 
     renderPane({ tab: 'session' });
 
-    expect(screen.getByText('Team binding role history')).toBeInTheDocument();
-    expect(screen.getByText('Team run list role history')).toBeInTheDocument();
+    expect(screen.queryByText('Team binding role history')).not.toBeInTheDocument();
+    expect(screen.queryByText('Team run list role history')).not.toBeInTheDocument();
     expect(screen.getByText('普通 Agent 历史会话')).toBeInTheDocument();
+    expect(useChatStore.getState().loadedSessions[recordKeyForSession('agent:test:session-canonical-binding-role', bindingRoleIdentity)]).toBeTruthy();
+    expect(useChatStore.getState().loadedSessions[recordKeyForSession('agent:test:session-canonical-run-list-role', runListRoleIdentity)]).toBeTruthy();
   });
 
-  it('冷启动 index 未 hydrate 时不把明显 Team role local session 泄漏到普通历史', () => {
+  it('ownership:null 的未知记录不当作普通历史', () => {
     const now = Date.now();
-    const teamRoleIdentity = createSessionIdentity('team-role-session-cold-start-leader', 'leader-agent');
+    const unknownIdentity = createSessionIdentity('agent:leader-agent:unknown-session', 'leader-agent');
     const ordinaryAgentIdentity = createSessionIdentity('agent:leader-agent:session-ordinary', 'leader-agent');
     useChatStore.setState({
       currentSessionKey: recordKeyForSession('agent:leader-agent:session-ordinary', ordinaryAgentIdentity),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
-        { key: 'team-role-session-cold-start-leader', displayName: 'Cold start team role history' },
+        { key: 'agent:leader-agent:unknown-session', displayName: 'Unknown ownership history' },
         { key: 'agent:leader-agent:session-ordinary', displayName: '普通 Leader Agent 历史' },
       ]),
       loadedSessions: {
-        [recordKeyForSession('team-role-session-cold-start-leader', teamRoleIdentity)]: createSessionRecord({
-          sessionKey: 'team-role-session-cold-start-leader',
-          sessionIdentity: teamRoleIdentity,
+        [recordKeyForSession('agent:leader-agent:unknown-session', unknownIdentity)]: createSessionRecord({
+          sessionKey: 'agent:leader-agent:unknown-session',
+          sessionIdentity: unknownIdentity,
+          ownership: null,
           historyStatus: 'ready',
-          label: 'Cold start team role history',
+          label: 'Unknown ownership history',
           lastActivityAt: now,
         }),
         [recordKeyForSession('agent:leader-agent:session-ordinary', ordinaryAgentIdentity)]: createSessionRecord({
@@ -752,7 +772,7 @@ describe('agent sessions pane', () => {
 
     renderPane({ tab: 'session' });
 
-    expect(screen.queryByText('Cold start team role history')).not.toBeInTheDocument();
+    expect(screen.queryByText('Unknown ownership history')).not.toBeInTheDocument();
     expect(screen.getByText('普通 Leader Agent 历史')).toBeInTheDocument();
   });
 
@@ -953,7 +973,7 @@ describe('agent sessions pane', () => {
 
     fireEvent.click(screen.getByTestId('agent-item-matcha'));
 
-    expect(openAgentConversation).toHaveBeenCalledWith('matcha');
+    expect(openAgentConversation).toHaveBeenCalledWith('matcha', matchaAgentTestRuntimeEndpoint);
     expect(useChatStore.getState().currentSessionKey).toBe('');
     expect(useChatStore.getState().currentConversation).toMatchObject({
       kind: 'draft',
@@ -1161,7 +1181,7 @@ describe('agent sessions pane', () => {
     renderPane();
     fireEvent.click(screen.getByTestId('agent-item-test'));
 
-    expect(openAgentConversation).toHaveBeenCalledWith('test');
+    expect(openAgentConversation).toHaveBeenCalledWith('test', openClawTestRuntimeEndpoint);
     expect(newSessionForScope).not.toHaveBeenCalled();
     expect(switchSession).not.toHaveBeenCalled();
   });

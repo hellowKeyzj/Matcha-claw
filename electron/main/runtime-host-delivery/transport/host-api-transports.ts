@@ -59,6 +59,7 @@ import type { TeamTriggerTransport } from './teams/trigger';
 import type { TeamWebhookAuthTransport } from './teams/webhook-auth';
 import type { ToolchainTransport } from './toolchain';
 import type { UsageTransport } from './usage';
+import type { WikiTransport } from './wiki';
 import type { WorkspaceMediaTransport } from './workspace/media';
 import type { WorkspaceBinaryTransport } from './workspace/read-binary';
 import type { WorkspaceDirectoryTransport } from './workspace/read-directory';
@@ -130,6 +131,7 @@ export interface RuntimeHostTransports {
   toolchainTransport: ToolchainTransport;
   sessionHistoryTransport: SessionHistoryTransport;
   usageTransport: UsageTransport;
+  wikiTransport: WikiTransport;
   runtimeDirectoryTransport: RuntimeEndpointDirectoryTransport;
   runtimeControlTransport: RuntimeControlTransport;
 }

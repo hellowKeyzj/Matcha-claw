@@ -10,7 +10,7 @@
  * 这样 OpenClaw Gateway 启动时就不会再把这些 channel 加载进来。
  *
  * 加进列表的常见原因：
- *   - 我们用了独立 npm 化的同功能插件（例如 @larksuite/openclaw-lark）替代它；
+ *   - 我们用了本地维护的同功能插件（例如 packages/openclaw-lark）替代它；
  *   - 它的运行时依赖在我们仓库里解不出兼容版本，会触发 OpenClaw 现场 npm
  *     install，而该回退路径在 Windows + Electron utilityProcess 下无法找到
  *     可用的 npm，会抛 "Unable to resolve a safe npm executable on Windows"。
@@ -22,7 +22,7 @@
 
 /** @type {readonly OpenClawBundledChannelPluginId[]} */
 export const REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS = Object.freeze([
-  // 由独立 npm 包 @larksuite/openclaw-lark（channel id: openclaw-lark）接管。
+  // 由本地 packages/openclaw-lark（plugin id: openclaw-lark，channel id: feishu）接管。
   // OpenClaw 内置 feishu 插件要求 @larksuiteoapi/node-sdk@^1.61.1，与我们
   // 仓库锁定的 1.60.0 版本不兼容，启动时会触发现场 npm install 并失败。
   'feishu',

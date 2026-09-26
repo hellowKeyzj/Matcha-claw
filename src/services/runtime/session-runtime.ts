@@ -180,6 +180,7 @@ export async function listSessions(
     key: buildSessionIdentityKey(session.sessionIdentity),
     agentId: session.agentId,
     sessionIdentity: session.sessionIdentity,
+    ownership: session.ownership,
     kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'automation'
       ? session.kind
       : 'session',

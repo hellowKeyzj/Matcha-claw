@@ -1,4 +1,5 @@
 import type { ResourceStatusState } from '@/lib/resource-state';
+import type { SessionOwnership } from '../../../electron/desktop-contract/session-ownership';
 import type {
   AgentScope,
   RuntimeEndpointRef,
@@ -61,6 +62,7 @@ export interface ChatSession {
   protocolId?: string;
   runtimeEndpointId?: string;
   sessionIdentity: SessionIdentity;
+  ownership: SessionOwnership | null;
   kind?: SessionCatalogKind;
   preferred?: boolean;
   label?: string;
@@ -70,6 +72,12 @@ export interface ChatSession {
   modelState?: SessionModelState;
   contextTokens?: SessionContextTokenSnapshot;
   updatedAt?: number;
+}
+
+export function isOrdinarySessionCandidate(
+  session: { ownership: SessionOwnership | null; kind?: SessionCatalogKind | null },
+): boolean {
+  return session.ownership?.kind === 'ordinary' && session.kind !== 'automation';
 }
 
 export type ChatSessionHistoryStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -202,6 +210,7 @@ export interface ChatSessionMetaState {
   protocolId: string | null;
   runtimeEndpointId: string | null;
   sessionIdentity: SessionIdentity | null;
+  ownership: SessionOwnership | null;
   kind: SessionCatalogKind | null;
   preferred: boolean;
   label: string | null;
@@ -255,6 +264,7 @@ export interface ChatSessionRuntimeSessionNode {
   sessionRecordKey: string;
   endpointSessionId: string | null;
   sessionIdentity: SessionIdentity;
+  ownership: SessionOwnership | null;
   kind: SessionCatalogKind | null;
   preferred: boolean;
   label: string | null;
@@ -424,7 +434,7 @@ export interface ChatHistoryLoadRequest {
 export interface ChatStoreActions {
   bootstrapSessionRuntime: () => Promise<void>;
   loadSessions: () => Promise<void>;
-  openAgentConversation: (agentId: string) => void;
+  openAgentConversation: (agentId: string, endpoint?: RuntimeEndpointRef) => void;
   openSessionIdentity: (target: { sessionIdentity: SessionIdentity; endpointSessionId?: string | null }) => void;
   switchSession: (key: string, traceId?: string | null) => void;
   selectSessionRuntimeEndpoint: (endpoint: RuntimeEndpointRef) => void;

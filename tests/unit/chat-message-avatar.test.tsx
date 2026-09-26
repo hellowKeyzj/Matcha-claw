@@ -397,7 +397,10 @@ describe('chat message avatar', () => {
     expect(screen.getByTestId('session-todo-panel')).toHaveTextContent('任务 0/3');
     expect(screen.getByTestId('session-todo-panel')).not.toHaveTextContent('实现任务状态');
 
-    fireEvent.click(screen.getByRole('button', { name: '展开任务列表' }));
+    const trigger = screen.getByRole('button', { name: '展开任务列表 · 任务 0/3' });
+    fireEvent.click(trigger);
+    // jsdom does not implement the native popover toggle action.
+    fireEvent(document.getElementById(trigger.getAttribute('popovertarget')!)!, Object.assign(new Event('toggle'), { newState: 'open' }));
 
     expect(screen.getByTestId('session-todo-panel')).toHaveTextContent('实现任务状态');
 

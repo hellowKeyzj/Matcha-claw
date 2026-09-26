@@ -83,11 +83,14 @@ impl Delivery {
 ///
 /// `None` when the receipt names an endpoint this Host does not own, so the renderer could never
 /// address that session.
-pub fn role_session_json(session: &organization::RoleSessionReceipt) -> Option<Value> {
+pub fn role_session_json(
+    session: &organization::RoleSessionReceipt,
+    resolver: &dyn organization::RoleSessionIdentityResolver,
+) -> Option<Value> {
     let identity = RuntimeDriverIdentity::from_reference(session.endpoint().as_str())?;
     let agent_id = session.agent().as_str();
     let endpoint_session_id = session.endpoint_session_id().as_str();
-    let session_key = rendered_session_key(identity, agent_id, endpoint_session_id)?;
+    let session_key = resolver.session_key(session)?;
     let endpoint = serde_json::to_value(identity.endpoint()).ok()?;
     Some(json!({
         "teamId": session.team().as_str(),
@@ -107,27 +110,18 @@ pub fn role_session_json(session: &organization::RoleSessionReceipt) -> Option<V
     }))
 }
 
-fn rendered_session_key(
-    identity: RuntimeDriverIdentity,
-    agent_id: &str,
-    endpoint_session_id: &str,
-) -> Option<String> {
-    match identity {
-        value if value == RuntimeDriverIdentity::open_claw() => {
-            Some(format!("agent:{agent_id}:{endpoint_session_id}"))
-        }
-        value if value == RuntimeDriverIdentity::matcha_agent() => {
-            Some(format!("matcha-agent:{agent_id}:{endpoint_session_id}"))
-        }
-        _ => None,
-    }
-}
-
-pub(crate) async fn list(owner: &OrganizationHandle, request: Request) -> Delivery {
+pub(crate) async fn list(
+    owner: &OrganizationHandle,
+    resolver: &dyn organization::RoleSessionIdentityResolver,
+    request: Request,
+) -> Delivery {
     match owner.role_sessions(request.team_id).await {
-        Ok(organization::TeamRoleSessionQueryOutcome::Available(sessions)) => {
-            Delivery::Available(sessions.iter().filter_map(role_session_json).collect())
-        }
+        Ok(organization::TeamRoleSessionQueryOutcome::Available(sessions)) => Delivery::Available(
+            sessions
+                .iter()
+                .filter_map(|session| role_session_json(session, resolver))
+                .collect(),
+        ),
         Ok(organization::TeamRoleSessionQueryOutcome::Unavailable)
         | Ok(organization::TeamRoleSessionQueryOutcome::OutcomeUnknown)
         | Err(_) => Delivery::Unavailable,

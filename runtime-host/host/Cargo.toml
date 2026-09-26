@@ -25,6 +25,7 @@ diagnostics = { version = "0.1.0", path = "../modules/diagnostics" }
 task-manager = { version = "0.1.0", path = "../modules/task-manager" }
 subagents = { version = "0.1.0", path = "../modules/subagents" }
 workspace = { version = "0.1.0", path = "../modules/workspace" }
+wiki = { version = "0.1.0", path = "../modules/wiki" }
 platform-tools = { version = "0.1.0", path = "../modules/platform-tools" }
 provider-module = { package = "provider", version = "0.1.0", path = "../modules/provider" }
 plugins-module = { package = "plugins", version = "0.1.0", path = "../modules/plugins" }

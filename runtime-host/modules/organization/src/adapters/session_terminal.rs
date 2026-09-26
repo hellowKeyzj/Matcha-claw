@@ -49,6 +49,7 @@ pub struct OrganizationRunTerminalSnapshot<SourceBinding> {
     pub route_key: Option<String>,
     pub source_binding: SourceBinding,
     pub native_run_id: String,
+    pub delivery_context: Option<(crate::DeliveryId, crate::EndpointSessionId)>,
     pub phase: OrganizationRunPhase,
     pub final_assistant_text: Option<String>,
 }
@@ -230,6 +231,7 @@ async fn settle<SourceBinding>(
         route_key,
         source_binding,
         native_run_id,
+        delivery_context,
         phase,
         final_assistant_text,
     } = snapshot;
@@ -246,7 +248,13 @@ async fn settle<SourceBinding>(
         return;
     };
     let observation_outcome = match organization
-        .team_message_terminal_observed(native_run_id, status, final_assistant_text, settled_at)
+        .team_message_terminal_observed(
+            native_run_id,
+            delivery_context,
+            status,
+            final_assistant_text,
+            settled_at,
+        )
         .await
     {
         Ok(Ok(outcome)) => outcome,

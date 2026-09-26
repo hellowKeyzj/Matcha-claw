@@ -465,10 +465,20 @@ export interface TeamGraphEdgeRecord {
   metadata?: Record<string, unknown>;
 }
 
+export interface TeamGraphNodePositionRecord {
+  x: number;
+  y: number;
+}
+
+export interface TeamGraphLayoutRecord {
+  nodePositions?: Record<string, TeamGraphNodePositionRecord>;
+}
+
 export interface TeamGraphSnapshotRecord {
   runId?: string;
   graphId?: string;
   workflowPlanId?: string;
+  layout?: TeamGraphLayoutRecord;
   nodes: TeamGraphNodeRecord[];
   edges: TeamGraphEdgeRecord[];
   status: string;
@@ -667,6 +677,7 @@ export type TeamGraphPatchOperation =
   | { op: 'remove_node'; nodeId: string }
   | { op: 'add_edge' | 'replace_edge'; edge: Record<string, unknown> }
   | { op: 'remove_edge'; edgeId: string }
+  | { op: 'set_node_position'; nodeId: string; position: TeamGraphNodePositionRecord }
   | { op: 'set_metadata'; metadata: Record<string, unknown> };
 
 export interface TeamGraphPatchInput {

@@ -6,9 +6,8 @@ use crate::{GraphRunId, NativeDeletionEvidence, RoleAbortOutcome};
 
 use super::{
     ActivityExecutionOutcome, ActivityExecutionRequest, DeliveryReceiptReference,
-    EndpointSessionId, MaterializationOperationOutcome, PromptDeliveryOutcome,
-    PromptDeliveryRequest, RoleSessionReceipt, RunRuntimeReceipt, SessionWindowReference,
-    TeamMaterializationRemoval, TeamMaterializationRequest,
+    EndpointSessionId, MaterializationOperationOutcome, RoleSessionReceipt, RunRuntimeReceipt,
+    SessionWindowReference, TeamMaterializationRemoval, TeamMaterializationRequest,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,11 +184,6 @@ pub trait TeamNativeEffectsPort {
         &mut self,
         removal: TeamMaterializationRemoval,
     ) -> Pin<Box<dyn Future<Output = MaterializationOperationOutcome> + Send + '_>>;
-
-    fn deliver(
-        &mut self,
-        request: PromptDeliveryRequest,
-    ) -> Pin<Box<dyn Future<Output = PromptDeliveryOutcome> + Send + '_>>;
 
     fn abort(
         &mut self,

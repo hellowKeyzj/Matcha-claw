@@ -420,6 +420,230 @@ export async function hostToolchainPrepare(): Promise<void> {
   });
 }
 
+export type HostWikiRequest = Record<string, unknown>;
+
+export type HostWikiImportSourceReceipt = Readonly<{
+  sourceRelativePath: string;
+  pageRelativePath: string;
+  revision: unknown;
+}>;
+
+export type HostWikiGeneratedPageInput = Readonly<{
+  path: string;
+  content: string;
+}>;
+
+export type HostWikiReviewOption = Readonly<{
+  label: string;
+  action: string;
+}>;
+
+export type HostWikiReviewItem = Readonly<{
+  id: string;
+  type: string;
+  title: string;
+  description: string;
+  sourcePath?: string;
+  affectedPages?: readonly string[];
+  searchQueries?: readonly string[];
+  options: readonly HostWikiReviewOption[];
+  resolved: boolean;
+  resolvedAction?: string;
+  createdAt: number;
+}>;
+
+export type HostWikiSourceWatchConfig = Readonly<{
+  enabled: boolean;
+  autoIngest: boolean;
+  outputLanguage: string;
+  generationModelRef?: string | null;
+  captionModelRef?: string | null;
+  captionEnabled: boolean;
+  captionConcurrency: number;
+  mineruEnabled: boolean;
+  mineruBackend: string;
+  mineruTokenConfigured: boolean;
+  mineruModelVersion: string;
+  mineruLocalEndpoint: string;
+  mineruLocalTokenConfigured: boolean;
+  mineruLocalBackend: string;
+  mineruLocalEffort: string;
+  mineruLocalParseMethod: string;
+  mineruLocalLanguage: string;
+  mineruLocalFormulaEnabled: boolean;
+  mineruLocalTableEnabled: boolean;
+  mineruLocalImageAnalysis: boolean;
+  mineruLocalServerUrl: string;
+}>;
+
+export type HostWikiSourceWatchConfigUpdate = Readonly<{
+  projectId?: string;
+  enabled?: boolean;
+  autoIngest?: boolean;
+  outputLanguage?: string;
+  generationModelRef?: string | null;
+  captionModelRef?: string | null;
+  captionEnabled?: boolean;
+  captionConcurrency?: number;
+  mineruEnabled?: boolean;
+  mineruBackend?: string;
+  mineruToken?: string;
+  mineruModelVersion?: string;
+  mineruLocalEndpoint?: string;
+  mineruLocalToken?: string;
+  mineruLocalBackend?: string;
+  mineruLocalEffort?: string;
+  mineruLocalParseMethod?: string;
+  mineruLocalLanguage?: string;
+  mineruLocalFormulaEnabled?: boolean;
+  mineruLocalTableEnabled?: boolean;
+  mineruLocalImageAnalysis?: boolean;
+  mineruLocalServerUrl?: string;
+}>;
+
+export async function hostWikiStatus(): Promise<unknown> {
+  return hostApiFetch('/api/wiki/status');
+}
+
+export async function hostWikiProjects(): Promise<unknown> {
+  return hostApiFetch('/api/wiki/projects');
+}
+
+export async function hostWikiProjectTemplates(): Promise<unknown> {
+  return hostApiFetch('/api/wiki/project-templates');
+}
+
+export async function hostWikiCreateProject(payload: HostWikiRequest): Promise<unknown> {
+  return hostApiFetch('/api/wiki/project/create', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiOpenProject(payload: HostWikiRequest): Promise<unknown> {
+  return hostApiFetch('/api/wiki/project/open', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiCurrentProject(): Promise<unknown> {
+  return hostApiFetch('/api/wiki/project/current');
+}
+
+export async function hostWikiFiles(payload: { projectId?: string; directory?: string } = {}): Promise<unknown> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  if (payload.directory) query.set('directory', payload.directory);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/files${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiReadFile(payload: HostWikiRequest): Promise<unknown> {
+  return hostApiFetch('/api/wiki/read-file', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiReadBinaryFile(payload: HostWikiRequest): Promise<ReadBinaryFileResult> {
+  try {
+    const value = await hostApiFetch<unknown>('/api/wiki/read-binary-file', { method: 'POST', body: JSON.stringify(payload) });
+    return isWorkspaceBinaryResponse(value)
+      ? { ok: true, name: value.name, data: value.data, size: value.size }
+      : { ok: false, error: 'unavailable' };
+  } catch (error) {
+    return { ok: false, error: wikiFileFailure(error instanceof Error ? error.message : error) };
+  }
+}
+
+export async function hostWikiReadSourcePreview(payload: HostWikiRequest): Promise<unknown> {
+  return hostApiFetch('/api/wiki/read-source-preview', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiWriteFile(payload: HostWikiRequest): Promise<unknown> {
+  return hostApiFetch('/api/wiki/write-file', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiSearch(payload: HostWikiRequest): Promise<unknown> {
+  return hostApiFetch('/api/wiki/search', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiGraph(payload: { projectId?: string } = {}): Promise<unknown> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/graph${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiSourceWatchConfig(payload: { projectId?: string } = {}): Promise<{ projectId: string; config: HostWikiSourceWatchConfig }> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/source-watch-config${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiUpdateSourceWatchConfig(payload: HostWikiSourceWatchConfigUpdate): Promise<{ projectId: string; config: HostWikiSourceWatchConfig }> {
+  return hostApiFetch('/api/wiki/source-watch-config', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiRescanSources(payload: HostWikiRequest = {}): Promise<unknown> {
+  return hostApiFetch('/api/wiki/rescan-sources', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiImportSource(payload: { projectId?: string; sourcePath: string }): Promise<HostWikiImportSourceReceipt> {
+  return hostApiFetch('/api/wiki/import-source', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiImportFolder(payload: { projectId?: string; folderPath: string }): Promise<unknown> {
+  return hostApiFetch('/api/wiki/import-folder', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiRefreshSources(payload: { projectId?: string } = {}): Promise<unknown> {
+  return hostApiFetch('/api/wiki/refresh-sources', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiApplyGeneratedPages(payload: { projectId?: string; sourcePath: string; files: HostWikiGeneratedPageInput[] }): Promise<unknown> {
+  return hostApiFetch('/api/wiki/apply-generated-pages', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiDeleteSource(payload: { projectId?: string; sourcePath: string; fileAlreadyDeleted?: boolean }): Promise<unknown> {
+  return hostApiFetch('/api/wiki/delete-source', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiReviews(payload: { projectId?: string } = {}): Promise<unknown> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/reviews${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiResolveReview(payload: { projectId?: string; id: string; action: string }): Promise<unknown> {
+  return hostApiFetch('/api/wiki/review/resolve', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiDismissReview(payload: { projectId?: string; id: string }): Promise<unknown> {
+  return hostApiFetch('/api/wiki/review/dismiss', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiClearResolvedReviews(payload: { projectId?: string } = {}): Promise<unknown> {
+  return hostApiFetch('/api/wiki/reviews/clear-resolved', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiSourceFiles(payload: { projectId?: string } = {}): Promise<unknown> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/source-files${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiSourceTasks(payload: { projectId?: string } = {}): Promise<unknown> {
+  return hostApiFetch('/api/wiki/source-tasks', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiCancelSourceTask(payload: { projectId?: string; sourcePath: string }): Promise<unknown> {
+  return hostApiFetch('/api/wiki/source-task/cancel', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiEmbedPage(payload: HostWikiRequest): Promise<unknown> {
+  return hostApiFetch('/api/wiki/embed-page', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiRetrieveContext(payload: HostWikiRequest): Promise<unknown> {
+  return hostApiFetch('/api/wiki/retrieve-context', { method: 'POST', body: JSON.stringify(payload) });
+}
+
 type WorkspaceFileRequest = {
   endpoint: RuntimeEndpointRef;
   sessionKey: string;
@@ -459,6 +683,14 @@ function workspaceFilePayload(
     target: { kind: 'workspace-file' },
     body: workspaceFileInput(payload, operationId === 'files.listDir'),
   });
+}
+
+function wikiFileFailure(error: unknown): FilePreviewError {
+  const message = typeof error === 'string' ? error : '';
+  if (message.includes('outside project') || message.includes('Invalid wiki path')) return 'invalidPath';
+  if (message.includes('not found') || message.includes('is a directory')) return 'notFound';
+  if (message.includes('exceeds the limit')) return 'tooLarge';
+  return 'unavailable';
 }
 
 function workspaceFailure(error: unknown): FilePreviewError {

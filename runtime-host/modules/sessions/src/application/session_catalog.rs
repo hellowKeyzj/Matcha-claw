@@ -28,6 +28,7 @@ pub struct SessionCatalogEntry {
     pub key: String,
     pub agent_id: String,
     pub endpoint_session_id: String,
+    pub ownership: Option<crate::state::SessionSourceBinding>,
     pub model_state: Option<crate::state::SessionModelState>,
     pub updated_at: Option<u64>,
     pub preferred: Option<bool>,
@@ -88,8 +89,8 @@ pub fn correct_catalog_models(
     corrections: Vec<(usize, Option<String>)>,
 ) -> SessionCatalog {
     for (index, model) in corrections {
-        catalog.sessions[index].model_state = model
-            .and_then(|model| crate::state::SessionModelState::selected_from_ref(model).ok());
+        catalog.sessions[index].model_state =
+            model.and_then(|model| crate::state::SessionModelState::selected_from_ref(model).ok());
     }
     catalog
 }
@@ -169,6 +170,7 @@ mod tests {
             key: key.to_owned(),
             agent_id: agent_id.to_owned(),
             endpoint_session_id: format!("{key}:native"),
+            ownership: None,
             model_state: model
                 .map(str::to_owned)
                 .and_then(|model| crate::state::SessionModelState::selected_from_ref(model).ok()),

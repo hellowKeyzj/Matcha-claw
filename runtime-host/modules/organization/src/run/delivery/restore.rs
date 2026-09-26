@@ -620,7 +620,7 @@ fn validate_terminal_observation(
             TerminalObservationResolution::GraphResolved(resolution),
         ) if observation
             .output()
-            .is_none_or(|output| output.output_port() == resolution.output_port())
+            .is_none_or(|output| output.decision() == resolution.output_port())
             && resolution.delivery_id() == observation.delivery_id()
             && resolution.graph_run_id() == observation.graph_run_id()
             && resolution.fence() == observation.fence()

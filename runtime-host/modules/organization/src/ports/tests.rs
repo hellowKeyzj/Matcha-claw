@@ -453,51 +453,6 @@ fn valid_run_runtime_receipt_survives_typed_construction() {
     assert_eq!(receipt.bindings(), bindings);
 }
 
-struct UnknownOutcomeDeliveryPort {
-    received: Option<(DeliveryReference, IdempotencyKey)>,
-}
-
-impl PromptDeliveryPort for UnknownOutcomeDeliveryPort {
-    type Error = ();
-
-    fn deliver(
-        &mut self,
-        request: PromptDeliveryRequest,
-    ) -> Result<PromptDeliveryOutcome, Self::Error> {
-        self.received = Some((
-            request.delivery().clone(),
-            request.idempotency_key().clone(),
-        ));
-        Ok(PromptDeliveryOutcome::OutcomeUnknown)
-    }
-}
-
-#[test]
-fn prompt_dispatch_payload_debug_redacts_prompt_text() {
-    let payload = PromptDispatchPayload::try_new("prompt-canary").unwrap();
-
-    assert!(!format!("{payload:?}").contains("prompt-canary"));
-}
-
-#[test]
-fn preserves_idempotency_and_unknown_external_delivery_outcome() {
-    let delivery = DeliveryReference::try_new("delivery-1").unwrap();
-    let key = idempotency_key();
-    let request = PromptDeliveryRequest::new(
-        delivery.clone(),
-        binding(),
-        key.clone(),
-        PromptDispatchPayload::try_new("review the release").unwrap(),
-    );
-    let mut port = UnknownOutcomeDeliveryPort { received: None };
-
-    assert_eq!(
-        port.deliver(request),
-        Ok(PromptDeliveryOutcome::OutcomeUnknown)
-    );
-    assert_eq!(port.received, Some((delivery, key)));
-}
-
 #[test]
 fn team_contracts_are_available_from_the_organization_root() {
     use std::time::UNIX_EPOCH;

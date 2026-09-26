@@ -291,6 +291,7 @@ pub(crate) struct AgentDeleted {
 }
 
 pub(crate) struct ConfigSnapshot {
+    valid: bool,
     raw: Option<ConfigDocument>,
     base_hash: Option<ConfigBaseHash>,
     source_config: Value,
@@ -312,243 +313,16 @@ impl ConfigSnapshot {
         (self.source_config, self.config, self.base_hash)
     }
 
-    pub(crate) fn patch_agents(
-        self,
-        patches: Vec<ConfigAgentPatch>,
-    ) -> Result<ConfigPatch, WireError> {
-        let (Some(raw), base_hash) = self.into_parts() else {
-            return Err(WireError::InvalidConfigSetRequest);
-        };
-        let raw = raw.as_str()?;
-        let mut document: Value =
-            serde_json::from_str(raw).map_err(|_| WireError::InvalidConfigSetRequest)?;
-        let root = document
-            .as_object_mut()
-            .ok_or(WireError::InvalidConfigSetRequest)?;
-        let agents = root
-            .entry("agents")
-            .or_insert_with(|| Value::Object(Default::default()))
-            .as_object_mut()
-            .ok_or(WireError::InvalidConfigSetRequest)?;
-        let list = agents
-            .entry("list")
-            .or_insert_with(|| Value::Array(Vec::new()))
-            .as_array_mut()
-            .ok_or(WireError::InvalidConfigSetRequest)?;
-        let mut entry_patches = Vec::with_capacity(patches.len());
-        let mut restore_facts = Vec::with_capacity(patches.len());
-        for patch in patches {
-            let (entry_patch, restore_fact) = patch.apply(list)?;
-            entry_patches.push(entry_patch);
-            restore_facts.push(restore_fact);
-        }
-        let raw = serde_json::to_string(&serde_json::json!({
-            "agents": {"list": entry_patches}
-        }))
-        .map_err(|_| WireError::InvalidConfigSetRequest)?;
-        Ok(ConfigPatch {
-            raw: ConfigDocument::new(raw)?,
-            base_hash,
-            restore_facts: ConfigRestoreFacts(restore_facts),
-            replace_paths: Vec::new(),
-        })
-    }
-
-    pub(crate) fn prepare_restore(
-        self,
-        facts: ConfigRestoreFacts,
-    ) -> Result<ConfigRestorePreparation, WireError> {
-        let (Some(raw), Some(base_hash)) = self.into_parts() else {
-            return Ok(ConfigRestorePreparation::Fenced);
-        };
-        let raw = raw.as_str()?;
-        let mut document: Value =
-            serde_json::from_str(raw).map_err(|_| WireError::InvalidConfigGet)?;
-        let Some(list) = document
-            .get_mut("agents")
-            .and_then(Value::as_object_mut)
-            .and_then(|agents| agents.get_mut("list"))
-            .and_then(Value::as_array_mut)
-        else {
-            return Ok(ConfigRestorePreparation::Fenced);
-        };
-
-        let mut replacements = Vec::new();
-        let mut removals = Vec::new();
-        let mut fenced = false;
-        for fact in facts.0 {
-            let matching = list
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| {
-                    entry
-                        .as_object()
-                        .and_then(|entry| entry.get("id"))
-                        .and_then(Value::as_str)
-                        == Some(fact.agent_id.as_str())
-                })
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            let [index] = matching.as_slice() else {
-                fenced = true;
-                continue;
-            };
-            if list[*index] != fact.expected_entry {
-                fenced = true;
-                continue;
-            }
-            match fact.prior_entry {
-                Some(prior_entry) => replacements.push((*index, prior_entry)),
-                None => removals.push(*index),
-            }
-        }
-        if replacements.is_empty() && removals.is_empty() {
-            return Ok(ConfigRestorePreparation::Fenced);
-        }
-        for (index, prior_entry) in replacements {
-            list[index] = prior_entry;
-        }
-        removals.sort_unstable_by(|left, right| right.cmp(left));
-        for index in removals {
-            list.remove(index);
-        }
-        let restored_list = list.clone();
-        let raw = serde_json::to_string(&serde_json::json!({
-            "agents": {"list": restored_list}
-        }))
-        .map_err(|_| WireError::InvalidConfigSetRequest)?;
-        let raw = ConfigDocument::new(raw)?;
-        let request_id = format!("team-config-restore-{}", next_restore_request_id());
-        let request =
-            config_patch_request(request_id, raw, Some(base_hash), vec!["agents.list".into()])?;
-        Ok(ConfigRestorePreparation::Ready { request, fenced })
-    }
 }
 
-pub(crate) struct ConfigAgentPatch {
-    agent_id: String,
-    name: String,
-    workspace: String,
-}
-
-impl ConfigAgentPatch {
-    pub(crate) fn new(agent_id: String, name: String, workspace: String) -> Self {
-        Self {
-            agent_id,
-            name,
-            workspace,
-        }
-    }
-
-    fn apply(self, list: &mut Vec<Value>) -> Result<(Value, ConfigRestoreFact), WireError> {
-        if !valid_string(&self.agent_id)
-            || !valid_string(&self.name)
-            || !valid_string(&self.workspace)
-        {
-            return Err(WireError::InvalidConfigSetRequest);
-        }
-        let agent_id = self.agent_id;
-        let matching = list
-            .iter()
-            .enumerate()
-            .filter(|(_, current)| {
-                current
-                    .as_object()
-                    .and_then(|current| current.get("id"))
-                    .and_then(Value::as_str)
-                    == Some(agent_id.as_str())
-            })
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        let prior_entry = match matching.as_slice() {
-            [] => None,
-            [index] => Some(list[*index].clone()),
-            _ => return Err(WireError::InvalidConfigSetRequest),
-        };
-        let mut entry = prior_entry
-            .as_ref()
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        let name = self.name;
-        let workspace = self.workspace;
-        entry.insert("id".into(), Value::String(agent_id.clone()));
-        entry.insert("name".into(), Value::String(name.clone()));
-        entry.insert("workspace".into(), Value::String(workspace.clone()));
-        let expected_entry = Value::Object(entry);
-        let entry_patch = serde_json::json!({
-            "id": agent_id.clone(),
-            "name": name,
-            "workspace": workspace
-        });
-        match matching.as_slice() {
-            [] => list.push(expected_entry.clone()),
-            [index] => list[*index] = expected_entry.clone(),
-            _ => unreachable!("duplicate config agent IDs were rejected"),
-        }
-        Ok((
-            entry_patch,
-            ConfigRestoreFact {
-                agent_id,
-                expected_entry,
-                prior_entry,
-            },
-        ))
-    }
-}
-
-impl fmt::Debug for ConfigAgentPatch {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ConfigAgentPatch([REDACTED])")
-    }
-}
+mod config;
+pub(crate) use config::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ConfigSetApplied;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ConfigPatchApplied;
-
-pub(crate) struct ConfigPatch {
-    raw: ConfigDocument,
-    base_hash: Option<ConfigBaseHash>,
-    restore_facts: ConfigRestoreFacts,
-    replace_paths: Vec<String>,
-}
-
-impl ConfigPatch {
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        ConfigDocument,
-        Option<ConfigBaseHash>,
-        ConfigRestoreFacts,
-        Vec<String>,
-    ) {
-        (
-            self.raw,
-            self.base_hash,
-            self.restore_facts,
-            self.replace_paths,
-        )
-    }
-}
-
-pub(crate) struct ConfigRestoreFacts(Vec<ConfigRestoreFact>);
-
-struct ConfigRestoreFact {
-    agent_id: String,
-    expected_entry: Value,
-    prior_entry: Option<Value>,
-}
-
-pub(crate) enum ConfigRestorePreparation {
-    Ready {
-        request: ConfigPatchRequest,
-        fenced: bool,
-    },
-    Fenced,
-}
 
 pub(crate) fn decode_agents_create(response: GatewayResponse) -> Result<AgentCreated, WireError> {
     let payload = success_payload(response, WireError::InvalidAgentsCreate)?;
@@ -590,6 +364,7 @@ pub(crate) fn decode_config_get(response: GatewayResponse) -> Result<ConfigSnaps
         return Err(WireError::InvalidConfigGet);
     }
     Ok(ConfigSnapshot {
+        valid: payload.valid,
         raw: payload
             .raw
             .into_option()

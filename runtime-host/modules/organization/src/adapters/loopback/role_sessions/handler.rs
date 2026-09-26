@@ -21,6 +21,7 @@ pub(crate) async fn handle_loopback(
     body: Vec<u8>,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     owner: crate::OrganizationHandle,
+    resolver: Arc<dyn crate::RoleSessionIdentityResolver>,
 ) -> platform::loopback::Response {
     handle(
         Request {
@@ -31,6 +32,7 @@ pub(crate) async fn handle_loopback(
         },
         verifier,
         owner,
+        resolver,
     )
     .await
     .into_loopback()
@@ -40,6 +42,7 @@ async fn handle(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     owner: crate::OrganizationHandle,
+    resolver: Arc<dyn crate::RoleSessionIdentityResolver>,
 ) -> Response {
     if request.method != "POST" || request.path != ROUTE {
         return Response::not_found();
@@ -63,7 +66,7 @@ async fn handle(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     };
     drop(verifier);
-    Response::from_delivery(list(&owner, request).await)
+    Response::from_delivery(list(&owner, resolver.as_ref(), request).await)
 }
 
 struct Request {

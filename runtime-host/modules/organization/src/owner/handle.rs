@@ -50,11 +50,20 @@ use super::{
 #[derive(Clone)]
 pub struct OrganizationHandle {
     inner: OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>,
+    schedule_changes: tokio::sync::watch::Sender<()>,
 }
 
 impl OrganizationHandle {
     pub fn new(inner: OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>) -> Self {
-        Self { inner }
+        let (schedule_changes, _) = tokio::sync::watch::channel(());
+        Self {
+            inner,
+            schedule_changes,
+        }
+    }
+
+    pub fn subscribe_schedule_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.schedule_changes.subscribe()
     }
 
     pub async fn execute_team_runtime(
@@ -253,7 +262,11 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn run_create_from_team_template(
@@ -274,7 +287,11 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn run_list(
@@ -363,6 +380,17 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
+    pub async fn role_session_receipts(
+        &self,
+    ) -> Result<Result<Vec<organization::RoleSessionReceipt>, StoreFault>, RequestAdmissionClosed> {
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_query(OrganizationQuery::RoleSessionReceipts { reply })
+            .await
+            .map_err(closed)?;
+        reply_rx.await.map_err(|_| closed_error())
+    }
+
     pub async fn start_gate_prompt_plan(
         &self,
         lookup: StartGateRuntimeBindingLookup,
@@ -421,7 +449,11 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn run_start_continue(
@@ -541,7 +573,11 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn webhook_trigger_fire(
@@ -560,7 +596,11 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn graph_save(
@@ -577,7 +617,11 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn graph_patch(
@@ -589,7 +633,11 @@ impl OrganizationHandle {
             .send_command(OrganizationCommand::GraphPatch { patch, reply })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn graph_context(
@@ -647,7 +695,11 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn node_prompt_retry_due(
@@ -688,7 +740,11 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn approval_resolve(
@@ -700,7 +756,11 @@ impl OrganizationHandle {
             .send_command(OrganizationCommand::ApprovalResolve { command, reply })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn decision_submit(
@@ -712,7 +772,11 @@ impl OrganizationHandle {
             .send_command(OrganizationCommand::DecisionSubmit { command, reply })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn task_board_read(
@@ -877,6 +941,7 @@ impl OrganizationHandle {
     pub async fn team_message_terminal_observed(
         &self,
         native_run_id: String,
+        delivery_context: Option<(DeliveryId, crate::EndpointSessionId)>,
         status: organization::NativeTerminalStatus,
         final_assistant_text: Option<String>,
         settled_at: u64,
@@ -888,6 +953,7 @@ impl OrganizationHandle {
         self.inner
             .send_command(OrganizationCommand::TeamMessageTerminalObserved {
                 native_run_id,
+                delivery_context,
                 status,
                 final_assistant_text,
                 settled_at,
@@ -895,7 +961,11 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn team_message_repair_queued(
@@ -924,7 +994,11 @@ impl OrganizationHandle {
             .send_command(OrganizationCommand::TeamMessageRepairRejected { repair, reply })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     pub async fn native_run_settled(
@@ -945,7 +1019,11 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.schedule_changes.send_replace(());
+        }
+        Ok(outcome)
     }
 
     /// Settles a team node terminal by native run id alone, resolving the owning delivery first.

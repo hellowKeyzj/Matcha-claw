@@ -74,8 +74,8 @@ export async function hostChannelsReadConfig(
   channelType: ChannelType,
   accountId?: string,
   options?: { traceId?: string },
-): Promise<{ success: boolean; values?: Record<string, string> }> {
-  return await hostApiFetch<{ success: boolean; values?: Record<string, string> }>(
+): Promise<{ success: true; values: Record<string, string>; agentId: string | null }> {
+  return await hostApiFetch<{ success: true; values: Record<string, string>; agentId: string | null }>(
     '/api/channels/config/read',
     {
       traceId: options?.traceId,
@@ -97,6 +97,8 @@ export async function hostChannelsConfigure(input: {
   const agentId = input.agentId?.trim();
   const result = await hostApiFetch<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/configure', {
     traceId: options?.traceId,
+    // Covers config retries/readback; this is a client wait budget, not a restart deadline.
+    timeoutMs: 240_000,
     method: 'POST',
     body: JSON.stringify({
       action: 'apply',

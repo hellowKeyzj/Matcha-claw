@@ -344,16 +344,6 @@ export function resolveTeamRoleChatTargetFromProbe(index: TeamRoleChatTargetInde
   return null;
 }
 
-export function isTeamRoleReservedLocalSessionKey(value: string | null | undefined): boolean {
-  return typeof value === 'string' && value.startsWith('team-role-session-');
-}
-
-export function isKnownTeamRoleSession(index: TeamRoleChatTargetIndex, probe: TeamRoleSessionProbe): boolean {
-  return resolveTeamRoleChatTargetFromProbe(index, probe) !== null
-    || isTeamRoleReservedLocalSessionKey(probe.sessionIdentity?.sessionKey)
-    || isTeamRoleReservedLocalSessionKey(probe.sessionKey);
-}
-
 let cachedTeamRoleChatTargetIndexInput: TeamRoleChatTargetIndexInput | null = null;
 let cachedTeamRoleChatTargetIndex: TeamRoleChatTargetIndex = buildTeamRoleChatTargetIndex({
   teams: [],
@@ -652,12 +642,23 @@ function normalizeTeamGraphEdges(edges: unknown): TeamGraphSnapshotRecord['edges
   });
 }
 
+function normalizeTeamGraphLayout(layout: unknown): TeamGraphSnapshotRecord['layout'] {
+  if (!isRecord(layout) || !isRecord(layout.nodePositions)) return { nodePositions: {} };
+  const nodePositions: Record<string, { x: number; y: number }> = {};
+  for (const [nodeId, position] of Object.entries(layout.nodePositions)) {
+    if (!isRecord(position) || typeof position.x !== 'number' || typeof position.y !== 'number') continue;
+    nodePositions[nodeId] = { x: position.x, y: position.y };
+  }
+  return { nodePositions };
+}
+
 function normalizeTeamGraphProjection(graph: TeamGraphSnapshotRecord | null | undefined, runId: string): TeamGraphSnapshotRecord | null {
   if (!graph) return null;
   return {
     ...graph,
     runId: graph.runId ?? runId,
     status: readNonEmptyString(graph.status) ?? 'draft',
+    layout: normalizeTeamGraphLayout((graph as { layout?: unknown }).layout),
     nodes: normalizeTeamGraphNodes((graph as { nodes?: unknown }).nodes),
     edges: normalizeTeamGraphEdges((graph as { edges?: unknown }).edges),
   };
@@ -686,6 +687,7 @@ function applyTeamGraphPatchOperations(
   let nodes = [...graph.nodes];
   let edges = [...graph.edges];
   let metadata = graph.metadata;
+  let nodePositions = { ...(graph.layout?.nodePositions ?? {}) };
   for (const operation of operations) {
     switch (operation.op) {
       case 'add_node': {
@@ -699,6 +701,7 @@ function applyTeamGraphPatchOperations(
       case 'remove_node':
         nodes = nodes.filter((node) => node.nodeId !== operation.nodeId);
         edges = edges.filter((edge) => edge.sourceNodeId !== operation.nodeId && edge.targetNodeId !== operation.nodeId);
+        delete nodePositions[operation.nodeId];
         break;
       case 'add_edge': {
         const [edge] = normalizeTeamGraphEdges([operation.edge]);
@@ -711,12 +714,15 @@ function applyTeamGraphPatchOperations(
       case 'remove_edge':
         edges = edges.filter((edge) => edge.edgeId !== operation.edgeId);
         break;
+      case 'set_node_position':
+        nodePositions[operation.nodeId] = operation.position;
+        break;
       case 'set_metadata':
         metadata = { ...(metadata ?? {}), ...operation.metadata };
         break;
     }
   }
-  return { ...graph, nodes, edges, metadata, updatedAt: Date.now() };
+  return { ...graph, layout: { nodePositions }, nodes, edges, metadata, updatedAt: Date.now() };
 }
 
 type TeamRunSnapshotUnavailableSection =
@@ -1226,6 +1232,7 @@ export const useTeamsStore = create<TeamsState>()(
         const currentGraph = normalizeTeamGraphProjection(state.graphByTeamId[teamId], runId) ?? {
           runId,
           status: 'draft',
+          layout: { nodePositions: {} },
           nodes: [],
           edges: [],
         };

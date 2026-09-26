@@ -53,6 +53,9 @@ pub enum NodeKind {
     End,
 }
 
+const COMPLETED_PORT: &str = "completed";
+const REWORK_PORT: &str = "rework";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EdgeAction {
     Activate,
@@ -542,6 +545,39 @@ impl EdgeDefinition {
     }
 }
 
+fn validate_edge_source_contract(
+    edge: &EdgeDefinition,
+    source_node: &NodeDefinition,
+) -> Result<(), DefinitionError> {
+    if edge.source_port() == REWORK_PORT && edge.action() != EdgeAction::Rework {
+        return Err(DefinitionError::InvalidReworkEdgeAction(edge.id().clone()));
+    }
+    if edge.source_port() == COMPLETED_PORT && edge.action() == EdgeAction::Rework {
+        return Err(DefinitionError::InvalidCompletedEdgeAction(
+            edge.id().clone(),
+        ));
+    }
+    match source_node.kind() {
+        NodeKind::Work if edge.source_port() != COMPLETED_PORT => {
+            Err(DefinitionError::InvalidWorkEdgeSourcePort {
+                edge_id: edge.id().clone(),
+                source_port: edge.source_port().to_owned(),
+            })
+        }
+        NodeKind::Review
+            if source_node.review_assignment().is_some()
+                && edge.source_port() != COMPLETED_PORT
+                && edge.source_port() != REWORK_PORT =>
+        {
+            Err(DefinitionError::InvalidReviewEdgeSourcePort {
+                edge_id: edge.id().clone(),
+                source_port: edge.source_port().to_owned(),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphDefinition {
     graph_id: String,
@@ -724,12 +760,12 @@ impl GraphDefinition {
             if !edge_ids.insert(edge.id.clone()) {
                 return Err(DefinitionError::DuplicateEdgeId(edge.id.clone()));
             }
-            if !nodes.contains_key(&edge.source_node_id) {
+            let Some(source_node) = nodes.get(&edge.source_node_id) else {
                 return Err(DefinitionError::UnknownEdgeSource {
                     edge_id: edge.id.clone(),
                     node_id: edge.source_node_id.clone(),
                 });
-            }
+            };
             if !nodes.contains_key(&edge.target_node_id) {
                 return Err(DefinitionError::UnknownEdgeTarget {
                     edge_id: edge.id.clone(),
@@ -739,6 +775,7 @@ impl GraphDefinition {
             if edge.source_port.trim().is_empty() || edge.target_port.trim().is_empty() {
                 return Err(DefinitionError::EmptyEdgePort(edge.id.clone()));
             }
+            validate_edge_source_contract(edge, source_node)?;
         }
 
         self.validate_activation_graph_acyclic()?;
@@ -824,9 +861,25 @@ pub enum DefinitionError {
     EmptyStartTrigger(NodeId),
     EmptyEdgeId,
     DuplicateEdgeId(EdgeId),
-    UnknownEdgeSource { edge_id: EdgeId, node_id: NodeId },
-    UnknownEdgeTarget { edge_id: EdgeId, node_id: NodeId },
+    UnknownEdgeSource {
+        edge_id: EdgeId,
+        node_id: NodeId,
+    },
+    UnknownEdgeTarget {
+        edge_id: EdgeId,
+        node_id: NodeId,
+    },
     EmptyEdgePort(EdgeId),
+    InvalidWorkEdgeSourcePort {
+        edge_id: EdgeId,
+        source_port: String,
+    },
+    InvalidReviewEdgeSourcePort {
+        edge_id: EdgeId,
+        source_port: String,
+    },
+    InvalidReworkEdgeAction(EdgeId),
+    InvalidCompletedEdgeAction(EdgeId),
     NoExecutionRoot,
     UnreachableNode(NodeId),
     ActivationCycle(NodeId),

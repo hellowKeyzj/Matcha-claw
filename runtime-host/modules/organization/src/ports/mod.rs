@@ -7,8 +7,7 @@ pub mod session;
 
 pub use delivery::{
     ActivityExecutionOutcome, ActivityExecutionRequest, ActivityExecutionRequestError,
-    DeliveryRejection, InvalidPromptDispatchPayload, NativeRunSettled, PromptDeliveryOutcome,
-    PromptDeliveryPort, PromptDeliveryRequest, PromptDispatchPayload,
+    DeliveryRejection, NativeRunSettled,
 };
 pub use fleet::{InvalidRunRuntimeReceipt, RunRuntimeReceipt};
 pub use identity::{
@@ -32,8 +31,8 @@ pub use native_effects::{
     RuntimeReceiptOutcome, TeamActivityExecutor, TeamNativeEffectsPort,
 };
 pub use session::{
-    InvalidRoleSessionRef, ROLE_SESSION_REF_INITIAL, RoleSessionPort, RoleSessionReceipt,
-    RoleSessionRef, RoleSessionSlot, RoleSessionWindow,
+    InvalidRoleSessionRef, ROLE_SESSION_REF_INITIAL, RoleSessionIdentityResolver, RoleSessionPort,
+    RoleSessionReceipt, RoleSessionRef, RoleSessionSlot, RoleSessionWindow,
 };
 
 #[cfg(test)]

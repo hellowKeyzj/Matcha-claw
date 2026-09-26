@@ -23,6 +23,7 @@ const HOST_FORBIDDEN_CRATES: &[&str] = &[
     "subagents",
     "task_manager",
     "usage",
+    "wiki",
     "workspace",
 ];
 
@@ -43,6 +44,7 @@ const MODULE_CRATES: &[&str] = &[
     "subagents",
     "task_manager",
     "usage",
+    "wiki",
     "workspace",
 ];
 
@@ -752,6 +754,13 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
         Path::new(RUNTIME_HOST_ROOT).join("modules/organization/src/adapters/mcp/tools.rs"),
     )
     .expect("read organization MCP tools adapter");
+    let wiki_module =
+        fs::read_to_string(Path::new(RUNTIME_HOST_ROOT).join("modules/wiki/src/lib.rs"))
+            .expect("read wiki module");
+    let wiki_mcp_tools = fs::read_to_string(
+        Path::new(RUNTIME_HOST_ROOT).join("modules/wiki/src/adapters/mcp/mod.rs"),
+    )
+    .expect("read wiki MCP adapter");
     let diagnostics_module =
         fs::read_to_string(Path::new(RUNTIME_HOST_ROOT).join("modules/diagnostics/src/lib.rs"))
             .expect("read diagnostics module");
@@ -797,10 +806,16 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
             && organization_terminal.contains("team_message_terminal_observed")
             && host_mcp.contains("ToolCatalog::new")
             && host_mcp.contains("organization::team_run_mcp_provider")
+            && host_mcp.contains("wiki::wiki_mcp_provider")
             && organization_mcp_tools.contains("impl ToolProvider for TeamRunMcpFacade")
             && organization_mcp_tools.contains("\"team_graph_context\"")
-            && organization_mcp_tools.contains("\"inputSchema\""),
-        "Host product MCP composition must install the Organization-owned TeamRun MCP provider"
+            && organization_mcp_tools.contains("\"inputSchema\"")
+            && wiki_module.contains("wiki_mcp_provider")
+            && wiki_mcp_tools.contains("impl ToolProvider for WikiMcpFacade")
+            && wiki_mcp_tools.contains("\"wiki_retrieve_context\"")
+            && wiki_mcp_tools.contains("\"wiki_apply_generated_pages\"")
+            && wiki_mcp_tools.contains("\"inputSchema\""),
+        "Host product MCP composition must install Organization-owned TeamRun and Wiki-owned MCP providers"
     );
     assert!(
         !Path::new(HOST_SRC).join("transport").exists(),

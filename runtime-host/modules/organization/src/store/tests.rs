@@ -12,24 +12,24 @@ use crate::run::delivery::{
     observe_native_terminal, resolve_authorized_graph_outcome,
 };
 use crate::{
-    AgentNodeEventResolution, Approval, ApprovalDecision, ApprovalRequest, ApprovalStatus,
-    ArmedTriggerFacts, AttemptStatus, CommandPayload, ControlAuthority, ControlNodeResolution,
-    ControlNodeResolutionError, ControlNodeResolutionOutcome, Delivery, DeliveryId, DeliveryLedger,
-    DeliveryLedgerSnapshot, DeliveryPhase, DeliveryPhaseSnapshot, DeliveryReceipt,
-    DeliveryReceiptError, DeliveryRequest, DeliveryResolution, DeliverySnapshot, DeliveryStart,
-    DependencyMetadata, EdgeAction, EdgeDefinition, EdgeId, EdgePayloadPolicy, EndpointSessionId,
-    EvidenceId, EvidenceRecord, EvidenceReference, ExecutorPolicy, GraphDefinition, GraphEvent,
-    GraphPatch, GraphPatchOperation, GraphRunId, GraphRunLifecycle, GraphRunLifecycleState,
-    GraphState, GroupId, HumanDecision, IdempotencyKey, JoinPolicy, ManagedAgentReference,
-    MaterializationOperationOutcome, MaterializationReceipt, MaterializationRecordOutcome,
-    MaterializationRejection, MaterializationSource, MemberId, NativeDeliveryCorrelation,
-    NodeDefinition, NodeId, NodeKind, RegisterOutcome, ReviewAssignment, RoleAssignment, RoleId,
-    RoleKind, RoleMaterializationAgent, RoleMaterializationReceipt, RoleSessionReceipt,
-    RunRuntimeReceipt, RuntimeEndpointReference, ScriptReviewRule, StartTrigger,
-    TeamDecisionCommand, TeamDecisionType, TeamDefinition, TeamId, TeamMember, TeamNodeEvent,
-    TeamNodeEventOutcome, TeamNodeOutput, TeamRevision, TeamRole, TeamRunQuery,
-    TeamRunQueryOutcome, TerminalObservationOutcome, TriggerFireError, TriggerFireRequest,
-    TriggerRegistration, TriggerSource, WorkAssignment, WorkGroup, begin_delivery,
+    ActivityTarget, AgentNodeEventResolution, Approval, ApprovalDecision, ApprovalRequest,
+    ApprovalStatus, ArmedTriggerFacts, AttemptStatus, CommandPayload, ControlAuthority,
+    ControlNodeResolution, ControlNodeResolutionError, ControlNodeResolutionOutcome, Delivery,
+    DeliveryId, DeliveryLedger, DeliveryLedgerSnapshot, DeliveryPhase, DeliveryPhaseSnapshot,
+    DeliveryReceipt, DeliveryReceiptError, DeliveryRequest, DeliveryResolution, DeliverySnapshot,
+    DeliveryStart, DependencyMetadata, EdgeAction, EdgeDefinition, EdgeId, EdgePayloadPolicy,
+    EndpointSessionId, EvidenceId, EvidenceRecord, EvidenceReference, ExecutorPolicy,
+    GraphDefinition, GraphEvent, GraphPatch, GraphPatchOperation, GraphRunId, GraphRunLifecycle,
+    GraphRunLifecycleState, GraphState, GroupId, HumanDecision, IdempotencyKey, JoinPolicy,
+    ManagedAgentReference, MaterializationOperationOutcome, MaterializationReceipt,
+    MaterializationRecordOutcome, MaterializationRejection, MaterializationSource, MemberId,
+    NativeDeliveryCorrelation, NodeDefinition, NodeId, NodeKind, RegisterOutcome, ReviewAssignment,
+    RoleAssignment, RoleId, RoleKind, RoleMaterializationAgent, RoleMaterializationReceipt,
+    RoleSessionReceipt, RunRuntimeReceipt, RuntimeEndpointReference, ScriptReviewRule,
+    StartTrigger, TeamDecisionCommand, TeamDecisionType, TeamDefinition, TeamId, TeamMember,
+    TeamNodeEvent, TeamNodeEventOutcome, TeamRevision, TeamRole, TeamRunQuery, TeamRunQueryOutcome,
+    TerminalObservationOutcome, TriggerFireError, TriggerFireRequest, TriggerRegistration,
+    TriggerSource, WorkAssignment, WorkGroup, begin_delivery,
     ports::materialization::NativeWorkspaceReceipt,
     query_team_run, reduce,
     run::event::NodeProgressCommand,
@@ -2877,7 +2877,7 @@ fn agent_node_event_resolution_requires_an_explicit_port_to_match_an_outgoing_ed
         DeliveryId::new("delivery:one").unwrap(),
         "run:one",
         fence.clone(),
-        Some("not-routed"),
+        Some("failed"),
         5,
     )
     .unwrap();
@@ -2898,7 +2898,7 @@ fn agent_node_event_resolution_requires_an_explicit_port_to_match_an_outgoing_ed
         DeliveryId::new("delivery:one").unwrap(),
         "run:one",
         fence,
-        Some("routed"),
+        Some("completed"),
         5,
     )
     .unwrap();
@@ -2915,7 +2915,7 @@ fn agent_node_event_resolution_requires_an_explicit_port_to_match_an_outgoing_ed
             .current_attempt(&NodeId::new("work"))
             .unwrap()
             .output_port(),
-        Some("routed")
+        Some("completed")
     );
     drop(store);
     remove_test_path(&path);
@@ -2980,7 +2980,7 @@ fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
         .replace_facts(facts_with_delivery(delivery, graph, binding, Vec::new()))
         .unwrap();
     let target = native_terminal_target(&store);
-    let final_text = r#"noise <team_message>{"summary":"completed safely","output_port":"completed","payload":{"ok":true},"status":"passed"}</team_message>"#.to_owned();
+    let final_text = r#"noise <team_message>{"summary":"已安全完成","decision":"completed","dispatch":[{"role_id":"leader","task":"复核结果"}]}</team_message>"#.to_owned();
 
     assert_eq!(
         store.resolve_native_run_output(
@@ -3004,9 +3004,11 @@ fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
         .output()
         .expect("native output should be durable");
     assert_eq!(output.final_assistant_text(), final_text);
-    assert_eq!(output.summary(), "completed safely");
-    assert_eq!(output.output_port(), "completed");
-    assert_eq!(output.status(), Some("passed"));
+    assert_eq!(output.summary(), "已安全完成");
+    assert_eq!(output.decision(), "completed");
+    assert_eq!(output.dispatch().len(), 1);
+    assert_eq!(output.dispatch()[0].role_id(), "leader");
+    assert_eq!(output.dispatch()[0].task(), "复核结果");
     assert!(matches!(
         observation.resolution(),
         TerminalObservationResolution::GraphResolved(resolution)
@@ -3046,11 +3048,118 @@ fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
     let DeliveryPhase::TerminalObserved { observation } = delivery.phase() else {
         panic!("native output should survive reopen");
     };
-    assert_eq!(
-        observation.output().map(TeamNodeOutput::output_port),
-        Some("completed")
-    );
+    let output = observation
+        .output()
+        .expect("native output should survive reopen");
+    assert_eq!(output.decision(), "completed");
+    assert_eq!(output.dispatch().len(), 1);
+    assert_eq!(output.dispatch()[0].role_id(), "leader");
+    assert_eq!(output.dispatch()[0].task(), "复核结果");
     drop(reopened);
+    remove_test_path(&path);
+}
+
+#[test]
+fn activity_registration_accepts_deterministic_teamrun_completion_prompt_only() {
+    let path = test_path("activity-completion-prompt-validation");
+    let mut store = OrganizationStore::open(&path).unwrap();
+    let binding = RoleSessionReceipt::with_endpoint_session_id(
+        team_id(),
+        GraphRunId::new("run:one"),
+        RoleId::try_new("leader").unwrap(),
+        crate::RoleSessionRef::initial(),
+        EndpointSessionId::try_new("native-session:one").unwrap(),
+        ManagedAgentReference::try_new("agent:one").unwrap(),
+        RuntimeEndpointReference::try_new("endpoint:one").unwrap(),
+    );
+    let graph = GraphState::initialize(
+        GraphDefinition::new(
+            "graph:one",
+            "plan:one",
+            GraphRunId::new("run:one"),
+            "activity prompt",
+            vec![NodeDefinition::work(
+                NodeId::new("work"),
+                "work",
+                NonZeroU32::new(1).unwrap(),
+                WorkAssignment::typed(
+                    "task:one",
+                    "private prompt",
+                    ExecutorPolicy::team_role("leader"),
+                    None,
+                    None,
+                ),
+            )],
+            Vec::new(),
+        )
+        .unwrap(),
+        1,
+    );
+    store
+        .replace_facts(
+            OrganizationFacts::restore_with_teamrun_ledgers(TeamRunFactsRestoreInput {
+                teams: vec![TeamFacts::new(
+                    team_definition(),
+                    TeamRevision::initial(),
+                    false,
+                )],
+                materializations: vec![terminal_materialization()],
+                runs: vec![
+                    GraphRunFacts::new(
+                        team_id(),
+                        TeamRevision::initial(),
+                        graph,
+                        Some(runtime(binding)),
+                    )
+                    .unwrap(),
+                ],
+                pending_workflow_plan_admissions: Vec::new(),
+                templates: Vec::new(),
+                deliveries: DeliveryLedgerSnapshot::new(Vec::new()),
+                activities: crate::ActivityLedgerSnapshot::new(Vec::new()),
+                triggers: Vec::new(),
+                control_resolutions: Vec::new(),
+                approvals: Vec::new(),
+                events: EventLedgerSnapshot::default(),
+                evidence: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let run = store.facts().run(&GraphRunId::new("run:one")).unwrap();
+    let scheduled = crate::run::scheduler::schedule_ready_nodes(run.graph(), 1, 0).unwrap();
+    let mut accepted = scheduled[0]
+        .bind_activity_target(
+            ActivityTarget::new(crate::ROLE_SESSION_REF_INITIAL).unwrap(),
+            2,
+            1,
+        )
+        .unwrap();
+    accepted.activity_id = crate::ActivityId::new("activity:accepted").unwrap();
+    accepted.idempotency_key = "activity:accepted".to_owned();
+    assert!(matches!(
+        store.register_activity(accepted),
+        Ok(crate::ActivityRegistrationOutcome::Recorded(_))
+    ));
+    let run = store.facts().run(&GraphRunId::new("run:one")).unwrap();
+    let scheduled = crate::run::scheduler::schedule_ready_nodes(run.graph(), 1, 0).unwrap();
+    let mut rejected = scheduled[0]
+        .bind_activity_target(
+            ActivityTarget::new(crate::ROLE_SESSION_REF_INITIAL).unwrap(),
+            3,
+            1,
+        )
+        .unwrap();
+    rejected.activity_id = crate::ActivityId::new("activity:rejected").unwrap();
+    rejected.idempotency_key = "activity:rejected".to_owned();
+    if let crate::ActivityKind::AgentTask { prompt, .. } = &mut rejected.activity_kind {
+        *prompt = "private prompt".to_owned();
+    }
+    assert_eq!(
+        store.register_activity(rejected),
+        Err(StoreFault::InvalidFacts)
+    );
+    drop(store);
     remove_test_path(&path);
 }
 
@@ -4863,7 +4972,7 @@ fn delivered_routed_work_delivery_and_graph() -> (Delivery, GraphState, RoleSess
             vec![EdgeDefinition::new(
                 EdgeId::new("work-next"),
                 NodeId::new("work"),
-                "routed",
+                "completed",
                 NodeId::new("next"),
                 "input",
                 EdgeAction::Activate,
@@ -5249,7 +5358,7 @@ fn rich_replacement_definition() -> GraphDefinition {
             edge(
                 "review-typed-join",
                 "review",
-                "approved",
+                "completed",
                 "typed-join",
                 EdgeAction::Gate,
             ),

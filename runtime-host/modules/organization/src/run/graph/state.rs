@@ -386,16 +386,72 @@ impl ReadyQueueItem {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NodePosition {
+    x: i64,
+    y: i64,
+}
+
+impl NodePosition {
+    pub const fn new(x: i64, y: i64) -> Self {
+        Self { x, y }
+    }
+
+    pub const fn x(&self) -> i64 {
+        self.x
+    }
+
+    pub const fn y(&self) -> i64 {
+        self.y
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GraphLayout {
+    node_positions: BTreeMap<NodeId, NodePosition>,
+}
+
+impl GraphLayout {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn from_durable(node_positions: BTreeMap<NodeId, NodePosition>) -> Self {
+        Self { node_positions }
+    }
+
+    pub fn node_positions(&self) -> &BTreeMap<NodeId, NodePosition> {
+        &self.node_positions
+    }
+
+    pub(crate) fn set_node_position(&mut self, node_id: NodeId, position: NodePosition) {
+        self.node_positions.insert(node_id, position);
+    }
+
+    pub(crate) fn remove_node(&mut self, node_id: &NodeId) {
+        self.node_positions.remove(node_id);
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphState {
     definition: GraphDefinition,
     metadata: BTreeMap<OpaqueId, MetadataValue>,
+    layout: GraphLayout,
     executions: BTreeMap<NodeId, NodeExecutionHistory>,
     ready_queue: Vec<ReadyQueueItem>,
 }
 
 impl GraphState {
     pub fn initialize(definition: GraphDefinition, now: u64) -> Self {
+        Self::initialize_with_layout(definition, GraphLayout::empty(), now)
+    }
+
+    pub(crate) fn initialize_with_layout(
+        definition: GraphDefinition,
+        layout: GraphLayout,
+        now: u64,
+    ) -> Self {
         let root_ids = definition.execution_root_ids();
         let mut executions = BTreeMap::new();
         let mut ready_queue = Vec::new();
@@ -427,6 +483,7 @@ impl GraphState {
         Self {
             definition,
             metadata: BTreeMap::new(),
+            layout,
             executions,
             ready_queue,
         }
@@ -435,12 +492,14 @@ impl GraphState {
     pub(crate) fn from_durable(
         definition: GraphDefinition,
         metadata: BTreeMap<OpaqueId, MetadataValue>,
+        layout: GraphLayout,
         executions: BTreeMap<NodeId, NodeExecutionHistory>,
         ready_queue: Vec<ReadyQueueItem>,
     ) -> Self {
         Self {
             definition,
             metadata,
+            layout,
             executions,
             ready_queue,
         }
@@ -452,6 +511,10 @@ impl GraphState {
 
     pub fn metadata(&self) -> &BTreeMap<OpaqueId, MetadataValue> {
         &self.metadata
+    }
+
+    pub fn layout(&self) -> &GraphLayout {
+        &self.layout
     }
 
     pub fn executions(&self) -> &BTreeMap<NodeId, NodeExecutionHistory> {
@@ -472,6 +535,16 @@ impl GraphState {
         self.executions
             .get_mut(node_id)
             .map(NodeExecutionHistory::current_mut)
+    }
+
+    pub(crate) fn superseded_attempt_mut(
+        &mut self,
+        node_id: &NodeId,
+        fence: &ExecutionFence,
+    ) -> Option<&mut NodeAttempt> {
+        let history = self.executions.get_mut(node_id)?;
+        let (_, superseded) = history.attempts.split_last_mut()?;
+        superseded.iter_mut().find(|attempt| attempt.fence() == fence)
     }
 
     pub(crate) fn append_attempt(&mut self, node_id: &NodeId, attempt: NodeAttempt) {

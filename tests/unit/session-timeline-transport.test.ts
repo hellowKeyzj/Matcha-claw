@@ -19,6 +19,15 @@ const identity = {
   sessionKey: 'agent:test:main',
 };
 
+const ordinaryOwnership = { kind: 'ordinary' } as const;
+const teamOwnership = {
+  kind: 'team',
+  teamId: 'team-1',
+  teamRunId: 'team-run-1',
+  roleId: 'role-1',
+  sessionRef: identity.sessionKey,
+} as const;
+
 function request(
   operationId: 'sessions.load' | 'sessions.window',
   options: { endpointSessionId?: string } = {},
@@ -52,6 +61,12 @@ function decodeDecision(authorization: string): Record<string, unknown> {
 
 function canonicalView(options: Parameters<typeof sessionView>[1] = {}) {
   return sessionView(identity.sessionKey, { identity, ...options });
+}
+
+function omitOwnership<T extends { ownership: unknown }>(value: T): Omit<T, 'ownership'> {
+  const { ownership: _ownership, ...withoutOwnership } = value;
+  void _ownership;
+  return withoutOwnership;
 }
 
 const runtimeHostTransportPort = 32_111;
@@ -116,6 +131,18 @@ describe('SessionTimelineTransport', () => {
     await expect(transport.load(request('sessions.load'))).resolves.toEqual({ status: 200, body: view });
   });
 
+  it.each([
+    ['null', null],
+    ['ordinary', ordinaryOwnership],
+    ['team', teamOwnership],
+  ] as const)('accepts a complete canonical SessionView with %s ownership', async (_name, ownership) => {
+    const view = canonicalView({ ownership });
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(view), { status: 200 }));
+    const transport = createSessionTimelineTransport(createRuntimeHostDeliveryIssuer(), runtimeHostTransportPort, fetcher);
+
+    await expect(transport.load(request('sessions.load'))).resolves.toEqual({ status: 200, body: view });
+  });
+
   it('rejects response identity and sessionKey mismatches', async () => {
     const identityMismatch = canonicalView({
       identity: { ...identity, sessionKey: 'agent:test:other' },
@@ -158,6 +185,15 @@ describe('SessionTimelineTransport', () => {
 
     const privateView = { ...canonicalView(), private: 'secret' };
     fetcher.mockResolvedValueOnce(new Response(JSON.stringify(privateView), { status: 200 }));
+    await expect(transport.load(request('sessions.load'))).resolves.toEqual(unavailableResponse());
+
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify(omitOwnership(canonicalView())), { status: 200 }));
+    await expect(transport.load(request('sessions.load'))).resolves.toEqual(unavailableResponse());
+
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({
+      ...canonicalView(),
+      ownership: { ...teamOwnership, roleId: '' },
+    }), { status: 200 }));
     await expect(transport.load(request('sessions.load'))).resolves.toEqual(unavailableResponse());
   });
 

@@ -11,7 +11,8 @@ pub use model::{
     DeliveryRequestError, InvalidAuthorizedGraphResolution,
     InvalidAuthorizedGraphResolutionReceipt, InvalidNativeRunReceiptReference,
     NativeDeliveryCorrelation, NativeRunReceiptReference, NativeTerminalStatus, TeamNodeOutput,
-    TeamNodeOutputError, TerminalObservation, TerminalObservationResolution, delivery_retry_at,
+    TeamNodeOutputDispatch, TeamNodeOutputError, TerminalObservation,
+    TerminalObservationResolution, delivery_retry_at,
 };
 pub use restore::{
     DeliveryClaimSnapshot, DeliveryPhaseSnapshot, DeliverySnapshot, RestoreDeliveryError,
@@ -21,8 +22,8 @@ pub use transition::{
     AuthorizedGraphResolutionError, AuthorizedGraphResolutionOutcome, DeliveryDispatch,
     DeliveryReceiptError, DeliveryRecovery, DeliveryResolution, DeliveryStart,
     NativeRunOutputResolutionError, RegisterDeliveryError, TerminalObservationError,
-    TerminalObservationOutcome, begin_delivery, dispatch_delivery, recover_interrupted_delivery,
-    register_delivery, settle_delivery,
+    TerminalObservationOutcome, begin_delivery, recover_interrupted_delivery, register_delivery,
+    settle_delivery,
 };
 
 pub(crate) use transition::{

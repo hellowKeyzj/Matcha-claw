@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     AttemptStatus, EdgeAction, EdgeDefinition, EdgeId, GraphPatchOperation, GraphStatus,
-    NodeDefinition, NodeId, NodeKind, WorkAssignment,
+    NodeDefinition, NodeId, NodeKind, WorkAssignment, run::NodePosition,
 };
 
 use super::team_run::{
@@ -442,6 +442,24 @@ fn graph_patch_tool() -> Value {
                                     "edgeId": { "type": "string", "minLength": 1 }
                                 },
                                 "required": ["op", "edgeId"]
+                            },
+                            {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "op": { "const": "set_node_position" },
+                                    "nodeId": { "type": "string", "minLength": 1 },
+                                    "position": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "properties": {
+                                            "x": { "type": "integer" },
+                                            "y": { "type": "integer" }
+                                        },
+                                        "required": ["x", "y"]
+                                    }
+                                },
+                                "required": ["op", "nodeId", "position"]
                             }
                         ]
                     }
@@ -659,8 +677,24 @@ fn parse_graph_patch_operation(value: &Value) -> Result<GraphPatchOperation, ()>
                 required_string(object, "edgeId")?,
             )))
         }
+        "set_node_position" => {
+            require_exact_keys(object, &["op", "nodeId", "position"])?;
+            Ok(GraphPatchOperation::SetNodePosition {
+                node_id: NodeId::new(required_string(object, "nodeId")?),
+                position: parse_node_position(object.get("position").ok_or(())?)?,
+            })
+        }
         _ => Err(()),
     }
+}
+
+fn parse_node_position(value: &Value) -> Result<NodePosition, ()> {
+    let object = value.as_object().ok_or(())?;
+    require_exact_keys(object, &["x", "y"])?;
+    Ok(NodePosition::new(
+        object.get("x").and_then(Value::as_i64).ok_or(())?,
+        object.get("y").and_then(Value::as_i64).ok_or(())?,
+    ))
 }
 
 fn approval_action(arguments: &Map<String, Value>) -> Result<crate::ApprovalAction, ()> {

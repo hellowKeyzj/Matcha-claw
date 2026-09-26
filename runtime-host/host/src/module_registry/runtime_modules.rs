@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use organization::RoleSessionIdentityResolver;
 use platform::module::ModuleDescriptor;
 
 use crate::{Host, composition::HostHandles};
@@ -31,12 +32,16 @@ pub(crate) fn runtime_module_install_plan(
     let openclaw_platform_admission: Arc<
         dyn openclaw::platform_runtime::loopback::OpenClawPlatformAdmissionPort,
     > = handles.admission.clone();
+    let role_session_identity: Arc<dyn RoleSessionIdentityResolver> =
+        handles.runtime_directory.clone();
 
     (
         vec![
-            handles
-                .organization_module
-                .descriptor(Arc::clone(&verifier), webhook_token),
+            handles.organization_module.descriptor(
+                Arc::clone(&verifier),
+                webhook_token,
+                role_session_identity,
+            ),
             handles.channel.descriptor(Arc::clone(&verifier)),
             handles.security.descriptor(Arc::clone(&verifier)),
             handles.settings.descriptor(Arc::clone(&verifier)),
@@ -85,6 +90,7 @@ pub(crate) fn runtime_module_install_plan(
             handles.task_manager.descriptor(Arc::clone(&verifier)),
             handles.agents.descriptor(Arc::clone(&verifier)),
             handles.workspace.descriptor(Arc::clone(&verifier)),
+            handles.wiki.descriptor(Arc::clone(&verifier)),
             handles.platform_tools.descriptor(Arc::clone(&verifier)),
             handles.toolchain.descriptor(Arc::clone(&verifier)),
         ],

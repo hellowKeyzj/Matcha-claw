@@ -4,6 +4,7 @@ mod patch;
 mod projection;
 mod reducer;
 mod restore;
+mod rework;
 mod state;
 mod workflow;
 mod yaml;
@@ -15,21 +16,22 @@ pub use definition::{
 };
 pub use durable::{
     DurableAttemptReason, DurableDependencyMetadata, DurableEdgeDefinition, DurableExecutionFence,
-    DurableInputReceipt, DurableNodeAttempt, DurableNodeDefinition, DurableNodeExecution,
-    DurableReadyQueueItem, DurableRestoreError, DurableReviewAssignment, DurableStartTrigger,
-    DurableWorkAssignment, DurableWorkGroup, GraphDurableSnapshot,
+    DurableGraphLayout, DurableInputReceipt, DurableNodeAttempt, DurableNodeDefinition,
+    DurableNodeExecution, DurableNodePosition, DurableReadyQueueItem, DurableRestoreError,
+    DurableReviewAssignment, DurableStartTrigger, DurableWorkAssignment, DurableWorkGroup,
+    GraphDurableSnapshot,
 };
 pub use patch::{GraphPatch, GraphPatchError, GraphPatchOperation, apply as apply_graph_patch};
 pub use projection::{
     AttemptProjection, EdgeProjection, EdgeStatus, GraphProjection, GraphStatus, InputProjection,
     NodeProjection, project,
 };
-pub use reducer::{GraphEvent, ReduceError, reduce};
+pub use reducer::{GraphEvent, ReduceError, reduce, settle_superseded_attempt};
 pub use restore::{RestoreError, restore_oracle};
 pub(crate) use state::NodeAttemptDurableInput;
 pub use state::{
-    AttemptId, AttemptReason, AttemptStatus, ExecutionFence, GraphState, InputReceipt, NodeAttempt,
-    NodeExecutionHistory, NodeExecutionId, ReadyQueueItem,
+    AttemptId, AttemptReason, AttemptStatus, ExecutionFence, GraphLayout, GraphState, InputReceipt,
+    NodeAttempt, NodeExecutionHistory, NodeExecutionId, NodePosition, ReadyQueueItem,
 };
 pub use workflow::{
     WorkflowGroup, WorkflowJoinPolicy, WorkflowPlan, WorkflowPlanCompilation,

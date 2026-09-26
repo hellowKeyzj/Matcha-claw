@@ -618,31 +618,39 @@ export const UserMessageMetaBar = memo(function UserMessageMetaBar({ timestamp }
 export const AssistantMessageMetaBar = memo(function AssistantMessageMetaBar({
   text,
   timestamp,
+  statusLabel,
 }: {
   text: string;
   timestamp?: number;
+  statusLabel?: string;
 }) {
   const [copied, setCopied] = useState(false);
+  const canCopy = text.trim().length > 0;
 
   const copyContent = useCallback(() => {
+    if (!canCopy) {
+      return;
+    }
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
-  }, [text]);
+  }, [canCopy, text]);
 
   return (
-    <div className="mt-0.5 flex w-full justify-start opacity-0 transition-opacity duration-200 select-none group-hover:opacity-100">
+    <div className="mt-0.5 flex w-full justify-end opacity-0 transition-opacity duration-200 select-none group-hover:opacity-100">
       <div className="inline-flex items-center gap-1.5 px-1 text-[11px] leading-5 text-muted-foreground/80">
-        <span>{timestamp ? formatTimestamp(timestamp) : ''}</span>
-        <button
-          type="button"
-          aria-label={copied ? 'Copied reply' : 'Copy reply'}
-          title={copied ? 'Copied' : 'Copy'}
-          className="inline-flex h-4 w-4 items-center justify-center text-muted-foreground/75 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border/60"
-          onClick={copyContent}
-        >
-          {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
-        </button>
+        <span>{statusLabel ?? (timestamp ? formatTimestamp(timestamp) : '')}</span>
+        {canCopy ? (
+          <button
+            type="button"
+            aria-label={copied ? 'Copied reply' : 'Copy reply'}
+            title={copied ? 'Copied' : 'Copy'}
+            className="inline-flex h-4 w-4 items-center justify-center text-muted-foreground/75 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border/60"
+            onClick={copyContent}
+          >
+            {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+          </button>
+        ) : null}
       </div>
     </div>
   );

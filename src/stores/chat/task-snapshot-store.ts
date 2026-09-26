@@ -1,17 +1,4 @@
 import { create } from 'zustand';
-import { buildSessionRecordKey } from './session-identity';
-import type {
-  SessionAssistantTurnItem,
-} from '../../types/session/render-item';
-import type {
-  SessionRenderToolCard,
-} from '../../types/session/tool-card';
-import type {
-  SessionStateSnapshot,
-} from '../../types/session/snapshot';
-import type {
-  SessionUpdateEvent,
-} from '../../types/session/update-event';
 import type {
   TaskData,
   TaskDataStatus,
@@ -19,39 +6,6 @@ import type {
   TaskSnapshotEvent,
   TodoItem,
 } from '../../types/session/task-snapshot';
-const TASK_SNAPSHOT_TOOL_METHODS = new Set([
-  'TaskCreate',
-  'TaskUpdate',
-  'TaskList',
-  'TaskGet',
-  'TodoWrite',
-  'TodoGet',
-]);
-
-function normalizeToolName(toolName: unknown): string {
-  return typeof toolName === 'string' ? toolName.trim() : '';
-}
-
-function canonicalizeStateOnlyTaskToolName(toolName: unknown): 'TodoWrite' | 'TodoGet' | '' {
-  switch (normalizeToolName(toolName).toLowerCase()) {
-    case 'todowrite':
-      return 'TodoWrite';
-    case 'todoget':
-      return 'TodoGet';
-    default:
-      return '';
-  }
-}
-
-function isTaskSnapshotToolMethod(toolName: unknown): boolean {
-  const normalized = normalizeToolName(toolName);
-  return Boolean(canonicalizeStateOnlyTaskToolName(normalized)) || TASK_SNAPSHOT_TOOL_METHODS.has(normalized);
-}
-
-function isTodoTaskToolName(toolName: unknown): boolean {
-  return Boolean(canonicalizeStateOnlyTaskToolName(toolName));
-}
-
 export type DerivedPlanStatus = 'finished' | 'building' | 'ready' | null;
 
 interface SessionTaskSnapshotState {
@@ -82,8 +36,6 @@ interface TaskSnapshotStoreState {
     },
   ) => void;
   reportTaskCenterSnapshot: (event: TaskSnapshotEvent & { recordKey?: string }) => void;
-  reportSessionUpdate: (event: SessionUpdateEvent) => void;
-  reportSessionSnapshot: (snapshot: SessionStateSnapshot, source?: TaskSnapshotEvent['source']) => void;
   getTodoList: (sessionKey: string) => TodoItem[];
   getTaskDataList: (scopeKey: string) => TaskData[];
   getPersistentTaskDataList: (scopeKey: string) => TaskData[];
@@ -219,12 +171,6 @@ function normalizeTask(raw: unknown, index = 0): TaskData | null {
   };
 }
 
-function normalizeTasks(value: unknown): TaskData[] {
-  return Array.isArray(value)
-    ? value.map(normalizeTask).filter((item): item is TaskData => Boolean(item))
-    : [];
-}
-
 function normalizeTodos(value: unknown): TodoItem[] {
   return Array.isArray(value)
     ? value.map(normalizeTodo).filter((item): item is TodoItem => Boolean(item))
@@ -334,101 +280,6 @@ function sortTasks(tasks: TaskData[]): TaskData[] {
     }
     return left.id.localeCompare(right.id);
   });
-}
-
-function parseJsonMaybe(value: string): unknown {
-  const trimmed = value.trim();
-  if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
-    return null;
-  }
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    return null;
-  }
-}
-
-function normalizeToolPayload(method: string, params: Record<string, unknown>): {
-  scope?: TaskScopeSnapshot;
-  tasks: TaskData[];
-  todos: TodoItem[];
-  source: TaskSnapshotEvent['source'];
-} | null {
-  if (!isTaskSnapshotToolMethod(method)) {
-    return null;
-  }
-  const tasks = [
-    ...normalizeTasks(params.tasks),
-    ...normalizeTasks(params.task ? [params.task] : []),
-  ];
-  const todos = normalizeTodos(params.todos ?? params.newTodos);
-  if (isTodoTaskToolName(method)) {
-    return { tasks: [], todos, source: 'todo' };
-  }
-  if (tasks.length === 0 && todos.length === 0) {
-    return null;
-  }
-  return { scope: normalizeScope(params.scope), tasks, todos, source: 'tool' };
-}
-
-function extractTaskArtifactPayload(value: unknown): TaskSnapshotEvent | null {
-  if (!isRecord(value) || value.type !== 'tasks') {
-    return null;
-  }
-  const sessionKey = normalizeString(value.sessionKey)
-    || normalizeString(value.uri).match(/^agent:\/\/\/(.+)\/tasks\//)?.[1]
-    || '';
-  if (!sessionKey) {
-    return null;
-  }
-  return {
-    sessionKey,
-    ...(normalizeScope(value.scope) ? { scope: normalizeScope(value.scope) } : {}),
-    tasks: normalizeTasks(value.tasks),
-    source: 'artifact',
-    enableEdit: value.enableEdit === true,
-    ...(normalizeString(value.uri) ? { uri: normalizeString(value.uri) } : {}),
-  };
-}
-
-function extractTasksFromTool(tool: SessionRenderToolCard, sessionKey: string): TaskSnapshotEvent | null {
-  const outputCandidates: unknown[] = [tool.output];
-  if (tool.result.kind === 'json' || tool.result.kind === 'text') {
-    outputCandidates.push(parseJsonMaybe(tool.result.bodyText));
-  }
-  for (const candidate of outputCandidates) {
-    if (!candidate) continue;
-    const artifact = extractTaskArtifactPayload(candidate);
-    if (artifact) return artifact;
-    if (!isRecord(candidate)) continue;
-    const normalized = normalizeToolPayload(tool.name, candidate);
-    if (!normalized) continue;
-    return {
-      sessionKey,
-      ...(normalized.scope ? { scope: normalized.scope } : {}),
-      tasks: normalized.tasks,
-      todos: normalized.todos,
-      source: normalized.source,
-    };
-  }
-  return null;
-}
-
-function extractSnapshotEventsFromItems(snapshot: SessionStateSnapshot): TaskSnapshotEvent[] {
-  const events: TaskSnapshotEvent[] = [];
-  for (const item of snapshot.items) {
-    if (item.kind !== 'assistant-turn') {
-      continue;
-    }
-    const turn = item as SessionAssistantTurnItem;
-    for (const tool of turn.tools) {
-      const event = extractTasksFromTool(tool, snapshot.sessionKey);
-      if (event) {
-        events.push(event);
-      }
-    }
-  }
-  return events;
 }
 
 function updateSnapshot(
@@ -546,46 +397,6 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
     });
     if (event.todos) {
       get().reportTodos(recordKey, event.todos);
-    }
-  },
-
-  reportSessionUpdate: (event) => {
-    const sourceSessionKey = normalizeString(event.sessionKey) || event.snapshot.sessionKey;
-    if (!sourceSessionKey) return;
-    const recordKey = buildSessionRecordKey({
-      ...event.snapshot.catalog.sessionIdentity,
-      sessionKey: event.snapshot.catalog.sessionIdentity.sessionKey || sourceSessionKey,
-    });
-    if (event.sessionUpdate === 'session_info_update') {
-      if (event.phase === 'started') {
-        get().notifyChatStarted(recordKey);
-      }
-      if (event.phase === 'final' || event.phase === 'error' || event.phase === 'aborted') {
-        get().notifyChatStopped(recordKey);
-      }
-    }
-    if (event.sessionUpdate === 'plan') {
-      if (event.taskSnapshot.source === 'todo' || event.taskSnapshot.todos) {
-        get().reportTodos(recordKey, event.taskSnapshot.todos ?? []);
-      }
-      return;
-    }
-    get().reportSessionSnapshot(event.snapshot, 'replay');
-  },
-
-  reportSessionSnapshot: (snapshot, source = 'replay') => {
-    void source;
-    const recordKey = buildSessionRecordKey({
-      ...snapshot.catalog.sessionIdentity,
-      sessionKey: snapshot.catalog.sessionIdentity.sessionKey || snapshot.sessionKey,
-    });
-    if (snapshot.taskSnapshot?.source === 'todo' || snapshot.taskSnapshot?.todos) {
-      get().reportTodos(recordKey, snapshot.taskSnapshot.todos ?? []);
-    }
-    for (const event of extractSnapshotEventsFromItems(snapshot)) {
-      if (event.source === 'todo' || event.todos) {
-        get().reportTodos(recordKey, event.todos ?? []);
-      }
     }
   },
 

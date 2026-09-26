@@ -157,27 +157,27 @@ impl fmt::Debug for TeamAgentUpdate {
 
 pub(crate) struct TeamConfigSnapshot(pub(super) wire::team::ConfigSnapshot);
 
-pub(crate) struct TeamConfigAgent {
-    agent_id: String,
-    name: String,
-    workspace: ResolvedWorkspace,
-}
+pub(crate) struct TeamConfigAgent(wire::team::ConfigAgentPatch);
 
 impl TeamConfigAgent {
     pub(crate) fn new(
         agent_id: TeamOwnedAgentId,
         name: String,
         workspace: ResolvedWorkspace,
+        tools: &[String],
     ) -> Self {
-        Self {
-            agent_id: agent_id.0,
-            name,
-            workspace,
-        }
+        Self(
+            wire::team::ConfigAgentPatch::new(agent_id.0, name, workspace.into_inner())
+                .with_tools(tools.to_vec()),
+        )
+    }
+
+    pub(crate) fn external(agent_id: &TeamOwnedAgentId, tools: &[String]) -> Self {
+        Self(wire::team::ConfigAgentPatch::external(agent_id.0.clone()).with_tools(tools.to_vec()))
     }
 
     pub(super) fn into_wire(self) -> wire::team::ConfigAgentPatch {
-        wire::team::ConfigAgentPatch::new(self.agent_id, self.name, self.workspace.into_inner())
+        self.0
     }
 }
 

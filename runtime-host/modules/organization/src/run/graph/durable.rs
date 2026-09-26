@@ -1,13 +1,17 @@
-use std::{collections::BTreeMap, num::NonZeroU32};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
+};
 
 use crate::run::event::{MetadataValue, OpaqueId};
 
 use super::{
     AttemptReason, AttemptStatus, DefinitionError, DependencyMetadata, EdgeAction, EdgeDefinition,
-    EdgeId, EdgePayloadPolicy, ExecutionFence, ExecutorPolicy, GraphDefinition, GraphRunId,
-    GraphState, GroupId, InputReceipt, JoinPolicy, NodeAttempt, NodeAttemptDurableInput,
-    NodeDefinition, NodeExecutionHistory, NodeId, NodeKind, ReadyQueueItem, RestoreError,
-    ReviewAssignment, StartTrigger, WorkAssignment, WorkGroup, restore_oracle,
+    EdgeId, EdgePayloadPolicy, ExecutionFence, ExecutorPolicy, GraphDefinition, GraphLayout,
+    GraphRunId, GraphState, GroupId, InputReceipt, JoinPolicy, NodeAttempt,
+    NodeAttemptDurableInput, NodeDefinition, NodeExecutionHistory, NodeId, NodeKind, NodePosition,
+    ReadyQueueItem, RestoreError, ReviewAssignment, StartTrigger, WorkAssignment, WorkGroup,
+    restore_oracle,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,10 +21,23 @@ pub struct GraphDurableSnapshot {
     pub run_id: String,
     pub title: String,
     pub metadata: BTreeMap<OpaqueId, MetadataValue>,
+    pub layout: DurableGraphLayout,
     pub nodes: Vec<DurableNodeDefinition>,
     pub edges: Vec<DurableEdgeDefinition>,
     pub executions: Vec<DurableNodeExecution>,
     pub ready_queue: Vec<DurableReadyQueueItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableGraphLayout {
+    pub node_positions: Vec<DurableNodePosition>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableNodePosition {
+    pub node_id: String,
+    pub x: i64,
+    pub y: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,6 +160,7 @@ pub struct DurableReadyQueueItem {
 pub enum DurableRestoreError {
     NonCanonicalNodeOrder,
     NonCanonicalEdgeOrder,
+    NonCanonicalLayout,
     NonCanonicalExecutions,
     InvalidAttemptNumber {
         node_id: String,
@@ -151,6 +169,7 @@ pub enum DurableRestoreError {
     InvalidNodeSnapshot {
         node_id: String,
     },
+    InvalidLayoutNodePosition,
     InvalidDefinition(DefinitionError),
     InvalidAttemptReason {
         node_id: NodeId,
@@ -196,6 +215,18 @@ impl GraphState {
             run_id: self.definition().run_id().as_str().to_owned(),
             title: self.definition().title().to_owned(),
             metadata: self.metadata().clone(),
+            layout: DurableGraphLayout {
+                node_positions: self
+                    .layout()
+                    .node_positions()
+                    .iter()
+                    .map(|(node_id, position)| DurableNodePosition {
+                        node_id: node_id.as_str().to_owned(),
+                        x: position.x(),
+                        y: position.y(),
+                    })
+                    .collect(),
+            },
             nodes: self
                 .definition()
                 .nodes()
@@ -269,6 +300,7 @@ impl GraphState {
     pub fn restore_durable(snapshot: GraphDurableSnapshot) -> Result<Self, DurableRestoreError> {
         let definition = restore_definition(&snapshot)?;
         let executions = restore_executions(&snapshot.executions)?;
+        let layout = restore_layout(&snapshot)?;
         let ready_queue = snapshot
             .ready_queue
             .into_iter()
@@ -280,11 +312,44 @@ impl GraphState {
                 )
             })
             .collect();
-        let state =
-            GraphState::from_durable(definition, snapshot.metadata, executions, ready_queue);
+        let state = GraphState::from_durable(
+            definition,
+            snapshot.metadata,
+            layout,
+            executions,
+            ready_queue,
+        );
         validate_cross_references(&state)?;
         restore_oracle(state).map_err(DurableRestoreError::InvalidState)
     }
+}
+
+fn restore_layout(snapshot: &GraphDurableSnapshot) -> Result<GraphLayout, DurableRestoreError> {
+    let node_ids = snapshot
+        .nodes
+        .iter()
+        .map(|node| NodeId::new(node.id.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut previous = None;
+    let mut node_positions = BTreeMap::new();
+    for position in &snapshot.layout.node_positions {
+        if previous
+            .as_ref()
+            .is_some_and(|last: &String| last >= &position.node_id)
+        {
+            return Err(DurableRestoreError::NonCanonicalLayout);
+        }
+        previous = Some(position.node_id.clone());
+        let node_id = NodeId::new(position.node_id.clone());
+        if !node_ids.contains(&node_id)
+            || node_positions
+                .insert(node_id, NodePosition::new(position.x, position.y))
+                .is_some()
+        {
+            return Err(DurableRestoreError::InvalidLayoutNodePosition);
+        }
+    }
+    Ok(GraphLayout::from_durable(node_positions))
 }
 
 fn durable_trigger(trigger: &StartTrigger) -> DurableStartTrigger {
@@ -636,12 +701,15 @@ fn validate_reason(
             if actual.is_empty() {
                 return Ok(());
             }
-            (actual.len() == 1
-                && state.definition().edges().iter().any(|edge| {
-                    edge.id() == actual[0].edge_id()
-                        && edge.target_node_id() == node_id
-                        && edge.action() == EdgeAction::Rework
-                }))
+            let mut edge_ids = BTreeSet::new();
+            actual.iter().all(|receipt| {
+                edge_ids.insert(receipt.edge_id())
+                    && state.definition().edges().iter().any(|edge| {
+                        edge.id() == receipt.edge_id()
+                            && edge.target_node_id() == node_id
+                            && edge.action() == EdgeAction::Rework
+                    })
+            })
             .then_some(())
             .ok_or_else(invalid_inputs)
         }

@@ -315,7 +315,6 @@ impl OrganizationGlobalState {
             .observe_native_terminal(&mut self.store, target, status, settled_at)?;
         crate::owner::team_run::resolve_native_settled_output(
             &mut self.store,
-            &self.team_run,
             &run_id,
             &delivery_id,
             NativeRunSettled {
@@ -654,6 +653,20 @@ impl OrganizationGlobalState {
         idempotency_key: IdempotencyKey,
         observed_at: u64,
     ) -> Result<TeamDeleteOutcome, StoreFault> {
+        if let Some(request) = self.store.team_materialization_recovery_request(&team_id) {
+            let Some(runtime) = shared.team_runtime_for_endpoint(request.intent().endpoint())
+            else {
+                return Ok(TeamDeleteOutcome::OutcomeUnknown);
+            };
+            match runtime.recover_team_materialization(request).await {
+                organization::MaterializationOperationOutcome::Confirmed { receipt }
+                    if receipt.team() == &team_id =>
+                {
+                    self.store.confirm_team_materialization(receipt)?;
+                }
+                _ => return Ok(TeamDeleteOutcome::OutcomeUnknown),
+            }
+        }
         for run_id in self.team_run_ids_for_team(&team_id) {
             match self.team_run.begin_cancellation(
                 &mut self.store,
@@ -785,12 +798,21 @@ impl OrganizationGlobalState {
     }
 
     fn team_delete_without_pending_cleanup(&self, team_id: &TeamId) -> TeamDeleteOutcome {
-        if self.store.team_materialization_cleanup_confirmed(team_id)
-            || self.store.facts().materialization(team_id).is_none()
-        {
-            TeamDeleteOutcome::Deleted
-        } else {
-            TeamDeleteOutcome::OutcomeUnknown
+        let lifecycle = self
+            .store
+            .facts()
+            .materialization_lifecycles()
+            .find(|lifecycle| lifecycle.team() == Some(team_id));
+        match lifecycle {
+            None
+            | Some(organization::TeamMaterializationLifecycle::Tombstoned(
+                organization::TombstonedMaterialization::None(_)
+                | organization::TombstonedMaterialization::Confirmed {
+                    cleanup: organization::TeamMaterializationCleanup::Confirmed(_),
+                    ..
+                },
+            )) => TeamDeleteOutcome::Deleted,
+            _ => TeamDeleteOutcome::OutcomeUnknown,
         }
     }
 
@@ -1098,6 +1120,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::TeamSkillSelectionDependencyPlan { .. }
             | OrganizationQuery::RunList { .. }
             | OrganizationQuery::RoleSessions { .. }
+            | OrganizationQuery::RoleSessionReceipts { .. }
             | OrganizationQuery::StartGatePromptPlan { .. }
             | OrganizationQuery::TriggerList { .. }
             | OrganizationQuery::Resume { .. }
@@ -1494,7 +1517,6 @@ impl OwnerSpec for OrganizationOwner {
                     )?;
                     crate::owner::team_run::resolve_native_settled_output(
                         &mut store,
-                        &state.team_run,
                         &run_id,
                         &delivery_id,
                         settled,
@@ -1646,6 +1668,7 @@ impl OwnerSpec for OrganizationOwner {
             }
             OrganizationCommand::TeamMessageTerminalObserved {
                 native_run_id,
+                delivery_context,
                 status,
                 final_assistant_text,
                 settled_at,
@@ -1664,6 +1687,13 @@ impl OwnerSpec for OrganizationOwner {
                             pending.settled_at,
                             plan,
                         );
+                    }
+                    if let Some((delivery_id, endpoint_session_id)) = delivery_context {
+                        state.store.accept_native_terminal_context(
+                            &delivery_id,
+                            endpoint_session_id,
+                            native_run_id.clone(),
+                        )?;
                     }
                     let Some(context) = state.team_message_terminal_context(&native_run_id)? else {
                         return Ok(organization::TeamMessageTerminalObservation::Ignored);
@@ -1904,6 +1934,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::TeamSkillSelectionDependencyPlan { .. }
             | OrganizationQuery::RunList { .. }
             | OrganizationQuery::RoleSessions { .. }
+            | OrganizationQuery::RoleSessionReceipts { .. }
             | OrganizationQuery::StartGatePromptPlan { .. }
             | OrganizationQuery::TriggerList { .. }
             | OrganizationQuery::Resume { .. }
@@ -1963,6 +1994,19 @@ impl OwnerSpec for OrganizationOwner {
                     Ok(()) => state.team_run.query_role_sessions(&state.store, &team_id),
                     Err(_) => organization::TeamRoleSessionQueryOutcome::Unavailable,
                 };
+                let _ = reply.send(outcome);
+            }
+            OrganizationQuery::RoleSessionReceipts { reply } => {
+                let outcome = state.store.refresh().map(|()| {
+                    state
+                        .store
+                        .facts()
+                        .runs()
+                        .filter_map(|run| run.runtime())
+                        .flat_map(|runtime| runtime.bindings())
+                        .cloned()
+                        .collect()
+                });
                 let _ = reply.send(outcome);
             }
             OrganizationQuery::StartGatePromptPlan {
@@ -2157,6 +2201,521 @@ mod tests {
         RoleSessionReceipt, RoleSessionRef, RunRuntimeReceipt, RuntimeEndpointReference,
         TeamDefinition, TeamFacts, TeamMember, TeamRevision, TeamRole, WorkAssignment, reduce,
     };
+
+    fn native_cycle_graph(limit: u32) -> GraphState {
+        GraphState::initialize(
+            GraphDefinition::new(
+                "native-cycle",
+                "plan",
+                GraphRunId::new("run:one"),
+                "cycle",
+                vec![
+                    NodeDefinition::work(
+                        NodeId::new("work"),
+                        "work",
+                        NonZeroU32::new(limit).unwrap(),
+                        WorkAssignment::typed(
+                            "task",
+                            "work prompt",
+                            ExecutorPolicy::team_role("leader"),
+                            None,
+                            None,
+                        ),
+                    ),
+                    NodeDefinition::review(
+                        NodeId::new("review"),
+                        "review",
+                        NonZeroU32::new(limit).unwrap(),
+                        organization::ReviewAssignment::new("leader", "review prompt"),
+                    ),
+                    NodeDefinition::control(
+                        NodeId::new("end"),
+                        organization::NodeKind::End,
+                        "end",
+                        NonZeroU32::new(1).unwrap(),
+                    ),
+                ],
+                vec![
+                    EdgeDefinition::new(
+                        EdgeId::new("work-review"),
+                        NodeId::new("work"),
+                        "completed",
+                        NodeId::new("review"),
+                        "input",
+                        EdgeAction::Activate,
+                    ),
+                    EdgeDefinition::new(
+                        EdgeId::new("review-work"),
+                        NodeId::new("review"),
+                        "rework",
+                        NodeId::new("work"),
+                        "input",
+                        EdgeAction::Rework,
+                    ),
+                    EdgeDefinition::new(
+                        EdgeId::new("review-end"),
+                        NodeId::new("review"),
+                        "completed",
+                        NodeId::new("end"),
+                        "input",
+                        EdgeAction::Finish,
+                    ),
+                ],
+            )
+            .unwrap(),
+            1,
+        )
+    }
+
+    fn claim_native_activity(
+        store: &mut OrganizationStore,
+        now: u64,
+    ) -> (
+        organization::ActivityClaim,
+        DeliveryId,
+        organization::EndpointSessionId,
+    ) {
+        let owner = TeamRunOwner::new();
+        let ids = schedule_ready_nodes(&owner, store, GraphRunId::new("run:one"), now).unwrap();
+        assert_eq!(ids.len(), 1);
+        let TeamRunActivityStart::Claimed { claim, request } = owner
+            .claim_agent_activity(store, ids[0].clone(), now + 1)
+            .unwrap()
+        else {
+            panic!("claim");
+        };
+        (
+            claim,
+            request.delivery_request().delivery_id.clone(),
+            request.binding().endpoint_session_id().clone(),
+        )
+    }
+
+    fn settle_native_output(
+        store: &mut OrganizationStore,
+        delivery_id: &DeliveryId,
+        status: organization::NativeTerminalStatus,
+        text: Option<String>,
+        now: u64,
+    ) {
+        let target = store.native_terminal_target(delivery_id).unwrap();
+        TeamRunOwner::new()
+            .observe_native_terminal(store, target, status, now)
+            .unwrap();
+        crate::owner::team_run::resolve_native_settled_output(
+            store,
+            &GraphRunId::new("run:one"),
+            delivery_id,
+            NativeRunSettled {
+                status,
+                final_assistant_text: text,
+            },
+            now,
+        )
+        .unwrap();
+    }
+
+    fn native_text(decision: &str) -> String {
+        format!(
+            r#"<team_message>{{"summary":"review feedback","decision":"{decision}","dispatch":[{{"role_id":"leader","task":"fix the reviewed issue"}}]}}</team_message>"#
+        )
+    }
+
+    #[test]
+    fn native_terminal_before_acceptance_is_durable_and_late_acceptance_is_noop() {
+        let (temp, mut store) = store_with_graph(native_cycle_graph(2));
+        let path = temp.path().join("organization-facts.log");
+        let (claim, delivery_id, session) = claim_native_activity(&mut store, 3);
+        store
+            .accept_native_terminal_context(&delivery_id, session.clone(), "native:one".into())
+            .unwrap();
+        settle_native_output(
+            &mut store,
+            &delivery_id,
+            organization::NativeTerminalStatus::Completed,
+            Some(native_text("completed")),
+            5,
+        );
+        let len = fs::metadata(&path).unwrap().len();
+        TeamRunOwner::new()
+            .settle_agent_activity_dispatch(
+                &mut store,
+                claim.clone(),
+                ActivityExecutionOutcome::accepted(session.clone(), "native:one".into()),
+            )
+            .unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), len);
+        assert!(matches!(
+            store
+                .facts()
+                .activities()
+                .activity(claim.activity_id())
+                .unwrap()
+                .phase(),
+            ActivityPhase::Completed { .. }
+        ));
+        assert!(
+            TeamRunOwner::new()
+                .settle_agent_activity_dispatch(
+                    &mut store,
+                    claim,
+                    ActivityExecutionOutcome::accepted(session, "native:conflict".into())
+                )
+                .is_err()
+        );
+        assert_eq!(fs::metadata(&path).unwrap().len(), len);
+        drop(store);
+        let store = OrganizationStore::open(&path).unwrap();
+        let organization::DeliveryPhase::TerminalObserved { observation } = store
+            .facts()
+            .deliveries()
+            .delivery(&delivery_id)
+            .unwrap()
+            .phase()
+        else {
+            panic!("terminal");
+        };
+        assert_eq!(observation.output().unwrap().summary(), "review feedback");
+        assert_eq!(
+            observation.output().unwrap().dispatch()[0].task(),
+            "fix the reviewed issue"
+        );
+    }
+
+    #[test]
+    fn native_rework_rereview_finish_and_exhaustion_survive_reopen() {
+        for exhausted in [false, true] {
+            let (temp, mut store) = store_with_graph(native_cycle_graph(2));
+            let mut last_delivery = None;
+            for (index, decision) in [
+                "completed",
+                "rework",
+                "completed",
+                if exhausted { "rework" } else { "completed" },
+            ]
+            .iter()
+            .enumerate()
+            {
+                let now = 3 + index as u64 * 4;
+                let (claim, delivery_id, session) = claim_native_activity(&mut store, now);
+                if index == 2 {
+                    let organization::ActivityKind::AgentTask { prompt, .. } = &store
+                        .facts()
+                        .activities()
+                        .activity(claim.activity_id())
+                        .unwrap()
+                        .facts()
+                        .activity_kind
+                    else {
+                        panic!("agent");
+                    };
+                    assert!(prompt.contains("review feedback"));
+                    assert!(prompt.contains("fix the reviewed issue"));
+                }
+                store
+                    .accept_native_terminal_context(
+                        &delivery_id,
+                        session,
+                        format!("native:{index}"),
+                    )
+                    .unwrap();
+                settle_native_output(
+                    &mut store,
+                    &delivery_id,
+                    organization::NativeTerminalStatus::Completed,
+                    Some(native_text(decision)),
+                    now + 2,
+                );
+                let len = fs::metadata(temp.path().join("organization-facts.log"))
+                    .unwrap()
+                    .len();
+                settle_native_output(
+                    &mut store,
+                    &delivery_id,
+                    organization::NativeTerminalStatus::Completed,
+                    Some(native_text(decision)),
+                    now + 3,
+                );
+                assert_eq!(
+                    fs::metadata(temp.path().join("organization-facts.log"))
+                        .unwrap()
+                        .len(),
+                    len
+                );
+                last_delivery = Some((claim.activity_id().clone(), delivery_id));
+            }
+            if !exhausted {
+                assert!(
+                    schedule_ready_nodes(
+                        &TeamRunOwner::new(),
+                        &mut store,
+                        GraphRunId::new("run:one"),
+                        20
+                    )
+                    .unwrap()
+                    .is_empty()
+                );
+            }
+            drop(store);
+            let store =
+                OrganizationStore::open(temp.path().join("organization-facts.log")).unwrap();
+            let organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Available(
+                snapshot,
+            ) = organization::run::public_projection::query_team_run_public_snapshot(
+                store.facts(),
+                &team_id(),
+                &GraphRunId::new("run:one"),
+            )
+            else {
+                panic!("snapshot");
+            };
+            assert_eq!(
+                snapshot
+                    .graph()
+                    .nodes()
+                    .iter()
+                    .find(|node| node.node_id() == "review")
+                    .unwrap()
+                    .status_reason(),
+                exhausted.then_some("rework_limit_exceeded")
+            );
+            let run = store.facts().run(&GraphRunId::new("run:one")).unwrap();
+            if !exhausted {
+                assert_eq!(
+                    run.graph()
+                        .current_attempt(&NodeId::new("end"))
+                        .unwrap()
+                        .status(),
+                    organization::AttemptStatus::Completed
+                );
+                assert!(run.graph().ready_queue().is_empty());
+            }
+            let review = run.graph().current_attempt(&NodeId::new("review")).unwrap();
+            assert_eq!(review.number().get(), 2);
+            assert_eq!(
+                review.status(),
+                if exhausted {
+                    organization::AttemptStatus::Failed
+                } else {
+                    organization::AttemptStatus::Completed
+                }
+            );
+            let (activity_id, delivery_id) = last_delivery.unwrap();
+            assert_eq!(
+                matches!(
+                    store
+                        .facts()
+                        .activities()
+                        .activity(&activity_id)
+                        .unwrap()
+                        .phase(),
+                    ActivityPhase::Failed { .. }
+                ),
+                exhausted
+            );
+            let organization::DeliveryPhase::TerminalObserved { observation } = store
+                .facts()
+                .deliveries()
+                .delivery(&delivery_id)
+                .unwrap()
+                .phase()
+            else {
+                panic!("terminal");
+            };
+            assert_eq!(
+                observation.native_terminal(),
+                organization::NativeTerminalStatus::Completed
+            );
+            assert_eq!(
+                observation.output().unwrap().decision(),
+                if exhausted { "rework" } else { "completed" }
+            );
+            if exhausted {
+                assert_eq!(
+                    run.graph()
+                        .current_attempt(&NodeId::new("end"))
+                        .unwrap()
+                        .status(),
+                    organization::AttemptStatus::Pending
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn superseded_pending_is_cancelled_but_native_inflight_drains_exact_history() {
+        for in_flight in [false, true] {
+            let (temp, mut store) =
+                store_with_graph(reworkable_review_graph(GraphRunId::new("run:one")));
+            let ids = schedule_ready_nodes(
+                &TeamRunOwner::new(),
+                &mut store,
+                GraphRunId::new("run:one"),
+                3,
+            )
+            .unwrap();
+            let old = store
+                .facts()
+                .activities()
+                .activity(&ids[0])
+                .unwrap()
+                .facts()
+                .fence
+                .clone();
+            let delivery_id = if in_flight {
+                let TeamRunActivityStart::Claimed { request, .. } = TeamRunOwner::new()
+                    .claim_agent_activity(&mut store, ids[0].clone(), 4)
+                    .unwrap()
+                else {
+                    panic!("claim");
+                };
+                let delivery_id = request.delivery_request().delivery_id.clone();
+                store
+                    .accept_native_terminal_context(
+                        &delivery_id,
+                        request.binding().endpoint_session_id().clone(),
+                        "native:old".into(),
+                    )
+                    .unwrap();
+                Some(delivery_id)
+            } else {
+                None
+            };
+            store
+                .apply_graph_event(
+                    &GraphRunId::new("run:one"),
+                    GraphEvent::ReworkRequested {
+                        node_id: NodeId::new("review"),
+                        requested_at: 5,
+                    },
+                )
+                .unwrap();
+            let current = store
+                .facts()
+                .run(&GraphRunId::new("run:one"))
+                .unwrap()
+                .graph()
+                .current_attempt(&NodeId::new("review"))
+                .unwrap()
+                .clone();
+            if let Some(delivery_id) = delivery_id {
+                assert!(matches!(
+                    store
+                        .facts()
+                        .activities()
+                        .activity(&ids[0])
+                        .unwrap()
+                        .phase(),
+                    ActivityPhase::Dispatched(_)
+                ));
+                assert!(
+                    schedule_ready_nodes(
+                        &TeamRunOwner::new(),
+                        &mut store,
+                        GraphRunId::new("run:one"),
+                        6
+                    )
+                    .unwrap()
+                    .is_empty()
+                );
+                settle_native_output(
+                    &mut store,
+                    &delivery_id,
+                    organization::NativeTerminalStatus::Completed,
+                    Some(native_text("rework")),
+                    7,
+                );
+                let graph = store
+                    .facts()
+                    .run(&GraphRunId::new("run:one"))
+                    .unwrap()
+                    .graph();
+                assert_eq!(
+                    graph.current_attempt(&NodeId::new("review")).unwrap(),
+                    &current
+                );
+                assert_eq!(
+                    graph.executions()[&NodeId::new("review")]
+                        .attempts()
+                        .iter()
+                        .find(|attempt| attempt.fence() == &old)
+                        .unwrap()
+                        .status(),
+                    organization::AttemptStatus::Completed
+                );
+            } else {
+                assert!(matches!(
+                    store
+                        .facts()
+                        .activities()
+                        .activity(&ids[0])
+                        .unwrap()
+                        .phase(),
+                    ActivityPhase::Cancelled { .. }
+                ));
+                assert!(!matches!(
+                    store.claim_activity(&ids[0], 6).unwrap(),
+                    organization::ActivityClaimOutcome::Claimed(_)
+                ));
+            }
+            let new_ids = schedule_ready_nodes(
+                &TeamRunOwner::new(),
+                &mut store,
+                GraphRunId::new("run:one"),
+                8,
+            )
+            .unwrap();
+            assert_eq!(new_ids.len(), 1);
+            assert_ne!(new_ids[0], ids[0]);
+            drop(store);
+            OrganizationStore::open(temp.path().join("organization-facts.log")).unwrap();
+        }
+    }
+
+    #[test]
+    fn unknown_dispatch_then_textless_native_failure_drains_activity() {
+        for status in [
+            organization::NativeTerminalStatus::Failed,
+            organization::NativeTerminalStatus::Interrupted,
+            organization::NativeTerminalStatus::Cancelled,
+        ] {
+            let (temp, mut store) = store_with_graph(native_cycle_graph(2));
+            let (claim, delivery_id, session) = claim_native_activity(&mut store, 3);
+            TeamRunOwner::new()
+                .settle_agent_activity_dispatch(
+                    &mut store,
+                    claim.clone(),
+                    ActivityExecutionOutcome::Unknown,
+                )
+                .unwrap();
+            store
+                .accept_native_terminal_context(&delivery_id, session, "native:one".into())
+                .unwrap();
+            settle_native_output(&mut store, &delivery_id, status, None, 5);
+            drop(store);
+            let store =
+                OrganizationStore::open(temp.path().join("organization-facts.log")).unwrap();
+            assert!(matches!(
+                store
+                    .facts()
+                    .activities()
+                    .activity(claim.activity_id())
+                    .unwrap()
+                    .phase(),
+                ActivityPhase::Failed { .. } | ActivityPhase::Cancelled { .. }
+            ));
+            let organization::DeliveryPhase::TerminalObserved { observation } = store
+                .facts()
+                .deliveries()
+                .delivery(&delivery_id)
+                .unwrap()
+                .phase()
+            else {
+                panic!("terminal");
+            };
+            assert!(observation.output().is_none());
+        }
+    }
 
     #[test]
     fn scheduler_registers_downstream_ready_work_activity() {

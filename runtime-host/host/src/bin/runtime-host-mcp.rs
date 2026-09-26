@@ -14,10 +14,13 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let Ok(provider) = organization::team_run_mcp_provider(&config.state_dir) else {
+    let Ok(team_run) = organization::team_run_mcp_provider(&config.state_dir) else {
         return ExitCode::FAILURE;
     };
-    let catalog = ToolCatalog::new(vec![Box::new(provider)]);
+    let Ok(wiki) = wiki::wiki_mcp_provider(&config.state_dir) else {
+        return ExitCode::FAILURE;
+    };
+    let catalog = ToolCatalog::new(vec![Box::new(team_run), Box::new(wiki)]);
 
     match run_stdio(
         catalog,

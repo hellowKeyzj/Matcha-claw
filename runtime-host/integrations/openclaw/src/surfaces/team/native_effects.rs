@@ -1,8 +1,7 @@
 use std::{future::Future, pin::Pin};
 
 use organization::{
-    MaterializationOperationOutcome, NativeEffectFailure,
-    PromptDeliveryOutcome as DomainDeliveryOutcome, PromptDeliveryRequest, RoleSessionAbortOutcome,
+    MaterializationOperationOutcome, NativeEffectFailure, RoleSessionAbortOutcome,
     RoleSessionAbortReceipt, RoleSessionDeleteOutcome, RoleSessionDeleteReceipt,
     RoleSessionReadbackOutcome, RoleSessionReadbackReceipt, RoleSessionReceipt,
     SessionWindowReference, TeamMaterializationRemoval, TeamMaterializationRequest,
@@ -14,12 +13,8 @@ use crate::{
     port::{OpenClawGateway, OpenClawSessionError, OpenClawSessionMutationFailure},
     session::protocol::{
         AgentId, AgentScopedSessionKey, ChatAbortParams, ChatAbortResult, ChatHistoryParams,
-        EndpointSessionId, RunId, SessionDeleteParams, SessionDeleteResult, SessionKey,
+        EndpointSessionId, SessionDeleteParams, SessionDeleteResult, SessionKey,
     },
-};
-
-use super::{
-    PromptDelivery, PromptDeliveryFailure, PromptDeliveryOutcome as NativeDeliveryOutcome,
 };
 
 /// Organization's typed Team effect producer backed by native OpenClaw APIs.
@@ -60,24 +55,6 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
     ) -> Pin<Box<dyn Future<Output = MaterializationOperationOutcome> + Send + '_>> {
         let gateway = &*self.gateway;
         Box::pin(async move { gateway.remove_team_materialization(removal).await })
-    }
-
-    fn deliver(
-        &mut self,
-        request: PromptDeliveryRequest,
-    ) -> Pin<Box<dyn Future<Output = DomainDeliveryOutcome> + Send + '_>> {
-        let delivery = match native_delivery(request) {
-            Ok(delivery) => delivery,
-            Err(_) => {
-                return Box::pin(async {
-                    DomainDeliveryOutcome::Rejected {
-                        rejection: organization::DeliveryRejection::Permanent,
-                    }
-                });
-            }
-        };
-        let gateway = &mut *self.gateway;
-        Box::pin(async move { map_delivery(gateway.deliver_team_prompt(delivery).await) })
     }
 
     fn abort(
@@ -169,39 +146,6 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
                 Err(_) => RoleSessionReadbackOutcome::OutcomeUnknown,
             }
         })
-    }
-}
-
-fn native_delivery(request: PromptDeliveryRequest) -> Result<PromptDelivery, NativeEffectFailure> {
-    let agent = AgentId::try_new(request.binding().agent().as_str().to_owned())
-        .map_err(|_| NativeEffectFailure::InvalidInput)?;
-    let session =
-        EndpointSessionId::try_new(request.binding().endpoint_session_id().as_str().to_owned())
-            .map_err(|_| NativeEffectFailure::InvalidInput)?;
-    let idempotency = RunId::try_new(request.idempotency_key().as_str().to_owned())
-        .map_err(|_| NativeEffectFailure::InvalidInput)?;
-    PromptDelivery::try_new(
-        agent,
-        session,
-        request.payload().as_str().to_owned(),
-        idempotency,
-    )
-    .map_err(|_| NativeEffectFailure::InvalidInput)
-}
-
-fn map_delivery(native: NativeDeliveryOutcome) -> DomainDeliveryOutcome {
-    match native {
-        NativeDeliveryOutcome::Accepted { receipt } => DomainDeliveryOutcome::Delivered {
-            receipt: organization::DeliveryReceiptReference::try_new(receipt.as_str().to_owned())
-                .expect("native OpenClaw run receipt must be a valid opaque reference"),
-        },
-        NativeDeliveryOutcome::Rejected { failure } => DomainDeliveryOutcome::Rejected {
-            rejection: match failure {
-                PromptDeliveryFailure::PolicyRejected => organization::DeliveryRejection::Permanent,
-                PromptDeliveryFailure::Unavailable => organization::DeliveryRejection::Retryable,
-            },
-        },
-        NativeDeliveryOutcome::OutcomeUnknown => DomainDeliveryOutcome::OutcomeUnknown,
     }
 }
 
@@ -361,13 +305,5 @@ mod tests {
             format!("{receipt:?}"),
             "RoleSessionAbortReceipt(<redacted>)"
         );
-        let delivery = PromptDelivery::try_new(
-            AgentId::try_new("agent-canary").unwrap(),
-            EndpointSessionId::try_new("session-canary").unwrap(),
-            "prompt-private",
-            RunId::try_new("run-canary").unwrap(),
-        )
-        .unwrap();
-        assert!(!format!("{delivery:?}").contains("prompt-private"));
     }
 }

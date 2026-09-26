@@ -101,7 +101,9 @@ impl TeamMaterializationLifecycle {
     pub fn cleanup_request(&self) -> Option<&TeamMaterializationRemoval> {
         match self {
             Self::Tombstoned(TombstonedMaterialization::Confirmed {
-                cleanup: TeamMaterializationCleanup::Pending(removal),
+                cleanup:
+                    TeamMaterializationCleanup::Pending(removal)
+                    | TeamMaterializationCleanup::OutcomeUnknown(removal),
                 ..
             }) => Some(removal),
             _ => None,
@@ -227,10 +229,10 @@ impl TeamMaterializationLifecycle {
                 let cleanup = TeamMaterializationCleanup::Pending(removal(&receipt));
                 Self::Tombstoned(TombstonedMaterialization::Confirmed { receipt, cleanup })
             }
-            Self::OutcomeUnknown(request) => {
+            Self::Requested(request) | Self::OutcomeUnknown(request) => {
                 Self::Tombstoned(TombstonedMaterialization::OutcomeUnknown(request))
             }
-            Self::Requested(request) | Self::Rejected { request, .. } => {
+            Self::Rejected { request, .. } => {
                 Self::Tombstoned(TombstonedMaterialization::None(request))
             }
             Self::Tombstoned(state) => Self::Tombstoned(state),

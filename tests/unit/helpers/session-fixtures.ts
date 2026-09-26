@@ -202,6 +202,7 @@ export function sessionView(
   sessionKey: string,
   options: {
     identity?: SessionIdentity | SessionWireIdentity;
+    ownership?: SessionView['ownership'];
     endpointSessionId?: string | null;
     epoch?: number;
     seq?: number;
@@ -225,6 +226,7 @@ export function sessionView(
     sessionKey,
     endpointSessionId: options.endpointSessionId ?? null,
     modelState: null,
+    ownership: options.ownership ?? null,
     identity: wireIdentity(options.identity ?? sessionFixtureIdentity(sessionKey)),
     epoch: options.epoch ?? 1,
     seq: options.seq ?? 0,

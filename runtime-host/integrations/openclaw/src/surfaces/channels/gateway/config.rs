@@ -133,11 +133,16 @@ pub enum ChannelConfigSchemaEffect {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChannelConfigReadProjection {
     values: BTreeMap<String, String>,
+    agent_id: Option<String>,
 }
 
 impl ChannelConfigReadProjection {
     pub fn values(&self) -> &BTreeMap<String, String> {
         &self.values
+    }
+
+    pub fn agent_id(&self) -> Option<&str> {
+        self.agent_id.as_deref()
     }
 }
 
@@ -351,11 +356,6 @@ impl ChannelConfigOperation {
                 Ok(fields) => fields,
                 Err(()) => return ChannelConfigReadEffect::OutcomeUnknown,
             };
-            if fields.is_empty() {
-                return ChannelConfigReadEffect::Values(ChannelConfigReadProjection {
-                    values: BTreeMap::new(),
-                });
-            }
             let mut document = if self.runtime_running {
                 let config_request = match wire::channel::config_get_request(next_request_id(
                     "channel-config-read-get",
@@ -419,10 +419,11 @@ impl ChannelConfigOperation {
                 }
             };
             let values = project_read_values(&document, &channel, &account_id, &fields);
+            let agent_id = project_account_binding(&document, &channel, &account_id);
             zeroize_value(&mut document);
             match values {
                 Ok(values) => {
-                    ChannelConfigReadEffect::Values(ChannelConfigReadProjection { values })
+                    ChannelConfigReadEffect::Values(ChannelConfigReadProjection { values, agent_id })
                 }
                 Err(()) => ChannelConfigReadEffect::OutcomeUnknown,
             }
@@ -1074,6 +1075,26 @@ fn scalar_kind(value: &Value) -> Option<ScalarKind> {
         Value::Number(_) => Some(ScalarKind::Number),
         Value::Null | Value::Array(_) | Value::Object(_) => None,
     }
+}
+
+fn project_account_binding(document: &Value, channel: &str, account: &str) -> Option<String> {
+    let bindings = document.get("bindings")?.as_array()?;
+    let mut agent_id = None;
+    for binding in bindings {
+        if binding
+            .get("type")
+            .is_some_and(|kind| kind.as_str() != Some("route"))
+            || !mutation::is_simple_binding(binding, channel, Some(account))
+        {
+            continue;
+        }
+        let candidate = binding.get("agentId")?.as_str()?;
+        if !valid_identifier(candidate) || agent_id.is_some_and(|agent| agent != candidate) {
+            return None;
+        }
+        agent_id = Some(candidate);
+    }
+    agent_id.map(str::to_owned)
 }
 
 fn project_read_values(

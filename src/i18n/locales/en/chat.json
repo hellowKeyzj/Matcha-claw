@@ -134,6 +134,8 @@
         }
     },
     "todoPanel": {
+        "title": "Task list",
+        "progress": "Progress",
         "summary": "Tasks {{completed}}/{{total}}",
         "expand": "Expand task list",
         "collapse": "Collapse task list",

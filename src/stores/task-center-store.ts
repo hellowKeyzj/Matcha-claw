@@ -1,6 +1,7 @@
 import { create } from 'zustand';
-import type {
-  SessionIdentity,
+import {
+  buildSessionIdentityKey,
+  type SessionIdentity,
 } from '../../electron/desktop-contract/runtime-address';
 import {
   isTaskManagementAvailable,
@@ -23,13 +24,16 @@ interface TaskCenterState {
   initialized: boolean;
   error: string | null;
   init: (session?: { recordKey: string; sessionIdentity: SessionIdentity }) => Promise<void>;
-  refreshTasks: (options?: { sessionKey?: string; sessionIdentity?: SessionIdentity; teamKey?: string; silent?: boolean }) => Promise<void>;
+  refreshTasks: (options?: { sessionKey?: string; sessionIdentity?: SessionIdentity; teamKey?: string; silent?: boolean; background?: boolean; invalidate?: boolean }) => Promise<void>;
   deleteTaskById: (payload: { taskId: string; sessionKey?: string; sessionIdentity?: SessionIdentity; teamKey?: string }) => Promise<void>;
   clearError: () => void;
 }
 
 const taskCenterInitPromises = new Map<string, Promise<void>>();
-const taskCenterRefreshPromises = new Map<string, Promise<void>>();
+const taskCenterRefreshPromises = new Map<string, {
+  promise: Promise<TaskListSnapshot | null>;
+  dirty: boolean;
+}>();
 
 function logTaskPipeline(event: string, payload: Record<string, unknown>): void {
   logRendererDebug(`[task-pipeline] task-center.${event}`, payload);
@@ -142,98 +146,92 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
   },
 
   refreshTasks: async (options) => {
-    const resolvedSessionKey = typeof options?.sessionKey === 'string' && options.sessionKey.trim().length > 0
-      ? options.sessionKey.trim()
-      : get().sessionKey;
-    if (!resolvedSessionKey) {
-      set({ sessionKey: null, sessionIdentity: null, selectedScopeKey: null, selectedScope: null, refreshing: false, error: null });
+    const background = options?.background === true;
+    const resolvedSessionKey = options?.sessionKey?.trim() || (background ? null : get().sessionKey);
+    const sessionIdentity = options?.sessionIdentity ?? (background ? null : get().sessionIdentity);
+    if (!resolvedSessionKey || !sessionIdentity) {
+      if (background) throw new Error('SessionIdentity and record key are required');
+      set({ sessionKey: resolvedSessionKey, sessionIdentity: null, selectedScopeKey: null, selectedScope: null, refreshing: false, error: resolvedSessionKey ? 'SessionIdentity is required' : null });
       return;
     }
-    const sessionIdentity = options?.sessionIdentity ?? get().sessionIdentity;
-    if (!sessionIdentity) {
-      set({ sessionKey: resolvedSessionKey, sessionIdentity: null, selectedScopeKey: null, selectedScope: null, refreshing: false, error: 'SessionIdentity is required' });
-      return;
-    }
-    const teamKey = typeof options?.teamKey === 'string' && options.teamKey.trim().length > 0
-      ? options.teamKey.trim()
-      : undefined;
+    const teamKey = options?.teamKey?.trim() || undefined;
     const requestedScopeKey = scopeKeyForOptions(resolvedSessionKey, teamKey);
-    const pendingRefresh = taskCenterRefreshPromises.get(requestedScopeKey);
-    if (pendingRefresh) {
-      await pendingRefresh;
-      return;
+    const identityKey = buildSessionIdentityKey(sessionIdentity);
+    const requestKey = JSON.stringify([identityKey, teamKey ?? null]);
+    const ownsSelection = () => !background
+      && get().sessionKey === resolvedSessionKey
+      && get().selectedScopeKey === requestedScopeKey
+      && get().sessionIdentity !== null
+      && buildSessionIdentityKey(get().sessionIdentity!) === identityKey;
+    if (!background) {
+      set({
+        sessionKey: resolvedSessionKey,
+        sessionIdentity,
+        selectedScopeKey: requestedScopeKey,
+        ...(!options?.silent ? { refreshing: true, error: null } : {}),
+      });
     }
-    if (!options?.silent) {
-      set({ sessionKey: resolvedSessionKey, sessionIdentity, selectedScopeKey: requestedScopeKey, refreshing: true, error: null });
-    } else if (get().sessionKey !== resolvedSessionKey || get().selectedScopeKey !== requestedScopeKey || get().sessionIdentity !== sessionIdentity) {
-      set({ sessionKey: resolvedSessionKey, sessionIdentity, selectedScopeKey: requestedScopeKey });
+    let pending = taskCenterRefreshPromises.get(requestKey);
+    if (pending) {
+      // A mutation/recovery during a read needs one more read, not a lost invalidation.
+      if (options?.invalidate) pending.dirty = true;
+    } else {
+      const refresh = { promise: Promise.resolve<TaskListSnapshot | null>(null), dirty: false };
+      refresh.promise = Promise.resolve().then(async () => {
+        try {
+          do {
+            refresh.dirty = false;
+            try {
+              logTaskPipeline('refresh.start', { sessionKey: resolvedSessionKey, identityKey, teamKey: teamKey ?? null, background });
+              const available = await isTaskManagementAvailable(sessionIdentity);
+              const snapshot = available
+                ? await listTaskSnapshot({ sessionKey: sessionIdentity.sessionKey, sessionIdentity, ...(teamKey ? { teamKey } : {}) })
+                : null;
+              // Discard results superseded by a terminal tool change or a new epoch.
+              if (refresh.dirty) continue;
+              logTaskPipeline(snapshot ? 'refresh.result' : 'refresh.unsupported', {
+                sessionKey: resolvedSessionKey,
+                identityKey,
+                tasksCount: snapshot?.tasks.length,
+                todosCount: snapshot?.todos.length,
+              });
+              return snapshot;
+            } catch (error) {
+              logTaskPipeline('refresh.failed', { sessionKey: resolvedSessionKey, identityKey, error: error instanceof Error ? error.message : String(error) });
+              if (!refresh.dirty) throw error;
+            }
+          } while (refresh.dirty);
+          return null;
+        } finally {
+          taskCenterRefreshPromises.delete(requestKey);
+        }
+      });
+      taskCenterRefreshPromises.set(requestKey, refresh);
+      pending = refresh;
     }
-    const task = (async () => {
-      try {
-        logTaskPipeline('refresh.start', {
-          sessionKey: resolvedSessionKey,
-          teamKey: teamKey ?? null,
-          scopeKey: requestedScopeKey,
-          silent: options?.silent === true,
-          storeSessionKey: get().sessionKey,
-        });
-        if (!await isTaskManagementAvailable(sessionIdentity)) {
-          const emptyScope = reportEmptyTaskSnapshot(resolvedSessionKey, sessionIdentity, teamKey);
-          if (get().sessionKey === resolvedSessionKey && get().selectedScopeKey === requestedScopeKey) {
-            set({
-              selectedScope: emptyScope,
-              refreshing: false,
-              error: null,
-              initialized: true,
-            });
-          }
-          return;
-        }
-        const snapshot = await listTaskSnapshot(teamKey
-          ? { sessionKey: sessionIdentity.sessionKey, sessionIdentity, teamKey }
-          : { sessionKey: sessionIdentity.sessionKey, sessionIdentity });
-        const nextScopeKey = snapshot.scope?.key ?? requestedScopeKey;
-        logTaskPipeline('refresh.result', {
-          sessionKey: resolvedSessionKey,
-          scopeKey: nextScopeKey,
-          tasksCount: snapshot.tasks.length,
-          todosCount: snapshot.todos.length,
-        });
-        useTaskSnapshotStore.getState().reportTaskCenterSnapshot({
-          sessionKey: sessionIdentity.sessionKey,
-          recordKey: resolvedSessionKey,
-          ...(snapshot.scope ? { scope: snapshot.scope } : {}),
-          tasks: snapshot.tasks,
-          todos: snapshot.todos,
-          source: 'replay',
-        });
-        if (get().sessionKey === resolvedSessionKey && get().selectedScopeKey === requestedScopeKey) {
-          set({
-            sessionKey: resolvedSessionKey,
-            sessionIdentity,
-            selectedScopeKey: nextScopeKey,
-            selectedScope: snapshot.scope ?? null,
-            refreshing: false,
-            error: null,
-            initialized: true,
-          });
-        }
-      } catch (error) {
-        if (get().sessionKey === resolvedSessionKey && get().selectedScopeKey === requestedScopeKey) {
-          set({
-            refreshing: false,
-            error: error instanceof Error ? error.message : String(error),
-            initialized: true,
-          });
-        }
-      }
-    })();
-    taskCenterRefreshPromises.set(requestedScopeKey, task);
     try {
-      await task;
-    } finally {
-      if (taskCenterRefreshPromises.get(requestedScopeKey) === task) {
-        taskCenterRefreshPromises.delete(requestedScopeKey);
+      const snapshot = await pending.promise;
+      if (!snapshot) {
+        // Keep the public foreground unsupported behavior; background is not an empty snapshot.
+        if (background) return;
+        const emptyScope = reportEmptyTaskSnapshot(resolvedSessionKey, sessionIdentity, teamKey);
+        if (ownsSelection()) set({ selectedScope: emptyScope, refreshing: false, error: null, initialized: true });
+        return;
+      }
+      reportTaskCenterSnapshot(resolvedSessionKey, sessionIdentity, snapshot);
+      if (ownsSelection()) {
+        set({
+          selectedScopeKey: snapshot.scope?.key ?? requestedScopeKey,
+          selectedScope: snapshot.scope ?? null,
+          refreshing: false,
+          error: null,
+          initialized: true,
+        });
+      }
+    } catch (error) {
+      if (background) throw error;
+      if (ownsSelection()) {
+        set({ refreshing: false, error: error instanceof Error ? error.message : String(error), initialized: true });
       }
     }
   },
@@ -263,7 +261,7 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
         status: 'deleted',
         ...(activeTeamKey ? { teamKey: activeTeamKey } : {}),
       });
-      const refreshOptions = { sessionKey: resolvedSessionKey, sessionIdentity: resolvedSessionIdentity, ...(activeTeamKey ? { teamKey: activeTeamKey } : {}), silent: true };
+      const refreshOptions = { sessionKey: resolvedSessionKey, sessionIdentity: resolvedSessionIdentity, ...(activeTeamKey ? { teamKey: activeTeamKey } : {}), silent: true, invalidate: true };
       if (result.outcome !== 'applied') {
         await get().refreshTasks(refreshOptions);
         set({ error: `Task delete was ${result.outcome}` });

@@ -1,0 +1,214 @@
+{
+  "common": {
+    "cancel": "キャンセル",
+    "choose": "選択",
+    "current": "現在",
+    "delete": "削除",
+    "empty": "記録がありません",
+    "folder": "フォルダ",
+    "name": "名前",
+    "optional": "任意",
+    "template": "テンプレート",
+    "refresh": "更新",
+    "settings": "設定"
+  },
+  "home": {
+    "title": "資料ライブラリ",
+    "search": "検索",
+    "myLibraries": "自分の資料",
+    "recent": "最近",
+    "newLibrary": "資料ライブラリを作成",
+    "dialogDescription": "フォルダを選択すると、Matcha がその中に資料ライブラリ構造を作成します。",
+    "folderPlaceholder": "資料ライブラリのフォルダを選択",
+    "table": {
+      "name": "名前",
+      "location": "場所",
+      "lastOpened": "最近のアクセス"
+    }
+  },
+  "templates": {
+    "research": {
+      "name": "研究",
+      "description": "仮説、方法論、研究ノートを管理する深掘り調査向けです。"
+    },
+    "reading": {
+      "name": "読書",
+      "description": "本の登場人物、テーマ、筋書き、章ごとのメモを記録します。"
+    },
+    "personal": {
+      "name": "自己成長",
+      "description": "目標、習慣、振り返り、自己改善の記録を管理します。"
+    },
+    "business": {
+      "name": "ビジネス",
+      "description": "会議、意思決定、プロジェクト、チームの関係者情報を管理します。"
+    },
+    "general": {
+      "name": "汎用",
+      "description": "最小構成で、どんな目的にも使える空のライブラリです。"
+    }
+  },
+  "workspace": {
+    "tabs": {
+      "wiki": "Wiki",
+      "sources": "ソース",
+      "search": "検索",
+      "graph": "グラフ"
+    },
+    "library": "資料ライブラリ",
+    "scan": "スキャン"
+  },
+  "content": {
+    "selectPage": "ページを選択",
+    "previewUnavailable": "プレビューできません",
+    "inlineUnsupported": "インラインプレビュー未対応",
+    "inlineUnsupportedDescription": "{{type}} ファイルは資料ライブラリに保存できます。",
+    "save": "保存",
+    "embed": "埋め込み"
+  },
+  "sources": {
+    "title": "ソース",
+    "subtitle": "{{sources}} 件のソース · {{records}} 件の記録",
+    "importFile": "ファイルを取り込む",
+    "folder": "フォルダ",
+    "backToSources": "ソース",
+    "refreshSources": "ソースを更新",
+    "scanSources": "ソースをスキャン",
+    "settingsTitle": "ソース設定",
+    "settingsSubtitle": "ソース監視、取り込み、PDF 解析を制御します。",
+    "watchTitle": "ソースフォルダを監視",
+    "watchDescription": "ソースディレクトリ内のファイル変更を検出します。オフにすると、手動スキャンまたは取り込み時のみ更新されます。",
+    "autoImportTitle": "新しいファイルを自動取り込み",
+    "autoImportDescription": "監視で検出した新しいファイルを自動的に資料ライブラリへ追加します。オフにすると、変更は記録されますが手動の取り込みまたはスキャンが必要です。",
+    "captionTitle": "画像キャプション",
+    "captionDescription": "取り込み時に画像キャプションを生成します。既定ではオフです。現在の並列数: {{concurrency}}。",
+    "generationModelTitle": "生成モデル",
+    "generationModelDescription": "ソースから Wiki ページを作るときに使います。チャット対応モデルだけを表示します。",
+    "captionModelTitle": "画像キャプションモデル",
+    "captionModelDescription": "画像キャプション生成に使います。画像理解対応モデルだけを表示します。キャプションをオフにしている場合は未選択でも構いません。",
+    "modelNone": "未選択",
+    "modelInvalidOption": "設定中のモデルは使えません",
+    "modelStatus": {
+      "loading": "モデル確認中",
+      "unavailable": "モデルを利用できません",
+      "unconfigured": "モデル未設定",
+      "invalid": "モデルが無効です",
+      "ready": "モデル準備完了"
+    },
+    "mineruTitle": "MinerU PDF 解析",
+    "mineruDescription": "利用可能な場合に MinerU で PDF を解析します。",
+    "mineruBasicTitle": "基本設定",
+    "mineruBasicDescription": "PDF 解析を有効にし、既定のバックエンドを選択します。",
+    "mineruEnabledTitle": "解析を有効化",
+    "mineruEnabledDescription": "利用可能な場合に MinerU で PDF を解析します。",
+    "mineruCloudTitle": "クラウド解析",
+    "mineruCloudDescription": "クラウド Token とモデル版を設定します。",
+    "mineruLocalTitle": "ローカル解析",
+    "mineruLocalDescription": "ローカルサービス、解析バックエンド、処理オプションを設定します。",
+    "mineruBackendTitle": "MinerU バックエンド",
+    "mineruBackendDescription": "クラウドまたはローカルの MinerU 解析を選択します。",
+    "mineruTokenTitle": "クラウド Token",
+    "mineruTokenDescription": "Token は書き込み専用です。設定状態だけを表示します。",
+    "tokenConfigured": "設定済み",
+    "tokenNotConfigured": "未設定",
+    "tokenPlaceholder": "新しい Token を入力",
+    "mineruModelVersionTitle": "クラウドモデル版",
+    "mineruModelVersionDescription": "クラウド MinerU 解析で使うモデル版です。",
+    "mineruLocalEndpointTitle": "ローカル Endpoint",
+    "mineruLocalEndpointDescription": "ローカル MinerU サービスのベース URL です。",
+    "mineruLocalTokenTitle": "ローカル Token",
+    "mineruLocalTokenDescription": "ローカル Token は書き込み専用です。設定状態だけを表示します。",
+    "mineruLocalBackendTitle": "ローカルバックエンド",
+    "mineruLocalBackendDescription": "ローカル MinerU 解析で使うバックエンドです。",
+    "mineruLocalEffortTitle": "ローカル effort",
+    "mineruLocalEffortDescription": "ローカル VLM 解析の処理 effort です。",
+    "mineruLocalParseMethodTitle": "ローカル解析方式",
+    "mineruLocalParseMethodDescription": "ローカル MinerU の解析方式です。",
+    "mineruLocalLanguageTitle": "ローカル言語",
+    "mineruLocalLanguageDescription": "ローカル MinerU に渡す言語ヒントです。",
+    "mineruLocalFormulaTitle": "数式解析",
+    "mineruLocalFormulaDescription": "ローカル MinerU の数式解析を有効にします。",
+    "mineruLocalTableTitle": "表解析",
+    "mineruLocalTableDescription": "ローカル MinerU の表解析を有効にします。",
+    "mineruLocalImageAnalysisTitle": "画像分析",
+    "mineruLocalImageAnalysisDescription": "ローカル MinerU の画像分析を有効にします。",
+    "mineruLocalServerUrlTitle": "ローカル Server URL",
+    "mineruLocalServerUrlDescription": "ローカル MinerU に渡す任意のサービス URL です。",
+    "outputLanguageTitle": "出力言語",
+    "outputLanguageDescription": "取り込み済みソースから Wiki 内容を生成するときの言語です。Auto はソースに従います。",
+    "documents": "ソース文書",
+    "emptyDocuments": "ソース文書がありません",
+    "activityLog": "処理記録",
+    "refreshRecords": "記録を更新",
+    "emptyRecords": "処理記録がありません",
+    "receipt": "{{label}}: 取り込み {{imported}} · 削除 {{deleted}} · 移動 {{moved}} · スキップ {{skipped}}"
+  },
+  "search": {
+    "title": "検索",
+    "placeholder": "検索",
+    "action": "検索",
+    "contextAction": "コンテキスト",
+    "results": "結果",
+    "context": "コンテキスト",
+    "noResults": "結果がありません",
+    "noContext": "コンテキストがありません"
+  },
+  "graph": {
+    "title": "グラフ",
+    "subtitle": "{{nodes}} ノード · {{edges}} エッジ",
+    "load": "読み込み",
+    "embed": "埋め込み",
+    "empty": "グラフがありません",
+    "nodes": "ノード",
+    "edges": "エッジ",
+    "emptyNodes": "ノードがありません",
+    "emptyEdges": "エッジがありません"
+  },
+  "activity": {
+    "pending": "保留中",
+    "tasks": "タスク",
+    "failed": "失敗",
+    "running": "実行中",
+    "refresh": "アクティビティを更新",
+    "details": "アクティビティ詳細",
+    "emptyTasks": "タスクがありません"
+  },
+  "tree": {
+    "empty": "ファイルがありません",
+    "emptyDirectory": "空"
+  },
+  "preview": {
+    "tooLarge": "ファイルが大きすぎるためインラインプレビューできません",
+    "notFound": "ファイルが見つかりません",
+    "invalidPath": "パスが無効です",
+    "unavailable": "ファイルを読み取れません"
+  },
+  "actions": {
+    "pickLibraryTitle": "資料ライブラリのフォルダを選択",
+    "useFolder": "このフォルダを使用",
+    "openedLibrary": "資料ライブラリを開きました",
+    "createdLibrary": "資料ライブラリを作成しました",
+    "switchedLibrary": "資料ライブラリを切り替えました",
+    "savedPage": "ページを保存しました",
+    "rescanned": "再スキャンしました",
+    "importFileReceipt": "ファイル取り込み",
+    "pickSourceFileTitle": "ソースファイルを選択",
+    "importFileButton": "ファイルを取り込む",
+    "importedSource": "ソースを取り込みました",
+    "importFolderReceipt": "フォルダ取り込み",
+    "pickSourceFolderTitle": "ソースフォルダを選択",
+    "importFolderButton": "フォルダを取り込む",
+    "importedFolder": "フォルダを取り込みました",
+    "deleteSourceReceipt": "ソース削除",
+    "deletedSource": "ソースを削除しました",
+    "refreshSourcesReceipt": "ソース更新",
+    "refreshedSources": "ソースを更新しました",
+    "updatedSourceWatch": "ソース監視を更新しました",
+    "embeddedPage": "ページの埋め込みを開始しました",
+    "appliedGeneratedPages": "生成内容を適用しました",
+    "failed": "{{label}} に失敗しました"
+  },
+  "time": {
+    "unrecorded": "記録なし"
+  }
+}

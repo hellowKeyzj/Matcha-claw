@@ -378,9 +378,7 @@ export function useChatWindowDockController({
     const finalSidePanelWidth = appliedDockWidth - CHAT_WORKSPACE_LAYOUT.paneResizerWidth;
 
     const completeOpening = () => {
-      if (finalSidePanelWidth !== renderWidthRef.current) {
-        setPanelWidthRef.current(finalSidePanelWidth);
-      }
+      setPanelWidthRef.current(finalSidePanelWidth);
 
       openPanelRef.current();
       publishRightDockLayout('open', appliedDockWidth, baseWindowWidth);
@@ -582,6 +580,7 @@ export function useChatWindowDockController({
       ) {
         return;
       }
+      setPanelWidthRef.current(sidePanelWidth);
       publishRightDockLayout('open', nextDockWidth, nextBaseWidth);
       commitDockState({
         ...currentState,

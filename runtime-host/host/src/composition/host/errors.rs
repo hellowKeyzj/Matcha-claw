@@ -68,6 +68,7 @@ pub enum ConstructionError {
     ProviderRouting,
     ExternalConnectors,
     Fleet,
+    Wiki,
     Settings,
     Security,
     RuntimeState,
@@ -101,6 +102,7 @@ impl fmt::Display for ConstructionError {
                 formatter.write_str("external connector owner could not be constructed")
             }
             Self::Fleet => formatter.write_str("Fleet owner could not be constructed"),
+            Self::Wiki => formatter.write_str("wiki owner could not be constructed"),
             Self::Settings => formatter.write_str("settings owner could not be constructed"),
             Self::Security => formatter.write_str("security owner could not be constructed"),
             Self::RuntimeState => {
@@ -130,6 +132,7 @@ impl std::error::Error for ConstructionError {
             | Self::ProviderRouting
             | Self::ExternalConnectors
             | Self::Fleet
+            | Self::Wiki
             | Self::Settings
             | Self::Security
             | Self::RuntimeState

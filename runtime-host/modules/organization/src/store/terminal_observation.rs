@@ -52,7 +52,7 @@ impl NativeTerminalReceiptTarget {
         &self.correlation
     }
 
-    pub(super) fn delivery_id(&self) -> &DeliveryId {
+    pub(crate) fn delivery_id(&self) -> &DeliveryId {
         &self.delivery_id
     }
 

@@ -11,6 +11,7 @@ pub(crate) fn session_view(view: &SessionView) -> Value {
     json!({
         "sessionKey": &view.session_key,
         "endpointSessionId": &view.endpoint_session_id,
+        "ownership": &view.ownership,
         "modelState": &view.model_state,
         "identity": identity_value(view),
         "epoch": view.epoch,
@@ -357,6 +358,7 @@ mod tests {
         let view = SessionView {
             session_key: "agent:main:demo".to_owned(),
             endpoint_session_id: Some("session-1".to_owned()),
+            ownership: None,
             model_state: None,
             identity: SessionIdentity::new(
                 "agent:main:demo",

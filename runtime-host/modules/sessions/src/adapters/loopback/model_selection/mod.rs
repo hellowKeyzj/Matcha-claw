@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_public_endpoint_session_binding_on_active_model_selection() {
+    fn keeps_public_endpoint_session_binding_on_active_model_selection() {
         let mut value = request("matcha-agent");
         value["input"]["endpointSessionId"] = json!("native-session-1");
 
@@ -272,7 +272,7 @@ mod tests {
             .into_command(None)
             .unwrap();
         assert_eq!(command.session_key, "agent:main:demo");
-        assert_eq!(command.endpoint_session_id, None);
+        assert_eq!(command.endpoint_session_id.as_deref(), Some("native-session-1"));
     }
 
     #[test]

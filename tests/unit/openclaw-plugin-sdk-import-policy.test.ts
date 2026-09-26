@@ -29,7 +29,7 @@ const REQUIRED_MIRRORS = [
   ['wecom', 'wecom-openclaw-plugin'],
   ['openclaw-weixin', 'openclaw-weixin'],
   ['qqbot', 'qqbot'],
-  ['feishu-openclaw-plugin', 'openclaw-lark'],
+  ['openclaw-lark', 'openclaw-lark'],
   ['matchaclaw-media', 'matchaclaw-media'],
 ] as const
 
@@ -53,14 +53,15 @@ async function createRequiredLocalPlugin(
   entrySource = "import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'\n",
 ): Promise<void> {
   const pluginDir = path.join(rootDir, 'packages', packageName)
+  const runtimeEntry = pluginId === 'openclaw-lark' ? './dist/index.mjs' : './dist/index.js'
   await mkdir(path.join(pluginDir, 'dist'), { recursive: true })
   await writeFile(path.join(pluginDir, 'openclaw.plugin.json'), JSON.stringify({ id: pluginId }), 'utf8')
   await writeFile(
     path.join(pluginDir, 'package.json'),
-    JSON.stringify({ openclaw: { extensions: ['./dist/index.js'] }, dependencies: {} }),
+    JSON.stringify({ openclaw: { extensions: [runtimeEntry] }, dependencies: {} }),
     'utf8',
   )
-  await writeFile(path.join(pluginDir, 'dist', 'index.js'), 'export {}\n', 'utf8')
+  await writeFile(path.join(pluginDir, runtimeEntry), 'export {}\n', 'utf8')
 
   for (const sourceEntry of sourceEntries) {
     const sourcePath = path.join(pluginDir, sourceEntry)
@@ -71,14 +72,21 @@ async function createRequiredLocalPlugin(
 
 async function createRequiredMirror(rootDir: string, dir: string, pluginId: string): Promise<void> {
   const mirrorDir = path.join(rootDir, 'build', 'openclaw-plugins', dir)
+  const runtimeEntry = pluginId === 'openclaw-lark' ? './dist/index.mjs' : './dist/index.js'
   await mkdir(path.join(mirrorDir, 'dist'), { recursive: true })
   await writeFile(path.join(mirrorDir, 'openclaw.plugin.json'), JSON.stringify({ id: pluginId }), 'utf8')
   await writeFile(
     path.join(mirrorDir, 'package.json'),
-    JSON.stringify({ openclaw: { extensions: ['./dist/index.js'] }, dependencies: {} }),
+    JSON.stringify({ openclaw: { extensions: [runtimeEntry] }, dependencies: {} }),
     'utf8',
   )
-  await writeFile(path.join(mirrorDir, 'dist', 'index.js'), 'export {}\n', 'utf8')
+  await writeFile(path.join(mirrorDir, runtimeEntry), 'export {}\n', 'utf8')
+  if (dir === 'openclaw-lark') {
+    await mkdir(path.join(mirrorDir, 'skills'), { recursive: true })
+    for (const filePath of ['dist/secret-contract-api.mjs', 'dist/config-schema.mjs', 'secret-contract-api.js', 'LICENSE']) {
+      await writeFile(path.join(mirrorDir, filePath), 'export {}\n', 'utf8')
+    }
+  }
   if (dir === 'tencent') {
     await writeFile(path.join(mirrorDir, 'dist', 'setup-api.js'), 'export {}\n', 'utf8')
   }
@@ -166,6 +174,7 @@ describe('openclaw plugin SDK import policy', () => {
     await createRequiredLocalPlugin(rootDir, 'openclaw-browser-relay-plugin', 'browser-relay')
     await createRequiredLocalPlugin(rootDir, 'memory-lancedb-pro', 'memory-lancedb-pro', ['./index.ts', './cli.ts', './src/embedder.ts'])
     await createRequiredLocalPlugin(rootDir, 'openclaw-matchaclaw-media-plugin', 'matchaclaw-media')
+    await createRequiredLocalPlugin(rootDir, 'openclaw-lark', 'openclaw-lark', ['./index.ts', './secret-contract-api.ts', './src/core/config-schema.ts', './secret-contract-api.js'])
     await createRequiredLocalPlugin(rootDir, 'openclaw-task-manager-plugin', 'task-manager', ['./src/index.ts'], [
       "import type { PluginLogger } from 'openclaw/plugin-sdk'",
       "export { compat } from 'openclaw/plugin-sdk/compat'",
@@ -202,12 +211,24 @@ describe('openclaw plugin SDK import policy', () => {
     for (const [dir, pluginId] of REQUIRED_MIRRORS) {
       await createRequiredMirror(rootDir, dir, pluginId)
     }
-    const mirrorDir = path.join(rootDir, 'build', 'openclaw-plugins', 'feishu-openclaw-plugin')
-    await writeFile(path.join(mirrorDir, 'dist', 'index.js'), "import type { PluginLogger } from 'openclaw/plugin-sdk'\n", 'utf8')
+    const mirrorDir = path.join(rootDir, 'build', 'openclaw-plugins', 'openclaw-lark')
+    const checker = path.join(process.cwd(), 'scripts/check-openclaw-plugin-mirrors.mjs')
+    await expect(execFileAsync(process.execPath, [checker], { cwd: rootDir })).resolves.toMatchObject({ stderr: '' })
+    await writeFile(path.join(mirrorDir, 'dist', 'index.mjs'), "import type { PluginLogger } from 'openclaw/plugin-sdk'\n", 'utf8')
 
-    await expect(execFileAsync(process.execPath, [path.join(process.cwd(), 'scripts/check-openclaw-plugin-mirrors.mjs')], { cwd: rootDir }))
+    await expect(execFileAsync(process.execPath, [checker], { cwd: rootDir }))
       .rejects.toMatchObject({
-        stderr: expect.stringContaining('build/openclaw-plugins/feishu-openclaw-plugin/dist/index.js -> openclaw/plugin-sdk'),
+        stderr: expect.stringContaining('build/openclaw-plugins/openclaw-lark/dist/index.mjs -> openclaw/plugin-sdk'),
       })
+
+    await writeFile(path.join(mirrorDir, 'dist', 'index.mjs'), 'export {}\n', 'utf8')
+    for (const filePath of ['dist/index.mjs', 'dist/secret-contract-api.mjs', 'dist/config-schema.mjs', 'secret-contract-api.js', 'skills', 'LICENSE']) {
+      await rm(path.join(mirrorDir, filePath), { recursive: true, force: true })
+      await expect(execFileAsync(process.execPath, [checker], { cwd: rootDir }))
+        .rejects.toMatchObject({
+          stderr: expect.stringContaining(`build 插件资源缺失: openclaw-lark -> ${filePath}`),
+        })
+      await createRequiredMirror(rootDir, 'openclaw-lark', 'openclaw-lark')
+    }
   })
 })

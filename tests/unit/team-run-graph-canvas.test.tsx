@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { TeamRunGraphCanvas } from '@/pages/Teams/TeamRunGraphCanvas';
-import type { TeamGraphSnapshotRecord } from '@/services/team-types';
+import type { TeamGraphNodeRecord, TeamGraphSnapshotRecord } from '@/services/openclaw/team-runtime-client';
+import teamsEn from '@/i18n/locales/en/teams.json';
 
 const labels = {
+  ...teamsEn.run.graphCanvas,
   workflowCanvas: 'Workflow canvas', workflowEdges: 'Workflow edges', nodePalette: 'Node palette',
   nodeConfiguration: 'Node configuration', nodeConfigurationDescription: 'Configure node',
   edgeConfiguration: 'Edge configuration', edgeConfigurationDescription: 'Configure edge',
@@ -34,7 +36,7 @@ function renderCanvas(graph: TeamGraphSnapshotRecord, onPatchGraph = vi.fn().moc
 }
 
 const workGraph: TeamGraphSnapshotRecord = {
-  graphId: 'graph-1', workflowPlanId: 'plan-1', runId: 'run-1', title: 'Graph',
+  graphId: 'graph-1', workflowPlanId: 'plan-1', runId: 'run-1', status: 'draft',
   nodes: [{ nodeId: 'work-1', kind: 'work', title: 'Work', roleId: 'builder', taskId: 'task-1', maxAttempts: 1 }],
   edges: [],
 };
@@ -74,7 +76,13 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
           nodeId: expect.stringMatching(/^draft-node:work:/),
           kind: 'work',
           roleId: 'leader',
+          maxAttempts: 3,
         }),
+      },
+      {
+        op: 'set_node_position',
+        nodeId: expect.stringMatching(/^draft-node:work:/),
+        position: expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }),
       },
     ]));
     const nodeId = patchGraph.mock.calls[0]?.[0]?.[0]?.node?.nodeId;
@@ -92,7 +100,7 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
     };
     const patchGraph = renderCanvas(graph);
 
-    fireEvent.click(screen.getByLabelText('Connect from Source'));
+    fireEvent.click(screen.getByLabelText('Connect from Source: completed'));
     fireEvent.click(screen.getByLabelText('Connect to Target'));
 
     await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
@@ -102,11 +110,159 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
           edgeId: expect.stringMatching(/^draft-edge:projection:/),
           sourceNodeId: 'source-node-with-a-very-long-public-projection-id',
           targetNodeId: 'target-node-with-a-very-long-public-projection-id',
+          sourcePort: 'completed',
+          targetPort: 'input',
+          action: 'activate',
         }),
       },
     ]));
     const edgeId = patchGraph.mock.calls[0]?.[0]?.[0]?.edge?.edgeId;
     expect(edgeId).toHaveLength(58);
+  });
+
+  it('adds review rework edges without changing either node budget', async () => {
+    const graph: TeamGraphSnapshotRecord = {
+      ...workGraph,
+      nodes: [
+        { nodeId: 'work-1', kind: 'work', title: 'Work', roleId: 'builder', taskId: 'task-1', maxAttempts: 1 },
+        { nodeId: 'review-1', kind: 'review', title: 'Review', roleId: 'reviewer', maxAttempts: 1 },
+      ],
+      edges: [],
+    };
+    const patchGraph = renderCanvas(graph);
+
+    fireEvent.click(screen.getByLabelText('Connect from Review: rework'));
+    fireEvent.click(screen.getByLabelText('Connect to Work'));
+
+    await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
+      {
+        op: 'add_edge',
+        edge: expect.objectContaining({
+          sourceNodeId: 'review-1',
+          targetNodeId: 'work-1',
+          sourcePort: 'rework',
+          targetPort: 'input',
+          action: 'rework',
+          payload: { includeUpstreamResult: true },
+        }),
+      },
+    ]));
+  });
+
+  it('keeps a completed review outlet as activation even when connecting back to completed work', async () => {
+    const graph: TeamGraphSnapshotRecord = {
+      ...workGraph,
+      nodes: [
+        { ...workGraph.nodes[0]!, status: 'completed' },
+        { nodeId: 'review-1', kind: 'review', title: 'Review', roleId: 'reviewer', maxAttempts: 1 },
+      ],
+      edges: [{ edgeId: 'forward', sourceNodeId: 'work-1', targetNodeId: 'review-1', sourcePort: 'completed', targetPort: 'input', action: 'activate' }],
+    };
+    const patchGraph = renderCanvas(graph);
+
+    fireEvent.click(screen.getByLabelText('Connect from Review: completed'));
+    fireEvent.click(screen.getByLabelText('Connect to Work'));
+
+    await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
+      {
+        op: 'add_edge',
+        edge: expect.objectContaining({ sourceNodeId: 'review-1', targetNodeId: 'work-1', sourcePort: 'completed', action: 'activate' }),
+      },
+    ]));
+    expect(graph.nodes.map((node) => node.maxAttempts)).toEqual([1, 1]);
+  });
+
+  it.each(['completed', 'rework'])('edits a review %s edge to rework without changing node budgets', async (sourcePort) => {
+    const graph: TeamGraphSnapshotRecord = {
+      ...workGraph,
+      nodes: [
+        ...workGraph.nodes,
+        { nodeId: 'review-1', kind: 'review', title: 'Review', roleId: 'reviewer', maxAttempts: 1 },
+      ],
+      edges: [{ edgeId: 'edge-1', sourceNodeId: 'review-1', targetNodeId: 'work-1', sourcePort, targetPort: 'input', action: sourcePort === 'rework' ? 'rework' : 'activate' }],
+    };
+    const patchGraph = renderCanvas(graph);
+    fireEvent.click(screen.getByLabelText('Workflow edges').querySelector('g path')!);
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('When upstream result is'), { target: { value: 'rework' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save edge' }));
+
+    await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
+      { op: 'replace_edge', edge: expect.objectContaining({ edgeId: 'edge-1', sourcePort: 'rework', action: 'rework' }) },
+    ]));
+    expect(graph.nodes.map((node) => node.maxAttempts)).toEqual([1, 1]);
+  });
+
+  it.each(['start', 'work', 'review', 'human_decision', 'script_review', 'join', 'end'])('preserves and explicitly edits the %s node execution budget', async (kind) => {
+    const node: TeamGraphNodeRecord = {
+      nodeId: 'node-1', kind, title: 'Configured node', roleId: 'builder', taskId: 'task-1', maxAttempts: 7,
+      executor: { kind: 'team-role', roleId: 'builder' },
+      config: kind === 'start' ? { trigger: { mode: 'cron', cron: '*/10 * * * *' } } : {},
+    };
+    const patchGraph = renderCanvas({ ...workGraph, nodes: [node] });
+    fireEvent.click(screen.getByText('Configured node').closest('[role="button"]')!);
+    let dialog = await screen.findByRole('dialog');
+    const budgetInput = within(dialog).getByRole('spinbutton', { name: labels.nodeMaxAttempts });
+    expect(budgetInput).toHaveValue(7);
+    expect(budgetInput).toHaveAttribute('min', '1');
+    expect(budgetInput).toHaveAttribute('max', '4294967295');
+    expect(budgetInput).toHaveAttribute('step', '1');
+    expect(budgetInput).toHaveAccessibleDescription(labels.nodeMaxAttemptsHint);
+    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: 'Renamed' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
+    await waitFor(() => expect(patchGraph).toHaveBeenLastCalledWith([
+      { op: 'replace_node', node: expect.objectContaining({ nodeId: 'node-1', kind, title: 'Renamed', maxAttempts: 7 }) },
+    ]));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByText('Configured node').closest('[role="button"]')!);
+    dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByRole('spinbutton', { name: labels.nodeMaxAttempts }), { target: { value: '1' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
+    await waitFor(() => expect(patchGraph).toHaveBeenLastCalledWith([
+      { op: 'replace_node', node: expect.objectContaining({ nodeId: 'node-1', kind, maxAttempts: 1 }) },
+    ]));
+    expect(patchGraph).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['work', 'start'])('rejects invalid %s budgets and accepts the u32 maximum', async (kind) => {
+    const graph: TeamGraphSnapshotRecord = {
+      ...workGraph,
+      nodes: [{ ...workGraph.nodes[0]!, kind, config: kind === 'start' ? { trigger: { mode: 'cron', cron: '*/10 * * * *' } } : {} }],
+    };
+    const patchGraph = renderCanvas(graph);
+    fireEvent.click(screen.getAllByText('Work')[0]!.closest('[role="button"]')!);
+    const dialog = await screen.findByRole('dialog');
+    const budgetInput = within(dialog).getByRole('spinbutton', { name: labels.nodeMaxAttempts });
+    const save = within(dialog).getByRole('button', { name: 'Save node' });
+    for (const value of ['', '0', '-1', '1.5', '1e2', '4294967296']) {
+      fireEvent.change(budgetInput, { target: { value } });
+      fireEvent.click(save);
+      expect(within(dialog).getByRole('alert')).toHaveTextContent(labels.nodeMaxAttemptsInvalid);
+      expect(patchGraph).not.toHaveBeenCalled();
+    }
+    fireEvent.change(budgetInput, { target: { value: '4294967295' } });
+    fireEvent.click(save);
+    await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
+      { op: 'replace_node', node: expect.objectContaining({ kind, maxAttempts: 4294967295 }) },
+    ]));
+  });
+
+  it('shows actionable localized guidance for an exhausted rework path', async () => {
+    renderCanvas({ ...workGraph, nodes: [{ ...workGraph.nodes[0]!, status: 'failed', statusReason: 'rework_limit_exceeded' }] });
+    fireEvent.click(screen.getAllByText('Work')[0]!.closest('[role="button"]')!);
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByRole('status')).toHaveTextContent(labels.reworkLimitExceeded);
+    expect(within(dialog).queryByText('rework_limit_exceeded')).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('spinbutton', { name: labels.nodeMaxAttempts })).toHaveValue(1);
+  });
+
+  it('does not expose an unknown status reason as raw user-facing copy', async () => {
+    renderCanvas({ ...workGraph, nodes: [{ ...workGraph.nodes[0]!, status: 'failed', statusReason: 'unknown_reason' }] });
+    fireEvent.click(screen.getAllByText('Work')[0]!.closest('[role="button"]')!);
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).queryByRole('status')).not.toBeInTheDocument();
+    expect(within(dialog).queryByText('unknown_reason')).not.toBeInTheDocument();
   });
 
   it('edits join title and edge payload policy', async () => {

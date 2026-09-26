@@ -10,13 +10,22 @@ const MAX_VALUE_BYTES: usize = 131_072;
 const MAX_TOTAL_VALUE_BYTES: usize = 262_144;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Projection {
     values: BTreeMap<String, String>,
+    agent_id: Option<String>,
 }
 
 impl Projection {
-    pub fn from_source(values: BTreeMap<String, String>) -> Result<Self, ()> {
-        if values.len() > MAX_VALUES {
+    pub fn from_source(
+        values: BTreeMap<String, String>,
+        agent_id: Option<String>,
+    ) -> Result<Self, ()> {
+        if values.len() > MAX_VALUES
+            || agent_id.as_deref().is_some_and(|agent_id| {
+                !valid_identity(agent_id) || public_string::contains_private_fragment(agent_id)
+            })
+        {
             return Err(());
         }
         let mut total_bytes = 0;
@@ -33,7 +42,7 @@ impl Projection {
                 return Err(());
             }
         }
-        Ok(Self { values })
+        Ok(Self { values, agent_id })
     }
 
     pub fn values(&self) -> &BTreeMap<String, String> {
@@ -67,10 +76,13 @@ mod tests {
 
     #[test]
     fn projection_serializes_source_backed_safe_scalar_values() {
-        let projection = Projection::from_source(BTreeMap::from([
-            ("enabled".into(), "true".into()),
-            ("serverUrl".into(), "https://chat.example.test".into()),
-        ]))
+        let projection = Projection::from_source(
+            BTreeMap::from([
+                ("enabled".into(), "true".into()),
+                ("serverUrl".into(), "https://chat.example.test".into()),
+            ]),
+            None,
+        )
         .unwrap();
 
         assert_eq!(
@@ -80,6 +92,7 @@ mod tests {
                     "enabled": "true",
                     "serverUrl": "https://chat.example.test",
                 },
+                "agentId": null,
             }),
         );
     }
@@ -98,24 +111,25 @@ mod tests {
             "errorMessage",
         ] {
             assert!(
-                Projection::from_source(BTreeMap::from([
-                    (key.to_owned(), "candidate".to_owned(),)
-                ]))
+                Projection::from_source(
+                    BTreeMap::from([(key.to_owned(), "candidate".to_owned(),)]),
+                    None
+                )
                 .is_err()
             );
         }
         assert!(
-            Projection::from_source(BTreeMap::from([(
-                "description".into(),
-                "x".repeat(MAX_VALUE_BYTES + 1),
-            )]))
+            Projection::from_source(
+                BTreeMap::from([("description".into(), "x".repeat(MAX_VALUE_BYTES + 1),)]),
+                None
+            )
             .is_err()
         );
         assert!(
-            Projection::from_source(BTreeMap::from([(
-                "home".into(),
-                "C:\\Users\\me\\private.txt".into(),
-            )]))
+            Projection::from_source(
+                BTreeMap::from([("home".into(), "C:\\Users\\me\\private.txt".into(),)]),
+                None
+            )
             .is_err()
         );
     }
@@ -125,26 +139,32 @@ mod tests {
         let at_value_limit = (0..MAX_VALUES)
             .map(|index| (format!("field{index}"), "value".to_owned()))
             .collect();
-        assert!(Projection::from_source(at_value_limit).is_ok());
+        assert!(Projection::from_source(at_value_limit, None).is_ok());
 
         let over_value_limit = (0..=MAX_VALUES)
             .map(|index| (format!("field{index}"), "value".to_owned()))
             .collect();
-        assert!(Projection::from_source(over_value_limit).is_err());
+        assert!(Projection::from_source(over_value_limit, None).is_err());
 
         assert!(
-            Projection::from_source(BTreeMap::from([
-                ("first".into(), "x".repeat(MAX_VALUE_BYTES)),
-                ("second".into(), "x".repeat(MAX_VALUE_BYTES)),
-            ]))
+            Projection::from_source(
+                BTreeMap::from([
+                    ("first".into(), "x".repeat(MAX_VALUE_BYTES)),
+                    ("second".into(), "x".repeat(MAX_VALUE_BYTES)),
+                ]),
+                None
+            )
             .is_ok()
         );
         assert!(
-            Projection::from_source(BTreeMap::from([
-                ("first".into(), "x".repeat(MAX_VALUE_BYTES)),
-                ("second".into(), "x".repeat(MAX_VALUE_BYTES - 1)),
-                ("third".into(), "xx".into()),
-            ]))
+            Projection::from_source(
+                BTreeMap::from([
+                    ("first".into(), "x".repeat(MAX_VALUE_BYTES)),
+                    ("second".into(), "x".repeat(MAX_VALUE_BYTES - 1)),
+                    ("third".into(), "xx".into()),
+                ]),
+                None
+            )
             .is_err()
         );
     }
@@ -168,7 +188,7 @@ mod tests {
 
     #[test]
     fn terminal_outcomes_remain_distinct() {
-        let projection = Projection::from_source(BTreeMap::new()).unwrap();
+        let projection = Projection::from_source(BTreeMap::new(), None).unwrap();
         assert!(matches!(Outcome::Values(projection), Outcome::Values(_)));
         assert!(matches!(Outcome::TargetRejected, Outcome::TargetRejected));
         assert!(matches!(Outcome::Unavailable, Outcome::Unavailable));

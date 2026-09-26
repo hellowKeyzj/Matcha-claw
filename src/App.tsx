@@ -36,6 +36,7 @@ import {
   PluginsRoute,
   ExternalConnectorsRoute,
   RemoteFleetRoute,
+  WikiRoute,
 } from './lib/route-preload';
 
 function RouteLoadingFallback() {
@@ -362,6 +363,14 @@ function App() {
                 element={(
                   <Suspense fallback={<RouteLoadingFallback />}>
                     <RemoteFleetRoute />
+                  </Suspense>
+                )}
+              />
+              <Route
+                path="/wiki"
+                element={(
+                  <Suspense fallback={<RouteLoadingFallback />}>
+                    <WikiRoute />
                   </Suspense>
                 )}
               />

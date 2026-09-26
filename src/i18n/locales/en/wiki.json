@@ -1,0 +1,239 @@
+{
+  "common": {
+    "cancel": "Cancel",
+    "choose": "Choose",
+    "current": "Current",
+    "delete": "Delete",
+    "empty": "No records",
+    "folder": "Folder",
+    "name": "Name",
+    "optional": "Optional",
+    "template": "Template",
+    "refresh": "Refresh",
+    "settings": "Settings"
+  },
+  "home": {
+    "title": "Library",
+    "search": "Search",
+    "myLibraries": "My libraries",
+    "recent": "Recent",
+    "newLibrary": "New library",
+    "dialogDescription": "Choose a folder. Matcha will create the library structure there.",
+    "folderPlaceholder": "Choose library folder",
+    "table": {
+      "name": "Name",
+      "location": "Location",
+      "lastOpened": "Last opened"
+    }
+  },
+  "templates": {
+    "research": {
+      "name": "Research",
+      "description": "Deep-dive research with hypothesis tracking and methodology notes."
+    },
+    "reading": {
+      "name": "Reading",
+      "description": "Track a book's characters, themes, plot threads, and chapter notes."
+    },
+    "personal": {
+      "name": "Personal Growth",
+      "description": "Track goals, habits, reflections, and journal entries for self-improvement."
+    },
+    "business": {
+      "name": "Business",
+      "description": "Manage meetings, decisions, projects, and stakeholder context for a team."
+    },
+    "general": {
+      "name": "General",
+      "description": "Minimal setup: a blank slate for any purpose."
+    }
+  },
+  "workspace": {
+    "tabs": {
+      "wiki": "Wiki",
+      "sources": "Sources",
+      "review": "Review",
+      "search": "Search",
+      "graph": "Graph"
+    },
+    "library": "Library",
+    "scan": "Scan"
+  },
+  "content": {
+    "selectPage": "Select a page",
+    "previewUnavailable": "Preview unavailable",
+    "inlineUnsupported": "Inline preview is not supported",
+    "inlineUnsupportedDescription": "{{type}} files can stay in the library.",
+    "save": "Save",
+    "embed": "Embed"
+  },
+  "sources": {
+    "title": "Sources",
+    "subtitle": "{{sources}} sources · {{records}} records",
+    "importFile": "Import file",
+    "folder": "Folder",
+    "backToSources": "Sources",
+    "refreshSources": "Refresh sources",
+    "scanSources": "Scan sources",
+    "settingsTitle": "Source settings",
+    "settingsSubtitle": "Control source watching, ingest, and PDF parsing.",
+    "watchTitle": "Watch source folder",
+    "watchDescription": "Detect file changes in the source directory. When off, sources update only after manual scan or import.",
+    "autoImportTitle": "Auto import new files",
+    "autoImportDescription": "Automatically add new files detected by the watcher. When off, changes are recorded and need manual import or scan.",
+    "captionTitle": "Image captions",
+    "captionDescription": "Generate image captions during ingest. Off by default. Current concurrency: {{concurrency}}.",
+    "generationModelTitle": "Generation model",
+    "generationModelDescription": "Used to turn sources into Wiki pages. Only chat-capable models are shown.",
+    "captionModelTitle": "Image caption model",
+    "captionModelDescription": "Used for image captions. Only image-understanding models are shown; optional when captions are off.",
+    "modelNone": "Not selected",
+    "modelInvalidOption": "Configured model is no longer valid",
+    "modelStatus": {
+      "loading": "Checking models",
+      "unavailable": "Models unavailable",
+      "unconfigured": "Models not configured",
+      "invalid": "Model invalid",
+      "ready": "Models ready"
+    },
+    "mineruTitle": "MinerU PDF parsing",
+    "mineruDescription": "Use MinerU for PDF parsing when available.",
+    "mineruBasicTitle": "Basic settings",
+    "mineruBasicDescription": "Enable PDF parsing and choose the default backend.",
+    "mineruEnabledTitle": "Enable parsing",
+    "mineruEnabledDescription": "Use MinerU for PDF parsing when available.",
+    "mineruCloudTitle": "Cloud parsing",
+    "mineruCloudDescription": "Configure the cloud token and model version.",
+    "mineruLocalTitle": "Local parsing",
+    "mineruLocalDescription": "Configure the local service, parser backend, and processing options.",
+    "mineruBackendTitle": "MinerU backend",
+    "mineruBackendDescription": "Choose cloud or local MinerU parsing.",
+    "mineruTokenTitle": "Cloud token",
+    "mineruTokenDescription": "Token value is write-only; only the configured state is shown.",
+    "tokenConfigured": "Configured",
+    "tokenNotConfigured": "Not configured",
+    "tokenPlaceholder": "Enter a new token",
+    "mineruModelVersionTitle": "Cloud model version",
+    "mineruModelVersionDescription": "Model version used by cloud MinerU parsing.",
+    "mineruLocalEndpointTitle": "Local endpoint",
+    "mineruLocalEndpointDescription": "Base endpoint for the local MinerU service.",
+    "mineruLocalTokenTitle": "Local token",
+    "mineruLocalTokenDescription": "Local token value is write-only; only the configured state is shown.",
+    "mineruLocalBackendTitle": "Local backend",
+    "mineruLocalBackendDescription": "Backend used by local MinerU parsing.",
+    "mineruLocalEffortTitle": "Local effort",
+    "mineruLocalEffortDescription": "Processing effort for local VLM parsing.",
+    "mineruLocalParseMethodTitle": "Local parse method",
+    "mineruLocalParseMethodDescription": "Parsing method for local MinerU.",
+    "mineruLocalLanguageTitle": "Local language",
+    "mineruLocalLanguageDescription": "Language hint passed to local MinerU.",
+    "mineruLocalFormulaTitle": "Formula parsing",
+    "mineruLocalFormulaDescription": "Enable formula parsing for local MinerU.",
+    "mineruLocalTableTitle": "Table parsing",
+    "mineruLocalTableDescription": "Enable table parsing for local MinerU.",
+    "mineruLocalImageAnalysisTitle": "Image analysis",
+    "mineruLocalImageAnalysisDescription": "Enable image analysis for local MinerU.",
+    "mineruLocalServerUrlTitle": "Local server URL",
+    "mineruLocalServerUrlDescription": "Optional server URL passed to local MinerU.",
+    "outputLanguageTitle": "Output language",
+    "outputLanguageDescription": "Controls the language used when imported sources generate Wiki content. Auto follows the source.",
+    "documents": "Source documents",
+    "emptyDocuments": "No source documents",
+    "activityLog": "Processing log",
+    "refreshRecords": "Refresh records",
+    "emptyRecords": "No processing records",
+    "cancelRequested": "Cancel requested",
+    "receipt": "{{label}}: imported {{imported}} · deleted {{deleted}} · moved {{moved}} · skipped {{skipped}}"
+  },
+  "review": {
+    "title": "Review",
+    "subtitle": "{{pending}} pending · {{resolved}} resolved",
+    "empty": "No review items",
+    "pending": "Pending",
+    "resolved": "Resolved",
+    "resolve": "Resolve",
+    "dismiss": "Dismiss",
+    "clearResolved": "Clear resolved",
+    "pages": "Pages",
+    "search": "Search",
+    "types": {
+      "contradiction": "Contradiction",
+      "duplicate": "Duplicate",
+      "missing-page": "Missing page",
+      "confirm": "Confirm",
+      "suggestion": "Suggestion"
+    }
+  },
+  "search": {
+    "title": "Search",
+    "placeholder": "Search",
+    "action": "Search",
+    "contextAction": "Context",
+    "results": "Results",
+    "context": "Context",
+    "noResults": "No results",
+    "noContext": "No context"
+  },
+  "graph": {
+    "title": "Graph",
+    "subtitle": "{{nodes}} nodes · {{edges}} edges",
+    "load": "Load",
+    "embed": "Embed",
+    "empty": "No graph",
+    "nodes": "Nodes",
+    "edges": "Edges",
+    "emptyNodes": "No nodes",
+    "emptyEdges": "No edges"
+  },
+  "activity": {
+    "pending": "Pending",
+    "tasks": "Tasks",
+    "failed": "Failed",
+    "running": "Running",
+    "refresh": "Refresh activity",
+    "details": "Activity details",
+    "emptyTasks": "No tasks"
+  },
+  "tree": {
+    "empty": "No files",
+    "emptyDirectory": "Empty"
+  },
+  "preview": {
+    "tooLarge": "File is too large for inline preview",
+    "notFound": "File not found",
+    "invalidPath": "Invalid path",
+    "unavailable": "Unable to read file"
+  },
+  "actions": {
+    "pickLibraryTitle": "Choose library folder",
+    "useFolder": "Use this folder",
+    "openedLibrary": "Library opened",
+    "createdLibrary": "Library created",
+    "switchedLibrary": "Library switched",
+    "savedPage": "Page saved",
+    "rescanned": "Rescanned",
+    "importFileReceipt": "Import file",
+    "pickSourceFileTitle": "Choose source file",
+    "importFileButton": "Import file",
+    "importedSource": "Source imported",
+    "importFolderReceipt": "Import folder",
+    "pickSourceFolderTitle": "Choose source folder",
+    "importFolderButton": "Import folder",
+    "importedFolder": "Folder imported",
+    "deleteSourceReceipt": "Delete source",
+    "deletedSource": "Source deleted",
+    "refreshSourcesReceipt": "Refresh sources",
+    "refreshedSources": "Sources refreshed",
+    "updatedSourceWatch": "Source watch updated",
+    "embeddedPage": "Page embedding started",
+    "appliedGeneratedPages": "Generated content applied",
+    "resolvedReview": "Review resolved",
+    "dismissedReview": "Review dismissed",
+    "clearedReviews": "Resolved reviews cleared",
+    "createdReviewPage": "Review page created",
+    "failed": "{{label}} failed"
+  },
+  "time": {
+    "unrecorded": "Not recorded"
+  }
+}

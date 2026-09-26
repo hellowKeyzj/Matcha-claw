@@ -1,4 +1,5 @@
 import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex } from './session-identity';
+import { buildSessionRuntimeGraph } from './session-runtime-graph';
 import {
   buildSessionIdentityKey,
   type SessionIdentity,
@@ -50,7 +51,7 @@ import { findLatestAssistantTextFromItems } from './timeline-message';
 import { sanitizeCanonicalUserText } from './message-helpers';
 import { projectSessionMedia } from './media-projection';
 import { syncViewportState } from './viewport-state';
-import { useTaskSnapshotStore } from './task-snapshot-store';
+import { useTaskCenterStore } from '../task-center-store';
 import { getCronSessionBaseKey } from './cron-session-utils';
 import {
   createSessionTraceId,
@@ -580,6 +581,19 @@ export function reconcileSessionItems(
   return changed ? [...reconciled, ...preservedReceipts] : currentItems;
 }
 
+export function areSessionOwnershipsEquivalent(
+  left: ChatSessionMetaState['ownership'],
+  right: ChatSessionMetaState['ownership'],
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.kind !== right.kind) return false;
+  return left.kind === 'ordinary' || (right.kind === 'team'
+    && left.teamId === right.teamId
+    && left.teamRunId === right.teamRunId
+    && left.roleId === right.roleId
+    && left.sessionRef === right.sessionRef);
+}
+
 export function areSessionModelStatesEquivalent(
   left: ChatSessionMetaState['modelState'] | ChatSession['modelState'],
   right: ChatSessionMetaState['modelState'] | ChatSession['modelState'],
@@ -612,6 +626,7 @@ export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[])
       || (a.protocolId ?? null) !== (b.protocolId ?? null)
       || (a.runtimeEndpointId ?? null) !== (b.runtimeEndpointId ?? null)
       || !sessionIdentitiesEquivalent(a.sessionIdentity, b.sessionIdentity)
+      || !areSessionOwnershipsEquivalent(a.ownership, b.ownership)
       || (a.kind ?? null) !== (b.kind ?? null)
       || (a.preferred ?? false) !== (b.preferred ?? false)
       || (a.label ?? null) !== (b.label ?? null)
@@ -694,6 +709,7 @@ export function createEmptySessionMeta(): ChatSessionMetaState {
     protocolId: null,
     runtimeEndpointId: null,
     sessionIdentity: null,
+    ownership: null,
     kind: null,
     preferred: false,
     label: null,
@@ -731,6 +747,7 @@ function areSessionMetaEquivalent(left: ChatSessionMetaState, right: ChatSession
     && (left.protocolId ?? null) === (right.protocolId ?? null)
     && (left.runtimeEndpointId ?? null) === (right.runtimeEndpointId ?? null)
     && sessionIdentitiesEquivalent(left.sessionIdentity, right.sessionIdentity)
+    && areSessionOwnershipsEquivalent(left.ownership, right.ownership)
     && left.kind === right.kind
     && left.preferred === right.preferred
     && left.label === right.label
@@ -1124,6 +1141,7 @@ export function patchSessionSnapshot(
     protocolId: catalog.protocolId ?? null,
     runtimeEndpointId: catalog.runtimeEndpointId ?? null,
     sessionIdentity: catalog.sessionIdentity,
+    ownership: catalog.ownership,
     kind: catalog.kind,
     preferred: catalog.preferred,
     label: nextLabel,
@@ -1539,18 +1557,36 @@ function projectionApprovals(
   return { ...state.pendingApprovalsBySession, [recordKey]: approvals };
 }
 
+function refreshSessionTasks(input: SessionProjectionApplyInput, view: SessionView, invalidate: boolean): void {
+  const identity = sessionIdentityForProjection(input.get(), view);
+  const recordKey = projectionRecordKey(input.get(), identity);
+  if (!identity || !recordKey) return;
+  void useTaskCenterStore.getState().refreshTasks({
+    sessionKey: recordKey,
+    sessionIdentity: identity,
+    background: true,
+    invalidate,
+  }).catch(() => { /* The refresh owner logs failures and preserves the last snapshot. */ });
+}
+
+// Reads also restore the plugin's current plan after compaction; never parse their output.
+const TASK_SNAPSHOT_TOOLS = new Set(['todowrite', 'todoget', 'taskcreate', 'taskupdate', 'tasklist', 'taskget']);
+
+function isTaskToolTerminalTransition(tool: SessionWireTool, previous?: SessionWireTool): boolean {
+  if (tool.phase !== 'completed' && tool.phase !== 'failed') return false;
+  if (!TASK_SNAPSHOT_TOOLS.has((tool.name ?? previous?.name ?? '').trim().toLowerCase())) return false;
+  return !previous || previous.runId !== tool.runId
+    || (previous.phase !== 'completed' && previous.phase !== 'failed');
+}
+
 function applyDecodedSessionView(
   input: SessionProjectionApplyInput,
   view: SessionProjectionState,
-  epochChanged = false,
 ): boolean {
   const state = input.get();
   const identity = sessionIdentityForProjection(state, view);
   const recordKey = projectionRecordKey(state, identity);
   if (!recordKey) return false;
-  if (epochChanged) {
-    useTaskSnapshotStore.getState().reset(recordKey);
-  }
   input.set((nextState) => {
     const current = getSessionRecord(nextState, recordKey);
     const nextIdentity = identity ?? current.meta.sessionIdentity;
@@ -1590,6 +1626,19 @@ export function applySessionView(
   if (view.sessionKey !== view.identity.sessionKey) {
     return { status: 'unavailable', sessionKey: view.sessionKey, reason: 'identity mismatch' };
   }
+  const identity = sessionIdentityForProjection(input.get(), view);
+  const recordKey = projectionRecordKey(input.get(), identity);
+  if (!recordKey) {
+    return { status: 'unavailable', sessionKey: view.sessionKey, reason: 'session identity unavailable' };
+  }
+  // Ownership is a Host fact, independent of the native timeline cursor; deltas never rewrite it.
+  input.set((state) => {
+    const loadedSessions = patchSessionMeta(state, recordKey, { ownership: view.ownership });
+    return loadedSessions === state.loadedSessions ? state : {
+      loadedSessions,
+      sessionRuntimeGraph: buildSessionRuntimeGraph(state.sessionRuntimeCatalog, loadedSessions),
+    };
+  });
   const store = projectionStore(input.get);
   const previous = store.get(view.sessionKey);
   if (previous) {
@@ -1601,15 +1650,16 @@ export function applySessionView(
         return { status: 'stale', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
       }
       if (view.cursor === previous.cursor && view.seq === previous.seq) {
+        refreshSessionTasks(input, view, false);
         return { status: 'duplicate', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
       }
     }
   }
-  const epochChanged = previous !== undefined && view.epoch > previous.epoch;
-  if (!applyDecodedSessionView(input, view, epochChanged)) {
+  if (!applyDecodedSessionView(input, view)) {
     return { status: 'unavailable', sessionKey: view.sessionKey, reason: 'session identity unavailable' };
   }
   store.set(view.sessionKey, view);
+  refreshSessionTasks(input, view, true);
   return { status: 'applied', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
 }
 
@@ -1790,17 +1840,29 @@ export function applySessionDelta(
       return { status: 'gap', sessionKey: delta.sessionKey, reason: `expected seq ${previous.seq + 1}, cursor ${previous.cursor + 1}` };
     }
   }
-  const nextView = delta.changes.reduce(applyProjectionChange, { ...previous, epoch: delta.epoch });
+  let tasksChanged = epochChanged;
+  const nextView = delta.changes.reduce((view, change) => {
+    if (change.kind === 'toolUpdated'
+      && (change.tool.phase === 'completed' || change.tool.phase === 'failed')
+      && (change.tool.name === null || TASK_SNAPSHOT_TOOLS.has(change.tool.name.trim().toLowerCase()))
+      && isTaskToolTerminalTransition(
+        change.tool,
+        factValue(view.tools)?.find((tool) => tool.toolCallId === change.tool.toolCallId),
+      )) tasksChanged = true;
+    if (change.kind === 'recoveryRequired') tasksChanged = true;
+    return applyProjectionChange(view, change);
+  }, { ...previous, epoch: delta.epoch });
   const projected: SessionView = {
     ...nextView,
     epoch: delta.epoch,
     seq: delta.seq,
     cursor: delta.cursor,
   };
-  if (!applyDecodedSessionView(input, projected, epochChanged)) {
+  if (!applyDecodedSessionView(input, projected)) {
     return { status: 'unavailable', sessionKey: delta.sessionKey, reason: 'session identity unavailable' };
   }
   store.set(projectionKey, projected);
+  if (tasksChanged) refreshSessionTasks(input, projected, true);
   return { status: 'applied', sessionKey: projectionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
 }
 

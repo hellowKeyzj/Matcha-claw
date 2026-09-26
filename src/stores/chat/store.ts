@@ -326,8 +326,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       }
     },
     loadSessions: () => executeLoadSessions(sessionInput),
-    openAgentConversation: (agentId) => {
-      executeOpenAgentConversation(sessionInput, agentId);
+    openAgentConversation: (agentId, endpoint) => {
+      executeOpenAgentConversation(sessionInput, agentId, endpoint);
     },
     openSessionIdentity: (target) => {
       executeOpenSessionIdentity(sessionInput, target);

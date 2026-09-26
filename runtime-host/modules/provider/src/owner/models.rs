@@ -10,13 +10,17 @@ use connectors::{
     ConnectorSecretValue, InvalidConnectorSecretRef,
 };
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     InvalidProviderModel, ProviderAccount, ProviderAccountAuthMode, ProviderAccountId,
-    ProviderApiProtocol, ProviderCascade, ProviderCascadeFault, ProviderModel,
+    ProviderApiProtocol, ProviderCascade, ProviderCascadeFault, ProviderEndpoint, ProviderModel,
     ProviderModelCapability, ProviderModelReference, ProviderModelStoreFault,
-    ProviderRoutingCapability, Resolver,
+    ProviderRoutingCapability, ProviderTextGenerationModelLimits,
+    ProviderTextGenerationModelLimitsOutcome, ProviderTextGenerationModelLimitsRequest,
+    ProviderTextGenerationOutcome, ProviderTextGenerationRequest, Resolver,
     application::{model_reference, receipts::*},
+    llm_client::{LlmClient, LlmClientError, LlmCredential, LlmEndpoint, LlmRequest},
     ports::{ProviderModelDiscoveryPortOutcome, ProviderRuntimeDirectory},
     provider_model_matches_routing_reference, provider_routing_model_capability,
 };
@@ -38,17 +42,125 @@ const MAX_DISCOVERY_RESPONSE_BYTES: u64 = 256 * 1024;
 
 pub(crate) struct ProviderModelOwner {
     private_resolver: Resolver,
+    llm_client: LlmClient,
 }
 
 impl ProviderModelOwner {
     pub(crate) fn new() -> Self {
         Self {
             private_resolver: Resolver::disabled(),
+            llm_client: LlmClient::new(reqwest::Client::new()),
         }
     }
 
     pub(crate) fn set_private_resolver(&mut self, private_resolver: Resolver) {
         self.private_resolver = private_resolver;
+    }
+
+    pub(super) fn text_generation_model_limits(
+        &self,
+        runtime: &dyn ProviderRuntimeDirectory,
+        cascade: &ProviderCascade,
+        request: ProviderTextGenerationModelLimitsRequest,
+    ) -> ProviderTextGenerationModelLimitsOutcome {
+        let candidates = match self.resolve_text_generation_candidates(
+            runtime,
+            cascade,
+            ProviderRoutingCapability::Chat,
+            request.model_ref.as_deref(),
+        ) {
+            Ok(Some(candidates)) => candidates,
+            Ok(None) | Err(()) => return ProviderTextGenerationModelLimitsOutcome::Rejected,
+        };
+        let Some((_, model, timeout_ms)) = candidates.into_iter().next() else {
+            return ProviderTextGenerationModelLimitsOutcome::Rejected;
+        };
+        ProviderTextGenerationModelLimitsOutcome::Available(text_generation_model_limits(
+            model, timeout_ms,
+        ))
+    }
+
+    pub(super) async fn generate_text(
+        &self,
+        runtime: &dyn ProviderRuntimeDirectory,
+        cascade: &ProviderCascade,
+        request: ProviderTextGenerationRequest,
+        cancellation: CancellationToken,
+    ) -> ProviderTextGenerationOutcome {
+        let capability = if request.messages.iter().any(|message| message.has_image()) {
+            ProviderRoutingCapability::ImageUnderstand
+        } else {
+            ProviderRoutingCapability::Chat
+        };
+        let candidates = match self.resolve_text_generation_candidates(
+            runtime,
+            cascade,
+            capability,
+            request.model_ref.as_deref(),
+        ) {
+            Ok(Some(candidates)) => candidates,
+            Ok(None) => return ProviderTextGenerationOutcome::Rejected,
+            Err(()) => return ProviderTextGenerationOutcome::Unavailable,
+        };
+        let mut unavailable = false;
+        for (account, model, timeout_ms) in candidates {
+            let Some(protocol) = provider_generation_protocol(account) else {
+                continue;
+            };
+            let Ok(endpoint) = provider_generation_endpoint(account) else {
+                continue;
+            };
+            let credential = match provider_generation_credential(account, &self.private_resolver) {
+                Ok(Some(credential)) => credential,
+                Ok(None) => continue,
+                Err(()) => {
+                    unavailable = true;
+                    continue;
+                }
+            };
+            let request = LlmRequest {
+                endpoint: LlmEndpoint::new(endpoint, protocol),
+                credential,
+                model: model.model_id().to_owned(),
+                messages: request.messages.clone(),
+                options: request.options.clone(),
+            };
+            let response = match timeout_ms {
+                Some(timeout_ms) => match tokio::select! {
+                    _ = cancellation.cancelled() => return ProviderTextGenerationOutcome::Cancelled,
+                    result = tokio::time::timeout(Duration::from_millis(timeout_ms), self.llm_client.generate(request)) => result,
+                } {
+                    Ok(response) => response,
+                    Err(_) => {
+                        unavailable = true;
+                        continue;
+                    }
+                },
+                None => tokio::select! {
+                    _ = cancellation.cancelled() => return ProviderTextGenerationOutcome::Cancelled,
+                    response = self.llm_client.generate(request) => response,
+                },
+            };
+            match response {
+                Ok(response) => {
+                    return ProviderTextGenerationOutcome::Generated {
+                        response,
+                        model_limits: text_generation_model_limits(model, timeout_ms),
+                    };
+                }
+                Err(LlmClientError::UnsupportedProtocol) => continue,
+                Err(
+                    LlmClientError::Http(_)
+                    | LlmClientError::Protocol(_)
+                    | LlmClientError::StreamSink(_),
+                ) => unavailable = true,
+            }
+        }
+        if unavailable {
+            ProviderTextGenerationOutcome::Unavailable
+        } else {
+            ProviderTextGenerationOutcome::Rejected
+        }
     }
 
     pub(super) fn select_session_model(
@@ -170,6 +282,37 @@ impl ProviderModelOwner {
             endpoint_session_id,
             trace_id,
         ))
+    }
+
+    fn resolve_text_generation_candidates<'a>(
+        &self,
+        runtime: &dyn ProviderRuntimeDirectory,
+        cascade: &'a ProviderCascade,
+        capability: ProviderRoutingCapability,
+        model_ref: Option<&str>,
+    ) -> Result<Option<Vec<(&'a ProviderAccount, &'a ProviderModel, Option<u64>)>>, ()> {
+        let required_capability = provider_routing_model_capability(capability);
+        match model_ref {
+            Some(model_ref) => {
+                let identity_ops = runtime.provider_runtime_identity_ops().ok_or(())?;
+                let identities = provider_runtime_identities(identity_ops, cascade.accounts())?;
+                for model in cascade.catalog().selectable_for(required_capability) {
+                    let Some(account) = cascade.account(model.account_id()) else {
+                        continue;
+                    };
+                    if !account.configuration().enabled() {
+                        continue;
+                    }
+                    if runtime_model_ref_for(identity_ops, &identities, account, model).as_deref()
+                        == Some(model_ref)
+                    {
+                        return Ok(Some(vec![(account, model, model.timeout_ms())]));
+                    }
+                }
+                Ok(None)
+            }
+            None => Ok(resolve_generation_models(cascade, capability)),
+        }
     }
 
     fn resolve_selection(
@@ -956,6 +1099,71 @@ fn normalized_base_url(base_url: &str) -> Result<String, ProviderModelDiscoveryE
         return Err(ProviderModelDiscoveryError::Rejected);
     }
     Ok(base.to_owned())
+}
+
+fn text_generation_model_limits(
+    model: &ProviderModel,
+    timeout_ms: Option<u64>,
+) -> ProviderTextGenerationModelLimits {
+    ProviderTextGenerationModelLimits {
+        context_window: model.context_window(),
+        max_tokens: model.max_tokens(),
+        timeout_ms,
+    }
+}
+
+fn resolve_generation_models(
+    cascade: &ProviderCascade,
+    capability: ProviderRoutingCapability,
+) -> Option<Vec<(&ProviderAccount, &ProviderModel, Option<u64>)>> {
+    let route = cascade.routing()?.route(capability)?;
+    let candidates = std::iter::once(route.primary())
+        .chain(route.fallbacks())
+        .filter_map(|reference| {
+            let account = cascade.account(reference.account_id())?;
+            let model = cascade.catalog().models().iter().find(|model| {
+                provider_model_matches_routing_reference(model, capability, reference)
+            })?;
+            Some((account, model, route.timeout_ms().or(model.timeout_ms())))
+        })
+        .collect::<Vec<_>>();
+    (!candidates.is_empty()).then_some(candidates)
+}
+
+fn provider_generation_endpoint(account: &ProviderAccount) -> Result<ProviderEndpoint, ()> {
+    account
+        .configuration()
+        .endpoint()
+        .cloned()
+        .or_else(|| {
+            default_discovery_endpoint(account.provider().as_str())
+                .and_then(|endpoint| ProviderEndpoint::try_new(endpoint).ok())
+        })
+        .ok_or(())
+}
+
+fn provider_generation_protocol(account: &ProviderAccount) -> Option<ProviderApiProtocol> {
+    account
+        .configuration()
+        .protocol()
+        .or_else(|| default_discovery_protocol(account.provider().as_str()))
+}
+
+fn provider_generation_credential(
+    account: &ProviderAccount,
+    private_resolver: &Resolver,
+) -> Result<Option<LlmCredential>, ()> {
+    match account.configuration().auth_mode() {
+        ProviderAccountAuthMode::ApiKey => provider_api_key(account, private_resolver)
+            .map(LlmCredential::api_key)
+            .map(Some),
+        ProviderAccountAuthMode::Token
+        | ProviderAccountAuthMode::OAuthBrowser
+        | ProviderAccountAuthMode::OAuthDevice => provider_api_key(account, private_resolver)
+            .map(LlmCredential::bearer)
+            .map(Some),
+        ProviderAccountAuthMode::CliReuse | ProviderAccountAuthMode::Local => Ok(None),
+    }
 }
 
 fn provider_api_key(account: &ProviderAccount, private_resolver: &Resolver) -> Result<String, ()> {

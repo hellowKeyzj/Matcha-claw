@@ -1852,6 +1852,76 @@ impl OrganizationFacts {
         Ok(ApprovalResolutionOutcome::Recorded)
     }
 
+    pub(crate) fn accept_native_terminal_context(
+        &mut self,
+        delivery_id: &crate::DeliveryId,
+        endpoint_session_id: crate::EndpointSessionId,
+        native_run_id: String,
+    ) -> Result<bool, OrganizationFactsError> {
+        let delivery = self
+            .deliveries
+            .delivery(delivery_id)
+            .ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
+        let run = self
+            .runs
+            .get(&delivery.facts().run_id)
+            .ok_or(OrganizationFactsError::UnknownRun)?;
+        let binding = run
+            .runtime()
+            .and_then(|runtime| {
+                runtime.bindings().iter().find(|binding| {
+                    binding.role().as_str() == delivery.facts().role_id
+                        && binding.session_ref().as_str() == delivery.facts().session_ref
+                })
+            })
+            .ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
+        if binding.endpoint_session_id() != &endpoint_session_id {
+            return Err(OrganizationFactsError::InvalidTerminalObservation);
+        }
+        let crate::ActivityExecutionOutcome::Accepted {
+            receipt,
+            correlation,
+        } = crate::ActivityExecutionOutcome::accepted(endpoint_session_id, native_run_id)
+        else {
+            return Err(OrganizationFactsError::InvalidTerminalObservation);
+        };
+        match delivery.phase() {
+            DeliveryPhase::Delivered {
+                receipt: existing,
+                native_correlation,
+                ..
+            } if existing == &receipt && native_correlation.as_ref() == Some(&correlation) => {
+                Ok(false)
+            }
+            DeliveryPhase::TerminalObserved { observation }
+                if observation.delivered_receipt() == &receipt
+                    && observation.correlation() == &correlation =>
+            {
+                Ok(false)
+            }
+            DeliveryPhase::Delivering(claim) => {
+                let claim = claim.clone();
+                self.settle_delivery(
+                    &claim,
+                    crate::DeliveryReceipt::Accepted {
+                        receipt,
+                        native_correlation: Some(correlation),
+                        accepted_at: claim.claimed_at(),
+                    },
+                    0,
+                )
+                .map_err(|_| OrganizationFactsError::InvalidTerminalObservation)?;
+                Ok(true)
+            }
+            DeliveryPhase::OutcomeUnknown { .. } => Ok(self
+                .deliveries
+                .delivery_mut(delivery_id)
+                .expect("validated delivery")
+                .confirm_unknown_native_delivery(receipt, correlation)),
+            _ => Err(OrganizationFactsError::InvalidTerminalObservation),
+        }
+    }
+
     pub(super) fn native_terminal_target(
         &self,
         delivery_id: &crate::DeliveryId,
@@ -1872,7 +1942,14 @@ impl OrganizationFacts {
         let fence = existing_observation.map_or_else(
             || {
                 run.graph()
-                    .current_attempt(&node_id)
+                    .executions()
+                    .get(&node_id)?
+                    .attempts()
+                    .iter()
+                    .find(|attempt| {
+                        attempt.fence().node_execution_id().as_str()
+                            == delivery.facts().node_execution_id
+                    })
                     .map(|attempt| attempt.fence().clone())
             },
             |observation| Some(observation.fence().clone()),
@@ -2482,10 +2559,6 @@ impl OrganizationFacts {
             let activity_id = ActivityId::new(delivery_id.as_str().to_owned())
                 .map_err(|_| TerminalObservationError::DeliveryMismatch)?;
             if let Some(activity) = self.activities.activity_mut(&activity_id) {
-                let claim = activity
-                    .active_claim()
-                    .cloned()
-                    .ok_or(TerminalObservationError::StaleFence)?;
                 let settlement = match outcome {
                     TerminalObservationOutcome::RecordedAwaitingAuthorizedGraphResolution => {
                         ActivitySettlement::TerminalObserved { observed_at }
@@ -2499,8 +2572,16 @@ impl OrganizationFacts {
                         unreachable!("replayed outcome was filtered")
                     }
                 };
-                crate::settle_activity(activity, &claim, settlement)
-                    .map_err(|_| TerminalObservationError::StaleFence)?;
+                if matches!(activity.phase(), ActivityPhase::OutcomeUnknown { .. }) {
+                    activity.confirm_unknown_native_terminal(native_terminal, observed_at);
+                } else {
+                    let claim = activity
+                        .active_claim()
+                        .cloned()
+                        .ok_or(TerminalObservationError::StaleFence)?;
+                    crate::settle_activity(activity, &claim, settlement)
+                        .map_err(|_| TerminalObservationError::StaleFence)?;
+                }
             }
         }
         self.runs.insert(run_id.as_str().to_owned(), run);
@@ -2526,7 +2607,45 @@ impl OrganizationFacts {
         }
         self.runs
             .insert(run_id.as_str().to_owned(), GraphRunFacts { graph, ..run });
+        self.cancel_superseded_pending_activities(run_id);
         Ok(())
+    }
+
+    pub(crate) fn cancel_superseded_pending_activities(&mut self, run_id: &GraphRunId) {
+        let Some(run) = self.runs.get(run_id.as_str()) else {
+            return;
+        };
+        let cancelled = self
+            .activities
+            .activities()
+            .filter(|activity| activity.facts().run_id == *run_id)
+            .filter(|activity| {
+                matches!(
+                    activity.phase(),
+                    ActivityPhase::Pending | ActivityPhase::RetryScheduled { .. }
+                )
+            })
+            .filter_map(|activity| {
+                let current = run.graph().current_attempt(&activity.facts().node_id)?;
+                (current.fence() != &activity.facts().fence)
+                    .then(|| (activity.facts().activity_id.clone(), current.created_at()))
+            })
+            .collect::<Vec<_>>();
+        for (activity_id, cancelled_at) in cancelled {
+            self.activities
+                .activity_mut(&activity_id)
+                .expect("selected activity exists")
+                .cancel(cancelled_at);
+            if let Ok(delivery_id) = crate::DeliveryId::new(activity_id.as_str())
+                && let Some(delivery) = self.deliveries.delivery_mut(&delivery_id)
+                && matches!(
+                    delivery.phase(),
+                    DeliveryPhase::Pending | DeliveryPhase::RetryScheduled { .. }
+                )
+            {
+                delivery.cancel(cancelled_at);
+            }
+        }
     }
 
     pub(crate) fn apply_graph_patch(
@@ -2748,8 +2867,14 @@ impl OrganizationFacts {
         {
             let attempt = run
                 .graph()
-                .current_attempt(&node_id)
-                .filter(|attempt| attempt.fence() == resolution.fence())
+                .executions()
+                .get(&node_id)
+                .and_then(|history| {
+                    history
+                        .attempts()
+                        .iter()
+                        .find(|attempt| attempt.fence() == resolution.fence())
+                })
                 .ok_or(AgentNodeEventResolutionError::CompletionReceiptMismatch)?;
             let evidence = event
                 .completion_receipt()
@@ -2798,21 +2923,41 @@ impl OrganizationFacts {
             return Err(AgentNodeEventResolutionError::CompletionReceiptMismatch);
         }
 
-        let outcome = self
-            .apply_authorized_graph_resolution(resolution)
-            .map_err(AgentNodeEventResolutionError::AuthorizedResolution)?;
-        if matches!(outcome, AuthorizedGraphResolutionOutcome::Recorded)
-            && let Some(artifact) = artifact
+        if let Some(artifact) = artifact {
+            self.record_terminal_completion_artifact(event.delivery_id(), artifact)
+                .map_err(|_| AgentNodeEventResolutionError::CompletionReceiptMismatch)?;
+        }
+        self.apply_authorized_graph_resolution(resolution)
+            .map_err(AgentNodeEventResolutionError::AuthorizedResolution)
+    }
+
+    fn record_terminal_completion_artifact(
+        &mut self,
+        delivery_id: &crate::DeliveryId,
+        artifact: ArtifactRecord,
+    ) -> Result<(), OrganizationFactsError> {
+        let delivery = self
+            .deliveries
+            .delivery(delivery_id)
+            .ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
+        let DeliveryPhase::TerminalObserved { observation } = delivery.phase() else {
+            return Err(OrganizationFactsError::InvalidTerminalObservation);
+        };
+        if artifact.run_id() != observation.graph_run_id()
+            || artifact.fence() != observation.fence()
+            || artifact.node_id() != observation.node_id()
+            || artifact.role_id() != observation.role_id()
         {
-            match self.record_artifact(artifact) {
-                Ok(ArtifactRecordOutcome::Recorded(_)) | Ok(ArtifactRecordOutcome::Replayed(_)) => {
-                }
-                Ok(ArtifactRecordOutcome::ConflictingArtifactId { .. }) | Err(_) => {
-                    return Err(AgentNodeEventResolutionError::CompletionReceiptMismatch);
-                }
+            return Err(OrganizationFactsError::InvalidTerminalObservation);
+        }
+        // Only a verified delivery terminal can attach its completion to superseded history.
+        validate_artifact_provenance(&self.runs, &artifact)?;
+        match self.artifacts.record(artifact) {
+            ArtifactRecordOutcome::Recorded(_) | ArtifactRecordOutcome::Replayed(_) => Ok(()),
+            ArtifactRecordOutcome::ConflictingArtifactId { .. } => {
+                Err(OrganizationFactsError::InvalidTerminalObservation)
             }
         }
-        Ok(outcome)
     }
 
     pub(crate) fn apply_authorized_graph_resolution(
@@ -2831,14 +2976,18 @@ impl OrganizationFacts {
             .cloned()
             .ok_or(AuthorizedGraphResolutionError::DeliveryMismatch)?;
         let delivery_id = delivery.facts().delivery_id.clone();
-        let resolution_outcome = resolution.outcome();
         let resolved_at = resolution.resolved_at();
         let outcome = apply_authorized_graph_resolution(&mut delivery, &mut run.graph, resolution)?;
-        if matches!(outcome, AuthorizedGraphResolutionOutcome::Recorded) {
-            self.settle_resolved_activity(&delivery_id, resolution_outcome, resolved_at)
+        if matches!(outcome, AuthorizedGraphResolutionOutcome::Recorded)
+            && let DeliveryPhase::TerminalObserved { observation } = delivery.phase()
+            && let TerminalObservationResolution::GraphResolved(resolution) =
+                observation.resolution()
+        {
+            self.settle_resolved_activity(&delivery_id, resolution.outcome(), resolved_at)
                 .map_err(|_| AuthorizedGraphResolutionError::GraphStateMismatch)?;
         }
         self.runs.insert(run_id.as_str().to_owned(), run);
+        self.cancel_superseded_pending_activities(&run_id);
         *self
             .deliveries
             .delivery_mut(&delivery_id)
@@ -2864,13 +3013,60 @@ impl OrganizationFacts {
                 AuthorizedGraphResolutionError::RunMismatch,
             ),
         )?;
-        let outcome = apply_native_run_output(
-            &mut delivery,
-            &mut run.graph,
-            receipt,
-            final_assistant_text,
-            resolved_at,
-        )?;
+        let output = crate::TeamNodeOutput::parse(final_assistant_text)
+            .map_err(|_| crate::NativeRunOutputResolutionError::InvalidOutput)?;
+        let DeliveryPhase::TerminalObserved { observation } = delivery.phase() else {
+            return Err(crate::NativeRunOutputResolutionError::AuthorizedResolution(
+                AuthorizedGraphResolutionError::DeliveryNotAwaitingAuthorizedResolution,
+            ));
+        };
+        if matches!(
+            observation.resolution(),
+            TerminalObservationResolution::GraphResolved(_)
+        ) {
+            return apply_native_run_output(
+                &mut delivery,
+                &mut run.graph,
+                receipt,
+                output,
+                resolved_at,
+            );
+        }
+        if observation.native_terminal() == NativeTerminalStatus::Completed {
+            let node_id = NodeId::new(observation.node_id());
+            let node = run.graph().definition().node(&node_id).ok_or(
+                crate::NativeRunOutputResolutionError::AuthorizedResolution(
+                    AuthorizedGraphResolutionError::NodeMismatch,
+                ),
+            )?;
+            let attempt = run.graph().executions()[&node_id]
+                .attempts()
+                .iter()
+                .find(|attempt| attempt.fence() == observation.fence())
+                .ok_or(crate::NativeRunOutputResolutionError::AuthorizedResolution(
+                    AuthorizedGraphResolutionError::StaleFence,
+                ))?;
+            let artifact = build_graph_completion_artifact(
+                &run_id,
+                node,
+                attempt,
+                delivery.facts().role_id.clone(),
+                CompletionMetadata {
+                    output_port: output.decision().to_owned(),
+                    summary: Some(output.summary().to_owned()),
+                    evidence: Vec::new(),
+                },
+                format!("team-node-event:{}", receipt.as_str()),
+                receipt.as_str(),
+                resolved_at,
+            )
+            .map_err(|_| crate::NativeRunOutputResolutionError::InvalidOutput)?
+            .artifact;
+            self.record_terminal_completion_artifact(delivery_id, artifact)
+                .map_err(|_| crate::NativeRunOutputResolutionError::InvalidOutput)?;
+        }
+        let outcome =
+            apply_native_run_output(&mut delivery, &mut run.graph, receipt, output, resolved_at)?;
         if matches!(outcome, AuthorizedGraphResolutionOutcome::Recorded)
             && let crate::DeliveryPhase::TerminalObserved { observation } = delivery.phase()
             && let TerminalObservationResolution::GraphResolved(resolution) =
@@ -2892,6 +3088,7 @@ impl OrganizationFacts {
             .deliveries
             .delivery_mut(delivery_id)
             .expect("delivery ledger preserves its delivery identity index") = delivery;
+        self.cancel_superseded_pending_activities(&run_id);
         Ok(outcome)
     }
 
@@ -3043,6 +3240,17 @@ impl OrganizationFacts {
             .activities
             .activity_mut(activity_id)
             .ok_or(OrganizationFactsError::UnknownActivity)?;
+        if matches!(
+            activity.phase(),
+            ActivityPhase::Pending | ActivityPhase::RetryScheduled { .. }
+        ) && self
+            .runs
+            .get(activity.facts().run_id.as_str())
+            .and_then(|run| run.graph().current_attempt(&activity.facts().node_id))
+            .is_none_or(|attempt| attempt.fence() != &activity.facts().fence)
+        {
+            return Err(OrganizationFactsError::InvalidActivityTransition);
+        }
         Ok(crate::claim_activity(activity, claimed_at))
     }
 
@@ -3670,7 +3878,7 @@ fn validate_activity_request(
             if work.task_id() != task_id
                 || work.role_id() != role_id
                 || work.session_ref().as_str() != session_ref
-                || work.prompt() != prompt
+                || !activity_prompt_matches(run.graph().definition(), node, work.prompt(), prompt)
             {
                 return Err(OrganizationFactsError::InvalidActivity);
             }
@@ -3690,7 +3898,7 @@ fn validate_activity_request(
                 .ok_or(OrganizationFactsError::InvalidActivity)?;
             if review.role_id() != role_id
                 || review.session_ref().as_str() != session_ref
-                || prompt.trim().is_empty()
+                || !activity_prompt_matches(run.graph().definition(), node, review.prompt(), prompt)
             {
                 return Err(OrganizationFactsError::InvalidActivity);
             }
@@ -3699,6 +3907,28 @@ fn validate_activity_request(
         (ActivityKind::Control { .. }, NodeKind::Start | NodeKind::Join | NodeKind::End) => Ok(()),
         _ => Err(OrganizationFactsError::InvalidActivity),
     }
+}
+
+fn activity_prompt_matches(
+    definition: &GraphDefinition,
+    node: &crate::NodeDefinition,
+    base_prompt: &str,
+    prompt: &str,
+) -> bool {
+    let Some(composed) =
+        crate::run::scheduler::compose_agent_task_prompt(definition, node, base_prompt)
+    else {
+        return false;
+    };
+    if prompt == composed {
+        return true;
+    }
+    let Some((prefix, suffix)) = composed.split_once("\n\n<teamrun_completion_protocol>") else {
+        return false;
+    };
+    prompt.starts_with(prefix)
+        && prompt.contains("\n\n<teamrun_upstream_context>\n")
+        && prompt.ends_with(&format!("\n\n<teamrun_completion_protocol>{suffix}"))
 }
 
 fn validate_activity_target(
@@ -3783,7 +4013,9 @@ fn validate_activity_transition(
         | (ActivityPhase::TerminalObserved { .. }, ActivityPhase::Failed { .. }) => Ok(()),
         (ActivityPhase::Completed { .. }, ActivityPhase::Completed { .. }) => Ok(()),
         (ActivityPhase::Failed { .. }, ActivityPhase::Failed { .. }) => Ok(()),
-        (ActivityPhase::OutcomeUnknown { .. }, ActivityPhase::OutcomeUnknown { .. }) => Ok(()),
+        (ActivityPhase::OutcomeUnknown { .. }, ActivityPhase::OutcomeUnknown { .. })
+        | (ActivityPhase::OutcomeUnknown { .. }, ActivityPhase::TerminalObserved { .. })
+        | (ActivityPhase::OutcomeUnknown { .. }, ActivityPhase::Cancelled { .. }) => Ok(()),
         (ActivityPhase::Cancelled { .. }, ActivityPhase::Cancelled { .. }) => Ok(()),
         _ => Err(OrganizationFactsError::InvalidActivityTransition),
     }
@@ -3867,16 +4099,17 @@ fn validate_terminal_observation(
         .ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
     match observation.resolution() {
         TerminalObservationResolution::AwaitingAuthorizedGraphResolution
-            if run
-                .graph()
-                .current_attempt(&node_id)
-                .is_some_and(|current| current.fence() == observation.fence())
-                && attempt.status() == crate::AttemptStatus::Waiting
+            if (attempt.status() == crate::AttemptStatus::Waiting
+                || (history.current().fence() != observation.fence()
+                    && matches!(
+                        attempt.status(),
+                        crate::AttemptStatus::Ready | crate::AttemptStatus::Running
+                    )))
                 && attempt.output_port().is_none() => {}
         TerminalObservationResolution::GraphResolved(resolution)
             if observation
                 .output()
-                .is_none_or(|output| output.output_port() == resolution.output_port())
+                .is_none_or(|output| output.decision() == resolution.output_port())
                 && resolution.delivery_id() == observation.delivery_id()
                 && resolution.graph_run_id() == observation.graph_run_id()
                 && resolution.fence() == observation.fence()
@@ -3893,11 +4126,7 @@ fn validate_terminal_observation(
                     )
                 ) => {}
         TerminalObservationResolution::NodeCancelled
-            if run
-                .graph()
-                .current_attempt(&node_id)
-                .is_some_and(|current| current.fence() == observation.fence())
-                && attempt.status() == crate::AttemptStatus::Cancelled
+            if attempt.status() == crate::AttemptStatus::Cancelled
                 && attempt.output_port().is_none() => {}
         _ => return Err(OrganizationFactsError::InvalidTerminalObservation),
     }

@@ -133,6 +133,7 @@ pub fn decode_team_runtime_capability_request(
 
 pub async fn execute_team_runtime_capability_request(
     owner: &organization::OrganizationHandle,
+    resolver: &dyn organization::RoleSessionIdentityResolver,
     request: TeamRuntimeCapabilityRequest,
 ) -> Result<(String, TeamRuntimeControlOutcome), TeamRuntimeDecodeError> {
     let operation_id = request.operation_id().to_owned();
@@ -148,6 +149,7 @@ pub async fn execute_team_runtime_capability_request(
         team_id.as_deref(),
         run_id.as_deref(),
         projection_context.as_ref(),
+        resolver,
     );
     Ok((operation_id, outcome))
 }
@@ -284,22 +286,14 @@ fn team_runtime_result_contract(result: &Value) -> &'static str {
     "operation-result"
 }
 
-#[cfg(test)]
-pub fn team_runtime_outcome(
-    outcome: TeamRuntimeCommandOutcome,
-    team_id: Option<&str>,
-    run_id: Option<&str>,
-) -> TeamRuntimeProjectionOutcome {
-    team_runtime_outcome_with_context(outcome, team_id, run_id, None)
-}
-
 pub fn project_team_runtime_outcome(
     outcome: TeamRuntimeCommandOutcome,
     team_id: Option<&str>,
     run_id: Option<&str>,
     projection_context: Option<&TeamRuntimeProjectionContext>,
+    resolver: &dyn organization::RoleSessionIdentityResolver,
 ) -> TeamRuntimeControlOutcome {
-    team_runtime_outcome_with_context(outcome, team_id, run_id, projection_context)
+    team_runtime_outcome_with_context(outcome, team_id, run_id, projection_context, resolver)
 }
 
 fn team_runtime_outcome_with_context(
@@ -307,6 +301,7 @@ fn team_runtime_outcome_with_context(
     team_id: Option<&str>,
     run_id: Option<&str>,
     projection_context: Option<&TeamRuntimeProjectionContext>,
+    resolver: &dyn organization::RoleSessionIdentityResolver,
 ) -> TeamRuntimeProjectionOutcome {
     match outcome {
         TeamRuntimeCommandOutcome::PackageValidate(validation) => {
@@ -372,14 +367,14 @@ fn team_runtime_outcome_with_context(
         },
         TeamRuntimeCommandOutcome::RunList(runs) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
             "teamId": team_id,
-            "runs": runs.iter().filter_map(team_run_list_item_legacy_json).collect::<Vec<_>>(),
+            "runs": runs.iter().filter_map(|run| team_run_list_item_legacy_json(run, resolver)).collect::<Vec<_>>(),
         }))),
         TeamRuntimeCommandOutcome::Resume {
             team_id,
             outcomes,
             runs,
         } => {
-            let result = team_resume_legacy_json(&team_id, &outcomes, &runs);
+            let result = team_resume_legacy_json(&team_id, &outcomes, &runs, resolver);
             if outcomes
                 .iter()
                 .any(|outcome| matches!(outcome, organization::ResumeOutcome::OutcomeUnknown(_)))
@@ -432,7 +427,7 @@ fn team_runtime_outcome_with_context(
             role_sessions,
         } => match snapshot {
             organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Available(snapshot) => {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(team_run_public_snapshot_legacy_json(&snapshot, role_sessions.as_deref())))
+                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(team_run_public_snapshot_legacy_json(&snapshot, role_sessions.as_deref(), resolver)))
             }
             organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Unavailable(_) => unavailable(),
         },
@@ -504,8 +499,7 @@ fn team_runtime_outcome_with_context(
             }
             Err(TeamRuntimeStatus::Unavailable) => unavailable(),
         },
-        TeamRuntimeCommandOutcome::GraphSave(result)
-        | TeamRuntimeCommandOutcome::GraphPatch(result) => match result {
+        TeamRuntimeCommandOutcome::GraphSave(result) => match result {
             Ok(organization::TeamRunCommandOutcome::Available(run)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
                 "success": true,
                 "runId": run.run().as_str(),
@@ -517,6 +511,19 @@ fn team_runtime_outcome_with_context(
                 TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" })))
             }
             Err(_) => TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team graph command was rejected."),
+        },
+        TeamRuntimeCommandOutcome::GraphPatch(result) => match result {
+            Ok(organization::TeamRunCommandOutcome::Available(run)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
+                "success": true,
+                "runId": run.run().as_str(),
+                "saved": true,
+                "outcome": "available",
+            }))),
+            Ok(organization::TeamRunCommandOutcome::Unavailable) => unavailable(),
+            Ok(organization::TeamRunCommandOutcome::OutcomeUnknown) => {
+                TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" })))
+            }
+            Err(_) => TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Graph patch validation failed. Refresh the TeamRun graph and retry; use the Review rework outlet for upstream rework links."),
         },
         TeamRuntimeCommandOutcome::GraphContext(result) => match result {
             organization::TeamGraphContextResult::Available(context) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
@@ -977,10 +984,13 @@ fn team_run_trigger_outcome(
     }
 }
 
-fn team_run_list_item_legacy_json(outcome: &organization::TeamRunQueryOutcome) -> Option<Value> {
+fn team_run_list_item_legacy_json(
+    outcome: &organization::TeamRunQueryOutcome,
+    resolver: &dyn organization::RoleSessionIdentityResolver,
+) -> Option<Value> {
     match outcome {
         organization::TeamRunQueryOutcome::Available(run) => {
-            let sessions = team_role_session_receipts_legacy_json(run.role_sessions());
+            let sessions = team_role_session_receipts_legacy_json(run.role_sessions(), resolver);
             Some(json!({
                 "runId": run.run().as_str(),
                 "status": team_run_status_from_graph_status(run.graph_status()),
@@ -1001,9 +1011,11 @@ fn team_run_list_item_legacy_json(outcome: &organization::TeamRunQueryOutcome) -
 fn team_run_public_snapshot_legacy_json(
     snapshot: &organization::run::public_projection::TeamRunPublicSnapshot,
     role_sessions: Option<&[organization::RoleSessionReceipt]>,
+    resolver: &dyn organization::RoleSessionIdentityResolver,
 ) -> Value {
     let roles_available = role_sessions.is_some();
-    let roles = role_sessions.map(team_role_session_receipts_legacy_json);
+    let roles =
+        role_sessions.map(|sessions| team_role_session_receipts_legacy_json(sessions, resolver));
     json!({
         "run": team_public_run_legacy_json(snapshot),
         "graph": team_public_graph_legacy_json(snapshot.run().run_id(), snapshot.graph()),
@@ -1050,10 +1062,13 @@ fn team_public_unavailable_sections_legacy_json(
 
 fn team_role_session_receipts_legacy_json(
     sessions: &[organization::RoleSessionReceipt],
+    resolver: &dyn organization::RoleSessionIdentityResolver,
 ) -> Vec<Value> {
     sessions
         .iter()
-        .filter_map(organization::adapters::loopback::role_session_json)
+        .filter_map(|session| {
+            organization::adapters::loopback::role_session_json(session, resolver)
+        })
         .collect()
 }
 
@@ -1082,9 +1097,20 @@ fn team_public_graph_legacy_json(
         "graphId": graph.graph_id(),
         "workflowPlanId": graph.workflow_plan_id(),
         "title": graph.title(),
+        "layout": team_public_graph_layout_legacy_json(graph.layout()),
         "nodes": graph.nodes().iter().map(team_public_node_legacy_json).collect::<Vec<_>>(),
         "edges": graph.edges().iter().map(team_public_edge_legacy_json).collect::<Vec<_>>(),
         "status": team_public_graph_status_name(graph.status()),
+    })
+}
+
+fn team_public_graph_layout_legacy_json(
+    layout: &organization::run::public_projection::TeamPublicGraphLayout,
+) -> Value {
+    json!({
+        "nodePositions": layout.node_positions().iter().map(|(node_id, position)| {
+            (node_id.clone(), json!({ "x": position.x(), "y": position.y() }))
+        }).collect::<BTreeMap<_, _>>(),
     })
 }
 
@@ -1098,6 +1124,7 @@ fn team_public_node_legacy_json(
         "roleId": node.role_id(),
         "taskId": node.task_id(),
         "status": team_public_attempt_status_name(node.attempt().status()),
+        "statusReason": node.status_reason(),
         "maxAttempts": node.max_attempts(),
         "config": team_public_node_config_json(node),
     })
@@ -1488,6 +1515,7 @@ fn team_resume_legacy_json(
     team_id: &organization::TeamId,
     outcomes: &[organization::ResumeOutcome],
     runs: &[organization::TeamRunQueryOutcome],
+    resolver: &dyn organization::RoleSessionIdentityResolver,
 ) -> Value {
     let terminal_run_ids = runs
         .iter()
@@ -1524,7 +1552,7 @@ fn team_resume_legacy_json(
         "restoredRunIds": restored_run_ids,
         "activeRunIds": active_run_ids,
         "skippedTerminalRunIds": skipped_terminal_run_ids.into_iter().collect::<Vec<_>>(),
-        "runs": runs.iter().filter_map(team_run_list_item_legacy_json).collect::<Vec<_>>(),
+        "runs": runs.iter().filter_map(|run| team_run_list_item_legacy_json(run, resolver)).collect::<Vec<_>>(),
     })
 }
 

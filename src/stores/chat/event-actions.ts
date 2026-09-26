@@ -19,7 +19,6 @@ import {
   loadMissingItemPreviews,
 } from './attachment-helpers';
 import { getSessionRuntime } from './store-state-helpers';
-import { useTaskSnapshotStore } from './task-snapshot-store';
 import { isAgentSessionTombstoned } from './session-actions';
 import { buildSessionRecordKey, findSessionRecordKey } from './session-identity';
 import {
@@ -260,7 +259,6 @@ export function handleStoreSessionUpdateEvent(
   });
 
   if (sessionUpdate.sessionUpdate === 'session_info_update') {
-    useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
     applySessionLifecycleEvent({
       set,
       get,
@@ -273,7 +271,6 @@ export function handleStoreSessionUpdateEvent(
   }
 
   if (sessionUpdate.sessionUpdate === 'plan') {
-    useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
     if (shouldIgnoreRuntimeEvent({
       eventSessionKey: null,
       targetEventSessionKey: sourceSessionKey,
@@ -295,7 +292,6 @@ export function handleStoreSessionUpdateEvent(
   ) {
     return;
   }
-  useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
 
   if (shouldIgnoreRuntimeEvent({
     eventSessionKey,

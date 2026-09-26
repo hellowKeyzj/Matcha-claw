@@ -1,6 +1,7 @@
 packages:
   - '.'
   - 'packages/memory-lancedb-pro'
+  - 'packages/openclaw-lark'
   - 'runtime-host'
 
 ignoredBuiltDependencies:

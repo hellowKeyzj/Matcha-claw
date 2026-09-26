@@ -11,6 +11,13 @@ const ROOT = process.cwd();
 
 const REQUIRED_LOCAL_PLUGINS = [
   {
+    pluginId: 'openclaw-lark',
+    sourceDir: 'packages/openclaw-lark',
+    expectedExtensions: ['./dist/index.mjs'],
+    sourceDirs: ['./src'],
+    sourceEntries: ['./index.ts', './secret-contract-api.ts', './src/core/config-schema.ts', './secret-contract-api.js'],
+  },
+  {
     pluginId: 'task-manager',
     sourceDir: 'packages/openclaw-task-manager-plugin',
     expectedExtensions: ['./dist/index.js'],

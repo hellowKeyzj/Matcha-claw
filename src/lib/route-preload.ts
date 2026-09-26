@@ -24,6 +24,7 @@ export const TasksRoute = lazyWithPreload(() => import('../pages/Tasks'));
 export const PluginsRoute = lazyWithPreload(() => import('../pages/Plugins'));
 export const ExternalConnectorsRoute = lazyWithPreload(() => import('../pages/ExternalConnectors'));
 export const RemoteFleetRoute = lazyWithPreload(() => import('../pages/RemoteFleet'));
+export const WikiRoute = lazyWithPreload(() => import('../pages/Wiki'));
 export const ProvidersRoute = lazyWithPreload(() =>
   import('../pages/Providers').then((module) => ({ default: module.ProvidersPage })),
 );
@@ -76,6 +77,9 @@ function resolveRoutePreloader(path: string): (() => Promise<unknown>) | null {
   }
   if (normalizedPath.startsWith('/remote-fleet')) {
     return () => RemoteFleetRoute.preload();
+  }
+  if (normalizedPath.startsWith('/wiki')) {
+    return () => WikiRoute.preload();
   }
   if (TEAMS_FEATURE_ENABLED && normalizedPath.startsWith('/teams/')) {
     return () => TeamChatRoute.preload();

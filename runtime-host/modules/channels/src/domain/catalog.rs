@@ -75,7 +75,7 @@ fn parse_values(mut bytes: Zeroizing<Vec<u8>>) -> Result<Map<String, Value>, ()>
     let parsed = serde_json::from_slice::<Value>(&bytes)
         .ok()
         .and_then(|value| match value {
-            Value::Object(object) if !object.is_empty() => Some(object),
+            Value::Object(object) => Some(object),
             _ => None,
         });
     bytes.zeroize();
@@ -87,11 +87,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_values_rejects_empty_or_non_object_payloads() {
-        assert!(parse_values(Zeroizing::new(b"{}".to_vec())).is_err());
-        assert!(parse_values(Zeroizing::new(b"[]".to_vec())).is_err());
-        assert!(parse_values(Zeroizing::new(b"null".to_vec())).is_err());
-        assert!(parse_values(Zeroizing::new(Vec::new())).is_err());
+    fn parse_patch_rejects_invalid_or_non_object_payloads() {
+        for bytes in [
+            b"[]".as_slice(),
+            b"null",
+            b"true",
+            b"1",
+            b"\"text\"",
+            b"{",
+            b"",
+        ] {
+            assert!(parse_patch(Zeroizing::new(bytes.to_vec())).is_err());
+        }
+    }
+
+    #[test]
+    fn parse_patch_accepts_empty_object() {
+        assert!(
+            parse_patch(Zeroizing::new(b"{}".to_vec()))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

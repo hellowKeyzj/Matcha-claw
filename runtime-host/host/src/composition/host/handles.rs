@@ -18,6 +18,7 @@ use subagents::SubagentsModule;
 use task_manager::TaskModule;
 use toolchain::ToolchainModule;
 use usage::UsageModule;
+use wiki::WikiModule;
 use workspace::WorkspaceModule;
 
 use super::super::{admission::HostAdmission, peer::PeerHandle};
@@ -46,9 +47,11 @@ pub(crate) struct HostHandles {
     pub agents: SubagentsModule,
     pub task_manager: TaskModule,
     pub workspace: WorkspaceModule,
+    pub wiki: WikiModule,
     pub usage: UsageModule,
     pub diagnostics: DiagnosticsModule,
     pub(crate) observation: ObservationSink,
     pub session_delta_source: sessions_module::SessionDeltaSource,
     pub start_gate_registry: Arc<organization::StartGateRegistry>,
+    pub runtime_directory: Arc<super::super::runtime_ports::RuntimeDriverDirectory>,
 }

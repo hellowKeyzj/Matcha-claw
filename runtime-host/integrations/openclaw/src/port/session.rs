@@ -20,11 +20,11 @@ use crate::{
         operation::SessionOperation,
         protocol::{
             ChatAbortParams, ChatAbortResult, ChatHistoryParams, ChatHistoryResult, ChatSendParams,
-            ChatSendResult, SessionCreateParams, SessionCreateResult, SessionDeleteParams,
-            SessionDeleteResult, SessionDescribeParams, SessionDescribeRow, SessionKey,
-            SessionLabelPatchParams, SessionLabelPatchResult, SessionModelPatchParams,
-            SessionModelPatchResult, SessionPermissionPatchParams, SessionPermissionProjection,
-            SessionsListParams, SessionsListResult,
+            ChatSendResult, SessionAbortParams, SessionAbortResult, SessionCreateParams,
+            SessionCreateResult, SessionDeleteParams, SessionDeleteResult, SessionDescribeParams,
+            SessionDescribeRow, SessionKey, SessionLabelPatchParams, SessionLabelPatchResult,
+            SessionModelPatchParams, SessionModelPatchResult, SessionPermissionPatchParams,
+            SessionPermissionProjection, SessionsListParams, SessionsListResult,
         },
     },
     team::NativeRunSettledOutcome,
@@ -393,6 +393,18 @@ impl OpenClawSessionGateway {
     {
         SessionOperation::new(Arc::clone(&self.client))
             .abort_chat(params)
+            .await
+            .map(port_outcome)
+            .map_err(Into::into)
+    }
+
+    pub async fn abort_session(
+        &self,
+        params: SessionAbortParams,
+    ) -> Result<InvocationOutcome<SessionAbortResult, OpenClawSessionError>, OpenClawSessionError>
+    {
+        SessionOperation::new(Arc::clone(&self.client))
+            .abort_session(params)
             .await
             .map(port_outcome)
             .map_err(Into::into)

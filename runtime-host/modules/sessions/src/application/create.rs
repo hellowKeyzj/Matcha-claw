@@ -47,26 +47,18 @@ impl SessionCreateAdmissionInput {
 pub struct SessionAdmission {
     endpoint: RuntimeEndpoint,
     provider: SessionProvider,
-    session_key_prefix: Option<&'static str>,
 }
 
 impl SessionAdmission {
-    pub fn new(
-        endpoint: RuntimeEndpoint,
-        provider: SessionProvider,
-        session_key_prefix: Option<&'static str>,
-    ) -> Self {
-        Self {
-            endpoint,
-            provider,
-            session_key_prefix,
-        }
+    pub fn new(endpoint: RuntimeEndpoint, provider: SessionProvider) -> Self {
+        Self { endpoint, provider }
     }
 
     pub fn prepare_create(
         &self,
         input: SessionCreateAdmissionInput,
         now_ms: u64,
+        session_key: impl FnOnce(&str, &str) -> Option<String>,
     ) -> Result<SessionCreateCommand, InvalidSessionCreate> {
         if input.endpoint != self.endpoint {
             return Err(InvalidSessionCreate);
@@ -83,12 +75,9 @@ impl SessionAdmission {
             }
             None => generated_endpoint_session_id(now_ms)?,
         };
-        let session_key = rendered_session_key(
-            self.session_key_prefix,
-            &input.agent_id,
-            &endpoint_session_id,
-        )
-        .ok_or(InvalidSessionCreate)?;
+        let session_key = session_key(&input.agent_id, &endpoint_session_id)
+            .filter(|key| valid_identity(key, MAX_SESSION_KEY_BYTES))
+            .ok_or(InvalidSessionCreate)?;
         SessionCreateCommand::from_prepared(
             self.endpoint.clone(),
             self.provider,
@@ -184,18 +173,6 @@ fn random_uuid_v4() -> Result<String, InvalidSessionCreate> {
         bytes[14],
         bytes[15]
     ))
-}
-
-fn rendered_session_key(
-    prefix: Option<&str>,
-    agent_id: &str,
-    endpoint_session_id: &str,
-) -> Option<String> {
-    let session_key = match prefix {
-        Some(prefix) => format!("{prefix}:{agent_id}:{endpoint_session_id}"),
-        None => format!("agent:{agent_id}:{endpoint_session_id}"),
-    };
-    valid_identity(&session_key, MAX_SESSION_KEY_BYTES).then_some(session_key)
 }
 
 fn valid_agent_id(value: &str) -> bool {
@@ -298,19 +275,22 @@ mod tests {
     }
 
     fn openclaw_admission() -> SessionAdmission {
-        SessionAdmission::new(
-            runtime_endpoint("openclaw"),
-            SessionProvider::OpenClaw,
-            None,
-        )
+        SessionAdmission::new(runtime_endpoint("openclaw"), SessionProvider::OpenClaw)
     }
 
     fn matcha_admission() -> SessionAdmission {
         SessionAdmission::new(
             runtime_endpoint("matcha-agent"),
             SessionProvider::MatchaAgent,
-            Some("matcha-agent"),
         )
+    }
+
+    fn openclaw_session_key(agent_id: &str, endpoint_session_id: &str) -> Option<String> {
+        Some(format!("agent:{agent_id}:{endpoint_session_id}"))
+    }
+
+    fn matcha_session_key(agent_id: &str, endpoint_session_id: &str) -> Option<String> {
+        Some(format!("matcha-agent:{agent_id}:{endpoint_session_id}"))
     }
 
     #[test]
@@ -323,6 +303,7 @@ mod tests {
                     Some("session-1".into()),
                 ),
                 0,
+                openclaw_session_key,
             )
             .unwrap();
         assert_eq!(command.session_key(), "agent:main:session-1");
@@ -334,6 +315,7 @@ mod tests {
             .prepare_create(
                 SessionCreateAdmissionInput::new(runtime_endpoint("openclaw"), "main".into(), None),
                 7,
+                openclaw_session_key,
             )
             .unwrap();
         let key = command.session_key();
@@ -359,6 +341,7 @@ mod tests {
                     None,
                 ),
                 7,
+                matcha_session_key,
             )
             .unwrap();
         let key = command.session_key().to_owned();
@@ -380,6 +363,7 @@ mod tests {
                         Some(" ".into()),
                     ),
                     1,
+                    openclaw_session_key,
                 )
                 .is_err()
         );

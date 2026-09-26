@@ -54,6 +54,10 @@ type TeamRunGraphCanvasLabels = {
   edgeFallback: string;
   canvasMinimap: string;
   nodeTitle: string;
+  nodeMaxAttempts: string;
+  nodeMaxAttemptsHint: string;
+  nodeMaxAttemptsInvalid: string;
+  reworkLimitExceeded: string;
   roleId: string;
   executorJson: string;
   prompt: string;
@@ -149,9 +153,15 @@ type DragState = {
   moved: boolean;
 };
 
+type ConnectionSource = {
+  sourcePort: string;
+  action: TeamGraphEdgeAction;
+};
+
 type ConnectionDraft = {
   sourceNodeId: string;
   sourcePort: string;
+  action: TeamGraphEdgeAction;
 };
 
 type ConfigurationSheet =
@@ -195,10 +205,12 @@ const DEFAULT_START_CRON_CUSTOM_KIND: TeamGraphCronCustomKind = 'intervalMinutes
 const DEFAULT_START_CRON_CUSTOM_INTERVAL_MINUTES = '10';
 const DEFAULT_START_CRON_CUSTOM_INTERVAL_HOURS = '1';
 const DEFAULT_START_CRON_CUSTOM_TIME = '09:00';
+const DEFAULT_NODE_MAX_ATTEMPTS = 3;
+const NODE_MAX_ATTEMPTS_LIMIT = 0xffff_ffff;
 const NODE_PALETTE: Array<{ kind: TeamGraphCanvasNodeKind; title: string; sourcePort: string }> = [
   { kind: 'start', title: 'Trigger', sourcePort: 'completed' },
   { kind: 'work', title: 'Role step', sourcePort: 'completed' },
-  { kind: 'review', title: 'Review', sourcePort: 'passed' },
+  { kind: 'review', title: 'Review', sourcePort: 'completed' },
   { kind: 'human_decision', title: 'Decision', sourcePort: 'approved' },
   { kind: 'script_review', title: 'Script check', sourcePort: 'passed' },
   { kind: 'join', title: 'Join', sourcePort: 'joined' },
@@ -213,6 +225,12 @@ const SCRIPT_REVIEW_RULE_IDS: TeamGraphScriptReviewRuleId[] = [
 ];
 
 const EDGE_VISUALS: Record<string, TeamGraphEdgeVisual> = {
+  rework: {
+    markerId: 'team-graph-arrow-rework',
+    stroke: '#f43f5e',
+    labelClassName: 'border-rose-300/70 bg-rose-50/95 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/95 dark:text-rose-300',
+    dashArray: '7 5',
+  },
   failed: {
     markerId: 'team-graph-arrow-failed',
     stroke: '#f43f5e',
@@ -358,9 +376,13 @@ function edgeDisplayLabel(edge: TeamGraphEdgeRecord): string {
   return edge.sourcePort || edge.kind || edge.label || '';
 }
 
-function positionNodes(nodes: TeamGraphNodeRecord[], draftPositions: Record<string, { x: number; y: number }>): PositionedNode[] {
+function positionNodes(
+  nodes: TeamGraphNodeRecord[],
+  draftPositions: Record<string, { x: number; y: number }>,
+  layoutPositions: Record<string, { x: number; y: number }>,
+): PositionedNode[] {
   return nodes.map((node, index) => {
-    const position = draftPositions[node.nodeId] ?? readNodePosition(node) ?? {
+    const position = draftPositions[node.nodeId] ?? layoutPositions[node.nodeId] ?? {
       x: CANVAS_PADDING + (index % 4) * COLUMN_GAP,
       y: CANVAS_PADDING + Math.floor(index / 4) * ROW_GAP,
     };
@@ -480,6 +502,7 @@ function hasRecordEntries(value: Record<string, unknown>): boolean {
 }
 
 const EMPTY_TEAM_GRAPH: TeamGraphSnapshotRecord = {
+  layout: { nodePositions: {} },
   nodes: [],
   edges: [],
   status: 'draft',
@@ -566,14 +589,6 @@ function nextNodePosition(
   if (nodes.length === 0) return start;
   const bottom = Math.max(...nodes.map((node) => node.y + (nodeSizes[node.nodeId]?.height ?? NODE_HEIGHT)));
   return { x: start.x, y: Math.max(minY, bottom + CANVAS_PADDING / 2) };
-}
-
-function readNodePosition(node: TeamGraphNodeRecord): { x: number; y: number } | null {
-  const position = node.metadata?.position;
-  if (!position || typeof position !== 'object' || Array.isArray(position)) return null;
-  const x = (position as Record<string, unknown>).x;
-  const y = (position as Record<string, unknown>).y;
-  return typeof x === 'number' && typeof y === 'number' ? { x, y } : null;
 }
 
 function defaultConfigForNode(kind: TeamGraphCanvasNodeKind, title: string): Record<string, unknown> | undefined {
@@ -690,6 +705,7 @@ function defaultExecutorForNode(kind: TeamGraphCanvasNodeKind): Record<string, u
 function defaultSourcePortForNode(node: TeamGraphNodeRecord): string {
   switch (node.kind) {
     case 'review':
+      return 'completed';
     case 'script_review':
       return 'passed';
     case 'human_decision':
@@ -705,9 +721,13 @@ function defaultTargetPortForNode(): string {
   return 'input';
 }
 
+function defaultEdgeActionForSourcePort(sourcePort: string): TeamGraphEdgeAction {
+  return sourcePort === 'rework' ? 'rework' : 'activate';
+}
+
 function defaultEdgeTypeForSourcePort(sourcePort: string): string {
   if (sourcePort === 'completed') return 'completed_success';
-  if (sourcePort === 'failed' || sourcePort === 'rejected') return 'rework';
+  if (sourcePort === 'rework' || sourcePort === 'failed' || sourcePort === 'rejected') return 'rework';
   if (sourcePort === 'approved') return 'approval';
   return sourcePort || 'control';
 }
@@ -717,6 +737,7 @@ function sourcePortOptionsForNode(node: TeamGraphNodeRecord | null): string[] {
     case 'start':
       return ['completed'];
     case 'review':
+      return ['completed', 'rework'];
     case 'script_review':
       return ['passed', 'failed'];
     case 'human_decision':
@@ -726,6 +747,17 @@ function sourcePortOptionsForNode(node: TeamGraphNodeRecord | null): string[] {
     default:
       return ['completed', 'failed'];
   }
+}
+
+function connectionSourcesForNode(node: TeamGraphNodeRecord): ConnectionSource[] {
+  if (node.kind === 'review') {
+    return [
+      { sourcePort: 'completed', action: 'activate' },
+      { sourcePort: 'rework', action: 'rework' },
+    ];
+  }
+  const sourcePort = defaultSourcePortForNode(node);
+  return [{ sourcePort, action: defaultEdgeActionForSourcePort(sourcePort) }];
 }
 
 function formatTemplate(template: string, values: Record<string, string | number>): string {
@@ -808,6 +840,7 @@ export function TeamRunGraphCanvas({
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [configurationSheet, setConfigurationSheet] = useState<ConfigurationSheet>(null);
   const [nodeTitle, setNodeTitle] = useState('');
+  const [nodeMaxAttempts, setNodeMaxAttempts] = useState('');
   const [roleId, setRoleId] = useState('');
   const [executorJson, setExecutorJson] = useState('{}');
   const [prompt, setPrompt] = useState('');
@@ -853,7 +886,11 @@ export function TeamRunGraphCanvas({
   const suppressClickNodeIdRef = useRef<string | null>(null);
 
   const effectiveGraph = useMemo<TeamGraphSnapshotRecord>(() => graph ?? EMPTY_TEAM_GRAPH, [graph]);
-  const positionedNodes = useMemo(() => positionNodes(effectiveGraph.nodes, draftPositions), [effectiveGraph.nodes, draftPositions]);
+  const graphRunId = effectiveGraph.runId ?? '';
+  const layoutRunIdRef = useRef(graphRunId);
+  const activeDraftPositions = layoutRunIdRef.current === graphRunId ? draftPositions : {};
+  const layoutPositions = effectiveGraph.layout?.nodePositions ?? {};
+  const positionedNodes = useMemo(() => positionNodes(effectiveGraph.nodes, activeDraftPositions, layoutPositions), [effectiveGraph.nodes, activeDraftPositions, layoutPositions]);
   const nodeById = useMemo(
     () => new Map(positionedNodes.map((node) => [node.nodeId, node])),
     [positionedNodes],
@@ -879,8 +916,25 @@ export function TeamRunGraphCanvas({
   const webhookPublicUrl = buildWebhookPublicUrl(startWebhookPublicBaseUrl, startWebhookPath);
 
   useEffect(() => {
-    setDraftPositions({});
-  }, [graph]);
+    if (layoutRunIdRef.current !== graphRunId) {
+      layoutRunIdRef.current = graphRunId;
+      setDraftPositions((current) => (hasRecordEntries(current) ? {} : current));
+      return;
+    }
+    setDraftPositions((current) => {
+      const activeNodeIds = new Set(effectiveGraph.nodes.map((node) => node.nodeId));
+      let changed = false;
+      const next: Record<string, { x: number; y: number }> = {};
+      for (const [nodeId, position] of Object.entries(current)) {
+        if (activeNodeIds.has(nodeId)) {
+          next[nodeId] = position;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [effectiveGraph.nodes, graphRunId]);
 
   useEffect(() => {
     const activeNodeIds = new Set(positionedNodes.map((node) => node.nodeId));
@@ -936,6 +990,7 @@ export function TeamRunGraphCanvas({
   useEffect(() => {
     if (!selectedNode) {
       setNodeTitle('');
+      setNodeMaxAttempts('');
       setRoleId('');
       setExecutorJson('{}');
       setPrompt('');
@@ -950,6 +1005,7 @@ export function TeamRunGraphCanvas({
       return;
     }
     setNodeTitle(selectedNode.title ?? '');
+    setNodeMaxAttempts(selectedNode.maxAttempts === undefined ? '' : String(selectedNode.maxAttempts));
     setRoleId(readNodeRoleId(selectedNode));
     setExecutorJson(stringifyJsonObject(selectedNode.executor));
     setPrompt(readNodePrompt(selectedNode));
@@ -988,7 +1044,7 @@ export function TeamRunGraphCanvas({
     setEdgeTargetPort(selectedEdge.targetPort ?? defaultTargetPortForNode());
     setEdgeType(selectedEdge.edgeType ?? selectedEdge.kind ?? defaultEdgeTypeForSourcePort(nextSourcePort));
     setEdgeLabel(selectedEdge.label ?? '');
-    setEdgeAction(selectedEdge.action ?? 'activate');
+    setEdgeAction(selectedEdge.action ?? defaultEdgeActionForSourcePort(nextSourcePort));
     setEdgeIncludeUpstreamResult(selectedEdge.payload?.includeUpstreamResult !== false);
     setFormError(null);
   }, [selectedEdge, selectedEdgeSourceNode]);
@@ -1011,7 +1067,7 @@ export function TeamRunGraphCanvas({
     }
   };
 
-  const appendEdge = async (input: { sourceNodeId: string; targetNodeId: string; sourcePort: string; label?: string }): Promise<void> => {
+  const appendEdge = async (input: { sourceNodeId: string; targetNodeId: string; sourcePort: string; action: TeamGraphEdgeAction; label?: string }): Promise<void> => {
     if (!input.sourceNodeId || !input.targetNodeId || input.sourceNodeId === input.targetNodeId) {
       setFormError(`${labels.sourceNode} / ${labels.targetNode}`);
       return;
@@ -1024,7 +1080,7 @@ export function TeamRunGraphCanvas({
       targetPort: defaultTargetPortForNode(),
       edgeType: defaultEdgeTypeForSourcePort(input.sourcePort),
       ...(input.label ? { label: input.label } : {}),
-      action: 'activate',
+      action: input.action,
       payload: { includeUpstreamResult: true },
       kind: 'projection',
     };
@@ -1046,7 +1102,7 @@ export function TeamRunGraphCanvas({
     }
   };
 
-  const handleSaveStartNode = async (): Promise<void> => {
+  const handleSaveStartNode = async (maxAttempts: number): Promise<void> => {
     if (!selectedNode) return;
     const normalizedWebhookPath = normalizeWebhookPathInput(startWebhookPath);
     if (startTriggerMode === 'webhook' && !normalizedWebhookPath) {
@@ -1084,6 +1140,7 @@ export function TeamRunGraphCanvas({
     const nextNode = graphPatchNode({
       ...selectedNode,
       title: nodeTitle.trim() || undefined,
+      maxAttempts,
       config: { ...(selectedNode.config ?? {}), trigger },
     });
     if (await submitGraphPatch([{ op: 'replace_node', node: nextNode }])) {
@@ -1093,6 +1150,15 @@ export function TeamRunGraphCanvas({
 
   const handleSaveNode = async (): Promise<void> => {
     if (!selectedNode) return;
+    const maxAttempts = readPositiveIntegerInRange(nodeMaxAttempts, 1, NODE_MAX_ATTEMPTS_LIMIT);
+    if (maxAttempts === null) {
+      setFormError(labels.nodeMaxAttemptsInvalid);
+      return;
+    }
+    if (selectedNode.kind === 'start') {
+      await handleSaveStartNode(maxAttempts);
+      return;
+    }
 
     let nextExecutor: Record<string, unknown>;
     let nextConfig: Record<string, unknown>;
@@ -1161,6 +1227,7 @@ export function TeamRunGraphCanvas({
     const nextNode = graphPatchNode({
       ...selectedNode,
       title: nodeTitle.trim() || undefined,
+      maxAttempts,
       roleId: nextRoleId,
       executor: hasRecordEntries(nextExecutor) ? nextExecutor : undefined,
       config: hasRecordEntries(nextConfig) ? nextConfig : undefined,
@@ -1207,19 +1274,23 @@ export function TeamRunGraphCanvas({
   const handleAddNode = async (kind: TeamGraphCanvasNodeKind): Promise<void> => {
     const paletteItem = NODE_PALETTE.find((item) => item.kind === kind)!;
     const nodeId = createProjectionNodeId(kind);
-    const position = nextNodePosition(positionedNodes, nodeSizes, readCanvasViewport(getCanvasScroller()));
+    const rawPosition = nextNodePosition(positionedNodes, nodeSizes, readCanvasViewport(getCanvasScroller()));
+    const position = { x: Math.round(rawPosition.x), y: Math.round(rawPosition.y) };
     const node: TeamGraphNodeRecord = {
       nodeId,
       kind,
       title: paletteItem.title,
-      maxAttempts: 1,
+      maxAttempts: DEFAULT_NODE_MAX_ATTEMPTS,
       status: 'pending',
       ...(kind === 'work' || kind === 'review' ? { roleId: 'leader' } : {}),
       ...(kind === 'work' ? { taskId: nodeId } : {}),
       executor: defaultExecutorForNode(kind),
       config: defaultConfigForNode(kind, paletteItem.title),
     };
-    if (await submitGraphPatch([{ op: 'add_node', node: graphPatchNode(node) }])) {
+    if (await submitGraphPatch([
+      { op: 'add_node', node: graphPatchNode(node) },
+      { op: 'set_node_position', nodeId, position },
+    ])) {
       setDraftPositions((current) => ({ ...current, [nodeId]: position }));
       setSelectedNodeId(nodeId);
     }
@@ -1253,21 +1324,23 @@ export function TeamRunGraphCanvas({
     setDragState({ ...dragState, currentX: nextX, currentY: nextY, moved });
   };
 
-  const handleNodePointerUp = (event: PointerEvent<HTMLDivElement>): void => {
+  const handleNodePointerUp = async (event: PointerEvent<HTMLDivElement>): Promise<void> => {
     if (!dragState || dragState.pointerId !== event.pointerId) return;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     const finishedDrag = dragState;
     setDragState(null);
     if (finishedDrag.moved) {
+      const position = { x: Math.round(finishedDrag.currentX), y: Math.round(finishedDrag.currentY) };
+      setDraftPositions((current) => ({ ...current, [finishedDrag.nodeId]: position }));
       suppressClickNodeIdRef.current = finishedDrag.nodeId;
       window.setTimeout(() => { suppressClickNodeIdRef.current = null; }, 0);
+      await submitGraphPatch([{ op: 'set_node_position', nodeId: finishedDrag.nodeId, position }]);
     }
   };
 
-  const handleStartConnection = (event: MouseEvent<HTMLButtonElement>, node: TeamGraphNodeRecord): void => {
+  const handleStartConnection = (event: MouseEvent<HTMLButtonElement>, node: TeamGraphNodeRecord, source: ConnectionSource): void => {
     event.stopPropagation();
-    const nextPort = defaultSourcePortForNode(node);
-    setConnectionDraft({ sourceNodeId: node.nodeId, sourcePort: nextPort });
+    setConnectionDraft({ sourceNodeId: node.nodeId, sourcePort: source.sourcePort, action: source.action });
   };
 
   const handleFinishConnection = (event: MouseEvent<HTMLButtonElement>, target: TeamGraphNodeRecord): void => {
@@ -1277,6 +1350,7 @@ export function TeamRunGraphCanvas({
       sourceNodeId: connectionDraft.sourceNodeId,
       targetNodeId: target.nodeId,
       sourcePort: connectionDraft.sourcePort,
+      action: connectionDraft.action,
       label: connectionDraft.sourcePort,
     });
     setConnectionDraft(null);
@@ -1320,7 +1394,7 @@ export function TeamRunGraphCanvas({
         </div>
       </div>
 
-      <div className="grid gap-3 2xl:grid-cols-[minmax(0,1.7fr)_24rem]">
+      <div className="grid gap-3 2xl:grid-cols-[minmax(0,1fr)_18rem]">
         <StableScrollArea data-team-graph-canvas="true" className="relative min-h-[520px] overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner">
           <div
             aria-label={labels.workflowCanvas}
@@ -1421,6 +1495,7 @@ export function TeamRunGraphCanvas({
               const isSelected = selectedNode?.nodeId === node.nodeId;
               const visual = visualForNodeKind(node.kind);
               const NodeIcon = visual.Icon;
+              const connectionSources = connectionSourcesForNode(node);
               return (
                 <div
                   key={node.nodeId}
@@ -1443,7 +1518,7 @@ export function TeamRunGraphCanvas({
                   }}
                   onPointerDown={(event) => handleNodePointerDown(event, node)}
                   onPointerMove={handleNodePointerMove}
-                  onPointerUp={handleNodePointerUp}
+                  onPointerUp={(event) => { void handleNodePointerUp(event); }}
                   className={`absolute cursor-grab overflow-hidden rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 active:cursor-grabbing ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
                   style={{ left: node.x, top: node.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT }}
                 >
@@ -1457,15 +1532,21 @@ export function TeamRunGraphCanvas({
                   >
                     <span className={`h-4 w-4 rounded-full border shadow-sm transition group-hover:ring-4 group-hover:ring-primary/10 group-focus-visible:ring-4 group-focus-visible:ring-primary/10 ${connectionDraft ? visual.handleClassName : 'border-border bg-background'}`} />
                   </button>
-                  <button
-                    type="button"
-                    aria-label={formatTemplate(labels.connectFromNode, { title: node.title ?? node.nodeId })}
-                    className="group absolute -right-5 top-1/2 z-20 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full"
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => handleStartConnection(event, node)}
-                  >
-                    <span className={`h-4 w-4 rounded-full border shadow-sm transition group-hover:ring-4 group-hover:ring-primary/10 group-focus-visible:ring-4 group-focus-visible:ring-primary/10 ${connectionDraft?.sourceNodeId === node.nodeId ? visual.handleClassName : 'border-border bg-background'}`} />
-                  </button>
+                  <div className="absolute -right-5 top-1/2 z-20 flex -translate-y-1/2 flex-col gap-1">
+                    {connectionSources.map((source) => (
+                      <button
+                        key={source.sourcePort}
+                        type="button"
+                        aria-label={`${formatTemplate(labels.connectFromNode, { title: node.title ?? node.nodeId })}: ${source.sourcePort}`}
+                        title={source.sourcePort}
+                        className="group grid h-8 w-10 place-items-center rounded-full"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => handleStartConnection(event, node, source)}
+                      >
+                        <span className={`h-4 w-4 rounded-full border shadow-sm transition group-hover:ring-4 group-hover:ring-primary/10 group-focus-visible:ring-4 group-focus-visible:ring-primary/10 ${connectionDraft?.sourceNodeId === node.nodeId && connectionDraft.sourcePort === source.sourcePort ? visual.handleClassName : 'border-border bg-background'}`} />
+                      </button>
+                    ))}
+                  </div>
                   <div className="space-y-3 p-3">
                     <div className="flex items-start gap-3">
                       <div className={`grid h-10 w-10 shrink-0 place-items-center border border-border/90 ${visual.iconClassName} ${visual.iconShape}`}>
@@ -1493,9 +1574,9 @@ export function TeamRunGraphCanvas({
         </StableScrollArea>
 
         <aside className="space-y-3">
-          <div className="rounded-xl border border-border/80 bg-card p-3 shadow-sm">
-            <div className="text-sm font-medium">{labels.nodePalette}</div>
-            <StableScrollArea className="mt-3 max-h-[17rem] space-y-2 overflow-y-auto pr-1 text-xs">
+          <div className="rounded-xl border border-border/80 bg-card p-2.5 shadow-sm">
+            <div className="text-xs font-medium">{labels.nodePalette}</div>
+            <StableScrollArea className="mt-2 max-h-[14rem] space-y-1.5 overflow-y-auto pr-1 text-xs">
               {NODE_PALETTE.map((item) => {
                 const visual = NODE_VISUALS[item.kind];
                 const PaletteIcon = visual.Icon;
@@ -1503,23 +1584,17 @@ export function TeamRunGraphCanvas({
                   <button
                     key={item.kind}
                     type="button"
-                    className={`group relative flex w-full items-center gap-3 overflow-hidden rounded-[18px] border p-3 text-left text-foreground shadow-sm shadow-slate-900/10 transition hover:shadow-md hover:shadow-slate-900/15 disabled:cursor-not-allowed disabled:opacity-60 ${visual.paletteClassName}`}
+                    className={`group relative flex w-full items-center gap-2 overflow-hidden rounded-xl border px-2.5 py-2 text-left text-foreground shadow-sm shadow-slate-900/10 transition hover:shadow-md hover:shadow-slate-900/15 disabled:cursor-not-allowed disabled:opacity-60 ${visual.paletteClassName}`}
                     onClick={() => void handleAddNode(item.kind)}
                     disabled={isSaving}
                   >
-                    <span className={`absolute inset-y-0 left-0 w-1 ${visual.accentClassName}`} />
-                    <span className={`grid h-11 w-11 shrink-0 place-items-center border border-border/90 ${visual.iconClassName} ${visual.iconShape}`}>
-                      <PaletteIcon className={`h-4 w-4 ${item.kind === 'join' ? '-rotate-45' : ''}`} />
+                    <span className={`absolute inset-y-0 left-0 w-0.5 ${visual.accentClassName}`} />
+                    <span className={`grid h-8 w-8 shrink-0 place-items-center border border-border/90 ${visual.iconClassName} ${visual.iconShape}`}>
+                      <PaletteIcon className={`h-3.5 w-3.5 ${item.kind === 'join' ? '-rotate-45' : ''}`} />
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-2">
-                        <span className="truncate text-sm font-semibold tracking-tight">{item.title}</span>
-                        <span className="rounded-full border border-border/80 bg-muted/70 px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">{item.kind}</span>
-                      </span>
-                      <span className="mt-1 block truncate text-[11px] text-muted-foreground">{labels.nodePaletteDescriptions[item.kind]}</span>
-                    </span>
-                    <span className="rounded-full border border-border bg-background px-2 py-0.5 text-[10px] text-muted-foreground shadow-sm">
-                      {labels.defaultOutputPort}: {item.sourcePort}
+                      <span className="block text-xs font-semibold tracking-tight">{item.title}</span>
+                      <span className="mt-0.5 block text-[10px] leading-snug text-muted-foreground">{labels.nodePaletteDescriptions[item.kind]}</span>
                     </span>
                   </button>
                 );
@@ -1538,6 +1613,28 @@ export function TeamRunGraphCanvas({
             <SheetTitle>{configurationSheet?.kind === 'edge' ? labels.edgeConfiguration : labels.nodeConfiguration}</SheetTitle>
             <SheetDescription>{configurationSheet?.kind === 'edge' ? labels.edgeConfigurationDescription : labels.nodeConfigurationDescription}</SheetDescription>
           </SheetHeader>
+
+          {configurationSheet?.kind === 'node' && selectedNode ? (
+            <div className="mt-4 space-y-1">
+              {selectedNode.statusReason === 'rework_limit_exceeded' ? (
+                <div role="status" className="mb-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{labels.reworkLimitExceeded}</div>
+              ) : null}
+              <label className="grid gap-1 text-xs text-muted-foreground">
+                {labels.nodeMaxAttempts}
+                <input
+                  className="rounded border bg-background px-2 py-1 text-sm text-foreground"
+                  type="number"
+                  min={1}
+                  max={NODE_MAX_ATTEMPTS_LIMIT}
+                  step={1}
+                  aria-describedby="team-node-max-attempts-hint"
+                  value={nodeMaxAttempts}
+                  onChange={(event) => setNodeMaxAttempts(event.target.value)}
+                />
+              </label>
+              <div id="team-node-max-attempts-hint" className="text-xs text-muted-foreground">{labels.nodeMaxAttemptsHint}</div>
+            </div>
+          ) : null}
 
           {configurationSheet?.kind === 'node' && selectedNode && selectedNodeKind === 'start' ? (
             <div className="mt-4 space-y-3 text-sm">
@@ -1675,7 +1772,7 @@ export function TeamRunGraphCanvas({
               ) : null}
               <div className="rounded border border-border/60 bg-muted/30 p-2 text-[11px] text-muted-foreground">{labels.startTriggerHint}</div>
               <div className="flex gap-2">
-                <button type="button" className="rounded border px-3 py-1.5 text-xs font-medium" onClick={() => void handleSaveStartNode()} disabled={isSaving}>
+                <button type="button" className="rounded border px-3 py-1.5 text-xs font-medium" onClick={() => void handleSaveNode()} disabled={isSaving}>
                   {labels.saveNode}
                 </button>
                 <button type="button" className="rounded border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive" onClick={() => void handleDeleteNode()} disabled={isSaving}>
@@ -1800,6 +1897,7 @@ export function TeamRunGraphCanvas({
                   const nextPort = event.target.value;
                   setEdgeSourcePort(nextPort);
                   setEdgeType(defaultEdgeTypeForSourcePort(nextPort));
+                  setEdgeAction(defaultEdgeActionForSourcePort(nextPort));
                 }}>
                   {sourcePortOptionsForNode(selectedEdgeSourceNode).map((port) => <option key={port} value={port}>{port}</option>)}
                 </select>
@@ -1829,6 +1927,7 @@ export function TeamRunGraphCanvas({
                       const nextPort = event.target.value;
                       setEdgeSourcePort(nextPort);
                       setEdgeType(defaultEdgeTypeForSourcePort(nextPort));
+                      setEdgeAction(defaultEdgeActionForSourcePort(nextPort));
                     }} />
                   </label>
                   <label className="grid gap-1 text-xs text-muted-foreground">
@@ -1859,6 +1958,7 @@ export function TeamRunGraphCanvas({
               </div>
             </div>
           ) : null}
+          {formError ? <div role="alert" className="mt-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{formError}</div> : null}
         </SheetContent>
       </Sheet>
     </div>

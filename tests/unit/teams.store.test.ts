@@ -22,7 +22,6 @@ import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import {
   buildTeamRoleChatTargetByIdentityKey,
   buildTeamRoleChatTargetIndex,
-  isKnownTeamRoleSession,
   resolveTeamRoleChatTarget,
   resolveTeamRoleChatTargetFromProbe,
   selectTeamRoleChatTargetIndex,
@@ -946,7 +945,11 @@ describe('teams store', () => {
       roleId: 'leader',
       endpointSessionId: leader.endpointSessionId,
     });
-    expect(isKnownTeamRoleSession(index, { sessionKey: leader.localSessionId })).toBe(true);
+    expect(resolveTeamRoleChatTargetFromProbe(index, { sessionKey: leader.localSessionId })).toMatchObject({
+      teamId: 'team-1',
+      runId: 'run-1',
+      roleId: 'leader',
+    });
   });
 
   it('resolves Team role probes by local, endpoint, and materialized session keys', () => {
@@ -976,11 +979,10 @@ describe('teams store', () => {
     expect(resolveTeamRoleChatTargetFromProbe(index, { sessionKey: materializedSessionKey })).toMatchObject({
       endpointSessionId: leader.endpointSessionId,
     });
-    expect(isKnownTeamRoleSession(index, { sessionKey: materializedSessionKey })).toBe(true);
-    expect(isKnownTeamRoleSession(index, { sessionKey: 'agent:leader-agent:ordinary-session' })).toBe(false);
+    expect(resolveTeamRoleChatTargetFromProbe(index, { sessionKey: 'agent:leader-agent:ordinary-session' })).toBeNull();
   });
 
-  it('keeps the Teams store role index stable and reserves Team role local session keys', () => {
+  it('keeps the Teams store role index stable and resolves only indexed Team role keys', () => {
     const leader = teamRoleSessionBinding({ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-run-1-leader' });
     const input = {
       teams: [teamMeta()],
@@ -992,18 +994,22 @@ describe('teams store', () => {
     const emptyIndex = buildTeamRoleChatTargetIndex({ teams: [], runListByTeamId: {}, rolesByTeamId: {} });
 
     expect(secondIndex).toBe(firstIndex);
-    expect(isKnownTeamRoleSession(firstIndex, { sessionIdentity: leader.sessionIdentity })).toBe(true);
-    expect(isKnownTeamRoleSession(emptyIndex, {
+    expect(resolveTeamRoleChatTargetFromProbe(firstIndex, { sessionIdentity: leader.sessionIdentity })).toMatchObject({
+      teamId: 'team-1',
+      runId: 'run-1',
+      roleId: 'leader',
+    });
+    expect(resolveTeamRoleChatTargetFromProbe(emptyIndex, {
       sessionIdentity: createOpenClawTestSessionIdentity('team-role-session-run-1-leader', 'leader-agent'),
-    })).toBe(true);
-    expect(isKnownTeamRoleSession(firstIndex, {
+    })).toBeNull();
+    expect(resolveTeamRoleChatTargetFromProbe(firstIndex, {
       sessionIdentity: createOpenClawTestSessionIdentity('team-role-session-orphan-leader', 'leader-agent'),
       sessionKey: 'team-role-session-orphan-leader',
-    })).toBe(true);
-    expect(isKnownTeamRoleSession(firstIndex, {
+    })).toBeNull();
+    expect(resolveTeamRoleChatTargetFromProbe(firstIndex, {
       sessionIdentity: createOpenClawTestSessionIdentity('agent:leader-agent:main', 'leader-agent'),
       sessionKey: 'agent:leader-agent:main',
-    })).toBe(false);
+    })).toBeNull();
   });
 
   it('guards duplicate in-flight resume actions while sending the sealed request only once', async () => {

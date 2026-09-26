@@ -9,6 +9,7 @@ use std::fmt;
 
 pub const CHAT_SEND_METHOD: &str = "chat.send";
 pub const CHAT_ABORT_METHOD: &str = "chat.abort";
+pub const SESSIONS_ABORT_METHOD: &str = "sessions.abort";
 pub const SESSIONS_LIST_METHOD: &str = "sessions.list";
 pub const SESSIONS_DESCRIBE_METHOD: &str = "sessions.describe";
 pub const SESSIONS_PATCH_METHOD: &str = "sessions.patch";
@@ -325,6 +326,32 @@ impl ChatAbortParams {
 
     pub fn session_key(&self) -> &SessionKey {
         &self.session_key
+    }
+
+    pub fn for_run(mut self, run_id: RunId) -> Self {
+        self.run_id = Some(run_id);
+        self
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAbortParams {
+    key: SessionKey,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<RunId>,
+}
+impl fmt::Debug for SessionAbortParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionAbortParams")
+            .field("has_run_id", &self.run_id.is_some())
+            .finish_non_exhaustive()
+    }
+}
+impl SessionAbortParams {
+    pub fn new(key: SessionKey) -> Self {
+        Self { key, run_id: None }
     }
 
     pub fn for_run(mut self, run_id: RunId) -> Self {
@@ -1246,17 +1273,27 @@ impl SessionDescribeRow {
     /// Rejoins the row's selected model into the canonical `provider/model` runtime ref shared
     /// with [`crate::native_config::ProviderModelRuntimeIdentity::runtime_model_ref`].
     pub fn model_ref(&self) -> Option<String> {
-        Some(openclaw_model_ref(self.model_provider.as_deref(), self.model.as_deref()?))
+        Some(openclaw_model_ref(
+            self.model_provider.as_deref(),
+            self.model.as_deref()?,
+        ))
     }
 
     pub fn model_state(&self) -> Option<sessions_module::state::SessionModelState> {
         let model = self.model.as_deref()?;
         Some(sessions_module::state::SessionModelState {
-            selected: Some(openclaw_model_identity(self.model_provider.as_deref(), model)),
+            selected: Some(openclaw_model_identity(
+                self.model_provider.as_deref(),
+                model,
+            )),
             active: None,
             override_source: self.model_override_source.map(|source| match source {
-                SessionModelOverrideSource::User => sessions_module::state::SessionModelOverrideSource::User,
-                SessionModelOverrideSource::Auto => sessions_module::state::SessionModelOverrideSource::Auto,
+                SessionModelOverrideSource::User => {
+                    sessions_module::state::SessionModelOverrideSource::User
+                }
+                SessionModelOverrideSource::Auto => {
+                    sessions_module::state::SessionModelOverrideSource::Auto
+                }
             }),
             selection_id: None,
         })
@@ -1316,6 +1353,29 @@ impl fmt::Debug for ChatAbortResult {
             .field("run_count", &self.run_ids.len())
             .finish()
     }
+}
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAbortResult {
+    pub ok: bool,
+    pub aborted_run_id: Option<RunId>,
+    pub status: SessionAbortStatus,
+}
+impl fmt::Debug for SessionAbortResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionAbortResult")
+            .field("ok", &self.ok)
+            .field("has_aborted_run_id", &self.aborted_run_id.is_some())
+            .field("status", &self.status)
+            .finish()
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionAbortStatus {
+    Aborted,
+    NoActiveRun,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -1400,9 +1460,6 @@ impl<'de> Deserialize<'de> for SessionSummary {
             "estimatedCostUsd",
             "subagentRunState",
             "hasActiveSubagentRun",
-            "startedAt",
-            "endedAt",
-            "runtimeMs",
             "parentSessionKey",
             "childSessions",
             "responseUsage",
@@ -1484,16 +1541,20 @@ impl SessionSummary {
     pub fn model_state(&self) -> Option<sessions_module::state::SessionModelState> {
         let model = self.model.as_deref()?;
         Some(sessions_module::state::SessionModelState {
-            selected: Some(openclaw_model_identity(self.model_provider.as_deref(), model)),
-            active: self
-                .active_model
-                .as_deref()
-                .map(|active_model| {
-                    openclaw_model_identity(self.active_model_provider.as_deref(), active_model)
-                }),
+            selected: Some(openclaw_model_identity(
+                self.model_provider.as_deref(),
+                model,
+            )),
+            active: self.active_model.as_deref().map(|active_model| {
+                openclaw_model_identity(self.active_model_provider.as_deref(), active_model)
+            }),
             override_source: self.model_override_source.map(|source| match source {
-                SessionModelOverrideSource::User => sessions_module::state::SessionModelOverrideSource::User,
-                SessionModelOverrideSource::Auto => sessions_module::state::SessionModelOverrideSource::Auto,
+                SessionModelOverrideSource::User => {
+                    sessions_module::state::SessionModelOverrideSource::User
+                }
+                SessionModelOverrideSource::Auto => {
+                    sessions_module::state::SessionModelOverrideSource::Auto
+                }
             }),
             selection_id: None,
         })
@@ -1596,6 +1657,7 @@ pub enum ProtocolError {
     Rejected,
     InvalidChatSendResult,
     InvalidChatAbortResult,
+    InvalidSessionAbortResult,
     InvalidSessionsListResult,
     InvalidSessionDescribeResult,
     InvalidSessionModelPatchResult,
@@ -1613,6 +1675,7 @@ impl fmt::Display for ProtocolError {
             Self::Rejected => "gateway rejected the session request",
             Self::InvalidChatSendResult => "chat.send result is invalid",
             Self::InvalidChatAbortResult => "chat.abort result is invalid",
+            Self::InvalidSessionAbortResult => "sessions.abort result is invalid",
             Self::InvalidSessionsListResult => "sessions.list result is invalid",
             Self::InvalidSessionDescribeResult => "sessions.describe result is invalid",
             Self::InvalidSessionModelPatchResult => "sessions.patch model result is invalid",
@@ -1644,6 +1707,17 @@ pub fn decode_chat_abort_result(
         .ok
         .then_some(result)
         .ok_or(ProtocolError::InvalidChatAbortResult)
+}
+pub fn decode_session_abort_result(
+    id: &str,
+    response: GatewayResponse,
+) -> Result<SessionAbortResult, ProtocolError> {
+    let result: SessionAbortResult =
+        decode_result(id, response, ProtocolError::InvalidSessionAbortResult)?;
+    result
+        .ok
+        .then_some(result)
+        .ok_or(ProtocolError::InvalidSessionAbortResult)
 }
 pub fn decode_sessions_list_result(
     id: &str,
@@ -3599,6 +3673,10 @@ mod tests {
             json(r#"{"sessionKey":"agent:main:session-1","runId":"run-7"}"#)
         );
         assert_eq!(
+            serde_json::to_value(SessionAbortParams::new(key()).for_run(run())).unwrap(),
+            json(r#"{"key":"agent:main:session-1","runId":"run-7"}"#)
+        );
+        assert_eq!(
             serde_json::to_value(SessionModelPatchParams::new(
                 key(),
                 Some(ModelRef::try_new("anthropic/claude-opus-4-7").unwrap()),
@@ -3850,6 +3928,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(abort.run_ids, [run()]);
+        let session_abort = decode_session_abort_result(
+            "abort",
+            success(
+                "abort",
+                r#"{"ok":true,"abortedRunId":"run-7","status":"aborted","future":true}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(session_abort.aborted_run_id, Some(run()));
+        assert_eq!(session_abort.status, SessionAbortStatus::Aborted);
         let list = decode_sessions_list_result(
             "list",
             success(

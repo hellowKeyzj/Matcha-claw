@@ -134,6 +134,8 @@
         }
     },
     "todoPanel": {
+        "title": "任务清单",
+        "progress": "完成进度",
         "summary": "任务 {{completed}}/{{total}}",
         "expand": "展开任务列表",
         "collapse": "收起任务列表",

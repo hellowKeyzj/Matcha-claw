@@ -119,7 +119,7 @@ pub fn schedule_ready_nodes(
         let Some(node) = graph.definition().node(item.node_id()) else {
             return Err(ReadyScheduleError::StaleReadyQueue(item.node_id().clone()));
         };
-        let Some(activity_kind) = activity_kind_for_ready_node(node) else {
+        let Some(activity_kind) = activity_kind_for_ready_node(graph.definition(), node) else {
             continue;
         };
         let idempotency_key = activity_idempotency_key(graph.definition().run_id(), item.fence());
@@ -142,7 +142,10 @@ pub fn schedule_ready_nodes(
     Ok(scheduled)
 }
 
-fn activity_kind_for_ready_node(node: &crate::NodeDefinition) -> Option<ActivityKind> {
+fn activity_kind_for_ready_node(
+    definition: &crate::GraphDefinition,
+    node: &crate::NodeDefinition,
+) -> Option<ActivityKind> {
     match node.kind() {
         NodeKind::Work => {
             let work = node.work_assignment()?;
@@ -153,7 +156,7 @@ fn activity_kind_for_ready_node(node: &crate::NodeDefinition) -> Option<Activity
                 task_id: work.task_id().to_owned(),
                 role_id: work.role_id().to_owned(),
                 session_ref: work.session_ref().as_str().to_owned(),
-                prompt: work.prompt().to_owned(),
+                prompt: compose_agent_task_prompt(definition, node, work.prompt())?,
             })
         }
         NodeKind::Review => {
@@ -165,7 +168,7 @@ fn activity_kind_for_ready_node(node: &crate::NodeDefinition) -> Option<Activity
                 task_id: node.id().as_str().to_owned(),
                 role_id: review.role_id().to_owned(),
                 session_ref: review.session_ref().as_str().to_owned(),
-                prompt: review.prompt().to_owned(),
+                prompt: compose_agent_task_prompt(definition, node, review.prompt())?,
             })
         }
         NodeKind::Start
@@ -174,6 +177,128 @@ fn activity_kind_for_ready_node(node: &crate::NodeDefinition) -> Option<Activity
         | NodeKind::Join
         | NodeKind::End => None,
     }
+}
+
+pub(crate) fn compose_agent_task_prompt(
+    definition: &crate::GraphDefinition,
+    node: &crate::NodeDefinition,
+    base_prompt: &str,
+) -> Option<String> {
+    compose_agent_task_prompt_with_upstream_context(definition, node, base_prompt, &[])
+}
+
+pub(crate) struct UpstreamPromptContext<'a> {
+    pub(crate) summary: &'a str,
+    pub(crate) tasks: Vec<&'a str>,
+}
+
+pub(crate) fn compose_agent_task_prompt_with_upstream_context(
+    definition: &crate::GraphDefinition,
+    node: &crate::NodeDefinition,
+    base_prompt: &str,
+    upstream: &[UpstreamPromptContext<'_>],
+) -> Option<String> {
+    let (decisions, source_ports) = match node.kind() {
+        NodeKind::Work => (work_decisions(), work_decision_ports()),
+        NodeKind::Review => (review_decisions(), review_decision_ports()),
+        NodeKind::Start
+        | NodeKind::HumanDecision
+        | NodeKind::ScriptReview
+        | NodeKind::Join
+        | NodeKind::End => return None,
+    };
+    Some(append_completion_protocol(
+        &append_upstream_context(base_prompt, upstream),
+        decisions,
+        allowed_role_ids(definition, node, source_ports),
+    ))
+}
+
+fn append_upstream_context(prompt: &str, upstream: &[UpstreamPromptContext<'_>]) -> String {
+    if upstream.is_empty() {
+        return prompt.to_owned();
+    }
+    let mut composed = prompt.to_owned();
+    composed.push_str("\n\n<teamrun_upstream_context>");
+    for context in upstream {
+        composed.push_str("\n- summary: ");
+        composed.push_str(context.summary);
+        for task in &context.tasks {
+            composed.push_str("\n  task: ");
+            composed.push_str(task);
+        }
+    }
+    composed.push_str("\n</teamrun_upstream_context>");
+    composed
+}
+
+fn append_completion_protocol(
+    prompt: &str,
+    decisions: &'static str,
+    allowed_role_ids: Vec<String>,
+) -> String {
+    format!(
+        "{prompt}\n\n<teamrun_completion_protocol>\n你处于 TeamRun 团队模式。完成当前节点任务后，在最终回复末尾追加一个 `<team_message>` 控制块\n\n`<team_message>` 控制块内必须是合法 JSON，结构如下：\n<team_message>{{\"summary\":\"\",\"decision\":\"\",\"dispatch\":[]}}</team_message>\n\n字段：\n- `summary`：中文写本节点交付摘要；包含完成内容、关键结论、产物/改动、风险、下游节点必要上下文\n- `decision`：选择当前节点的一个后续流向。只能选择下面列出的值：\n{decisions}\n- `dispatch`：给下游节点 role 的具体任务；没有任务时填 `[]`。每项包含：\n  - `role_id`：下游 role id，只能选择以下团队role：\n{}\n  - `task`：给该 role 的具体任务。\n\n要求：\n- 整条最终回复只能出现一个 `<team_message>`\n- 不要新增未说明字段\n</teamrun_completion_protocol>",
+        format_allowed_role_ids(&allowed_role_ids)
+    )
+}
+
+fn work_decisions() -> &'static str {
+    "- `completed`：当前节点已完成，继续正常后续节点。"
+}
+
+fn review_decisions() -> &'static str {
+    "- `completed`：审查/验收通过，继续正常后续节点。\n- `rework`：审查/验收不通过，返回返工路径。"
+}
+
+fn work_decision_ports() -> &'static [&'static str] {
+    &["completed"]
+}
+
+fn review_decision_ports() -> &'static [&'static str] {
+    &["completed", "rework"]
+}
+
+fn allowed_role_ids(
+    definition: &crate::GraphDefinition,
+    node: &crate::NodeDefinition,
+    source_ports: &[&str],
+) -> Vec<String> {
+    let mut role_ids: Vec<String> = Vec::new();
+    for edge in definition
+        .outgoing_edges(node.id())
+        .filter(|edge| source_ports.contains(&edge.source_port()))
+    {
+        let Some(target) = definition.node(edge.target_node_id()) else {
+            continue;
+        };
+        let role_id = match target.kind() {
+            NodeKind::Work => target.work_assignment().map(|work| work.role_id()),
+            NodeKind::Review => target.review_assignment().map(|review| review.role_id()),
+            NodeKind::Start
+            | NodeKind::HumanDecision
+            | NodeKind::ScriptReview
+            | NodeKind::Join
+            | NodeKind::End => None,
+        };
+        if let Some(role_id) = role_id {
+            if !role_ids.iter().any(|existing| existing.as_str() == role_id) {
+                role_ids.push(role_id.to_owned());
+            }
+        }
+    }
+    role_ids
+}
+
+fn format_allowed_role_ids(role_ids: &[String]) -> String {
+    if role_ids.is_empty() {
+        return "- 无".to_owned();
+    }
+    role_ids
+        .iter()
+        .map(|role_id| format!("- `{role_id}`"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn activity_idempotency_key(run_id: &GraphRunId, fence: &ExecutionFence) -> String {
@@ -245,6 +370,12 @@ mod tests {
         }
     }
 
+    fn expected_prompt(prompt: &str, decisions: &str, allowed_role_ids: &str) -> String {
+        format!(
+            "{prompt}\n\n<teamrun_completion_protocol>\n你处于 TeamRun 团队模式。完成当前节点任务后，在最终回复末尾追加一个 `<team_message>` 控制块\n\n`<team_message>` 控制块内必须是合法 JSON，结构如下：\n<team_message>{{\"summary\":\"\",\"decision\":\"\",\"dispatch\":[]}}</team_message>\n\n字段：\n- `summary`：中文写本节点交付摘要；包含完成内容、关键结论、产物/改动、风险、下游节点必要上下文\n- `decision`：选择当前节点的一个后续流向。只能选择下面列出的值：\n{decisions}\n- `dispatch`：给下游节点 role 的具体任务；没有任务时填 `[]`。每项包含：\n  - `role_id`：下游 role id，只能选择以下团队role：\n{allowed_role_ids}\n  - `task`：给该 role 的具体任务。\n\n要求：\n- 整条最终回复只能出现一个 `<team_message>`\n- 不要新增未说明字段\n</teamrun_completion_protocol>"
+        )
+    }
+
     #[test]
     fn skips_a_slot_that_is_not_due() {
         assert_eq!(plan_due_cron_trigger(armed(101), 100, Some(200)), Ok(None));
@@ -299,10 +430,13 @@ mod tests {
     #[test]
     fn schedule_ready_nodes_uses_typed_group_facts_and_parallel_capacity() {
         use crate::run::graph::{
-            ExecutorPolicy, GraphDefinition, GraphRunId, NodeDefinition, NodeId, WorkAssignment,
+            EdgeAction, EdgeDefinition, EdgeId, ExecutorPolicy, GraphDefinition, GraphRunId,
+            NodeDefinition, NodeId, WorkAssignment,
         };
         use std::num::NonZeroU32;
 
+        let work_a = NodeId::new("work-a");
+        let work_b = NodeId::new("work-b");
         let graph = GraphState::initialize(
             GraphDefinition::new(
                 "graph-1",
@@ -311,7 +445,7 @@ mod tests {
                 "graph",
                 vec![
                     NodeDefinition::work(
-                        NodeId::new("work-a"),
+                        work_a.clone(),
                         "work a",
                         NonZeroU32::new(1).unwrap(),
                         WorkAssignment::typed(
@@ -323,13 +457,26 @@ mod tests {
                         ),
                     ),
                     NodeDefinition::work(
-                        NodeId::new("work-b"),
+                        work_b.clone(),
                         "work b",
                         NonZeroU32::new(1).unwrap(),
-                        WorkAssignment::new("task-b", "role-b"),
+                        WorkAssignment::typed(
+                            "task-b",
+                            "next prompt",
+                            ExecutorPolicy::team_role("role-b"),
+                            None,
+                            None,
+                        ),
                     ),
                 ],
-                Vec::new(),
+                vec![EdgeDefinition::new(
+                    EdgeId::new("work-a-work-b"),
+                    work_a,
+                    "completed",
+                    work_b,
+                    "input",
+                    EdgeAction::Activate,
+                )],
             )
             .unwrap(),
             1,
@@ -350,7 +497,14 @@ mod tests {
         assert!(matches!(
             selected[0].activity_kind(),
             ActivityKind::AgentTask { task_id, role_id, session_ref, prompt }
-                if task_id == "task-a" && role_id == "role-a" && session_ref == "rs0" && prompt == "prompt"
+                if task_id == "task-a"
+                    && role_id == "role-a"
+                    && session_ref == "rs0"
+                    && prompt == &expected_prompt(
+                        "prompt",
+                        work_decisions(),
+                        "- `role-b`",
+                    )
         ));
         let request = selected[0]
             .bind_activity_target(ActivityTarget::new("session-a").unwrap(), 3, 1)
@@ -388,6 +542,270 @@ mod tests {
 
         assert!(schedule_ready_nodes(&graph, 1, 0).unwrap().is_empty());
         assert_eq!(graph.ready_queue().len(), 1);
+    }
+
+    #[test]
+    fn work_prompt_lists_no_allowed_roles_without_downstream_agent_nodes() {
+        use crate::run::graph::{
+            ExecutorPolicy, GraphDefinition, GraphRunId, NodeDefinition, NodeId, WorkAssignment,
+        };
+        use std::num::NonZeroU32;
+
+        let graph = GraphState::initialize(
+            GraphDefinition::new(
+                "graph-1",
+                "plan-1",
+                GraphRunId::new("run-1"),
+                "graph",
+                vec![NodeDefinition::work(
+                    NodeId::new("work"),
+                    "work",
+                    NonZeroU32::new(1).unwrap(),
+                    WorkAssignment::typed(
+                        "task",
+                        "solo prompt",
+                        ExecutorPolicy::team_role("role"),
+                        None,
+                        None,
+                    ),
+                )],
+                Vec::new(),
+            )
+            .unwrap(),
+            1,
+        );
+
+        let selected = schedule_ready_nodes(&graph, 1, 0).unwrap();
+
+        assert!(matches!(
+            selected[0].activity_kind(),
+            ActivityKind::AgentTask { prompt, .. }
+                if prompt == &expected_prompt("solo prompt", work_decisions(), "- 无")
+        ));
+    }
+
+    #[test]
+    fn review_prompt_lists_completed_and_rework_decisions_with_downstream_roles() {
+        use crate::run::graph::{
+            EdgeAction, EdgeDefinition, EdgeId, ExecutorPolicy, GraphDefinition, GraphRunId,
+            NodeDefinition, NodeId, ReviewAssignment, WorkAssignment,
+        };
+        use std::num::NonZeroU32;
+
+        let review = NodeId::new("review");
+        let accepted = NodeId::new("accepted");
+        let rework = NodeId::new("rework");
+        let graph = GraphState::initialize(
+            GraphDefinition::new(
+                "graph-1",
+                "plan-1",
+                GraphRunId::new("run-1"),
+                "graph",
+                vec![
+                    NodeDefinition::review(
+                        review.clone(),
+                        "review",
+                        NonZeroU32::new(1).unwrap(),
+                        ReviewAssignment::new("reviewer", "review prompt"),
+                    ),
+                    NodeDefinition::work(
+                        accepted.clone(),
+                        "accepted",
+                        NonZeroU32::new(1).unwrap(),
+                        WorkAssignment::typed(
+                            "task-accepted",
+                            "accepted prompt",
+                            ExecutorPolicy::team_role("role-accepted"),
+                            None,
+                            None,
+                        ),
+                    ),
+                    NodeDefinition::work(
+                        rework.clone(),
+                        "rework",
+                        NonZeroU32::new(2).unwrap(),
+                        WorkAssignment::typed(
+                            "task-rework",
+                            "rework prompt",
+                            ExecutorPolicy::team_role("role-rework"),
+                            None,
+                            None,
+                        ),
+                    ),
+                ],
+                vec![
+                    EdgeDefinition::new(
+                        EdgeId::new("review-accepted"),
+                        review.clone(),
+                        "completed",
+                        accepted,
+                        "input",
+                        EdgeAction::Activate,
+                    ),
+                    EdgeDefinition::new(
+                        EdgeId::new("review-rework"),
+                        review.clone(),
+                        "rework",
+                        rework,
+                        "input",
+                        EdgeAction::Rework,
+                    ),
+                ],
+            )
+            .unwrap(),
+            1,
+        );
+
+        let selected = schedule_ready_nodes(&graph, 1, 0).unwrap();
+
+        assert_eq!(selected[0].node_id(), &review);
+        assert!(matches!(
+            selected[0].activity_kind(),
+            ActivityKind::AgentTask { prompt, .. }
+                if prompt == &expected_prompt(
+                    "review prompt",
+                    review_decisions(),
+                    "- `role-accepted`\n- `role-rework`",
+                )
+        ));
+    }
+
+    #[test]
+    fn rework_schedules_work_then_review_again_before_finishing() {
+        use crate::run::graph::{
+            AttemptReason, AttemptStatus, EdgeAction, EdgeDefinition, EdgeId, ExecutorPolicy,
+            GraphDefinition, GraphEvent, GraphRunId, GraphState, NodeDefinition, NodeId,
+            ReviewAssignment, WorkAssignment, reduce,
+        };
+        use std::num::NonZeroU32;
+
+        let work = NodeId::new("work");
+        let review = NodeId::new("review");
+        let graph = GraphState::initialize(
+            GraphDefinition::new(
+                "graph-1",
+                "plan-1",
+                GraphRunId::new("run-1"),
+                "graph",
+                vec![
+                    NodeDefinition::work(
+                        work.clone(),
+                        "work",
+                        NonZeroU32::new(2).unwrap(),
+                        WorkAssignment::typed(
+                            "task-work",
+                            "work prompt",
+                            ExecutorPolicy::team_role("builder"),
+                            None,
+                            None,
+                        ),
+                    ),
+                    NodeDefinition::review(
+                        review.clone(),
+                        "review",
+                        NonZeroU32::new(2).unwrap(),
+                        ReviewAssignment::new("reviewer", "review prompt"),
+                    ),
+                ],
+                vec![
+                    EdgeDefinition::new(
+                        EdgeId::new("work-review"),
+                        work.clone(),
+                        "completed",
+                        review.clone(),
+                        "input",
+                        EdgeAction::Activate,
+                    ),
+                    EdgeDefinition::new(
+                        EdgeId::new("review-work"),
+                        review.clone(),
+                        "rework",
+                        work.clone(),
+                        "input",
+                        EdgeAction::Rework,
+                    ),
+                ],
+            )
+            .unwrap(),
+            1,
+        );
+
+        let work_fence = graph.current_attempt(&work).unwrap().fence().clone();
+        let graph = reduce(
+            graph,
+            GraphEvent::NodeCompleted {
+                node_id: work.clone(),
+                fence: work_fence,
+                output_port: "completed".into(),
+                completed_at: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(graph.ready_queue()[0].node_id(), &review);
+
+        let review_fence = graph.current_attempt(&review).unwrap().fence().clone();
+        let graph = reduce(
+            graph,
+            GraphEvent::NodeCompleted {
+                node_id: review.clone(),
+                fence: review_fence,
+                output_port: "rework".into(),
+                completed_at: 3,
+            },
+        )
+        .unwrap();
+        let work_attempt = graph.current_attempt(&work).unwrap();
+        assert_eq!(work_attempt.number(), NonZeroU32::new(2).unwrap());
+        assert_eq!(work_attempt.status(), AttemptStatus::Ready);
+        assert_eq!(work_attempt.reason(), &AttemptReason::Rework);
+
+        let selected = schedule_ready_nodes(&graph, 1, 0).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].node_id(), &work);
+        assert_eq!(
+            selected[0].activity_id().as_str(),
+            "team-graph-activity:run-1:work:attempt:2"
+        );
+        assert_eq!(
+            graph.current_attempt(&review).unwrap().status(),
+            AttemptStatus::Pending
+        );
+        let graph = reduce(
+            graph,
+            GraphEvent::NodeCompleted {
+                node_id: work,
+                fence: selected[0].fence().clone(),
+                output_port: "completed".into(),
+                completed_at: 4,
+            },
+        )
+        .unwrap();
+        let selected = schedule_ready_nodes(&graph, 1, 0).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].node_id(), &review);
+        assert_eq!(
+            selected[0].activity_id().as_str(),
+            "team-graph-activity:run-1:review:attempt:2"
+        );
+        let graph = reduce(
+            graph,
+            GraphEvent::NodeCompleted {
+                node_id: review,
+                fence: selected[0].fence().clone(),
+                output_port: "completed".into(),
+                completed_at: 5,
+            },
+        )
+        .unwrap();
+        assert!(schedule_ready_nodes(&graph, 1, 0).unwrap().is_empty());
+        assert_eq!(
+            crate::run::graph::project(&graph).status,
+            crate::run::graph::GraphStatus::Completed
+        );
+        assert_eq!(
+            GraphState::restore_durable(graph.durable_snapshot()).unwrap(),
+            graph
+        );
     }
 
     #[test]

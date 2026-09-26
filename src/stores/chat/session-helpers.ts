@@ -1,5 +1,5 @@
 import type { ChatSession, ChatStoreState, TaskChatBridgeState } from './types';
-import { isRunActive } from './types';
+import { isOrdinarySessionCandidate, isRunActive } from './types';
 import {
   getSessionMeta,
   getSessionItemCount,
@@ -8,6 +8,7 @@ import {
   getSessionItems,
   toMs,
   areSessionModelStatesEquivalent,
+  areSessionOwnershipsEquivalent,
 } from './store-state-helpers';
 
 const EMPTY_CHAT_SESSIONS: ChatSession[] = [];
@@ -112,6 +113,7 @@ function areChatSessionsEqual(left: ChatSession | undefined, right: ChatSession)
     && (left.protocolId ?? null) === (right.protocolId ?? null)
     && (left.runtimeEndpointId ?? null) === (right.runtimeEndpointId ?? null)
     && JSON.stringify(left.sessionIdentity ?? null) === JSON.stringify(right.sessionIdentity ?? null)
+    && areSessionOwnershipsEquivalent(left.ownership, right.ownership)
     && (left.kind ?? null) === (right.kind ?? null)
     && (left.preferred ?? false) === (right.preferred ?? false)
     && (left.label ?? null) === (right.label ?? null)
@@ -161,6 +163,7 @@ export function readSessionsFromState(
       protocolId: meta.protocolId ?? undefined,
       runtimeEndpointId: meta.runtimeEndpointId ?? undefined,
       sessionIdentity: meta.sessionIdentity,
+      ownership: meta.ownership,
       kind: meta.kind ?? undefined,
       preferred: meta.preferred,
       label: label ?? undefined,
@@ -208,6 +211,9 @@ export function shouldRetainLocalSessionRecord(
     return true;
   }
   const record = getSessionRecord(state, sessionKey);
+  if (record.meta.ownership?.kind === 'team') {
+    return true;
+  }
   const runtime = record.runtime;
   return (
     getSessionItemCount(record) > 0
@@ -305,7 +311,7 @@ export function resolvePreferredSessionKeyForAgent(
   sessions: ChatSession[],
   loadedSessions: ChatStoreState['loadedSessions'],
 ): string | null {
-  const owned = sessions.filter((session) => session.agentId === agentId);
+  const owned = sessions.filter((session) => session.agentId === agentId && isOrdinarySessionCandidate(session));
   if (owned.length === 0) {
     return null;
   }
@@ -373,7 +379,8 @@ export function isTrulyEmptyNonMainSession(
   if (!record) {
     return false;
   }
-  return !record.meta.preferred
+  return isOrdinarySessionCandidate(record.meta)
+    && !record.meta.preferred
     && record.meta.kind !== 'main'
     && !sessionKey.endsWith(':main')
     && getSessionItemCount(record) === 0

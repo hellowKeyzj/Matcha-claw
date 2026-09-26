@@ -132,9 +132,12 @@ impl TaskManagerOperation {
             MutationDelivery::NotWritten(_) | MutationDelivery::MayHaveReached(_) => {
                 TaskMutationOutcome::OutcomeUnknown
             }
-            MutationDelivery::Response(response) => decode_todo_snapshot(response)
-                .map(TaskMutationOutcome::Applied)
-                .unwrap_or(TaskMutationOutcome::OutcomeUnknown),
+            MutationDelivery::Response(response) => match decode_todo_snapshot(response) {
+                Ok(snapshot) if snapshot.updated_at().is_some() => {
+                    TaskMutationOutcome::Applied(snapshot)
+                }
+                Ok(_) | Err(_) => TaskMutationOutcome::OutcomeUnknown,
+            },
         }
     }
 
@@ -531,7 +534,7 @@ impl TaskCreateReceipt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TodoSnapshot {
     todos: Vec<Todo>,
-    updated_at: u64,
+    updated_at: Option<u64>,
 }
 
 impl TodoSnapshot {
@@ -539,7 +542,7 @@ impl TodoSnapshot {
         &self.todos
     }
 
-    pub fn updated_at(&self) -> u64 {
+    pub fn updated_at(&self) -> Option<u64> {
         self.updated_at
     }
 }
@@ -964,7 +967,7 @@ fn decode_todo_snapshot(response: GatewayResponse) -> Result<TodoSnapshot, Proto
         .into_iter()
         .map(Todo::try_from)
         .collect::<Result<_, _>>()?;
-    safe_integer(wire.updated_at)?;
+    wire.updated_at.map(safe_integer).transpose()?;
     Ok(TodoSnapshot {
         todos,
         updated_at: wire.updated_at,
@@ -1074,7 +1077,15 @@ struct TaskUpdateDeletedResponse {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct TodoResponse {
     todos: Vec<TodoWire>,
-    updated_at: u64,
+    #[serde(default, deserialize_with = "deserialize_todo_updated_at")]
+    updated_at: Option<u64>,
+}
+
+fn deserialize_todo_updated_at<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u64::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -1942,7 +1953,7 @@ mod tests {
         })))
         .unwrap();
         assert_eq!(todo_snapshot.todos().len(), 1);
-        assert_eq!(todo_snapshot.updated_at(), 2);
+        assert_eq!(todo_snapshot.updated_at(), Some(2));
 
         assert!(!format!("{snapshot:?}").contains("metadata-canary"));
     }

@@ -19,7 +19,7 @@ use crate::{
     events::SessionDeltaStream,
     send_hook::SessionSendHookSet,
     session_catalog::{SessionCatalogCommand, SessionCatalogEntry, SessionCatalogOutcome},
-    state::SessionModelState,
+    state::{SessionModelState, SessionSourceBinding},
 };
 
 pub(crate) mod abort;
@@ -350,6 +350,7 @@ struct Session {
     session_identity: SessionIdentity,
     kind: PublicSessionKind,
     endpoint_session_id: String,
+    ownership: Option<SessionSourceBinding>,
     model_state: Option<SessionModelState>,
     updated_at: Option<u64>,
     preferred: Option<bool>,
@@ -364,6 +365,7 @@ fn session_value(session: &Session) -> Value {
         "sessionIdentity": session_identity_value(session),
         "kind": public_session_kind_value(session.kind),
         "endpointSessionId": &session.endpoint_session_id,
+        "ownership": &session.ownership,
     });
     if let Some(model_state) = &session.model_state {
         value["modelState"] = serde_json::json!(model_state);
@@ -430,6 +432,7 @@ fn project_session(session: SessionCatalogEntry) -> Option<Session> {
         agent_id: session.agent_id,
         kind,
         endpoint_session_id: session.endpoint_session_id,
+        ownership: session.ownership,
         model_state: session.model_state,
         updated_at: session.updated_at,
         preferred: session.preferred,
@@ -561,6 +564,7 @@ mod tests {
             key,
             agent_id,
             endpoint_session_id,
+            ownership: None,
             model_state: None,
             updated_at,
             preferred: None,
@@ -595,6 +599,7 @@ mod tests {
                     },
                     "kind": "session",
                     "endpointSessionId": "direct-session",
+                    "ownership": null,
                     "updatedAt": 42,
                 }],
             })
@@ -626,6 +631,7 @@ mod tests {
                         },
                         "kind": "main",
                         "endpointSessionId": "main",
+                        "ownership": null,
                         "updatedAt": 42,
                     },
                     {
@@ -642,6 +648,7 @@ mod tests {
                         },
                         "kind": "session",
                         "endpointSessionId": "direct-session",
+                        "ownership": null,
                         "updatedAt": 42,
                     }
                 ],

@@ -39,7 +39,7 @@ export async function handleChannelConfigReadRoutes(
   try {
     const projection = await transport.read(body, traceId);
     if (projection) {
-      const response = { success: true, values: projection.values };
+      const response = { success: true, values: projection.values, agentId: projection.agentId };
       finish(200, response);
       sendJson(res, 200, response);
     } else {

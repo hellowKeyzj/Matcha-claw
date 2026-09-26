@@ -33,6 +33,7 @@ pub struct Dependencies {
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     organization: crate::OrganizationHandle,
     webhook_token: trigger::WebhookToken,
+    role_session_identity: Arc<dyn crate::RoleSessionIdentityResolver>,
 }
 
 impl Dependencies {
@@ -40,11 +41,13 @@ impl Dependencies {
         verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
         organization: crate::OrganizationHandle,
         webhook_token: trigger::WebhookToken,
+        role_session_identity: Arc<dyn crate::RoleSessionIdentityResolver>,
     ) -> Self {
         Self {
             verifier,
             organization,
             webhook_token,
+            role_session_identity,
         }
     }
 }
@@ -114,6 +117,7 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
                     body,
                     dependencies.verifier,
                     dependencies.organization,
+                    dependencies.role_session_identity,
                 )
                 .await
             }
@@ -221,6 +225,7 @@ fn team_runtime_route(dependencies: Dependencies, request: Request) -> RouteFutu
             request.body,
             dependencies.verifier,
             dependencies.organization,
+            dependencies.role_session_identity,
         )
         .await
         .into()

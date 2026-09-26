@@ -3,8 +3,6 @@ use std::{
     num::{NonZeroU32, NonZeroU64},
 };
 
-use serde_json::Value;
-
 use crate::{
     ActivityClaimSnapshot, ActivityDispatchSnapshot, ActivityFailure, ActivityId, ActivityKind,
     ActivityLedgerSnapshot, ActivityPhaseSnapshot, ActivityRequest, ActivitySnapshot,
@@ -39,7 +37,7 @@ use crate::{
         delivery::{
             AuthorizedGraphOutcome, AuthorizedGraphResolution, AuthorizedGraphResolutionReceipt,
             NativeRunReceiptReference, NativeTerminalStatus, TeamNodeOutput,
-            TerminalObservationResolution, TerminalObservationSnapshot,
+            TeamNodeOutputDispatch, TerminalObservationResolution, TerminalObservationSnapshot,
             TerminalObservationSnapshotInput,
         },
         event::{
@@ -50,9 +48,10 @@ use crate::{
         },
         graph::{
             DurableAttemptReason, DurableDependencyMetadata, DurableEdgeDefinition,
-            DurableExecutionFence, DurableInputReceipt, DurableNodeAttempt, DurableNodeDefinition,
-            DurableNodeExecution, DurableReadyQueueItem, DurableReviewAssignment,
-            DurableStartTrigger, DurableWorkAssignment, DurableWorkGroup, GraphDurableSnapshot,
+            DurableExecutionFence, DurableGraphLayout, DurableInputReceipt, DurableNodeAttempt,
+            DurableNodeDefinition, DurableNodeExecution, DurableNodePosition,
+            DurableReadyQueueItem, DurableReviewAssignment, DurableStartTrigger,
+            DurableWorkAssignment, DurableWorkGroup, GraphDurableSnapshot,
         },
         lifecycle::{GraphRunLifecycle, GraphRunLifecycleState},
     },
@@ -67,7 +66,7 @@ use super::{GraphRunFacts, OrganizationFacts, StoreFault, TeamFacts};
 pub(super) const HEADER_LEN: usize = 17;
 pub(super) const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const LOG_MAGIC: [u8; 8] = *b"MORGDU01";
-const CURRENT_SCHEMA_VERSION: u8 = 23;
+const CURRENT_SCHEMA_VERSION: u8 = 25;
 const FRAME_MARKER: u8 = 0xA1;
 const FRAME_METADATA_LEN: usize = 16;
 const MAX_FACTS_BYTES: usize = 1024 * 1024;
@@ -457,14 +456,22 @@ fn encode_materialization_request(
     push_count(output, intent.agents().len())?;
     for agent in intent.agents() {
         push_string(output, agent.role().as_str())?;
+        let tools = agent.tools();
+        // Tags 0/1 retain the existing empty-tools layout; 2/3 carry role tools.
         match agent.agent() {
             RoleMaterializationAgent::Managed { name } => {
-                output.push(0);
+                output.push(if tools.is_empty() { 0 } else { 2 });
                 push_string(output, name)?;
             }
             RoleMaterializationAgent::External { agent } => {
-                output.push(1);
+                output.push(if tools.is_empty() { 1 } else { 3 });
                 push_string(output, agent.as_str())?;
+            }
+        }
+        if !tools.is_empty() {
+            push_count(output, tools.len())?;
+            for tool in tools {
+                push_string(output, tool)?;
             }
         }
     }
@@ -578,6 +585,12 @@ fn encode_graph(output: &mut Vec<u8>, graph: &GraphDurableSnapshot) -> Result<()
     for (key, value) in &graph.metadata {
         push_string(output, key.as_str())?;
         encode_metadata_value(output, value)?;
+    }
+    push_count(output, graph.layout.node_positions.len())?;
+    for position in &graph.layout.node_positions {
+        push_string(output, &position.node_id)?;
+        output.extend_from_slice(&position.x.to_le_bytes());
+        output.extend_from_slice(&position.y.to_le_bytes());
     }
     push_count(output, graph.nodes.len())?;
     for node in &graph.nodes {
@@ -821,12 +834,13 @@ fn encode_team_node_output(
 ) -> Result<(), StoreFault> {
     push_string(output, team_output.final_assistant_text())?;
     push_string(output, team_output.summary())?;
-    push_string(output, team_output.output_port())?;
-    let payload =
-        serde_json::to_string(team_output.payload()).map_err(|_| StoreFault::InvalidFacts)?;
-    push_string(output, &payload)?;
-    push_optional_string(output, team_output.outcome())?;
-    push_optional_string(output, team_output.status())
+    push_string(output, team_output.decision())?;
+    push_count(output, team_output.dispatch().len())?;
+    for dispatch in team_output.dispatch() {
+        push_string(output, dispatch.role_id())?;
+        push_string(output, dispatch.task())?;
+    }
+    Ok(())
 }
 
 fn encode_activities(
@@ -1322,6 +1336,13 @@ fn encode_graph_patch_operation(
             push_string(output, key.as_str())?;
             encode_metadata_value(output, value)
         }
+        GraphPatchOperation::SetNodePosition { node_id, x, y } => {
+            output.push(7);
+            push_string(output, node_id)?;
+            output.extend_from_slice(&x.to_le_bytes());
+            output.extend_from_slice(&y.to_le_bytes());
+            Ok(())
+        }
     }
 }
 
@@ -1687,24 +1708,24 @@ impl<'a> Reader<'a> {
         let agents = (0..self.count()?)
             .map(|_| {
                 let role = RoleId::try_new(self.string()?).map_err(|_| StoreFault::InvalidFacts)?;
-                let agent = match self.byte()? {
-                    0 => RoleMaterializationAgent::Managed {
-                        name: self.string()?,
-                    },
-                    1 => RoleMaterializationAgent::External {
-                        agent: ManagedAgentReference::try_new(self.string()?)
+                let tag = self.byte()?;
+                let agent = match tag {
+                    0 | 2 => RoleAgentMaterialization::managed(role, self.string()?)
+                        .map_err(|_| StoreFault::InvalidFacts)?,
+                    1 | 3 => RoleAgentMaterialization::external(
+                        role,
+                        ManagedAgentReference::try_new(self.string()?)
                             .map_err(|_| StoreFault::InvalidFacts)?,
-                    },
+                    ),
                     _ => return Err(StoreFault::InvalidFacts),
                 };
-                match agent {
-                    RoleMaterializationAgent::Managed { name } => {
-                        RoleAgentMaterialization::managed(role, name)
-                            .map_err(|_| StoreFault::InvalidFacts)
-                    }
-                    RoleMaterializationAgent::External { agent } => {
-                        Ok(RoleAgentMaterialization::external(role, agent))
-                    }
+                if matches!(tag, 2 | 3) {
+                    let tools = (0..self.count()?)
+                        .map(|_| self.string())
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(agent.with_tools(tools))
+                } else {
+                    Ok(agent)
                 }
             })
             .collect::<Result<Vec<_>, StoreFault>>()?;
@@ -1852,6 +1873,17 @@ impl<'a> Reader<'a> {
                 }
                 Ok(metadata)
             })?;
+        let layout = DurableGraphLayout {
+            node_positions: (0..self.count()?)
+                .map(|_| {
+                    Ok(DurableNodePosition {
+                        node_id: self.string()?,
+                        x: self.i64()?,
+                        y: self.i64()?,
+                    })
+                })
+                .collect::<Result<Vec<_>, StoreFault>>()?,
+        };
         let nodes = (0..self.count()?)
             .map(|_| {
                 let order = self.u32()?;
@@ -1988,6 +2020,7 @@ impl<'a> Reader<'a> {
             run_id,
             title,
             metadata,
+            layout,
             nodes,
             edges,
             executions,
@@ -2271,20 +2304,16 @@ impl<'a> Reader<'a> {
     fn team_node_output(&mut self) -> Result<TeamNodeOutput, StoreFault> {
         let final_assistant_text = self.string()?;
         let summary = self.string()?;
-        let output_port = self.string()?;
-        let payload =
-            serde_json::from_str::<Value>(&self.string()?).map_err(|_| StoreFault::InvalidFacts)?;
-        let outcome = self.optional_string()?;
-        let status = self.optional_string()?;
-        TeamNodeOutput::restore(
-            final_assistant_text,
-            summary,
-            output_port,
-            payload,
-            outcome,
-            status,
-        )
-        .map_err(|_| StoreFault::InvalidFacts)
+        let decision = self.string()?;
+        let dispatch = (0..self.count()?)
+            .map(|_| {
+                let role_id = self.string()?;
+                let task = self.string()?;
+                TeamNodeOutputDispatch::new(role_id, task).map_err(|_| StoreFault::InvalidFacts)
+            })
+            .collect::<Result<Vec<_>, StoreFault>>()?;
+        TeamNodeOutput::restore(final_assistant_text, summary, decision, dispatch)
+            .map_err(|_| StoreFault::InvalidFacts)
     }
 
     fn task_board(&mut self) -> Result<TaskBoardFacts, StoreFault> {
@@ -2921,6 +2950,11 @@ impl<'a> Reader<'a> {
                 key: self.opaque_id()?,
                 value: self.metadata_value()?,
             }),
+            7 => Ok(GraphPatchOperation::SetNodePosition {
+                node_id: self.string()?,
+                x: self.i64()?,
+                y: self.i64()?,
+            }),
             _ => Err(StoreFault::CorruptRecord),
         }
     }
@@ -3310,6 +3344,14 @@ impl<'a> Reader<'a> {
 
     fn u64(&mut self) -> Result<u64, StoreFault> {
         Ok(u64::from_le_bytes(
+            self.take(8)?
+                .try_into()
+                .map_err(|_| StoreFault::CorruptRecord)?,
+        ))
+    }
+
+    fn i64(&mut self) -> Result<i64, StoreFault> {
+        Ok(i64::from_le_bytes(
             self.take(8)?
                 .try_into()
                 .map_err(|_| StoreFault::CorruptRecord)?,

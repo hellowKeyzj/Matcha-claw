@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -5,6 +6,12 @@ import ts from 'typescript'
 import { safeRm } from './safe-delete.mjs'
 
 const BUILD_TARGETS = [
+  {
+    pluginId: 'openclaw-lark',
+    packageDir: 'packages/openclaw-lark',
+    build: 'tsdown',
+    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist', 'secret-contract-api.js', 'skills', 'LICENSE'],
+  },
   {
     pluginId: 'task-manager',
     packageDir: 'packages/openclaw-task-manager-plugin',
@@ -243,6 +250,14 @@ async function refreshManagedPluginMirror({ rootDir, target }) {
     [path.join(packageDir, 'node_modules'), path.join(rootDir, 'node_modules')],
   )
   copyFlattenedDeps(outputDir, dependencyMap)
+
+  if (target.pluginId === 'openclaw-lark') {
+    const oldMirrorDir = path.join(rootDir, 'build', 'openclaw-plugins', 'feishu-openclaw-plugin')
+    const oldManifestPath = path.join(oldMirrorDir, 'openclaw.plugin.json')
+    if (await pathExists(oldManifestPath) && readJson(oldManifestPath).id === 'openclaw-lark') {
+      await safeRm(oldMirrorDir, { root: path.join(rootDir, 'build', 'openclaw-plugins') })
+    }
+  }
 }
 
 function toAbsolutePath(packageDir, targetPath) {
@@ -351,12 +366,19 @@ export async function buildManagedOpenClawPlugins({
 
   for (const target of selectedTargets) {
     const packageDir = path.join(resolvedRootDir, target.packageDir)
-    await buildLocalPluginArtifacts({
-      packageDir,
-      ...(Array.isArray(target.compileDirs) ? { compileDirs: target.compileDirs } : {}),
-      ...(Array.isArray(target.compileFiles) ? { compileFiles: target.compileFiles } : {}),
-      ...(target.preserveDirStructure === true ? { preserveDirStructure: true } : {}),
-    })
+    if (target.build === 'tsdown') {
+      const tsdownDir = path.join(packageDir, 'node_modules', 'tsdown')
+      const { bin } = readJson(path.join(tsdownDir, 'package.json'))
+      const entry = typeof bin === 'string' ? bin : bin.tsdown
+      execFileSync(process.execPath, [path.join(tsdownDir, entry)], { cwd: packageDir, stdio: 'inherit' })
+    } else {
+      await buildLocalPluginArtifacts({
+        packageDir,
+        ...(Array.isArray(target.compileDirs) ? { compileDirs: target.compileDirs } : {}),
+        ...(Array.isArray(target.compileFiles) ? { compileFiles: target.compileFiles } : {}),
+        ...(target.preserveDirStructure === true ? { preserveDirStructure: true } : {}),
+      })
+    }
 
     if (refreshMirrors) {
       await refreshManagedPluginMirror({

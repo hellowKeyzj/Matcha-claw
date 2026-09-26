@@ -4,7 +4,8 @@ import { useLayoutStore } from '@/stores/layout';
 import { useChatStore } from '@/stores/chat';
 import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 import { readSessionsFromState } from '@/stores/chat/session-helpers';
-import { listTaskSnapshot, type Task, type TaskListSnapshot } from '@/services/openclaw/task-manager-client';
+import type { Task } from '@/services/openclaw/task-manager-client';
+import { useTaskCenterStore } from '@/stores/task-center-store';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import { filterUnfinishedTasks } from '@/lib/task-domain';
 import {
@@ -96,10 +97,6 @@ function sortTaskInboxTasks(tasks: TaskInboxTask[]): TaskInboxTask[] {
     }
     return taskInboxKey(left).localeCompare(taskInboxKey(right));
   });
-}
-
-function getSnapshotSessionKey(sessionKey: string, snapshot: TaskListSnapshot): string {
-  return snapshot.scope?.sessionKey ?? sessionKey;
 }
 
 interface ChatSidePanelState {
@@ -219,23 +216,14 @@ export function useChatSidePanelController(
         const activeSessions = readSessionsFromState(chatState);
         const sessionKeys = uniqueSorted(activeSessions.map((session) => session.key));
         const sessionByKey = new Map(activeSessions.map((session) => [session.key, session]));
-        const snapshots = await Promise.all(sessionKeys.map(async (sessionKey) => {
+        await Promise.all(sessionKeys.map((sessionKey) => {
           const session = sessionByKey.get(sessionKey)!;
-          return {
+          return useTaskCenterStore.getState().refreshTasks({
             sessionKey,
-            snapshot: await listTaskSnapshot({ sessionKey: session.sessionIdentity.sessionKey, sessionIdentity: session.sessionIdentity }),
-          };
-        }));
-        for (const { sessionKey, snapshot } of snapshots) {
-          useTaskSnapshotStore.getState().reportTaskCenterSnapshot({
-            sessionKey: getSnapshotSessionKey(sessionKey, snapshot),
-            recordKey: sessionKey,
-            ...(snapshot.scope ? { scope: snapshot.scope } : {}),
-            tasks: snapshot.tasks,
-            todos: snapshot.todos,
-            source: 'replay',
+            sessionIdentity: session.sessionIdentity,
+            background: true,
           });
-        }
+        }));
       } catch (error) {
         setTaskInboxError(error instanceof Error ? error.message : String(error));
       } finally {

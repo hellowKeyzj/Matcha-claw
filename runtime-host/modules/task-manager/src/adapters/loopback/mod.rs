@@ -680,10 +680,13 @@ fn snapshot_body(snapshot: &TaskSnapshot) -> Value {
 }
 
 fn todos_body(snapshot: &TodoSnapshot) -> Value {
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "todos": snapshot.todos().iter().map(todo_body).collect::<Vec<_>>(),
-        "updatedAt": snapshot.updated_at(),
-    })
+    });
+    if let Some(updated_at) = snapshot.updated_at() {
+        body["updatedAt"] = updated_at.into();
+    }
+    body
 }
 
 fn task_body(task: &Task) -> Value {

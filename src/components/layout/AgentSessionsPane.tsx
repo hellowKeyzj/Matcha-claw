@@ -5,14 +5,13 @@ import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import { useSubagentsStore } from '@/stores/subagents';
 import {
-  isKnownTeamRoleSession,
   resolveTeamRoleChatTargetFromProbe,
   selectTeamRoleChatTargetIndex,
   useTeamsStore,
 } from '@/stores/teams';
 import { useChatStore, type ChatSession } from '@/stores/chat';
 import { selectAgentSessionsPaneState } from '@/stores/chat/selectors';
-import type { ChatSessionRuntimeEndpointNode } from '@/stores/chat/types';
+import { isOrdinarySessionCandidate, type ChatSessionRuntimeEndpointNode } from '@/stores/chat/types';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -932,11 +931,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
     newSessionForScope,
     deleteSession,
     renameSession,
-    selectSessionRuntimeEndpoint,
-  } = useChatStore(useShallow((state) => ({
-    ...selectAgentSessionsPaneState(state),
-    selectSessionRuntimeEndpoint: state.selectSessionRuntimeEndpoint,
-  })));
+  } = useChatStore(useShallow(selectAgentSessionsPaneState));
   const teams = useTeamsStore((state) => state.teams);
   const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
   const teamRoleChatTargetIndex = useTeamsStore(selectTeamRoleChatTargetIndex);
@@ -977,22 +972,16 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
     const agentPaneSessionEntries: typeof sessionEntries = [];
     const switchboardSessionEntries: typeof sessionEntries = [];
     for (const entry of sessionEntries) {
-      const probe = {
-        sessionIdentity: entry.session.sessionIdentity,
-        sessionKey: entry.session.key,
-        endpointSessionId: entry.session.endpointSessionId,
-      };
-      const teamTarget = resolveTeamRoleChatTargetFromProbe(teamRoleChatTargetIndex, probe);
-      const isTeamRole = teamTarget != null || isKnownTeamRoleSession(teamRoleChatTargetIndex, probe);
-      if (!isTeamRole && !isAgentSessionSwitchboardAutomationSession(entry.session)) {
+      if (entry.session.ownership?.kind !== 'ordinary') {
+        continue;
+      }
+      if (isOrdinarySessionCandidate(entry.session)) {
         agentPaneSessionEntries.push(entry);
       }
-      if (teamTarget || !isTeamRole) {
-        switchboardSessionEntries.push(entry);
-      }
+      switchboardSessionEntries.push(entry);
     }
     return { agentPaneSessionEntries, switchboardSessionEntries };
-  }, [sessionEntries, teamRoleChatTargetIndex]);
+  }, [sessionEntries]);
   const switchboardTeams = useMemo<AgentSessionSwitchboardTeamInput[]>(() => teams.map((team) => ({
     teamId: team.id,
     teamName: team.name,
@@ -1114,16 +1103,11 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
   }, [switchSession]);
 
   const handleOpenRuntimeAgent = useCallback((agent: AgentSessionSwitchboardAgentResult) => {
-    if (agent.preferredSessionKey) {
-      switchSession(agent.preferredSessionKey);
-      return;
-    }
     const endpoint = endpointByRuntimeScopeKey.get(agent.runtimeScopeKey);
-    if (endpoint && currentConversation?.runtimeScopeKey !== agent.runtimeScopeKey) {
-      selectSessionRuntimeEndpoint(endpoint.endpoint);
+    if (endpoint) {
+      openAgentConversation(agent.agentId, endpoint.endpoint);
     }
-    openAgentConversation(agent.agentId);
-  }, [currentConversation?.runtimeScopeKey, endpointByRuntimeScopeKey, openAgentConversation, selectSessionRuntimeEndpoint, switchSession]);
+  }, [endpointByRuntimeScopeKey, openAgentConversation]);
 
   const handleCreateSessionForDefaultScope = useCallback(() => {
     const target = selectedRuntimeEndpoint?.target;

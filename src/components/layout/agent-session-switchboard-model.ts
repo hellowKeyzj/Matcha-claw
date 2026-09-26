@@ -43,7 +43,6 @@ export interface AgentSessionSwitchboardAgentResult {
   agentName: string;
   avatarSeed?: string;
   avatarStyle?: AgentAvatarStyle;
-  preferredSessionKey: string | null;
   sessionCount: number;
   isCurrent: boolean;
   identityLabel: string;
@@ -150,7 +149,6 @@ interface AgentSessionSwitchboardRuntimeAgentInput {
   agentName: string;
   avatarSeed?: string;
   avatarStyle?: AgentAvatarStyle;
-  preferredSessionKey: string | null;
   sessionCount: number;
 }
 
@@ -268,7 +266,7 @@ function buildTeamRoleSourceIndex(teams: readonly AgentSessionSwitchboardTeamInp
 
 function resolveTeamRoleSource(
   index: ReadonlyMap<string, TeamRoleSource>,
-  session: ChatSession,
+  session: Pick<ChatSession, 'key' | 'sessionIdentity' | 'endpointSessionId'>,
 ): TeamRoleSource | null {
   const identityTarget = index.get(buildSessionIdentityKey(session.sessionIdentity));
   if (identityTarget) {
@@ -337,7 +335,6 @@ function buildAgentResults(
       agentName: agent.agentName,
       avatarSeed: agent.avatarSeed,
       avatarStyle: agent.avatarStyle,
-      preferredSessionKey: agent.preferredSessionKey,
       sessionCount: agent.sessionCount,
       isCurrent: currentConversation?.runtimeScopeKey === runtime.runtimeScopeKey
         && currentConversation.agentId === agent.agentId,
@@ -455,7 +452,6 @@ function resolveCurrentIdentity(input: {
     const teamSource = resolveTeamRoleSource(input.teamSourceIndex, {
       key: conversation.sessionRecordKey,
       endpointSessionId: conversation.endpointSessionId ?? undefined,
-      agentId: conversation.agentId,
       sessionIdentity: conversation.sessionIdentity,
     });
     if (teamSource) {

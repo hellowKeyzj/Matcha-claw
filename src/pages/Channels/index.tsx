@@ -27,7 +27,7 @@ import { ChannelIcon } from '@/components/channels/ChannelIcon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Select } from '@/components/ui/select';
+import * as SelectPrimitive from '@radix-ui/react-select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
@@ -463,7 +463,7 @@ function ChannelCard({ channel, isMutating = false, onConfigure, onManagePairing
 
         <div className="mt-auto flex items-center justify-between gap-2 border-t border-border/70 pt-3">
           <p className="truncate text-xs text-muted-foreground">
-            {channel.accountId && channel.accountId !== 'default' ? channel.accountId : CHANNEL_NAMES[channel.type]}
+            {CHANNEL_NAMES[channel.type]}
           </p>
           <div className="flex shrink-0 items-center gap-1">
             <Button
@@ -659,6 +659,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
   const [configValues, setConfigValues] = useState<Record<string, string>>({});
   const [channelName, setChannelName] = useState('');
   const [selectedAgentId, setSelectedAgentId] = useState('');
+  const [loadedAgentId, setLoadedAgentId] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [authPrompt, setAuthPrompt] = useState<ChannelAuthPrompt | null>(null);
@@ -705,10 +706,18 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
   const shouldStartAuthorization = guidedSetupFlow?.kind === 'authorization' && target.kind !== 'configured' && effectiveSetupMode === 'guided';
   const shouldStartQrLogin = guidedSetupFlow?.kind === 'qr-login' && target.kind !== 'configured' && effectiveSetupMode === 'guided';
   const shouldValidateToken = effectiveSetupMode === 'credential' && meta?.connectionType === 'token' && requiredFieldsFilled;
+  const agentIdToSave = selectedAgentId && (!isConfiguredChannelEdit || selectedAgentId !== loadedAgentId)
+    ? selectedAgentId
+    : undefined;
   const agentOptions = useMemo(() => {
-    if (agents.some((agent) => agent.id === 'main')) return agents;
-    return [{ id: 'main', name: t('dialog.mainAgent'), isDefault: agents.length === 0 }, ...agents];
-  }, [agents, t]);
+    const options = agents.some((agent) => agent.id === 'main')
+      ? [...agents]
+      : [{ id: 'main', name: t('dialog.mainAgent') }, ...agents];
+    for (const id of [loadedAgentId, selectedAgentId]) {
+      if (id && !options.some((agent) => agent.id === id)) options.push({ id, name: id });
+    }
+    return options;
+  }, [agents, loadedAgentId, selectedAgentId, t]);
 
   useEffect(() => {
     onChannelAddedRef.current = onChannelAdded;
@@ -717,12 +726,6 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
   useEffect(() => {
     void loadAgents({ silent: true }).catch(() => undefined);
   }, [loadAgents]);
-
-  useEffect(() => {
-    setSelectedAgentId((current) => (
-      !current || agentOptions.some((agent) => agent.id === current) ? current : ''
-    ));
-  }, [agentOptions]);
 
   const clearQrGenerateTimeout = useCallback(() => {
     if (qrGenerateTimeoutRef.current) {
@@ -770,6 +773,8 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
   // Load existing config when a channel type is selected
   useEffect(() => {
+    setSelectedAgentId('');
+    setLoadedAgentId('');
     if (!selectedType) {
       clearQrGenerateTimeout();
       qrWaitAbortControllerRef.current?.abort();
@@ -779,7 +784,6 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
       setConnecting(false);
       setConfigValues({});
       setChannelName('');
-      setSelectedAgentId('');
       setIsExistingConfig(false);
       setAuthPrompt(null);
       setQrImageFailed(false);
@@ -810,12 +814,12 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
         if (cancelled) return;
 
-        const hasValues = Boolean(result.success && result.values && Object.keys(result.values).length > 0);
+        const hasValues = Object.keys(result.values).length > 0;
         logChannelTrace('config.read.end', traceId, { outcome: hasValues ? 'loaded' : 'empty', durationMs: Date.now() - startedAt });
-        if (hasValues) {
-          setConfigValues(result.values!);
-          setIsExistingConfig(true);
-        }
+        setConfigValues(result.values);
+        setSelectedAgentId(result.agentId ?? '');
+        setLoadedAgentId(result.agentId ?? '');
+        if (hasValues) setIsExistingConfig(true);
       } catch (error) {
         if (!cancelled) {
           logChannelTrace('config.read.end', traceId, { outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt });
@@ -890,7 +894,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
     if (shouldStartQrLogin || shouldStartAuthorization) {
       await stopActiveLoginSession();
     }
-    const explicitAgentId = selectedAgentId || undefined;
+    const explicitAgentId = agentIdToSave;
 
     try {
       // For QR-based channels, request QR code
@@ -1173,7 +1177,8 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
   const isFormValid = () => {
     if (!meta) return false;
-    if (isConfiguredChannelEdit && selectedAgentId) return true;
+    if (isConfiguredChannelEdit && agentIdToSave) return true;
+    if (isConfiguredChannelEdit && Object.keys(configValues).length === 0) return false;
     if (shouldStartAuthorization) return true;
 
     // Check all required fields are filled
@@ -1384,18 +1389,47 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
               <div className="space-y-2">
                 <Label htmlFor="channel-agent">{t('dialog.agent')}</Label>
-                <Select
-                  id="channel-agent"
-                  value={selectedAgentId}
-                  onChange={(event) => setSelectedAgentId(event.target.value)}
+                <SelectPrimitive.Root
+                  value={selectedAgentId ? `agent:${selectedAgentId}` : 'keep'}
+                  onValueChange={(value) => setSelectedAgentId(value === 'keep' ? '' : value.slice('agent:'.length))}
+                  disabled={connecting}
                 >
-                  <option value="">{t('dialog.agentDefault')}</option>
-                  {agentOptions.map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.name && agent.name !== agent.id ? `${agent.name} (${agent.id})` : agent.id}
-                    </option>
-                  ))}
-                </Select>
+                  <SelectPrimitive.Trigger
+                    id="channel-agent"
+                    className="flex h-11 w-full items-center justify-between gap-2 rounded-[var(--radius-interactive)] border border-input bg-card px-4 py-2 text-[15px] text-foreground ring-offset-background transition-[border-color,box-shadow,background-color,color] duration-150 hover:border-border focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/15 focus-visible:shadow-[var(--shadow-focus)] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <span className="min-w-0 truncate"><SelectPrimitive.Value /></span>
+                    <SelectPrimitive.Icon asChild>
+                      <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    </SelectPrimitive.Icon>
+                  </SelectPrimitive.Trigger>
+                  <SelectPrimitive.Portal>
+                    <SelectPrimitive.Content
+                      position="popper"
+                      sideOffset={4}
+                      collisionPadding={12}
+                      aria-label={t('dialog.agent')}
+                      className="z-50 w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-24px)] max-h-[min(20rem,var(--radix-select-content-available-height))] overflow-hidden rounded-[var(--radius-interactive)] border border-border bg-popover text-popover-foreground shadow-lg"
+                    >
+                      <SelectPrimitive.Viewport className="select-scroll-viewport max-h-[inherit] overflow-y-auto overscroll-contain p-1">
+                        {[{ id: '', name: t('dialog.agentDefault') }, ...agentOptions].map((agent) => (
+                          <SelectPrimitive.Item
+                            key={agent.id}
+                            value={agent.id ? `agent:${agent.id}` : 'keep'}
+                            className="relative flex cursor-default select-none items-center rounded-md py-2 pl-3 pr-8 text-sm outline-none data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground"
+                          >
+                            <SelectPrimitive.ItemText>
+                              {agent.id && agent.name && agent.name !== agent.id ? `${agent.name} (${agent.id})` : agent.name || agent.id}
+                            </SelectPrimitive.ItemText>
+                            <SelectPrimitive.ItemIndicator className="absolute right-2 flex items-center">
+                              <Check className="h-4 w-4" />
+                            </SelectPrimitive.ItemIndicator>
+                          </SelectPrimitive.Item>
+                        ))}
+                      </SelectPrimitive.Viewport>
+                    </SelectPrimitive.Content>
+                  </SelectPrimitive.Portal>
+                </SelectPrimitive.Root>
               </div>
 
               {/* Configuration fields */}

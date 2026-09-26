@@ -9,8 +9,10 @@ describe('release mac signing config', () => {
     expect(workflow).toContain('uses: dtolnay/rust-toolchain@1.97.0');
     expect(workflow).toContain('targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu, aarch64-pc-windows-msvc, x86_64-pc-windows-msvc');
     const installDependencies = workflow.indexOf('      - name: Install dependencies\n        run: pnpm install --frozen-lockfile');
+    const downloadProtoc = workflow.indexOf('      - name: Download bundled protoc\n        run: pnpm run protoc:download');
     const prepareWindowsDependencies = workflow.indexOf("      - name: Prepare Windows bundled runtime dependencies\n        if: matrix.platform == 'win'\n        run: pnpm run prep:win-binaries");
-    expect(prepareWindowsDependencies).toBeGreaterThan(installDependencies);
+    expect(downloadProtoc).toBeGreaterThan(installDependencies);
+    expect(prepareWindowsDependencies).toBeGreaterThan(downloadProtoc);
   });
 
   it('creates and signs an exact Windows x64 NSIS installed-package evidence receipt', async () => {
@@ -23,7 +25,7 @@ describe('release mac signing config', () => {
     expect(workflow).toContain('Expected exactly one Windows x64 NSIS installer from the release build; found $($installers.Count).');
     expect(workflow).not.toContain('WINDOWS_NSIS_BUILD_STARTED_AT');
     expect(workflow).toContain('$nsisInstallStopwatch = [System.Diagnostics.Stopwatch]::StartNew()');
-    expect(workflow).toContain('& $installer.FullName /S "/D=$installRoot"\n            $nsisInstallStopwatch.Stop()\n            $nsisInstallExitCode = $LASTEXITCODE\n            $nsisInstallDurationMs = [Math]::Floor($nsisInstallStopwatch.Elapsed.TotalMilliseconds)');
+    expect(workflow).toContain("$nsisInstallProcess = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', \"/D=$installRoot\") -Wait -PassThru\n            $nsisInstallStopwatch.Stop()\n            $nsisInstallExitCode = $nsisInstallProcess.ExitCode\n            $nsisInstallDurationMs = [Math]::Floor($nsisInstallStopwatch.Elapsed.TotalMilliseconds)");
     expect(workflow).toContain('--nsis-install-duration-ms $nsisInstallDurationMs --nsis-install-exit-code $nsisInstallExitCode');
     expect(workflow).toContain('--receipt $receiptPath');
     expect(workflow).toContain('--workflow-ref "$env:GITHUB_WORKFLOW_REF"');
@@ -84,7 +86,7 @@ describe('release mac signing config', () => {
     expect(workflow).toContain('      - name: Prove Windows ARM64 installed NSIS runtime host');
     expect((workflow.match(/\$nsisInstallStopwatch = \[System\.Diagnostics\.Stopwatch\]::StartNew\(\)/g) ?? []).length).toBe(2);
     expect((workflow.match(/--nsis-install-duration-ms \$nsisInstallDurationMs --nsis-install-exit-code \$nsisInstallExitCode/g) ?? []).length).toBe(2);
-    expect((workflow.match(/& \$installer\.FullName \/S "\/D=\$installRoot"\n            \$nsisInstallStopwatch\.Stop\(\)\n            \$nsisInstallExitCode = \$LASTEXITCODE\n            \$nsisInstallDurationMs = \[Math\]::Floor\(\$nsisInstallStopwatch\.Elapsed\.TotalMilliseconds\)/g) ?? []).length).toBe(2);
+    expect((workflow.match(/\$nsisInstallProcess = Start-Process -FilePath \$installer\.FullName -ArgumentList @\('\/S', "\/D=\$installRoot"\) -Wait -PassThru\n            \$nsisInstallStopwatch\.Stop\(\)\n            \$nsisInstallExitCode = \$nsisInstallProcess\.ExitCode\n            \$nsisInstallDurationMs = \[Math\]::Floor\(\$nsisInstallStopwatch\.Elapsed\.TotalMilliseconds\)/g) ?? []).length).toBe(2);
     expect(workflow).toContain('--platform win32 --arch x64 --target nsis');
     expect(workflow).toContain('--platform win32 --arch arm64 --target nsis');
     expect(workflow).toContain('      - name: Prove Linux x64 extracted package runtime host');

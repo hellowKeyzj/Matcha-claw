@@ -13,11 +13,10 @@ describe('chat shell stage layout', () => {
         isEmptyState={false}
         emptyState={null}
         sidePanel={null}
-        header={<div data-testid="chat-header" />}
+        header={<div data-testid="chat-header"><div data-testid="chat-todo-panel" /></div>}
         viewportPane={<div data-testid="thread-panel" />}
         errorBanner={<div data-testid="chat-error-banner" />}
         approvalDock={<div data-testid="chat-approval-dock" />}
-        todoPanel={<div data-testid="chat-todo-panel" />}
         input={<div data-testid="chat-input" />}
       />,
     );

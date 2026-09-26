@@ -417,6 +417,22 @@ impl Activity {
         }
     }
 
+    pub(crate) fn confirm_unknown_native_terminal(
+        &mut self,
+        terminal: crate::NativeTerminalStatus,
+        observed_at: u64,
+    ) {
+        if matches!(self.phase, ActivityPhase::OutcomeUnknown { .. }) {
+            self.phase = if terminal == crate::NativeTerminalStatus::Cancelled {
+                ActivityPhase::Cancelled {
+                    cancelled_at: observed_at,
+                }
+            } else {
+                ActivityPhase::TerminalObserved { observed_at }
+            };
+        }
+    }
+
     pub(crate) fn mark_terminal_observed(&mut self, observed_at: u64) {
         self.close_active_attempt();
         self.phase = ActivityPhase::TerminalObserved { observed_at };

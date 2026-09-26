@@ -12,6 +12,7 @@ import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fix
 const listTaskSnapshotMock = vi.fn();
 
 vi.mock('@/services/openclaw/task-manager-client', () => ({
+  isTaskManagementAvailable: async () => true,
   listTaskSnapshot: (...args: unknown[]) => listTaskSnapshotMock(...args),
 }));
 
@@ -259,7 +260,7 @@ describe('chat side panel controller', () => {
       secondRefresh = result.current.refreshTaskInbox();
     });
 
-    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(listTaskSnapshotMock).toHaveBeenCalledTimes(1));
 
     await act(async () => {
       resolveSnapshot({

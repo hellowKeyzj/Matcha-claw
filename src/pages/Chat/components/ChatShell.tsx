@@ -33,7 +33,6 @@ interface ChatShellProps {
   viewportPane: ReactNode;
   errorBanner: ReactNode;
   approvalDock: ReactNode;
-  todoPanel?: ReactNode;
   input: ReactNode;
 }
 
@@ -56,7 +55,6 @@ export function ChatShell({
   viewportPane,
   errorBanner,
   approvalDock,
-  todoPanel = null,
   input,
 }: ChatShellProps) {
   const isMac = window.electron?.platform === 'darwin';
@@ -246,13 +244,6 @@ export function ChatShell({
                 {header}
               </div>
             </div>
-            {todoPanel ? (
-              <div className={CHAT_LAYOUT_TOKENS.stageFloatingRail}>
-                <div className="pointer-events-auto mt-2 w-full min-w-0">
-                  {todoPanel}
-                </div>
-              </div>
-            ) : null}
           </div>
 
           <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">

@@ -26,10 +26,26 @@ const session = {
     agentId: 'agent-1',
     sessionKey: 'agent:agent-1:session-1',
   },
+  ownership: null,
   kind: 'session',
   endpointSessionId: 'session-1',
   updatedAt: 1_717_171_717_000,
 } as const;
+
+const ordinaryOwnership = { kind: 'ordinary' } as const;
+const teamOwnership = {
+  kind: 'team',
+  teamId: 'team-1',
+  teamRunId: 'team-run-1',
+  roleId: 'role-1',
+  sessionRef: 'agent:agent-1:session-1',
+} as const;
+
+function omitOwnership<T extends { ownership: unknown }>(value: T): Omit<T, 'ownership'> {
+  const { ownership: _ownership, ...withoutOwnership } = value;
+  void _ownership;
+  return withoutOwnership;
+}
 
 describe('Electron Main session-list transport', () => {
   it('signs only the fixed local OpenClaw session-list request', async () => {
@@ -71,6 +87,24 @@ describe('Electron Main session-list transport', () => {
     });
     expect(signDecision).not.toHaveBeenCalled();
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['null', null],
+    ['ordinary', ordinaryOwnership],
+    ['team', teamOwnership],
+  ] as const)('accepts session catalog rows with %s ownership', async (_name, ownership) => {
+    const ownedSession = { ...session, ownership };
+    const transport = createSessionListTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_101,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => ({ sessions: [ownedSession] }) }),
+    );
+
+    await expect(transport.list(request)).resolves.toEqual({
+      status: 200,
+      body: { sessions: [ownedSession] },
+    });
   });
 
   it('accepts automation session catalog rows', async () => {
@@ -131,6 +165,7 @@ describe('Electron Main session-list transport', () => {
         agentId: 'matcha',
         sessionKey: 'matcha-agent:matcha:native-session-1',
       },
+      ownership: null,
       kind: 'session',
       preferred: false,
       endpointSessionId: 'native-session-1',
@@ -151,6 +186,14 @@ describe('Electron Main session-list transport', () => {
   });
 
   it.each([
+    {
+      name: 'missing ownership',
+      body: { sessions: [omitOwnership(session)] },
+    },
+    {
+      name: 'invalid team ownership',
+      body: { sessions: [{ ...session, ownership: { ...teamOwnership, roleId: '' } }] },
+    },
     {
       name: 'identity agent binding mismatch',
       body: { sessions: [{ ...session, sessionIdentity: { ...session.sessionIdentity, agentId: 'other-agent' } }] },

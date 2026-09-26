@@ -12,10 +12,8 @@ type TeamMessageRepairFuture<'a> = Pin<Box<dyn Future<Output = Option<String>> +
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TeamMessage {
     summary: String,
-    output_port: String,
-    payload: Value,
-    outcome: Option<String>,
-    status: Option<String>,
+    decision: String,
+    dispatch: Vec<TeamMessageDispatch>,
 }
 
 impl TeamMessage {
@@ -23,20 +21,28 @@ impl TeamMessage {
         &self.summary
     }
 
-    pub(crate) fn output_port(&self) -> &str {
-        &self.output_port
+    pub(crate) fn decision(&self) -> &str {
+        &self.decision
     }
 
-    pub(crate) fn payload(&self) -> &Value {
-        &self.payload
+    pub(crate) fn dispatch(&self) -> &[TeamMessageDispatch] {
+        &self.dispatch
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TeamMessageDispatch {
+    role_id: String,
+    task: String,
+}
+
+impl TeamMessageDispatch {
+    pub(crate) fn role_id(&self) -> &str {
+        &self.role_id
     }
 
-    pub(crate) fn outcome(&self) -> Option<&str> {
-        self.outcome.as_deref()
-    }
-
-    pub(crate) fn status(&self) -> Option<&str> {
-        self.status.as_deref()
+    pub(crate) fn task(&self) -> &str {
+        &self.task
     }
 }
 
@@ -74,7 +80,6 @@ pub enum TeamMessageValidationError {
         max: usize,
     },
     ControlCharacter(&'static str),
-    UnsafeOutputPort,
 }
 
 impl std::fmt::Display for TeamMessageValidationError {
@@ -99,10 +104,6 @@ impl std::fmt::Display for TeamMessageValidationError {
                     "field `{field}` must not contain control characters"
                 )
             }
-            Self::UnsafeOutputPort => write!(
-                formatter,
-                "field `output_port` must contain only ASCII graphic characters except `/` or `\\`"
-            ),
         }
     }
 }
@@ -272,38 +273,23 @@ pub(crate) fn validate_team_message(value: &Value) -> Result<TeamMessage, TeamMe
     };
     let mut errors = Vec::new();
     for field in object.keys() {
-        if !matches!(
-            field.as_str(),
-            "summary" | "output_port" | "payload" | "outcome" | "status"
-        ) {
+        if !matches!(field.as_str(), "summary" | "decision" | "dispatch") {
             errors.push(TeamMessageValidationError::UnexpectedField(field.clone()));
         }
     }
     let summary = required_string(object, "summary", &mut errors);
-    let output_port = required_string(object, "output_port", &mut errors);
+    let decision = required_string(object, "decision", &mut errors);
     if let Some(summary) = summary {
         validate_summary(summary, &mut errors);
     }
-    if let Some(output_port) = output_port {
-        validate_output_port(output_port, &mut errors);
-    }
-    let payload = object.get("payload").cloned().or_else(|| {
-        errors.push(TeamMessageValidationError::MissingField("payload"));
-        None
-    });
-    let outcome = optional_string(object, "outcome", &mut errors);
-    let status = optional_string(object, "status", &mut errors);
+    let dispatch = required_dispatch(object.get("dispatch"), &mut errors);
     if !errors.is_empty() {
         return Err(TeamMessageError::ErrorList(errors));
     }
     Ok(TeamMessage {
         summary: summary.expect("validated summary is present").to_owned(),
-        output_port: output_port
-            .expect("validated output_port is present")
-            .to_owned(),
-        payload: payload.expect("validated payload is present"),
-        outcome: outcome.map(str::to_owned),
-        status: status.map(str::to_owned),
+        decision: decision.expect("validated decision is present").to_owned(),
+        dispatch: dispatch.expect("validated dispatch is present"),
     })
 }
 
@@ -312,7 +298,15 @@ fn required_string<'a>(
     field: &'static str,
     errors: &mut Vec<TeamMessageValidationError>,
 ) -> Option<&'a str> {
-    match object.get(field) {
+    required_string_value(object.get(field), field, errors)
+}
+
+fn required_string_value<'a>(
+    value: Option<&'a Value>,
+    field: &'static str,
+    errors: &mut Vec<TeamMessageValidationError>,
+) -> Option<&'a str> {
+    match value {
         Some(Value::String(value)) if value.trim().is_empty() => {
             errors.push(TeamMessageValidationError::EmptyString(field));
             None
@@ -332,6 +326,48 @@ fn required_string<'a>(
     }
 }
 
+fn required_dispatch(
+    value: Option<&Value>,
+    errors: &mut Vec<TeamMessageValidationError>,
+) -> Option<Vec<TeamMessageDispatch>> {
+    let Some(Value::Array(items)) = value else {
+        match value {
+            Some(_) => errors.push(TeamMessageValidationError::FieldType {
+                field: "dispatch",
+                expected: "an array",
+            }),
+            None => errors.push(TeamMessageValidationError::MissingField("dispatch")),
+        }
+        return None;
+    };
+    let mut dispatch = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(object) = item.as_object() else {
+            errors.push(TeamMessageValidationError::FieldType {
+                field: "dispatch",
+                expected: "an array of objects",
+            });
+            continue;
+        };
+        for field in object.keys() {
+            if !matches!(field.as_str(), "role_id" | "task") {
+                errors.push(TeamMessageValidationError::UnexpectedField(format!(
+                    "dispatch.{field}"
+                )));
+            }
+        }
+        let role_id = required_string(object, "role_id", errors);
+        let task = required_string(object, "task", errors);
+        if let (Some(role_id), Some(task)) = (role_id, task) {
+            dispatch.push(TeamMessageDispatch {
+                role_id: role_id.to_owned(),
+                task: task.to_owned(),
+            });
+        }
+    }
+    Some(dispatch)
+}
+
 fn validate_summary(summary: &str, errors: &mut Vec<TeamMessageValidationError>) {
     if summary.len() > 512 {
         errors.push(TeamMessageValidationError::StringTooLong {
@@ -341,37 +377,6 @@ fn validate_summary(summary: &str, errors: &mut Vec<TeamMessageValidationError>)
     }
     if summary.chars().any(char::is_control) {
         errors.push(TeamMessageValidationError::ControlCharacter("summary"));
-    }
-}
-
-fn validate_output_port(output_port: &str, errors: &mut Vec<TeamMessageValidationError>) {
-    if !output_port
-        .bytes()
-        .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'/' | b'\\'))
-    {
-        errors.push(TeamMessageValidationError::UnsafeOutputPort);
-    }
-}
-
-fn optional_string<'a>(
-    object: &'a serde_json::Map<String, Value>,
-    field: &'static str,
-    errors: &mut Vec<TeamMessageValidationError>,
-) -> Option<&'a str> {
-    match object.get(field) {
-        Some(Value::String(value)) if value.trim().is_empty() => {
-            errors.push(TeamMessageValidationError::EmptyString(field));
-            None
-        }
-        Some(Value::String(value)) => Some(value.as_str()),
-        Some(Value::Null) | None => None,
-        Some(_) => {
-            errors.push(TeamMessageValidationError::FieldType {
-                field,
-                expected: "a string or null",
-            });
-            None
-        }
     }
 }
 
@@ -433,15 +438,23 @@ fn build_team_message_repair_prompt<'a>(
     error: &TeamMessageError,
 ) -> TeamMessageRepairPrompt<'a> {
     let errors = error.repair_errors();
-    let correct_format =
-        r#"<team_message>{"summary":"...","output_port":"...","payload":{}}</team_message>"#;
+    let correct_format = r#"<team_message>{"summary":"中文交付摘要","decision":"completed","dispatch":[]}</team_message>"#;
     let prompt = format!(
-        "Repair TeamRun node output (attempt {attempt}/{MAX_REPAIR_ATTEMPTS}).\n\
-Do not call tools. Do not redo the task. Only output a valid <team_message> envelope.\n\
-Original output:\n{original_output}\n\
-Errors:\n{}\n\
-Correct format:\n{correct_format}\n\
-The JSON object must include non-empty string fields `summary` and `output_port`, and a `payload` field with any JSON value. Optional `outcome` and `status` must be non-empty strings if present.",
+        "<teamrun_message_repair>\n\
+你正在修复 TeamRun 节点最终回复中的 `<team_message>` 控制块。\n\n\
+只做格式修复，不重新执行任务，不调用工具，不输出解释。\n\
+最终回复必须只包含一个 `<team_message>...</team_message>`，其中内容必须是合法 JSON。\n\n\
+原始输出：\n{original_output}\n\n\
+校验错误：\n{}\n\n\
+目标结构：\n{correct_format}\n\n\
+修复规则：\n\
+- JSON 顶层只能包含 `summary`、`decision`、`dispatch`\n\
+- `summary`：用中文概括原始输出里的完成内容、关键结论、产物/改动、风险、下游必要上下文\n\
+- `decision`：保留原始输出表达的后续流向；如果无法判断，填 `completed`\n\
+- `dispatch`：必须是数组；没有明确下游任务时填 `[]`\n\
+- `dispatch` 每项只能包含非空字符串字段 `role_id` 和 `task`\n\
+- JSON 字符串里的换行和引号必须正确转义\n\
+</teamrun_message_repair>",
         errors.join("\n")
     );
     TeamMessageRepairPrompt {
@@ -462,19 +475,19 @@ mod tests {
 
     #[test]
     fn multiple_envelopes_extracts_last() {
-        let text = "noise <team_message>{\"summary\":\"old\",\"output_port\":\"x\",\"payload\":1}</team_message> tail <team_message>{\"summary\":\"new\",\"output_port\":\"done\",\"payload\":{\"ok\":true}}</team_message>";
+        let text = "noise <team_message>{\"summary\":\"旧摘要\",\"decision\":\"completed\",\"dispatch\":[]}</team_message> tail <team_message>{\"summary\":\"新摘要\",\"decision\":\"completed\",\"dispatch\":[]}</team_message>";
 
         assert_eq!(
             extract_last_team_message(text).unwrap(),
-            "{\"summary\":\"new\",\"output_port\":\"done\",\"payload\":{\"ok\":true}}"
+            "{\"summary\":\"新摘要\",\"decision\":\"completed\",\"dispatch\":[]}"
         );
-        assert_eq!(parse_team_message(text).unwrap().summary(), "new");
+        assert_eq!(parse_team_message(text).unwrap().summary(), "新摘要");
     }
 
     #[test]
     fn json_syntax_error_is_reported() {
         let error =
-            parse_team_message("<team_message>{\"summary\":\"x\",\"output_port\":</team_message>")
+            parse_team_message("<team_message>{\"summary\":\"摘要\",\"decision\":</team_message>")
                 .unwrap_err();
 
         assert!(matches!(error, TeamMessageError::Json(_)));
@@ -484,43 +497,65 @@ mod tests {
     fn schema_validation_collects_multiple_errors() {
         let error = validate_team_message(&json!({
             "summary": "bad\nsummary",
-            "output_port": "bad/port",
-            "outcome": false
+            "decision": "",
+            "dispatch": [{"role_id": "", "task": false, "extra": true}]
         }))
         .unwrap_err();
 
         assert_eq!(
             error,
             TeamMessageError::ErrorList(vec![
+                TeamMessageValidationError::EmptyString("decision"),
                 TeamMessageValidationError::ControlCharacter("summary"),
-                TeamMessageValidationError::UnsafeOutputPort,
-                TeamMessageValidationError::MissingField("payload"),
+                TeamMessageValidationError::UnexpectedField("dispatch.extra".to_owned()),
+                TeamMessageValidationError::EmptyString("role_id"),
                 TeamMessageValidationError::FieldType {
-                    field: "outcome",
-                    expected: "a string or null"
+                    field: "task",
+                    expected: "a string"
                 },
             ])
         );
     }
 
     #[test]
-    fn payload_accepts_dynamic_json() {
+    fn dispatch_accepts_role_tasks() {
         let message = parse_team_message(
-            "<team_message>{\"summary\":\"ok\",\"output_port\":\"review\",\"payload\":[1,{\"nested\":true}],\"status\":\"passed\"}</team_message>",
+            "<team_message>{\"summary\":\"已完成交付\",\"decision\":\"completed\",\"dispatch\":[{\"role_id\":\"reviewer\",\"task\":\"复核结果\"}]}</team_message>",
         )
         .unwrap();
 
-        assert_eq!(message.output_port(), "review");
-        assert_eq!(message.payload(), &json!([1, {"nested": true}]));
-        assert_eq!(message.status(), Some("passed"));
+        assert_eq!(message.decision(), "completed");
+        assert_eq!(message.dispatch().len(), 1);
+        assert_eq!(message.dispatch()[0].role_id(), "reviewer");
+        assert_eq!(message.dispatch()[0].task(), "复核结果");
+    }
+
+    #[test]
+    fn normalize_wraps_bare_valid_json_only_after_validation() {
+        let normalized = parse_or_normalize_team_message_text(
+            "before {\"summary\":\"已完成交付\",\"decision\":\"completed\",\"dispatch\":[]} after",
+        )
+        .unwrap();
+
+        assert_eq!(
+            normalized,
+            "<team_message>{\"summary\":\"已完成交付\",\"decision\":\"completed\",\"dispatch\":[]}</team_message>"
+        );
+
+        let error = parse_or_normalize_team_message_text(
+            "before {\"summary\":\"已完成交付\",\"output_port\":\"done\",\"payload\":{}} after",
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, TeamMessageError::ErrorList(_)));
     }
 
     #[test]
     fn schema_rejects_unexpected_top_level_fields() {
         let error = validate_team_message(&json!({
-            "summary": "ok",
-            "output_port": "done",
-            "payload": {},
+            "summary": "已完成",
+            "decision": "completed",
+            "dispatch": [],
             "extra": true
         }))
         .unwrap_err();
@@ -547,8 +582,11 @@ mod tests {
                 self.attempts += 1;
                 assert_eq!(prompt.attempt, self.attempts);
                 assert_eq!(prompt.max_attempts, 3);
-                assert!(prompt.as_str().contains("Do not call tools"));
-                assert!(prompt.as_str().contains("Do not redo the task"));
+                assert!(prompt.as_str().contains("不调用工具"));
+                assert!(prompt.as_str().contains("不重新执行任务"));
+                assert!(prompt.as_str().contains(
+                    "{\"summary\":\"中文交付摘要\",\"decision\":\"completed\",\"dispatch\":[]}"
+                ));
                 assert_eq!(prompt.original_output, "broken");
                 Box::pin(async { Some("still broken".to_owned()) })
             }

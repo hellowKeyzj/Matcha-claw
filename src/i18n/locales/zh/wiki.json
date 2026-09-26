@@ -1,0 +1,239 @@
+{
+  "common": {
+    "cancel": "取消",
+    "choose": "选择",
+    "current": "当前",
+    "delete": "删除",
+    "empty": "无记录",
+    "folder": "文件夹",
+    "name": "名称",
+    "optional": "可选",
+    "template": "模板",
+    "refresh": "刷新",
+    "settings": "设置"
+  },
+  "home": {
+    "title": "资料库",
+    "search": "搜索",
+    "myLibraries": "我的资料",
+    "recent": "最近",
+    "newLibrary": "新建资料库",
+    "dialogDescription": "选择一个文件夹，Matcha 会在其中建立资料库结构。",
+    "folderPlaceholder": "选择资料库文件夹",
+    "table": {
+      "name": "名称",
+      "location": "位置",
+      "lastOpened": "最近访问"
+    }
+  },
+  "templates": {
+    "research": {
+      "name": "研究",
+      "description": "用于深度研究，跟踪假设、方法和研究笔记。"
+    },
+    "reading": {
+      "name": "阅读",
+      "description": "跟踪书籍角色、主题、情节线和章节笔记。"
+    },
+    "personal": {
+      "name": "个人成长",
+      "description": "跟踪目标、习惯、反思和自我提升日志。"
+    },
+    "business": {
+      "name": "商务",
+      "description": "管理会议、决策、项目和团队相关方背景。"
+    },
+    "general": {
+      "name": "通用",
+      "description": "最小设置，适合任何用途的空白资料库。"
+    }
+  },
+  "workspace": {
+    "tabs": {
+      "wiki": "Wiki",
+      "sources": "来源",
+      "review": "Review",
+      "search": "搜索",
+      "graph": "图谱"
+    },
+    "library": "资料库",
+    "scan": "扫描"
+  },
+  "content": {
+    "selectPage": "选择页面",
+    "previewUnavailable": "无法预览",
+    "inlineUnsupported": "暂不支持内联预览",
+    "inlineUnsupportedDescription": "{{type}} 文件可保留在资料库中。",
+    "save": "保存",
+    "embed": "嵌入"
+  },
+  "sources": {
+    "title": "来源",
+    "subtitle": "{{sources}} 个来源 · {{records}} 条记录",
+    "importFile": "导入文件",
+    "folder": "文件夹",
+    "backToSources": "来源",
+    "refreshSources": "刷新来源",
+    "scanSources": "扫描来源",
+    "settingsTitle": "来源设置",
+    "settingsSubtitle": "控制来源监听、导入和 PDF 解析。",
+    "watchTitle": "监听来源文件夹",
+    "watchDescription": "检测来源目录里的文件变化。关闭后，只在手动扫描或导入时更新。",
+    "autoImportTitle": "自动导入新文件",
+    "autoImportDescription": "监听到新文件后自动加入资料库。关闭后，变化只会被记录，需要手动导入或扫描。",
+    "captionTitle": "图片说明",
+    "captionDescription": "导入时为图片生成说明，默认关闭。当前并发 {{concurrency}}。",
+    "generationModelTitle": "生成模型",
+    "generationModelDescription": "用于把来源内容整理成 Wiki 页面。只显示支持对话的模型。",
+    "captionModelTitle": "图片说明模型",
+    "captionModelDescription": "用于生成图片说明。只显示支持图像理解的模型；关闭图片说明时可不选。",
+    "modelNone": "未选择",
+    "modelInvalidOption": "当前配置的模型已失效",
+    "modelStatus": {
+      "loading": "模型检查中",
+      "unavailable": "模型不可用",
+      "unconfigured": "模型未配置",
+      "invalid": "模型已失效",
+      "ready": "模型就绪"
+    },
+    "mineruTitle": "MinerU PDF 解析",
+    "mineruDescription": "可用时使用 MinerU 解析 PDF。",
+    "mineruBasicTitle": "基础设置",
+    "mineruBasicDescription": "启用 PDF 解析并选择默认后端。",
+    "mineruEnabledTitle": "启用解析",
+    "mineruEnabledDescription": "可用时使用 MinerU 解析 PDF。",
+    "mineruCloudTitle": "云端解析",
+    "mineruCloudDescription": "配置云端 Token 和模型版本。",
+    "mineruLocalTitle": "本地解析",
+    "mineruLocalDescription": "配置本地服务、解析后端和处理选项。",
+    "mineruBackendTitle": "MinerU 后端",
+    "mineruBackendDescription": "选择云端或本地 MinerU 解析。",
+    "mineruTokenTitle": "云端 Token",
+    "mineruTokenDescription": "Token 只写入不回显，只显示是否已配置。",
+    "tokenConfigured": "已配置",
+    "tokenNotConfigured": "未配置",
+    "tokenPlaceholder": "输入新 Token",
+    "mineruModelVersionTitle": "云端模型版本",
+    "mineruModelVersionDescription": "云端 MinerU 解析使用的模型版本。",
+    "mineruLocalEndpointTitle": "本地 Endpoint",
+    "mineruLocalEndpointDescription": "本地 MinerU 服务的基础地址。",
+    "mineruLocalTokenTitle": "本地 Token",
+    "mineruLocalTokenDescription": "本地 Token 只写入不回显，只显示是否已配置。",
+    "mineruLocalBackendTitle": "本地后端",
+    "mineruLocalBackendDescription": "本地 MinerU 解析使用的后端。",
+    "mineruLocalEffortTitle": "本地推理强度",
+    "mineruLocalEffortDescription": "本地 VLM 解析使用的处理强度。",
+    "mineruLocalParseMethodTitle": "本地解析方式",
+    "mineruLocalParseMethodDescription": "本地 MinerU 使用的解析方式。",
+    "mineruLocalLanguageTitle": "本地语言",
+    "mineruLocalLanguageDescription": "传给本地 MinerU 的语言提示。",
+    "mineruLocalFormulaTitle": "公式解析",
+    "mineruLocalFormulaDescription": "启用本地 MinerU 公式解析。",
+    "mineruLocalTableTitle": "表格解析",
+    "mineruLocalTableDescription": "启用本地 MinerU 表格解析。",
+    "mineruLocalImageAnalysisTitle": "图片分析",
+    "mineruLocalImageAnalysisDescription": "启用本地 MinerU 图片分析。",
+    "mineruLocalServerUrlTitle": "本地 Server URL",
+    "mineruLocalServerUrlDescription": "传给本地 MinerU 的可选服务地址。",
+    "outputLanguageTitle": "生成语言",
+    "outputLanguageDescription": "控制来源导入后生成 Wiki 内容的语言。Auto 会跟随来源内容。",
+    "documents": "来源文档",
+    "emptyDocuments": "无来源文档",
+    "activityLog": "处理记录",
+    "refreshRecords": "刷新记录",
+    "emptyRecords": "无处理记录",
+    "cancelRequested": "已请求取消",
+    "receipt": "{{label}}: 导入 {{imported}} · 删除 {{deleted}} · 移动 {{moved}} · 跳过 {{skipped}}"
+  },
+  "review": {
+    "title": "Review",
+    "subtitle": "{{pending}} 待处理 · {{resolved}} 已处理",
+    "empty": "无 Review 项",
+    "pending": "待处理",
+    "resolved": "已处理",
+    "resolve": "完成",
+    "dismiss": "忽略",
+    "clearResolved": "清除已处理",
+    "pages": "页面",
+    "search": "搜索",
+    "types": {
+      "contradiction": "冲突",
+      "duplicate": "重复",
+      "missing-page": "缺失页面",
+      "confirm": "确认",
+      "suggestion": "建议"
+    }
+  },
+  "search": {
+    "title": "搜索",
+    "placeholder": "搜索",
+    "action": "搜索",
+    "contextAction": "上下文",
+    "results": "结果",
+    "context": "上下文",
+    "noResults": "无结果",
+    "noContext": "无上下文"
+  },
+  "graph": {
+    "title": "图谱",
+    "subtitle": "{{nodes}} 节点 · {{edges}} 边",
+    "load": "读取",
+    "embed": "嵌入",
+    "empty": "无图谱",
+    "nodes": "节点",
+    "edges": "边",
+    "emptyNodes": "无节点",
+    "emptyEdges": "无边"
+  },
+  "activity": {
+    "pending": "待处理",
+    "tasks": "任务",
+    "failed": "失败",
+    "running": "运行",
+    "refresh": "刷新活动",
+    "details": "活动详情",
+    "emptyTasks": "无任务"
+  },
+  "tree": {
+    "empty": "暂无文件",
+    "emptyDirectory": "空"
+  },
+  "preview": {
+    "tooLarge": "文件太大，无法内联预览",
+    "notFound": "文件不存在",
+    "invalidPath": "路径无效",
+    "unavailable": "无法读取文件"
+  },
+  "actions": {
+    "pickLibraryTitle": "选择资料库文件夹",
+    "useFolder": "使用此文件夹",
+    "openedLibrary": "已打开资料库",
+    "createdLibrary": "已创建资料库",
+    "switchedLibrary": "已切换资料库",
+    "savedPage": "已保存页面",
+    "rescanned": "已重新扫描",
+    "importFileReceipt": "导入文件",
+    "pickSourceFileTitle": "选择来源文件",
+    "importFileButton": "导入文件",
+    "importedSource": "已导入来源",
+    "importFolderReceipt": "导入文件夹",
+    "pickSourceFolderTitle": "选择来源文件夹",
+    "importFolderButton": "导入文件夹",
+    "importedFolder": "已导入文件夹",
+    "deleteSourceReceipt": "删除来源",
+    "deletedSource": "已删除来源",
+    "refreshSourcesReceipt": "刷新来源",
+    "refreshedSources": "已刷新来源",
+    "updatedSourceWatch": "已更新来源监听",
+    "embeddedPage": "已触发页面嵌入",
+    "appliedGeneratedPages": "已应用生成内容",
+    "resolvedReview": "已处理 Review",
+    "dismissedReview": "已忽略 Review",
+    "clearedReviews": "已清除已处理 Review",
+    "createdReviewPage": "已创建 Review 页面",
+    "failed": "{{label}} 失败"
+  },
+  "time": {
+    "unrecorded": "未记录"
+  }
+}

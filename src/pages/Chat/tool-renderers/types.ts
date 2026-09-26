@@ -34,17 +34,18 @@ export type GenericToolActivityRenderer = ToolActivityRenderer & {
 };
 
 const KNOWN_TOOL_NAME_MATCHERS: Readonly<Record<Exclude<KnownToolName, 'generic'>, readonly string[]>> = {
-  file: ['write', 'edit', 'multiedit', 'notebookedit', 'filewrite', 'fileedit'],
+  file: ['write', 'edit', 'multiedit', 'notebookedit', 'filewrite', 'fileedit', 'writefile', 'editfile'],
   shell: ['bash', 'shell', 'terminal', 'powershell', 'pwsh', 'cmd', 'exec', 'runcommand'],
   search: ['read', 'grep', 'glob', 'rg', 'ripgrep', 'search', 'find', 'ls', 'list'],
-  skill: ['skill', 'slashcommand', 'commandloader', 'loadskill'],
-  agent: ['agent', 'task', 'subagent', 'delegate', 'taskoutput', 'taskstop', 'sendmessage'],
+  skill: ['skill', 'slashcommand', 'commandloader', 'loadskill', 'skillworkshop'],
+  agent: ['agent', 'task', 'subagent', 'subagents', 'agentswait', 'delegate', 'taskoutput', 'taskstop', 'sendmessage'],
   web: ['webfetch', 'websearch', 'fetch', 'browser', 'searchweb', 'openurl'],
   progress_card: ['progresscard'],
 };
 
 export function normalizeToolName(toolName: string): string {
-  return toolName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+  // MCP names are server__tool (OpenClaw) or mcp__server__tool (Matcha).
+  return toolName.trim().replace(/^(?:mcp__)?[a-z0-9_-]+?__/i, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
 export function matchKnownToolName(normalizedName: string): KnownToolName | null {
@@ -52,7 +53,7 @@ export function matchKnownToolName(normalizedName: string): KnownToolName | null
     Exclude<KnownToolName, 'generic'>,
     readonly string[],
   ]>) {
-    if (candidates.some((candidate) => normalizedName.includes(candidate))) {
+    if (candidates.includes(normalizedName)) {
       return knownName;
     }
   }

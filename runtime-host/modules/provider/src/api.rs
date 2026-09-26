@@ -1,9 +1,12 @@
 use foundation::execution::{CommandRoute, OwnerRuntimeHandle, QueryRoute};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     ProviderAccountId, ProviderAccountRevision, ProviderModelCapability,
-    ProviderPrivateProjectionEffect, ProviderRouting, Resolver,
+    ProviderPrivateProjectionEffect, ProviderRouting, ProviderTextGenerationModelLimitsOutcome,
+    ProviderTextGenerationModelLimitsRequest, ProviderTextGenerationOutcome,
+    ProviderTextGenerationRequest, Resolver,
     application::{ProviderAccountDraft, receipts::*},
 };
 
@@ -134,6 +137,43 @@ impl ProviderHandle {
         let (reply, rx) = oneshot::channel();
         self.owner
             .send_query(ProviderQuery::ListRouting { reply })
+            .await
+            .map_err(|_| ())?;
+        rx.await.map_err(|_| ())
+    }
+
+    pub async fn text_generation_model_limits(
+        &self,
+        request: ProviderTextGenerationModelLimitsRequest,
+    ) -> Result<ProviderTextGenerationModelLimitsOutcome, ()> {
+        let (reply, rx) = oneshot::channel();
+        self.owner
+            .send_query(ProviderQuery::TextGenerationModelLimits { request, reply })
+            .await
+            .map_err(|_| ())?;
+        rx.await.map_err(|_| ())
+    }
+
+    pub async fn generate_text(
+        &self,
+        request: ProviderTextGenerationRequest,
+    ) -> Result<ProviderTextGenerationOutcome, ()> {
+        self.generate_text_cancellable(request, CancellationToken::new())
+            .await
+    }
+
+    pub async fn generate_text_cancellable(
+        &self,
+        request: ProviderTextGenerationRequest,
+        cancellation: CancellationToken,
+    ) -> Result<ProviderTextGenerationOutcome, ()> {
+        let (reply, rx) = oneshot::channel();
+        self.owner
+            .send_query(ProviderQuery::GenerateText {
+                request,
+                cancellation,
+                reply,
+            })
             .await
             .map_err(|_| ())?;
         rx.await.map_err(|_| ())
@@ -344,6 +384,15 @@ pub enum ProviderQuery {
         trace_id: Option<String>,
         reply: oneshot::Sender<ProviderSessionModelSelectionOutcome>,
     },
+    TextGenerationModelLimits {
+        request: ProviderTextGenerationModelLimitsRequest,
+        reply: oneshot::Sender<ProviderTextGenerationModelLimitsOutcome>,
+    },
+    GenerateText {
+        request: ProviderTextGenerationRequest,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<ProviderTextGenerationOutcome>,
+    },
 }
 
 impl ProviderCommand {
@@ -364,7 +413,9 @@ impl ProviderQuery {
             | Self::SelectSessionModel { .. }
             | Self::SelectMatchaSessionModelRuntime { .. }
             | Self::AcceptSessionRuntimeModels { .. }
-            | Self::SelectSessionModelRebound { .. } => QueryRoute::Global,
+            | Self::SelectSessionModelRebound { .. }
+            | Self::TextGenerationModelLimits { .. }
+            | Self::GenerateText { .. } => QueryRoute::Global,
         }
     }
 }

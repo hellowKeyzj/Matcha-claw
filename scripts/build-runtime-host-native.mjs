@@ -2,7 +2,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -107,6 +107,18 @@ function requirePath(path, label) {
   }
 }
 
+function createCargoBuildEnv(projectRootDir) {
+  const hostKey = `${process.platform}-${process.arch}`;
+  const protocName = process.platform === 'win32' ? 'protoc.exe' : 'protoc';
+  const protocRoot = resolve(projectRootDir, 'resources', 'bin', 'protoc', hostKey);
+  const protocPath = join(protocRoot, 'bin', protocName);
+  const protocInclude = join(protocRoot, 'include');
+  if (!existsSync(protocPath) || !existsSync(join(protocInclude, 'google', 'protobuf', 'descriptor.proto'))) {
+    return process.env;
+  }
+  return { ...process.env, PROTOC: protocPath, PROTOC_INCLUDE: protocInclude };
+}
+
 function buildRuntimeHostNative(target) {
   const plan = createRuntimeHostNativeBuildPlan(target);
   requirePath(resolve(rootDir, 'runtime-host', 'Cargo.toml'), 'Cargo workspace manifest');
@@ -116,11 +128,13 @@ function buildRuntimeHostNative(target) {
     { binaryName: 'runtime-host-mcp', ...plan.mcp },
     ...(plan.guardian ? [{ binaryName: 'runtime-host-guardian', ...plan.guardian }] : []),
   ];
+  const cargoEnv = createCargoBuildEnv(rootDir);
 
   for (const artifact of artifacts) {
     console.log(`[build-runtime-host-native] cargo ${artifact.cargoArgs.join(' ')}`);
     const result = spawnSync('cargo', artifact.cargoArgs, {
       cwd: rootDir,
+      env: cargoEnv,
       stdio: 'inherit',
     });
     if (result.error) {

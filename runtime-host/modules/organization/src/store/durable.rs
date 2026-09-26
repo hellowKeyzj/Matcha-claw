@@ -783,26 +783,82 @@ impl OrganizationStore {
         receipt: DeliveryReceipt,
         activity_settlement: Option<ActivitySettlement>,
     ) -> Result<(DeliveryResolution, Option<ActivitySettlementOutcome>), StoreFault> {
-        self.transact(|facts| {
-            let delivery_id = DeliveryId::new(claim.activity_id().as_str().to_owned())
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            let delivery_claim = facts
-                .deliveries()
-                .delivery(&delivery_id)
-                .and_then(|delivery| delivery.active_claim().cloned())
-                .ok_or(StoreFault::InvalidFacts)?;
-            let delivery = facts
-                .settle_delivery(&delivery_claim, receipt, 0)
-                .map_err(|error| StoreFault::DeliveryReceipt(Box::new(error)))?;
-            let activity = activity_settlement
-                .map(|settlement| {
-                    facts
-                        .settle_activity(claim, settlement)
-                        .map_err(|_| StoreFault::InvalidFacts)
-                })
-                .transpose()?;
-            Ok((delivery, activity))
-        })
+        self.ensure_writable()?;
+        let lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        let delivery_id = DeliveryId::new(claim.activity_id().as_str().to_owned())
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        let delivery = self
+            .facts
+            .deliveries()
+            .delivery(&delivery_id)
+            .ok_or(StoreFault::InvalidFacts)?;
+        let activity = self
+            .facts
+            .activities()
+            .activity(claim.activity_id())
+            .ok_or(StoreFault::InvalidFacts)?;
+        if let DeliveryReceipt::Accepted {
+            receipt,
+            native_correlation,
+            ..
+        } = &receipt
+        {
+            let accepted = match delivery.phase() {
+                crate::DeliveryPhase::Delivered {
+                    receipt: existing,
+                    native_correlation: existing_correlation,
+                    ..
+                } => existing == receipt && existing_correlation == native_correlation,
+                crate::DeliveryPhase::TerminalObserved { observation } => {
+                    observation.delivered_receipt() == receipt
+                        && Some(observation.correlation()) == native_correlation.as_ref()
+                }
+                _ => false,
+            };
+            let snapshot = activity.snapshot();
+            let matching_claim = activity.active_claim().map_or_else(
+                || {
+                    snapshot.completed_attempts() == claim.attempt()
+                        && snapshot.next_claim_generation() == claim.generation() + 1
+                },
+                |active| active == claim,
+            );
+            if accepted && matching_claim && activity_settlement.is_none() {
+                return Ok((DeliveryResolution::Delivered, None));
+            }
+        }
+        if activity.active_claim() != Some(claim) {
+            return Err(StoreFault::InvalidFacts);
+        }
+        let delivery_claim = delivery
+            .active_claim()
+            .cloned()
+            .ok_or(StoreFault::InvalidFacts)?;
+        let mut candidate = self.facts.clone();
+        let delivery = candidate
+            .settle_delivery(&delivery_claim, receipt, 0)
+            .map_err(|error| StoreFault::DeliveryReceipt(Box::new(error)))?;
+        let activity = activity_settlement
+            .map(|settlement| {
+                candidate
+                    .settle_activity(claim, settlement)
+                    .map_err(|_| StoreFault::InvalidFacts)
+            })
+            .transpose()?;
+        let run_id = candidate
+            .activities()
+            .activity(claim.activity_id())
+            .ok_or(StoreFault::InvalidFacts)?
+            .facts()
+            .run_id
+            .clone();
+        candidate.cancel_superseded_pending_activities(&run_id);
+        candidate
+            .validate_transition_from(&self.facts)
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        self.commit_locked(&lock, candidate)?;
+        Ok((delivery, activity))
     }
 
     pub fn claim_activity(
@@ -912,6 +968,28 @@ impl OrganizationStore {
             self.commit_locked(&lock, candidate)?;
         }
         Ok(registration)
+    }
+
+    pub(crate) fn accept_native_terminal_context(
+        &mut self,
+        delivery_id: &DeliveryId,
+        endpoint_session_id: crate::EndpointSessionId,
+        native_run_id: String,
+    ) -> Result<(), StoreFault> {
+        self.ensure_writable()?;
+        let lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        let mut candidate = self.facts.clone();
+        if candidate
+            .accept_native_terminal_context(delivery_id, endpoint_session_id, native_run_id)
+            .map_err(|_| StoreFault::InvalidFacts)?
+        {
+            candidate
+                .validate_transition_from(&self.facts)
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            self.commit_locked(&lock, candidate)?;
+        }
+        Ok(())
     }
 
     pub fn native_terminal_target(

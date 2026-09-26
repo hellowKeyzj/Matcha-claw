@@ -142,21 +142,22 @@
   @apply rounded-full bg-border;
 }
 
-.chat-model-picker-viewport {
+/* Radix Select hides native scrollbars; these viewports opt into the app style. */
+.select-scroll-viewport {
   scrollbar-width: thin !important;
   scrollbar-color: hsl(var(--border)) transparent !important;
 }
 
-.chat-model-picker-viewport::-webkit-scrollbar {
+.select-scroll-viewport::-webkit-scrollbar {
   display: block !important;
   width: var(--scrollbar-size);
 }
 
-.chat-model-picker-viewport::-webkit-scrollbar-thumb {
+.select-scroll-viewport::-webkit-scrollbar-thumb {
   @apply rounded-full bg-border;
 }
 
-.chat-model-picker-viewport::-webkit-scrollbar-thumb:hover {
+.select-scroll-viewport::-webkit-scrollbar-thumb:hover {
   @apply bg-muted-foreground/30;
 }
 

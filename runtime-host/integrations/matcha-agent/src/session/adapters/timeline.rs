@@ -267,6 +267,7 @@ fn project_matcha_view(
     let view = SessionView {
         session_key: identity.session_key.clone(),
         endpoint_session_id,
+        ownership: None,
         model_state: None,
         identity: identity.clone(),
         epoch,
@@ -302,6 +303,7 @@ fn project_matcha_hydration_view(
     let view = SessionView {
         session_key: identity.session_key.clone(),
         endpoint_session_id,
+        ownership: None,
         model_state: None,
         identity: identity.clone(),
         epoch,

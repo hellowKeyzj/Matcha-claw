@@ -85,14 +85,19 @@ impl OpenClawDriver {
         let params = match command.run_id {
             Some(run_id) => match crate::session::protocol::RunId::try_new(run_id) {
                 Ok(run_id) => {
-                    crate::session::protocol::ChatAbortParams::new(session_key).for_run(run_id)
+                    crate::session::protocol::SessionAbortParams::new(session_key).for_run(run_id)
                 }
                 Err(_) => return SessionAbortOutcome::Rejected,
             },
-            None => crate::session::protocol::ChatAbortParams::new(session_key),
+            None => crate::session::protocol::SessionAbortParams::new(session_key),
         };
-        match self.session_gateway.abort_chat(params).await {
-            Ok(InvocationOutcome::Succeeded(_)) => SessionAbortOutcome::Succeeded,
+        match self.session_gateway.abort_session(params).await {
+            Ok(InvocationOutcome::Succeeded(result))
+                if result.status == crate::session::protocol::SessionAbortStatus::Aborted =>
+            {
+                SessionAbortOutcome::Succeeded
+            }
+            Ok(InvocationOutcome::Succeeded(_)) => SessionAbortOutcome::Unknown,
             Ok(InvocationOutcome::TargetRejected(_)) => SessionAbortOutcome::Rejected,
             Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) | Err(_) => {
                 SessionAbortOutcome::Unknown
@@ -541,6 +546,7 @@ fn project_openclaw_session_catalog_entry(
         key: entry.session_key.as_str().to_owned(),
         agent_id: entry.agent_id.as_str().to_owned(),
         endpoint_session_id: entry.endpoint_session_id,
+        ownership: None,
         model_state: session.model_state(),
         updated_at: session.updated_at,
         preferred: None,
@@ -620,9 +626,9 @@ impl SessionOpenOps for OpenClawDriver {
                         )
                         .await;
                     match accepted {
-                        Ok(provider_module::ProviderSessionRuntimeModelsOutcome::Accepted(accepted))
-                            if accepted.first() == Some(&true) =>
-                        {
+                        Ok(provider_module::ProviderSessionRuntimeModelsOutcome::Accepted(
+                            accepted,
+                        )) if accepted.first() == Some(&true) => {
                             log_session_model_reconcile_kept(command.session_key(), model);
                             return SessionView {
                                 model_state: facts.model_state,
@@ -686,10 +692,11 @@ impl SessionOpenOps for OpenClawDriver {
                 return view;
             };
             let resolved_model = Some(selection.runtime_model_ref.clone());
-            let resolved_model_state = sessions_module::state::SessionModelState::selected_from_ref(
-                selection.runtime_model_ref,
-            )
-            .ok();
+            let resolved_model_state =
+                sessions_module::state::SessionModelState::selected_from_ref(
+                    selection.runtime_model_ref,
+                )
+                .ok();
             let diagnostic = Some(SessionModelSelectionDiagnostic::new(
                 selection.account_id,
                 selection.model_id,
@@ -809,8 +816,21 @@ impl SessionOps for OpenClawDriver {
         SessionAdmission::new(
             RuntimeDriverIdentity::open_claw().endpoint(),
             sessions_module::state::SessionProvider::OpenClaw,
-            None,
         )
+    }
+
+    fn agent_scoped_session_key(
+        &self,
+        agent_id: &str,
+        endpoint_session_id: &str,
+    ) -> Option<String> {
+        let agent_id = crate::session::protocol::AgentId::try_new(agent_id.to_owned()).ok()?;
+        let endpoint_session_id =
+            crate::session::protocol::EndpointSessionId::try_new(endpoint_session_id.to_owned())
+                .ok()?;
+        crate::session::protocol::AgentScopedSessionKey::try_new(agent_id, endpoint_session_id)
+            .ok()
+            .map(|key| key.as_str().to_owned())
     }
 
     fn abort_session<'a>(

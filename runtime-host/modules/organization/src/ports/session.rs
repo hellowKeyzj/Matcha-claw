@@ -136,6 +136,10 @@ impl RoleSessionReceipt {
     }
 }
 
+pub trait RoleSessionIdentityResolver: Send + Sync {
+    fn session_key(&self, session: &RoleSessionReceipt) -> Option<String>;
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RoleSessionWindow {
     Available {

@@ -17,6 +17,7 @@ pub(crate) async fn handle_loopback(
     body: Vec<u8>,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     owner: crate::OrganizationHandle,
+    resolver: Arc<dyn crate::RoleSessionIdentityResolver>,
 ) -> Response {
     if method != "POST" || path != ROUTE {
         return Response::not_found();
@@ -48,11 +49,14 @@ pub(crate) async fn handle_loopback(
         Err(crate::TeamRuntimeDecodeError::InvalidInput) => return invalid_request(),
         Err(crate::TeamRuntimeDecodeError::Unavailable) => return unavailable(),
     };
-    let outcome = match crate::execute_team_runtime_capability_request(&owner, request).await {
-        Ok((_, outcome)) => outcome,
-        Err(crate::TeamRuntimeDecodeError::InvalidInput) => return invalid_request(),
-        Err(crate::TeamRuntimeDecodeError::Unavailable) => return unavailable(),
-    };
+    let outcome =
+        match crate::execute_team_runtime_capability_request(&owner, resolver.as_ref(), request)
+            .await
+        {
+            Ok((_, outcome)) => outcome,
+            Err(crate::TeamRuntimeDecodeError::InvalidInput) => return invalid_request(),
+            Err(crate::TeamRuntimeDecodeError::Unavailable) => return unavailable(),
+        };
     project_outcome(outcome)
 }
 
@@ -62,7 +66,7 @@ fn project_outcome(outcome: crate::TeamRuntimeControlOutcome) -> Response {
         crate::TeamRuntimeControlOutcome::Unknown(_)
         | crate::TeamRuntimeControlOutcome::Unavailable => unavailable(),
         crate::TeamRuntimeControlOutcome::InvalidInput => invalid_request(),
-        crate::TeamRuntimeControlOutcome::Failed(_) => failed(),
+        crate::TeamRuntimeControlOutcome::Failed(message) => failed(message),
     }
 }
 
@@ -87,11 +91,8 @@ fn unavailable() -> Response {
     )
 }
 
-fn failed() -> Response {
-    Response::json(
-        500,
-        json!({ "success": false, "error": "Team runtime operation is unavailable" }),
-    )
+fn failed(message: &'static str) -> Response {
+    Response::json(400, json!({ "success": false, "error": message }))
 }
 
 fn now_millis() -> u64 {

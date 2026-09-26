@@ -123,6 +123,7 @@ function clickAvailableChannel(name: string) {
 describe('Channels page QR session lifecycle', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    Element.prototype.scrollIntoView = vi.fn();
     i18n.changeLanguage('en');
     useChannelsStore.setState({
       channels: [],
@@ -147,7 +148,7 @@ describe('Channels page QR session lifecycle', () => {
       loadAgents: vi.fn().mockResolvedValue(undefined),
     } as never);
     hostChannelsFetchSnapshotMock.mockResolvedValue(emptySnapshot());
-    hostChannelsReadConfigMock.mockResolvedValue({ success: true, values: {} });
+    hostChannelsReadConfigMock.mockResolvedValue({ success: true, values: {}, agentId: null });
     hostChannelsValidateCredentialsMock.mockResolvedValue({ success: true, valid: true });
     hostChannelsConfigureMock.mockResolvedValue({ success: true });
     hostChannelsActivateMock.mockResolvedValue({
@@ -522,10 +523,12 @@ describe('Channels page QR session lifecycle', () => {
     render(<Channels />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Configure WeChat' }));
-    await waitFor(() => expect([...(screen.getByLabelText('Agent') as HTMLSelectElement).options].map((option) => option.value)).toEqual(['', 'main', 'support']));
-    const agentSelect = screen.getByLabelText('Agent') as HTMLSelectElement;
-    fireEvent.change(agentSelect, { target: { value: 'support' } });
-    expect(agentSelect.value).toBe('support');
+    const agentSelect = await screen.findByRole('combobox', { name: 'Agent' });
+    fireEvent.keyDown(agentSelect, { key: 'ArrowDown' });
+    await screen.findByRole('option', { name: 'Support (support)' });
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(['Default (main) / keep existing', 'main', 'Support (support)']);
+    fireEvent.click(screen.getByRole('option', { name: 'Support (support)' }));
+    expect(agentSelect).toHaveTextContent('Support (support)');
     fireEvent.click(await screen.findByRole('button', { name: 'Update & Reconnect' }));
 
     await waitFor(() => {
@@ -548,9 +551,11 @@ describe('Channels page QR session lifecycle', () => {
     render(<Channels />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Configure Feishu' }));
-    await waitFor(() => expect([...(screen.getByLabelText('Agent') as HTMLSelectElement).options].map((option) => option.value)).toEqual(['', 'main', 'support']));
-    const agentSelect = screen.getByLabelText('Agent') as HTMLSelectElement;
-    fireEvent.change(agentSelect, { target: { value: 'support' } });
+    const agentSelect = await screen.findByRole('combobox', { name: 'Agent' });
+    fireEvent.keyDown(agentSelect, { key: 'ArrowDown' });
+    await screen.findByRole('option', { name: 'Support (support)' });
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(['Default (main) / keep existing', 'main', 'Support (support)']);
+    fireEvent.click(screen.getByRole('option', { name: 'Support (support)' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Update & Reconnect' }));
 
     await waitFor(() => {

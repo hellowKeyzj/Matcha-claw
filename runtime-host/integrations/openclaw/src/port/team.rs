@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use platform::{exchange::InvocationOutcome, state_dir::CanonicalStateDir};
+use platform::state_dir::CanonicalStateDir;
 
 use super::OpenClawGateway;
 use crate::{
     agents::{AgentWait, OpenClawAgents},
     gateway::client::GatewayClient,
-    session::operation::SessionOperation,
-    team::{NativeRunSettledOutcome, PromptDelivery, PromptDeliveryOutcome, TeamProvider},
+    team::{NativeRunSettledOutcome, TeamProvider},
 };
 use organization::{
     MaterializationOperationOutcome, TeamMaterializationRemoval, TeamMaterializationRequest,
@@ -36,30 +35,6 @@ impl OpenClawGateway {
     pub fn team_native_run_waiter(&self) -> TeamNativeRunWaiter {
         TeamNativeRunWaiter {
             client: Arc::clone(&self.client),
-        }
-    }
-
-    pub async fn deliver_team_prompt(&mut self, delivery: PromptDelivery) -> PromptDeliveryOutcome {
-        let params = match delivery.into_params() {
-            Ok(params) => params,
-            Err(_) => {
-                return PromptDeliveryOutcome::Rejected {
-                    failure: crate::surfaces::team::PromptDeliveryFailure::PolicyRejected,
-                };
-            }
-        };
-        let session_key = params.session_key().clone();
-        let operation = SessionOperation::new(Arc::clone(&self.client));
-        if let Err(error) = operation.subscribe_session_messages(&session_key).await {
-            return crate::surfaces::team::map_send_outcome(InvocationOutcome::TargetRejected(
-                error,
-            ));
-        }
-        match operation.send_chat(params).await {
-            Ok(outcome) => crate::surfaces::team::map_send_outcome(outcome),
-            Err(error) => {
-                crate::surfaces::team::map_send_outcome(InvocationOutcome::TargetRejected(error))
-            }
         }
     }
 

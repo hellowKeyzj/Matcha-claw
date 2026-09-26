@@ -10,6 +10,7 @@ import {
 import enCommon from './locales/en/common.json';
 import enSettings from './locales/en/settings.json';
 import enDashboard from './locales/en/dashboard.json';
+import enWiki from './locales/en/wiki.json';
 import enChat from './locales/en/chat.json';
 import enChannels from './locales/en/channels.json';
 import enSkills from './locales/en/skills.json';
@@ -25,6 +26,7 @@ import enPlugins from './locales/en/plugins.json';
 import zhCommon from './locales/zh/common.json';
 import zhSettings from './locales/zh/settings.json';
 import zhDashboard from './locales/zh/dashboard.json';
+import zhWiki from './locales/zh/wiki.json';
 import zhChat from './locales/zh/chat.json';
 import zhChannels from './locales/zh/channels.json';
 import zhSkills from './locales/zh/skills.json';
@@ -40,6 +42,7 @@ import zhPlugins from './locales/zh/plugins.json';
 import jaCommon from './locales/ja/common.json';
 import jaSettings from './locales/ja/settings.json';
 import jaDashboard from './locales/ja/dashboard.json';
+import jaWiki from './locales/ja/wiki.json';
 import jaChat from './locales/ja/chat.json';
 import jaChannels from './locales/ja/channels.json';
 import jaSkills from './locales/ja/skills.json';
@@ -55,6 +58,7 @@ import jaPlugins from './locales/ja/plugins.json';
 import ruCommon from './locales/ru/common.json';
 import ruSettings from './locales/ru/settings.json';
 import ruDashboard from './locales/ru/dashboard.json';
+import ruWiki from './locales/ru/wiki.json';
 import ruChat from './locales/ru/chat.json';
 import ruChannels from './locales/ru/channels.json';
 import ruSkills from './locales/ru/skills.json';
@@ -80,6 +84,7 @@ const resources = {
         common: enCommon,
         settings: enSettings,
         dashboard: enDashboard,
+        wiki: enWiki,
         chat: enChat,
         channels: enChannels,
         skills: enSkills,
@@ -95,6 +100,7 @@ const resources = {
         common: zhCommon,
         settings: zhSettings,
         dashboard: zhDashboard,
+        wiki: zhWiki,
         chat: zhChat,
         channels: zhChannels,
         skills: zhSkills,
@@ -110,6 +116,7 @@ const resources = {
         common: jaCommon,
         settings: jaSettings,
         dashboard: jaDashboard,
+        wiki: jaWiki,
         chat: jaChat,
         channels: jaChannels,
         skills: jaSkills,
@@ -125,6 +132,7 @@ const resources = {
         common: ruCommon,
         settings: ruSettings,
         dashboard: ruDashboard,
+        wiki: ruWiki,
         chat: ruChat,
         channels: ruChannels,
         skills: ruSkills,
@@ -146,7 +154,7 @@ i18n
         fallbackLng: 'en',
         supportedLngs: [...SUPPORTED_LANGUAGE_CODES],
         defaultNS: 'common',
-        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'subagents', 'subagentTemplates', 'teams', 'tasks', 'security', 'plugins'],
+        ns: ['common', 'settings', 'dashboard', 'wiki', 'chat', 'channels', 'skills', 'cron', 'subagents', 'subagentTemplates', 'teams', 'tasks', 'security', 'plugins'],
         interpolation: {
             escapeValue: false, // React already escapes
         },

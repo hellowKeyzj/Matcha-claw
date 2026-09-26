@@ -13,7 +13,8 @@ use super::{
         TeamConfigSnapshot, TeamOwnedAgentId,
     },
     buddy::TeamBuddyMarker,
-    recovery::{self, TeamRecoveryOutcome, TeamRecoveryRequest},
+    config::ConfigUndo,
+    recovery::{TeamRecoveryOutcome, TeamRecoveryRequest},
     workspace::{ResolvedWorkspace, TeamExternalWorkspaces, TeamWorkspaceProjection},
 };
 use crate::{
@@ -97,86 +98,78 @@ impl TeamProvider {
             .map(|agents| agents.recover(request))
     }
 
-    /// Rebuilds a receipt only from a native `agents.list` readback. The durable
-    /// intent supplies role identity and ownership; private workspace paths remain
-    /// integration-local evidence and never leave it.
     pub(crate) async fn recover_materialization(
         &self,
         request: TeamMaterializationRequest,
     ) -> MaterializationOperationOutcome {
-        if request
-            .intent()
-            .agents()
-            .iter()
-            .any(|role| matches!(role.agent(), RoleMaterializationAgent::Managed { .. }))
-        {
-            // A durable managed-agent intent records a requested name, not the
-            // provider-assigned native ID. Do not guess that identity from list
-            // output; keep it ambiguous until a provider-owned recovery receipt exists.
+        let Ok(Some(undo)) = ConfigUndo::load(&self.config.state_dir(), request.intent().team())
+        else {
+            return MaterializationOperationOutcome::OutcomeUnknown;
+        };
+        if !undo.matches_request(&request) {
             return MaterializationOperationOutcome::OutcomeUnknown;
         }
-        let Some(recovery_request) = recovery_request(&request) else {
+        let (Ok(facts), Ok(receipt)) = (undo.facts(), undo.receipt()) else {
             return MaterializationOperationOutcome::OutcomeUnknown;
         };
-        let recovery = match self.recover(recovery_request).await {
-            Ok(TeamRecoveryOutcome::Recovered(recovery))
-                if recovery.team().as_str() == request.intent().team().as_str() =>
-            {
-                recovery
-            }
-            Ok(TeamRecoveryOutcome::Recovered(_)) | Ok(TeamRecoveryOutcome::Unknown) | Err(_) => {
-                return MaterializationOperationOutcome::OutcomeUnknown;
-            }
+        let Ok(snapshot) = self.config_snapshot().await else {
+            return MaterializationOperationOutcome::OutcomeUnknown;
         };
-        let mut roles = Vec::with_capacity(request.intent().agents().len());
-        for requested in request.intent().agents() {
-            let Some(recovered) = recovery
+        if !snapshot.0.matches_agents(&facts) {
+            return MaterializationOperationOutcome::OutcomeUnknown;
+        }
+        let recovery_request = TeamRecoveryRequest::try_new(
+            receipt.team().as_str(),
+            receipt
                 .roles()
                 .iter()
-                .find(|recovered| recovered.role().as_str() == requested.role().as_str())
-            else {
+                .map(|role| {
+                    super::recovery::TeamRecoveryRole::try_new(
+                        role.role().as_str(),
+                        role.agent().as_str(),
+                    )
+                })
+                .collect::<Result<_, _>>()
+                .expect("validated receipt roles"),
+        )
+        .expect("validated receipt");
+        let Ok(TeamRecoveryOutcome::Recovered(recovered)) = self.recover(recovery_request).await
+        else {
+            return MaterializationOperationOutcome::OutcomeUnknown;
+        };
+        for role in receipt.roles() {
+            let Some(workspace) = role.native_workspace() else {
                 return MaterializationOperationOutcome::OutcomeUnknown;
             };
-            if recovered.agent().as_str().is_empty() {
+            if !recovered.roles().iter().any(|native| {
+                native.role().as_str() == role.role().as_str()
+                    && native.agent().as_str() == role.agent().as_str()
+                    && native.workspace().as_str() == workspace.as_str()
+            }) {
                 return MaterializationOperationOutcome::OutcomeUnknown;
             }
-            let ownership = match requested.agent() {
-                RoleMaterializationAgent::Managed { .. } => {
-                    return MaterializationOperationOutcome::OutcomeUnknown;
-                }
-                RoleMaterializationAgent::External { agent } => {
-                    if recovered.agent().as_str() != agent.as_str() {
+        }
+        // Durable expected config and all native identities are verified above.
+        // Finish only missing markers after an interrupted materialization.
+        for role in receipt.roles() {
+            let workspace = std::path::Path::new(
+                role.native_workspace()
+                    .expect("verified workspace")
+                    .as_str(),
+            );
+            let marker = TeamBuddyMarker::new(receipt.team().clone(), role.role().clone());
+            match marker.recover(workspace) {
+                Ok(true) => {}
+                Ok(false) => {
+                    if marker.write(workspace).is_err()
+                        || !matches!(marker.recover(workspace), Ok(true))
+                    {
                         return MaterializationOperationOutcome::OutcomeUnknown;
                     }
-                    RoleMaterializationOwnership::External
                 }
-            };
-            if !matches!(
-                TeamBuddyMarker::new(request.intent().team().clone(), requested.role().clone(),)
-                    .recover(std::path::Path::new(recovered.workspace().as_str())),
-                Ok(true)
-            ) {
-                return MaterializationOperationOutcome::OutcomeUnknown;
+                Err(_) => return MaterializationOperationOutcome::OutcomeUnknown,
             }
-            let agent = ManagedAgentReference::try_new(recovered.agent().as_str().to_owned())
-                .expect("native recovery agent ID must be a valid materialization reference");
-            let workspace =
-                NativeWorkspaceReceipt::try_new(recovered.workspace().as_str().to_owned())
-                    .expect("native recovery workspace must be a valid workspace receipt");
-            roles.push(RoleMaterializationReceipt::with_native_workspace(
-                requested.role().clone(),
-                agent,
-                ownership,
-                request.intent().endpoint().clone(),
-                workspace,
-            ));
         }
-        let receipt = MaterializationReceipt::try_new(
-            request.intent().team().clone(),
-            request.intent().endpoint().clone(),
-            roles,
-        )
-        .expect("complete native recovery facts must form a receipt");
         MaterializationOperationOutcome::Confirmed { receipt }
     }
 
@@ -184,6 +177,11 @@ impl TeamProvider {
         &self,
         request: TeamMaterializationRequest,
     ) -> MaterializationOperationOutcome {
+        match ConfigUndo::load(&self.config.state_dir(), request.intent().team()) {
+            Ok(Some(_)) => return self.recover_materialization(request).await,
+            Ok(None) => {}
+            Err(()) => return MaterializationOperationOutcome::OutcomeUnknown,
+        }
         let workspaces = match self.workspace_projection_for_request(&request) {
             Ok(workspaces) => workspaces,
             Err(WorkspaceProjectionError::Rejected) => return permanent_rejection(),
@@ -230,6 +228,7 @@ impl TeamProvider {
                             agent_id.clone(),
                             name.clone(),
                             workspace.clone(),
+                            role.tools(),
                         ));
                     }
                     match outcome {
@@ -263,6 +262,7 @@ impl TeamProvider {
                             .fail_materialization(&mut progress, permanent_rejection())
                             .await;
                     };
+                    config_agents.push(TeamConfigAgent::external(&agent_id, role.tools()));
                     verified_roles.push(VerifiedRole::external(
                         role.role().clone(),
                         agent_id,
@@ -283,22 +283,44 @@ impl TeamProvider {
                         .await;
                 }
             };
-            match self.apply_config_agents(snapshot, config_agents).await {
-                MutationOutcome::Applied(restore_facts) => {
-                    progress.config_restore = Some(restore_facts);
-                }
+            let planned_receipt = MaterializationReceipt::try_new(
+                request.intent().team().clone(),
+                request.intent().endpoint().clone(),
+                verified_roles
+                    .iter()
+                    .map(|role| {
+                        RoleMaterializationReceipt::with_native_workspace(
+                            role.role.clone(),
+                            ManagedAgentReference::try_new(role.agent_id.as_str())
+                                .expect("validated agent"),
+                            role.ownership,
+                            request.intent().endpoint().clone(),
+                            NativeWorkspaceReceipt::try_new(role.workspace.as_str())
+                                .expect("validated workspace"),
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("validated materialization roles");
+            match self
+                .apply_config_agents(
+                    snapshot,
+                    config_agents,
+                    &request,
+                    &planned_receipt,
+                    &mut progress,
+                )
+                .await
+            {
+                MutationOutcome::Applied(()) => {}
                 MutationOutcome::Rejected => {
                     return self
                         .fail_materialization(&mut progress, permanent_rejection())
                         .await;
                 }
                 MutationOutcome::OutcomeUnknown => {
-                    return self
-                        .fail_materialization(
-                            &mut progress,
-                            MaterializationOperationOutcome::OutcomeUnknown,
-                        )
-                        .await;
+                    // A late config write may still arrive; retain its durable undo.
+                    return MaterializationOperationOutcome::OutcomeUnknown;
                 }
             }
         }
@@ -382,7 +404,6 @@ impl TeamProvider {
             }
             progress.written_markers += 1;
         }
-        progress.config_restore = None;
         let receipt = MaterializationReceipt::try_new(
             request.intent().team().clone(),
             request.intent().endpoint().clone(),
@@ -444,6 +465,32 @@ impl TeamProvider {
         &self,
         removal: TeamMaterializationRemoval,
     ) -> MaterializationOperationOutcome {
+        let undo = match ConfigUndo::load(&self.config.state_dir(), removal.receipt().team()) {
+            Ok(Some(undo)) if undo.matches_receipt(removal.receipt()) => Some(undo),
+            Ok(None)
+                if removal
+                    .receipt()
+                    .roles()
+                    .iter()
+                    .all(|role| role.ownership() == RoleMaterializationOwnership::Managed) =>
+            {
+                None
+            }
+            _ => return MaterializationOperationOutcome::OutcomeUnknown,
+        };
+        if let Some(undo) = &undo {
+            if undo.is_removed() {
+                return MaterializationOperationOutcome::Confirmed {
+                    receipt: removal.receipt().clone(),
+                };
+            }
+            if !matches!(
+                self.restore_config(undo, false).await,
+                MutationOutcome::Applied(())
+            ) {
+                return MaterializationOperationOutcome::OutcomeUnknown;
+            }
+        }
         for role in removal.receipt().roles().iter().rev() {
             let Some(workspace) = role.native_workspace() else {
                 return MaterializationOperationOutcome::OutcomeUnknown;
@@ -464,6 +511,9 @@ impl TeamProvider {
                     }
                 }
             }
+        }
+        if undo.is_some_and(|undo| undo.finish_removal(&self.config.state_dir()).is_err()) {
+            return MaterializationOperationOutcome::OutcomeUnknown;
         }
         MaterializationOperationOutcome::Confirmed {
             receipt: removal.receipt().clone(),
@@ -614,7 +664,10 @@ impl TeamProvider {
         &self,
         snapshot: TeamConfigSnapshot,
         agents: Vec<TeamConfigAgent>,
-    ) -> MutationOutcome<wire::team::ConfigRestoreFacts> {
+        request: &TeamMaterializationRequest,
+        receipt: &MaterializationReceipt,
+        progress: &mut MaterializationProgress,
+    ) -> MutationOutcome<()> {
         let patch = match snapshot
             .0
             .patch_agents(agents.into_iter().map(TeamConfigAgent::into_wire).collect())
@@ -622,71 +675,90 @@ impl TeamProvider {
             Ok(patch) => patch,
             Err(_) => return MutationOutcome::Rejected,
         };
-        let (raw, base_hash, restore_facts, replace_paths) = patch.into_parts();
-        let request = match wire::team::config_patch_request(
-            next_request_id("config-patch"),
-            raw,
-            base_hash,
-            replace_paths,
-        ) {
-            Ok(request) => request,
-            Err(_) => return MutationOutcome::Rejected,
+        let (raw, base_hash, facts) = patch.into_parts();
+        let undo = match ConfigUndo::prepare(request, receipt, &facts) {
+            Ok(undo) => undo,
+            Err(()) => return MutationOutcome::Rejected,
         };
-        match self.write_config_patch_request(request).await {
-            MutationOutcome::Applied(()) => MutationOutcome::Applied(restore_facts),
-            MutationOutcome::Rejected => MutationOutcome::Rejected,
-            MutationOutcome::OutcomeUnknown => MutationOutcome::OutcomeUnknown,
+        if undo.persist(&self.config.state_dir()).is_err() {
+            return MutationOutcome::OutcomeUnknown;
         }
-    }
-
-    async fn restore_config(&self, facts: wire::team::ConfigRestoreFacts) -> MutationOutcome<()> {
-        let snapshot = match self.config_snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(_) => return MutationOutcome::OutcomeUnknown,
-        };
-        let (request, fenced) = match snapshot.0.prepare_restore(facts) {
-            Ok(wire::team::ConfigRestorePreparation::Ready { request, fenced }) => {
-                (request, fenced)
-            }
-            Ok(wire::team::ConfigRestorePreparation::Fenced) => {
-                return MutationOutcome::OutcomeUnknown;
-            }
-            Err(_) => return MutationOutcome::OutcomeUnknown,
-        };
-        match self.write_config_patch_request(request).await {
-            MutationOutcome::Applied(()) if !fenced => MutationOutcome::Applied(()),
-            MutationOutcome::Applied(())
-            | MutationOutcome::Rejected
-            | MutationOutcome::OutcomeUnknown => MutationOutcome::OutcomeUnknown,
-        }
-    }
-
-    async fn write_config_patch_request(
-        &self,
-        request: wire::team::ConfigPatchRequest,
-    ) -> MutationOutcome<()> {
+        progress.config_restore = Some(undo);
+        let request =
+            match wire::team::config_set_request(next_request_id("config-set"), raw, base_hash) {
+                Ok(request) => request,
+                Err(_) => return MutationOutcome::Rejected,
+            };
         match self
-            .gateway
-            .rpc_encoded_mutation(
-                request.request_id().to_owned(),
-                match request.encode() {
-                    Ok(encoded) => encoded,
-                    Err(_) => return MutationOutcome::Rejected,
-                },
-            )
+            .write_config_request(wire::team::ConfigRestoreRequest::Set(request))
             .await
         {
-            MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
-                MutationOutcome::Rejected
-            }
-            MutationDelivery::Response(response) => match wire::team::decode_config_patch(response)
-            {
-                Ok(_) => MutationOutcome::Applied(()),
-                Err(_) => MutationOutcome::OutcomeUnknown,
+            MutationOutcome::Applied(()) => match self.config_snapshot().await {
+                Ok(snapshot) if snapshot.0.matches_agents(&facts) => MutationOutcome::Applied(()),
+                _ => MutationOutcome::OutcomeUnknown,
             },
-            MutationDelivery::NotWritten(_) => MutationOutcome::Rejected,
-            MutationDelivery::MayHaveReached(_) => MutationOutcome::OutcomeUnknown,
+            outcome => outcome,
         }
+    }
+
+    async fn restore_config(&self, undo: &ConfigUndo, compensate: bool) -> MutationOutcome<()> {
+        if !undo.has_external_roles() {
+            return MutationOutcome::Applied(());
+        }
+        // At most one full replacement and one removal patch; each uses a fresh hash.
+        // A final read proves restoration even when the previous write outcome was lost.
+        for step in 0..=2 {
+            let (Ok(snapshot), Ok(facts)) = (self.config_snapshot().await, undo.facts()) else {
+                return MutationOutcome::OutcomeUnknown;
+            };
+            let prepared = if compensate {
+                snapshot.0.prepare_restore(facts)
+            } else {
+                snapshot.0.prepare_external_restore(facts)
+            };
+            match prepared {
+                Ok(wire::team::ConfigRestorePreparation::Restored) => {
+                    return MutationOutcome::Applied(());
+                }
+                Ok(wire::team::ConfigRestorePreparation::Ready { request, .. }) if step < 2 => {
+                    if !matches!(
+                        self.write_config_request(request).await,
+                        MutationOutcome::Applied(())
+                    ) {
+                        return MutationOutcome::OutcomeUnknown;
+                    }
+                }
+                Ok(
+                    wire::team::ConfigRestorePreparation::Ready { .. }
+                    | wire::team::ConfigRestorePreparation::Fenced,
+                )
+                | Err(_) => return MutationOutcome::OutcomeUnknown,
+            }
+        }
+        MutationOutcome::OutcomeUnknown
+    }
+
+    async fn write_config_request(
+        &self,
+        request: wire::team::ConfigRestoreRequest,
+    ) -> MutationOutcome<()> {
+        let encoded = match request.encode() {
+            Ok(encoded) => encoded,
+            Err(_) => return MutationOutcome::Rejected,
+        };
+        let is_set = matches!(&request, wire::team::ConfigRestoreRequest::Set(_));
+        map_write_response(
+            self.gateway
+                .rpc_encoded_mutation(request.request_id().to_owned(), encoded)
+                .await,
+            |response| {
+                if is_set {
+                    wire::team::decode_config_set(response).map(|_| ())
+                } else {
+                    wire::team::decode_config_patch(response).map(|_| ())
+                }
+            },
+        )
     }
 
     async fn write_request<T>(
@@ -740,7 +812,7 @@ impl TeamProvider {
 #[derive(Default)]
 struct MaterializationProgress {
     created_agents: Vec<TeamOwnedAgentId>,
-    config_restore: Option<wire::team::ConfigRestoreFacts>,
+    config_restore: Option<ConfigUndo>,
     markers: Vec<(TeamBuddyMarker, ResolvedWorkspace)>,
     written_markers: usize,
 }
@@ -758,8 +830,8 @@ impl MaterializationProgress {
                 confirmed = false;
             }
         }
-        if let Some(facts) = self.config_restore.take() {
-            match provider.restore_config(facts).await {
+        if let Some(undo) = &self.config_restore {
+            match provider.restore_config(undo, true).await {
                 MutationOutcome::Applied(()) => {}
                 MutationOutcome::Rejected | MutationOutcome::OutcomeUnknown => {
                     confirmed = false;
@@ -772,6 +844,13 @@ impl MaterializationProgress {
                 MutationOutcome::Rejected | MutationOutcome::OutcomeUnknown => {
                     confirmed = false;
                 }
+            }
+        }
+        if confirmed {
+            if let Some(undo) = self.config_restore.take() {
+                confirmed = undo
+                    .finish_compensation(&provider.config.state_dir())
+                    .is_ok();
             }
         }
         confirmed
@@ -836,21 +915,6 @@ fn is_agent_not_found_error(code: &str) -> bool {
         code,
         "NOT_FOUND" | "AGENT_NOT_FOUND" | "not_found" | "agent_not_found"
     )
-}
-
-fn recovery_request(request: &TeamMaterializationRequest) -> Option<TeamRecoveryRequest> {
-    let roles = request
-        .intent()
-        .agents()
-        .iter()
-        .map(|role| match role.agent() {
-            RoleMaterializationAgent::External { agent } => {
-                recovery::TeamRecoveryRole::try_new(role.role().as_str(), agent.as_str()).ok()
-            }
-            RoleMaterializationAgent::Managed { .. } => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-    TeamRecoveryRequest::try_new(request.intent().team().as_str(), roles).ok()
 }
 
 fn map_write_response<T>(

@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::Serialize;
 
 use crate::{
@@ -5,7 +7,10 @@ use crate::{
     run::{
         approval::{ApprovalDecision, ApprovalResolutionCause, ApprovalStatus},
         decision::TeamDecisionType,
-        delivery::{AuthorizedGraphOutcome, DeliveryFailure, TerminalObservationResolution},
+        delivery::{
+            AuthorizedGraphOutcome, DeliveryFailure, NativeTerminalStatus,
+            TerminalObservationResolution,
+        },
         event::TeamEventType,
         graph::{
             AttemptReason, AttemptStatus, EdgeAction, EdgeStatus, GraphStatus, NodeKind,
@@ -91,6 +96,7 @@ pub struct TeamPublicGraph {
     workflow_plan_id: String,
     title: String,
     status: TeamPublicGraphStatus,
+    layout: TeamPublicGraphLayout,
     nodes: Vec<TeamPublicNode>,
     edges: Vec<TeamPublicEdge>,
 }
@@ -112,12 +118,45 @@ impl TeamPublicGraph {
         self.status
     }
 
+    pub const fn layout(&self) -> &TeamPublicGraphLayout {
+        &self.layout
+    }
+
     pub fn nodes(&self) -> &[TeamPublicNode] {
         &self.nodes
     }
 
     pub fn edges(&self) -> &[TeamPublicEdge] {
         &self.edges
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamPublicGraphLayout {
+    node_positions: BTreeMap<String, TeamPublicNodePosition>,
+}
+
+impl TeamPublicGraphLayout {
+    pub fn node_positions(&self) -> &BTreeMap<String, TeamPublicNodePosition> {
+        &self.node_positions
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamPublicNodePosition {
+    x: i64,
+    y: i64,
+}
+
+impl TeamPublicNodePosition {
+    pub const fn x(&self) -> i64 {
+        self.x
+    }
+
+    pub const fn y(&self) -> i64 {
+        self.y
     }
 }
 
@@ -143,6 +182,8 @@ pub struct TeamPublicNode {
     task_id: Option<String>,
     max_attempts: u32,
     trigger: Option<TeamPublicStartTrigger>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_reason: Option<&'static str>,
     attempt: TeamPublicAttempt,
 }
 
@@ -173,6 +214,10 @@ impl TeamPublicNode {
 
     pub fn trigger(&self) -> Option<&TeamPublicStartTrigger> {
         self.trigger.as_ref()
+    }
+
+    pub const fn status_reason(&self) -> Option<&'static str> {
+        self.status_reason
     }
 
     pub fn attempt(&self) -> &TeamPublicAttempt {
@@ -1130,7 +1175,7 @@ fn build_public_snapshot(
     request: &TeamRunPublicSnapshotRequest,
 ) -> TeamRunPublicSnapshot {
     let runtime = runtime_state(facts, run_id, run.runtime().is_some());
-    let graph = graph_projection(run.graph());
+    let graph = graph_projection(facts, run.graph());
     let attempts = run
         .graph()
         .executions()
@@ -1583,7 +1628,7 @@ pub fn query_team_public_projection(
         proposal_id: run.start_gate().proposal_id().map(ToOwned::to_owned),
         proposal_summary: run.start_gate().summary().map(ToOwned::to_owned),
         proposal_source_delivery_id: run.start_gate().source_delivery_id().map(ToOwned::to_owned),
-        graph: graph_projection(run.graph()),
+        graph: graph_projection(facts, run.graph()),
     })
 }
 
@@ -1618,14 +1663,54 @@ fn runtime_state(
     }
 }
 
-fn graph_projection(graph: &GraphState) -> TeamPublicGraph {
+fn graph_projection(facts: &OrganizationFacts, graph: &GraphState) -> TeamPublicGraph {
     let projected = project(graph);
     let definition = graph.definition();
+    let rework_limit_nodes: BTreeSet<_> = facts
+        .deliveries()
+        .deliveries()
+        .filter_map(|delivery| {
+            let DeliveryPhase::TerminalObserved { observation } = delivery.phase() else {
+                return None;
+            };
+            let TerminalObservationResolution::GraphResolved(resolution) = observation.resolution()
+            else {
+                return None;
+            };
+            if observation.graph_run_id() != definition.run_id().as_str()
+                || observation.native_terminal() != NativeTerminalStatus::Completed
+                || resolution.outcome() != AuthorizedGraphOutcome::Failed
+                || !observation.output().is_some_and(|output| output.decision() == "rework")
+            {
+                return None;
+            }
+            let node_id = crate::NodeId::new(observation.node_id());
+            let current = graph.current_attempt(&node_id)?;
+            (current.fence() == observation.fence() && current.status() == AttemptStatus::Failed)
+                .then_some(node_id)
+        })
+        .collect();
     TeamPublicGraph {
         graph_id: definition.graph_id().to_owned(),
         workflow_plan_id: definition.workflow_plan_id().to_owned(),
         title: definition.title().to_owned(),
         status: graph_status(projected.status),
+        layout: TeamPublicGraphLayout {
+            node_positions: graph
+                .layout()
+                .node_positions()
+                .iter()
+                .map(|(node_id, position)| {
+                    (
+                        node_id.as_str().to_owned(),
+                        TeamPublicNodePosition {
+                            x: position.x(),
+                            y: position.y(),
+                        },
+                    )
+                })
+                .collect(),
+        },
         nodes: definition
             .nodes()
             .iter()
@@ -1647,6 +1732,9 @@ fn graph_projection(graph: &GraphState) -> TeamPublicGraph {
                         expression: expression.clone(),
                     },
                 }),
+                status_reason: rework_limit_nodes
+                    .contains(definition.id())
+                    .then_some("rework_limit_exceeded"),
                 attempt: TeamPublicAttempt {
                     number: current.current.number,
                     status: attempt_status(current.current.status),

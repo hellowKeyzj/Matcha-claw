@@ -20,6 +20,7 @@ pub enum RoleMaterializationAgent {
 pub struct RoleAgentMaterialization {
     role: RoleId,
     agent: RoleMaterializationAgent,
+    tools: Vec<String>,
 }
 
 impl RoleAgentMaterialization {
@@ -34,6 +35,7 @@ impl RoleAgentMaterialization {
         Ok(Self {
             role,
             agent: RoleMaterializationAgent::Managed { name },
+            tools: Vec::new(),
         })
     }
 
@@ -41,6 +43,7 @@ impl RoleAgentMaterialization {
         Self {
             role,
             agent: RoleMaterializationAgent::External { agent },
+            tools: Vec::new(),
         }
     }
 
@@ -50,6 +53,17 @@ impl RoleAgentMaterialization {
 
     pub fn agent(&self) -> &RoleMaterializationAgent {
         &self.agent
+    }
+
+    pub fn tools(&self) -> &[String] {
+        &self.tools
+    }
+
+    pub fn with_tools(mut self, mut tools: Vec<String>) -> Self {
+        let mut seen = BTreeSet::new();
+        tools.retain(|tool| seen.insert(tool.clone()));
+        self.tools = tools;
+        self
     }
 }
 

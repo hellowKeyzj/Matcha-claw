@@ -6,6 +6,7 @@ pub struct SessionRunTerminalSnapshot {
     pub route_key: Option<String>,
     pub source_binding: SessionSourceBinding,
     pub native_run_id: String,
+    pub delivery_context: Option<super::state::SessionDeliveryContext>,
     pub phase: RunPhase,
     pub final_assistant_text: Option<String>,
 }

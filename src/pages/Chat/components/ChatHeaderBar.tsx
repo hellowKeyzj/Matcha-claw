@@ -1,5 +1,5 @@
 import { Brain, Download, PanelRightClose, PanelRightOpen } from 'lucide-react';
-import { memo } from 'react';
+import { memo, type ReactNode } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -21,6 +21,7 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   sidePanelOpen,
   unfinishedTaskCount,
   onToggleSidePanel,
+  todoPanel,
 }: {
   showThinking: boolean;
   onToggleThinking: () => void;
@@ -29,6 +30,7 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   sidePanelOpen: boolean;
   unfinishedTaskCount: number;
   onToggleSidePanel: () => void;
+  todoPanel?: ReactNode;
 }) {
   const { t } = useTranslation('chat');
   const sidePanelToggleLabel = sidePanelOpen
@@ -38,6 +40,7 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   return (
     <div className="flex items-start justify-end gap-2">
       <div className="flex items-center gap-1">
+        {todoPanel}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button

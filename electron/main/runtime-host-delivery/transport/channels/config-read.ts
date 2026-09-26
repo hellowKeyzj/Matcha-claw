@@ -16,6 +16,7 @@ export type ChannelConfigReadRequest = Readonly<{
 
 export type ChannelConfigReadProjection = Readonly<{
   values: Readonly<Record<string, string>>;
+  agentId: string | null;
 }>;
 
 export interface ChannelConfigReadTransport {
@@ -62,7 +63,7 @@ export function createChannelConfigReadTransport(
         body = response.body;
         if (response.status === 200 && isProjection(body)) {
           finish(status, body);
-          return { values: body.values };
+          return { values: body.values, agentId: body.agentId };
         }
         if ((response.status === 400 || response.status === 503) && isPublicError(body)) {
           finish(status, body);
@@ -85,8 +86,9 @@ function isRequest(value: unknown): value is ChannelConfigReadRequest {
 
 function isProjection(value: unknown): value is ChannelConfigReadProjection {
   return isRecord(value)
-    && hasExactKeys(value, ['values'])
-    && isStringMap(value.values);
+    && hasExactKeys(value, ['values', 'agentId'])
+    && isStringMap(value.values)
+    && (value.agentId === null || isIdentity(value.agentId));
 }
 
 function isStringMap(value: unknown): value is Readonly<Record<string, string>> {

@@ -665,7 +665,6 @@ exports.default = async function afterPack(context) {
       required: true,
       localSourceCandidates: [
         join(__dirname, '..', 'build', 'openclaw-plugins', 'openclaw-lark'),
-        join(__dirname, '..', 'build', 'openclaw-plugins', 'feishu-openclaw-plugin'),
       ],
     },
   ];

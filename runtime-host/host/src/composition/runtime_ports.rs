@@ -288,6 +288,18 @@ impl organization::OrganizationRuntimeDirectory for RuntimeDriverDirectory {
     }
 }
 
+impl organization::RoleSessionIdentityResolver for RuntimeDriverDirectory {
+    fn session_key(&self, session: &organization::RoleSessionReceipt) -> Option<String> {
+        let identity = RuntimeDriverIdentity::from_reference(session.endpoint().as_str())?;
+        let driver = self.lookup(&identity.endpoint())?;
+        let session_ops = driver.session_ops()?;
+        session_ops.agent_scoped_session_key(
+            session.agent().as_str(),
+            session.endpoint_session_id().as_str(),
+        )
+    }
+}
+
 impl RuntimeDriverDirectory {
     #[cfg(test)]
     pub(crate) fn new() -> Self {

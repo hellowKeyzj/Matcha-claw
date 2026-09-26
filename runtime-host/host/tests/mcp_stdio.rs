@@ -54,6 +54,22 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
             "team_graph_context",
             "team_run_decision_submit",
             "team_evidence_record",
+            "wiki_status",
+            "wiki_projects",
+            "wiki_set_project",
+            "wiki_files",
+            "wiki_read_file",
+            "wiki_search",
+            "wiki_graph",
+            "wiki_rescan_sources",
+            "wiki_import_source",
+            "wiki_import_folder",
+            "wiki_refresh_sources",
+            "wiki_apply_generated_pages",
+            "wiki_delete_source",
+            "wiki_source_tasks",
+            "wiki_embed_page",
+            "wiki_retrieve_context",
         ],
     );
     assert_eq!(
@@ -107,7 +123,7 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
             .as_array()
             .unwrap()
             .len(),
-        4
+        5
     );
     assert_eq!(
         tools["result"]["tools"][2]["inputSchema"]["required"],
@@ -175,6 +191,47 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
                 },
                 "required": ["evidenceId", "runId", "nodeExecutionId", "referenceKind", "reference"]
             }
+        })
+    );
+    assert_eq!(
+        tools["result"]["tools"][17],
+        json!({
+            "name": "wiki_apply_generated_pages",
+            "description": "Apply generated wiki pages for a source file.",
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "projectId": { "type": ["string", "null"], "minLength": 1 },
+                    "sourcePath": { "type": "string", "minLength": 1 },
+                    "files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "path": { "type": "string", "minLength": 1 },
+                                "content": { "type": "string" }
+                            },
+                            "required": ["path", "content"]
+                        }
+                    }
+                },
+                "required": ["sourcePath", "files"]
+            }
+        })
+    );
+    assert_eq!(
+        tools["result"]["tools"][18]["inputSchema"],
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "projectId": { "type": ["string", "null"], "minLength": 1 },
+                "sourcePath": { "type": "string", "minLength": 1 },
+                "fileAlreadyDeleted": { "type": ["boolean", "null"], "default": false }
+            },
+            "required": ["sourcePath"]
         })
     );
 }

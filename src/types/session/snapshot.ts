@@ -1,4 +1,5 @@
 import type { SessionIdentity } from '../../../electron/desktop-contract/runtime-address';
+import { isSessionOwnership, type SessionOwnership } from '../../../electron/desktop-contract/session-ownership';
 import type { SessionRenderItem } from './render-item';
 import type { SessionRuntimeStateSnapshot } from './runtime-state';
 import type { TaskSnapshotEvent } from './task-snapshot';
@@ -56,6 +57,7 @@ export interface SessionCatalogItem {
   runtimeEndpointId: string;
   endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
+  ownership: SessionOwnership | null;
   kind: SessionCatalogKind;
   preferred: boolean;
   status?: 'active' | 'completed' | 'archived' | 'deleted';
@@ -279,6 +281,7 @@ export type SessionView = {
   sessionKey: string;
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
+  ownership: SessionOwnership | null;
   identity: SessionWireIdentity;
   epoch: number;
   seq: number;
@@ -324,6 +327,7 @@ export type SessionProjectionSnapshot = {
   sessionKey: string;
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
+  ownership: SessionOwnership | null;
   identity: SessionWireIdentity;
   epoch: number;
   seq: number;
@@ -832,7 +836,7 @@ function isRecoveryReason(value: unknown): value is SessionRecoveryReason {
 }
 
 function decodeView(value: unknown): SessionView | null {
-  if (!isRecord(value) || !hasExactKeys(value, ['sessionKey', 'endpointSessionId', 'modelState', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness'])) return null;
+  if (!isRecord(value) || !hasExactKeys(value, ['sessionKey', 'endpointSessionId', 'modelState', 'ownership', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness'])) return null;
   const identity = decodeIdentity(value.identity);
   const modelState = value.modelState === null ? null : decodeModelState(value.modelState);
   const items = decodeFact(value.items, (facts) => Array.isArray(facts) && facts.length <= MAX_ITEMS && facts.every((item) => decodeItem(item) !== null) ? facts.map((item) => decodeItem(item)!) : null);
@@ -844,12 +848,13 @@ function decodeView(value: unknown): SessionView | null {
   if (!identity || !isNonEmptyIdentifier(value.sessionKey, MAX_SESSION_KEY_BYTES)
     || (value.endpointSessionId !== null && !isNonEmptyIdentifier(value.endpointSessionId, MAX_SESSION_KEY_BYTES))
     || (value.modelState !== null && !modelState)
+    || (value.ownership !== null && !isSessionOwnership(value.ownership))
     || identity.sessionKey !== value.sessionKey
     || !isSafeInteger(value.epoch) || value.epoch < 1 || value.epoch > MAX_SAFE_INTEGER
     || !isSafeInteger(value.seq) || value.seq < 0 || value.seq > MAX_SAFE_INTEGER
     || !isSafeInteger(value.cursor) || value.cursor < 0 || value.cursor > MAX_SAFE_INTEGER
     || !items || !tools || !approvals || !runtime || !window || !completeness) return null;
-  return { sessionKey: value.sessionKey, endpointSessionId: value.endpointSessionId, modelState, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
+  return { sessionKey: value.sessionKey, endpointSessionId: value.endpointSessionId, modelState, ownership: value.ownership, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
 }
 
 function decodeDelta(value: unknown): SessionDelta | null {

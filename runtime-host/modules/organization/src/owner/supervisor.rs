@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     coordinator::{TeamRunCoordinatorInput, TeamRunCoordinatorRequest},
     receipt_router::TeamRunReceiptRouter,
-    run_actor::TeamRunActors,
+    run_actor::{CompletedActivity, TeamRunActors},
     team_run::{CronReconciliation, TeamTriggerCron},
 };
 
@@ -14,6 +14,8 @@ enum Next {
     Shutdown,
     Tick,
     AdmissionChanged,
+    ScheduleChanged,
+    ActivityCompleted(CompletedActivity),
     Request(Option<TeamRunCoordinatorRequest>),
 }
 
@@ -30,16 +32,23 @@ impl TeamRunSupervisor {
         }
     }
 
-    async fn wake_active_runs(&mut self, input: &TeamRunCoordinatorInput, now: u64) {
+    async fn wake_active_runs(
+        &mut self,
+        input: &TeamRunCoordinatorInput,
+        now: u64,
+        retry_deferred: bool,
+    ) {
         if let Ok(run_ids) = input.organization.active_run_ids().await {
             self.run_actors
-                .wake_active_runs(input, &mut self.receipt_router, run_ids, now)
+                .wake_active_runs(input, run_ids, now, retry_deferred)
                 .await;
         }
     }
 
-    fn cancel(&mut self) {
-        self.run_actors.cancel();
+    async fn cancel_and_join(&mut self, input: &TeamRunCoordinatorInput) {
+        self.run_actors
+            .cancel_and_join(input, &mut self.receipt_router)
+            .await;
     }
 }
 
@@ -49,24 +58,51 @@ pub(super) async fn run(
     cancellation: CancellationToken,
 ) {
     let mut requests_open = true;
+    let mut schedule_changes = input.organization.subscribe_schedule_changes();
     let mut team_trigger_cron = TeamTriggerCron::default();
     let mut supervisor = TeamRunSupervisor::new(&input);
     reconcile(&input, &mut team_trigger_cron, &mut supervisor).await;
+    let mut maintenance = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(30),
+        Duration::from_secs(30),
+    );
+    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         match next(
             &mut requests,
             &mut requests_open,
             &mut input.admission_changes,
+            &mut schedule_changes,
+            &mut supervisor.run_actors,
+            &mut maintenance,
             &cancellation,
         )
         .await
         {
             Next::Shutdown => {
-                supervisor.cancel();
+                supervisor.cancel_and_join(&input).await;
                 return;
             }
             Next::Tick | Next::AdmissionChanged => {
                 reconcile(&input, &mut team_trigger_cron, &mut supervisor).await;
+            }
+            Next::ScheduleChanged => {
+                if input.admission.is_admitted() {
+                    supervisor
+                        .wake_active_runs(&input, now_seconds(), false)
+                        .await;
+                }
+            }
+            Next::ActivityCompleted(completion) => {
+                supervisor
+                    .run_actors
+                    .route_completion(&input, &mut supervisor.receipt_router, completion)
+                    .await;
+                if input.admission.is_admitted() {
+                    supervisor
+                        .wake_active_runs(&input, now_seconds(), false)
+                        .await;
+                }
             }
             Next::Request(Some(TeamRunCoordinatorRequest::RecoverMaterializationReceipts)) => {
                 if input.admission.is_admitted() {
@@ -82,6 +118,9 @@ async fn next(
     requests: &mut mpsc::Receiver<TeamRunCoordinatorRequest>,
     requests_open: &mut bool,
     admission_changes: &mut tokio::sync::watch::Receiver<super::coordinator::AdmissionState>,
+    schedule_changes: &mut tokio::sync::watch::Receiver<()>,
+    run_actors: &mut TeamRunActors,
+    maintenance: &mut tokio::time::Interval,
     cancellation: &CancellationToken,
 ) -> Next {
     tokio::select! {
@@ -92,7 +131,12 @@ async fn next(
             Ok(()) => Next::AdmissionChanged,
             Err(_) => Next::Shutdown,
         },
-        _ = tokio::time::sleep(Duration::from_secs(30)) => Next::Tick,
+        _ = maintenance.tick() => Next::Tick,
+        completion = run_actors.next_completion() => Next::ActivityCompleted(completion),
+        changed = schedule_changes.changed() => match changed {
+            Ok(()) => Next::ScheduleChanged,
+            Err(_) => Next::Shutdown,
+        },
     }
 }
 
@@ -106,7 +150,7 @@ async fn reconcile(
     }
     let now = now_seconds();
     reconcile_team_trigger_cron(input, team_trigger_cron, now).await;
-    supervisor.wake_active_runs(input, now).await;
+    supervisor.wake_active_runs(input, now, true).await;
 }
 
 async fn reconcile_team_trigger_cron(
@@ -136,4 +180,65 @@ fn now_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::watch;
+
+    #[tokio::test]
+    async fn fact_change_wakes_without_waiting_for_maintenance() {
+        let (_requests, mut requests) = mpsc::channel(1);
+        let (_admission, mut admission) =
+            watch::channel(super::super::coordinator::AdmissionState::Changed);
+        let (changes, mut changes_rx) = watch::channel(());
+        let mut actors = TeamRunActors::default();
+        let mut maintenance = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            Duration::from_secs(30),
+        );
+        changes.send_replace(());
+        changes.send_replace(());
+        assert!(matches!(
+            next(
+                &mut requests,
+                &mut true,
+                &mut admission,
+                &mut changes_rx,
+                &mut actors,
+                &mut maintenance,
+                &CancellationToken::new()
+            )
+            .await,
+            Next::ScheduleChanged
+        ));
+        assert!(!changes_rx.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn shutdown_precedes_a_pending_fact_change() {
+        let (_requests, mut requests) = mpsc::channel(1);
+        let (_admission, mut admission) =
+            watch::channel(super::super::coordinator::AdmissionState::Changed);
+        let (changes, mut changes_rx) = watch::channel(());
+        let mut actors = TeamRunActors::default();
+        let mut maintenance = tokio::time::interval(Duration::from_secs(30));
+        let cancellation = CancellationToken::new();
+        changes.send_replace(());
+        cancellation.cancel();
+        assert!(matches!(
+            next(
+                &mut requests,
+                &mut true,
+                &mut admission,
+                &mut changes_rx,
+                &mut actors,
+                &mut maintenance,
+                &cancellation
+            )
+            .await,
+            Next::Shutdown
+        ));
+    }
 }

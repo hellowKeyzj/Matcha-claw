@@ -809,7 +809,8 @@ function isTaskManagerResponse(value: unknown, operation: TaskOperation): boolea
   if (operation === 'todos.write') {
     return (hasExactKeys(value, ['outcome', 'snapshot'])
       && value.outcome === 'applied'
-      && isTodoSnapshot(value.snapshot))
+      && isTodoSnapshot(value.snapshot)
+      && isNonNegativeSafeInteger(value.snapshot.updatedAt))
       || isClosedTaskMutation(value);
   }
   if (operation === 'tasks.create') {
@@ -838,12 +839,12 @@ function isTaskSnapshot(value: unknown): boolean {
     && value.todos.every(isTodo);
 }
 
-function isTodoSnapshot(value: unknown): boolean {
+function isTodoSnapshot(value: unknown): value is Record<string, unknown> {
   return isRecord(value)
-    && hasExactKeys(value, ['todos', 'updatedAt'])
+    && hasOnlyKeys(value, ['todos', 'updatedAt'])
     && Array.isArray(value.todos)
     && value.todos.every(isTodo)
-    && isNonNegativeSafeInteger(value.updatedAt);
+    && (!Object.hasOwn(value, 'updatedAt') || isNonNegativeSafeInteger(value.updatedAt));
 }
 
 function isTask(value: unknown): boolean {

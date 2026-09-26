@@ -1731,7 +1731,7 @@ export const ChatInput = memo(function ChatInput({
                       >
                         <SelectPrimitive.Viewport
                           data-chat-model-picker-viewport="true"
-                          className="chat-model-picker-viewport max-h-[inherit] overflow-y-auto overscroll-contain p-1.5"
+                          className="select-scroll-viewport max-h-[inherit] overflow-y-auto overscroll-contain p-1.5"
                         >
                           {modelPicker.options.map((option) => {
                             const selected = option.id === modelPicker.currentModelId;

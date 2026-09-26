@@ -357,6 +357,7 @@ mod tests {
         SessionView {
             session_key: "session-1".to_owned(),
             endpoint_session_id: None,
+            ownership: None,
             model_state: None,
             identity: SessionIdentity::new(
                 "session-1",

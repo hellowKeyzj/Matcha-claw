@@ -67,6 +67,7 @@ import { createWorkspaceWriteTransport } from './workspace/write-text';
 import { createRuntimeControlTransport } from './runtime-control';
 import { createRuntimeEndpointDirectoryTransport } from './runtime-directory';
 import { createUsageTransport } from './usage';
+import { createWikiTransport } from './wiki';
 
 type CronE2ETraceReporter = NonNullable<
   NonNullable<Parameters<typeof createCronTransport>[3]>['reportE2ETrace']
@@ -162,6 +163,7 @@ export function createRuntimeHostTransportBundle(
     pluginsTransport: createPluginsTransport(issuer, runtimeHostTransportPort),
     toolchainTransport: createToolchainTransport(issuer, runtimeHostTransportPort),
     usageTransport: createUsageTransport(issuer, runtimeHostTransportPort),
+    wikiTransport: createWikiTransport(issuer, runtimeHostTransportPort),
     sessionHistoryTransport: createSessionHistoryTransport(issuer, runtimeHostTransportPort),
   };
 

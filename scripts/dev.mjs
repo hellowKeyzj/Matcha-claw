@@ -3,6 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildManagedOpenClawPlugins } from './lib/openclaw-local-plugin-builder.mjs';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const devElectronDist = join(projectRoot, '.cache', 'matchaclaw', 'dev-electron-icon', 'dist');
@@ -27,8 +28,10 @@ function run(command, args, options = {}) {
   }
 }
 
+run('node', ['scripts/download-bundled-protoc.mjs']);
 run('node', ['scripts/build-runtime-host-native.mjs', '--platform', 'win32', '--arch', 'x64']);
 run('node', ['scripts/patch-dev-electron-icon.mjs']);
+await buildManagedOpenClawPlugins({ rootDir: projectRoot, pluginIds: ['openclaw-lark'] });
 run('vite', [], {
   env: process.platform === 'win32'
     ? { ...process.env, ELECTRON_OVERRIDE_DIST_PATH: devElectronDist }

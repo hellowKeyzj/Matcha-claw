@@ -326,6 +326,7 @@ fn project_openclaw_replay_view(
     let view = SessionView {
         session_key: identity.session_key.clone(),
         endpoint_session_id: Some(endpoint_session_id),
+        ownership: None,
         model_state: None,
         identity: identity.clone(),
         epoch,

@@ -122,6 +122,8 @@
         }
     },
     "todoPanel": {
+        "title": "タスクリスト",
+        "progress": "進捗状況",
         "summary": "タスク {{completed}}/{{total}}",
         "expand": "タスクリストを展開",
         "collapse": "タスクリストを折りたたむ",

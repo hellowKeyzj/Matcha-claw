@@ -48,7 +48,7 @@ pub(super) async fn read(
             .and_then(|value| value.get("schema"))
             .and_then(|value| value.get("properties"))
             .and_then(Value::as_object)
-            .is_some_and(|properties| !properties.is_empty())
+            .is_some()
         {
             return payload(descriptor.ok_or(LocalSchemaError::Invalid)?, channel);
         }
@@ -168,9 +168,6 @@ fn payload(descriptor: &Value, channel: &str) -> Result<Value, LocalSchemaError>
         }
         children.push(json!({"key": key, "hasChildren": false, "hint": hint}));
     }
-    if children.is_empty() {
-        return Err(LocalSchemaError::Unavailable);
-    }
     if children.len() > super::MAX_READ_FIELDS {
         return Err(LocalSchemaError::Invalid);
     }
@@ -193,8 +190,8 @@ for (const method of ['log', 'info', 'warn', 'error', 'debug', 'trace']) console
 try {
   let descriptor;
   if (channel === 'feishu') {
-    const source = await import(pathToFileURL(path.join(pluginRoot, 'src/core/config-schema.js')).href);
-    descriptor = { schema: source.FEISHU_CONFIG_JSON_SCHEMA ?? source.default?.FEISHU_CONFIG_JSON_SCHEMA };
+    const source = await import(pathToFileURL(path.join(pluginRoot, 'dist/config-schema.mjs')).href);
+    descriptor = { schema: source.FEISHU_CONFIG_JSON_SCHEMA };
   } else if (channel === 'openclaw-weixin') {
     const require = createRequire(path.join(realpathSync(root), 'package.json'));
     const { createJiti } = require('jiti');

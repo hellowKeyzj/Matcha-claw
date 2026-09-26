@@ -59,7 +59,6 @@ interface SidebarAgentSummary {
   name?: string;
   avatarSeed?: string;
   avatarStyle?: AgentAvatarStyle;
-  preferredSessionKey?: string | null;
 }
 
 function addNonEmptyAgentId(agentIds: Set<string>, agentId: string | null | undefined): void {
@@ -96,20 +95,17 @@ function buildRuntimeEndpointAgentSummaries(
     return endpoint.agents.map((agent) => ({
       id: agent.agentId,
       name: agent.catalogEntry?.name?.trim() || agent.agentId,
-      preferredSessionKey: agent.preferredSessionKey,
     }));
   }
   if (target.agentCatalog.source === 'runtime-endpoint') {
     return endpoint.agents.map((agent) => ({
       id: agent.agentId,
       name: agent.catalogEntry?.name?.trim() || agent.agentId,
-      preferredSessionKey: agent.preferredSessionKey,
     }));
   }
 
   const agentMetadataById = new Map(agents.map((agent) => [agent.id, agent] as const));
   const seedAgentById = new Map(target.agentCatalog.seedAgents.map((agent) => [agent.id, agent] as const));
-  const graphAgentById = new Map(endpoint.agents.map((agent) => [agent.agentId, agent] as const));
   const graphAgentIds = endpoint.agents.map((agent) => agent.agentId);
   return buildRuntimeEndpointAgentIds(graphAgentIds, agents).map((agentId) => {
     const metadata = agentMetadataById.get(agentId);
@@ -119,7 +115,6 @@ function buildRuntimeEndpointAgentSummaries(
       name: metadata?.name?.trim() || seedAgent?.name?.trim() || agentId,
       avatarSeed: metadata?.avatarSeed,
       avatarStyle: metadata?.avatarStyle,
-      preferredSessionKey: graphAgentById.get(agentId)?.preferredSessionKey ?? null,
     };
   });
 }
@@ -164,7 +159,6 @@ export interface AgentSessionNode {
   avatarSeed?: string;
   avatarStyle?: AgentAvatarStyle;
   sessions: ChatSession[];
-  preferredSessionKey: string | null;
 }
 
 interface SessionListNode {
@@ -471,7 +465,6 @@ export function useAgentSessionsPaneViewModel(
         avatarSeed: agent.avatarSeed,
         avatarStyle: agent.avatarStyle,
         sessions,
-        preferredSessionKey: agent.preferredSessionKey ?? resolvePreferredSessionKey(sessions),
       };
     });
   }, [runtimeAgentSummaries, sessionAggregation]);
@@ -620,7 +613,6 @@ export function useAgentSessionsPaneViewModel(
         agentName: agent.name?.trim() || agent.id,
         avatarSeed: agent.avatarSeed,
         avatarStyle: agent.avatarStyle,
-        preferredSessionKey: agent.preferredSessionKey ?? null,
         sessionCount: switchboardSessionSourceIndex.sessionCountByRuntimeAgent.get(createRuntimeAgentSessionCountKey(endpoint.runtimeScopeKey, agent.id)) ?? 0,
       })),
     }));

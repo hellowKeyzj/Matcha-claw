@@ -30,6 +30,7 @@ describe('channel runtime client', () => {
 
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/configure', {
       traceId: 'd87d94ee-0ac8-4a60-a8b3-8f53637c6362',
+      timeoutMs: 240_000,
       method: 'POST',
       body: JSON.stringify({
         action: 'apply',
@@ -54,6 +55,7 @@ describe('channel runtime client', () => {
 
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/configure', {
       traceId: 'd87d94ee-0ac8-4a60-a8b3-8f53637c6362',
+      timeoutMs: 240_000,
       method: 'POST',
       body: JSON.stringify({
         action: 'apply',
