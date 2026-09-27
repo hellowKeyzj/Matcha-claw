@@ -373,6 +373,13 @@ describe('Team runtime client compatibility verification', () => {
     await expect(exportTeamRunGraphYaml({ runId })).rejects.toThrow('Team runtime response is unavailable');
   });
 
+  it('accepts team delete outcome-unknown as the durable tombstone result', async () => {
+    const projection = { teamId, state: 'outcome_unknown' };
+    hostApiFetch.mockResolvedValueOnce(projection);
+
+    await expect(deleteTeamInstance({ teamId })).resolves.toEqual(projection);
+  });
+
   it('decodes Rust graph export projection without requiring the old success wrapper', async () => {
     const projection = { runId, fileName: `${runId}.yaml`, yaml: 'version: 1\n' };
     hostApiFetch.mockResolvedValueOnce(projection);

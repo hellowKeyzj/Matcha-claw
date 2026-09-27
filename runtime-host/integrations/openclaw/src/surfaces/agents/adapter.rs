@@ -231,7 +231,9 @@ impl OpenClawDriver {
                     )
                     .await,
             )),
-            Command::ExportPackage { .. } | Command::InstallPackage { .. } => Outcome::Unsupported,
+            Command::ExportPackage { .. }
+            | Command::ExportCloudPackage { .. }
+            | Command::InstallPackage { .. } => Outcome::Unsupported,
         }
     }
 }

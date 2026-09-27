@@ -15,10 +15,10 @@ const badgeVariants = cva(
         default:
           'border-transparent bg-primary text-primary-foreground',
         secondary:
-          'border-border bg-secondary text-secondary-foreground',
+          'border-[hsl(var(--shell-border))] bg-[hsl(var(--shell-surface-muted))] text-secondary-foreground',
         destructive:
           'border-transparent bg-destructive text-destructive-foreground',
-        outline: 'border-input bg-card text-foreground',
+        outline: 'border-[hsl(var(--shell-border))] bg-[hsl(var(--shell-surface))] text-foreground',
         success:
           'border-transparent bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-200',
         warning:

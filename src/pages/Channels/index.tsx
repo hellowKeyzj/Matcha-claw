@@ -205,19 +205,19 @@ export function Channels() {
   }, [configuredChannels.length, fetchChannels, gatewayOperational]);
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-6 text-foreground">
       {/* Header */}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="space-y-3">
           <div>
-            <h1 className="text-2xl font-semibold tracking-[-0.03em]">{t('title')}</h1>
-            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t('title')}</h1>
+            <p className="mt-1 max-w-2xl text-sm text-[hsl(var(--shell-text-muted))]">
               {t('subtitle')}
             </p>
           </div>
           {!showInitialLoading && (
             <div className="flex flex-wrap gap-2">
-              <span className="inline-flex h-8 items-center gap-2 rounded-full border border-border/80 bg-card px-3 text-xs text-muted-foreground">
+              <span className="inline-flex h-8 items-center gap-2 rounded-full border bg-[hsl(var(--shell-surface-muted))] px-3 text-xs text-[hsl(var(--shell-text-muted))] [border-color:hsl(var(--shell-border))]">
                 <Radio className="h-3.5 w-3.5" />
                 <strong className="text-foreground">{configuredChannels.length}</strong>
                 {t('stats.total')}
@@ -227,7 +227,7 @@ export function Channels() {
                 <strong>{connectedCount}</strong>
                 {t('stats.connected')}
               </span>
-              <span className="inline-flex h-8 items-center gap-2 rounded-full border border-border/80 bg-secondary/70 px-3 text-xs text-muted-foreground">
+              <span className="inline-flex h-8 items-center gap-2 rounded-full border bg-[hsl(var(--shell-surface-muted))] px-3 text-xs text-[hsl(var(--shell-text-muted))] [border-color:hsl(var(--shell-border))]">
                 <strong className="text-foreground">{configuredChannels.length - connectedCount}</strong>
                 {t('stats.disconnected')}
               </span>
@@ -322,11 +322,11 @@ export function Channels() {
           )}
 
           {/* Available Channels */}
-          <section className="space-y-3 rounded-[1.5rem] border border-border/90 bg-card p-5">
+          <section className="space-y-3 rounded-[1.5rem] border bg-[hsl(var(--shell-surface-muted))] p-5 [border-color:hsl(var(--shell-border))]">
             <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <h2 className="text-base font-semibold tracking-[-0.02em]">{t('available')}</h2>
-                <p className="text-sm text-muted-foreground">{t('availableDesc')}</p>
+                <p className="text-sm text-[hsl(var(--shell-text-muted))]">{t('availableDesc')}</p>
               </div>
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
@@ -338,15 +338,15 @@ export function Channels() {
                   <button
                     key={type}
                     className={cn(
-                      'group relative flex min-h-[148px] flex-col rounded-[1.1rem] border p-4 text-left transition-[background-color,border-color,box-shadow] duration-150 hover:border-foreground/20 hover:shadow-whisper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20',
+                      'group relative flex min-h-[148px] flex-col rounded-[1.1rem] border p-4 text-left transition-[background-color,border-color] duration-150 hover:[border-color:hsl(var(--shell-border-strong))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20',
                       isConfigured
                         ? 'border-emerald-500/45 bg-emerald-500/10'
-                        : 'border-border/90 bg-background/35 hover:bg-secondary/60'
+                        : 'bg-[hsl(var(--shell-surface))] [border-color:hsl(var(--shell-border))] hover:bg-[hsl(var(--shell-surface-hover))]'
                     )}
                     onClick={() => setDialogTarget({ kind: 'new', type })}
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <span className="grid h-11 w-11 place-items-center rounded-[0.9rem] bg-secondary shadow-sm">
+                      <span className="grid h-11 w-11 place-items-center rounded-[0.9rem] border bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
                         <ChannelIcon id={meta.iconId} className="h-7 w-7" />
                       </span>
                       {isConfigured ? (
@@ -440,11 +440,11 @@ function ChannelCard({ channel, isMutating = false, onConfigure, onManagePairing
   const statusLabel = t(`status.${status}`, { defaultValue: status });
 
   return (
-    <Card className="h-full bg-card/80">
+    <Card className="h-full bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
       <CardContent className="flex h-full min-h-[118px] flex-col gap-4 p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            <span className="grid h-10 w-10 place-items-center rounded-[0.85rem] bg-secondary shadow-sm">
+            <span className="grid h-10 w-10 place-items-center rounded-[0.85rem] border bg-[hsl(var(--shell-surface))] [border-color:hsl(var(--shell-border))]">
               <ChannelIcon id={CHANNEL_META[channel.type].iconId} className="h-6 w-6" />
             </span>
             <div className="min-w-0">
@@ -461,7 +461,7 @@ function ChannelCard({ channel, isMutating = false, onConfigure, onManagePairing
           <p className="line-clamp-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">{channel.error}</p>
         )}
 
-        <div className="mt-auto flex items-center justify-between gap-2 border-t border-border/70 pt-3">
+        <div className="mt-auto flex items-center justify-between gap-2 border-t pt-3 [border-color:hsl(var(--shell-border))]">
           <p className="truncate text-xs text-muted-foreground">
             {CHANNEL_NAMES[channel.type]}
           </p>
@@ -558,7 +558,7 @@ function ChannelPairingDialog({ channel, onClose }: ChannelPairingDialogProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[hsl(var(--shell-scrim))] p-4"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           onClose();
@@ -1203,7 +1203,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[hsl(var(--shell-scrim))] p-4"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           onClose();
@@ -1211,12 +1211,12 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
       }}
     >
       <Card
-        className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-[1.35rem] shadow-[0_24px_80px_rgba(0,0,0,0.35)]"
+        className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-[1.35rem] bg-[hsl(var(--shell-surface))] shadow-[var(--shell-shadow-overlay)] [border-color:hsl(var(--shell-border))]"
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <CardHeader className="flex flex-row items-start justify-between gap-4 border-b border-border/70 p-5">
+        <CardHeader className="flex flex-row items-start justify-between gap-4 border-b p-5 [border-color:hsl(var(--shell-border))]">
           <div className="flex min-w-0 items-start gap-3">
-            <span className="grid h-11 w-11 shrink-0 place-items-center rounded-[0.95rem] bg-secondary shadow-sm">
+            <span className="grid h-11 w-11 shrink-0 place-items-center rounded-[0.95rem] border bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
               {meta ? <ChannelIcon id={meta.iconId} className="h-7 w-7" /> : <Plus className="h-5 w-5" />}
             </span>
             <div className="min-w-0">
@@ -1248,10 +1248,10 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
                   <button
                     key={type}
                     onClick={() => onTargetChange({ kind: 'new', type })}
-                    className="group rounded-[1rem] border border-border/90 bg-background/35 p-4 text-left transition-[background-color,border-color,box-shadow] duration-150 hover:border-foreground/20 hover:bg-secondary/60 hover:shadow-whisper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
+                    className="group rounded-[1rem] border bg-[hsl(var(--shell-surface-muted))] p-4 text-left transition-[background-color,border-color] duration-150 [border-color:hsl(var(--shell-border))] hover:bg-[hsl(var(--shell-surface-hover))] hover:[border-color:hsl(var(--shell-border-strong))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <span className="grid h-10 w-10 place-items-center rounded-[0.85rem] bg-secondary shadow-sm">
+                      <span className="grid h-10 w-10 place-items-center rounded-[0.85rem] border bg-[hsl(var(--shell-surface))] [border-color:hsl(var(--shell-border))]">
                         <ChannelIcon id={channelMeta.iconId} className="h-6 w-6" />
                       </span>
                       <Badge variant="secondary">
@@ -1268,7 +1268,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
             </div>
           ) : authPrompt ? (
             // QR/link authorization display
-            <div className="rounded-[1.15rem] border border-border/90 bg-secondary/45 p-5 text-center">
+            <div className="rounded-[1.15rem] border bg-[hsl(var(--shell-surface-muted))] p-5 text-center [border-color:hsl(var(--shell-border))]">
               <p className="text-sm font-medium text-foreground">
                 {authPrompt.qrDataUrl ? t('dialog.scanQR', { name: meta?.name }) : t('dialog.openAuthorization', { name: meta?.name })}
               </p>
@@ -1319,12 +1319,12 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
             // Connection form
             <div className="space-y-4">
               {showSetupModeSwitch && (
-                <div className="grid grid-cols-2 gap-2 rounded-[0.95rem] bg-secondary/60 p-1">
+                <div className="grid grid-cols-2 gap-2 rounded-[0.95rem] border bg-[hsl(var(--shell-surface-muted))] p-1 [border-color:hsl(var(--shell-border))]">
                   <button
                     type="button"
                     className={cn(
                       'rounded-[0.75rem] px-3 py-2 text-sm font-medium transition-colors',
-                      effectiveSetupMode === 'guided' ? 'bg-background shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                      effectiveSetupMode === 'guided' ? 'bg-[hsl(var(--shell-surface))]' : 'text-[hsl(var(--shell-text-muted))] hover:text-foreground',
                     )}
                     onClick={() => setSetupMode('guided')}
                     disabled={connecting}
@@ -1335,7 +1335,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
                     type="button"
                     className={cn(
                       'rounded-[0.75rem] px-3 py-2 text-sm font-medium transition-colors',
-                      effectiveSetupMode === 'credential' ? 'bg-background shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                      effectiveSetupMode === 'credential' ? 'bg-[hsl(var(--shell-surface))]' : 'text-[hsl(var(--shell-text-muted))] hover:text-foreground',
                     )}
                     onClick={() => setSetupMode('credential')}
                     disabled={connecting}

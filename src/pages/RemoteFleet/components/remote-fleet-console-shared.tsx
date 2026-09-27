@@ -148,8 +148,8 @@ export function RemoteFleetEmptyPanel({
   readonly description: string;
 }) {
   return (
-    <div className="rounded-md border border-dashed border-border/70 px-4 py-5 text-center text-xs text-muted-foreground">
-      <div className="mx-auto mb-2 flex h-8 w-8 items-center justify-center rounded-full bg-muted/60 text-muted-foreground">
+    <div className="rounded-md border border-dashed px-4 py-5 text-center text-xs text-[hsl(var(--shell-text-muted))] [border-color:hsl(var(--shell-border))]">
+      <div className="mx-auto mb-2 flex h-8 w-8 items-center justify-center rounded-full bg-[hsl(var(--shell-surface-muted))] text-[hsl(var(--shell-icon))]">
         {icon}
       </div>
       <div className="font-medium text-foreground">{title}</div>

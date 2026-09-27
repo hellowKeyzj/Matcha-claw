@@ -11,8 +11,6 @@ import {
   KeyRound,
   ListTodo,
   Users,
-  ChevronLeft,
-  ChevronRight,
   Terminal,
   ExternalLink,
   CreditCard,
@@ -24,7 +22,6 @@ import {
   BookOpen,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useChatStore, type ApprovalItem } from '@/stores/chat';
 import { selectSidebarNewSessionAction, selectSidebarPendingBlockersState } from '@/stores/chat/selectors';
@@ -46,7 +43,6 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { SubscriptionPlanDialog } from '@/components/billing/SubscriptionPlanDialog';
-import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { hostApiFetch } from '@/lib/host-api';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import { preloadLazyRouteForPath } from '@/lib/route-preload';
@@ -64,7 +60,6 @@ interface NavItemProps {
   to: string;
   icon: React.ReactNode;
   label: string;
-  collapsed?: boolean;
   active?: boolean;
   onMouseEnter?: () => void;
   onFocus?: () => void;
@@ -73,8 +68,7 @@ interface NavItemProps {
 
 interface SidebarProps {
   width?: number;
-  railWidth?: number;
-  containerWidth?: number;
+  overlay?: boolean;
   showRightDivider?: boolean;
 }
 
@@ -94,14 +88,6 @@ const EMPTY_TEAM_APPROVALS: TeamApprovalRecord[] = [];
 const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
 const teamApprovalCardsCacheByApprovalsRef = new WeakMap<TeamApprovalRecord[], Map<string, PendingBlockerCard[]>>();
 const approvalCardsCacheByApprovalsRef = new WeakMap<ApprovalItem[], Map<string, PendingBlockerCard[]>>();
-
-function simplifyMessage(content: string): string {
-  const normalized = String(content || '').replace(/\s+/g, ' ').trim();
-  if (normalized.length <= 72) {
-    return normalized;
-  }
-  return `${normalized.slice(0, 72)}...`;
-}
 
 function formatMessageTime(createdAt: number): string {
   if (!Number.isFinite(createdAt) || createdAt <= 0) {
@@ -261,7 +247,6 @@ function accountStatusLabel(status: string, hasUser: boolean, t: (key: string) =
 }
 
 interface SidebarAccountCardProps {
-  collapsed: boolean;
   status: string;
   user: CloudUser | null;
   subscription: AccountSubscriptionProjection | null;
@@ -282,20 +267,19 @@ function SidebarAccountAvatar({ user, initial }: { user: CloudUser | null; initi
       <img
         src={user.avatarUrl}
         alt=""
-        className="h-9 w-9 rounded-full object-cover"
+        className="h-8 w-8 rounded-full object-cover"
       />
     );
   }
 
   return (
-    <span className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/12 text-sm font-semibold text-primary">
+    <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[hsl(var(--shell-surface-muted))] text-xs font-semibold text-[hsl(var(--shell-icon-active))]">
       {initial}
     </span>
   );
 }
 
 const SidebarAccountCard = memo(function SidebarAccountCard({
-  collapsed,
   status,
   user,
   subscription,
@@ -333,31 +317,27 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
     return [];
   }, [subscriptionProgress, subscriptionSummary, t, usage, user]);
 
-  const triggerClassName = collapsed
-    ? 'flex h-10 w-10 items-center justify-center rounded-full border border-transparent bg-transparent transition-[background-color,border-color,box-shadow] hover:bg-secondary/70 data-[state=open]:border-border data-[state=open]:bg-card data-[state=open]:shadow-whisper'
-    : 'w-full rounded-[1.15rem] border border-transparent bg-transparent p-2.5 text-left transition-[background-color,border-color,box-shadow] hover:bg-secondary/70 data-[state=open]:border-border data-[state=open]:bg-card data-[state=open]:shadow-whisper';
+  const triggerClassName = 'w-full rounded-[12px] border border-transparent bg-transparent px-2.5 py-2 text-left transition-[background-color,border-color] hover:bg-[hsl(var(--shell-surface-hover))] data-[state=open]:[border-color:hsl(var(--shell-border))] data-[state=open]:bg-[hsl(var(--shell-surface-active))]';
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button type="button" className={triggerClassName} aria-label={signedIn ? t('sidebar.account.openMenu') : t('sidebar.account.loginAria')}>
-          <div className={cn('flex min-w-0 items-center', collapsed ? 'justify-center' : 'gap-2.5')}>
+          <div className="flex min-w-0 items-center gap-2.5">
             <SidebarAccountAvatar user={user} initial={initial} />
-            {!collapsed && (
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">{displayName}</span>
-                  {signedIn ? (
-                    <Badge variant={planVariant} className="max-w-[92px] shrink-0 px-2 py-0.5">
-                      {planLabel}
-                    </Badge>
-                  ) : null}
-                </div>
-                <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                  {email ?? statusLabel}
-                </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[hsl(var(--shell-icon-active))]">{displayName}</span>
+                {signedIn ? (
+                  <Badge variant={planVariant} className="max-w-[92px] shrink-0 px-2 py-0.5">
+                    {planLabel}
+                  </Badge>
+                ) : null}
               </div>
-            )}
+              <div className="mt-0.5 truncate text-xs text-[hsl(var(--shell-text-muted))]">
+                {email ?? statusLabel}
+              </div>
+            </div>
           </div>
         </button>
       </DropdownMenuTrigger>
@@ -367,7 +347,7 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
             <SidebarAccountAvatar user={user} initial={initial} />
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-semibold text-foreground">{displayName}</div>
-              <div className="truncate text-xs font-normal text-muted-foreground">{email ?? statusLabel}</div>
+              <div className="truncate text-xs font-normal text-[hsl(var(--shell-text-muted))]">{email ?? statusLabel}</div>
             </div>
             <Badge variant={planVariant} className="max-w-[96px] shrink-0 px-2 py-0.5">
               {planLabel}
@@ -379,14 +359,14 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
           {quotaViews.length > 0 ? (
             quotaViews.map((quota) => (
               <div key={quota.id} className="space-y-1.5">
-                <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                <div className="flex items-center justify-between gap-2 text-[11px] text-[hsl(var(--shell-text-muted))]">
                   <span className="truncate">{quota.name}</span>
                   <span className="shrink-0">{quota.usageLabel}</span>
                 </div>
                 {quota.hasLimit ? (
-                  <div className="h-1.5 overflow-hidden rounded-full bg-secondary">
+                  <div className="h-1.5 overflow-hidden rounded-full bg-[hsl(var(--shell-surface-muted))]">
                     <div
-                      className="h-full rounded-full bg-primary"
+                      className="h-full rounded-full bg-[hsl(var(--shell-icon-active))]"
                       style={{ width: `${quota.percent}%` }}
                     />
                   </div>
@@ -394,7 +374,7 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
               </div>
             ))
           ) : (
-            <div className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-[hsl(var(--shell-text-muted))]">
               {t('sidebar.account.quotaEmpty')}
             </div>
           )}
@@ -472,28 +452,6 @@ type PrefetchScheduleHandle =
   | { type: 'idle'; id: number }
   | { type: 'timeout'; id: number };
 
-interface SidebarTextLabelProps {
-  collapsed?: boolean;
-  className?: string;
-  children: React.ReactNode;
-}
-
-function SidebarTextLabel({ collapsed, className, children }: SidebarTextLabelProps) {
-  return (
-    <span
-      className={cn(
-        'block min-w-0 overflow-hidden transition-[opacity,transform] duration-150 ease-out',
-        collapsed
-          ? 'pointer-events-none w-0 flex-none -translate-x-1 opacity-0'
-          : 'flex-1 translate-x-0 opacity-100',
-        className,
-      )}
-    >
-      <span className="block truncate">{children}</span>
-    </span>
-  );
-}
-
 function buildTeamApprovalBlockerCards(input: {
   teamId: string;
   teamName: string;
@@ -558,7 +516,7 @@ function buildApprovalBlockerCards(input: {
   return cards;
 }
 
-function NavItem({ to, icon, label, collapsed, active, onMouseEnter, onFocus, onNavigate }: NavItemProps) {
+function NavItem({ to, icon, label, active, onMouseEnter, onFocus, onNavigate }: NavItemProps) {
   return (
     <NavLink
       to={to}
@@ -584,17 +542,18 @@ function NavItem({ to, icon, label, collapsed, active, onMouseEnter, onFocus, on
       }}
       className={({ isActive }) =>
         cn(
-          'flex items-center rounded-[var(--radius-pill)] px-3.5 py-2.5 text-sm font-medium tracking-[-0.01em] transition-[background-color,color,box-shadow]',
-          'hover:bg-secondary hover:text-foreground',
+          'group flex items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-[13px] font-medium tracking-[-0.01em] transition-[background-color,color]',
+          'hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))]',
           (active ?? isActive)
-            ? 'bg-secondary text-foreground'
-            : 'text-muted-foreground',
-          collapsed ? 'justify-center gap-0 px-0' : 'gap-3',
+            ? 'bg-[hsl(var(--shell-surface-active))] text-[hsl(var(--shell-icon-active))]'
+            : 'text-[hsl(var(--shell-text-muted))]',
         )
       }
     >
-      {icon}
-      <SidebarTextLabel collapsed={collapsed}>{label}</SidebarTextLabel>
+      <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-[hsl(var(--shell-icon))] transition-colors group-hover:text-[hsl(var(--shell-icon-active))] group-aria-[current=page]:text-[hsl(var(--shell-icon-active))]">
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
     </NavLink>
   );
 }
@@ -717,70 +676,66 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
       .slice(0, SIDEBAR_BLOCKER_RENDER_LIMIT);
   }, [approvalCards, teamApprovalCards]);
 
+  if (pendingBlockers.length === 0) {
+    return null;
+  }
+
   return (
-    <section className="mt-4 rounded-[1rem] border border-border/80 bg-secondary/55 p-2.5">
-      <header className="mb-2 flex items-center justify-between">
-        <h3 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-foreground">{t('sidebar.pendingBlockers')}</h3>
-        <span className="text-[11px] text-muted-foreground">{pendingBlockers.length}</span>
-      </header>
-      {pendingBlockers.length === 0 ? (
-        <div className="rounded-[calc(var(--radius-interactive)+2px)] border border-dashed border-border px-3 py-3 text-center text-xs text-muted-foreground">
-          {t('sidebar.pendingBlockersEmpty')}
-        </div>
-      ) : (
-        <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
-          {pendingBlockers.map((card) => (
-            <button
-              key={card.id}
-              type="button"
-              className="w-full rounded-[calc(var(--radius-interactive)+2px)] border border-border bg-card px-3 py-2.5 text-left transition-[background-color,border-color,box-shadow] hover:border-input hover:bg-secondary hover:shadow-whisper"
-              onClick={() => {
-                if (card.source === 'team_approval') {
-                  setActiveTeam(card.teamId);
-                  navigate(`/teams/${card.teamId}`);
-                  return;
-                }
-                if (card.source === 'chat_approval' && card.sessionKey) {
-                  navigate(`/?session=${encodeURIComponent(card.sessionKey)}`);
-                  return;
-                }
-                navigate('/tasks');
-              }}
-            >
-              <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                <span className="truncate">
-                  {card.source === 'team_approval'
-                    ? card.teamName
-                    : t('sidebar.pendingBlockerSourceChat')}
-                </span>
-                <span>{formatMessageTime(card.createdAt)}</span>
-              </div>
-              <div className="mt-1 truncate text-xs font-medium text-foreground">
-                {card.title}
-              </div>
-              <div className="mt-1 text-xs text-muted-foreground">
-                {simplifyMessage(card.content)}
-              </div>
-              <div className="mt-1 text-[11px] text-muted-foreground">
+    <section className="mt-3 space-y-1.5" aria-label={t('sidebar.pendingBlockers')}>
+      <div className="flex items-center justify-between px-2.5 text-[10.5px] font-medium tracking-[0.04em] text-[hsl(var(--shell-text-muted))]">
+        <span>{t('sidebar.pendingBlockers')}</span>
+        <span>{pendingBlockers.length}</span>
+      </div>
+      <div className="max-h-56 space-y-1 overflow-y-auto pr-0.5">
+        {pendingBlockers.map((card) => (
+          <button
+            key={card.id}
+            type="button"
+            className="w-full rounded-[12px] px-2.5 py-2 text-left transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))]"
+            onClick={() => {
+              if (card.source === 'team_approval') {
+                setActiveTeam(card.teamId);
+                navigate(`/teams/${card.teamId}`);
+                return;
+              }
+              if (card.source === 'chat_approval' && card.sessionKey) {
+                navigate(`/?session=${encodeURIComponent(card.sessionKey)}`);
+                return;
+              }
+              navigate('/tasks');
+            }}
+          >
+            <div className="flex items-center gap-2 text-xs font-medium text-[hsl(var(--shell-icon-active))]">
+              <span className="min-w-0 flex-1 truncate">{card.title}</span>
+              <span className="shrink-0 text-[11px] font-normal text-[hsl(var(--shell-text-muted))]">{formatMessageTime(card.createdAt)}</span>
+            </div>
+            <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[hsl(var(--shell-text-muted))]">
+              <span className="min-w-0 flex-1 truncate">
+                {card.source === 'team_approval'
+                  ? card.teamName
+                  : t('sidebar.pendingBlockerSourceChat')}
+              </span>
+              <span className="shrink-0">
                 {card.source === 'team_approval'
                   ? t('sidebar.pendingBlockerFrom', { from: card.from })
                   : t('sidebar.pendingBlockerApprovalId', { id: card.from })}
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
+              </span>
+            </div>
+            <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[hsl(var(--shell-text-muted))]">
+              {card.content}
+            </div>
+          </button>
+        ))}
+      </div>
     </section>
   );
 });
 
 export function Sidebar({
   width = 256,
-  railWidth = 64,
+  overlay = false,
   showRightDivider = true,
 }: SidebarProps) {
-  const sidebarVisible = useLayoutStore((state) => state.sidebarVisible);
-  const toggleSidebar = useLayoutStore((state) => state.toggleSidebar);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const newSession = useChatStore(selectSidebarNewSessionAction);
   const currentSessionKey = useChatStore((state) => state.currentSessionKey);
@@ -802,10 +757,6 @@ export function Sidebar({
   const navigate = useNavigate();
   const location = useLocation();
   const isOnChat = location.pathname === '/';
-  const sidebarCollapsed = !sidebarVisible;
-  const sidebarExpanded = !sidebarCollapsed;
-  const deferredSidebarExpanded = useDeferredValue(sidebarExpanded);
-  const showExpandedExtras = sidebarExpanded && deferredSidebarExpanded;
   const { t } = useTranslation();
 
   const openDevConsole = async () => {
@@ -826,15 +777,15 @@ export function Sidebar({
   };
 
   const navItems = [
-    { to: '/tasks', icon: <ListTodo className="h-5 w-5" />, label: t('sidebar.tasks') },
-    { to: '/subagents', icon: <Bot className="h-5 w-5" />, label: t('sidebar.subagents') },
+    { to: '/tasks', icon: <ListTodo className="h-[17px] w-[17px]" />, label: t('sidebar.tasks') },
+    { to: '/subagents', icon: <Bot className="h-[17px] w-[17px]" />, label: t('sidebar.subagents') },
     ...(TEAMS_FEATURE_ENABLED
-      ? [{ to: '/teams', icon: <Users className="h-5 w-5" />, label: t('sidebar.teams') }]
+      ? [{ to: '/teams', icon: <Users className="h-[17px] w-[17px]" />, label: t('sidebar.teams') }]
       : []),
-    { to: '/providers', icon: <KeyRound className="h-5 w-5" />, label: t('settings:aiProviders.title') },
-    { to: '/channels', icon: <Radio className="h-5 w-5" />, label: t('sidebar.channels') },
-    { to: '/wiki', icon: <BookOpen className="h-5 w-5" />, label: 'Wiki' },
-    { to: '/dashboard', icon: <Home className="h-5 w-5" />, label: t('sidebar.dashboard') },
+    { to: '/providers', icon: <KeyRound className="h-[17px] w-[17px]" />, label: t('settings:aiProviders.title') },
+    { to: '/channels', icon: <Radio className="h-[17px] w-[17px]" />, label: t('sidebar.channels') },
+    { to: '/wiki', icon: <BookOpen className="h-[17px] w-[17px]" />, label: 'Wiki' },
+    { to: '/dashboard', icon: <Home className="h-[17px] w-[17px]" />, label: t('sidebar.dashboard') },
   ];
 
   const prefetchNavPath = useCallback((path: string) => {
@@ -963,12 +914,13 @@ export function Sidebar({
   return (
     <aside
       className={cn(
-        'relative flex shrink-0 flex-col overflow-hidden bg-card',
-        showRightDivider && 'border-r [border-right-color:var(--divider-line)]',
+        'relative flex h-full shrink-0 flex-col overflow-hidden bg-[hsl(var(--shell-surface))]',
+        showRightDivider && 'border-r [border-right-color:hsl(var(--shell-border))]',
+        overlay && 'shadow-[0_18px_60px_hsl(var(--shell-shadow-overlay))]',
       )}
-      style={{ width: sidebarCollapsed ? railWidth : width }}
+      style={{ width }}
     >
-      <nav className="flex flex-1 flex-col gap-1.5 overflow-hidden p-3">
+      <nav className="flex flex-1 flex-col gap-1 overflow-hidden p-2.5">
         <button
           type="button"
           onClick={() => {
@@ -981,23 +933,18 @@ export function Sidebar({
               navigate('/');
             });
           }}
-          className={cn(
-            'flex items-center rounded-[var(--radius-pill)] px-3.5 py-2.5 text-sm font-medium tracking-[-0.01em] text-muted-foreground transition-[background-color,color,box-shadow]',
-            'hover:bg-secondary hover:text-foreground',
-            sidebarCollapsed ? 'justify-center gap-0 px-0' : 'gap-3',
-          )}
+          className="group flex items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-[hsl(var(--shell-text-muted))] transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))]"
         >
-          <MessageSquare className="h-5 w-5 shrink-0" />
-          <SidebarTextLabel collapsed={sidebarCollapsed} className="text-left">
-            {t('sidebar.newChat')}
-          </SidebarTextLabel>
+          <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-[hsl(var(--shell-icon))] group-hover:text-[hsl(var(--shell-icon-active))]">
+            <MessageSquare className="h-[17px] w-[17px]" />
+          </span>
+          <span className="min-w-0 flex-1 truncate text-left">{t('sidebar.newChat')}</span>
         </button>
 
         {navItems.map((item) => (
           <NavItem
             key={item.to}
             {...item}
-            collapsed={sidebarCollapsed}
             active={item.to === '/subagents' && ['/subagents', '/skills', '/plugins', '/connectors'].includes(location.pathname) ? true : undefined}
             onMouseEnter={() => scheduleNavPrefetch(item.to)}
             onFocus={() => scheduleNavPrefetch(item.to)}
@@ -1005,11 +952,11 @@ export function Sidebar({
           />
         ))}
 
-        {showExpandedExtras && <SidebarPendingBlockers />}
+        <SidebarPendingBlockers />
       </nav>
 
-      <div className="space-y-2 p-3 pt-0">
-        {devModeUnlocked && showExpandedExtras && (
+      <div className="space-y-1.5 p-2.5 pt-0">
+        {devModeUnlocked && (
           <Button
             variant="ghost"
             size="sm"
@@ -1022,7 +969,6 @@ export function Sidebar({
           </Button>
         )}
         <SidebarAccountCard
-          collapsed={sidebarCollapsed}
           status={accountStatus}
           user={accountUser}
           subscription={accountSubscription}
@@ -1039,14 +985,6 @@ export function Sidebar({
       </div>
 
       <SubscriptionPlanDialog open={subscriptionDialogOpen} onOpenChange={setSubscriptionDialogOpen} />
-
-      <PaneEdgeToggle
-        side="right"
-        onClick={toggleSidebar}
-        ariaLabel={sidebarCollapsed ? t('sidebar.expandMenu') : t('sidebar.collapseMenu')}
-        title={sidebarCollapsed ? t('sidebar.expandMenu') : t('sidebar.collapseMenu')}
-        icon={sidebarCollapsed ? <ChevronRight className="h-2.5 w-2.5" /> : <ChevronLeft className="h-2.5 w-2.5" />}
-      />
     </aside>
   );
 }

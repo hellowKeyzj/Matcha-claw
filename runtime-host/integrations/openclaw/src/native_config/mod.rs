@@ -19,7 +19,6 @@ pub(crate) mod provider_key;
 pub mod provider_models;
 pub mod routing;
 pub mod runtime_paths;
-pub mod sealed_agent_config;
 pub mod security;
 pub mod settings;
 pub mod subagent_templates;

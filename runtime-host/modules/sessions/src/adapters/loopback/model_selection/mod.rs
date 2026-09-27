@@ -272,7 +272,10 @@ mod tests {
             .into_command(None)
             .unwrap();
         assert_eq!(command.session_key, "agent:main:demo");
-        assert_eq!(command.endpoint_session_id.as_deref(), Some("native-session-1"));
+        assert_eq!(
+            command.endpoint_session_id.as_deref(),
+            Some("native-session-1")
+        );
     }
 
     #[test]

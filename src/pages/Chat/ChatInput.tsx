@@ -3,8 +3,8 @@
  * Textarea with send button and universal file upload support.
  * Enter to send, Shift+Enter for new line.
  * Supports: native file picker, clipboard paste, drag & drop.
- * Files are staged to disk via IPC — only opaque staged IDs
- * are sent with the message (no base64 over WebSocket).
+ * Files are staged to disk via IPC. Inline attachments send opaque staged IDs;
+ * larger local files keep their source path for prompt-side reads.
  */
 import { memo, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, type ReactNode, type SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
@@ -27,6 +27,7 @@ import { AgentSkillManagerDialog, type AgentSkillPreviewState } from './componen
 import type { AgentSkillOption } from './components/AgentSkillConfigPanel';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 import type { ChatSendAttachment, ChatSendResult } from '@/stores/chat';
+import { CHAT_INLINE_ATTACHMENT_MAX_BYTES } from '@/stores/chat/types';
 import { resolveChatSendGateForPayload, type ChatSendGate } from '@/stores/chat/send-gate';
 import type { ChatContextUsageViewModel } from './context-usage';
 import type { ComposerDraftSelection } from '@/stores/composer-drafts';
@@ -139,7 +140,7 @@ const PERMISSION_MODE_LABEL_KEYS: Record<PermissionMode, string> = {
 };
 
 const STAGE_BUFFER_CONCURRENCY = 3;
-const STAGE_BUFFER_MAX_BYTES = 20 * 1024 * 1024;
+const STAGE_BUFFER_MAX_BYTES = CHAT_INLINE_ATTACHMENT_MAX_BYTES;
 const QUICK_PHRASE_STORAGE_KEY = 'matchaclaw:chat:quick-phrases';
 
 interface QuickPhrase {
@@ -190,10 +191,9 @@ function resolveInputPlaceholder(
   return translate('input.messagePlaceholder');
 }
 
-function resolveInputStatusText(
+function resolveComposerNoticeText(
   disabled: boolean,
   approvalWaiting: boolean,
-  selectedSkillCount: number,
   translate: (key: string, options?: Record<string, unknown>) => string,
 ): string | null {
   if (disabled) {
@@ -201,12 +201,6 @@ function resolveInputStatusText(
   }
   if (approvalWaiting) {
     return translate('input.approvalWaitingPlaceholder');
-  }
-  if (selectedSkillCount > 1) {
-    return translate('input.skillsActive', { count: selectedSkillCount });
-  }
-  if (selectedSkillCount === 1) {
-    return translate('input.skillActive', { count: selectedSkillCount });
   }
   return null;
 }
@@ -461,7 +455,6 @@ export const ChatInput = memo(function ChatInput({
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashStart, setSlashStart] = useState(-1);
   const [slashEnd, setSlashEnd] = useState(-1);
-  const [slashItems, setSlashItems] = useState<SelectedSkill[]>([]);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [selectedSkills, setSelectedSkills] = useState<SelectedSkill[]>([]);
   const [quickPhrases, setQuickPhrases] = useState<QuickPhrase[]>(() => loadQuickPhrases());
@@ -493,6 +486,36 @@ export const ChatInput = memo(function ChatInput({
     }
     return new Set(allowedSkillIds.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim()));
   }, [allowedSkillIds]);
+
+  const slashItems = useMemo<SelectedSkill[]>(() => {
+    if (!slashOpen || slashStart < 0 || slashEnd < slashStart) {
+      return [];
+    }
+    const query = normalizeSearchText(input.slice(slashStart + 1, slashEnd));
+    const selectedIds = new Set(selectedSkills.map((skill) => skill.id));
+    return skills
+      .filter((skill) => (
+        skill.enabled
+        && skill.eligible === true
+        && !selectedIds.has(skill.id)
+        && (!allowedSkillIdSet || allowedSkillIdSet.has(skill.id))
+      ))
+      .filter((skill) => {
+        if (!query) {
+          return true;
+        }
+        const fields = [skill.id, skill.slug ?? '', skill.name, skill.description];
+        return fields.some((field) => normalizeSearchText(field).includes(query));
+      })
+      .map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        icon: skill.icon || '🧩',
+        filePath: skill.filePath,
+        baseDir: skill.baseDir,
+      }));
+  }, [allowedSkillIdSet, input, selectedSkills, skills, slashEnd, slashOpen, slashStart]);
+  const slashSkillsLoading = slashOpen && !skillsSnapshotReady;
 
   const rememberDraftSelection = useCallback((textarea = textareaRef.current) => {
     if (!onDraftSelectionChange || !textarea || !textarea.value) return;
@@ -617,7 +640,6 @@ export const ChatInput = memo(function ChatInput({
 
   const closeSlash = useCallback(() => {
     setSlashOpen(false);
-    setSlashItems([]);
     setSlashActiveIndex(0);
     setSlashStart(-1);
     setSlashEnd(-1);
@@ -692,37 +714,13 @@ export const ChatInput = memo(function ChatInput({
       closeSlash();
       return;
     }
-    const query = normalizeSearchText(range.query);
-    const selectedIds = new Set(selectedSkills.map((skill) => skill.id));
-    const matched = skills
-      .filter((skill) => (
-        skill.enabled
-        && skill.eligible === true
-        && !selectedIds.has(skill.id)
-        && (!allowedSkillIdSet || allowedSkillIdSet.has(skill.id))
-      ))
-      .filter((skill) => {
-        if (!query) {
-          return true;
-        }
-        const fields = [skill.id, skill.slug ?? '', skill.name, skill.description];
-        return fields.some((field) => normalizeSearchText(field).includes(query));
-      })
-      .map((skill) => ({
-        id: skill.id,
-        name: skill.name,
-        icon: skill.icon || '🧩',
-        filePath: skill.filePath,
-        baseDir: skill.baseDir,
-      }));
     setSlashOpen(true);
     setSlashStart(range.start);
     setSlashEnd(range.end);
-    setSlashItems(matched);
-    setSlashActiveIndex((prev) => (prev >= matched.length ? 0 : prev));
+    setSlashActiveIndex(0);
     closeMention();
     closeQuickPhrase();
-  }, [allowedSkillIdSet, closeMention, closeQuickPhrase, closeSlash, selectedSkills, skills]);
+  }, [closeMention, closeQuickPhrase, closeSlash]);
 
   const applySlashSelection = useCallback((candidate: SelectedSkill) => {
     if (!textareaRef.current || slashStart < 0 || slashEnd < slashStart) {
@@ -862,7 +860,7 @@ export const ChatInput = memo(function ChatInput({
 
     try {
       const result = await invokeIpc<StageOpenAttachmentsResult>('dialog:stageOpenAttachments', {
-        properties: ['openFile', 'openDirectory', 'multiSelections'],
+        properties: ['openFile', 'multiSelections'],
       });
       if (result.canceled || !result.attachments || result.attachments.length === 0) {
         return;
@@ -1079,10 +1077,11 @@ export const ChatInput = memo(function ChatInput({
 
   const allReady = attachments.length === 0 || attachments.every(a => a.status === 'ready');
   const hasFailedAttachments = attachments.some((a) => a.status === 'error');
-  const materializableAttachmentCount = attachments.filter((attachment) => !isDirectoryAttachment(attachment)).length;
+  const readableAttachmentCount = attachments.filter((attachment) => !isDirectoryAttachment(attachment)
+    && (attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES || Boolean(attachment.sourcePath))).length;
   const payloadGate = resolveChatSendGateForPayload(sendGate, {
     text: input,
-    attachmentCount: materializableAttachmentCount,
+    attachmentCount: readableAttachmentCount,
     selectedSkillCount: selectedSkills.length,
   });
   const canSend = payloadGate.canSend
@@ -1295,40 +1294,20 @@ export const ChatInput = memo(function ChatInput({
         return;
       }
       const { pathFiles, bufferFiles } = collectDroppedFiles(e.dataTransfer);
-      const filesByPath = new Map(
-        Array.from(e.dataTransfer.items ?? []).flatMap((item) => {
-          if (item.kind !== 'file' || item.webkitGetAsEntry?.()?.isDirectory) {
-            return [];
-          }
-          const file = item.getAsFile();
-          const filePath = file ? window.electron?.getPathForFile?.(file) : '';
-          return filePath ? [[filePath, file] as const] : [];
-        }),
-      );
-      const filesToStage = [...bufferFiles];
-      const pathFilesToStage = pathFiles.filter((filePath) => {
-        const file = filesByPath.get(filePath);
-        if (!file) {
-          return true;
-        }
-        filesToStage.push(file);
-        return false;
-      });
-      if (pathFilesToStage.length > 0) {
-        void stageDroppedPathFiles(pathFilesToStage);
+      if (pathFiles.length > 0) {
+        void stageDroppedPathFiles(pathFiles);
       }
-      if (filesToStage.length > 0) {
-        stageBufferFiles(filesToStage);
+      if (bufferFiles.length > 0) {
+        stageBufferFiles(bufferFiles);
       }
     },
     [stageBufferFiles, stageDroppedPathFiles],
   );
 
   const placeholderText = resolveInputPlaceholder(disabled, approvalWaiting, t);
-  const statusText = resolveInputStatusText(
+  const composerNoticeText = resolveComposerNoticeText(
     disabled,
     approvalWaiting,
-    selectedSkills.length,
     t,
   );
 
@@ -1343,6 +1322,11 @@ export const ChatInput = memo(function ChatInput({
         {reconnecting ? (
           <div className="mb-2 rounded-full border border-border/45 bg-background px-3 py-1.5 text-xs text-muted-foreground shadow-none">
             {t('input.gatewayRecoveringNotice')}
+          </div>
+        ) : null}
+        {composerNoticeText ? (
+          <div className="mb-2 rounded-full border border-border/45 bg-background px-3 py-1.5 text-xs text-muted-foreground shadow-none">
+            {composerNoticeText}
           </div>
         ) : null}
         {/* Input Row */}
@@ -1410,7 +1394,7 @@ export const ChatInput = memo(function ChatInput({
                   ))}
                 </div>
               )}
-              <Textarea
+              <textarea
                 ref={textareaRef}
                 value={input}
                 onChange={(e) => {
@@ -1476,7 +1460,9 @@ export const ChatInput = memo(function ChatInput({
                 role="listbox"
                 className="absolute bottom-full z-40 mb-2 max-h-56 w-full overflow-y-auto rounded-2xl border border-border/60 bg-background/95 p-1.5 shadow-[0_16px_50px_rgba(15,23,42,0.12)] backdrop-blur-xl"
               >
-                {slashItems.length === 0 ? (
+                {slashSkillsLoading ? (
+                  <div className="px-2.5 py-2 text-xs text-muted-foreground">{t('skillConfigDialog.loading')}</div>
+                ) : slashItems.length === 0 ? (
                   <div className="px-2.5 py-2 text-xs text-muted-foreground">No matched skill</div>
                 ) : (
                   slashItems.map((item, index) => {
@@ -1817,11 +1803,6 @@ export const ChatInput = memo(function ChatInput({
                 )}
               </Button>
             </div>
-            {statusText ? (
-              <div className="min-w-0 px-0.5 text-[11px] text-muted-foreground/78">
-                <span className="block truncate">{statusText}</span>
-              </div>
-            ) : null}
           </div>
         </div>
         {skillManagerOpen && skillManager && typeof document !== 'undefined' ? createPortal((

@@ -91,6 +91,12 @@
     "open": "打开",
     "delete": "删除"
   },
+  "deleteToast": {
+    "deletedTitle": "团队已删除",
+    "deletedDescription": "运行时资源正在后台清理。",
+    "cleanupUnknownTitle": "团队已删除",
+    "cleanupUnknownDescription": "运行时清理结果未确认。"
+  },
   "chat": {
     "teamNotFound": "团队不存在",
     "backToList": "返回团队列表",
@@ -127,7 +133,8 @@
     "graphCanvas": {
       "workflowCanvas": "工作流画布",
       "workflowEdges": "工作流连线",
-      "nodePalette": "节点库",
+      "nodePalette": "添加节点",
+      "nodePaletteTitle": "选择节点类型",
       "nodeConfiguration": "节点配置",
       "nodeConfigurationDescription": "配置这个工作流节点。",
       "edgeConfiguration": "连线配置",
@@ -256,13 +263,13 @@
       "edges": "连线",
       "noEdges": "0 条连线",
       "nodePaletteDescriptions": {
-        "start": "工作流的外部触发入口（Webhook 或定时）。",
-        "work": "按 TeamRun attempt 渲染的角色步骤。",
-        "review": "由 reviewer 角色检查上游工作。",
-        "humanDecision": "人工批准或拒绝的控制门。",
-        "scriptReview": "runtime 规则或脚本审核门。",
-        "join": "汇合事件规则连线后继续。",
-        "end": "标记工作流终点。"
+        "start": "工作流的外部触发入口（Webhook 或定时）",
+        "work": "按 TeamRun attempt 渲染的角色步骤",
+        "review": "由 reviewer 角色检查上游工作",
+        "humanDecision": "人工批准或拒绝的控制门",
+        "scriptReview": "runtime 规则或脚本审核门",
+        "join": "汇合事件规则连线后继续",
+        "end": "标记工作流终点"
       }
     },
     "roles": "角色",

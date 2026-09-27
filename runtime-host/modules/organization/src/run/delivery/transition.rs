@@ -156,51 +156,10 @@ pub fn settle_delivery(
     receipt: DeliveryReceipt,
     _retry_at: u64,
 ) -> Result<DeliveryResolution, DeliveryReceiptError> {
-    let active_claim =
-        delivery
-            .active_claim()
-            .ok_or_else(|| DeliveryReceiptError::NotDelivering {
-                phase: delivery.phase().clone(),
-            })?;
+    let active_claim = active_claim_for_delivery_settlement(delivery)?;
+    ensure_current_delivery_claim(&active_claim, claim)?;
 
-    if active_claim != claim {
-        return Err(DeliveryReceiptError::StaleClaim {
-            delivery_id: claim.delivery_id().clone(),
-        });
-    }
-
-    match receipt {
-        DeliveryReceipt::Accepted {
-            receipt,
-            native_correlation,
-            accepted_at,
-        } => {
-            delivery.mark_delivered(receipt, native_correlation, accepted_at);
-            Ok(DeliveryResolution::Delivered)
-        }
-        DeliveryReceipt::Rejected {
-            failure,
-            observed_at,
-        } if failure.is_retryable() => {
-            let retry_at = delivery_retry_at(observed_at);
-            if delivery.schedule_retry(retry_at, observed_at, failure) {
-                Ok(DeliveryResolution::RetryScheduled { retry_at })
-            } else {
-                Ok(DeliveryResolution::Failed)
-            }
-        }
-        DeliveryReceipt::Rejected {
-            failure,
-            observed_at,
-        } => {
-            delivery.mark_failed(observed_at, failure);
-            Ok(DeliveryResolution::Failed)
-        }
-        DeliveryReceipt::OutcomeUnknown { observed_at } => {
-            delivery.mark_outcome_unknown(observed_at);
-            Ok(DeliveryResolution::OutcomeUnknown)
-        }
-    }
+    Ok(record_delivery_receipt(delivery, receipt))
 }
 
 /// Records only a terminal fact already classified by a runtime-native terminal consumer.
@@ -601,11 +560,85 @@ fn terminal_observation(
 
 pub fn recover_interrupted_delivery(delivery: &mut Delivery, observed_at: u64) -> DeliveryRecovery {
     if delivery.active_claim().is_some() {
-        delivery.mark_outcome_unknown(observed_at);
+        record_delivery_outcome_unknown_without_retry(delivery, observed_at);
         return DeliveryRecovery::OutcomeUnknown;
     }
 
     DeliveryRecovery::Unchanged {
         phase: delivery.phase().clone(),
     }
+}
+
+fn active_claim_for_delivery_settlement(
+    delivery: &Delivery,
+) -> Result<DeliveryClaim, DeliveryReceiptError> {
+    delivery
+        .active_claim()
+        .cloned()
+        .ok_or_else(|| DeliveryReceiptError::NotDelivering {
+            phase: delivery.phase().clone(),
+        })
+}
+
+fn ensure_current_delivery_claim(
+    active_claim: &DeliveryClaim,
+    submitted_claim: &DeliveryClaim,
+) -> Result<(), DeliveryReceiptError> {
+    if active_claim == submitted_claim {
+        Ok(())
+    } else {
+        Err(DeliveryReceiptError::StaleClaim {
+            delivery_id: submitted_claim.delivery_id().clone(),
+        })
+    }
+}
+
+fn record_delivery_receipt(
+    delivery: &mut Delivery,
+    receipt: DeliveryReceipt,
+) -> DeliveryResolution {
+    match receipt {
+        DeliveryReceipt::Accepted {
+            receipt,
+            native_correlation,
+            accepted_at,
+        } => {
+            delivery.mark_delivered(receipt, native_correlation, accepted_at);
+            DeliveryResolution::Delivered
+        }
+        DeliveryReceipt::Rejected {
+            failure,
+            observed_at,
+        } if failure.is_retryable() => {
+            schedule_delivery_retry_or_fail(delivery, observed_at, failure)
+        }
+        DeliveryReceipt::Rejected {
+            failure,
+            observed_at,
+        } => {
+            delivery.mark_failed(observed_at, failure);
+            DeliveryResolution::Failed
+        }
+        DeliveryReceipt::OutcomeUnknown { observed_at } => {
+            record_delivery_outcome_unknown_without_retry(delivery, observed_at);
+            DeliveryResolution::OutcomeUnknown
+        }
+    }
+}
+
+fn schedule_delivery_retry_or_fail(
+    delivery: &mut Delivery,
+    observed_at: u64,
+    failure: super::DeliveryFailure,
+) -> DeliveryResolution {
+    let retry_at = delivery_retry_at(observed_at);
+    if delivery.schedule_retry(retry_at, observed_at, failure) {
+        DeliveryResolution::RetryScheduled { retry_at }
+    } else {
+        DeliveryResolution::Failed
+    }
+}
+
+fn record_delivery_outcome_unknown_without_retry(delivery: &mut Delivery, observed_at: u64) {
+    delivery.mark_outcome_unknown(observed_at);
 }

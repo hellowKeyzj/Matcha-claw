@@ -91,6 +91,12 @@
     "open": "Open",
     "delete": "Delete"
   },
+  "deleteToast": {
+    "deletedTitle": "Team deleted",
+    "deletedDescription": "Runtime resources are being cleaned up in the background.",
+    "cleanupUnknownTitle": "Team deleted",
+    "cleanupUnknownDescription": "Runtime cleanup is not confirmed yet."
+  },
   "chat": {
     "teamNotFound": "Team not found",
     "backToList": "Back to Teams",
@@ -127,7 +133,8 @@
     "graphCanvas": {
       "workflowCanvas": "Workflow canvas",
       "workflowEdges": "Workflow edges",
-      "nodePalette": "Node palette",
+      "nodePalette": "Add node",
+      "nodePaletteTitle": "Choose node type",
       "nodeConfiguration": "Node configuration",
       "nodeConfigurationDescription": "Configure this workflow node.",
       "edgeConfiguration": "Connection configuration",
@@ -256,13 +263,13 @@
       "edges": "Edges",
       "noEdges": "0 edges",
       "nodePaletteDescriptions": {
-        "start": "External trigger entry for the workflow (webhook or schedule).",
-        "work": "Role step rendered as a TeamRun attempt.",
-        "review": "Reviewer role checks upstream work.",
-        "humanDecision": "Human approval or rejection gate.",
-        "scriptReview": "Runtime rule or script review gate.",
-        "join": "Joins event-rule edges before continuing.",
-        "end": "Marks the workflow terminal point."
+        "start": "External trigger entry for the workflow (webhook or schedule)",
+        "work": "Role step rendered as a TeamRun attempt",
+        "review": "Reviewer role checks upstream work",
+        "humanDecision": "Human approval or rejection gate",
+        "scriptReview": "Runtime rule or script review gate",
+        "join": "Joins event-rule edges before continuing",
+        "end": "Marks the workflow terminal point"
       }
     },
     "roles": "Roles",

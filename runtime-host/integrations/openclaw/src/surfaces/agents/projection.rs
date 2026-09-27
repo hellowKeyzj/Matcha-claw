@@ -464,6 +464,7 @@ pub(crate) fn tool_option(option: &native_agent_configuration::ToolOption) -> ag
         risk: option.risk().map(str::to_owned),
         tags: option.tags().to_vec(),
         default_profiles: option.default_profiles().to_vec(),
+        denied_by_global_policy: option.denied_by_global_policy(),
         group_key: option.group_key().map(str::to_owned),
         group_display_name: option.group_display_name().map(str::to_owned),
     }

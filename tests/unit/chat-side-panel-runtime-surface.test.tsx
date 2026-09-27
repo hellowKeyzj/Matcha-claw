@@ -10,19 +10,13 @@ import {
 import { useGatewayStore } from '@/stores/gateway';
 import { useLayoutStore } from '@/stores/layout';
 import { useChatStore } from '@/stores/chat';
-import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createReadyResourceStatusState } from '@/lib/resource-state';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const mocks = vi.hoisted(() => ({
-  listTaskSnapshot: vi.fn(),
   hostOpenClawBrowserRequest: vi.fn(),
   hostOpenClawMcpAppRequest: vi.fn(),
-}));
-
-vi.mock('@/services/openclaw/task-manager-client', () => ({
-  listTaskSnapshot: (...args: unknown[]) => mocks.listTaskSnapshot(...args),
 }));
 
 vi.mock('@/lib/host-api', async (importOriginal) => {
@@ -36,13 +30,7 @@ vi.mock('@/lib/host-api', async (importOriginal) => {
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, options?: Record<string, unknown>) => {
-      if (key === 'taskInbox.unfinishedCount') {
-        return `count:${String(options?.count ?? 0)}`;
-      }
-      if (key === 'taskInbox.shortTitle') {
-        return '任务';
-      }
+    t: (key: string) => {
       if (key === 'artifacts.sectionLabel') {
         return '产物';
       }
@@ -113,13 +101,6 @@ function defaultSidePanelProps(): ComponentProps<typeof ChatSidePanel> {
     onTabChange: vi.fn(),
     onClose: vi.fn(),
     onToggleArtifactWorkbenchFullscreen: vi.fn(),
-    unfinishedTaskCount: 0,
-    taskInboxTasks: [],
-    taskInboxLoading: false,
-    taskInboxError: null,
-    onRefreshTaskInbox: vi.fn().mockResolvedValue(undefined),
-    onClearTaskInboxError: vi.fn(),
-    derivedPlanStatus: null,
     artifactGroups: [],
     artifactFocusedGroupFiles: [],
     artifactFocusedFile: null,
@@ -152,7 +133,6 @@ function resetChatRuntimeFixtures(): void {
     isInitialized: true,
   } as never);
   useLayoutStore.setState({ chatTakeoverMode: 'none' });
-  useTaskSnapshotStore.getState().cleanup('agent:main:main');
 
   const mainSession = createEmptySessionRecord();
   const mainSessionIdentity = createOpenClawTestSessionIdentity('agent:main:main');
@@ -172,8 +152,6 @@ function resetChatRuntimeFixtures(): void {
     },
   } as never);
 
-  mocks.listTaskSnapshot.mockReset();
-  mocks.listTaskSnapshot.mockResolvedValue({ tasks: [], todos: [] });
   mocks.hostOpenClawBrowserRequest.mockReset();
   mocks.hostOpenClawBrowserRequest.mockImplementation(async (input: { path?: string }) => {
     if (input.path?.includes('/tabs')) {

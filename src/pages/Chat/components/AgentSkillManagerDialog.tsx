@@ -54,7 +54,7 @@ export function AgentSkillManagerDialog({
 
   return (
     <div
-      className="fixed inset-0 z-[120] flex items-center justify-center bg-black/55 p-6"
+      className="fixed inset-0 z-[120] flex items-center justify-center bg-[hsl(var(--shell-scrim))] p-6"
       role="presentation"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
@@ -66,11 +66,11 @@ export function AgentSkillManagerDialog({
         role="dialog"
         aria-modal="true"
         aria-label={label}
-        className="flex h-[min(720px,calc(100vh-3rem))] w-full max-w-[54rem] overflow-hidden rounded-[1.25rem] border border-border bg-card shadow-[0_24px_70px_rgba(15,23,42,0.28)]"
+        className="flex h-[min(720px,calc(100vh-3rem))] w-full max-w-[54rem] overflow-hidden rounded-[1.25rem] border bg-[hsl(var(--shell-surface))] shadow-[var(--shell-shadow-overlay)] [border-color:hsl(var(--shell-border))]"
       >
         {skillPreview ? (
           <div data-testid="chat-skill-preview-panel" className="flex min-h-0 flex-1 flex-col">
-            <div className={cn('border-b border-border/40', PANEL_PAD_X, PANEL_PAD_Y)}>
+            <div className={cn('border-b [border-color:hsl(var(--shell-border))]', PANEL_PAD_X, PANEL_PAD_Y)}>
               <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-2">
                   <Button
@@ -86,7 +86,7 @@ export function AgentSkillManagerDialog({
                   </Button>
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-foreground">{skillPreview.skillName}</p>
-                    <p className="text-xs text-muted-foreground">{t('chat:skillPreviewTitle')}</p>
+                    <p className="text-xs text-[hsl(var(--shell-text-muted))]">{t('chat:skillPreviewTitle')}</p>
                   </div>
                 </div>
                 <Button

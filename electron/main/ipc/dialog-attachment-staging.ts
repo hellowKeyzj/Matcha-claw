@@ -4,7 +4,7 @@ import { copyFile, mkdir, readFile, realpath, stat, unlink, writeFile } from 'no
 import { basename, extname, join, relative } from 'node:path';
 import { getAttachmentStagingDir } from '../../utils/paths';
 
-const ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
+const INLINE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
 const IMAGE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
 
@@ -88,7 +88,7 @@ export async function consumeStagedAttachment(stagedAttachmentId: string): Promi
       throw new Error('unavailable');
     }
     const metadata = await stat(ownedPath);
-    if (!metadata.isFile() || metadata.size > ATTACHMENT_MAX_BYTES) {
+    if (!metadata.isFile() || metadata.size > INLINE_ATTACHMENT_MAX_BYTES) {
       throw new Error('unavailable');
     }
     const content = await readFile(ownedPath);
@@ -124,7 +124,7 @@ export async function copyStagedAttachment(
       throw new Error('unavailable');
     }
     const metadata = await stat(ownedPath);
-    if (!metadata.isFile() || metadata.size > ATTACHMENT_MAX_BYTES) {
+    if (!metadata.isFile() || metadata.size > INLINE_ATTACHMENT_MAX_BYTES) {
       throw new Error('unavailable');
     }
     await copyFile(ownedPath, destinationPath);
@@ -199,7 +199,7 @@ export async function stageWorkspaceMediaAttachment(input: {
   preview?: string | null;
 }): Promise<StagedDialogAttachmentPayload> {
   if (!input.name || input.name.includes('\0') || !input.mimeType || input.mimeType.includes('\0')
-    || input.content.length > ATTACHMENT_MAX_BYTES) {
+    || input.content.length > INLINE_ATTACHMENT_MAX_BYTES) {
     throw new Error('invalid');
   }
   const attachmentStagingDirectory = getAttachmentStagingDir();
@@ -216,7 +216,7 @@ export async function stageWorkspaceMediaAttachment(input: {
       throw new Error('invalid');
     }
     const metadata = await stat(ownedPath);
-    if (!metadata.isFile() || metadata.size !== input.content.length || metadata.size > ATTACHMENT_MAX_BYTES) {
+    if (!metadata.isFile() || metadata.size !== input.content.length || metadata.size > INLINE_ATTACHMENT_MAX_BYTES) {
       throw new Error('invalid');
     }
     const preview = input.preview ?? await generateImagePreview(ownedPath, input.mimeType, metadata.size);
@@ -241,12 +241,12 @@ export async function stageRendererBufferAttachment(input: {
   fileName: string;
   mimeType: string;
 }): Promise<StagedDialogAttachmentPayload> {
-  if (typeof input.base64 !== 'string' || input.base64.length > Math.ceil(ATTACHMENT_MAX_BYTES / 3) * 4
+  if (typeof input.base64 !== 'string' || input.base64.length > Math.ceil(INLINE_ATTACHMENT_MAX_BYTES / 3) * 4
     || !/^[A-Za-z0-9+/]*={0,2}$/.test(input.base64) || input.base64.length % 4 !== 0) {
     throw new Error('invalid');
   }
   const content = Buffer.from(input.base64, 'base64');
-  if (content.length > ATTACHMENT_MAX_BYTES || content.toString('base64') !== input.base64) {
+  if (content.length > INLINE_ATTACHMENT_MAX_BYTES || content.toString('base64') !== input.base64) {
     throw new Error('invalid');
   }
   return await stageWorkspaceMediaAttachment({
@@ -286,12 +286,21 @@ export async function stageDialogSelectedAttachments(filePaths: string[]): Promi
     if (!fileStat.isFile()) {
       throw new Error('notFound');
     }
-    if (fileStat.size > ATTACHMENT_MAX_BYTES) {
-      throw new Error('tooLarge');
-    }
 
     const ext = extname(sourcePath);
     const mimeType = getMimeType(ext);
+    if (fileStat.size > INLINE_ATTACHMENT_MAX_BYTES) {
+      attachments.push({
+        entryKind: 'file',
+        fileName: basename(sourcePath) || 'file',
+        mimeType,
+        fileSize: fileStat.size,
+        preview: null,
+        sourcePath,
+      });
+      continue;
+    }
+
     const id = randomUUID();
     const root = await ensureStagingRoot();
     const stagedPath = join(root, `${id}${ext}`);
@@ -304,7 +313,7 @@ export async function stageDialogSelectedAttachments(filePaths: string[]): Promi
         throw new Error('invalid');
       }
       const metadata = await stat(ownedPath);
-      if (!metadata.isFile() || metadata.size !== fileStat.size || metadata.size > ATTACHMENT_MAX_BYTES) {
+      if (!metadata.isFile() || metadata.size !== fileStat.size || metadata.size > INLINE_ATTACHMENT_MAX_BYTES) {
         throw new Error('invalid');
       }
       const preview = await generateImagePreview(ownedPath, mimeType, metadata.size);

@@ -40,6 +40,7 @@ const MAX_PACKAGE_RELATIVE_PATH_BYTES: usize = 240;
 const MAX_TEXT_LENGTH: usize = 1024 * 1024;
 const SUBAGENTS_REQUEST_BYTES: usize = 1024 * 1024 + 64 * 1024;
 const SHORT_DEADLINE: Duration = Duration::from_secs(5);
+const TIMEOUT_ERROR: &str = "Runtime Host request deadline exceeded";
 
 #[derive(Clone)]
 pub struct Dependencies {
@@ -77,7 +78,12 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
     (path == AUTHORIZATION_ENDPOINT || path.starts_with(SEALED_AGENT_READ_ENDPOINT_PREFIX)).then(
         || {
-            RouteHeadPlan::new(
+            let plan = if head.method == "POST" && path == AUTHORIZATION_ENDPOINT {
+                RouteHeadPlan::body_deadline
+            } else {
+                RouteHeadPlan::new
+            };
+            plan(
                 body_policy_for_method(head.method.as_str(), SUBAGENTS_REQUEST_BYTES),
                 SHORT_DEADLINE,
                 timeout_response,
@@ -114,7 +120,7 @@ fn body_policy_for_method(method: &str, max_bytes: usize) -> BodyPolicy {
 fn timeout_response() -> Response {
     Response::json(
         503,
-        serde_json::json!({ "success": false, "error": "Runtime Host request deadline exceeded" }),
+        serde_json::json!({ "success": false, "error": TIMEOUT_ERROR }),
     )
 }
 
@@ -281,6 +287,40 @@ fn valid_package_path(value: &str) -> bool {
         && value.ends_with(".matcha-agentpkg")
 }
 
+fn valid_text(value: &str, max_bytes: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max_bytes && !value.contains('\0')
+}
+
+fn valid_cloud_metadata(value: &CloudMetadataInput) -> bool {
+    valid_text(&value.package_version_id, 512)
+        && valid_text(&value.package_type, 64)
+        && value
+            .package_sha256
+            .as_deref()
+            .is_none_or(|value| valid_text(value, 128))
+        && value
+            .file_name
+            .as_deref()
+            .is_none_or(|value| valid_text(value, 512))
+}
+
+fn decode_cloud_metadata(
+    value: Option<CloudMetadataInput>,
+) -> Result<Option<agents::CloudPackageMetadata>, RequestError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !valid_cloud_metadata(&value) {
+        return Err(RequestError::Invalid);
+    }
+    Ok(Some(agents::CloudPackageMetadata::new(
+        value.package_version_id,
+        value.package_type,
+        value.package_sha256,
+        value.file_name,
+    )))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RequestError {
     Invalid,
@@ -418,12 +458,32 @@ impl AgentsRequest {
             (Operation::PackageExport, Input::PackageExport { agent_id, .. }) => {
                 Ok(agents::Command::ExportPackage { endpoint, agent_id })
             }
-            (Operation::PackageInstall, Input::PackageInstall { package_path, .. }) => {
-                Ok(agents::Command::InstallPackage {
-                    endpoint,
+            (
+                Operation::PackageExportCloud,
+                Input::PackageExportCloud {
+                    agent_id,
+                    cloud_public_key,
+                    cloud_key_id,
+                    ..
+                },
+            ) => Ok(agents::Command::ExportCloudPackage {
+                endpoint,
+                agent_id,
+                cloud_public_key,
+                cloud_key_id: cloud_key_id.ok_or(RequestError::Invalid)?,
+            }),
+            (
+                Operation::PackageInstall,
+                Input::PackageInstall {
                     package_path,
-                })
-            }
+                    cloud_metadata,
+                    ..
+                },
+            ) => Ok(agents::Command::InstallPackage {
+                endpoint,
+                package_path,
+                cloud_metadata: decode_cloud_metadata(cloud_metadata)?,
+            }),
             (
                 Operation::FilesSet,
                 Input::FilesSet {
@@ -567,6 +627,7 @@ enum Operation {
     FilesList,
     DisplayConfiguration,
     PackageExport,
+    PackageExportCloud,
     PackageInstall,
     SetDescription,
     SetConfigurationModel,
@@ -584,6 +645,7 @@ impl Operation {
             Self::DraftWait
                 | Self::DisplayConfiguration
                 | Self::PackageExport
+                | Self::PackageExportCloud
                 | Self::PackageInstall
                 | Self::SetDescription
                 | Self::SetConfigurationModel
@@ -615,6 +677,7 @@ impl Operation {
             "subagents.files.list" => Some(Self::FilesList),
             "subagents.displayConfig.get" => Some(Self::DisplayConfiguration),
             "subagents.package.export" => Some(Self::PackageExport),
+            "subagents.package.exportCloud" => Some(Self::PackageExportCloud),
             "subagents.package.install" => Some(Self::PackageInstall),
             "subagents.description.set" => Some(Self::SetDescription),
             "subagents.model.set" => Some(Self::SetConfigurationModel),
@@ -761,10 +824,21 @@ enum Input {
         #[serde(rename = "agentId")]
         agent_id: String,
     },
+    PackageExportCloud {
+        endpoint: Endpoint,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(rename = "cloudPublicKey")]
+        cloud_public_key: String,
+        #[serde(rename = "cloudKeyId")]
+        cloud_key_id: Option<String>,
+    },
     PackageInstall {
         endpoint: Endpoint,
         #[serde(rename = "packagePath")]
         package_path: String,
+        #[serde(rename = "cloudMetadata")]
+        cloud_metadata: Option<CloudMetadataInput>,
     },
     DisplayConfiguration {
         endpoint: Endpoint,
@@ -886,6 +960,15 @@ impl FieldUpdate<String> {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CloudMetadataInput {
+    package_version_id: String,
+    package_type: String,
+    package_sha256: Option<String>,
+    file_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct AgentConfigurationInput {
     #[serde(rename = "agentId")]
@@ -990,6 +1073,7 @@ impl Input {
             | Self::FilesSet { endpoint, .. }
             | Self::FilesList { endpoint, .. }
             | Self::PackageExport { endpoint, .. }
+            | Self::PackageExportCloud { endpoint, .. }
             | Self::PackageInstall { endpoint, .. }
             | Self::DisplayConfiguration { endpoint, .. }
             | Self::SetDescription { endpoint, .. }
@@ -1058,8 +1142,33 @@ impl Input {
             | (Operation::PackageExport, Self::PackageExport { agent_id, .. }) => {
                 valid_id(agent_id) && target_matches(agent_id)
             }
-            (Operation::PackageInstall, Self::PackageInstall { package_path, .. }) => {
-                target.subagent_id.is_none() && valid_package_path(package_path)
+            (
+                Operation::PackageExportCloud,
+                Self::PackageExportCloud {
+                    agent_id,
+                    cloud_public_key,
+                    cloud_key_id,
+                    ..
+                },
+            ) => {
+                valid_id(agent_id)
+                    && target_matches(agent_id)
+                    && valid_text(cloud_public_key, 8 * 1024)
+                    && cloud_key_id
+                        .as_deref()
+                        .is_none_or(|value| valid_text(value, 512))
+            }
+            (
+                Operation::PackageInstall,
+                Self::PackageInstall {
+                    package_path,
+                    cloud_metadata,
+                    ..
+                },
+            ) => {
+                target.subagent_id.is_none()
+                    && valid_package_path(package_path)
+                    && cloud_metadata.as_ref().is_none_or(valid_cloud_metadata)
             }
             (Operation::FilesGet, Self::FilesGet { agent_id, name, .. }) => {
                 valid_id(agent_id)
@@ -1174,6 +1283,50 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn agents_post_uses_body_deadline() {
+        let plan = head_plan(&RequestHead::new(
+            "POST".to_owned(),
+            AUTHORIZATION_ENDPOINT.to_owned(),
+            Vec::new(),
+            false,
+            None,
+            None,
+        ))
+        .expect("agents route plan");
+
+        match plan.deadline() {
+            platform::loopback::RouteDeadline::Body(deadline) => {
+                assert_eq!(deadline, SHORT_DEADLINE)
+            }
+            platform::loopback::RouteDeadline::Request(_) => {
+                panic!("agents POST must not bound owner execution")
+            }
+        }
+    }
+
+    #[test]
+    fn sealed_agent_read_keeps_request_deadline() {
+        let plan = head_plan(&RequestHead::new(
+            "GET".to_owned(),
+            format!("{SEALED_AGENT_READ_ENDPOINT_PREFIX}agent/AGENTS.md"),
+            Vec::new(),
+            false,
+            None,
+            None,
+        ))
+        .expect("sealed read route plan");
+
+        match plan.deadline() {
+            platform::loopback::RouteDeadline::Request(deadline) => {
+                assert_eq!(deadline, SHORT_DEADLINE)
+            }
+            platform::loopback::RouteDeadline::Body(_) => {
+                panic!("sealed reads keep request deadline")
+            }
+        }
+    }
 
     fn endpoint(adapter: &str) -> Value {
         json!({
@@ -1512,6 +1665,30 @@ mod tests {
             Ok(agents::Command::InstallPackage {
                 endpoint: NativeEndpoint::OpenClawLocal,
                 package_path: "C:/sealed/writer.matcha-agentpkg".into(),
+                cloud_metadata: None,
+            })
+        );
+
+        let mut cloud = request.clone();
+        cloud["input"]["cloudMetadata"] = json!({
+            "packageVersionId": "pkgver_1",
+            "packageType": "agent",
+            "packageSha256": "abc123",
+            "fileName": "writer.matcha-agentpkg",
+        });
+        assert_eq!(
+            AgentsRequest::decode_semantics(cloud)
+                .expect("decode cloud package install")
+                .command(None),
+            Ok(agents::Command::InstallPackage {
+                endpoint: NativeEndpoint::OpenClawLocal,
+                package_path: "C:/sealed/writer.matcha-agentpkg".into(),
+                cloud_metadata: Some(agents::CloudPackageMetadata::new(
+                    "pkgver_1".into(),
+                    "agent".into(),
+                    Some("abc123".into()),
+                    Some("writer.matcha-agentpkg".into()),
+                )),
             })
         );
 
@@ -1544,6 +1721,11 @@ mod tests {
             {
                 let mut value = request.clone();
                 value["input"]["packagePath"] = json!("C:/sealed/writer.matchaclaw-agent.json");
+                value
+            },
+            {
+                let mut value = request.clone();
+                value["input"]["authorizationKey"] = json!("secret");
                 value
             },
             {

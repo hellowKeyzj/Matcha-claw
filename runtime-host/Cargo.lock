@@ -6948,14 +6948,18 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "base64 0.22.1",
+ "chrono",
  "getrandom 0.3.4",
  "platform",
+ "rsa",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "skills",
  "subagents",
  "tempfile",
+ "tokio",
  "zeroize",
 ]
 

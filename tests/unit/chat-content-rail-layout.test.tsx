@@ -821,11 +821,12 @@ describe('chat content rail layout', () => {
       .filter((value): value is string => typeof value === 'string');
 
     expect(classNames.some((value) => value.includes(CHAT_LAYOUT_TOKENS.inputRail))).toBe(true);
-    expect(classNames.some((value) => value.includes(CHAT_LAYOUT_TOKENS.inputCard))).toBe(true);
+    expect(classNames.some((value) => value.includes('rounded-[1.35rem]'))).toBe(true);
+    expect(classNames.some((value) => value.includes('shadow-[var(--shell-shadow-overlay)]'))).toBe(true);
     expect(CHAT_LAYOUT_TOKENS.inputRail).toContain('mx-auto');
     expect(CHAT_LAYOUT_TOKENS.inputRail).toContain('max-w-');
-    expect(CHAT_LAYOUT_TOKENS.inputCard).toContain('backdrop-blur');
-    expect(CHAT_LAYOUT_TOKENS.inputCard).toContain('shadow-');
+    expect(CHAT_LAYOUT_TOKENS.inputCard).toContain('bg-[hsl(var(--shell-surface-muted))]');
+    expect(CHAT_LAYOUT_TOKENS.inputCard).toContain('shadow-[var(--shell-shadow-overlay)]');
     expect(screen.getByRole('textbox')).toBeInTheDocument();
     expect(screen.getByTestId('chat-model-picker').tagName).toBe('BUTTON');
   });
@@ -869,7 +870,7 @@ describe('chat content rail layout', () => {
     expect(CHAT_LAYOUT_TOKENS.inputActionsRow).toContain('flex-col');
     expect(CHAT_LAYOUT_TOKENS.inputModelPickerTrigger).toContain('w-full');
     expect(CHAT_LAYOUT_TOKENS.inputModelPickerTrigger).toContain('h-9');
-    expect(CHAT_LAYOUT_TOKENS.inputModelPickerTrigger).toContain('bg-card');
+    expect(CHAT_LAYOUT_TOKENS.inputModelPickerTrigger).toContain('bg-[hsl(var(--shell-surface))]');
     expect(CHAT_LAYOUT_TOKENS.inputAttachButton).toContain('h-9');
     expect(CHAT_LAYOUT_TOKENS.inputSendButton).toContain('h-9');
   });

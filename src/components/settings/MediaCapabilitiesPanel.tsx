@@ -214,7 +214,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
   };
 
   return (
-    <div className="border-t border-border/70 first:border-t-0">
+    <div className="border-t first:border-t-0 [border-color:hsl(var(--shell-border))]">
       <div className="grid gap-3 px-4 py-3 md:grid-cols-[11rem_minmax(0,1fr)_8.75rem] md:items-center">
         <div className="min-w-0 space-y-0.5">
           <p className="truncate text-sm font-medium">{title}</p>
@@ -266,7 +266,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
             variant="ghost"
             size="icon"
             onClick={() => setAdvancedOpen((open) => !open)}
-            className={cn('h-8 w-8', advancedOpen && 'bg-secondary text-foreground')}
+            className={cn('h-8 w-8', advancedOpen && 'bg-[hsl(var(--shell-surface-active))] text-foreground')}
             aria-label={advancedOpen ? t('capabilityRouting.advanced.collapse') : t('capabilityRouting.advanced.expand')}
             title={advancedOpen ? t('capabilityRouting.advanced.collapse') : t('capabilityRouting.advanced.expand')}
           >
@@ -286,7 +286,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
       </div>
 
       {advancedOpen ? (
-        <div className="space-y-3 border-t border-border/70 bg-muted/25 px-4 py-3">
+        <div className="space-y-3 border-t bg-[hsl(var(--shell-surface))] px-4 py-3 [border-color:hsl(var(--shell-border))]">
           <div className="space-y-1.5">
             <Label htmlFor={`capability-${capability}-fallback-add`} className="text-xs">
               {t('capabilityRouting.fallbacksLabel')}
@@ -414,8 +414,8 @@ export function MediaCapabilitiesPanel() {
   const initialLoading = (loading && !ready) || (modelCatalogLoading && !modelCatalogReady);
 
   return (
-    <Card className="overflow-hidden rounded-lg">
-      <CardHeader className={cn('pb-4', open && 'border-b border-border/70')}>
+    <Card className="overflow-hidden rounded-[1.25rem] bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
+      <CardHeader className={cn('pb-4', open && 'border-b [border-color:hsl(var(--shell-border))]')}>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <button
             type="button"

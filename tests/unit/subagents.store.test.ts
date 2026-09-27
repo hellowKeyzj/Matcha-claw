@@ -6,6 +6,7 @@ import {
   resetGatewayClientMocks,
 } from './helpers/mock-gateway-client';
 
+import i18n from '@/i18n';
 import {
   __resetSubagentsStoreInternalCachesForTest,
   useSubagentsStore,
@@ -1015,7 +1016,6 @@ describe('subagents store', () => {
     await expect(useSubagentsStore.getState().exportAgentPackage('writer')).resolves.toEqual({
       agentId: 'writer',
       fileName: 'writer.matcha-agentpkg',
-      packagePath: 'C:/sealed/writer.matcha-agentpkg',
       size: 1024,
       exportedAtMs: 1,
     });
@@ -1030,21 +1030,9 @@ describe('subagents store', () => {
       loadAgents,
     });
     hostApiFetchMock.mockImplementation(async (path, options) => {
-      if (path === '/api/subagents/agents') {
-        expect(JSON.parse(String(options?.body))).toEqual({
-          id: 'subagent.management',
-          operationId: 'subagents.package.export',
-          scope: { kind: 'agent', endpoint: runtimeEndpoint, agentId: 'default' },
-          target: { kind: 'subagent', subagentId: 'writer' },
-          input: { kind: 'packageExport', endpoint: runtimeEndpoint, agentId: 'writer' },
-        });
-        return {
-          success: true,
-          package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1 },
-        };
-      }
-      if (path === '/api/packages/upload') {
-        expect(JSON.parse(String(options?.body))).toEqual({ packagePath: 'C:/sealed/writer.matcha-agentpkg' });
+      if (path === '/api/packages/upload/sealed-agent') {
+        expect(JSON.parse(String(options?.body))).toEqual({ agentId: 'writer' });
+        expect(String(options?.body)).not.toMatch(/packagePath|deviceEnvelope|authorizationKey|contentKey|rawPayload|token/);
         return { packageId: 'pkg-writer', packageVersionId: 'version-writer', fileName: 'writer.matcha-agentpkg', bytes: 1024 };
       }
       if (path === '/api/packages/download') {
@@ -1053,6 +1041,7 @@ describe('subagents store', () => {
       }
       if (path === '/api/packages/install') {
         expect(JSON.parse(String(options?.body))).toEqual({ packageVersionId: 'version-writer', packageType: 'agent', source: 'subagents' });
+        expect(String(options?.body)).not.toMatch(/packagePath|deviceEnvelope|authorizationKey|contentKey|rawPayload|token/);
         return { packageId: 'pkg-writer', packageVersionId: 'version-writer', install: { outcome: 'accepted', agentId: 'writer', workspace: 'C:/private' } };
       }
       throw new Error(`Unexpected path in test: ${String(path)}`);
@@ -1079,7 +1068,20 @@ describe('subagents store', () => {
       packageId: 'pkg-writer',
       packageVersionId: 'version-writer',
     });
+    expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/subagents/agents', expect.anything());
     expect(loadAgents).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps package install unknown outcome to an actionable user message', async () => {
+    hostApiFetchMock.mockImplementation(async (path) => {
+      if (path === '/api/packages/install') {
+        throw new Error('Subagent mutation outcome is unknown');
+      }
+      throw new Error(`Unexpected path in test: ${String(path)}`);
+    });
+
+    await expect(useSubagentsStore.getState().installAgentPackageFromCloud('version-writer'))
+      .rejects.toThrow(i18n.t('subagents:transfer.installPackageUnknownOutcome'));
   });
 
   it('exportAgentConfig rejects sealed agents before reading editable files', async () => {

@@ -29,7 +29,7 @@
     "input": {
         "gatewayDisconnectedPlaceholder": "运行时不可用...",
         "gatewayRecoveringNotice": "运行时正在准备…",
-        "messagePlaceholder": "消息（输入 / 选skill，Enter 发送，Shift+Enter 换行）",
+        "messagePlaceholder": "输入消息，/ 选择技能，Enter 发送，Shift+Enter 换行",
         "approvalWaitingPlaceholder": "等待审批中...",
         "imageGenerationActive": "正在生成图片",
         "pickModel": "选择模型",
@@ -236,45 +236,5 @@
         "withinTwoWeeks": "两周内",
         "withinMonth": "一个月内",
         "older": "一个月之前"
-    },
-    "taskInbox": {
-        "title": "任务收件箱",
-        "shortTitle": "任务",
-        "unfinishedCount": "{{count}} 个未完成任务",
-        "refresh": "刷新任务",
-        "workspaceScope": "范围：{{scope}}",
-        "gatewayPreparing": "网关正在启动，任务列表稍后可用",
-        "gatewayStopped": "网关未运行，任务列表与恢复操作已禁用",
-        "empty": "当前工作区无未完成任务",
-        "unboundSession": "未绑定会话，先恢复任务",
-        "taskNotFound": "任务不存在或已更新，请刷新后重试",
-        "untitledTask": "未命名任务",
-        "assignedSessionReady": "已绑定会话",
-        "assignedSessionMissing": "未绑定会话",
-        "openSession": "进入会话",
-        "inputPlaceholder": "请输入补充信息",
-        "submitInput": "提交输入",
-        "reject": "拒绝",
-        "approve": "批准",
-        "collapse": "收起任务收件箱",
-        "expand": "展开任务收件箱",
-        "status": {
-            "pending": "待处理",
-            "in_progress": "进行中",
-            "running": "执行中",
-            "waiting_for_input": "等待输入",
-            "waiting_approval": "等待审批",
-            "completed": "已完成",
-            "deleted": "已删除",
-            "failed": "已失败"
-        },
-        "planStatus": {
-            "finished": "已完成",
-            "building": "执行中",
-            "ready": "待确认"
-        },
-        "toast": {
-            "resumed": "任务已恢复执行"
-        }
     }
 }

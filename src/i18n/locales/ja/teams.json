@@ -91,6 +91,12 @@
     "open": "開く",
     "delete": "削除"
   },
+  "deleteToast": {
+    "deletedTitle": "チームを削除しました",
+    "deletedDescription": "ランタイムリソースはバックグラウンドでクリーンアップされています。",
+    "cleanupUnknownTitle": "チームを削除しました",
+    "cleanupUnknownDescription": "ランタイムクリーンアップの結果はまだ確認できていません。"
+  },
   "chat": {
     "teamNotFound": "チームが見つかりません",
     "backToList": "チーム一覧へ戻る",
@@ -120,7 +126,8 @@
     "graphCanvas": {
       "workflowCanvas": "ワークフローキャンバス",
       "workflowEdges": "ワークフロー接続",
-      "nodePalette": "ノードライブラリ",
+      "nodePalette": "ノードを追加",
+      "nodePaletteTitle": "ノードタイプを選択",
       "nodeConfiguration": "ノード設定",
       "nodeConfigurationDescription": "このワークフローノードを設定します。",
       "edgeConfiguration": "接続設定",
@@ -249,13 +256,13 @@
       "edges": "接続",
       "noEdges": "0 接続",
       "nodePaletteDescriptions": {
-        "start": "ワークフローの外部トリガー入口（Webhook またはスケジュール）。",
-        "work": "TeamRun attempt として描画されるロールステップ。",
-        "review": "Reviewer ロールが上流の作業を確認します。",
-        "humanDecision": "人による承認または却下のゲート。",
-        "scriptReview": "runtime ルールまたはスクリプト審査ゲート。",
-        "join": "イベントルールの接続を合流してから続行します。",
-        "end": "ワークフローの終点を示します。"
+        "start": "ワークフローの外部トリガー入口（Webhook またはスケジュール）",
+        "work": "TeamRun attempt として描画されるロールステップ",
+        "review": "Reviewer ロールが上流の作業を確認します",
+        "humanDecision": "人による承認または却下のゲート",
+        "scriptReview": "runtime ルールまたはスクリプト審査ゲート",
+        "join": "イベントルールの接続を合流してから続行します",
+        "end": "ワークフローの終点を示します"
       }
     },
     "roles": "Roles",

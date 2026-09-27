@@ -121,6 +121,41 @@ describe('Electron Main agents transport', () => {
     },
     {
       id: 'subagent.management',
+      operationId: 'subagents.package.exportCloud',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent', subagentId: 'writer' },
+      input: { kind: 'packageExportCloud', endpoint, agentId: 'writer', cloudPublicKey: 'cloud-public-key', packagePath: 'C:/private' },
+    },
+    {
+      id: 'subagent.management',
+      operationId: 'subagents.package.install',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent' },
+      input: { kind: 'packageInstall', endpoint, packagePath: 'C:/sealed/writer.matcha-agentpkg', authorizationKey: 'authorization-key' },
+    },
+    {
+      id: 'subagent.management',
+      operationId: 'subagents.package.install',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent' },
+      input: { kind: 'packageInstall', endpoint, packagePath: 'C:/sealed/writer.matcha-agentpkg', deviceEnvelope: 'device-envelope' },
+    },
+    {
+      id: 'subagent.management',
+      operationId: 'subagents.package.install',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent' },
+      input: { kind: 'packageInstall', endpoint, packagePath: 'C:/sealed/writer.matcha-agentpkg', contentKey: 'content-key' },
+    },
+    {
+      id: 'subagent.management',
+      operationId: 'subagents.package.install',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent' },
+      input: { kind: 'packageInstall', endpoint, packagePath: 'C:/sealed/writer.matcha-agentpkg', rawPayload: 'raw-payload' },
+    },
+    {
+      id: 'subagent.management',
       operationId: 'subagents.package.install',
       scope: { kind: 'agent', endpoint, agentId: 'main' },
       target: { kind: 'subagent' },
@@ -190,12 +225,39 @@ describe('Electron Main agents transport', () => {
     }));
   });
 
+  it('exports cloud sealed packages with only cloud public envelope input', async () => {
+    const request = {
+      id: 'subagent.management',
+      operationId: 'subagents.package.exportCloud',
+      scope: { kind: 'agent', endpoint, agentId: 'main' },
+      target: { kind: 'subagent', subagentId: 'writer' },
+      input: { kind: 'packageExportCloud', endpoint, agentId: 'writer', cloudPublicKey: 'cloud-public-key', cloudKeyId: 'cloud-key' },
+    } as const;
+    const body = { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1 } };
+    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => body });
+    const transport = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      fetcher,
+    );
+
+    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body });
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34225/api/subagents/agents', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify(request),
+    }));
+  });
+
   it.each([
     { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, content: 'private' } },
     { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, path: 'C:/private' } },
     { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, files: [] } },
     { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, source: 'private' } },
     { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, token: 'private' } },
+    { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, authorizationKey: 'private' } },
+    { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, deviceEnvelope: 'private' } },
+    { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, contentKey: 'private' } },
+    { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, rawPayload: 'private' } },
     { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1, key: 'private' } },
   ])('rejects sealed package export receipts with private fields', async (body) => {
     const request = {
@@ -238,6 +300,7 @@ describe('Electron Main agents transport', () => {
       method: 'POST',
       body: JSON.stringify(request),
     }));
+    expect(String(fetcher.mock.calls[0]?.[1]?.body)).not.toMatch(/authorizationKey|deviceEnvelope|contentKey|rawPayload|token/);
   });
 
   it.each([
@@ -248,6 +311,10 @@ describe('Electron Main agents transport', () => {
     { success: true, package: { agentId: 'writer', content: 'private' } },
     { success: true, package: { agentId: 'writer', path: 'C:/private' } },
     { success: true, package: { agentId: 'writer', token: 'private' } },
+    { success: true, package: { agentId: 'writer', authorizationKey: 'private' } },
+    { success: true, package: { agentId: 'writer', deviceEnvelope: 'private' } },
+    { success: true, package: { agentId: 'writer', contentKey: 'private' } },
+    { success: true, package: { agentId: 'writer', rawPayload: 'private' } },
   ])('rejects sealed package install receipts with private fields', async (body) => {
     const request = {
       id: 'subagent.management',
@@ -529,7 +596,7 @@ describe('Electron Main agents transport', () => {
     const toolOption = {
       toolKey: 'read', displayName: 'Read', optionType: 'tool', description: null,
       source: 'core', pluginId: null, optional: true, risk: 'low', tags: ['file'], defaultProfiles: ['default'],
-      groupKey: null, groupDisplayName: null,
+      deniedByGlobalPolicy: false, groupKey: null, groupDisplayName: null,
     };
     const view = {
       agentId: 'writer', support: { supportType: 'supported' }, selectionMode: 'inheritsDefaultTools', toolPolicy: null,

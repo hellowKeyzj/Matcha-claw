@@ -113,24 +113,29 @@
         "cloudAvailable": "云端可用",
         "cloudInstalled": "已安装",
         "packageSize": "{{size}} bytes",
-        "uploadLocalPackage": "上传技能包",
+        "installLocalPackage": "安装本地包",
+        "uploadToCloud": "上传云端",
         "installFromCloud": "安装",
         "uploaded": "技能包已上传",
         "uploadFailed": "上传技能包失败",
+        "installedLocal": "技能包已安装",
+        "installLocalFailed": "安装本地技能包失败",
         "installedFromCloud": "技能包已安装",
         "installFromCloudFailed": "安装云端技能包失败",
-        "uploadDialog": {
-            "title": "上传技能包",
+        "packageFilter": "Matcha 技能包",
+        "installDialog": {
+            "title": "安装本地技能包",
             "empty": "拖拽 .matcha-skillpkg 或点击选择",
-            "hint": "仅上传本地已生成的 .matcha-skillpkg。",
+            "hint": "安装本地包并通过云端授权解包。",
             "replace": "点击或拖拽其他技能包可重新选择",
-            "confirm": "上传到云端",
-            "packageFilter": "Matcha 技能包"
+            "confirm": "安装本地包"
         },
         "exportTitle": "生成技能包",
         "export": "生成包",
         "exported": "已生成只读技能包",
         "exportFailed": "生成技能包失败",
+        "uninstallConfirmTitle": "卸载技能包",
+        "uninstallConfirmMessage": "从本地技能包中移除 {{name}}？",
         "noExportTargets": "暂无可生成技能包的明文非内置技能。"
     },
     "toast": {

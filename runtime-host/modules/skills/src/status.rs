@@ -36,6 +36,7 @@ pub struct Entry {
     pub always: Option<bool>,
     pub emoji: Option<String>,
     pub source: Option<String>,
+    pub uninstallable: bool,
     pub base_dir: Option<String>,
     pub file_path: Option<String>,
     pub missing_categories: Vec<RequirementCategory>,
@@ -59,6 +60,7 @@ impl fmt::Debug for Entry {
             .field("always", &self.always)
             .field("emoji", &self.emoji)
             .field("source", &self.source)
+            .field("uninstallable", &self.uninstallable)
             .field("base_dir", &base_dir)
             .field("file_path", &file_path)
             .field("missing_categories", &self.missing_categories)

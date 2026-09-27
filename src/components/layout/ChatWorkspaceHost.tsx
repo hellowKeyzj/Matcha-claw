@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { AgentSessionsPane } from './AgentSessionsPane';
 import { Chat } from '@/pages/Chat';
 
@@ -5,10 +6,23 @@ interface ChatWorkspaceHostProps {
   takeoverMode: 'none' | 'artifact-workbench';
 }
 
+const STARTUP_TRACE_PREFIX = '[startup-trace]';
+
 export function ChatWorkspaceHost({
   takeoverMode,
 }: ChatWorkspaceHostProps) {
   const artifactWorkbenchFullscreen = takeoverMode === 'artifact-workbench';
+
+  useEffect(() => {
+    console.info(JSON.stringify({
+      prefix: STARTUP_TRACE_PREFIX,
+      traceScope: 'renderer-boundary',
+      source: 'chat-workspace-host',
+      phase: 'mounted',
+      at: Date.now(),
+      takeoverMode,
+    }));
+  }, [takeoverMode]);
 
   return (
     <div

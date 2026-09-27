@@ -91,6 +91,12 @@
     "open": "Open",
     "delete": "Delete"
   },
+  "deleteToast": {
+    "deletedTitle": "Team deleted",
+    "deletedDescription": "Runtime resources are being cleaned up in the background.",
+    "cleanupUnknownTitle": "Team deleted",
+    "cleanupUnknownDescription": "Runtime cleanup is not confirmed yet."
+  },
   "chat": {
     "teamNotFound": "Team not found",
     "backToList": "Back to Teams",
@@ -120,7 +126,8 @@
     "graphCanvas": {
       "workflowCanvas": "Холст workflow",
       "workflowEdges": "Связи workflow",
-      "nodePalette": "Библиотека узлов",
+      "nodePalette": "Добавить узел",
+      "nodePaletteTitle": "Выберите тип узла",
       "nodeConfiguration": "Настройка узла",
       "nodeConfigurationDescription": "Настройте этот узел workflow.",
       "edgeConfiguration": "Настройка связи",
@@ -249,13 +256,13 @@
       "edges": "Связи",
       "noEdges": "0 связей",
       "nodePaletteDescriptions": {
-        "start": "Внешняя точка запуска workflow (webhook или расписание).",
-        "work": "Шаг роли, отрисованный как TeamRun attempt.",
-        "review": "Роль reviewer проверяет предыдущую работу.",
-        "humanDecision": "Шлюз ручного утверждения или отказа.",
-        "scriptReview": "Шлюз runtime-правила или script review.",
-        "join": "Объединяет связи event-rule перед продолжением.",
-        "end": "Обозначает конечную точку workflow."
+        "start": "Внешняя точка запуска workflow (webhook или расписание)",
+        "work": "Шаг роли, отрисованный как TeamRun attempt",
+        "review": "Роль reviewer проверяет предыдущую работу",
+        "humanDecision": "Шлюз ручного утверждения или отказа",
+        "scriptReview": "Шлюз runtime-правила или script review",
+        "join": "Объединяет связи event-rule перед продолжением",
+        "end": "Обозначает конечную точку workflow"
       }
     },
     "roles": "Roles",

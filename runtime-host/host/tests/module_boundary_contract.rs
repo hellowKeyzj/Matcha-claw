@@ -780,7 +780,8 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
         sealed_module.contains("SealedResourceModule")
             && sealed_ports.contains("skills_port")
             && sealed_ports.contains("agents_port")
-            && module_registry_runtime_modules.contains("handles.sealed_resource.descriptor()")
+            && module_registry_runtime_modules
+                .contains("handles.sealed_resource.descriptor(Arc::clone(&verifier))")
             && host_sealed_resources.contains("SealedResourceModule::openclaw"),
         "sealed-resource module must own sealed stores while module_registry/runtime_modules installs its descriptor"
     );

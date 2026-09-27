@@ -43,6 +43,7 @@ fn project_entry(entry: &Entry) -> Value {
         ),
     );
     value.insert("eligible".into(), Value::Bool(entry.eligible));
+    value.insert("uninstallable".into(), Value::Bool(entry.uninstallable));
     insert_optional_bool(&mut value, "bundled", entry.bundled);
     insert_optional_bool(&mut value, "always", entry.always);
     insert_optional_string(&mut value, "emoji", &entry.emoji);
@@ -113,6 +114,7 @@ mod tests {
                 always: Some(false),
                 emoji: Some("📊".into()),
                 source: Some("bundled".into()),
+                uninstallable: false,
                 base_dir: Some("C:\\skills\\Excel XLSX".into()),
                 file_path: Some("C:\\skills\\Excel XLSX\\SKILL.md".into()),
                 missing_categories: vec![
@@ -138,6 +140,7 @@ mod tests {
                     "always": false,
                     "emoji": "📊",
                     "source": "bundled",
+                    "uninstallable": false,
                     "baseDir": "C:\\skills\\Excel XLSX",
                     "filePath": "C:\\skills\\Excel XLSX\\SKILL.md"
                 }]
@@ -162,6 +165,7 @@ mod tests {
                     always: None,
                     emoji: None,
                     source: None,
+                    uninstallable: false,
                     base_dir: None,
                     file_path: None,
                     missing_categories: Vec::new(),
@@ -176,6 +180,7 @@ mod tests {
                 "unavailableReason": "ineligible",
                 "missingCategories": [],
                 "eligible": false,
+                "uninstallable": false,
                 "bundled": false
             }]})
         );
@@ -199,6 +204,7 @@ mod tests {
                         always: None,
                         emoji: None,
                         source: None,
+                        uninstallable: false,
                         base_dir: None,
                         file_path: None,
                         missing_categories: Vec::new(),
@@ -216,6 +222,7 @@ mod tests {
                         always: None,
                         emoji: None,
                         source: None,
+                        uninstallable: false,
                         base_dir: None,
                         file_path: None,
                         missing_categories: vec![RequirementCategory::OperatingSystem],
@@ -231,7 +238,8 @@ mod tests {
                     "selectable": false,
                     "unavailableReason": "missingRequirements",
                     "missingCategories": ["operatingSystem"],
-                    "eligible": true
+                    "eligible": true,
+                    "uninstallable": false
                 }]
             })
         );

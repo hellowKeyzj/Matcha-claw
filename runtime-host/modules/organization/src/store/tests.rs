@@ -1969,6 +1969,74 @@ fn workflow_plan_run_persists_complete_template_and_is_idempotent() {
 }
 
 #[test]
+fn tombstoned_team_retains_existing_workflow_template_but_rejects_replacement() {
+    let path = test_path("workflow-template-tombstoned-team");
+    let team = team_id();
+    let run_id = GraphRunId::new("run:tombstoned-template");
+    let plan = workflow_plan(
+        "run:tombstoned-template",
+        "template-key:tombstoned-template",
+    );
+    let mut store = OrganizationStore::open(&path).unwrap();
+    store
+        .replace_facts(
+            OrganizationFacts::restore(
+                [TeamFacts::new(
+                    team_definition(),
+                    TeamRevision::initial(),
+                    false,
+                )],
+                [terminal_materialization()],
+                [],
+                DeliveryLedgerSnapshot::new(Vec::new()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    store
+        .create_workflow_plan_run(
+            team.clone(),
+            run_id,
+            "create:tombstoned-template",
+            plan.clone(),
+            "source:tombstoned-template".to_owned(),
+            11,
+            42,
+        )
+        .unwrap();
+    store
+        .tombstone_team(
+            &team,
+            IdempotencyKey::try_new("cleanup:tombstoned-template").unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(store.facts().template(&team).unwrap().plan(), &plan);
+    assert_eq!(
+        store.replace_workflow_template(
+            super::WorkflowTemplateFacts::new(
+                team.clone(),
+                "source:tombstoned-template:replacement",
+                12,
+                workflow_plan(
+                    "run:tombstoned-template:replacement",
+                    "template-key:tombstoned-template:replacement",
+                ),
+            )
+            .unwrap(),
+        ),
+        Err(StoreFault::InvalidFacts)
+    );
+
+    drop(store);
+    let reopened = OrganizationStore::open(&path).unwrap();
+    assert!(reopened.facts().team(&team).unwrap().tombstoned());
+    assert_eq!(reopened.facts().template(&team).unwrap().plan(), &plan);
+    drop(reopened);
+    remove_test_path(&path);
+}
+
+#[test]
 fn workflow_plan_run_rejects_invalid_inputs_without_durable_side_effects() {
     let missing_receipt_path = test_path("workflow-plan-run-missing-receipt");
     let team = team_id();
@@ -4352,6 +4420,29 @@ fn tombstoned_team_rejects_runtime_receipt_without_appending() {
 }
 
 #[test]
+fn tombstoned_team_can_restore_existing_runtime_receipt() {
+    let path = test_path("runtime-receipt-tombstoned-team-restore");
+    let mut store = OrganizationStore::open(&path).unwrap();
+    store
+        .replace_facts(tombstoned_runtime_receipt_facts())
+        .unwrap();
+    drop(store);
+
+    let reopened = OrganizationStore::open(&path).unwrap();
+    assert!(reopened.facts().team(&team_id()).unwrap().tombstoned());
+    assert!(
+        reopened
+            .facts()
+            .run(&GraphRunId::new("run:one"))
+            .unwrap()
+            .runtime()
+            .is_some()
+    );
+    drop(reopened);
+    remove_test_path(&path);
+}
+
+#[test]
 fn restore_accepts_runtime_receipt_with_agent_drift() {
     let runtime = provisionable_runtime("agent:drifted");
     let run = GraphRunFacts::new(
@@ -4618,6 +4709,28 @@ fn tombstoned_provisionable_facts() -> OrganizationFacts {
         vec![terminal_materialization()],
         vec![
             GraphRunFacts::new(team_id(), TeamRevision::initial(), graph("display"), None).unwrap(),
+        ],
+        DeliveryLedgerSnapshot::new(Vec::new()),
+    )
+    .unwrap()
+}
+
+fn tombstoned_runtime_receipt_facts() -> OrganizationFacts {
+    OrganizationFacts::restore(
+        vec![TeamFacts::new(
+            team_definition(),
+            TeamRevision::initial(),
+            true,
+        )],
+        vec![terminal_materialization()],
+        vec![
+            GraphRunFacts::new(
+                team_id(),
+                TeamRevision::initial(),
+                graph("display"),
+                Some(provisionable_runtime("agent:one")),
+            )
+            .unwrap(),
         ],
         DeliveryLedgerSnapshot::new(Vec::new()),
     )

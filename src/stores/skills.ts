@@ -34,6 +34,7 @@ type GatewaySkillStatus = {
   author?: string;
   bundled?: boolean;
   always?: boolean;
+  uninstallable?: boolean;
   eligible?: boolean;
   missing?: GatewaySkillMissing;
   source?: string;
@@ -304,6 +305,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
               config: {},
               isCore: s.bundled && s.always,
               isBundled: s.bundled,
+              uninstallable: s.uninstallable === true,
               source: s.source,
               baseDir: s.baseDir,
               filePath: s.filePath,
@@ -324,6 +326,13 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         });
       } catch (error) {
         console.error('Failed to fetch skills:', error);
+        if (silent && hasSnapshot) {
+          set({
+            initialLoading: false,
+            refreshing: false,
+          });
+          return;
+        }
         const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });
         const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'fetch');
         set({
@@ -489,7 +498,12 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       if (result.outcome !== 'removed') {
         throw new Error('Uninstall failed');
       }
-      await get().fetchSkills({ force: true, fresh: true });
+      set((state) => ({
+        skills: state.skills.filter((skill) =>
+          skill.id !== skillKey && (!slug || skill.slug !== slug)
+        ),
+      }));
+      void get().fetchSkills({ force: true, silent: true, fresh: true });
     } catch (error) {
       console.error('Uninstall error:', error);
       throw error;

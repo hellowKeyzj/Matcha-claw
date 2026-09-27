@@ -3097,38 +3097,40 @@ async fn caption_import_images(
         })
         .collect::<Vec<_>>();
     let captions = stream::iter(requests)
-        .map(|(index, sha256, mime_type, data_base64, prompt, caption_model_ref)| {
-            let llm = llm.clone();
-            let cancellation = cancellation.clone();
-            let cached = cache.caption(&sha256, output_language).map(str::to_owned);
-            async move {
-                cancel_if_requested(&cancellation)?;
-                if let Some(caption) = cached {
-                    return Ok::<_, WikiFailure>((index, sha256, Some(caption)));
-                }
-                let caption = match llm
-                    .caption_image_cancellable(
-                        WikiIngestImageCaptionRequest {
-                            model_ref: caption_model_ref,
-                            prompt,
-                            mime_type,
-                            data_base64,
-                            options: WikiIngestLlmOptions {
-                                max_output_tokens: Some(240),
-                                temperature: Some(0.1),
+        .map(
+            |(index, sha256, mime_type, data_base64, prompt, caption_model_ref)| {
+                let llm = llm.clone();
+                let cancellation = cancellation.clone();
+                let cached = cache.caption(&sha256, output_language).map(str::to_owned);
+                async move {
+                    cancel_if_requested(&cancellation)?;
+                    if let Some(caption) = cached {
+                        return Ok::<_, WikiFailure>((index, sha256, Some(caption)));
+                    }
+                    let caption = match llm
+                        .caption_image_cancellable(
+                            WikiIngestImageCaptionRequest {
+                                model_ref: caption_model_ref,
+                                prompt,
+                                mime_type,
+                                data_base64,
+                                options: WikiIngestLlmOptions {
+                                    max_output_tokens: Some(240),
+                                    temperature: Some(0.1),
+                                },
                             },
-                        },
-                        cancellation.clone(),
-                    )
-                    .await
-                {
-                    Ok(response) => response.caption,
-                    Err(error) if error.is_cancelled() => return Err(error),
-                    Err(_) => None,
-                };
-                Ok((index, sha256, caption))
-            }
-        })
+                            cancellation.clone(),
+                        )
+                        .await
+                    {
+                        Ok(response) => response.caption,
+                        Err(error) if error.is_cancelled() => return Err(error),
+                        Err(_) => None,
+                    };
+                    Ok((index, sha256, caption))
+                }
+            },
+        )
         .buffer_unordered(concurrency.max(1) as usize)
         .collect::<Vec<_>>()
         .await;

@@ -23,6 +23,13 @@ use super::team_run::{
     TeamRunActivityOutcome, TeamRunActivityStart, TeamRunCommandOutcome, TeamRunTriggerOutcome,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TeamDeleteRunNativeSettlement {
+    Cancellation,
+    Cancelled,
+    Tombstoned,
+}
+
 pub enum OrganizationCommand {
     TeamSkillAuthorize {
         package_root: PathBuf,
@@ -57,6 +64,18 @@ pub enum OrganizationCommand {
         idempotency_key: IdempotencyKey,
         observed_at: u64,
         reply: oneshot::Sender<Result<TeamDeleteOutcome, StoreFault>>,
+    },
+    TeamDeleteRunNativeSettled {
+        team_id: TeamId,
+        run_id: GraphRunId,
+        idempotency_key: String,
+        settlement: TeamDeleteRunNativeSettlement,
+        native: organization::NativeDeletionEvidence,
+        observed_at: u64,
+    },
+    TeamDeleteRemovalSettled {
+        team_id: TeamId,
+        outcome: organization::MaterializationOperationOutcome,
     },
     RunCreate {
         team_id: TeamId,

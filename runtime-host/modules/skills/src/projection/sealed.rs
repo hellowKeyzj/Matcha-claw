@@ -63,8 +63,8 @@ where
     project_error_kind(error.sealed_error_kind())
 }
 
-pub const fn rejected_error() -> SealedSkillError {
-    SealedSkillError::Rejected
+pub fn rejected_error() -> SealedSkillError {
+    SealedSkillError::rejected()
 }
 
 fn project_entry_ref<E>(entry: &E) -> SealedSkillCatalogEntry

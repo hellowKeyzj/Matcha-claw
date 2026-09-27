@@ -1,15 +1,19 @@
 use platform::capability::CapabilityDecisionVerifier;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::{SkillsModule, ports::SealedSkillError};
+use crate::{
+    SkillsModule,
+    ports::{CloudPackageMetadata, SealedSkillError, SealedSkillRejectionDetail},
+};
 
 pub(super) const STATUS_ENDPOINT: &str = "/api/sealed-skills/status";
 pub(super) const EXPORT_ENDPOINT: &str = "/api/sealed-skills/export";
+pub(super) const EXPORT_CLOUD_ENDPOINT: &str = "/api/sealed-skills/export-cloud";
 pub(super) const INSTALL_ENDPOINT: &str = "/api/sealed-skills/install";
 pub(super) const UNINSTALL_ENDPOINT: &str = "/api/sealed-skills/uninstall";
 pub(super) const READ_ENDPOINT_PREFIX: &str = "/api/sealed-skills/read/";
@@ -19,6 +23,7 @@ const SEALED_RUNTIME_AUTHORIZATION_HEADER: &str = "x-matcha-sealed-token";
 const SEALED_RUNTIME_HEADER: &str = "x-matcha-sealed-runtime";
 const BEARER_PREFIX: &str = "Bearer ";
 const OPENCLAW_RUNTIME: &str = "openclaw";
+const MATCHA_SEALED_SOURCE: &str = "matcha-sealed";
 const MAX_OPENCLAW_SKILL_KEY_BYTES: usize = 4 * 1024;
 const MAX_PACKAGE_PATH_BYTES: usize = 4 * 1024;
 const MAX_PACKAGE_RELATIVE_PATH_BYTES: usize = 240;
@@ -34,6 +39,7 @@ pub(super) enum RequestError {
 enum Route {
     Status,
     Export,
+    ExportCloud,
     Install,
     Uninstall,
     SkillRead,
@@ -44,6 +50,7 @@ impl Route {
         match (method, endpoint) {
             ("GET", STATUS_ENDPOINT) => Ok(Self::Status),
             ("POST", EXPORT_ENDPOINT) => Ok(Self::Export),
+            ("POST", EXPORT_CLOUD_ENDPOINT) => Ok(Self::ExportCloud),
             ("POST", INSTALL_ENDPOINT) => Ok(Self::Install),
             ("POST", UNINSTALL_ENDPOINT) => Ok(Self::Uninstall),
             ("GET", value) if value.starts_with(READ_ENDPOINT_PREFIX) => Ok(Self::SkillRead),
@@ -66,6 +73,12 @@ impl Route {
                 "sealed-skills:package",
                 "sealedSkills.export",
                 "sealed-skills-export",
+            )),
+            Self::ExportCloud => Some((
+                EXPORT_CLOUD_ENDPOINT,
+                "sealed-skills:package",
+                "sealedSkills.exportCloud",
+                "sealed-skills-export-cloud",
             )),
             Self::Install => Some((
                 INSTALL_ENDPOINT,
@@ -92,8 +105,26 @@ struct SkillKeyRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CloudExportRequest {
+    skill_key: String,
+    cloud_public_key: String,
+    cloud_key_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InstallRequest {
     package_path: String,
+    cloud_metadata: Option<CloudMetadataRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CloudMetadataRequest {
+    package_version_id: String,
+    package_type: String,
+    package_sha256: Option<String>,
+    file_name: Option<String>,
 }
 
 pub(super) async fn handle(
@@ -121,9 +152,10 @@ pub(super) async fn handle(
     match route {
         Route::Status => status(body, skills).await,
         Route::Export => export(body, skills),
+        Route::ExportCloud => export_cloud(body, skills),
         Route::Install => install(body, skills),
         Route::Uninstall => uninstall(body, skills),
-        Route::SkillRead => read_skill(endpoint, headers, body, skills),
+        Route::SkillRead => read_skill(endpoint, headers, body, skills).await,
     }
 }
 
@@ -132,26 +164,103 @@ async fn status(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), Reque
         return Err(RequestError::Invalid);
     }
     let catalog = handle.sealed_catalog().map_err(map_error)?;
-    let enabled = enabled_skills(&handle).await;
     Ok((
         200,
         json!({
-            "skills": catalog.entries().iter().map(|entry| project_entry(entry, &enabled)).collect::<Vec<_>>(),
+            "skills": catalog.entries().iter().map(project_entry).collect::<Vec<_>>(),
             "ready": true,
         }),
     ))
 }
 
 fn export(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestError> {
-    let request = decode_skill_key(body)?;
-    match handle.export_sealed_skill_package(request.skill_key) {
-        Ok(entry) => Ok((
+    let request = match decode_skill_key(body) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!(
+                "[startup-trace] source=sealed-skills-export phase=runtime detail=invalid-request"
+            );
+            return Err(error);
+        }
+    };
+    let skill_key = request.skill_key;
+    eprintln!(
+        "[startup-trace] source=sealed-skills-export phase=runtime detail=request skillKey={}",
+        skill_key
+    );
+    match handle.export_sealed_skill_package(skill_key.clone()) {
+        Ok(entry) => {
+            eprintln!(
+                "[startup-trace] source=sealed-skills-export phase=runtime detail=accepted skillKey={}",
+                entry.skill_key()
+            );
+            Ok((
+                200,
+                json!({ "outcome": "accepted", "skillKey": entry.skill_key() }),
+            ))
+        }
+        Err(SealedSkillError::NotFound) => {
+            eprintln!(
+                "[startup-trace] source=sealed-skills-export phase=runtime detail=not-found skillKey={}",
+                skill_key
+            );
+            Ok((404, json!({ "outcome": "notFound" })))
+        }
+        Err(SealedSkillError::RejectedWith(detail)) => rejected_export_response(&skill_key, detail),
+        Err(error) => {
+            eprintln!(
+                "[startup-trace] source=sealed-skills-export phase=runtime detail={} skillKey={}",
+                sealed_skill_error_detail(&error),
+                skill_key
+            );
+            Err(map_error(error))
+        }
+    }
+}
+
+fn export_cloud(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestError> {
+    let request =
+        serde_json::from_slice::<CloudExportRequest>(body).map_err(|_| RequestError::Invalid)?;
+    if !valid_openclaw_skill_key(&request.skill_key)
+        || !valid_text(&request.cloud_public_key, 8 * 1024)
+        || request
+            .cloud_key_id
+            .as_deref()
+            .is_none_or(|value| !valid_text(value, 512))
+    {
+        return Err(RequestError::Invalid);
+    }
+    let cloud_key_id = request.cloud_key_id.ok_or(RequestError::Invalid)?;
+    match handle.export_cloud_sealed_skill_package(
+        request.skill_key.clone(),
+        request.cloud_public_key,
+        cloud_key_id,
+    ) {
+        Ok(export) => Ok((
             200,
-            json!({ "outcome": "accepted", "skillKey": entry.skill_key() }),
+            json!({ "outcome": "accepted", "skillKey": export.skill_key(), "packagePath": export.package_path() }),
         )),
         Err(SealedSkillError::NotFound) => Ok((404, json!({ "outcome": "notFound" }))),
+        Err(SealedSkillError::RejectedWith(detail)) => {
+            rejected_export_response(&request.skill_key, detail)
+        }
         Err(error) => Err(map_error(error)),
     }
+}
+
+fn rejected_export_response(
+    skill_key: &str,
+    detail: SealedSkillRejectionDetail,
+) -> Result<(u16, Value), RequestError> {
+    eprintln!(
+        "[startup-trace] source=sealed-skills-export phase=runtime detail=rejected reason={} skillKey={}",
+        detail.reason(),
+        skill_key
+    );
+    Ok((
+        400,
+        json!({ "outcome": "rejected", "reason": detail.reason(), "error": detail.message() }),
+    ))
 }
 
 fn install(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestError> {
@@ -160,7 +269,8 @@ fn install(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestErr
     if !valid_package_path(&request.package_path) {
         return Err(RequestError::Invalid);
     }
-    match handle.install_sealed_skill(PathBuf::from(request.package_path)) {
+    let cloud_metadata = decode_cloud_metadata(request.cloud_metadata)?;
+    match handle.install_sealed_skill(PathBuf::from(request.package_path), cloud_metadata) {
         Ok(entry) => Ok((
             200,
             json!({ "outcome": "accepted", "skillKey": entry.skill_key() }),
@@ -181,7 +291,7 @@ fn uninstall(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestE
     }
 }
 
-fn read_skill(
+async fn read_skill(
     endpoint: &str,
     headers: &[(String, String)],
     body: &[u8],
@@ -197,6 +307,9 @@ fn read_skill(
     let token = header_value(headers, SEALED_RUNTIME_AUTHORIZATION_HEADER)
         .ok_or(RequestError::Unauthorized)?;
     let (skill_key, path) = decode_skill_read_path(endpoint)?;
+    if !is_openclaw_matcha_sealed_skill_enabled(&handle, &skill_key).await {
+        return Ok((404, json!({ "outcome": "notFound" })));
+    }
     match handle.read_sealed_skill_file(token, skill_key, path) {
         Ok(read) => Ok((200, project_read(read))),
         Err(SealedSkillError::NotFound) => Ok((404, json!({ "outcome": "notFound" }))),
@@ -249,18 +362,32 @@ fn decode_skill_read_path(endpoint: &str) -> Result<(String, String), RequestErr
     Ok((skill_key.trim().to_owned(), path))
 }
 
-fn project_entry(
-    entry: &crate::ports::SealedSkillCatalogEntry,
-    enabled: &HashMap<String, bool>,
-) -> Value {
+async fn is_openclaw_matcha_sealed_skill_enabled(handle: &SkillsModule, skill_key: &str) -> bool {
+    let Ok(crate::status::Outcome::Available(catalog)) = handle.skill_status().await else {
+        return false;
+    };
+    let mut found = false;
+    for entry in catalog
+        .entries
+        .into_iter()
+        .filter(|entry| entry.key == skill_key)
+    {
+        if !entry.enabled || entry.source.as_deref() != Some(MATCHA_SEALED_SOURCE) {
+            return false;
+        }
+        found = true;
+    }
+    found
+}
+
+fn project_entry(entry: &crate::ports::SealedSkillCatalogEntry) -> Value {
     json!({
         "skillKey": entry.skill_key(),
         "name": entry.name(),
         "description": entry.description(),
         "installed": true,
-        "enabled": enabled.get(entry.skill_key()).copied().unwrap_or(true),
         "runtimes": [entry.runtime_target()],
-        "source": "sealed",
+        "source": MATCHA_SEALED_SOURCE,
     })
 }
 
@@ -274,23 +401,22 @@ fn project_read(read: crate::ports::SealedResourceRead) -> Value {
     value
 }
 
-async fn enabled_skills(handle: &SkillsModule) -> HashMap<String, bool> {
-    match handle.skill_status().await {
-        Ok(crate::status::Outcome::Available(catalog)) => catalog
-            .entries
-            .into_iter()
-            .map(|entry| (entry.key, entry.enabled))
-            .collect(),
-        Ok(crate::status::Outcome::Unavailable) | Err(()) => HashMap::new(),
-    }
-}
-
 fn map_error(error: SealedSkillError) -> RequestError {
     match error {
         SealedSkillError::Unknown => RequestError::Unavailable,
         SealedSkillError::AlreadyExists
         | SealedSkillError::NotFound
-        | SealedSkillError::Rejected => RequestError::Invalid,
+        | SealedSkillError::Rejected
+        | SealedSkillError::RejectedWith(_) => RequestError::Invalid,
+    }
+}
+
+fn sealed_skill_error_detail(error: &SealedSkillError) -> &'static str {
+    match error {
+        SealedSkillError::AlreadyExists => "already-exists",
+        SealedSkillError::NotFound => "not-found",
+        SealedSkillError::Rejected | SealedSkillError::RejectedWith(_) => "rejected",
+        SealedSkillError::Unknown => "unknown",
     }
 }
 
@@ -304,6 +430,37 @@ fn valid_package_path(value: &str) -> bool {
         && value.len() <= MAX_PACKAGE_PATH_BYTES
         && !value.contains('\0')
         && value.ends_with(".matcha-skillpkg")
+}
+
+fn valid_text(value: &str, max_bytes: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max_bytes && !value.contains('\0')
+}
+
+fn decode_cloud_metadata(
+    value: Option<CloudMetadataRequest>,
+) -> Result<Option<CloudPackageMetadata>, RequestError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !valid_text(&value.package_version_id, 512)
+        || !valid_text(&value.package_type, 64)
+        || value
+            .package_sha256
+            .as_deref()
+            .is_some_and(|value| !valid_text(value, 128))
+        || value
+            .file_name
+            .as_deref()
+            .is_some_and(|value| !valid_text(value, 512))
+    {
+        return Err(RequestError::Invalid);
+    }
+    Ok(Some(CloudPackageMetadata::new(
+        value.package_version_id,
+        value.package_type,
+        value.package_sha256,
+        value.file_name,
+    )))
 }
 
 fn validate_package_relative_path(value: &str) -> Result<(), RequestError> {

@@ -26,26 +26,22 @@ vi.mock('@/components/ui/tooltip', () => ({
   ),
 }));
 
-describe('chat header bar task panel toggle', () => {
-  it('shows unfinished task count and uses header buttons for export and the shared side panel', () => {
+describe('chat header bar side panel toggle', () => {
+  it('uses header buttons for export and the shared side panel', () => {
     const onExportMarkdown = vi.fn();
     const onToggleSidePanel = vi.fn();
 
     render(
       <ChatHeaderBar
-        onRefresh={vi.fn()}
-        refreshBusy={false}
         showThinking={false}
         onToggleThinking={vi.fn()}
         onExportMarkdown={onExportMarkdown}
         sidePanelOpen={false}
-        unfinishedTaskCount={7}
         onToggleSidePanel={onToggleSidePanel}
       />,
     );
 
-    expect(screen.getByText('7')).toBeInTheDocument();
-    expect(screen.getAllByTestId('tooltip-content')).toHaveLength(4);
+    expect(screen.getAllByTestId('tooltip-content')).toHaveLength(3);
     for (const tooltip of screen.getAllByTestId('tooltip-content')) {
       expect(tooltip).toHaveAttribute('data-side', 'bottom');
       expect(tooltip).toHaveAttribute('data-align', 'end');

@@ -15,9 +15,6 @@ export function WelcomeScreen({ input }: { input?: ReactNode }) {
       <h2 className="max-w-2xl text-[2rem] font-semibold tracking-[-0.05em] text-foreground md:text-[2.35rem]">
         {t('welcome.title')}
       </h2>
-      <p className="mt-2 max-w-2xl text-[14px] leading-6 text-muted-foreground md:text-[15px] md:leading-7">
-        {t('welcome.subtitle')}
-      </p>
 
       {input ? (
         <div className="mt-8 w-full">

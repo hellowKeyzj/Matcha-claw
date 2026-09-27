@@ -29,9 +29,34 @@ export async function handleAgentsRoutes(
 
   try {
     const response = await transport.execute(request);
-    sendJson(res, response.status, response.body);
+    sendJson(res, response.status, publicAgentsBody(request, response.body));
   } catch {
     sendJson(res, 503, UNAVAILABLE);
   }
   return true;
+}
+
+function publicAgentsBody(request: unknown, body: unknown): unknown {
+  if (!isRecord(request)
+    || (request.operationId !== 'subagents.package.export'
+      && request.operationId !== 'subagents.package.exportCloud'
+      && request.operationId !== 'subagents.package.install')
+    || !isRecord(body)
+    || !isRecord(body.package)) {
+    return body;
+  }
+  const {
+    packagePath: _packagePath,
+    authorizationKey: _authorizationKey,
+    deviceEnvelope: _deviceEnvelope,
+    contentKey: _contentKey,
+    rawPayload: _rawPayload,
+    token: _token,
+    ...publicPackage
+  } = body.package;
+  return { ...body, package: publicPackage };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

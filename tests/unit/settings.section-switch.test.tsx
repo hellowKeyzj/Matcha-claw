@@ -83,6 +83,13 @@ vi.mock('@/lib/host-api', () => ({
   hostRuntimeEndpointsList: hostRuntimeEndpointsListMock,
 }));
 
+function runtimeStatusPanel(title: string): HTMLElement {
+  const heading = screen.getByText(title);
+  const item = heading.closest('[role="listitem"]');
+  expect(item).not.toBeNull();
+  return item as HTMLElement;
+}
+
 function buildRuntimeEndpoint(runtimeAdapterId: 'openclaw' | 'matcha-agent') {
   return {
     id: `${runtimeAdapterId}-local`,
@@ -194,12 +201,10 @@ describe('settings page section switch', () => {
     expect(screen.queryByRole('button', { name: 'AI Providers' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Task Plugin' })).not.toBeInTheDocument();
 
-    expect(screen.getByText('Runtime Host Status')).toBeInTheDocument();
-    const openClawStatusTitle = await screen.findByText('OpenClaw Status');
-    const openClawStatusPanel = openClawStatusTitle.closest('.space-y-3');
-    expect(openClawStatusPanel).not.toBeNull();
+    expect(screen.getAllByText('Runtime Status').length).toBeGreaterThan(0);
+    const openClawStatusTitle = await screen.findByText('OpenClaw');
+    const openClawStatusPanel = runtimeStatusPanel(openClawStatusTitle.textContent ?? 'OpenClaw');
     expect(within(openClawStatusPanel as HTMLElement).getByText('running')).toBeInTheDocument();
-    expect(within(openClawStatusPanel as HTMLElement).getByText('Port: 18789')).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(within(openClawStatusPanel as HTMLElement).getByRole('button', { name: 'Logs' }));
@@ -214,11 +219,9 @@ describe('settings page section switch', () => {
       expect(useRuntimeHostStore.getState().restart).toHaveBeenCalled();
     });
 
-    const matchaAgentTitle = await screen.findByText('matcha-agent app-server Status');
-    const matchaAgentPanel = matchaAgentTitle.closest('.space-y-3');
-    expect(matchaAgentPanel).not.toBeNull();
+    const matchaAgentTitle = await screen.findByText('matcha-agent');
+    const matchaAgentPanel = runtimeStatusPanel(matchaAgentTitle.textContent ?? 'matcha-agent');
     expect(within(matchaAgentPanel as HTMLElement).getByText('running')).toBeInTheDocument();
-    expect(within(matchaAgentPanel as HTMLElement).getByText('Port: 31987')).toBeInTheDocument();
     expect(within(matchaAgentPanel as HTMLElement).getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
 
     await act(async () => {
@@ -234,7 +237,7 @@ describe('settings page section switch', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Updates' }));
     });
     expect(screen.getByTestId('update-settings-panel')).toBeInTheDocument();
-    expect(screen.queryByText('Runtime Host Status')).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Runtime Status' })).not.toBeInTheDocument();
   });
 
   it('后发的 app-server status 请求拥有最终状态，旧响应不会覆盖', async () => {
@@ -292,11 +295,9 @@ describe('settings page section switch', () => {
         await statusRequests[1].promise;
       });
 
-      const matchaAgentTitle = await screen.findByText('matcha-agent app-server Status');
-      const matchaAgentPanel = matchaAgentTitle.closest('.space-y-3');
-      expect(matchaAgentPanel).not.toBeNull();
-      expect(within(matchaAgentPanel as HTMLElement).getByText('Port: 32999')).toBeInTheDocument();
-      expect(within(matchaAgentPanel as HTMLElement).getByText('PID: 9876')).toBeInTheDocument();
+      const matchaAgentTitle = await screen.findByText('matcha-agent');
+      const matchaAgentPanel = runtimeStatusPanel(matchaAgentTitle.textContent ?? 'matcha-agent');
+      expect(within(matchaAgentPanel as HTMLElement).getByText('running')).toBeInTheDocument();
 
       await act(async () => {
         statusRequests[0].resolve({
@@ -311,8 +312,6 @@ describe('settings page section switch', () => {
       });
 
       expect(within(matchaAgentPanel as HTMLElement).getByText('running')).toBeInTheDocument();
-      expect(within(matchaAgentPanel as HTMLElement).getByText('Port: 32999')).toBeInTheDocument();
-      expect(within(matchaAgentPanel as HTMLElement).getByText('PID: 9876')).toBeInTheDocument();
       expect(within(matchaAgentPanel as HTMLElement).queryByText('stopping')).not.toBeInTheDocument();
       expect(within(matchaAgentPanel as HTMLElement).queryByText('Port: 31987')).not.toBeInTheDocument();
       expect(within(matchaAgentPanel as HTMLElement).queryByText('stale status')).not.toBeInTheDocument();
@@ -330,18 +329,15 @@ describe('settings page section switch', () => {
       renderWithRouter('/settings?section=gateway');
     });
 
-    const openClawStatusTitle = await screen.findByText('OpenClaw Status');
-    const openClawStatusPanel = openClawStatusTitle.closest('.space-y-3');
-    expect(openClawStatusPanel).not.toBeNull();
+    const openClawStatusTitle = await screen.findByText('OpenClaw');
+    const openClawStatusPanel = runtimeStatusPanel(openClawStatusTitle.textContent ?? 'OpenClaw');
     expect(within(openClawStatusPanel as HTMLElement).getByText('Loading...')).toBeInTheDocument();
 
-    const matchaAgentTitle = await screen.findByText('matcha-agent app-server Status');
-    const matchaAgentPanel = matchaAgentTitle.closest('.space-y-3');
-    expect(matchaAgentPanel).not.toBeNull();
+    const matchaAgentTitle = await screen.findByText('matcha-agent');
+    const matchaAgentPanel = runtimeStatusPanel(matchaAgentTitle.textContent ?? 'matcha-agent');
     await waitFor(() => {
       expect(within(matchaAgentPanel as HTMLElement).getByText('running')).toBeInTheDocument();
     });
-    expect(within(matchaAgentPanel as HTMLElement).getByText('Port: 31987')).toBeInTheDocument();
   });
 
   it('Matcha app-server status 刷新不依赖 OpenClaw 或 Runtime Host status 刷新', async () => {
@@ -369,9 +365,8 @@ describe('settings page section switch', () => {
       renderWithRouter('/settings?section=gateway');
     });
 
-    const matchaAgentTitle = await screen.findByText('matcha-agent app-server Status');
-    const matchaAgentPanel = matchaAgentTitle.closest('.space-y-3');
-    expect(matchaAgentPanel).not.toBeNull();
+    const matchaAgentTitle = await screen.findByText('matcha-agent');
+    const matchaAgentPanel = runtimeStatusPanel(matchaAgentTitle.textContent ?? 'matcha-agent');
     await waitFor(() => {
       expect(hostApiFetchMock).toHaveBeenCalledWith('/api/matcha-agent/app-server/status');
     });
@@ -396,7 +391,7 @@ describe('settings page section switch', () => {
     });
 
     expect(screen.getByRole('button', { name: 'Runtime Status' })).toBeInTheDocument();
-    expect(screen.getByText('Runtime Host Status')).toBeInTheDocument();
+    expect(screen.getAllByText('Runtime Status').length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: 'AI Providers' })).not.toBeInTheDocument();
   });
 });

@@ -132,7 +132,7 @@ describe('Electron Main session-send transport', () => {
     },
     { ...request, input: { ...request.input, attachments: [{ ...request.input.attachments[0], content: 'aGVsbG8' }] } },
     { ...request, input: { ...request.input, attachments: [{ ...request.input.attachments[0], content: 'aGVsbG9=' }] } },
-    { ...request, input: { ...request.input, attachments: [{ ...request.input.attachments[0], content: 'A'.repeat(Math.ceil((20 * 1024 * 1024 + 1) / 3) * 4) }] } },
+    { ...request, input: { ...request.input, attachments: [{ ...request.input.attachments[0], content: 'A'.repeat(Math.ceil((5 * 1024 * 1024 + 1) / 3) * 4) }] } },
   ])('fails closed before signing a malformed request', async (invalid) => {
     const signDecision = vi.fn();
     const fetcher = vi.fn();

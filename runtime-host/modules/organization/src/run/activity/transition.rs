@@ -63,7 +63,7 @@ pub fn claim_activity(activity: &mut Activity, claimed_at: u64) -> ActivityClaim
             ActivityClaimOutcome::Claimed(activity.start_claim(claimed_at))
         }
         ActivityPhase::Claimed(_) | ActivityPhase::Dispatched(_) => {
-            ActivityClaimOutcome::AlreadyClaimed(claim_from_active(activity))
+            ActivityClaimOutcome::AlreadyClaimed(clone_active_activity_claim(activity))
         }
         phase => ActivityClaimOutcome::Terminal(phase),
     }
@@ -74,18 +74,13 @@ pub fn dispatch_activity(
     claim: &ActivityClaim,
     dispatched_at: u64,
 ) -> Result<ActivityDispatchOutcome, ActivityTransitionError> {
-    let active_claim =
-        activity
-            .active_claim()
-            .ok_or_else(|| ActivityTransitionError::NotClaimed {
-                phase: activity.phase().clone(),
-            })?;
-    if active_claim != claim {
-        return Err(ActivityTransitionError::StaleClaim);
-    }
+    let active_claim = active_claim_for_dispatch(activity)?;
+    ensure_current_activity_claim(&active_claim, claim)?;
+
     if matches!(activity.phase(), ActivityPhase::Dispatched(_)) {
         return Ok(ActivityDispatchOutcome::Replayed);
     }
+
     activity.mark_dispatched(claim.clone(), dispatched_at);
     Ok(ActivityDispatchOutcome::Recorded)
 }
@@ -95,77 +90,38 @@ pub fn settle_activity(
     claim: &ActivityClaim,
     settlement: ActivitySettlement,
 ) -> Result<ActivitySettlementOutcome, ActivityTransitionError> {
-    let active_claim =
-        activity
-            .active_claim()
-            .ok_or_else(|| ActivityTransitionError::CannotSettle {
-                phase: activity.phase().clone(),
-            })?;
-    if active_claim != claim {
-        return Err(ActivityTransitionError::StaleClaim);
+    let active_claim = active_claim_for_settlement(activity)?;
+    ensure_current_activity_claim(&active_claim, claim)?;
+
+    if !matches!(activity.phase(), ActivityPhase::Dispatched(_)) {
+        return Err(ActivityTransitionError::NotDispatched {
+            phase: activity.phase().clone(),
+        });
     }
 
-    match (activity.phase(), settlement) {
-        (ActivityPhase::Dispatched(_), ActivitySettlement::TerminalObserved { observed_at }) => {
-            activity.mark_terminal_observed(observed_at);
-            Ok(ActivitySettlementOutcome::TerminalObserved)
-        }
-        (ActivityPhase::Dispatched(_), ActivitySettlement::Completed { completed_at }) => {
-            activity.mark_completed(completed_at);
-            Ok(ActivitySettlementOutcome::Completed)
-        }
-        (
-            ActivityPhase::Dispatched(_),
-            ActivitySettlement::RetryScheduled {
-                retry_at,
-                observed_at,
-                failure,
-            },
-        ) => {
-            if activity.schedule_retry(retry_at, observed_at, failure) {
-                Ok(ActivitySettlementOutcome::RetryScheduled)
-            } else {
-                Ok(ActivitySettlementOutcome::Failed)
-            }
-        }
-        (ActivityPhase::Dispatched(_), ActivitySettlement::Failed { failed_at, failure }) => {
-            activity.mark_failed(failed_at, failure);
-            Ok(ActivitySettlementOutcome::Failed)
-        }
-        (ActivityPhase::Dispatched(_), ActivitySettlement::OutcomeUnknown { observed_at }) => {
-            activity.mark_outcome_unknown(observed_at);
-            Ok(ActivitySettlementOutcome::OutcomeUnknown)
-        }
-        (ActivityPhase::Dispatched(_), ActivitySettlement::Cancelled { cancelled_at }) => {
-            activity.cancel(cancelled_at);
-            Ok(ActivitySettlementOutcome::Cancelled)
-        }
-        (_, _) => Err(ActivityTransitionError::NotDispatched {
-            phase: activity.phase().clone(),
-        }),
-    }
+    Ok(record_dispatched_activity_settlement(activity, settlement))
 }
 
 pub(crate) fn resolve_terminal_observed_activity(
     activity: &mut Activity,
     settlement: ActivitySettlement,
 ) -> Result<ActivitySettlementOutcome, ActivityTransitionError> {
-    match (activity.phase(), settlement) {
-        (
-            ActivityPhase::TerminalObserved { .. },
-            ActivitySettlement::Completed { completed_at },
-        ) => {
+    if !matches!(activity.phase(), ActivityPhase::TerminalObserved { .. }) {
+        return Err(ActivityTransitionError::CannotSettle {
+            phase: activity.phase().clone(),
+        });
+    }
+
+    match settlement {
+        ActivitySettlement::Completed { completed_at } => {
             activity.mark_completed(completed_at);
             Ok(ActivitySettlementOutcome::Completed)
         }
-        (
-            ActivityPhase::TerminalObserved { .. },
-            ActivitySettlement::Failed { failed_at, failure },
-        ) => {
+        ActivitySettlement::Failed { failed_at, failure } => {
             activity.mark_failed(failed_at, failure);
             Ok(ActivitySettlementOutcome::Failed)
         }
-        (_, _) => Err(ActivityTransitionError::CannotSettle {
+        _ => Err(ActivityTransitionError::CannotSettle {
             phase: activity.phase().clone(),
         }),
     }
@@ -176,13 +132,96 @@ pub fn recover_interrupted_activity(
     observed_at: u64,
 ) -> ActivitySettlementOutcome {
     if activity.active_claim().is_some() {
-        activity.mark_outcome_unknown(observed_at);
+        record_activity_outcome_unknown_without_retry(activity, observed_at);
         return ActivitySettlementOutcome::OutcomeUnknown;
     }
     ActivitySettlementOutcome::Replayed
 }
 
-fn claim_from_active(activity: &Activity) -> ActivityClaim {
+fn active_claim_for_dispatch(
+    activity: &Activity,
+) -> Result<ActivityClaim, ActivityTransitionError> {
+    activity
+        .active_claim()
+        .cloned()
+        .ok_or_else(|| ActivityTransitionError::NotClaimed {
+            phase: activity.phase().clone(),
+        })
+}
+
+fn active_claim_for_settlement(
+    activity: &Activity,
+) -> Result<ActivityClaim, ActivityTransitionError> {
+    activity
+        .active_claim()
+        .cloned()
+        .ok_or_else(|| ActivityTransitionError::CannotSettle {
+            phase: activity.phase().clone(),
+        })
+}
+
+fn ensure_current_activity_claim(
+    active_claim: &ActivityClaim,
+    submitted_claim: &ActivityClaim,
+) -> Result<(), ActivityTransitionError> {
+    if active_claim == submitted_claim {
+        Ok(())
+    } else {
+        Err(ActivityTransitionError::StaleClaim)
+    }
+}
+
+fn record_dispatched_activity_settlement(
+    activity: &mut Activity,
+    settlement: ActivitySettlement,
+) -> ActivitySettlementOutcome {
+    match settlement {
+        ActivitySettlement::TerminalObserved { observed_at } => {
+            activity.mark_terminal_observed(observed_at);
+            ActivitySettlementOutcome::TerminalObserved
+        }
+        ActivitySettlement::Completed { completed_at } => {
+            activity.mark_completed(completed_at);
+            ActivitySettlementOutcome::Completed
+        }
+        ActivitySettlement::RetryScheduled {
+            retry_at,
+            observed_at,
+            failure,
+        } => schedule_activity_retry_or_fail(activity, retry_at, observed_at, failure),
+        ActivitySettlement::Failed { failed_at, failure } => {
+            activity.mark_failed(failed_at, failure);
+            ActivitySettlementOutcome::Failed
+        }
+        ActivitySettlement::OutcomeUnknown { observed_at } => {
+            record_activity_outcome_unknown_without_retry(activity, observed_at);
+            ActivitySettlementOutcome::OutcomeUnknown
+        }
+        ActivitySettlement::Cancelled { cancelled_at } => {
+            activity.cancel(cancelled_at);
+            ActivitySettlementOutcome::Cancelled
+        }
+    }
+}
+
+fn schedule_activity_retry_or_fail(
+    activity: &mut Activity,
+    retry_at: u64,
+    observed_at: u64,
+    failure: ActivityFailure,
+) -> ActivitySettlementOutcome {
+    if activity.schedule_retry(retry_at, observed_at, failure) {
+        ActivitySettlementOutcome::RetryScheduled
+    } else {
+        ActivitySettlementOutcome::Failed
+    }
+}
+
+fn record_activity_outcome_unknown_without_retry(activity: &mut Activity, observed_at: u64) {
+    activity.mark_outcome_unknown(observed_at);
+}
+
+fn clone_active_activity_claim(activity: &Activity) -> ActivityClaim {
     activity
         .active_claim()
         .expect("active phase always exposes an activity claim")

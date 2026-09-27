@@ -116,3 +116,4 @@ patches/
 .target-connector-store/
 .target-runtime-host-timeline/
 runtime-host_bak/
+src-tauri/

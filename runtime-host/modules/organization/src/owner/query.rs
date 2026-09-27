@@ -63,7 +63,9 @@ pub enum OrganizationQuery {
         reply: oneshot::Sender<organization::TeamRoleSessionQueryOutcome>,
     },
     RoleSessionReceipts {
-        reply: oneshot::Sender<Result<Vec<organization::RoleSessionReceipt>, organization::StoreFault>>,
+        reply: oneshot::Sender<
+            Result<Vec<organization::RoleSessionReceipt>, organization::StoreFault>,
+        >,
     },
     StartGatePromptPlan {
         lookup: StartGateRuntimeBindingLookup,

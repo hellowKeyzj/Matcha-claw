@@ -8,13 +8,25 @@ import { Sidebar } from './Sidebar';
 import { ChatWorkspaceHost } from './ChatWorkspaceHost';
 import { TitleBar } from './TitleBar';
 import { VerticalPaneResizer } from './VerticalPaneResizer';
-import {
-  CHAT_WORKSPACE_LAYOUT,
-  resolveChatWorkspaceLayout,
-} from '@/pages/Chat/chat-workspace-layout';
+import { resolveChatWorkspaceLayout } from './chat-workspace-layout';
 import { invokeIpc } from '@/lib/api-client';
 import { StableScrollArea } from '@/components/scroll';
 import { useLayoutStore } from '@/stores/layout';
+
+type PageViewportMode = 'document' | 'workspace';
+
+const WORKSPACE_PAGE_PATH_PREFIXES = ['/wiki'] as const;
+
+const PAGE_VIEWPORT_CLASS_NAME: Record<PageViewportMode, string> = {
+  document: 'h-full overflow-auto overscroll-contain bg-[hsl(var(--shell-surface))] px-5 py-4 [scrollbar-gutter:stable] md:px-8 md:py-6',
+  workspace: 'h-full overflow-auto overscroll-contain bg-[hsl(var(--shell-surface))] [scrollbar-gutter:stable]',
+};
+
+function resolvePageViewportMode(pathname: string): PageViewportMode {
+  return WORKSPACE_PAGE_PATH_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
+    ? 'workspace'
+    : 'document';
+}
 
 export function MainLayout() {
   const location = useLocation();
@@ -28,6 +40,7 @@ export function MainLayout() {
   const layoutRef = useRef<HTMLDivElement>(null);
   const resizeRafRef = useRef<number | null>(null);
   const isChatRoute = location.pathname === '/';
+  const pageViewportMode = resolvePageViewportMode(location.pathname);
   const chatTakeoverActive = isChatRoute && chatTakeoverMode !== 'none';
   const activeRightDockLayout = isChatRoute ? chatWindowRightDockLayout : null;
 
@@ -132,20 +145,30 @@ export function MainLayout() {
   };
 
   return (
-    <div className="app-shell-bg flex h-screen flex-col overflow-hidden bg-card">
+    <div className="flex h-screen flex-col overflow-hidden bg-[hsl(var(--shell-window))]">
       <TitleBar />
 
       <div
         ref={layoutRef}
-        className="relative flex flex-1 overflow-hidden bg-card"
+        className="relative flex flex-1 overflow-hidden bg-[hsl(var(--shell-surface))]"
       >
-        {!chatTakeoverActive ? (
+        {!chatTakeoverActive && sidebarVisible ? (
           <Sidebar
             width={workspaceLayout.sidebarWidth}
-            railWidth={CHAT_WORKSPACE_LAYOUT.sidebarRailWidth}
-            containerWidth={layoutContainerWidth}
-            showRightDivider={!sidebarVisible}
+            showRightDivider={false}
           />
+        ) : null}
+        {!chatTakeoverActive && !sidebarVisible ? (
+          <div className="group/sidebar-peek absolute inset-y-0 left-0 z-30 w-3">
+            <div className="absolute inset-y-0 left-0 w-3" />
+            <div className="absolute inset-y-0 left-0 -translate-x-full transform-gpu shadow-[var(--shell-shadow-overlay)] transition-transform duration-200 ease-out will-change-transform group-hover/sidebar-peek:translate-x-0 motion-reduce:transition-none">
+              <Sidebar
+                width={sidebarWidth}
+                overlay
+                showRightDivider
+              />
+            </div>
+          </div>
         ) : null}
         {!chatTakeoverActive && sidebarVisible ? (
           <VerticalPaneResizer
@@ -155,11 +178,14 @@ export function MainLayout() {
             variant="subtle-border"
           />
         ) : null}
-        <main className="min-w-0 flex-1 overflow-hidden bg-card" style={mainStyle}>
+        <main className="min-w-0 flex-1 overflow-hidden bg-[hsl(var(--shell-surface))]" style={mainStyle}>
           {isChatRoute ? (
             <ChatWorkspaceHost takeoverMode={chatTakeoverMode} />
           ) : (
-            <StableScrollArea data-page-scroll className="h-full overflow-auto overscroll-contain bg-card px-5 py-4 [scrollbar-gutter:stable] md:px-8 md:py-6">
+            <StableScrollArea
+              data-page-scroll
+              className={PAGE_VIEWPORT_CLASS_NAME[pageViewportMode]}
+            >
               <Outlet />
             </StableScrollArea>
           )}

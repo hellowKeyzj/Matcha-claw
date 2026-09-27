@@ -1101,6 +1101,25 @@ impl ToolCatalog {
     fn policy_keys(&self) -> &BTreeSet<String> {
         &self.policy_keys
     }
+
+    fn with_global_tool_deny(mut self, deny: &[String]) -> Self {
+        if deny.is_empty() {
+            return self;
+        }
+        let deny = deny
+            .iter()
+            .filter_map(|entry| normalize_tool_policy_key(entry))
+            .collect::<Vec<_>>();
+        for group in &mut self.groups {
+            for tool in &mut group.tools {
+                tool.denied_by_global_policy = is_denied_by_global_tool_policy(tool, &deny);
+            }
+        }
+        for option in &mut self.options {
+            option.denied_by_global_policy = is_denied_by_global_tool_policy(option, &deny);
+        }
+        self
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1156,6 +1175,7 @@ pub struct ToolOption {
     default_profiles: Vec<String>,
     group_key: Option<String>,
     group_display_name: Option<String>,
+    denied_by_global_policy: bool,
 }
 impl ToolOption {
     fn group(key: String, display_name: String, source: String, plugin_id: Option<String>) -> Self {
@@ -1171,6 +1191,7 @@ impl ToolOption {
             default_profiles: Vec::new(),
             group_key: None,
             group_display_name: None,
+            denied_by_global_policy: false,
         }
     }
     pub fn key(&self) -> &str {
@@ -1199,6 +1220,9 @@ impl ToolOption {
     }
     pub fn default_profiles(&self) -> &[String] {
         &self.default_profiles
+    }
+    pub const fn denied_by_global_policy(&self) -> bool {
+        self.denied_by_global_policy
     }
     pub fn group_key(&self) -> Option<&str> {
         self.group_key.as_deref()
@@ -1262,6 +1286,7 @@ fn tool_group(value: &Value) -> Option<ToolGroup> {
                 default_profiles: value_texts(tool.get("defaultProfiles")),
                 group_key: Some(key.clone()),
                 group_display_name: Some(display_name.clone()),
+                denied_by_global_policy: false,
                 key: tool_key,
             })
         })
@@ -1287,6 +1312,103 @@ fn unknown_tool_keys(allow: &[String], deny: &[String], known: &BTreeSet<String>
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+const OPENCLAW_GROUP_EXCLUDED_TOOL_KEYS: &[&str] = &[
+    "ls",
+    "read",
+    "write",
+    "edit",
+    "apply_patch",
+    "exec",
+    "process",
+    "canvas",
+];
+
+fn normalize_tool_policy_key(value: &str) -> Option<String> {
+    let value = normalize_text(value)?.to_ascii_lowercase();
+    Some(match value.as_str() {
+        "bash" => "exec".into(),
+        "apply-patch" => "apply_patch".into(),
+        "cron" => "automations".into(),
+        _ => value,
+    })
+}
+
+fn is_denied_by_global_tool_policy(tool: &ToolOption, deny: &[String]) -> bool {
+    if deny.is_empty() {
+        return false;
+    }
+    let mut candidates = Vec::with_capacity(5);
+    if let Some(tool_key) = normalize_tool_policy_key(&tool.key) {
+        if tool.source == "core"
+            && !tool_key.starts_with("group:")
+            && !OPENCLAW_GROUP_EXCLUDED_TOOL_KEYS.contains(&tool_key.as_str())
+        {
+            candidates.push("group:openclaw".to_owned());
+        }
+        candidates.push(tool_key);
+    }
+    if let Some(group_key) = tool
+        .group_key
+        .as_deref()
+        .and_then(|group| normalize_tool_policy_key(&format!("group:{group}")))
+    {
+        candidates.push(group_key);
+    }
+    if tool.source == "plugin" {
+        candidates.push("group:plugins".to_owned());
+    }
+    if let Some(plugin_id) = tool
+        .plugin_id
+        .as_deref()
+        .and_then(normalize_tool_policy_key)
+    {
+        candidates.push(plugin_id);
+    }
+    deny.iter().any(|pattern| {
+        candidates
+            .iter()
+            .any(|candidate| tool_policy_pattern_matches(pattern, candidate))
+    })
+}
+
+fn tool_policy_pattern_matches(pattern: &str, value: &str) -> bool {
+    if pattern == "*" || pattern == value {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return false;
+    }
+    let parts = pattern
+        .split('*')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return true;
+    }
+    let mut remaining = value;
+    let mut start = 0;
+    if !pattern.starts_with('*') {
+        let first = parts[0];
+        if !remaining.starts_with(first) {
+            return false;
+        }
+        remaining = &remaining[first.len()..];
+        start = 1;
+    }
+    let end = if pattern.ends_with('*') {
+        parts.len()
+    } else {
+        parts.len() - 1
+    };
+    for part in &parts[start..end] {
+        let Some(index) = remaining.find(part) else {
+            return false;
+        };
+        remaining = &remaining[index + part.len()..];
+    }
+    pattern.ends_with('*') || remaining.ends_with(parts[parts.len() - 1])
 }
 
 fn enforce_agent_facing_internal_tool_deny(selection: ToolSelection) -> ToolSelection {
@@ -1646,11 +1768,17 @@ impl Snapshot {
                     deny,
                 })
             });
+        let global_tool_deny = document
+            .get("tools")
+            .and_then(Value::as_object)
+            .and_then(|tools| tools.get("deny"))
+            .map(display_tool_policy_keys)
+            .unwrap_or_default();
         Ok(ToolConfigurationView {
             agent_id,
             configured: true,
             policy,
-            catalog,
+            catalog: catalog.with_global_tool_deny(&global_tool_deny),
             revision: self.revision(),
         })
     }
@@ -2744,6 +2872,75 @@ mod tests {
             option.default_profiles(),
             ["coding".to_owned(), "messaging".to_owned()].as_slice()
         );
+    }
+
+    #[test]
+    fn tool_view_marks_catalog_tools_denied_by_root_policy() {
+        let snapshot = Snapshot::decode(response(json!({
+            "valid": true,
+            "raw": null,
+            "config": {
+                "tools": {"deny": ["group:fs", "group:plugins"]},
+                "agents": {"list": [{"id": "writer", "tools": {"profile": "full", "allow": ["write"], "deny": []}}]}
+            },
+            "hash": "base"
+        })))
+        .unwrap();
+        let catalog = ToolCatalog::decode(response(json!({
+            "groups": [
+                {"id": "fs", "label": "Files", "tools": [{"id": "read"}, {"id": "write"}]},
+                {"id": "web", "label": "Web", "tools": [{"id": "web_search"}]},
+                {"id": "plugin-tools", "label": "Plugin Tools", "source": "plugin", "pluginId": "bundle-mcp", "tools": [{"id": "outlook__send_mail", "source": "plugin"}]}
+            ]
+        })))
+        .unwrap();
+        let view = snapshot.tool_view("writer".into(), catalog).unwrap();
+        let option = |key: &str| {
+            view.catalog()
+                .options()
+                .iter()
+                .find(|option| option.key() == key)
+                .unwrap()
+        };
+
+        assert!(option("read").denied_by_global_policy());
+        assert!(option("write").denied_by_global_policy());
+        assert!(!option("web_search").denied_by_global_policy());
+        assert!(option("outlook__send_mail").denied_by_global_policy());
+        assert!(
+            !view
+                .policy()
+                .unwrap()
+                .deny()
+                .contains(&"group:fs".to_owned())
+        );
+    }
+
+    #[test]
+    fn global_openclaw_group_deny_excludes_fs_runtime_and_plugins() {
+        let catalog = ToolCatalog::decode(response(json!({
+            "groups": [
+                {"id": "fs", "label": "Files", "tools": [{"id": "read"}, {"id": "write"}]},
+                {"id": "runtime", "label": "Runtime", "tools": [{"id": "exec"}]},
+                {"id": "web", "label": "Web", "tools": [{"id": "web_search"}]},
+                {"id": "plugin-tools", "label": "Plugin Tools", "source": "plugin", "pluginId": "bundle-mcp", "tools": [{"id": "outlook__send_mail", "source": "plugin"}]}
+            ]
+        })))
+        .unwrap()
+        .with_global_tool_deny(&["group:openclaw".to_owned()]);
+        let option = |key: &str| {
+            catalog
+                .options()
+                .iter()
+                .find(|option| option.key() == key)
+                .unwrap()
+        };
+
+        assert!(!option("read").denied_by_global_policy());
+        assert!(!option("write").denied_by_global_policy());
+        assert!(!option("exec").denied_by_global_policy());
+        assert!(option("web_search").denied_by_global_policy());
+        assert!(!option("outlook__send_mail").denied_by_global_policy());
     }
 
     #[test]

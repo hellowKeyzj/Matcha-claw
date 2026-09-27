@@ -1,5 +1,11 @@
 use platform::state_dir::CanonicalStateDir;
-use std::{future::Future, path::PathBuf, sync::Arc};
+use std::{
+    fs,
+    future::Future,
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use skills_module::{
     install::{Command as SkillInstallCommand, Outcome as SkillInstallOutcome},
@@ -10,8 +16,8 @@ use tokio::sync::Mutex;
 use super::{
     MissingSkillRequirementCategory, SkillConfigRemoveOutcome, SkillDetail, SkillDetailRequest,
     SkillMutationOutcome, SkillReadError, SkillStatusCatalog, SkillStatusCatalogError,
-    SkillUploadBegin, SkillUploadChunk, SkillUploadCommit, SkillUploadOutcome,
-    bundle as native_bundle, readme as native_readme,
+    SkillStatusEntry, SkillStatusSource, SkillUploadBegin, SkillUploadChunk, SkillUploadCommit,
+    SkillUploadOutcome, bundle as native_bundle, readme as native_readme,
 };
 use crate::{port::OpenClawGateway, workspace::OpenClawWorkspaceAccess};
 
@@ -62,7 +68,7 @@ impl OpenClawSkillProvider {
                     "[startup-trace] source=skills-status phase=host detail=available entries={}",
                     catalog.entries().len()
                 );
-                skills_module::status::Outcome::Available(project_status(catalog))
+                skills_module::status::Outcome::Available(project_status(&catalog))
             }
             Err(error) => {
                 eprintln!(
@@ -180,14 +186,16 @@ impl OpenClawSkillProvider {
             }
             skills_module::management::Command::Uninstall { skill_key, slug } => {
                 let (slugs, config_keys) = self.skill_uninstall_plan(&skill_key, slug).await;
-                for slug in slugs {
-                    let Ok(request) = clawhub::ClawHubUninstallRequest::try_new(slug) else {
+                for slug in &slugs {
+                    let Ok(request) = clawhub::ClawHubUninstallRequest::try_new(slug.clone())
+                    else {
                         continue;
                     };
                     match self.uninstall_clawhub_skill(request).await {
                         clawhub::ClawHubUninstallOutcome::Removed => {
+                            self.remove_skill_configs_best_effort(config_keys);
                             return SkillManagementOutcome::Uninstall(
-                                self.remove_skill_configs(config_keys).await,
+                                skills_module::management::RemoveOutcome::Removed,
                             );
                         }
                         clawhub::ClawHubUninstallOutcome::Unknown => {
@@ -199,11 +207,31 @@ impl OpenClawSkillProvider {
                         | clawhub::ClawHubUninstallOutcome::Rejected => {}
                     }
                 }
-                let outcome = map_remove(self.skill_bundles().remove(skill_key));
-                if outcome != skills_module::management::RemoveOutcome::Removed {
+                let outcome = map_remove(self.skill_bundles().remove(skill_key.clone()));
+                if outcome == skills_module::management::RemoveOutcome::Removed {
+                    self.remove_skill_configs_best_effort(config_keys);
+                    return SkillManagementOutcome::Uninstall(
+                        skills_module::management::RemoveOutcome::Removed,
+                    );
+                }
+                if outcome == skills_module::management::RemoveOutcome::Unknown {
                     return SkillManagementOutcome::Uninstall(outcome);
                 }
-                SkillManagementOutcome::Uninstall(self.remove_skill_configs(config_keys).await)
+                if let Some(base_dir) = self
+                    .openclaw_managed_skill_base_dir(&skill_key, &slugs)
+                    .await
+                {
+                    let outcome =
+                        remove_openclaw_managed_skill_dir(self.state_dir.as_path(), &base_dir);
+                    if outcome == skills_module::management::RemoveOutcome::Removed {
+                        self.remove_skill_configs_best_effort(config_keys);
+                        return SkillManagementOutcome::Uninstall(
+                            skills_module::management::RemoveOutcome::Removed,
+                        );
+                    }
+                    return SkillManagementOutcome::Uninstall(outcome);
+                }
+                SkillManagementOutcome::Uninstall(outcome)
             }
             skills_module::management::Command::ImportMarkdown { content } => {
                 SkillManagementOutcome::Import(map_import(
@@ -478,6 +506,27 @@ impl OpenClawSkillProvider {
         native_readme::SkillReadmeRequest::try_new(skill_key, slug, file_path, base_dir)
     }
 
+    async fn openclaw_managed_skill_base_dir(
+        &self,
+        skill_key: &str,
+        slugs: &[String],
+    ) -> Option<String> {
+        let catalog = self.skill_status_catalog().await.ok()?;
+        let entry = catalog.entries().iter().find(|entry| {
+            entry.key() == skill_key
+                || entry.slug().is_some_and(|slug| {
+                    slug == skill_key || slugs.iter().any(|candidate| candidate.as_str() == slug)
+                })
+        })?;
+        if !is_uninstallable_status_entry(entry) {
+            return None;
+        }
+        catalog
+            .locator(entry.key())
+            .and_then(|locator| locator.base_dir())
+            .map(str::to_owned)
+    }
+
     async fn skill_uninstall_plan(
         &self,
         skill_key: &str,
@@ -518,27 +567,75 @@ impl OpenClawSkillProvider {
         (slugs, config_keys)
     }
 
-    async fn remove_skill_configs(
-        &self,
-        skill_keys: Vec<String>,
-    ) -> skills_module::management::RemoveOutcome {
-        for skill_key in skill_keys {
-            match self.remove_skill_config(skill_key).await {
-                SkillConfigRemoveOutcome::Removed | SkillConfigRemoveOutcome::NotFound => {}
-                SkillConfigRemoveOutcome::Rejected | SkillConfigRemoveOutcome::Unknown => {
-                    return skills_module::management::RemoveOutcome::Unknown;
-                }
+    fn remove_skill_configs_best_effort(&self, skill_keys: Vec<String>) {
+        let gateway = Arc::clone(&self.gateway);
+        tokio::spawn(async move {
+            for skill_key in skill_keys {
+                let _ = gateway.lock().await.remove_skill_config(skill_key).await;
             }
-        }
-        skills_module::management::RemoveOutcome::Removed
+        });
     }
 }
 
-fn project_status(catalog: SkillStatusCatalog) -> skills_module::status::Catalog {
+fn is_uninstallable_status_entry(entry: &SkillStatusEntry) -> bool {
+    matches!(entry.source(), Some(SkillStatusSource::OpenClawManaged))
+        && entry.bundled() != Some(true)
+}
+
+fn status_entry_exists(entry: &SkillStatusEntry, catalog: &SkillStatusCatalog) -> bool {
+    if !matches!(entry.source(), Some(SkillStatusSource::OpenClawManaged)) {
+        return true;
+    }
+    catalog
+        .locator(entry.key())
+        .and_then(|locator| locator.base_dir())
+        .is_some_and(|base_dir| Path::new(base_dir).is_dir())
+}
+
+fn remove_openclaw_managed_skill_dir(
+    state_dir: &Path,
+    base_dir: &str,
+) -> skills_module::management::RemoveOutcome {
+    let target = Path::new(base_dir);
+    if !target.is_absolute() {
+        return skills_module::management::RemoveOutcome::Rejected;
+    }
+
+    let root = match fs::canonicalize(state_dir.join("skills")) {
+        Ok(root) => root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return skills_module::management::RemoveOutcome::NotFound;
+        }
+        Err(_) => return skills_module::management::RemoveOutcome::Unknown,
+    };
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return skills_module::management::RemoveOutcome::NotFound;
+        }
+        Err(_) => return skills_module::management::RemoveOutcome::Unknown,
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return skills_module::management::RemoveOutcome::Rejected;
+    }
+    let target = match fs::canonicalize(target) {
+        Ok(target) => target,
+        Err(_) => return skills_module::management::RemoveOutcome::Unknown,
+    };
+    if target.parent() != Some(root.as_path()) {
+        return skills_module::management::RemoveOutcome::Rejected;
+    }
+    fs::remove_dir_all(target)
+        .map(|_| skills_module::management::RemoveOutcome::Removed)
+        .unwrap_or(skills_module::management::RemoveOutcome::Unknown)
+}
+
+fn project_status(catalog: &SkillStatusCatalog) -> skills_module::status::Catalog {
     skills_module::status::Catalog {
         entries: catalog
             .entries()
             .iter()
+            .filter(|entry| status_entry_exists(entry, catalog))
             .map(|entry| skills_module::status::Entry {
                 key: entry.key().to_owned(),
                 slug: entry.slug().map(str::to_owned),
@@ -552,6 +649,7 @@ fn project_status(catalog: SkillStatusCatalog) -> skills_module::status::Catalog
                 always: entry.always(),
                 emoji: entry.emoji().map(str::to_owned),
                 source: entry.source().map(|source| source.as_str().to_owned()),
+                uninstallable: is_uninstallable_status_entry(entry),
                 base_dir: catalog
                     .locator(entry.key())
                     .and_then(|locator| locator.base_dir())

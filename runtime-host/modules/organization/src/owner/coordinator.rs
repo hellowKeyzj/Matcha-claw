@@ -9,6 +9,40 @@ use super::OrganizationHandle;
 
 const TEAM_RUN_MAINTENANCE_CAPACITY: usize = 8;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TeamRunWake {
+    reason: TeamRunWakeReason,
+    run_id: Option<organization::GraphRunId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TeamRunWakeReason {
+    GraphChanged,
+    TerminalSettled,
+    RepairRejected,
+    NativeRunSettled,
+    TriggerFired,
+    RunStarted,
+    RunCancelled,
+    NodeEventRecorded,
+    ApprovalResolved,
+    DecisionSubmitted,
+}
+
+impl TeamRunWake {
+    pub fn new(reason: TeamRunWakeReason, run_id: Option<organization::GraphRunId>) -> Self {
+        Self { reason, run_id }
+    }
+
+    pub fn reason(&self) -> TeamRunWakeReason {
+        self.reason
+    }
+
+    pub fn run_id(&self) -> Option<&organization::GraphRunId> {
+        self.run_id.as_ref()
+    }
+}
+
 pub trait TeamRunAdmission: Send + Sync {
     fn is_admitted(&self) -> bool;
 }

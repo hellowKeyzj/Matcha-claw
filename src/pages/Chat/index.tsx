@@ -726,13 +726,6 @@ export function Chat({ isActive = true }: ChatProps) {
     sidePanelWidthPolicy,
     activeSidePanelTab,
     artifactWorkbenchFullscreen,
-    unfinishedTaskCount,
-    taskInboxTasks,
-    taskInboxLoading,
-    taskInboxError,
-    refreshTaskInbox,
-    clearTaskInboxError,
-    derivedPlanStatus,
     openSidePanel: openSidePanelDomain,
     setActiveSidePanelTab,
     closeSidePanel: closeSidePanelDomain,
@@ -1160,7 +1153,7 @@ export function Chat({ isActive = true }: ChatProps) {
     || currentSession.runtime.activeRunId != null;
   const modelPicker = useMemo(() => {
     const currentModelId = currentSessionModelId;
-    if (!currentModelId) {
+    if (!currentModelId && availableModels.length === 0 && !modelsLoading) {
       return null;
     }
     const triggerLabels = new Map<string, string>();
@@ -1173,13 +1166,15 @@ export function Chat({ isActive = true }: ChatProps) {
     }));
     return {
       currentModelId,
-      currentLabel: triggerLabels.get(currentModelId) ?? resolveModelTriggerLabel(currentModelId),
+      currentLabel: currentModelId
+        ? triggerLabels.get(currentModelId) ?? resolveModelTriggerLabel(currentModelId)
+        : t('input.pickModel'),
       options,
       loading: modelsLoading,
       switching: false,
       disabled: activeRun || !currentSessionRecordKey,
     };
-  }, [activeRun, availableModels, currentSessionModelId, currentSessionRecordKey, modelsLoading]);
+  }, [activeRun, availableModels, currentSessionModelId, currentSessionRecordKey, modelsLoading, t]);
   const handleSendMessage = useCallback(async (
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
@@ -1479,13 +1474,6 @@ export function Chat({ isActive = true }: ChatProps) {
             onTabChange={setActiveSidePanelTab}
             onClose={chatWindowDock.closeSidePanel}
             onToggleArtifactWorkbenchFullscreen={toggleArtifactWorkbenchFullscreen}
-            unfinishedTaskCount={unfinishedTaskCount}
-            taskInboxTasks={taskInboxTasks}
-            taskInboxLoading={taskInboxLoading}
-            taskInboxError={taskInboxError}
-            onRefreshTaskInbox={refreshTaskInbox}
-            onClearTaskInboxError={clearTaskInboxError}
-            derivedPlanStatus={derivedPlanStatus}
             artifactGroups={artifactGroups}
             artifactFocusedGroupKey={artifactWorkbenchSelection.focusedGroupKey}
             artifactFocusedGroupFiles={artifactFocusedGroupFiles}
@@ -1518,7 +1506,6 @@ export function Chat({ isActive = true }: ChatProps) {
             exportDisabled={exportingMarkdown || !currentSessionRecordKey}
             onExportMarkdown={handleExportMarkdown}
             sidePanelOpen={chatWindowDock.sidePanelExpanded}
-            unfinishedTaskCount={unfinishedTaskCount}
             onToggleSidePanel={chatWindowDock.toggleSidePanel}
             todoPanel={<SessionTodoPanel sessionKey={currentSessionRecordKey} />}
           />

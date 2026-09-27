@@ -27,10 +27,7 @@ pub(super) async fn enrich_catalog(
     enrich(reader, slots).await;
 }
 
-pub(super) async fn enrich_views(
-    reader: &dyn SessionOwnershipReader,
-    views: &mut [SessionView],
-) {
+pub(super) async fn enrich_views(reader: &dyn SessionOwnershipReader, views: &mut [SessionView]) {
     let slots = views
         .iter_mut()
         .map(|view| {
@@ -55,7 +52,10 @@ pub(super) async fn enrich_timeline(
 
 async fn enrich(
     reader: &dyn SessionOwnershipReader,
-    slots: Vec<(Option<SessionOwnershipQuery>, &mut Option<SessionSourceBinding>)>,
+    slots: Vec<(
+        Option<SessionOwnershipQuery>,
+        &mut Option<SessionSourceBinding>,
+    )>,
 ) {
     let mut queries = Vec::with_capacity(slots.len());
     let mut outputs = Vec::with_capacity(slots.len());

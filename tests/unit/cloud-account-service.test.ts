@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
   readCloudAccountSessionMock: vi.fn(),
@@ -150,5 +150,95 @@ describe('cloud account service', () => {
       tokenType: 'Bearer',
     });
     expect(fetchProfileMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('cloud account package client', () => {
+  const originalBaseUrl = process.env.MATCHA_CLOUD_BASE_URL;
+
+  afterEach(() => {
+    process.env.MATCHA_CLOUD_BASE_URL = originalBaseUrl;
+    vi.unstubAllGlobals();
+  });
+
+  it('requests package authorization lease with device key and parses device envelope there only', async () => {
+    process.env.MATCHA_CLOUD_BASE_URL = 'https://cloud.test/api/v1';
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      code: 0,
+      message: 'ok',
+      data: {
+        package_version_id: 'version-calendar',
+        package_type: 'skill',
+        device_envelope: { keyId: 'device-key', algorithm: 'rsa-oaep-sha256', ciphertextBase64: 'ciphertext' },
+        lease_expires_at: '2099-01-01T00:00:00.000Z',
+      },
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { createCloudAccountClient } = await import('../../electron/main/cloud-account/client');
+
+    await expect(createCloudAccountClient().authorizePackage('session-access-token', {
+      packageVersionId: 'version-calendar',
+      packageType: 'skill',
+      source: 'skills',
+      devicePublicKey: 'device-public-key',
+    })).resolves.toEqual({
+      packageVersionId: 'version-calendar',
+      packageType: 'skill',
+      deviceEnvelope: { keyId: 'device-key', algorithm: 'rsa-oaep-sha256', ciphertextBase64: 'ciphertext' },
+      leaseExpiresAt: '2099-01-01T00:00:00.000Z',
+    });
+    expect(fetchMock).toHaveBeenCalledWith('https://cloud.test/api/v1/packages/version-calendar/authorization', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        packageVersionId: 'version-calendar',
+        packageType: 'skill',
+        source: 'skills',
+        devicePublicKey: 'device-public-key',
+      }),
+    }));
+  });
+
+  it('keeps download-record response free of device envelope', async () => {
+    process.env.MATCHA_CLOUD_BASE_URL = 'https://cloud.test/api/v1';
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      code: 0,
+      message: 'ok',
+      data: {
+        packageVersionId: 'version-calendar',
+        recorded: true,
+        deviceEnvelope: { keyId: 'old-device-key', algorithm: 'rsa-oaep-sha256', ciphertextBase64: 'ciphertext' },
+      },
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { createCloudAccountClient } = await import('../../electron/main/cloud-account/client');
+
+    const record = await createCloudAccountClient().recordPackageDownload('session-access-token', {
+      packageVersionId: 'version-calendar',
+      source: 'skills',
+    });
+
+    expect(record).toEqual({
+      packageVersionId: 'version-calendar',
+      recorded: true,
+    });
+    expect(JSON.stringify(record)).not.toContain('deviceEnvelope');
+  });
+
+  it('downloads package bytes without implicitly recording the download', async () => {
+    process.env.MATCHA_CLOUD_BASE_URL = 'https://cloud.test/api/v1';
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3]), {
+      status: 200,
+      headers: { 'content-disposition': 'attachment; filename="calendar.matcha-skillpkg"' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { createCloudAccountClient } = await import('../../electron/main/cloud-account/client');
+
+    await createCloudAccountClient().downloadPackage('session-access-token', {
+      packageVersionId: 'version-calendar',
+      packageType: 'skill',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://cloud.test/api/v1/packages/version-calendar/download');
   });
 });

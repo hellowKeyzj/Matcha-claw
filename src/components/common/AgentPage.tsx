@@ -65,10 +65,10 @@ export function AgentPage({ children }: { children: ReactNode }) {
   }, [pathname]);
 
   return (
-    <div ref={pageRef} className="min-w-0 space-y-6">
+    <div ref={pageRef} className="min-w-0 space-y-6 text-foreground">
       <header className="flex flex-wrap items-center justify-between gap-4 pb-1">
-        <h1 className="text-2xl font-semibold tracking-tight">{t(currentModule.key)}</h1>
-        <nav aria-label={t('sidebar.subagents')} className="inline-flex max-w-full gap-1 overflow-x-auto rounded-full border border-border bg-secondary/80 p-1">
+        <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t(currentModule.key)}</h1>
+        <nav aria-label={t('sidebar.subagents')} className="inline-flex max-w-full gap-1 overflow-x-auto rounded-full border bg-[hsl(var(--shell-surface-muted))] p-1 [border-color:hsl(var(--shell-border))]">
           {modules.map(({ to, key, icon: Icon }) => (
             <NavLink
               key={to}
@@ -76,8 +76,8 @@ export function AgentPage({ children }: { children: ReactNode }) {
               onMouseEnter={() => prefetchModule(to)}
               onFocus={() => prefetchModule(to)}
               className={({ isActive }) => cn(
-                'inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-4 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none',
-                isActive && 'bg-accent text-foreground',
+                'inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-4 py-2 text-xs font-medium text-[hsl(var(--shell-text-muted))] transition-colors hover:bg-[hsl(var(--shell-surface-hover))] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none',
+                isActive && 'bg-[hsl(var(--shell-surface))] text-foreground',
               )}
             >
               <Icon className="size-4" aria-hidden="true" />
@@ -93,7 +93,7 @@ export function AgentPage({ children }: { children: ReactNode }) {
 
 export function AgentPageSection({ children, actions }: { children: ReactNode; actions?: ReactNode }) {
   return (
-    <div className="flex min-h-12 flex-wrap items-center justify-between gap-x-4 gap-y-3 border-b border-border">
+    <div className="flex min-h-12 flex-wrap items-center justify-between gap-x-4 gap-y-3 border-b [border-color:hsl(var(--shell-border))]">
       {children}
       {actions && <div className="flex flex-wrap items-center gap-2 pb-3">{actions}</div>}
     </div>
@@ -109,17 +109,17 @@ export function AgentResourceGrid({ className, ...props }: HTMLAttributes<HTMLDi
 }
 
 export function AgentResourceCard({ className, ...props }: HTMLAttributes<HTMLElement>) {
-  return <article className={cn('group relative flex min-w-0 flex-col overflow-hidden rounded-[1.5rem] border border-border/70 bg-card p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_1px_2px_rgba(15,23,42,0.05)] transition-[border-color,background-color] duration-200 ease-out hover:border-foreground/15 hover:bg-secondary/20 focus-within:border-foreground/20 motion-reduce:transition-none dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]', className)} {...props} />;
+  return <article className={cn('group relative flex min-w-0 flex-col overflow-hidden rounded-[1.25rem] border bg-[hsl(var(--shell-surface-muted))] p-5 shadow-none transition-[border-color,background-color] duration-200 ease-out [border-color:hsl(var(--shell-border))] hover:bg-[hsl(var(--shell-surface-hover))] hover:[border-color:hsl(var(--shell-border-strong))] focus-within:[border-color:hsl(var(--shell-border-strong))] motion-reduce:transition-none', className)} {...props} />;
 }
 
 export function AgentResourceIcon({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex size-11 shrink-0 items-center justify-center rounded-[1.05rem] border border-border/70 bg-secondary/60 text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.75)] ring-1 ring-background/80 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]', className)} {...props} />;
+  return <div className={cn('flex size-11 shrink-0 items-center justify-center rounded-[1rem] border bg-[hsl(var(--shell-surface))] text-[hsl(var(--shell-icon))] shadow-none [border-color:hsl(var(--shell-border))]', className)} {...props} />;
 }
 
 export function AgentResourcePill({ className, ...props }: HTMLAttributes<HTMLSpanElement>) {
-  return <span className={cn('inline-flex h-6 max-w-full shrink-0 items-center gap-1.5 rounded-full bg-secondary/60 px-2.5 text-[11px] text-muted-foreground ring-1 ring-border/55', className)} {...props} />;
+  return <span className={cn('inline-flex h-6 max-w-full shrink-0 items-center gap-1.5 rounded-full bg-[hsl(var(--shell-surface))] px-2.5 text-[11px] text-[hsl(var(--shell-text-muted))] ring-1 ring-[hsl(var(--shell-border))]', className)} {...props} />;
 }
 
 export function AgentResourceFooter({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('mt-auto flex items-center justify-between gap-3 rounded-2xl bg-secondary/45 px-3 py-2 text-xs text-muted-foreground ring-1 ring-border/50', className)} {...props} />;
+  return <div className={cn('mt-auto flex items-center justify-between gap-3 rounded-2xl bg-[hsl(var(--shell-surface))] px-3 py-2 text-xs text-[hsl(var(--shell-text-muted))] ring-1 ring-[hsl(var(--shell-border))]', className)} {...props} />;
 }

@@ -25,6 +25,7 @@ import {
   type TeamArtifactRecord,
   type TeamDecisionRecord,
   type TeamDecisionType,
+  type TeamDeleteResult,
   type TeamDispatchExecutionRecord,
   type TeamDispatchGroupRecord,
   type TeamDispatchRecord,
@@ -172,7 +173,7 @@ interface TeamsState {
   replaceTeamSkillVersion: (input: { teamId: string; expectedCurrentVersion: string; candidate: TeamSkillCandidate }) => string;
   setActiveTeam: (teamId: string | null) => void;
   setActiveRun: (teamId: string, runId: string | null) => void;
-  deleteTeam: (teamId: string) => Promise<void>;
+  deleteTeam: (teamId: string) => Promise<TeamDeleteResult>;
   provisionTeamAgents: (teamId: string) => Promise<void>;
   createRun: (teamId: string) => Promise<TeamRunSummary | undefined>;
   syncRunList: (teamId: string) => Promise<void>;
@@ -1029,6 +1030,7 @@ export const useTeamsStore = create<TeamsState>()(
             loadingByTeamId: withoutKey(state.loadingByTeamId, teamId),
             errorByTeamId: withoutKey(state.errorByTeamId, teamId),
           }));
+          return result;
         } catch (error) {
           set((state) => ({
             loadingByTeamId: { ...state.loadingByTeamId, [teamId]: false },

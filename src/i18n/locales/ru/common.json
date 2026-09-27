@@ -114,7 +114,6 @@
         "settings": "Настройки",
         "devConsole": "Консоль разработчика",
         "pendingBlockers": "Блокировки сессии",
-        "pendingBlockersEmpty": "Нет ожидающих блокировок",
         "pendingBlockerTask": "Задача {{taskId}}",
         "pendingBlockerStage": "Stage {{stageId}}",
         "pendingBlockerGeneral": "Общая блокировка",

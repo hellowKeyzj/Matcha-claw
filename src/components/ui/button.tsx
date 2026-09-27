@@ -13,14 +13,14 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: 'bg-primary text-primary-foreground shadow-whisper hover:bg-primary/92',
+        default: 'bg-[hsl(var(--shell-icon-active))] text-[hsl(var(--shell-window))] shadow-none hover:bg-[hsl(var(--shell-icon-active))]/92',
         destructive:
-          'bg-destructive text-destructive-foreground shadow-whisper hover:bg-destructive/90',
+          'bg-destructive text-destructive-foreground shadow-none hover:bg-destructive/90',
         outline:
-          'border-input bg-card text-foreground shadow-whisper hover:border-border hover:bg-secondary',
+          'border-[hsl(var(--shell-border))] bg-[hsl(var(--shell-surface))] text-foreground shadow-none hover:border-[hsl(var(--shell-border-strong))] hover:bg-[hsl(var(--shell-surface-hover))]',
         secondary:
-          'border-border bg-secondary text-secondary-foreground hover:bg-accent',
-        ghost: 'bg-transparent text-muted-foreground shadow-none hover:bg-secondary hover:text-foreground',
+          'border-[hsl(var(--shell-border))] bg-[hsl(var(--shell-surface-muted))] text-secondary-foreground hover:bg-[hsl(var(--shell-surface-hover))]',
+        ghost: 'bg-transparent text-[hsl(var(--shell-text-muted))] shadow-none hover:bg-[hsl(var(--shell-surface-hover))] hover:text-foreground',
         link: 'rounded-none border-transparent bg-transparent px-0 text-[hsl(var(--ring))] shadow-none hover:text-foreground hover:underline',
       },
       size: {

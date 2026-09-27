@@ -1,6 +1,5 @@
-import { Brain, Download, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Brain, Download, PanelRight } from 'lucide-react';
 import { memo, type ReactNode } from 'react';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
@@ -19,7 +18,6 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   exportDisabled = false,
   onExportMarkdown,
   sidePanelOpen,
-  unfinishedTaskCount,
   onToggleSidePanel,
   todoPanel,
 }: {
@@ -28,7 +26,6 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   exportDisabled?: boolean;
   onExportMarkdown: () => void;
   sidePanelOpen: boolean;
-  unfinishedTaskCount: number;
   onToggleSidePanel: () => void;
   todoPanel?: ReactNode;
 }) {
@@ -80,9 +77,8 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
 
         <Tooltip>
           <TooltipTrigger asChild>
-            <div className="relative">
-              <Button
-                variant="ghost"
+            <Button
+              variant="ghost"
               size="icon"
               aria-label={sidePanelToggleLabel}
               className={cn(
@@ -91,21 +87,8 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
               )}
               onClick={onToggleSidePanel}
             >
-                {sidePanelOpen ? (
-                  <PanelRightClose className="h-4 w-4" />
-                ) : (
-                  <PanelRightOpen className="h-4 w-4" />
-                )}
-              </Button>
-              {unfinishedTaskCount > 0 ? (
-                <Badge
-                  variant="secondary"
-                  className="pointer-events-none absolute -right-1 -top-1 h-5 min-w-5 justify-center px-1.5 text-[10px]"
-                >
-                  {unfinishedTaskCount}
-                </Badge>
-              ) : null}
-            </div>
+              <PanelRight className="h-4 w-4" />
+            </Button>
           </TooltipTrigger>
           <TooltipContent {...HEADER_TOOLTIP_PROPS}>
             <p>{sidePanelToggleLabel}</p>

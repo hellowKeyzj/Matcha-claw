@@ -77,6 +77,7 @@ export type ProductApiContext = Pick<HostApiContext, 'cloudAccountService'> & Ru
   | 'skillBundleTransport'
   | 'skillsManagementTransport'
   | 'sealedSkillsTransport'
+  | 'sealedResourceAuthorizationTransport'
   | 'pluginsTransport'
   | 'usageTransport'
   | 'runtimeDirectoryTransport'

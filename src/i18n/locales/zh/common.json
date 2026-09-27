@@ -117,7 +117,6 @@
         "settings": "设置",
         "devConsole": "开发者控制台",
         "pendingBlockers": "会话阻塞",
-        "pendingBlockersEmpty": "当前没有待处理阻塞",
         "pendingBlockerTask": "任务 {{taskId}}",
         "pendingBlockerStage": "阶段 {{stageId}}",
         "pendingBlockerGeneral": "通用阻塞",

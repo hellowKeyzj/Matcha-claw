@@ -34,6 +34,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -590,10 +591,18 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
 }
 
 // Marketplace skill card component
+type MarketplaceSkillAction = 'install' | 'uninstall' | null;
+
+function resolveMarketplaceSkillAction(isInstalled: boolean, canUninstall: boolean): MarketplaceSkillAction {
+  if (!isInstalled) return 'install';
+  return canUninstall ? 'uninstall' : null;
+}
+
 interface MarketplaceSkillCardProps {
   skill: MarketplaceSkill;
   isInstalling: boolean;
   isInstalled: boolean;
+  canUninstall: boolean;
   mutationLocked: boolean;
   onOpenDetail: () => void;
   onInstall: () => void;
@@ -604,12 +613,14 @@ function MarketplaceSkillCard({
   skill,
   isInstalling,
   isInstalled,
+  canUninstall,
   mutationLocked,
   onOpenDetail,
   onInstall,
   onUninstall
 }: MarketplaceSkillCardProps) {
   const { t } = useTranslation('skills');
+  const action = resolveMarketplaceSkillAction(isInstalled, canUninstall);
   return (
     <AgentResourceCard className="relative gap-3 p-4">
       <div className="flex min-w-0 items-center gap-3">
@@ -632,16 +643,18 @@ function MarketplaceSkillCard({
       </div>
       <AgentResourceFooter>
         <span>{isInstalled ? t('sealed.packageInstalled') : t('sealed.packageAvailable')}</span>
-        <Button
-          variant="outline"
-          size="sm"
-          className={cn('relative z-10 h-8 gap-2', isInstalled && 'text-destructive hover:text-destructive')}
-          onClick={isInstalled ? onUninstall : onInstall}
-          disabled={isInstalling || mutationLocked}
-        >
-          {isInstalling ? <RefreshCw className="size-3.5 animate-spin motion-reduce:animate-none" /> : isInstalled ? <Trash2 className="size-3.5" /> : <Download className="size-3.5" />}
-          {isInstalled ? t('actions.uninstall') : t('actions.install')}
-        </Button>
+        {action && (
+          <Button
+            variant="outline"
+            size="sm"
+            className={cn('relative z-10 h-8 gap-2', action === 'uninstall' && 'text-destructive hover:text-destructive')}
+            onClick={action === 'uninstall' ? onUninstall : onInstall}
+            disabled={isInstalling || mutationLocked}
+          >
+            {isInstalling ? <RefreshCw className="size-3.5 animate-spin motion-reduce:animate-none" /> : action === 'uninstall' ? <Trash2 className="size-3.5" /> : <Download className="size-3.5" />}
+            {action === 'uninstall' ? t('actions.uninstall') : t('actions.install')}
+          </Button>
+        )}
       </AgentResourceFooter>
     </AgentResourceCard>
   );
@@ -651,6 +664,7 @@ interface MarketplaceSkillDetailDialogProps {
   skill: MarketplaceSkill;
   isInstalling: boolean;
   isInstalled: boolean;
+  canUninstall: boolean;
   mutationLocked: boolean;
   onInstall: () => void;
   onUninstall: () => void;
@@ -661,12 +675,14 @@ function MarketplaceSkillDetailDialog({
   skill,
   isInstalling,
   isInstalled,
+  canUninstall,
   mutationLocked,
   onInstall,
   onUninstall,
   onClose,
 }: MarketplaceSkillDetailDialogProps) {
   const { t } = useTranslation('skills');
+  const action = resolveMarketplaceSkillAction(isInstalled, canUninstall);
   const openMarketplacePage = () => {
     void invokeIpc('shell:openExternal', buildMarketplaceSkillUrl(skill.slug));
   };
@@ -725,21 +741,23 @@ function MarketplaceSkillDetailDialog({
             <Globe className="h-4 w-4" />
             ClawHub
           </Button>
-          <Button
-            variant={isInstalled ? 'destructive' : 'default'}
-            className="gap-2"
-            onClick={isInstalled ? onUninstall : onInstall}
-            disabled={isInstalling || mutationLocked}
-          >
-            {isInstalling ? (
-              <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" />
-            ) : isInstalled ? (
-              <Trash2 className="h-4 w-4" />
-            ) : (
-              <Download className="h-4 w-4" />
-            )}
-            {isInstalled ? t('actions.uninstall') : t('actions.install')}
-          </Button>
+          {action && (
+            <Button
+              variant={action === 'uninstall' ? 'destructive' : 'default'}
+              className="gap-2"
+              onClick={action === 'uninstall' ? onUninstall : onInstall}
+              disabled={isInstalling || mutationLocked}
+            >
+              {isInstalling ? (
+                <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+              ) : action === 'uninstall' ? (
+                <Trash2 className="h-4 w-4" />
+              ) : (
+                <Download className="h-4 w-4" />
+              )}
+              {action === 'uninstall' ? t('actions.uninstall') : t('actions.install')}
+            </Button>
+          )}
         </div>
       </Card>
     </div>
@@ -885,7 +903,7 @@ interface SkillGridCardViewModel {
   skillIcon: string;
   sourceLabel: string;
   isCore: boolean;
-  isBundled: boolean;
+  uninstallable: boolean;
   slug?: string;
   version?: string;
   enabled: boolean;
@@ -900,14 +918,18 @@ interface SkillGridCardProps extends SkillGridCardViewModel {
   onOpenDetail: (skillId: string) => void;
   mutationLocked: boolean;
   onToggleSkill: (skillId: string, enabled: boolean) => void;
-  onUninstallSkill: (skillId: string) => void;
+  onUninstallSkill: (skillId: string, slug?: string) => void;
 }
 
 interface SealedSkillCardProps {
   skill: SealedSkillMetadata;
   enabled: boolean;
   mutationLocked: boolean;
+  uninstalling: boolean;
+  cloudUploading: boolean;
   onToggleSkill: (skillId: string, enabled: boolean) => void;
+  onUninstallSkill: (skillId: string) => void;
+  onUploadToCloud: (skillId: string) => void;
 }
 
 interface SealedSkillCloudPackageCardProps {
@@ -916,15 +938,11 @@ interface SealedSkillCloudPackageCardProps {
   onInstall: (packageInfo: SealedSkillCloudPackage) => void;
 }
 
-interface SealedSkillPackageUploadDialogProps {
+interface LocalSkillPackageInstallDialogProps {
   open: boolean;
-  uploading: boolean;
-  selectedPackageName: string;
-  selectedPackagePath: string;
+  installing: boolean;
   onClose: () => void;
-  onChoosePackage: () => void;
-  onDropPackagePath: (path: string) => void;
-  onUpload: () => void;
+  onInstall: () => void;
 }
 
 interface ExportSkillPackageCardProps {
@@ -934,19 +952,30 @@ interface ExportSkillPackageCardProps {
 }
 
 type InstalledSkillSourceFilter = 'all' | 'built-in' | 'managed';
+type SealedSkillDeleteTarget = Pick<SealedSkillMetadata, 'skillKey' | 'name'>;
 
-function SealedSkillCard({ skill, enabled, mutationLocked, onToggleSkill }: SealedSkillCardProps) {
+function SealedSkillCard({ skill, enabled, mutationLocked, uninstalling, cloudUploading, onToggleSkill, onUninstallSkill, onUploadToCloud }: SealedSkillCardProps) {
   const { t } = useTranslation('skills');
   const runtimeLabel = skill.runtimes?.length ? skill.runtimes.join(', ') : t('sealed.runtimeAny');
 
   return (
     <AgentResourceCard className="gap-3 p-4">
-      <div className="flex min-w-0 items-center gap-3">
+      <div className="flex min-w-0 items-start gap-3">
         <AgentResourceIcon className={SKILL_CARD_ICON_CLASS_NAME}><Lock className="size-5" aria-hidden="true" /></AgentResourceIcon>
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <h3 className="truncate text-sm font-semibold">{skill.name || skill.skillKey}</h3>
           <p className="mt-1 truncate text-xs text-muted-foreground">{skill.skillKey}</p>
         </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+          disabled={mutationLocked || uninstalling}
+          aria-label={`${t('actions.uninstall')} ${skill.name || skill.skillKey}`}
+          onClick={() => onUninstallSkill(skill.skillKey)}
+        >
+          {uninstalling ? <RefreshCw className="size-4 animate-spin motion-reduce:animate-none" /> : <Trash2 className="size-4" />}
+        </Button>
       </div>
       <p className={SKILL_CARD_DESCRIPTION_CLASS_NAME}>{skill.description || t('sealed.noDescription')}</p>
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -955,17 +984,29 @@ function SealedSkillCard({ skill, enabled, mutationLocked, onToggleSkill }: Seal
         <span>{skill.installed === false ? t('sealed.packageAvailable') : t('sealed.packageInstalled')}</span>
         <span className="max-w-full truncate">{t('sealed.runtimeLabel', { runtime: runtimeLabel })}</span>
       </div>
-      <AgentResourceFooter>
+      <AgentResourceFooter className="flex-wrap">
         <span className={cn('inline-flex items-center gap-2', enabled && 'text-emerald-700 dark:text-emerald-400')}>
           <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />
           {enabled ? t('detail.enabled') : t('detail.disabled')}
         </span>
-        <Switch
-          checked={enabled}
-          onCheckedChange={(checked) => onToggleSkill(skill.skillKey, checked)}
-          disabled={mutationLocked}
-          aria-label={`${enabled ? t('detail.enabled') : t('detail.disabled')}: ${skill.name || skill.skillKey}`}
-        />
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 shrink-0 gap-2"
+            disabled={cloudUploading || uninstalling}
+            onClick={() => onUploadToCloud(skill.skillKey)}
+          >
+            {cloudUploading ? <RefreshCw className="size-3.5 animate-spin motion-reduce:animate-none" /> : <Upload className="size-3.5" />}
+            {t('sealed.uploadToCloud')}
+          </Button>
+          <Switch
+            checked={enabled}
+            onCheckedChange={(checked) => onToggleSkill(skill.skillKey, checked)}
+            disabled={mutationLocked || uninstalling}
+            aria-label={`${enabled ? t('detail.enabled') : t('detail.disabled')}: ${skill.name || skill.skillKey}`}
+          />
+        </div>
       </AgentResourceFooter>
     </AgentResourceCard>
   );
@@ -1001,39 +1042,20 @@ function SealedSkillCloudPackageCard({ packageInfo, installing, onInstall }: Sea
   );
 }
 
-function SealedSkillPackageUploadDialog({
+function LocalSkillPackageInstallDialog({
   open,
-  uploading,
-  selectedPackageName,
-  selectedPackagePath,
+  installing,
   onClose,
-  onChoosePackage,
-  onDropPackagePath,
-  onUpload,
-}: SealedSkillPackageUploadDialogProps) {
+  onInstall,
+}: LocalSkillPackageInstallDialogProps) {
   const { t } = useTranslation('skills');
-  const [dragActive, setDragActive] = useState(false);
 
   if (!open) {
     return null;
   }
 
   const handleClose = () => {
-    setDragActive(false);
     onClose();
-  };
-
-  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    setDragActive(false);
-    const droppedPath = Array.from(event.dataTransfer.files)
-      .map((file) => window.electron.getPathForFile(file))
-      .find((path): path is string => typeof path === 'string' && path.trim().length > 0 && path.endsWith('.matcha-skillpkg'));
-    if (!droppedPath) {
-      return;
-    }
-    onDropPackagePath(droppedPath);
   };
 
   return (
@@ -1044,68 +1066,31 @@ function SealedSkillPackageUploadDialog({
       >
         <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-4">
           <div>
-            <CardTitle className="text-xl">{t('sealed.uploadDialog.title')}</CardTitle>
+            <CardTitle className="text-xl">{t('sealed.installDialog.title')}</CardTitle>
           </div>
-          <Button variant="ghost" size="icon" onClick={handleClose} disabled={uploading}>
+          <Button variant="ghost" size="icon" onClick={handleClose} disabled={installing}>
             <X className="h-4 w-4" />
           </Button>
         </CardHeader>
 
         <CardContent className="space-y-5">
-          <div
-            role="button"
-            tabIndex={0}
-            className={cn(
-              'rounded-[1.25rem] border border-dashed px-6 py-8 text-center transition-colors',
-              dragActive
-                ? 'border-primary bg-primary/5'
-                : 'border-border/70 bg-muted/15 hover:border-primary/50 hover:bg-muted/30',
-            )}
-            onClick={onChoosePackage}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
-                onChoosePackage();
-              }
-            }}
-            onDragEnter={(event) => {
-              event.preventDefault();
-              setDragActive(true);
-            }}
-            onDragOver={(event) => {
-              event.preventDefault();
-              setDragActive(true);
-            }}
-            onDragLeave={(event) => {
-              event.preventDefault();
-              setDragActive(false);
-            }}
-            onDrop={handleDrop}
-          >
+          <div className="rounded-[1.25rem] border border-border/70 bg-muted/15 px-6 py-8 text-center">
             <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted/50 text-muted-foreground">
               <Upload className="h-5 w-5" />
             </div>
-            {selectedPackageName ? (
-              <div className="mt-4 space-y-1">
-                <p className="text-base font-medium text-foreground">{selectedPackageName}</p>
-                <p className="break-all text-xs text-muted-foreground">{selectedPackagePath}</p>
-                <p className="pt-1 text-sm text-muted-foreground">{t('sealed.uploadDialog.replace')}</p>
-              </div>
-            ) : (
-              <div className="mt-4 space-y-1">
-                <p className="text-base font-medium text-foreground">{t('sealed.uploadDialog.empty')}</p>
-                <p className="text-sm text-muted-foreground">{t('sealed.uploadDialog.hint')}</p>
-              </div>
-            )}
+            <div className="mt-4 space-y-1">
+              <p className="text-base font-medium text-foreground">{t('sealed.installDialog.empty')}</p>
+              <p className="text-sm text-muted-foreground">{t('sealed.installDialog.hint')}</p>
+            </div>
           </div>
 
           <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={onClose} disabled={uploading}>
+            <Button variant="outline" onClick={onClose} disabled={installing}>
               {t('common:actions.cancel', 'Cancel')}
             </Button>
-            <Button onClick={onUpload} disabled={!selectedPackagePath || uploading} className="gap-2">
-              {uploading ? <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Upload className="h-4 w-4" />}
-              {t('sealed.uploadDialog.confirm')}
+            <Button onClick={onInstall} disabled={installing} className="gap-2">
+              {installing ? <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Download className="h-4 w-4" />}
+              {t('sealed.installDialog.confirm')}
             </Button>
           </div>
         </CardContent>
@@ -1150,7 +1135,7 @@ const SkillGridCard = memo(function SkillGridCard({
   skillIcon,
   sourceLabel,
   isCore,
-  isBundled,
+  uninstallable,
   slug,
   version,
   enabled,
@@ -1178,15 +1163,15 @@ const SkillGridCard = memo(function SkillGridCard({
             </button>
             {isCore && <Lock className="size-3 shrink-0 text-muted-foreground" aria-label={t('detail.coreSystem')} />}
           </h3>
-          {slug && <p className="mt-1 truncate text-xs text-muted-foreground">{slug}</p>}
+          {slug && slug !== skillName && <p className="mt-1 truncate text-xs text-muted-foreground">{slug}</p>}
         </div>
-        {!isBundled && !isCore && (
+        {uninstallable && (
           <Button
             variant="ghost"
             size="icon"
             className="relative z-10 size-8 shrink-0 text-muted-foreground hover:text-destructive"
             aria-label={`${t('actions.uninstall')} ${skillName}`}
-            onClick={() => onUninstallSkill(skillId)}
+            onClick={() => onUninstallSkill(skillId, slug)}
           >
             <Trash2 className="size-4" />
           </Button>
@@ -1242,15 +1227,19 @@ export function Skills() {
   const cloudPackages = useSealedSkillsStore((state) => state.cloudPackages);
   const sealedSkillsLoading = useSealedSkillsStore((state) => state.loading);
   const sealedCloudLoading = useSealedSkillsStore((state) => state.cloudLoading);
-  const sealedCloudUploading = useSealedSkillsStore((state) => state.cloudUploading);
+  const localPackageInstalling = useSealedSkillsStore((state) => state.localPackageInstalling);
   const sealedSkillsError = useSealedSkillsStore((state) => state.error);
   const sealedCloudError = useSealedSkillsStore((state) => state.cloudError);
   const exportingBySkillKey = useSealedSkillsStore((state) => state.exportingBySkillKey);
+  const uninstallingBySkillKey = useSealedSkillsStore((state) => state.uninstallingBySkillKey);
+  const cloudUploadingBySkillKey = useSealedSkillsStore((state) => state.cloudUploadingBySkillKey);
   const cloudInstallingByPackageKey = useSealedSkillsStore((state) => state.cloudInstallingByPackageKey);
   const fetchSealedSkills = useSealedSkillsStore((state) => state.fetchSealedSkills);
   const fetchCloudSkillPackages = useSealedSkillsStore((state) => state.fetchCloudSkillPackages);
   const exportSkillPackage = useSealedSkillsStore((state) => state.exportSkillPackage);
-  const uploadLocalSkillPackageToCloud = useSealedSkillsStore((state) => state.uploadLocalSkillPackageToCloud);
+  const uninstallSealedSkill = useSealedSkillsStore((state) => state.uninstallSealedSkill);
+  const uploadInstalledSkillPackageToCloud = useSealedSkillsStore((state) => state.uploadInstalledSkillPackageToCloud);
+  const installLocalSkillPackage = useSealedSkillsStore((state) => state.installLocalSkillPackage);
   const downloadAndInstallCloudSkillPackage = useSealedSkillsStore((state) => state.downloadAndInstallCloudSkillPackage);
   const { t } = useTranslation('skills');
   const gatewayStatus = useGatewayStore((state) => state.status);
@@ -1268,8 +1257,8 @@ export function Skills() {
   const [localSkillDialogOpen, setLocalSkillDialogOpen] = useState(false);
   const [localSkillSourcePath, setLocalSkillSourcePath] = useState('');
   const [localSkillImporting, setLocalSkillImporting] = useState(false);
-  const [skillPackageUploadDialogOpen, setSkillPackageUploadDialogOpen] = useState(false);
-  const [skillPackagePath, setSkillPackagePath] = useState('');
+  const [localSkillPackageInstallDialogOpen, setLocalSkillPackageInstallDialogOpen] = useState(false);
+  const [sealedSkillToDelete, setSealedSkillToDelete] = useState<SealedSkillDeleteTarget | null>(null);
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [selectedMarketplaceSkill, setSelectedMarketplaceSkill] = useState<MarketplaceSkill | null>(null);
   const tabParam = searchParams.get('tab');
@@ -1438,8 +1427,8 @@ export function Skills() {
         skillIcon: skill.icon || '',
         sourceLabel: resolveSkillSourceLabel(skill, t),
         isCore: Boolean(skill.isCore),
-        isBundled: Boolean(skill.isBundled),
-        slug: skill.slug && skill.slug !== displayName ? skill.slug : undefined,
+        uninstallable: skill.uninstallable === true,
+        slug: skill.slug,
         version: skill.version,
         enabled: skill.enabled,
         configurable: Boolean(skill.configurable),
@@ -1481,6 +1470,20 @@ export function Skills() {
       toast.error(t('sealed.exportFailed') + ': ' + String(err));
     }
   }, [exportSkillPackage, t]);
+
+  const handleConfirmUninstallSealedSkill = useCallback(async () => {
+    if (!sealedSkillToDelete) {
+      return;
+    }
+    await uninstallSealedSkill(sealedSkillToDelete.skillKey);
+    setSealedSkillToDelete(null);
+    toast.success(t('toast.uninstalled'));
+  }, [sealedSkillToDelete, uninstallSealedSkill, t]);
+
+  const handleUninstallSealedSkillQuick = useCallback((skillId: string) => {
+    const skill = sealedSkills.find((entry) => entry.skillKey === skillId);
+    setSealedSkillToDelete({ skillKey: skillId, name: skill?.name || skillId });
+  }, [sealedSkills]);
 
   const bulkToggleVisible = useCallback(async (enable: boolean) => {
     const candidates = filteredSkills.filter((skill) => !skill.isCore && skill.enabled !== enable);
@@ -1584,22 +1587,14 @@ export function Skills() {
     return localSkillSourcePath.split(/[\\/]/).pop() || localSkillSourcePath;
   }, [localSkillSourcePath]);
 
-  const skillPackageName = useMemo(() => {
-    if (!skillPackagePath) {
-      return '';
-    }
-    return skillPackagePath.split(/[\\/]/).pop() || skillPackagePath;
-  }, [skillPackagePath]);
-
   const resetLocalSkillDialog = useCallback(() => {
     setLocalSkillDialogOpen(false);
     setLocalSkillSourcePath('');
     setLocalSkillImporting(false);
   }, []);
 
-  const resetSkillPackageUploadDialog = useCallback(() => {
-    setSkillPackageUploadDialogOpen(false);
-    setSkillPackagePath('');
+  const resetLocalSkillPackageInstallDialog = useCallback(() => {
+    setLocalSkillPackageInstallDialogOpen(false);
   }, []);
 
   const handleChooseLocalSkillSource = useCallback(async () => {
@@ -1671,38 +1666,31 @@ export function Skills() {
     }
   }, [enableSkill, fetchSkills, importLocalSkill, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, t]);
 
-  const handleChooseSkillPackage = useCallback(async () => {
-    try {
-      const result = await invokeIpc<{ canceled: boolean; filePaths?: string[] }>('dialog:open', {
-        properties: ['openFile'],
-        filters: [
-          {
-            name: t('sealed.uploadDialog.packageFilter'),
-            extensions: ['matcha-skillpkg'],
-          },
-        ],
-      });
-      if (result.canceled || !result.filePaths?.length) {
-        return;
-      }
-      setSkillPackagePath(result.filePaths[0]);
-    } catch (error) {
-      toast.error(t('sealed.uploadFailed') + ': ' + String(error));
-    }
-  }, [t]);
-
-  const handleUploadSkillPackageToCloud = useCallback(async () => {
-    if (!skillPackagePath.trim() || sealedCloudUploading) {
+  const handleInstallLocalSkillPackage = useCallback(async () => {
+    if (localPackageInstalling) {
       return;
     }
     try {
-      await uploadLocalSkillPackageToCloud(skillPackagePath);
+      const installed = await installLocalSkillPackage();
+      if (!installed) {
+        return;
+      }
+      toast.success(t('sealed.installedLocal'));
+      resetLocalSkillPackageInstallDialog();
+      await fetchSkills({ force: true, fresh: true });
+    } catch (error) {
+      toast.error(t('sealed.installLocalFailed') + ': ' + String(error));
+    }
+  }, [fetchSkills, installLocalSkillPackage, localPackageInstalling, resetLocalSkillPackageInstallDialog, t]);
+
+  const handleUploadInstalledSkillPackageToCloud = useCallback(async (skillKey: string) => {
+    try {
+      await uploadInstalledSkillPackageToCloud(skillKey);
       toast.success(t('sealed.uploaded'));
-      resetSkillPackageUploadDialog();
     } catch (error) {
       toast.error(t('sealed.uploadFailed') + ': ' + String(error));
     }
-  }, [resetSkillPackageUploadDialog, sealedCloudUploading, skillPackagePath, t, uploadLocalSkillPackageToCloud]);
+  }, [t, uploadInstalledSkillPackageToCloud]);
 
   const handleInstallCloudSkillPackage = useCallback(async (packageInfo: SealedSkillCloudPackage) => {
     try {
@@ -1788,8 +1776,8 @@ export function Skills() {
     }
   }, [uninstallSkill, t]);
 
-  const handleUninstallSkillQuick = useCallback((skillKey: string) => {
-    void handleUninstall(skillKey);
+  const handleUninstallSkillQuick = useCallback((skillKey: string, slug?: string) => {
+    void handleUninstall(skillKey, slug);
   }, [handleUninstall]);
 
   const selectedInstalledMarketplaceSkill = useMemo(() => {
@@ -1972,11 +1960,11 @@ export function Skills() {
                 type="button"
                 variant="outline"
                 className="gap-2"
-                disabled={sealedCloudUploading}
-                onClick={() => setSkillPackageUploadDialogOpen(true)}
+                disabled={localPackageInstalling}
+                onClick={() => setLocalSkillPackageInstallDialogOpen(true)}
               >
-                {sealedCloudUploading ? <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Upload className="h-4 w-4" />}
-                {t('sealed.uploadLocalPackage')}
+                {localPackageInstalling ? <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Download className="h-4 w-4" />}
+                {t('sealed.installLocalPackage')}
               </Button>
             </AgentPageToolbar>
 
@@ -2008,9 +1996,13 @@ export function Skills() {
                   <SealedSkillCard
                     key={skill.skillKey}
                     skill={skill}
-                    enabled={skillById.get(skill.skillKey)?.enabled ?? skill.enabled !== false}
+                    enabled={skillById.get(skill.skillKey)?.enabled ?? false}
                     mutationLocked={Boolean(mutatingBySkillId[skill.skillKey])}
+                    uninstalling={Boolean(uninstallingBySkillKey[skill.skillKey])}
+                    cloudUploading={Boolean(cloudUploadingBySkillKey[skill.skillKey])}
                     onToggleSkill={handleToggleSkillQuick}
+                    onUninstallSkill={handleUninstallSealedSkillQuick}
+                    onUploadToCloud={handleUploadInstalledSkillPackageToCloud}
                   />
                 ))}
               </AgentResourceGrid>
@@ -2152,6 +2144,7 @@ export function Skills() {
                       skill={skill}
                       isInstalling={Boolean(installing[skill.slug] || installing[installedSkill?.id ?? ''])}
                       isInstalled={installedSkill !== undefined}
+                      canUninstall={installedSkill?.uninstallable === true}
                       mutationLocked={false}
                       onOpenDetail={() => setSelectedMarketplaceSkill(skill)}
                       onInstall={() => handleInstall(skill.slug)}
@@ -2218,6 +2211,7 @@ export function Skills() {
           skill={selectedMarketplaceSkill}
           isInstalled={selectedMarketplaceInstalled}
           isInstalling={selectedMarketplaceInstalling}
+          canUninstall={selectedInstalledMarketplaceSkill?.uninstallable === true}
           mutationLocked={false}
           onInstall={() => { void handleInstall(selectedMarketplaceSkill.slug); }}
           onUninstall={() => { void handleUninstall(selectedInstalledMarketplaceSkill?.id ?? selectedMarketplaceSkill.slug, selectedMarketplaceSkill.slug); }}
@@ -2240,19 +2234,29 @@ export function Skills() {
         onImport={() => { void handleImportLocalSkill(); }}
       />
 
-      <SealedSkillPackageUploadDialog
-        open={skillPackageUploadDialogOpen}
-        uploading={sealedCloudUploading}
-        selectedPackageName={skillPackageName}
-        selectedPackagePath={skillPackagePath}
+      <LocalSkillPackageInstallDialog
+        open={localSkillPackageInstallDialogOpen}
+        installing={localPackageInstalling}
         onClose={() => {
-          if (!sealedCloudUploading) {
-            resetSkillPackageUploadDialog();
+          if (!localPackageInstalling) {
+            resetLocalSkillPackageInstallDialog();
           }
         }}
-        onChoosePackage={() => { void handleChooseSkillPackage(); }}
-        onDropPackagePath={setSkillPackagePath}
-        onUpload={() => { void handleUploadSkillPackageToCloud(); }}
+        onInstall={() => { void handleInstallLocalSkillPackage(); }}
+      />
+
+      <ConfirmDialog
+        open={sealedSkillToDelete !== null}
+        title={t('sealed.uninstallConfirmTitle')}
+        message={t('sealed.uninstallConfirmMessage', { name: sealedSkillToDelete?.name || sealedSkillToDelete?.skillKey || '' })}
+        confirmLabel={t('actions.uninstall')}
+        cancelLabel={t('common:actions.cancel')}
+        variant="destructive"
+        onConfirm={handleConfirmUninstallSealedSkill}
+        onCancel={() => setSealedSkillToDelete(null)}
+        onError={(error) => {
+          toast.error(t('toast.failedUninstall') + ': ' + String(error));
+        }}
       />
     </AgentPage>
   );

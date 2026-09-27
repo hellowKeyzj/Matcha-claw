@@ -62,9 +62,9 @@ pub(crate) async fn handle_loopback(
 
 fn project_outcome(outcome: crate::TeamRuntimeControlOutcome) -> Response {
     match outcome {
-        crate::TeamRuntimeControlOutcome::Succeeded(result) => Response::json(200, result),
-        crate::TeamRuntimeControlOutcome::Unknown(_)
-        | crate::TeamRuntimeControlOutcome::Unavailable => unavailable(),
+        crate::TeamRuntimeControlOutcome::Succeeded(result)
+        | crate::TeamRuntimeControlOutcome::Unknown(result) => Response::json(200, result),
+        crate::TeamRuntimeControlOutcome::Unavailable => unavailable(),
         crate::TeamRuntimeControlOutcome::InvalidInput => invalid_request(),
         crate::TeamRuntimeControlOutcome::Failed(message) => failed(message),
     }

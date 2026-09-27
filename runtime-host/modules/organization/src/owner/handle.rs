@@ -39,6 +39,7 @@ use crate::{
 
 use super::{
     OrganizationCommand, OrganizationQuery,
+    coordinator::{TeamRunWake, TeamRunWakeReason},
     team_run::{
         ArmedTrigger, ManualTeamCreateOutcome, TeamDeleteOutcome,
         TeamMaterializationCommandOutcome, TeamNodeTerminalResolution, TeamNodeTerminalResult,
@@ -50,20 +51,26 @@ use super::{
 #[derive(Clone)]
 pub struct OrganizationHandle {
     inner: OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>,
-    schedule_changes: tokio::sync::watch::Sender<()>,
+    schedule_changes: tokio::sync::watch::Sender<TeamRunWake>,
 }
 
 impl OrganizationHandle {
     pub fn new(inner: OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>) -> Self {
-        let (schedule_changes, _) = tokio::sync::watch::channel(());
+        let (schedule_changes, _) =
+            tokio::sync::watch::channel(TeamRunWake::new(TeamRunWakeReason::GraphChanged, None));
         Self {
             inner,
             schedule_changes,
         }
     }
 
-    pub fn subscribe_schedule_changes(&self) -> tokio::sync::watch::Receiver<()> {
+    pub fn subscribe_schedule_changes(&self) -> tokio::sync::watch::Receiver<TeamRunWake> {
         self.schedule_changes.subscribe()
+    }
+
+    fn publish_team_run_wake(&self, reason: TeamRunWakeReason, run_id: Option<GraphRunId>) {
+        self.schedule_changes
+            .send_replace(TeamRunWake::new(reason, run_id));
     }
 
     pub async fn execute_team_runtime(
@@ -248,6 +255,7 @@ impl OrganizationHandle {
         template_revision: u64,
         created_at: u64,
     ) -> Result<Result<CreateGraphRunOutcome, StoreFault>, RequestAdmissionClosed> {
+        let wake_run_id = run_id.clone();
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::RunCreate {
@@ -264,7 +272,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::RunStarted, Some(wake_run_id));
         }
         Ok(outcome)
     }
@@ -276,6 +284,7 @@ impl OrganizationHandle {
         idempotency_key: IdempotencyKey,
         created_at: u64,
     ) -> Result<Result<CreateGraphRunOutcome, TeamRuntimeStatus>, RequestAdmissionClosed> {
+        let wake_run_id = run_id.clone();
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::RunCreateFromTeamTemplate {
@@ -289,7 +298,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::RunStarted, Some(wake_run_id));
         }
         Ok(outcome)
     }
@@ -382,7 +391,8 @@ impl OrganizationHandle {
 
     pub async fn role_session_receipts(
         &self,
-    ) -> Result<Result<Vec<organization::RoleSessionReceipt>, StoreFault>, RequestAdmissionClosed> {
+    ) -> Result<Result<Vec<organization::RoleSessionReceipt>, StoreFault>, RequestAdmissionClosed>
+    {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_query(OrganizationQuery::RoleSessionReceipts { reply })
@@ -440,6 +450,7 @@ impl OrganizationHandle {
         proposal_id: String,
     ) -> Result<Result<organization::ConfirmRunStartOutcome, StoreFault>, RequestAdmissionClosed>
     {
+        let wake_run_id = run_id.clone();
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::RunStartConfirm {
@@ -451,7 +462,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::RunStarted, Some(wake_run_id));
         }
         Ok(outcome)
     }
@@ -564,6 +575,7 @@ impl OrganizationHandle {
         request: TriggerFireRequest,
         fired_at: u64,
     ) -> Result<Result<TeamRunTriggerOutcome, StoreFault>, RequestAdmissionClosed> {
+        let wake_run_id = GraphRunId::new(request.run_id.clone());
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::TriggerFire {
@@ -575,7 +587,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::TriggerFired, Some(wake_run_id));
         }
         Ok(outcome)
     }
@@ -598,7 +610,14 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            let run_id = match &outcome {
+                Ok(TeamTriggerFireOutcome::Recorded(request))
+                | Ok(TeamTriggerFireOutcome::Replayed(request)) => {
+                    Some(GraphRunId::new(request.trigger.run_id.clone()))
+                }
+                _ => None,
+            };
+            self.publish_team_run_wake(TeamRunWakeReason::TriggerFired, run_id);
         }
         Ok(outcome)
     }
@@ -608,6 +627,7 @@ impl OrganizationHandle {
         command: RunCommand,
         definition: GraphDefinition,
     ) -> Result<Result<TeamRunCommandOutcome, StoreFault>, RequestAdmissionClosed> {
+        let wake_run_id = GraphRunId::new(command.run_id().as_str().to_owned());
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::GraphSave {
@@ -619,7 +639,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::GraphChanged, Some(wake_run_id));
         }
         Ok(outcome)
     }
@@ -635,7 +655,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::GraphChanged, None);
         }
         Ok(outcome)
     }
@@ -686,6 +706,7 @@ impl OrganizationHandle {
         command: RunCommand,
         event: TeamNodeEvent,
     ) -> Result<Result<TeamNodeEventOutcome, StoreFault>, RequestAdmissionClosed> {
+        let wake_run_id = GraphRunId::new(command.run_id().as_str().to_owned());
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::NodeEvent {
@@ -697,7 +718,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::NodeEventRecorded, Some(wake_run_id));
         }
         Ok(outcome)
     }
@@ -725,6 +746,7 @@ impl OrganizationHandle {
         idempotency_key: String,
         resolved_at: u64,
     ) -> Result<Result<TeamNodeTerminalResult, StoreFault>, RequestAdmissionClosed> {
+        let wake_run_id = run_id.clone();
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::NodeTerminalResolve {
@@ -742,7 +764,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::TerminalSettled, Some(wake_run_id));
         }
         Ok(outcome)
     }
@@ -751,6 +773,7 @@ impl OrganizationHandle {
         &self,
         command: HumanDecisionCommand,
     ) -> Result<Result<HumanDecisionOutcome, StoreFault>, RequestAdmissionClosed> {
+        let wake_run_id = command.run_id().clone();
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::ApprovalResolve { command, reply })
@@ -758,7 +781,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::ApprovalResolved, Some(wake_run_id));
         }
         Ok(outcome)
     }
@@ -767,6 +790,7 @@ impl OrganizationHandle {
         &self,
         command: TeamDecisionCommand,
     ) -> Result<Result<TeamDecisionReceipt, StoreFault>, RequestAdmissionClosed> {
+        let wake_run_id = GraphRunId::new(command.run_id().to_owned());
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::DecisionSubmit { command, reply })
@@ -774,7 +798,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::DecisionSubmitted, Some(wake_run_id));
         }
         Ok(outcome)
     }
@@ -963,7 +987,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::TerminalSettled, None);
         }
         Ok(outcome)
     }
@@ -996,7 +1020,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(TeamRunWakeReason::RepairRejected, None);
         }
         Ok(outcome)
     }
@@ -1008,6 +1032,12 @@ impl OrganizationHandle {
         settled: NativeRunSettled,
         settled_at: u64,
     ) -> Result<Result<TeamNodeTerminalResult, StoreFault>, RequestAdmissionClosed> {
+        let wake_run_id = run_id.clone();
+        let wake_reason = if settled.status == organization::NativeTerminalStatus::Cancelled {
+            TeamRunWakeReason::RunCancelled
+        } else {
+            TeamRunWakeReason::NativeRunSettled
+        };
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::NativeRunSettled {
@@ -1021,7 +1051,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
-            self.schedule_changes.send_replace(());
+            self.publish_team_run_wake(wake_reason, Some(wake_run_id));
         }
         Ok(outcome)
     }

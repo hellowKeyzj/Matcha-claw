@@ -26,7 +26,7 @@
     },
     "input": {
         "gatewayDisconnectedPlaceholder": "ゲートウェイ未接続...",
-        "messagePlaceholder": "メッセージ（/ でスキル候補、Enter 送信、Shift+Enter 改行）",
+        "messagePlaceholder": "メッセージ、/ でスキル、Enter 送信、Shift+Enter 改行",
         "approvalWaitingPlaceholder": "承認待ちです...",
         "pickModel": "モデルを選択",
         "modelPickerTitle": "モデルを切り替え",
@@ -221,45 +221,5 @@
         "withinTwoWeeks": "2週間以内",
         "withinMonth": "1か月以内",
         "older": "1か月より前"
-    },
-    "taskInbox": {
-        "title": "タスク受信箱",
-        "shortTitle": "タスク",
-        "unfinishedCount": "未完了タスク {{count}} 件",
-        "refresh": "タスクを更新",
-        "workspaceScope": "対象: {{scope}}",
-        "gatewayPreparing": "ゲートウェイを起動中です。タスク一覧はまもなく利用できます",
-        "gatewayStopped": "ゲートウェイ停止中のため、タスク一覧と再開操作は利用できません",
-        "empty": "現在のワークスペースに未完了タスクはありません",
-        "unboundSession": "セッション未紐付けです。先にタスクを再開してください",
-        "taskNotFound": "タスクが見つからないか更新されています。再読み込みしてください",
-        "untitledTask": "無題タスク",
-        "assignedSessionReady": "セッション紐付け済み",
-        "assignedSessionMissing": "セッション未紐付け",
-        "openSession": "セッションを開く",
-        "inputPlaceholder": "補足情報を入力してください",
-        "submitInput": "入力を送信",
-        "reject": "却下",
-        "approve": "承認",
-        "collapse": "タスク受信箱を折りたたむ",
-        "expand": "タスク受信箱を展開",
-        "status": {
-            "pending": "保留",
-            "in_progress": "進行中",
-            "running": "実行中",
-            "waiting_for_input": "入力待ち",
-            "waiting_approval": "承認待ち",
-            "completed": "完了",
-            "deleted": "削除済み",
-            "failed": "失敗"
-        },
-        "planStatus": {
-            "finished": "完了",
-            "building": "進行中",
-            "ready": "確認待ち"
-        },
-        "toast": {
-            "resumed": "タスクを再開しました"
-        }
     }
 }

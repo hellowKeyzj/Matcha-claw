@@ -1680,7 +1680,9 @@ fn graph_projection(facts: &OrganizationFacts, graph: &GraphState) -> TeamPublic
             if observation.graph_run_id() != definition.run_id().as_str()
                 || observation.native_terminal() != NativeTerminalStatus::Completed
                 || resolution.outcome() != AuthorizedGraphOutcome::Failed
-                || !observation.output().is_some_and(|output| output.decision() == "rework")
+                || !observation
+                    .output()
+                    .is_some_and(|output| output.decision() == "rework")
             {
                 return None;
             }

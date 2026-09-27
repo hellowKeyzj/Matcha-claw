@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { Check, Plus, RefreshCw, Search, X } from 'lucide-react';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { Badge } from '@/components/ui/badge';
@@ -520,6 +521,25 @@ export function TeamsPage() {
     }
   };
 
+  const handleDeleteTeam = async (teamId: string) => {
+    try {
+      const result = await deleteTeam(teamId);
+      if (result.state === 'outcome_unknown') {
+        toast.warning(t('deleteToast.cleanupUnknownTitle'), {
+          description: t('deleteToast.cleanupUnknownDescription'),
+          duration: 8000,
+        });
+        return;
+      }
+      toast.success(t('deleteToast.deletedTitle'), {
+        description: t('deleteToast.deletedDescription'),
+        duration: 4000,
+      });
+    } catch {
+      // Store keeps the team visible and records the per-team error.
+    }
+  };
+
   const primaryButtonLabel = createSourceType === 'manual'
     ? creatingManual ? t('create.creatingButton') : t('create.createButton')
     : review?.creationPlan.action === 'open_existing'
@@ -536,11 +556,11 @@ export function TeamsPage() {
       || (review.creationPlan.action === 'replace_required' && !replacementConfirmed);
 
   return (
-    <section className="space-y-6">
+    <section className="space-y-6 text-foreground">
       <header className="flex items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-[-0.02em]">{t('title')}</h1>
-          {subtitle ? <p className="text-sm text-muted-foreground">{subtitle}</p> : null}
+          <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t('title')}</h1>
+          {subtitle ? <p className="text-sm text-[hsl(var(--shell-text-muted))]">{subtitle}</p> : null}
         </div>
         {!createDialogOpen ? (
           <Button onClick={() => setCreateDialogOpen(true)}>
@@ -549,35 +569,35 @@ export function TeamsPage() {
         ) : null}
       </header>
 
-      <Card className="overflow-hidden border-border/70 bg-[linear-gradient(135deg,hsl(var(--card))_0%,hsl(var(--muted))_100%)]">
+      <Card className="overflow-hidden bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
         <CardContent className="grid gap-5 p-6 md:grid-cols-[1.2fr_0.8fr] md:items-center">
           <div className="space-y-3">
             <Badge variant="outline" className="w-fit">{t('overview.badge')}</Badge>
             <div className="space-y-2">
               <h2 className="text-xl font-semibold tracking-[-0.02em]">{t('overview.title')}</h2>
-              <p className="max-w-2xl text-sm leading-6 text-muted-foreground">{t('overview.description')}</p>
+              <p className="max-w-2xl text-sm leading-6 text-[hsl(var(--shell-text-muted))]">{t('overview.description')}</p>
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-2 rounded-2xl border border-border/70 bg-background/60 p-2 text-center shadow-whisper">
-            <div className="rounded-xl bg-card px-3 py-3">
+          <div className="grid grid-cols-2 gap-2 rounded-2xl border bg-[hsl(var(--shell-surface))] p-2 text-center [border-color:hsl(var(--shell-border))]">
+            <div className="rounded-xl bg-[hsl(var(--shell-surface-muted))] px-3 py-3">
               <div className="text-lg font-semibold">{teams.length}</div>
-              <div className="text-[11px] text-muted-foreground">{t('create.metricTeams')}</div>
+              <div className="text-[11px] text-[hsl(var(--shell-text-muted))]">{t('create.metricTeams')}</div>
             </div>
-            <div className="rounded-xl bg-card px-3 py-3">
+            <div className="rounded-xl bg-[hsl(var(--shell-surface-muted))] px-3 py-3">
               <div className="text-lg font-semibold">{provisionedRoleCount}</div>
-              <div className="text-[11px] text-muted-foreground">{t('create.metricRoles')}</div>
+              <div className="text-[11px] text-[hsl(var(--shell-text-muted))]">{t('create.metricRoles')}</div>
             </div>
           </div>
         </CardContent>
       </Card>
 
       {createDialogOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6" role="presentation">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[hsl(var(--shell-scrim))] p-6" role="presentation">
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="team-create-title"
-            className="relative flex h-[min(760px,calc(100dvh-3rem))] w-full max-w-5xl flex-col overflow-hidden rounded-[1.25rem] border border-border bg-card text-card-foreground shadow-elevated"
+            className="relative flex h-[min(760px,calc(100dvh-3rem))] w-full max-w-5xl flex-col overflow-hidden rounded-[1.25rem] border bg-[hsl(var(--shell-surface))] text-card-foreground shadow-[var(--shell-shadow-overlay)] [border-color:hsl(var(--shell-border))]"
           >
             <Button
               type="button"
@@ -591,9 +611,9 @@ export function TeamsPage() {
               <span className="sr-only">{t('create.cancelButton')}</span>
             </Button>
 
-            <div className="border-b border-border bg-muted/25 p-6 pr-14">
+            <div className="border-b bg-[hsl(var(--shell-surface-muted))] p-6 pr-14 [border-color:hsl(var(--shell-border))]">
               <h2 id="team-create-title" className="text-xl font-semibold tracking-[-0.02em]">{t('create.modalTitle')}</h2>
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">{t('create.modalDescription')}</p>
+              <p className="mt-2 text-sm leading-6 text-[hsl(var(--shell-text-muted))]">{t('create.modalDescription')}</p>
             </div>
 
             <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-hidden p-6">
@@ -968,7 +988,7 @@ export function TeamsPage() {
                           size="sm"
                           variant="outline"
                           disabled={!gatewayOperational || deletingTeam}
-                          onClick={() => void deleteTeam(team.id).catch(() => undefined)}
+                          onClick={() => void handleDeleteTeam(team.id)}
                         >
                           {t('list.delete')}
                         </Button>

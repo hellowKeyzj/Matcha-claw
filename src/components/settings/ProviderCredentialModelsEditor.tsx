@@ -383,8 +383,8 @@ function ProviderCredentialModelsEditorInner(props: {
   };
 
   return (
-    <section className="overflow-hidden rounded-lg border border-border/80 bg-background">
-      <div className={cn('flex flex-wrap items-center justify-between gap-2 bg-muted px-3 py-2.5', open && 'border-b border-border/70')}>
+    <section className="overflow-hidden rounded-[1rem] border bg-[hsl(var(--shell-surface))] [border-color:hsl(var(--shell-border))]">
+      <div className={cn('flex flex-wrap items-center justify-between gap-2 bg-[hsl(var(--shell-surface-muted))] px-3 py-2.5', open && 'border-b [border-color:hsl(var(--shell-border))]')}>
         <button
           type="button"
           className="flex items-center gap-2 text-left"
@@ -444,7 +444,7 @@ function ProviderCredentialModelsEditorInner(props: {
           ) : rows.length === 0 ? (
             <p className="px-3 py-4 text-xs text-muted-foreground">{t('providerModels.group.empty')}</p>
           ) : (
-            <StableScrollArea className="max-h-[360px] overflow-y-auto overscroll-contain bg-background [scrollbar-gutter:stable]">
+            <StableScrollArea className="max-h-[360px] overflow-y-auto overscroll-contain bg-[hsl(var(--shell-surface))] [scrollbar-gutter:stable]">
               {rows.map((row, index) => (
                 <ProviderModelDraftRow
                   key={`${credential.id}-${index}`}
@@ -469,7 +469,7 @@ function ProviderCredentialModelsEditorInner(props: {
             <p className="border-t border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">{warning}</p>
           ) : null}
           {dirty ? (
-            <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-2 border-t border-border/70 bg-background px-3 py-2">
+            <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-2 border-t bg-[hsl(var(--shell-surface))] px-3 py-2 [border-color:hsl(var(--shell-border))]">
               <span className="text-xs font-medium text-muted-foreground">
                 {t('providerModels.pending.summary', { count: pendingChangeCount })}
               </span>

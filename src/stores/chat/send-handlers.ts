@@ -3,6 +3,7 @@ import { hasActiveStreamingRun } from './runtime-stream-state';
 import type { StoreSessionRunCache } from './session-run-cache';
 import {
   CHAT_SEND_RPC_TIMEOUT_MS,
+  resolveChatSendTransportPayload,
   sendChatTransport,
 } from './send-transport';
 import { selectCurrentChatSendGate } from './selectors';
@@ -32,7 +33,7 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
-import type { ChatSendAttachment, ChatSendResult, ChatSessionRuntimeState, ChatStoreState } from './types';
+import { CHAT_INLINE_ATTACHMENT_MAX_BYTES, type ChatSendAttachment, type ChatSendResult, type ChatSessionRuntimeState, type ChatStoreState } from './types';
 import { isRunActive, isWaitingTool } from './types';
 import type {
   SessionAssistantTurnItem,
@@ -203,13 +204,14 @@ function isDirectoryAttachment(attachment: ChatSendAttachment): boolean {
   return attachment.entryKind === 'directory' || attachment.mimeType === 'application/x-directory';
 }
 
-function materializableAttachments(attachments: ChatSendAttachment[] | undefined): ChatSendAttachment[] | undefined {
-  const materializable = attachments?.filter((attachment) => !isDirectoryAttachment(attachment));
-  return materializable && materializable.length > 0 ? materializable : undefined;
+function readableAttachments(attachments: ChatSendAttachment[] | undefined): ChatSendAttachment[] | undefined {
+  const readable = attachments?.filter((attachment) => !isDirectoryAttachment(attachment)
+    && (attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES || Boolean(attachment.sourcePath)));
+  return readable && readable.length > 0 ? readable : undefined;
 }
 
 function attachmentReselectionRequired(attachments: ChatSendAttachment[] | undefined): true | undefined {
-  return materializableAttachments(attachments) ? true : undefined;
+  return readableAttachments(attachments)?.some((attachment) => attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES) ? true : undefined;
 }
 
 function cachedAttachmentReceiptFiles(attachments: ChatSendAttachment[]) {
@@ -458,8 +460,9 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   } = params;
   const trimmed = text.trim();
   const traceId = createSessionTraceId('send-boundary');
-  const attachmentsToMaterialize = materializableAttachments(attachments);
-  const attachmentCount = attachmentsToMaterialize?.length ?? 0;
+  const readableSendAttachments = readableAttachments(attachments);
+  const attachmentCount = readableSendAttachments?.length ?? 0;
+  const transportPayload = resolveChatSendTransportPayload(trimmed, readableSendAttachments ?? []);
   const stateBeforeSend = get();
   const gate = resolveChatSendGateForPayload(selectCurrentChatSendGate(stateBeforeSend), {
     text,
@@ -512,7 +515,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     set,
     sessionKey: currentSessionKey,
     clientId: clientMessageId,
-    text: trimmed,
+    text: transportPayload.message,
     attachments,
     createdAt: nowMs,
   });
@@ -526,16 +529,16 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
 
   beginMutating();
   try {
-    if (attachmentsToMaterialize) {
-      cacheSendAttachments(attachmentsToMaterialize);
+    if (readableSendAttachments) {
+      cacheSendAttachments(readableSendAttachments);
     }
 
     const sendResult = await sendChatTransport({
       endpointSessionId,
       sessionIdentity,
-      message: trimmed,
+      message: transportPayload.message,
       idempotencyKey: clientMessageId,
-      attachments: attachmentsToMaterialize,
+      attachments: transportPayload.attachments,
       timeoutMs: CHAT_SEND_RPC_TIMEOUT_MS,
       traceId,
     });

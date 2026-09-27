@@ -31,14 +31,15 @@
     "exportSuccess": "Agent config exported.",
     "exportPackageSuccess": "Agent package exported: {{fileName}}",
     "uploadPackageSuccess": "Agent package uploaded: {{fileName}}",
-    "downloadPackageSuccess": "Agent package downloaded: {{fileName}}",
     "installPackageSuccess": "Agent package installed: {{agentId}}",
     "importFailed": "Failed to import agent config: {{message}}",
     "exportFailed": "Failed to export agent config: {{message}}",
     "exportPackageFailed": "Failed to export agent package: {{message}}",
     "uploadPackageFailed": "Failed to upload agent package: {{message}}",
-    "downloadPackageFailed": "Failed to download agent package: {{message}}",
-    "installPackageFailed": "Failed to install agent package: {{message}}"
+    "installPackageFailed": "Failed to install agent package: {{message}}",
+    "installPackageUnknownOutcome": "A local sealed Agent copy already exists. Refresh the Agent list; if it still does not appear, delete the same-name Agent and install again.",
+    "installPackageRejected": "Agent package cannot be installed. Make sure this device still has the encryption key used to export the package.",
+    "installPackageUnexpectedResult": "Agent package install result is unknown. Refresh the Agent list to confirm whether it was installed."
   },
   "status": {
     "refreshing": "Refreshing...",
@@ -184,17 +185,19 @@
       "pluginBadge": "Plugin",
       "toolCount": "{{count}} tools",
       "profileDefault": "Profile default",
-      "effectiveTools": "Effective tools",
+      "configPreview": "Config preview",
+      "globalDeny": "Global deny",
       "explicitRules": "Explicit rules",
       "policyDefault": "Default",
       "inheritToolsHint": "This agent is inheriting default tools. Switch to explicit configuration to adjust individual tools or whole groups.",
-      "toolProfileSummary": "{{profile}}: {{enabled}}/{{total}} enabled now; {{defaultEnabled}} by profile, {{overrides}} explicit rules",
+      "toolProfileSummary": "{{profile}}: config preview {{enabled}}/{{total}}; profile {{defaultEnabled}}, global deny {{globalDeny}}, explicit rules {{overrides}}",
       "groupSummary": "{{enabled}}/{{total}} enabled · {{rules}} explicit rules",
       "toolStates": {
         "enabledByProfile": "Profile on",
         "disabledByProfile": "Profile off",
         "allowedByOverride": "Allowed",
-        "deniedByOverride": "Denied"
+        "deniedByOverride": "Denied",
+        "deniedByGlobalPolicy": "Globally denied"
       },
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "This runtime does not support agent skill configuration.",
@@ -206,7 +209,6 @@
   "cloudPackages": {
     "title": "Cloud Agent Packages",
     "empty": "No cloud agent packages.",
-    "download": "Download",
     "install": "Install"
   },
   "card": {

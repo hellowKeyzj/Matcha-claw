@@ -422,9 +422,10 @@ impl ChannelConfigOperation {
             let agent_id = project_account_binding(&document, &channel, &account_id);
             zeroize_value(&mut document);
             match values {
-                Ok(values) => {
-                    ChannelConfigReadEffect::Values(ChannelConfigReadProjection { values, agent_id })
-                }
+                Ok(values) => ChannelConfigReadEffect::Values(ChannelConfigReadProjection {
+                    values,
+                    agent_id,
+                }),
                 Err(()) => ChannelConfigReadEffect::OutcomeUnknown,
             }
         }

@@ -59,7 +59,6 @@ export interface SubagentImportResult {
 export interface SubagentPackageExportResult {
   agentId: string;
   fileName: string;
-  packagePath: string;
   size: number;
   exportedAtMs: number;
 }

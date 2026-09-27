@@ -33,9 +33,21 @@
     --shadow-whisper: 0 3px 6px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.07);
     --shadow-elevated: 0 10px 20px rgba(0, 0, 0, 0.1), 0 3px 6px rgba(0, 0, 0, 0.05);
     --shadow-focus: 0 0 0 3px rgba(13, 116, 206, 0.18);
-    --divider-line: rgb(224 225 230 / 0.45);
-    --divider-line-strong: rgb(224 225 230 / 0.65);
-    --divider-line-hover: rgb(28 32 36 / 0.24);
+    --shell-window: 220 18% 96%;
+    --shell-surface: 0 0% 100%;
+    --shell-surface-muted: 220 20% 98%;
+    --shell-surface-hover: 220 17% 95%;
+    --shell-surface-active: 220 14% 92%;
+    --shell-border: 220 13% 88%;
+    --shell-border-strong: 220 10% 78%;
+    --shell-icon: 220 7% 42%;
+    --shell-icon-active: 220 13% 15%;
+    --shell-text-muted: 220 7% 38%;
+    --shell-shadow-overlay: 0 22px 60px rgb(15 23 42 / 0.18), 0 8px 22px rgb(15 23 42 / 0.10);
+    --shell-scrim: 220 13% 15% / 0.42;
+    --divider-line: rgb(218 220 226 / 0.48);
+    --divider-line-strong: rgb(218 220 226 / 0.68);
+    --divider-line-hover: rgb(28 32 36 / 0.22);
     --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
@@ -63,8 +75,20 @@
     --shadow-whisper: 0 12px 24px rgba(0, 0, 0, 0.28), 0 3px 8px rgba(0, 0, 0, 0.22);
     --shadow-elevated: 0 18px 34px rgba(0, 0, 0, 0.32), 0 8px 16px rgba(0, 0, 0, 0.2);
     --shadow-focus: 0 0 0 3px rgba(71, 108, 255, 0.2);
-    --divider-line: rgb(54 58 63 / 0.65);
-    --divider-line-strong: rgb(54 58 63 / 0.82);
+    --shell-window: 220 5% 10%;
+    --shell-surface: 220 4% 12%;
+    --shell-surface-muted: 220 5% 14%;
+    --shell-surface-hover: 220 5% 17%;
+    --shell-surface-active: 220 6% 20%;
+    --shell-border: 220 6% 22%;
+    --shell-border-strong: 220 6% 28%;
+    --shell-icon: 220 6% 70%;
+    --shell-icon-active: 220 18% 94%;
+    --shell-text-muted: 220 7% 70%;
+    --shell-shadow-overlay: 0 24px 70px rgb(0 0 0 / 0.44), 0 10px 30px rgb(0 0 0 / 0.30);
+    --shell-scrim: 0 0% 0% / 0.58;
+    --divider-line: rgb(58 61 67 / 0.62);
+    --divider-line-strong: rgb(68 72 79 / 0.78);
     --divider-line-hover: rgb(240 240 243 / 0.18);
     color-scheme: dark;
   }
@@ -114,12 +138,6 @@
   ::selection {
     background-color: hsl(var(--accent));
     color: hsl(var(--foreground));
-  }
-}
-
-@layer utilities {
-  .app-shell-bg {
-    background-color: hsl(var(--background));
   }
 }
 

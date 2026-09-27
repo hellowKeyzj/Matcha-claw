@@ -24,6 +24,7 @@ import type { ProviderModelsTransport } from './providers/models';
 import type { ProviderRoutingTransport } from './providers/routing';
 import type { RuntimeControlTransport } from './runtime-control';
 import type { RuntimeEndpointDirectoryTransport } from './runtime-directory';
+import type { SealedResourceAuthorizationTransport } from './sealed-resource';
 import type { SecurityEmergencyTransport } from './security/emergency';
 import type { SecurityPolicyTransport } from './security/policy';
 import type { SecurityRuleCatalogTransport } from './security/rule-catalog';
@@ -127,6 +128,7 @@ export interface RuntimeHostTransports {
   skillBundleTransport: SkillBundleTransport;
   skillsManagementTransport: SkillsManagementTransport;
   sealedSkillsTransport: SealedSkillsTransport;
+  sealedResourceAuthorizationTransport: SealedResourceAuthorizationTransport;
   pluginsTransport: PluginsTransport;
   toolchainTransport: ToolchainTransport;
   sessionHistoryTransport: SessionHistoryTransport;

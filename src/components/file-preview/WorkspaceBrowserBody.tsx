@@ -1,5 +1,5 @@
 import { startTransition, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { ChevronDown, ChevronRight, FolderTree, GitCompare, PanelLeftClose, PanelLeftOpen, RefreshCw } from 'lucide-react';
+import { ChevronDown, ChevronRight, FolderTree, GitCompare, PanelRight, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
@@ -589,7 +589,7 @@ export function WorkspaceBrowserBody({
       aria-expanded={!treeCollapsed}
       data-testid="workspace-tree-collapse-toggle"
     >
-      {treeCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+      <PanelRight className="h-4 w-4" />
     </Button>
   );
   const workspaceBrowserStyle = useMemo<CSSProperties>(() => {

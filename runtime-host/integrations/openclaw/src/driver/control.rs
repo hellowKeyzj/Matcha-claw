@@ -156,12 +156,8 @@ impl OpenClawDriver {
     }
 
     pub fn control_ui_url(&self) -> String {
-        safe_control_ui_url(self.control_ui_url.as_str())
+        self.control_ui_url.as_str().to_owned()
     }
-}
-
-fn safe_control_ui_url(url: &str) -> String {
-    url.split_once('#').map_or(url, |(base, _)| base).to_owned()
 }
 
 pub struct OpenClawControlSnapshotObservation {

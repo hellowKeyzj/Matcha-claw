@@ -327,7 +327,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     let outcome: 'confirmed' | 'target_rejected' | 'unknown' | 'error' | undefined;
     try {
       logChannelTrace('delete.config.start', traceId, { accountPresent: Boolean(channel?.accountId) });
-      const result = await hostChannelsDeleteConfig(channelType, undefined, { traceId });
+      const result = await hostChannelsDeleteConfig(channelType, channel?.accountId, { traceId });
       outcome = ['confirmed', 'target_rejected'].includes(result.outcome) ? result.outcome : 'unknown';
       logChannelTrace('delete.config.end', traceId, { outcome, durationMs: Date.now() - startedAt });
       if (result.outcome !== 'confirmed') {

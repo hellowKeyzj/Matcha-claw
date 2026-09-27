@@ -492,6 +492,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
                 module_scope("toolchain", toolchain_task),
                 module_scope("platform-tools", platform_tools_task),
                 route_only_scope("plugins"),
+                route_only_scope("sealed-resource"),
                 route_only_scope("skills"),
             ],
             organization: OrganizationRuntime {

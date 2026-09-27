@@ -894,9 +894,17 @@ export async function provisionTeamAgents(payload: {
   }, decodeTeamProvisionAgents);
 }
 
+export type TeamDeleteResult = {
+  teamId: string | null;
+  deleted?: boolean;
+  state: 'tombstoned' | 'outcome_unknown';
+  deletedRunIds?: string[];
+  deletedAgentIds?: string[];
+};
+
 export async function deleteTeamInstance(payload: {
   teamId: string;
-}): Promise<{ teamId: string | null; deleted?: boolean; state: 'tombstoned'; deletedRunIds?: string[]; deletedAgentIds?: string[] }> {
+}): Promise<TeamDeleteResult> {
   return await teamRuntimeApi({
     operationId: 'team.delete',
     target: { kind: 'team', teamId: payload.teamId },
@@ -1302,15 +1310,15 @@ function decodeTeamProvisionAgents(payload: unknown): { teamId: string; managedA
   return teamRuntimeDecodeFailure();
 }
 
-function decodeTeamDelete(payload: unknown): { teamId: string | null; deleted?: boolean; state: 'tombstoned'; deletedRunIds?: string[]; deletedAgentIds?: string[] } {
+function decodeTeamDelete(payload: unknown): TeamDeleteResult {
   if (isRecord(payload)
     && hasOnlyKeys(payload, ['teamId', 'state', 'deleted', 'deletedRunIds', 'deletedAgentIds'])
     && (payload.teamId === null || isText(payload.teamId))
-    && payload.state === 'tombstoned'
+    && (payload.state === 'tombstoned' || payload.state === 'outcome_unknown')
     && (payload.deleted === undefined || typeof payload.deleted === 'boolean')
     && (payload.deletedRunIds === undefined || isStringArray(payload.deletedRunIds))
     && (payload.deletedAgentIds === undefined || isStringArray(payload.deletedAgentIds))) {
-    return payload as { teamId: string | null; deleted?: boolean; state: 'tombstoned'; deletedRunIds?: string[]; deletedAgentIds?: string[] };
+    return payload as TeamDeleteResult;
   }
   return teamRuntimeDecodeFailure();
 }

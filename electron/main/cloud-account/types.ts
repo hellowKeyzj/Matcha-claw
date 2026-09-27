@@ -354,6 +354,13 @@ export type CloudPackageMeteringBinding = Readonly<{
   currency?: string;
 }>;
 
+export type CloudSealedCloudKey = Readonly<{
+  version: 1;
+  publicKey: string;
+  keyId: string;
+  algorithm: string;
+}>;
+
 export type CloudPackageVersion = Readonly<{
   packageId: string;
   packageVersionId: string;
@@ -396,6 +403,30 @@ export type CloudPackageDownloadRecordRequest = Readonly<{
   source?: string;
 }>;
 
+export type CloudPackageAuthorizationRequest = Readonly<{
+  packageVersionId: string;
+  packageType?: string;
+  clientVersion?: string;
+  installId?: string;
+  source?: string;
+  devicePublicKey: string;
+}>;
+
+export type CloudPackageEnvelope = Readonly<{
+  keyId?: string;
+  algorithm: string;
+  ciphertextBase64: string;
+}>;
+
+export type CloudPackageAuthorization = Readonly<{
+  packageVersionId: string;
+  packageType: string;
+  meteringBinding?: CloudPackageMeteringBinding;
+  entitlementStatus?: string;
+  deviceEnvelope?: CloudPackageEnvelope;
+  leaseExpiresAt: string;
+}>;
+
 export type CloudPackageDownloadRecord = Readonly<{
   packageVersionId: string;
   meteringBinding?: CloudPackageMeteringBinding;
@@ -410,6 +441,7 @@ export type CloudPackageLocalDownload = Readonly<{
   filename: string;
   contentType?: string;
   bytes: number;
+  packageSha256: string;
   meteringBinding?: CloudPackageMeteringBinding;
   entitlementStatus?: string;
   recorded?: boolean;

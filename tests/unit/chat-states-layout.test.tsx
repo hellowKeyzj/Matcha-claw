@@ -18,7 +18,7 @@ describe('chat states layout', () => {
       .map((node) => node.className)
       .filter((className): className is string => typeof className === 'string');
 
-    expect(cards.some((className) => className.includes('backdrop-blur-sm'))).toBe(true);
-    expect(cards.some((className) => className.includes('shadow-'))).toBe(true);
+    expect(cards.some((className) => className.includes('bg-[hsl(var(--shell-surface-muted))]'))).toBe(true);
+    expect(cards.some((className) => className.includes('[border-color:hsl(var(--shell-border))]'))).toBe(true);
   });
 });

@@ -544,7 +544,9 @@ impl GraphState {
     ) -> Option<&mut NodeAttempt> {
         let history = self.executions.get_mut(node_id)?;
         let (_, superseded) = history.attempts.split_last_mut()?;
-        superseded.iter_mut().find(|attempt| attempt.fence() == fence)
+        superseded
+            .iter_mut()
+            .find(|attempt| attempt.fence() == fence)
     }
 
     pub(crate) fn append_attempt(&mut self, node_id: &NodeId, attempt: NodeAttempt) {

@@ -4,6 +4,46 @@ use crate::{bundle, install, management, status};
 
 pub type SkillsFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloudPackageMetadata {
+    package_version_id: String,
+    package_type: String,
+    package_sha256: Option<String>,
+    file_name: Option<String>,
+}
+
+impl CloudPackageMetadata {
+    pub fn new(
+        package_version_id: String,
+        package_type: String,
+        package_sha256: Option<String>,
+        file_name: Option<String>,
+    ) -> Self {
+        Self {
+            package_version_id,
+            package_type,
+            package_sha256,
+            file_name,
+        }
+    }
+
+    pub fn package_version_id(&self) -> &str {
+        &self.package_version_id
+    }
+
+    pub fn package_type(&self) -> &str {
+        &self.package_type
+    }
+
+    pub fn package_sha256(&self) -> Option<&str> {
+        self.package_sha256.as_deref()
+    }
+
+    pub fn file_name(&self) -> Option<&str> {
+        self.file_name.as_deref()
+    }
+}
+
 pub trait SkillRuntimeOps: Send + Sync {
     fn installed_skill_names<'a>(&'a self) -> SkillsFuture<'a, Option<Vec<String>>>;
 
@@ -110,6 +150,29 @@ impl ClawHubSearchResult {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedSkillPackageExport {
+    skill_key: String,
+    package_path: String,
+}
+
+impl SealedSkillPackageExport {
+    pub fn new(skill_key: String, package_path: String) -> Self {
+        Self {
+            skill_key,
+            package_path,
+        }
+    }
+
+    pub fn skill_key(&self) -> &str {
+        &self.skill_key
+    }
+
+    pub fn package_path(&self) -> &str {
+        &self.package_path
+    }
+}
+
 pub trait SealedSkillStorePort: Send + Sync {
     fn sealed_catalog(&self) -> Result<SealedSkillCatalog, SealedSkillError>;
 
@@ -118,9 +181,17 @@ pub trait SealedSkillStorePort: Send + Sync {
         skill_key: String,
     ) -> Result<SealedSkillCatalogEntry, SealedSkillError>;
 
+    fn export_cloud_sealed_skill_package(
+        &self,
+        skill_key: String,
+        cloud_public_key: String,
+        cloud_key_id: String,
+    ) -> Result<SealedSkillPackageExport, SealedSkillError>;
+
     fn install_sealed_skill(
         &self,
         package_path: PathBuf,
+        cloud_metadata: Option<CloudPackageMetadata>,
     ) -> Result<SealedSkillCatalogEntry, SealedSkillError>;
 
     fn read_sealed_skill_file(
@@ -211,10 +282,51 @@ impl SealedResourceRead {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedSkillRejectionDetail {
+    reason: String,
+    message: String,
+}
+
+impl SealedSkillRejectionDetail {
+    pub fn new(reason: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SealedSkillError {
     AlreadyExists,
     NotFound,
     Rejected,
+    RejectedWith(SealedSkillRejectionDetail),
     Unknown,
+}
+
+impl SealedSkillError {
+    pub const fn rejected() -> Self {
+        Self::Rejected
+    }
+
+    pub fn rejected_with(reason: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::RejectedWith(SealedSkillRejectionDetail::new(reason, message))
+    }
+
+    pub fn rejection_detail(&self) -> Option<&SealedSkillRejectionDetail> {
+        match self {
+            Self::RejectedWith(detail) => Some(detail),
+            _ => None,
+        }
+    }
 }

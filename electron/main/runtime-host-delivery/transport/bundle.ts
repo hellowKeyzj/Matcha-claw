@@ -66,6 +66,7 @@ import { createWorkspaceTextTransport } from './workspace/read-text';
 import { createWorkspaceWriteTransport } from './workspace/write-text';
 import { createRuntimeControlTransport } from './runtime-control';
 import { createRuntimeEndpointDirectoryTransport } from './runtime-directory';
+import { createSealedResourceAuthorizationTransport } from './sealed-resource';
 import { createUsageTransport } from './usage';
 import { createWikiTransport } from './wiki';
 
@@ -160,6 +161,7 @@ export function createRuntimeHostTransportBundle(
     skillBundleTransport: createSkillBundleTransport(issuer, runtimeHostTransportPort),
     skillsManagementTransport: createSkillsManagementTransport(issuer, runtimeHostTransportPort),
     sealedSkillsTransport: createSealedSkillsTransport(issuer, runtimeHostTransportPort),
+    sealedResourceAuthorizationTransport: createSealedResourceAuthorizationTransport(issuer, runtimeHostTransportPort),
     pluginsTransport: createPluginsTransport(issuer, runtimeHostTransportPort),
     toolchainTransport: createToolchainTransport(issuer, runtimeHostTransportPort),
     usageTransport: createUsageTransport(issuer, runtimeHostTransportPort),

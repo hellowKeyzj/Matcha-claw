@@ -8,11 +8,50 @@ import type {
   SessionIdentity,
 } from '../../types/desktop/runtime-address';
 import { decodeSessionProjectionEvent, type SessionProjectionEvent } from '../../types/session/update-event';
-import type { ChatSendAttachment } from './types';
+import { CHAT_INLINE_ATTACHMENT_MAX_BYTES, type ChatSendAttachment } from './types';
 
 export const CHAT_SEND_RPC_TIMEOUT_MS = 120_000;
 const CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT = 'Process the attached file(s).';
 const CHAT_SEND_DEFAULT_ERROR = 'Failed to send message';
+
+function isDirectoryAttachment(attachment: Pick<ChatSendAttachment, 'entryKind' | 'mimeType'>): boolean {
+  return attachment.entryKind === 'directory' || attachment.mimeType === 'application/x-directory';
+}
+
+function localPathAttachments(attachments: readonly ChatSendAttachment[]): ChatSendAttachment[] {
+  return attachments.filter((attachment) => !isDirectoryAttachment(attachment)
+    && attachment.fileSize > CHAT_INLINE_ATTACHMENT_MAX_BYTES
+    && Boolean(attachment.sourcePath));
+}
+
+function inlineAttachments(attachments: readonly ChatSendAttachment[]): ChatSendAttachment[] {
+  return attachments.filter((attachment) => !isDirectoryAttachment(attachment)
+    && attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES
+    && Boolean(attachment.stagedAttachmentId));
+}
+
+function appendLocalPathAttachmentPrompt(message: string, attachments: readonly ChatSendAttachment[]): string {
+  const pathAttachments = localPathAttachments(attachments);
+  if (pathAttachments.length === 0) {
+    return message;
+  }
+  const pathBlock = ['Read files:', ...pathAttachments.map((attachment) => `- ${attachment.sourcePath}`)].join('\n');
+  return message.trim() ? `${message}\n\n${pathBlock}` : pathBlock;
+}
+
+export function resolveChatSendTransportPayload(
+  message: string,
+  attachments: readonly ChatSendAttachment[],
+): { message: string; attachments: ChatSendAttachment[] } {
+  const attachmentsToInline = inlineAttachments(attachments);
+  return {
+    message: appendLocalPathAttachmentPrompt(
+      message || (attachmentsToInline.length > 0 ? CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT : ''),
+      attachments,
+    ),
+    attachments: attachmentsToInline,
+  };
+}
 
 export interface SendChatTransportParams {
   endpointSessionId?: string;
@@ -32,25 +71,28 @@ export async function sendChatTransport(
   params: SendChatTransportParams,
 ): Promise<SendChatTransportResult> {
   const attachments = params.attachments ?? [];
+  const payloadInput = resolveChatSendTransportPayload(params.message, attachments);
+  const message = payloadInput.message;
+  const attachmentsToInline = payloadInput.attachments;
   logSessionTrace('send.transport.request', params.traceId, {
     sessionKey: summarizeIdentifier(params.sessionIdentity.sessionKey),
     endpointSessionId: summarizeIdentifier(params.endpointSessionId),
     sessionIdentity: summarizeSessionIdentity(params.sessionIdentity),
     idempotencyKey: summarizeIdentifier(params.idempotencyKey),
-    messageLength: params.message.length,
-    attachmentCount: attachments.length,
-    attachmentBytes: attachments.reduce((sum, attachment) => sum + attachment.fileSize, 0),
+    messageLength: message.length,
+    attachmentCount: attachmentsToInline.length,
+    attachmentBytes: attachmentsToInline.reduce((sum, attachment) => sum + attachment.fileSize, 0),
     timeoutMs: params.timeoutMs ?? null,
   });
   const payload = {
     ...(params.endpointSessionId ? { endpointSessionId: params.endpointSessionId } : {}),
     sessionIdentity: params.sessionIdentity,
-    message: params.message || (attachments.length > 0 ? CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT : ''),
+    message,
     idempotencyKey: params.idempotencyKey,
     deliver: false,
-    ...(attachments.length > 0
+    ...(attachmentsToInline.length > 0
       ? {
-          attachments: attachments.map((attachment) => ({
+          attachments: attachmentsToInline.map((attachment) => ({
             stagedAttachmentId: attachment.stagedAttachmentId,
             fileName: attachment.fileName,
             mimeType: attachment.mimeType,

@@ -60,6 +60,7 @@ export type NativeSkillStatusEntry = Readonly<{
   unavailableReason: SkillUnavailableReason | null;
   missingCategories: SkillMissingCategory[];
   eligible: boolean;
+  uninstallable?: boolean;
   bundled?: boolean;
   always?: boolean;
   emoji?: string;
@@ -95,6 +96,7 @@ export type SkillStatusEntry = Readonly<{
   eligible: boolean;
   missingCategories: SkillMissingCategory[];
   missing?: SkillMissingProjection;
+  uninstallable?: boolean;
   bundled?: boolean;
   always?: boolean;
   emoji?: string;
@@ -329,7 +331,8 @@ function projectSkillCapabilityResult(
     return hasExactKeys(body, ['success', 'content', 'filePath'])
       && body.success === true
       && typeof body.content === 'string'
-      && isAbsolutePath(body.filePath, 4 * 1024)
+      && isSkillReferencePath(body.filePath)
+      && isManifestPath(body.filePath)
       ? { status: 200, body }
       : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
   }
@@ -377,6 +380,7 @@ export function projectSkillsStatus(value: NativeSkillsStatusResult): SkillsStat
       eligible: entry.eligible,
       missingCategories: entry.missingCategories,
       ...(entry.missingCategories.length > 0 ? { missing: projectMissing(entry.missingCategories) } : {}),
+      ...(entry.uninstallable === undefined ? {} : { uninstallable: entry.uninstallable }),
       ...(entry.bundled === undefined ? {} : { bundled: entry.bundled }),
       ...(entry.always === undefined ? {} : { always: entry.always }),
       ...(entry.emoji === undefined ? {} : { emoji: entry.emoji }),
@@ -442,8 +446,8 @@ function targetMatchesSkillOperation(target: Record<string, unknown>, input: Rec
   if (operation === 'skills.updateState') return hasExactKeys(input, ['skillKey', 'enabled']) && input.skillKey === skillId && typeof input.enabled === 'boolean';
   return input.skillKey === skillId
     && (input.slug === undefined || input.slug === target.slug)
-    && (input.baseDir === undefined || isAbsolutePath(input.baseDir, 4 * 1024))
-    && (input.filePath === undefined || (isAbsolutePath(input.filePath, 4 * 1024) && isManifestPath(input.filePath)))
+    && (input.baseDir === undefined || isSkillReferencePath(input.baseDir))
+    && (input.filePath === undefined || (isSkillReferencePath(input.filePath) && isManifestPath(input.filePath)))
     && hasOnlyKeys(input, ['skillKey', 'slug', 'baseDir', 'filePath']);
 }
 
@@ -488,6 +492,7 @@ type ProjectedSkillStatusEntry = Readonly<{
   unavailableReason: SkillUnavailableReason | null;
   missingCategories: SkillMissingCategory[];
   eligible: boolean;
+  uninstallable?: boolean;
   bundled?: boolean;
   always?: boolean;
   emoji?: string;
@@ -507,6 +512,7 @@ function normalizeProjectedSkillStatusEntry(entry: ProjectedSkillStatusEntry): N
     unavailableReason: entry.unavailableReason,
     missingCategories: entry.missingCategories,
     eligible: entry.eligible,
+    ...(entry.uninstallable === undefined ? {} : { uninstallable: entry.uninstallable }),
     ...(entry.bundled === undefined ? {} : { bundled: entry.bundled }),
     ...(entry.always === undefined ? {} : { always: entry.always }),
     ...(entry.emoji === undefined ? {} : { emoji: entry.emoji }),
@@ -517,7 +523,7 @@ function normalizeProjectedSkillStatusEntry(entry: ProjectedSkillStatusEntry): N
 }
 
 function isProjectedSkillStatusEntry(value: unknown): value is ProjectedSkillStatusEntry {
-  return hasOnlyKeys(value, ['key', 'slug', 'name', 'description', 'enabled', 'selectable', 'unavailableReason', 'missingCategories', 'eligible', 'bundled', 'always', 'emoji', 'source', 'baseDir', 'filePath'])
+  return hasOnlyKeys(value, ['key', 'slug', 'name', 'description', 'enabled', 'selectable', 'unavailableReason', 'missingCategories', 'eligible', 'uninstallable', 'bundled', 'always', 'emoji', 'source', 'baseDir', 'filePath'])
     && hasRequiredKeys(value, ['key', 'name', 'description', 'enabled', 'selectable', 'unavailableReason', 'missingCategories', 'eligible'])
     && isOpenClawSkillKey(value.key)
     && (value.slug === undefined || isSlug(value.slug))
@@ -529,12 +535,13 @@ function isProjectedSkillStatusEntry(value: unknown): value is ProjectedSkillSta
     && Array.isArray(value.missingCategories)
     && value.missingCategories.every(isSkillMissingCategory)
     && typeof value.eligible === 'boolean'
+    && (value.uninstallable === undefined || typeof value.uninstallable === 'boolean')
     && (value.bundled === undefined || typeof value.bundled === 'boolean')
     && (value.always === undefined || typeof value.always === 'boolean')
     && (value.emoji === undefined || isText(value.emoji, 32))
     && (value.source === undefined || isSafeSource(value.source))
-    && (value.baseDir === undefined || isAbsolutePath(value.baseDir, 4 * 1024))
-    && (value.filePath === undefined || (isAbsolutePath(value.filePath, 4 * 1024) && isManifestPath(value.filePath)));
+    && (value.baseDir === undefined || isSkillReferencePath(value.baseDir))
+    && (value.filePath === undefined || (isSkillReferencePath(value.filePath) && isManifestPath(value.filePath)));
 }
 
 function isSafeSource(value: unknown): value is SkillsSafeSource {
@@ -737,8 +744,8 @@ function isSkillsReadmeRequest(value: unknown): value is SkillsReadmeRequest {
     && hasRequiredKeys(value, ['skillKey'])
     && isOpenClawSkillKey(value.skillKey)
     && (value.slug === undefined || isOpenClawSkillKey(value.slug))
-    && (value.filePath === undefined || (isAbsolutePath(value.filePath, 4 * 1024) && isManifestPath(value.filePath)))
-    && (value.baseDir === undefined || isAbsolutePath(value.baseDir, 4 * 1024));
+    && (value.filePath === undefined || (isSkillReferencePath(value.filePath) && isManifestPath(value.filePath)))
+    && (value.baseDir === undefined || isSkillReferencePath(value.baseDir));
 }
 
 function isSkillsReadmeResult(value: unknown): value is SkillsReadmeResult {
@@ -746,7 +753,7 @@ function isSkillsReadmeResult(value: unknown): value is SkillsReadmeResult {
     && hasExactKeys(value, ['success', 'content', 'filePath'])
     && value.success === true
     && isBoundedText(value.content, 48 * 1024)
-    && isAbsolutePath(value.filePath, 4 * 1024)
+    && isSkillReferencePath(value.filePath)
     && isManifestPath(value.filePath);
 }
 
@@ -799,11 +806,23 @@ function isIdentifier(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
 }
 
+function isSkillReferencePath(value: unknown): value is string {
+  return isAbsolutePath(value, 4 * 1024) || isMatchaSkillUri(value);
+}
+
 function isAbsolutePath(value: unknown, maxLength: number): value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > maxLength || value.includes('\0')) {
     return false;
   }
   return /^[A-Za-z]:[\\/]|^\\\\|^\//.test(value);
+}
+
+function isMatchaSkillUri(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 4 * 1024 || value.includes('\0')) {
+    return false;
+  }
+  const match = /^matcha-skill:\/\/([^/]+)\/(.+)$/.exec(value);
+  return match !== null && match[1].length > 0 && match[2].length > 0;
 }
 
 function isManifestPath(value: string): boolean {

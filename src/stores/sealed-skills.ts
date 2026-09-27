@@ -4,20 +4,32 @@ import type { SealedSkillCloudPackage, SealedSkillMetadata } from '@/types/skill
 
 export const SEALED_SKILL_CLOUD_ENDPOINTS = {
   list: '/api/packages/market?packageType=skill',
-  uploadLocalPackage: '/api/packages/upload',
+  uploadInstalledPackage: '/api/packages/upload/sealed-skill',
   installFromCloud: '/api/packages/install',
+} as const;
+
+export const SEALED_SKILL_LOCAL_ENDPOINTS = {
+  install: '/api/sealed-skills/install-local',
 } as const;
 
 export const SEALED_SKILL_CLOUD_UNAVAILABLE_ERROR = 'cloudUnavailable';
 
+type SealedSkillStatusEntry = SealedSkillMetadata;
+
 type SealedSkillsStatusResult = {
-  skills?: SealedSkillMetadata[];
+  skills?: SealedSkillStatusEntry[];
   error?: string | null;
 };
 
 type SealedSkillsExportResult = {
   outcome?: 'accepted' | 'rejected' | 'unknown' | 'notFound';
   skill?: SealedSkillMetadata;
+  error?: string;
+};
+
+type SealedSkillsUninstallResult = {
+  outcome: 'removed' | 'notFound' | 'rejected' | 'unknown';
+  skillKey?: string;
   error?: string;
 };
 
@@ -29,9 +41,9 @@ type SealedSkillCloudPackagesResult = {
 
 type SealedSkillCloudMutationResult = {
   success?: boolean;
-  outcome?: 'accepted' | 'rejected' | 'unknown' | 'notFound';
+  outcome?: 'accepted' | 'rejected' | 'unknown' | 'notFound' | 'canceled';
   package?: SealedSkillCloudPackage;
-  install?: { outcome?: 'accepted' | 'rejected' | 'unknown' | 'notFound' };
+  install?: { outcome?: 'accepted' | 'rejected' | 'unknown' | 'notFound'; skillKey?: string };
   error?: string | null;
 };
 
@@ -53,15 +65,19 @@ interface SealedSkillsState {
   cloudPackages: SealedSkillCloudPackage[];
   loading: boolean;
   cloudLoading: boolean;
-  cloudUploading: boolean;
+  localPackageInstalling: boolean;
   exportingBySkillKey: Record<string, boolean>;
+  uninstallingBySkillKey: Record<string, boolean>;
+  cloudUploadingBySkillKey: Record<string, boolean>;
   cloudInstallingByPackageKey: Record<string, boolean>;
   error: string | null;
   cloudError: string | null;
   fetchSealedSkills: () => Promise<void>;
   fetchCloudSkillPackages: () => Promise<void>;
   exportSkillPackage: (skillKey: string) => Promise<void>;
-  uploadLocalSkillPackageToCloud: (packagePath: string) => Promise<void>;
+  uninstallSealedSkill: (skillKey: string) => Promise<void>;
+  uploadInstalledSkillPackageToCloud: (skillKey: string) => Promise<void>;
+  installLocalSkillPackage: () => Promise<boolean>;
   downloadAndInstallCloudSkillPackage: (packageInfo: SealedSkillCloudPackage) => Promise<void>;
 }
 
@@ -71,6 +87,18 @@ export function getSealedSkillCloudPackageKey(packageInfo: SealedSkillCloudPacka
     || packageInfo.skillKey?.trim()
     || packageInfo.fileName?.trim()
     || 'cloud-package';
+}
+
+function toSealedSkillMetadata(value: SealedSkillStatusEntry): SealedSkillMetadata {
+  return {
+    skillKey: value.skillKey,
+    name: value.name,
+    description: value.description,
+    installed: value.installed,
+    version: value.version,
+    source: value.source,
+    runtimes: value.runtimes,
+  };
 }
 
 function toSealedSkillCloudPackage(value: CloudPackageVersion): SealedSkillCloudPackage {
@@ -113,10 +141,17 @@ async function hostListCloudSkillPackages(): Promise<SealedSkillCloudPackagesRes
   return hostApiFetch<SealedSkillCloudPackagesResult>(SEALED_SKILL_CLOUD_ENDPOINTS.list);
 }
 
-async function hostUploadLocalSkillPackageToCloud(packagePath: string): Promise<SealedSkillCloudMutationResult> {
-  return hostApiFetch<SealedSkillCloudMutationResult>(SEALED_SKILL_CLOUD_ENDPOINTS.uploadLocalPackage, {
+async function hostUploadInstalledSkillPackageToCloud(skillKey: string): Promise<SealedSkillCloudMutationResult> {
+  return hostApiFetch<SealedSkillCloudMutationResult>(SEALED_SKILL_CLOUD_ENDPOINTS.uploadInstalledPackage, {
     method: 'POST',
-    body: JSON.stringify({ packagePath }),
+    body: JSON.stringify({ skillKey }),
+    timeoutMs: 120000,
+  });
+}
+
+async function hostInstallLocalSkillPackage(): Promise<SealedSkillCloudMutationResult> {
+  return hostApiFetch<SealedSkillCloudMutationResult>(SEALED_SKILL_LOCAL_ENDPOINTS.install, {
+    method: 'POST',
     timeoutMs: 120000,
   });
 }
@@ -129,13 +164,22 @@ async function hostInstallCloudSkillPackage(packageInfo: SealedSkillCloudPackage
   });
 }
 
+async function hostUninstallSealedSkill(skillKey: string): Promise<SealedSkillsUninstallResult> {
+  return hostApiFetch<SealedSkillsUninstallResult>('/api/sealed-skills/uninstall', {
+    method: 'POST',
+    body: JSON.stringify({ skillKey }),
+  });
+}
+
 export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
   skills: [],
   cloudPackages: [],
   loading: false,
   cloudLoading: false,
-  cloudUploading: false,
+  localPackageInstalling: false,
   exportingBySkillKey: {},
+  uninstallingBySkillKey: {},
+  cloudUploadingBySkillKey: {},
   cloudInstallingByPackageKey: {},
   error: null,
   cloudError: null,
@@ -144,7 +188,10 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const result = await hostApiFetch<SealedSkillsStatusResult>('/api/sealed-skills/status');
-      set({ skills: Array.isArray(result.skills) ? result.skills : [], error: result.error ?? null });
+      set({
+        skills: Array.isArray(result.skills) ? result.skills.map(toSealedSkillMetadata) : [],
+        error: result.error ?? null,
+      });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -201,22 +248,80 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
     }
   },
 
-  uploadLocalSkillPackageToCloud: async (packagePath) => {
-    const normalizedPackagePath = packagePath.trim();
-    if (!normalizedPackagePath || get().cloudUploading) {
+  uninstallSealedSkill: async (skillKey) => {
+    const normalizedSkillKey = skillKey.trim();
+    if (!normalizedSkillKey || get().uninstallingBySkillKey[normalizedSkillKey]) {
       return;
     }
 
-    set({ cloudUploading: true, cloudError: null });
+    set((state) => ({
+      uninstallingBySkillKey: { ...state.uninstallingBySkillKey, [normalizedSkillKey]: true },
+      error: null,
+    }));
+
     try {
-      const result = await hostUploadLocalSkillPackageToCloud(normalizedPackagePath);
+      const result = await hostUninstallSealedSkill(normalizedSkillKey);
+      if (result.outcome !== 'removed') {
+        throw new Error(result.error || 'Failed to uninstall skill package');
+      }
+      await get().fetchSealedSkills();
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    } finally {
+      set((state) => {
+        const nextUninstalling = { ...state.uninstallingBySkillKey };
+        delete nextUninstalling[normalizedSkillKey];
+        return { uninstallingBySkillKey: nextUninstalling };
+      });
+    }
+  },
+
+  uploadInstalledSkillPackageToCloud: async (skillKey) => {
+    const normalizedSkillKey = skillKey.trim();
+    if (!normalizedSkillKey || get().cloudUploadingBySkillKey[normalizedSkillKey]) {
+      return;
+    }
+
+    set((state) => ({
+      cloudUploadingBySkillKey: { ...state.cloudUploadingBySkillKey, [normalizedSkillKey]: true },
+      cloudError: null,
+    }));
+    try {
+      const result = await hostUploadInstalledSkillPackageToCloud(normalizedSkillKey);
       assertCloudMutationAccepted(result, 'Failed to upload skill package');
       await get().fetchCloudSkillPackages();
     } catch (error) {
       set({ cloudError: error instanceof Error ? error.message : String(error) });
       throw error;
     } finally {
-      set({ cloudUploading: false });
+      set((state) => {
+        const nextUploading = { ...state.cloudUploadingBySkillKey };
+        delete nextUploading[normalizedSkillKey];
+        return { cloudUploadingBySkillKey: nextUploading };
+      });
+    }
+  },
+
+  installLocalSkillPackage: async () => {
+    if (get().localPackageInstalling) {
+      return false;
+    }
+
+    set({ localPackageInstalling: true, error: null });
+    try {
+      const result = await hostInstallLocalSkillPackage();
+      if (result.outcome === 'canceled') {
+        return false;
+      }
+      assertCloudMutationAccepted(result, 'Failed to install skill package');
+      await get().fetchSealedSkills();
+      return true;
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    } finally {
+      set({ localPackageInstalling: false });
     }
   },
 

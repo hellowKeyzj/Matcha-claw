@@ -90,7 +90,7 @@ describe('chat input attachments', () => {
     });
 
     expect(invokeIpcMock).toHaveBeenCalledWith('dialog:stageOpenAttachments', {
-      properties: ['openFile', 'openDirectory', 'multiSelections'],
+      properties: ['openFile', 'multiSelections'],
     });
     expect(screen.queryByRole('img', { name: /image\.png/i })).toBeNull();
 
@@ -105,7 +105,7 @@ describe('chat input attachments', () => {
     render(<MemoryRouter><ChatInput onSend={onSend} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
     const input = screen.getByPlaceholderText('input.messagePlaceholder');
     const file = new File(['small'], 'huge.bin', { type: 'application/octet-stream' });
-    Object.defineProperty(file, 'size', { value: 50 * 1024 * 1024 + 1 });
+    Object.defineProperty(file, 'size', { value: 5 * 1024 * 1024 + 1 });
 
     fireEvent.paste(input, {
       clipboardData: {
@@ -120,60 +120,40 @@ describe('chat input attachments', () => {
     expect(screen.getByLabelText('Remove huge.bin')).toBeInTheDocument();
   });
 
-  it('Electron File 拖放时经 buffer staging 并显示 ready 附件', async () => {
-    const originalFileReader = globalThis.FileReader;
-    const readAsDataUrl = vi.fn(function(this: FileReader) {
-      Object.defineProperty(this, 'result', {
-        configurable: true,
-        value: 'data:text/plain;base64,ZXh0ZXJuYWwtY29udGVudA==',
-      });
-      this.onload?.(new ProgressEvent('load'));
-    });
-    class ControlledFileReader {
-      result: string | ArrayBuffer | null = null;
-      onload: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
-      onerror: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
-      readAsDataURL = readAsDataUrl;
-    }
-
-    vi.stubGlobal('FileReader', ControlledFileReader);
+  it('Electron File 拖放时经 path staging 并显示 ready 附件', async () => {
     vi.mocked(window.electron.getPathForFile).mockReturnValue('D:\\external\\external.txt');
     invokeIpcMock.mockImplementation(async (channel: string) => {
-      if (channel === 'dialog:stageRendererBufferAttachment') {
+      if (channel === 'dialog:stageDroppedAttachments') {
         return {
-          stagedAttachmentId: 'staged-external',
-          fileName: 'external.txt',
-          mimeType: 'text/plain',
-          fileSize: 16,
-          preview: null,
+          attachments: [{
+            stagedAttachmentId: 'staged-external',
+            fileName: 'external.txt',
+            mimeType: 'text/plain',
+            fileSize: 16,
+            preview: null,
+            sourcePath: 'D:\\external\\external.txt',
+          }],
         };
       }
       return null;
     });
 
-    try {
-      render(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
-      const file = new File(['external-content'], 'external.txt', { type: 'text/plain' });
+    render(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+    const file = new File(['external-content'], 'external.txt', { type: 'text/plain' });
 
-      fireEvent.drop(screen.getByPlaceholderText('input.messagePlaceholder').closest('.w-full')!, {
-        dataTransfer: {
-          files: [file],
-          items: [{ kind: 'file', getAsFile: () => file }],
-        },
-      });
+    fireEvent.drop(screen.getByPlaceholderText('input.messagePlaceholder').closest('.w-full')!, {
+      dataTransfer: {
+        files: [file],
+        items: [{ kind: 'file', getAsFile: () => file }],
+      },
+    });
 
-      await waitFor(() => {
-        expect(window.electron.getPathForFile).toHaveBeenCalledWith(file);
-        expect(invokeIpcMock).toHaveBeenCalledWith('dialog:stageRendererBufferAttachment', {
-          base64: 'ZXh0ZXJuYWwtY29udGVudA==',
-          fileName: 'external.txt',
-          mimeType: 'text/plain',
-        });
-      });
-        expect(screen.queryByRole('button', { name: 'Open external.txt' })).toBeNull();
-    } finally {
-      vi.stubGlobal('FileReader', originalFileReader);
-    }
+    await waitFor(() => {
+      expect(window.electron.getPathForFile).toHaveBeenCalledWith(file);
+      expect(invokeIpcMock).toHaveBeenCalledWith('dialog:stageDroppedAttachments', ['D:\\external\\external.txt']);
+    });
+    expect(invokeIpcMock).not.toHaveBeenCalledWith('dialog:stageRendererBufferAttachment', expect.anything());
+    expect(screen.queryByRole('button', { name: 'Open external.txt' })).toBeNull();
   });
 
   it('目录附件只作为 receipt 发送，不释放或传给 materialization', async () => {

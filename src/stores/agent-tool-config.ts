@@ -46,6 +46,7 @@ export interface AgentToolConfigOption {
   risk?: AgentToolCatalogRisk;
   tags?: string[];
   defaultProfiles?: string[];
+  deniedByGlobalPolicy: boolean;
   groupKey?: string;
   groupDisplayName?: string;
 }
@@ -230,6 +231,7 @@ function normalizeToolConfigOption(value: unknown, group?: { groupKey: string; g
     ...(risk ? { risk } : {}),
     ...(tags.length > 0 ? { tags } : {}),
     ...(defaultProfiles.length > 0 ? { defaultProfiles } : {}),
+    deniedByGlobalPolicy: record.deniedByGlobalPolicy === true,
     ...(groupKey ? { groupKey } : {}),
     ...(groupDisplayName ? { groupDisplayName } : {}),
   };

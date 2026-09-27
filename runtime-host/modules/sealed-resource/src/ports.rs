@@ -1,15 +1,23 @@
 use std::{path::PathBuf, sync::Arc};
 
-use platform::module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId};
-use platform::state_dir::CanonicalStateDir;
+use platform::{
+    capability::CapabilityDecisionVerifier,
+    module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
+    state_dir::CanonicalStateDir,
+};
 use skills_module::projection::sealed as skill_projection;
+use tokio::sync::Mutex;
 
 use crate::{
-    api::{SealedResourceError, SealedResourceRead},
+    api::{
+        SealedCloudPackageMetadata, SealedCloudPackageType, SealedPackageAuthorizationKey,
+        SealedPackageAuthorizationKeyring, SealedResourceError, SealedResourceRead, now_millis,
+    },
     domain::{AgentKey, PackageRelativePath, SkillKey},
     store::{
-        SealedAgentPackageExport, SealedAgentRuntimeProjection, SealedAgentStore,
-        SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillStore,
+        SealedAgentCatalogEntry, SealedAgentInstallPlan, SealedAgentPackageExport,
+        SealedAgentRuntimeProjection, SealedAgentStore, SealedSkillCatalog,
+        SealedSkillCatalogEntry, SealedSkillPackageExport, SealedSkillStore,
     },
 };
 
@@ -19,14 +27,21 @@ const PROVIDES: &[CapabilityKey] = &[
     CapabilityKey::new("sealed-agent-store.read"),
 ];
 const REQUIRES: &[CapabilityKey] = &[];
-const ROUTES: &[&str] = &[];
+const ROUTES: &[&str] = &["sealed-resource.loopback"];
 const EVENTS: &[&str] = &[];
-const EFFECTS: &[EffectKind] = &[EffectKind::FilesystemRead, EffectKind::FilesystemWrite];
+const EFFECTS: &[EffectKind] = &[
+    EffectKind::FilesystemRead,
+    EffectKind::FilesystemWrite,
+    EffectKind::Route,
+];
 
 #[derive(Clone)]
 pub struct SealedResourceModule {
+    skill_store: Arc<SealedSkillStore>,
+    agent_store: Arc<SealedAgentStore>,
     skills: Arc<dyn skills_module::SealedSkillStorePort>,
     agents: Arc<dyn subagents::SealedAgentStorePort>,
+    authorization_keyring: Arc<SealedPackageAuthorizationKeyring>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,17 +51,21 @@ pub enum SealedResourceProvisionError {
 }
 
 impl SealedResourceModule {
-    pub fn new(
+    fn new(
         skill_store: Arc<SealedSkillStore>,
         agent_store: Arc<SealedAgentStore>,
         runtime_token: Option<Arc<str>>,
+        authorization_keyring: Arc<SealedPackageAuthorizationKeyring>,
     ) -> Self {
         Self {
+            skill_store: skill_store.clone(),
+            agent_store: agent_store.clone(),
             skills: Arc::new(SealedSkillStoreAdapter::new(
                 skill_store,
                 runtime_token.clone(),
             )),
             agents: Arc::new(SealedAgentStoreAdapter::new(agent_store, runtime_token)),
+            authorization_keyring,
         }
     }
 
@@ -57,15 +76,29 @@ impl SealedResourceModule {
         agent_private_root: PathBuf,
         runtime_token: Option<Arc<str>>,
     ) -> Result<Self, SealedResourceProvisionError> {
+        let authorization_keyring = Arc::new(SealedPackageAuthorizationKeyring::new());
         let skill_store = Arc::new(
-            SealedSkillStore::openclaw(state_dir, skill_private_root)
-                .map_err(|_| SealedResourceProvisionError::Skills)?,
+            SealedSkillStore::openclaw_with_keyring(
+                state_dir,
+                skill_private_root,
+                Arc::clone(&authorization_keyring),
+            )
+            .map_err(|_| SealedResourceProvisionError::Skills)?,
         );
         let agent_store = Arc::new(
-            SealedAgentStore::openclaw(agent_runtime, agent_private_root)
-                .map_err(|_| SealedResourceProvisionError::Agents)?,
+            SealedAgentStore::openclaw_with_keyring(
+                agent_runtime,
+                agent_private_root,
+                Arc::clone(&authorization_keyring),
+            )
+            .map_err(|_| SealedResourceProvisionError::Agents)?,
         );
-        Ok(Self::new(skill_store, agent_store, runtime_token))
+        Ok(Self::new(
+            skill_store,
+            agent_store,
+            runtime_token,
+            authorization_keyring,
+        ))
     }
 
     pub fn skills_port(&self) -> Arc<dyn skills_module::SealedSkillStorePort> {
@@ -76,8 +109,58 @@ impl SealedResourceModule {
         self.agents.clone()
     }
 
-    pub fn descriptor(&self) -> ModuleDescriptor {
-        ModuleDescriptor::new(MODULE_ID, PROVIDES, REQUIRES, EFFECTS, ROUTES, EVENTS, None)
+    pub fn register_authorization_key(
+        &self,
+        package_sha256: String,
+        authorization_key: SealedPackageAuthorizationKey,
+        lease_expires_at_ms: u64,
+    ) -> Result<(), SealedResourceError> {
+        self.authorization_keyring.register_authorization_key(
+            package_sha256,
+            authorization_key,
+            lease_expires_at_ms,
+        )
+    }
+
+    pub fn install_skill_package_path_with_cloud_metadata(
+        &self,
+        package_path: PathBuf,
+        metadata: SealedCloudPackageMetadata,
+    ) -> Result<SealedSkillCatalogEntry, SealedResourceError> {
+        self.skill_store
+            .install_package_path_with_cloud_metadata(package_path, metadata)
+    }
+
+    pub fn prepare_agent_install_with_cloud_metadata(
+        &self,
+        package_path: PathBuf,
+        metadata: SealedCloudPackageMetadata,
+    ) -> Result<SealedAgentInstallPlan, SealedResourceError> {
+        self.agent_store
+            .prepare_install_with_cloud_metadata(package_path, metadata)
+    }
+
+    pub fn install_agent_package_path_with_cloud_metadata(
+        &self,
+        package_path: PathBuf,
+        metadata: SealedCloudPackageMetadata,
+    ) -> Result<SealedAgentCatalogEntry, SealedResourceError> {
+        self.agent_store
+            .install_package_path_with_cloud_metadata(package_path, metadata)
+    }
+
+    pub fn descriptor(&self, verifier: Arc<Mutex<CapabilityDecisionVerifier>>) -> ModuleDescriptor {
+        ModuleDescriptor::new(
+            MODULE_ID,
+            PROVIDES,
+            REQUIRES,
+            EFFECTS,
+            ROUTES,
+            EVENTS,
+            Some(crate::adapters::loopback::descriptor(
+                crate::adapters::loopback::Dependencies::new(verifier, self.clone()),
+            )),
+        )
     }
 }
 
@@ -119,15 +202,35 @@ impl skills_module::SealedSkillStorePort for SealedSkillStoreAdapter {
             .map_err(project_skill_error)
     }
 
+    fn export_cloud_sealed_skill_package(
+        &self,
+        skill_key: String,
+        cloud_public_key: String,
+        cloud_key_id: String,
+    ) -> Result<skills_module::SealedSkillPackageExport, skills_module::SealedSkillError> {
+        let skill_key =
+            SkillKey::parse(skill_key).map_err(|_| skill_projection::rejected_error())?;
+        self.store
+            .export_cloud_directory_package(skill_key, cloud_public_key, cloud_key_id)
+            .map(project_skill_export)
+            .map_err(project_skill_error)
+    }
+
     fn install_sealed_skill(
         &self,
         package_path: PathBuf,
+        cloud_metadata: Option<skills_module::ports::CloudPackageMetadata>,
     ) -> Result<skills_module::SealedSkillCatalogEntry, skills_module::SealedSkillError> {
-        self.store
-            .install_package_path(package_path)
-            .map(SealedSkillCatalogEntryProjectionInput)
-            .map(skill_projection::project_entry)
-            .map_err(project_skill_error)
+        match cloud_metadata {
+            Some(metadata) => self.store.install_package_path_with_cloud_metadata(
+                package_path,
+                skill_cloud_metadata(metadata)?,
+            ),
+            None => self.store.install_package_path(package_path),
+        }
+        .map(SealedSkillCatalogEntryProjectionInput)
+        .map(skill_projection::project_entry)
+        .map_err(project_skill_error)
     }
 
     fn read_sealed_skill_file(
@@ -193,15 +296,57 @@ impl subagents::SealedAgentStorePort for SealedAgentStoreAdapter {
             .map_err(project_agent_error)
     }
 
-    fn install_package(
+    fn export_cloud_package(
+        &self,
+        agent_id: String,
+        cloud_public_key: String,
+        cloud_key_id: String,
+    ) -> Result<subagents::PackageExportReceipt, subagents::SealedAgentError> {
+        let agent_key =
+            AgentKey::parse(agent_id).map_err(|_| subagents::SealedAgentError::Rejected)?;
+        self.store
+            .export_cloud_workspace_package(agent_key, cloud_public_key, cloud_key_id)
+            .map(project_agent_export)
+            .map_err(project_agent_error)
+    }
+
+    fn prepare_install(
         &self,
         package_path: String,
+        cloud_metadata: Option<subagents::CloudPackageMetadata>,
+    ) -> Result<subagents::PackageInstallPlan, subagents::SealedAgentError> {
+        match cloud_metadata {
+            Some(metadata) => self.store.prepare_install_with_cloud_metadata(
+                PathBuf::from(package_path),
+                agent_cloud_metadata(metadata)?,
+            ),
+            None => self.store.prepare_install(PathBuf::from(package_path)),
+        }
+        .map(project_agent_install_plan)
+        .map_err(project_agent_error)
+    }
+
+    fn install_prepared_package(
+        &self,
+        package_path: String,
+        cloud_metadata: Option<subagents::CloudPackageMetadata>,
     ) -> Result<subagents::PackageInstallReceipt, subagents::SealedAgentError> {
+        match cloud_metadata {
+            Some(metadata) => self.store.install_package_path_with_cloud_metadata(
+                PathBuf::from(package_path),
+                agent_cloud_metadata(metadata)?,
+            ),
+            None => self.store.install_package_path(PathBuf::from(package_path)),
+        }
+        .map(|entry| subagents::PackageInstallReceipt::new(entry.agent_key().as_str().to_owned()))
+        .map_err(project_agent_error)
+    }
+
+    fn remove_package(&self, agent_id: String) -> Result<bool, subagents::SealedAgentError> {
+        let agent_key =
+            AgentKey::parse(agent_id).map_err(|_| subagents::SealedAgentError::Rejected)?;
         self.store
-            .install_package_path(PathBuf::from(package_path))
-            .map(|entry| {
-                subagents::PackageInstallReceipt::new(entry.agent_key().as_str().to_owned())
-            })
+            .remove_package(agent_key)
             .map_err(project_agent_error)
     }
 
@@ -318,14 +463,85 @@ impl skill_projection::SealedErrorProjection for SealedResourceErrorProjectionIn
         match self.0 {
             SealedResourceError::AlreadyExists => skill_projection::SealedErrorKind::AlreadyExists,
             SealedResourceError::NotFound => skill_projection::SealedErrorKind::NotFound,
-            SealedResourceError::Rejected => skill_projection::SealedErrorKind::Rejected,
+            SealedResourceError::Rejected | SealedResourceError::RejectedWith(_) => {
+                skill_projection::SealedErrorKind::Rejected
+            }
             SealedResourceError::Unknown => skill_projection::SealedErrorKind::Unknown,
         }
     }
 }
 
 fn project_skill_error(error: SealedResourceError) -> skills_module::SealedSkillError {
-    skill_projection::project_error(SealedResourceErrorProjectionInput(error))
+    match error.rejection_detail() {
+        Some(detail) => {
+            skills_module::SealedSkillError::rejected_with(detail.reason(), detail.message())
+        }
+        None => skill_projection::project_error(SealedResourceErrorProjectionInput(error)),
+    }
+}
+
+fn project_skill_export(
+    export: SealedSkillPackageExport,
+) -> skills_module::SealedSkillPackageExport {
+    skills_module::SealedSkillPackageExport::new(
+        export.entry().skill_key().as_str().to_owned(),
+        export.package_path().to_string_lossy().into_owned(),
+    )
+}
+
+fn skill_cloud_metadata(
+    metadata: skills_module::ports::CloudPackageMetadata,
+) -> Result<SealedCloudPackageMetadata, skills_module::SealedSkillError> {
+    let package_sha256 = metadata
+        .package_sha256()
+        .ok_or_else(skill_projection::rejected_error)?
+        .to_owned();
+    let file_name = metadata
+        .file_name()
+        .ok_or_else(skill_projection::rejected_error)?
+        .to_owned();
+    SealedCloudPackageMetadata::new(
+        metadata.package_version_id().to_owned(),
+        cloud_package_type(metadata.package_type(), SealedCloudPackageType::Skill)
+            .map_err(project_skill_error)?,
+        package_sha256,
+        file_name,
+        now_millis(),
+    )
+    .map_err(project_skill_error)
+}
+
+fn agent_cloud_metadata(
+    metadata: subagents::CloudPackageMetadata,
+) -> Result<SealedCloudPackageMetadata, subagents::SealedAgentError> {
+    let package_sha256 = metadata
+        .package_sha256()
+        .ok_or(subagents::SealedAgentError::Rejected)?
+        .to_owned();
+    let file_name = metadata
+        .file_name()
+        .ok_or(subagents::SealedAgentError::Rejected)?
+        .to_owned();
+    SealedCloudPackageMetadata::new(
+        metadata.package_version_id().to_owned(),
+        cloud_package_type(metadata.package_type(), SealedCloudPackageType::Agent)
+            .map_err(project_agent_error)?,
+        package_sha256,
+        file_name,
+        now_millis(),
+    )
+    .map_err(project_agent_error)
+}
+
+fn cloud_package_type(
+    value: &str,
+    expected: SealedCloudPackageType,
+) -> Result<SealedCloudPackageType, SealedResourceError> {
+    match (value, expected) {
+        ("skill", SealedCloudPackageType::Skill) => Ok(SealedCloudPackageType::Skill),
+        ("agent", SealedCloudPackageType::Agent) => Ok(SealedCloudPackageType::Agent),
+        _ => Err(SealedResourceError::Rejected),
+    }
 }
 
 fn project_agent_export(receipt: SealedAgentPackageExport) -> subagents::PackageExportReceipt {
@@ -338,11 +554,21 @@ fn project_agent_export(receipt: SealedAgentPackageExport) -> subagents::Package
     )
 }
 
+fn project_agent_install_plan(plan: SealedAgentInstallPlan) -> subagents::PackageInstallPlan {
+    subagents::PackageInstallPlan::new(
+        plan.agent_key().as_str().to_owned(),
+        plan.workspace().to_string_lossy().into_owned(),
+        plan.workspace_preexisted(),
+    )
+}
+
 fn project_agent_error(error: SealedResourceError) -> subagents::SealedAgentError {
     match error {
         SealedResourceError::AlreadyExists => subagents::SealedAgentError::AlreadyExists,
         SealedResourceError::NotFound => subagents::SealedAgentError::NotFound,
-        SealedResourceError::Rejected => subagents::SealedAgentError::Rejected,
+        SealedResourceError::Rejected | SealedResourceError::RejectedWith(_) => {
+            subagents::SealedAgentError::Rejected
+        }
         SealedResourceError::Unknown => subagents::SealedAgentError::Unknown,
     }
 }

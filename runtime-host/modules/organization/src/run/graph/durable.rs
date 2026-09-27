@@ -702,16 +702,18 @@ fn validate_reason(
                 return Ok(());
             }
             let mut edge_ids = BTreeSet::new();
-            actual.iter().all(|receipt| {
-                edge_ids.insert(receipt.edge_id())
-                    && state.definition().edges().iter().any(|edge| {
-                        edge.id() == receipt.edge_id()
-                            && edge.target_node_id() == node_id
-                            && edge.action() == EdgeAction::Rework
-                    })
-            })
-            .then_some(())
-            .ok_or_else(invalid_inputs)
+            actual
+                .iter()
+                .all(|receipt| {
+                    edge_ids.insert(receipt.edge_id())
+                        && state.definition().edges().iter().any(|edge| {
+                            edge.id() == receipt.edge_id()
+                                && edge.target_node_id() == node_id
+                                && edge.action() == EdgeAction::Rework
+                        })
+                })
+                .then_some(())
+                .ok_or_else(invalid_inputs)
         }
         _ => Err(invalid_reason()),
     }

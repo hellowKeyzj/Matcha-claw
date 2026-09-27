@@ -284,14 +284,14 @@ export function RemoteFleetResourceBrowser(props: RemoteFleetResourceBrowserProp
 
   return (
     <div className={cn(
-      'grid h-full min-h-0 min-w-0 bg-card',
+      'grid h-full min-h-0 min-w-0 bg-[hsl(var(--shell-surface-muted))]',
       props.layout === 'wide' ? 'grid-cols-[minmax(10rem,13rem)_minmax(17rem,22rem)]' : 'grid-cols-1',
     )}>
       {props.layout === 'wide' ? (
-        <nav className="min-h-0 border-r border-border/70 p-3" aria-label={t('remoteFleet.resourceBrowser.types', { defaultValue: 'Resource types' })}>
+        <nav className="min-h-0 border-r p-3 [border-color:hsl(var(--shell-border))]" aria-label={t('remoteFleet.resourceBrowser.types', { defaultValue: 'Resource types' })}>
           {(['infrastructure', 'execution'] as const).map((group) => (
             <div key={group} className="mb-5 last:mb-0">
-              <div className="mb-1.5 px-2 text-xs font-medium text-muted-foreground">
+              <div className="mb-1.5 px-2 text-xs font-medium text-[hsl(var(--shell-text-muted))]">
                 {t(`remoteFleet.resourceBrowser.groups.${group}`, { defaultValue: group === 'infrastructure' ? 'Infrastructure' : 'Execution' })}
               </div>
               <div className="space-y-0.5">
@@ -302,13 +302,13 @@ export function RemoteFleetResourceBrowser(props: RemoteFleetResourceBrowserProp
                     aria-current={props.activeType === type ? 'page' : undefined}
                     onClick={() => selectType(type)}
                     className={cn(
-                      'flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-muted-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                      props.activeType === type ? 'bg-secondary font-medium text-foreground' : 'hover:bg-muted/60 hover:text-foreground',
+                      'flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[hsl(var(--shell-text-muted))] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                      props.activeType === type ? 'bg-[hsl(var(--shell-surface))] font-medium text-foreground' : 'hover:bg-[hsl(var(--shell-surface-hover))] hover:text-foreground',
                     )}
                   >
                     <Icon className="h-4 w-4 shrink-0" />
                     <span className="min-w-0 flex-1 truncate">{resourceTypeLabel(type, t)}</span>
-                    <span className="text-xs tabular-nums text-muted-foreground">{countForType(type, props)}</span>
+                    <span className="text-xs tabular-nums text-[hsl(var(--shell-text-muted))]">{countForType(type, props)}</span>
                   </button>
                 ))}
               </div>
@@ -318,13 +318,13 @@ export function RemoteFleetResourceBrowser(props: RemoteFleetResourceBrowserProp
       ) : null}
 
       <section className="flex min-h-0 min-w-0 flex-col" aria-labelledby="remote-fleet-resource-index-title">
-        <div className="shrink-0 border-b border-border/70 px-3 py-3">
+        <div className="shrink-0 border-b px-3 py-3 [border-color:hsl(var(--shell-border))]">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <h2 id="remote-fleet-resource-index-title" className="truncate text-sm font-semibold">
                 {t('remoteFleet.resourceBrowser.index', { defaultValue: 'Resource index' })}
               </h2>
-              <p className="mt-0.5 text-xs text-muted-foreground" role="status" aria-live="polite">
+              <p className="mt-0.5 text-xs text-[hsl(var(--shell-text-muted))]" role="status" aria-live="polite">
                 {t('remoteFleet.resourceBrowser.resultCount', { defaultValue: '{{visible}} of {{total}}', visible: filteredItems.length, total: items.length })}
               </p>
             </div>
@@ -332,7 +332,7 @@ export function RemoteFleetResourceBrowser(props: RemoteFleetResourceBrowserProp
           </div>
           {props.layout !== 'wide' ? <div className="mt-3">{typeSelector}</div> : null}
           <div className="relative mt-3">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[hsl(var(--shell-icon))]" />
             <Input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
@@ -371,9 +371,9 @@ export function RemoteFleetResourceBrowser(props: RemoteFleetResourceBrowserProp
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           {filteredItems.length === 0 ? (
             <div className="flex h-full min-h-52 flex-col items-center justify-center px-6 text-center">
-              <SlidersHorizontal className="h-5 w-5 text-muted-foreground" />
+              <SlidersHorizontal className="h-5 w-5 text-[hsl(var(--shell-icon))]" />
               <div className="mt-3 text-sm font-medium">{t('remoteFleet.resourceBrowser.emptyTitle', { defaultValue: 'No matching resources' })}</div>
-              <p className="mt-1 max-w-64 text-xs leading-relaxed text-muted-foreground">
+              <p className="mt-1 max-w-64 text-xs leading-relaxed text-[hsl(var(--shell-text-muted))]">
                 {hasFilters
                   ? t('remoteFleet.resourceBrowser.emptyFilteredDescription', { defaultValue: 'Change or clear the filters to see more resources.' })
                   : t('remoteFleet.resourceBrowser.emptyTypeDescription', { defaultValue: 'Resources of this type will appear here.' })}
@@ -381,7 +381,7 @@ export function RemoteFleetResourceBrowser(props: RemoteFleetResourceBrowserProp
               {hasFilters ? <Button variant="outline" size="sm" className="mt-3" onClick={clearFilters}>{t('remoteFleet.resourceBrowser.clearFilters', { defaultValue: 'Clear filters' })}</Button> : null}
             </div>
           ) : (
-            <div className="divide-y divide-border/70">
+            <div className="divide-y divide-[hsl(var(--shell-border))]">
               {filteredItems.map((item) => {
                 const selected = props.selected.kind === selectedKind && props.selected.id === item.id;
                 return (
@@ -392,7 +392,7 @@ export function RemoteFleetResourceBrowser(props: RemoteFleetResourceBrowserProp
                     onClick={() => props.onSelect({ kind: selectedKind, id: item.id })}
                     className={cn(
                       'group w-full px-3 py-3 text-left transition-colors focus-visible:relative focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
-                      selected ? 'bg-secondary/80' : 'hover:bg-muted/45',
+                      selected ? 'bg-[hsl(var(--shell-surface))]' : 'hover:bg-[hsl(var(--shell-surface-hover))]',
                     )}
                   >
                     <div className="flex min-w-0 items-start gap-3">

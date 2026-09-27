@@ -107,19 +107,22 @@
     "cloudAvailable": "Доступен в облаке",
     "cloudInstalled": "Установлен",
     "packageSize": "{{size}} байт",
-    "uploadLocalPackage": "Загрузить пакет",
+    "installLocalPackage": "Установить локальный пакет",
+    "uploadToCloud": "Загрузить в облако",
     "installFromCloud": "Установить",
     "uploaded": "Пакет навыка загружен",
     "uploadFailed": "Не удалось загрузить пакет навыка",
+    "installedLocal": "Пакет навыка установлен",
+    "installLocalFailed": "Не удалось установить локальный пакет навыка",
     "installedFromCloud": "Пакет навыка установлен",
     "installFromCloudFailed": "Не удалось установить облачный пакет навыка",
-    "uploadDialog": {
-      "title": "Загрузить пакет навыка",
+    "packageFilter": "Пакет навыка Matcha",
+    "installDialog": {
+      "title": "Установить локальный пакет навыка",
       "empty": "Перетащите .matcha-skillpkg или нажмите для выбора",
-      "hint": "Можно загрузить только локально созданный файл .matcha-skillpkg.",
+      "hint": "Установите локальный пакет и распакуйте его через облачную авторизацию.",
       "replace": "Нажмите или перетащите другой пакет, чтобы заменить выбранный",
-      "confirm": "Загрузить в облако",
-      "packageFilter": "Пакет навыка Matcha"
+      "confirm": "Установить локальный пакет"
     },
     "securityNote": "Пакеты навыков (.matcha-skillpkg) — read-only артефакты для запуска и распространения. Редактируемый исходник остаётся обычной папкой навыка или .md. Экспорт сохраняет исходник; если один key есть в обеих формах, обычный исходник имеет приоритет.",
     "runtimeLabel": "Runtime: {{runtime}}",
@@ -134,6 +137,8 @@
     "export": "Создать пакет",
     "exported": "Read-only пакет навыка создан",
     "exportFailed": "Не удалось создать пакет навыка",
+    "uninstallConfirmTitle": "Удалить пакет навыка",
+    "uninstallConfirmMessage": "Удалить {{name}} из локальных пакетов навыков?",
     "noExportTargets": "Нет обычных невстроенных навыков для создания пакета."
   },
   "toast": {

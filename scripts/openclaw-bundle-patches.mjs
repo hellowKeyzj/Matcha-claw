@@ -4,7 +4,7 @@ import path from 'node:path';
 import { safeRmSync } from './lib/safe-delete.mjs';
 import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
 
-const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch']);
+const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string']);
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -449,6 +449,14 @@ function matchaSealedSkillPackageFingerprint(dir) {
     return "";
   }
 }
+function resolveLoadedSkillRecordKey(record) {
+  return resolveSkillKey(record.skill, {
+    metadata: resolveSkillEntryMetadata({
+      frontmatter: record.frontmatter,
+      skillDir: record.skill.baseDir
+    })
+  });
+}
 function loadMatchaSealedSkillRecords(dir) {
   if (!process.env.MATCHA_SEALED_ENDPOINT || !process.env.MATCHA_SEALED_TOKEN || process.env.MATCHA_SEALED_RUNTIME !== "openclaw") return [];
   let entries;
@@ -469,7 +477,7 @@ function loadMatchaSealedSkillRecords(dir) {
       continue;
     }
     const manifest = wire?.manifest;
-    if (wire?.format !== "matcha-skillpkg" || wire?.version !== 1 || manifest?.runtimeTarget !== "openclaw") continue;
+    if (wire?.format !== "matcha-skillpkg" || wire?.version !== 1 || manifest?.target !== "openclaw") continue;
     const skillKey = typeof manifest.skillKey === "string" ? manifest.skillKey.trim() : "";
     const descriptor = manifest.descriptor && typeof manifest.descriptor === "object" ? manifest.descriptor : void 0;
     const name = typeof descriptor?.name === "string" && descriptor.name.trim() || skillKey;
@@ -522,6 +530,22 @@ function loadMatchaSealedSkillRecords(dir) {
       patchId,
     );
     changed = true;
+  } else if (!source.includes('function resolveLoadedSkillRecordKey(')) {
+    source = replaceOnce(
+      source,
+      'function loadMatchaSealedSkillRecords(dir) {',
+      `function resolveLoadedSkillRecordKey(record) {
+  return resolveSkillKey(record.skill, {
+    metadata: resolveSkillEntryMetadata({
+      frontmatter: record.frontmatter,
+      skillDir: record.skill.baseDir
+    })
+  });
+}
+function loadMatchaSealedSkillRecords(dir) {`,
+      patchId,
+    );
+    changed = true;
   }
   if (source.includes('metadata: JSON.stringify({ skillKey })')) {
     source = source.replaceAll(
@@ -561,29 +585,50 @@ function loadMatchaSealedSkillRecords(dir) {
 	});`;
   const buggyManagedAndSealed = `${managedOnly}
 	const sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir);`;
-  const managedAndFilteredSealed = `${managedOnly}
+  const managedFilteredSealed = `${managedOnly}
 	const managedSkillKeys = new Set(managedSkills.map((record) => resolveSkillKey(record.skill, record)));
 	const sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir).filter((record) => !managedSkillKeys.has(resolveSkillKey(record.skill, record)));`;
-  if (!source.includes(managedAndFilteredSealed)) {
-    source = replaceOnce(
-      source,
-      source.includes(buggyManagedAndSealed) ? buggyManagedAndSealed : managedOnly,
-      managedAndFilteredSealed,
-      patchId,
-    );
+  if (source.includes(managedFilteredSealed)) {
+    source = replaceOnce(source, managedFilteredSealed, managedOnly, patchId);
+    changed = true;
+  } else if (source.includes(buggyManagedAndSealed)) {
+    source = replaceOnce(source, buggyManagedAndSealed, managedOnly, patchId);
+    changed = true;
+  }
+  const workspaceSkillsOnly = `	const workspaceSkills = loadSkills({ dir: workspaceSkillsDir, source: "openclaw-workspace" });`;
+  const allOrdinaryFilteredSealed = `	const ordinarySkillKeys = new Set([
+		...bundledSkills,
+		...custodianSkills,
+		...extraSkills,
+		...managedSkills,
+		...workshopSkills,
+		...personalAgentsSkills,
+		...projectAgentsSkills,
+		...workspaceSkills
+	].map(resolveLoadedSkillRecordKey));
+	const sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir).filter((record) => !ordinarySkillKeys.has(resolveLoadedSkillRecordKey(record)));`;
+  if (!source.includes(allOrdinaryFilteredSealed)) {
+    source = replaceOnce(source, workspaceSkillsOnly, `${workspaceSkillsOnly}\n${allOrdinaryFilteredSealed}`, patchId);
     changed = true;
   }
   const buggyOrder = `for (const record of managedSkills) mergeRecord(record);
 	for (const record of sealedSkills) mergeRecord(record);`;
-  const expectedOrder = `for (const record of sealedSkills) mergeRecord(record);
+  const managedOrder = 'for (const record of managedSkills) mergeRecord(record);';
+  if (source.includes(buggyOrder)) {
+    source = replaceOnce(source, buggyOrder, managedOrder, patchId);
+    changed = true;
+  }
+  const oldExpectedOrder = `for (const record of sealedSkills) mergeRecord(record);
 	for (const record of managedSkills) mergeRecord(record);`;
-  if (!source.includes(expectedOrder)) {
-    source = replaceOnce(
-      source,
-      source.includes(buggyOrder) ? buggyOrder : 'for (const record of managedSkills) mergeRecord(record);',
-      expectedOrder,
-      patchId,
-    );
+  if (source.includes(oldExpectedOrder)) {
+    source = replaceOnce(source, oldExpectedOrder, managedOrder, patchId);
+    changed = true;
+  }
+  const extraMerge = 'for (const record of extraSkills) mergeRecord(record);';
+  const sealedBeforeExtra = `for (const record of sealedSkills) mergeRecord(record);
+	${extraMerge}`;
+  if (!source.includes(sealedBeforeExtra)) {
+    source = replaceOnce(source, extraMerge, sealedBeforeExtra, patchId);
     changed = true;
   }
   if (changed) writeText(filePath, source);
@@ -698,7 +743,7 @@ function matchaSealedAgentPackageKeys(dir) {
     }
     const manifest = wire?.manifest;
     const agentKey = typeof manifest?.agentKey === "string" ? manifest.agentKey.trim() : "";
-    if (wire?.format !== "matcha-agentpkg" || wire?.version !== 1 || manifest?.runtimeTarget !== "openclaw" || !agentKey || seen.has(agentKey)) continue;
+    if (wire?.format !== "matcha-agentpkg" || wire?.version !== 1 || manifest?.target !== "openclaw" || !agentKey || seen.has(agentKey)) continue;
     seen.add(agentKey);
     keys.push(agentKey);
   }
@@ -2085,6 +2130,80 @@ function patchExplicitSessionModelSelection(filePath, patchId) {
   return true;
 }
 
+function patchAgentDeleteCleanupIdentityString(openclawDir) {
+  const patchId = 'agent-delete-cleanup-identity-string';
+  const distDir = path.join(openclawDir, 'dist');
+  const agentsFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'agents-',
+    markers: [
+      'function cleanupPathIdentity(stat)',
+      'async function prepareAgentDeleteCleanupPaths(',
+      'cleanup path identity changed before deletion',
+    ],
+  });
+  const journalFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'openclaw-agent-db-lease-',
+    markers: [
+      'function parseCleanupPaths(value)',
+      'Invalid agent deletion cleanup path journal.',
+      'function readAgentDeletionJournal(',
+    ],
+  });
+  const changed = [
+    [agentsFile, patchAgentDeleteCleanupIdentity(agentsFile, patchId)],
+    [journalFile, patchAgentDeletionJournalCleanupIdentity(journalFile, patchId)],
+  ].filter(([, changed]) => changed).map(([file]) => path.basename(file));
+  return changed.length > 0
+    ? { status: 'applied', detail: changed.join(', ') }
+    : { status: 'clean', detail: 'already patched' };
+}
+
+function patchAgentDeleteCleanupIdentity(filePath, patchId) {
+  let source = readText(filePath);
+  const replacement = `function cleanupPathIdentity(stat) {
+\tif (typeof stat?.dev !== "number" && typeof stat?.dev !== "bigint" || typeof stat.ino !== "number" && typeof stat.ino !== "bigint") return null;
+\treturn {
+\t\tdev: String(stat.dev),
+\t\tino: String(stat.ino)
+\t};
+}
+async function statAgentCleanupPath(cleanupPath) {`;
+  const patch = replaceBlockOnce(
+    source,
+    'function cleanupPathIdentity(stat) {',
+    '\nasync function statAgentCleanupPath(cleanupPath) {',
+    replacement,
+    patchId,
+  );
+  source = patch.source;
+  if (patch.changed) writeText(filePath, source);
+  return patch.changed;
+}
+
+function patchAgentDeletionJournalCleanupIdentity(filePath, patchId) {
+  let source = readText(filePath);
+  const replacement = `function parseCleanupPaths(value) {
+\tconst parsed = JSON.parse(value);
+\tif (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "object" && entry !== null && typeof entry.path === "string" && typeof entry.canonicalPath === "string" && typeof entry.parentPath === "string" && (entry.kind === "target" || entry.kind === "symlink") && (entry.dev === null || typeof entry.dev === "number" || typeof entry.dev === "string") && (entry.ino === null || typeof entry.ino === "number" || typeof entry.ino === "string") && typeof entry.coversDescendants === "boolean" && typeof entry.done === "boolean" && (entry.note === void 0 || typeof entry.note === "string") && Array.isArray(entry.sourcePaths) && entry.sourcePaths.every((sourcePath) => typeof sourcePath === "string"))) throw new Error("Invalid agent deletion cleanup path journal.");
+\treturn parsed.map((entry) => ({
+\t\t...entry,
+\t\tdev: entry.dev === null ? null : String(entry.dev),
+\t\tino: entry.ino === null ? null : String(entry.ino)
+\t}));
+}
+function readAgentDeletionJournal(agentId, options = {}) {`;
+  const patch = replaceBlockOnce(
+    source,
+    'function parseCleanupPaths(value) {',
+    '\nfunction readAgentDeletionJournal(agentId, options = {}) {',
+    replacement,
+    patchId,
+  );
+  source = patch.source;
+  if (patch.changed) writeText(filePath, source);
+  return patch.changed;
+}
+
 const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'strip-bundled-channel-plugins',
@@ -2109,6 +2228,10 @@ const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'explicit-session-model-patch',
     apply: patchExplicitSessionModelPatch,
+  },
+  {
+    id: 'agent-delete-cleanup-identity-string',
+    apply: patchAgentDeleteCleanupIdentityString,
   },
 ]);
 

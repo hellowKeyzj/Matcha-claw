@@ -126,7 +126,7 @@ session_params!(SessionTranscriptParams);
 
 const ATTACHMENT_PROMPT_PAYLOAD_VERSION: &str = "attachments-v1";
 const MAX_ATTACHMENTS: usize = 16;
-const MAX_ATTACHMENT_DECODED_BYTES: usize = 20 * 1024 * 1024;
+const MAX_ATTACHMENT_DECODED_BYTES: usize = 5 * 1024 * 1024;
 const MAX_ATTACHMENTS_DECODED_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ATTACHMENT_BASE64_BYTES: usize = MAX_ATTACHMENT_DECODED_BYTES.div_ceil(3) * 4;
 const MAX_ATTACHMENTS_BASE64_BYTES: usize = MAX_ATTACHMENTS_DECODED_BYTES.div_ceil(3) * 4;

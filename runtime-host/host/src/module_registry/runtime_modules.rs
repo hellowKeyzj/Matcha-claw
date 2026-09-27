@@ -80,7 +80,7 @@ pub(crate) fn runtime_module_install_plan(
             ),
             handles.fleet_module.descriptor(Arc::clone(&verifier)),
             handles.plugins.descriptor(Arc::clone(&verifier)),
-            handles.sealed_resource.descriptor(),
+            handles.sealed_resource.descriptor(Arc::clone(&verifier)),
             handles.skills.descriptor(Arc::clone(&verifier)),
             handles.cron.descriptor(Arc::clone(&verifier)),
             handles.usage.descriptor(Arc::clone(&verifier)),

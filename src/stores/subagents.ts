@@ -22,6 +22,7 @@ import {
   type AgentAvatarStyle,
 } from '@/lib/agent-avatar';
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import i18n from '@/i18n';
 import { fetchSelectableProviderModels } from '@/lib/provider-models';
 import { useChatStore } from '@/stores/chat';
 import {
@@ -930,6 +931,17 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function agentPackageInstallErrorMessage(error: unknown): string {
+  const message = getErrorMessage(error);
+  if (message === 'Subagent mutation outcome is unknown') {
+    return i18n.t('subagents:transfer.installPackageUnknownOutcome');
+  }
+  if (message === 'Subagent request was rejected') {
+    return i18n.t('subagents:transfer.installPackageRejected');
+  }
+  return message;
+}
+
 function buildCreateWarning(agentId: string, message: string): string {
   return `智能体 "${agentId}" 已创建，但${message}。请在编辑中重新确认`;
 }
@@ -1707,28 +1719,36 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     if (!result.success || !result.package) {
       throw new Error(result.error || 'Failed to export agent package');
     }
-    return result.package;
+    return {
+      agentId: result.package.agentId,
+      fileName: result.package.fileName,
+      size: result.package.size,
+      exportedAtMs: result.package.exportedAtMs,
+    };
   },
 
   uploadAgentPackageToCloud: async (agentId) => {
-    const exported = await get().exportAgentPackage(agentId);
-    const uploaded = await hostApiFetch<{ packageId?: string; packageVersionId?: string; name?: string; fileName?: string; bytes?: number }>('/api/packages/upload', {
+    const normalizedAgentId = agentId.trim();
+    if (!normalizedAgentId) {
+      throw new Error('Agent id is required');
+    }
+    const uploaded = await hostApiFetch<{ packageId?: string; packageVersionId?: string; name?: string; fileName?: string; bytes?: number }>('/api/packages/upload/sealed-agent', {
       method: 'POST',
-      body: JSON.stringify({ packagePath: exported.packagePath }),
+      body: JSON.stringify({ agentId: normalizedAgentId }),
       timeoutMs: 120000,
     });
     return {
-      agentId: exported.agentId,
+      agentId: normalizedAgentId,
       packageId: uploaded.packageId,
       packageVersionId: uploaded.packageVersionId,
-      fileName: uploaded.fileName ?? exported.fileName,
-      size: uploaded.bytes ?? exported.size,
+      fileName: uploaded.fileName ?? uploaded.name,
+      size: uploaded.bytes,
       uploadedAtMs: Date.now(),
     };
   },
 
   downloadAgentPackageFromCloud: async (packageVersionId) => {
-    const result = await hostApiFetch<{ packagePath?: string; packageId?: string; packageVersionId?: string; filename?: string; bytes?: number }>('/api/packages/download', {
+    const result = await hostApiFetch<{ packageId?: string; packageVersionId?: string; filename?: string; bytes?: number }>('/api/packages/download', {
       method: 'POST',
       body: JSON.stringify({ packageVersionId, packageType: 'agent', source: 'subagents' }),
       timeoutMs: 120000,
@@ -1737,20 +1757,25 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       agentId: result.packageVersionId ?? packageVersionId,
       packageId: result.packageId,
       packageVersionId: result.packageVersionId,
-      fileName: result.filename ?? result.packagePath ?? packageVersionId,
+      fileName: result.filename ?? packageVersionId,
       size: result.bytes,
       downloadedAtMs: Date.now(),
     };
   },
 
   installAgentPackageFromCloud: async (packageVersionId) => {
-    const result = await hostApiFetch<{ packageId?: string; packageVersionId?: string; install?: { outcome?: string; agentId?: string } }>('/api/packages/install', {
-      method: 'POST',
-      body: JSON.stringify({ packageVersionId, packageType: 'agent', source: 'subagents' }),
-      timeoutMs: 120000,
-    });
+    let result: { packageId?: string; packageVersionId?: string; install?: { outcome?: string; agentId?: string } };
+    try {
+      result = await hostApiFetch<{ packageId?: string; packageVersionId?: string; install?: { outcome?: string; agentId?: string } }>('/api/packages/install', {
+        method: 'POST',
+        body: JSON.stringify({ packageVersionId, packageType: 'agent', source: 'subagents' }),
+        timeoutMs: 120000,
+      });
+    } catch (error) {
+      throw new Error(agentPackageInstallErrorMessage(error), { cause: error });
+    }
     if (result.install?.outcome !== 'accepted' || !result.install.agentId) {
-      throw new Error('Failed to install agent package');
+      throw new Error(i18n.t('subagents:transfer.installPackageUnexpectedResult'));
     }
     await get().loadAgents({ silent: true });
     return {

@@ -69,6 +69,27 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
   return Object.keys(headers).some((headerName) => headerName.toLowerCase() === name);
 }
 
+function skillKeyFromHostApiBody(body: unknown): string {
+  const parsed = typeof body === 'string' ? parseHostApiJson(body) : body;
+  if (!parsed || typeof parsed !== 'object' || !('skillKey' in parsed)) return 'none';
+  const value = (parsed as { skillKey?: unknown }).skillKey;
+  return typeof value === 'string' && value.trim() ? value.trim() : 'invalid';
+}
+
+function outcomeFromHostApiBody(body: unknown): string {
+  if (!body || typeof body !== 'object' || !('outcome' in body)) return 'unknown';
+  const value = (body as { outcome?: unknown }).outcome;
+  return typeof value === 'string' ? value : 'unknown';
+}
+
+function parseHostApiJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 async function waitForHostApiReadyOrAbort(signal: AbortSignal): Promise<void> {
   if (signal.aborted) {
     throw new Error('Host API request aborted.');
@@ -145,6 +166,16 @@ export function registerHostApiProxyHandlers(): void {
       try {
         await waitForHostApiReadyOrAbort(controller.signal);
 
+        if (normalizedPath === '/api/sealed-skills/export') {
+          console.info('[startup-trace]', {
+            source: 'sealed-skills-export',
+            phase: 'hostapi-proxy',
+            detail: 'request',
+            method,
+            skillKey: skillKeyFromHostApiBody(request?.body),
+          });
+        }
+
         const headers = withoutRendererAuthenticationHeaders(request?.headers);
         const traceId = typeof request?.headers?.[SESSION_TRACE_HEADER] === 'string'
           ? request.headers[SESSION_TRACE_HEADER]
@@ -173,6 +204,15 @@ export function registerHostApiProxyHandlers(): void {
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
         if (contentType.includes('application/json')) {
           const json = await response.json();
+          if (normalizedPath === '/api/sealed-skills/export') {
+            console.info('[startup-trace]', {
+              source: 'sealed-skills-export',
+              phase: 'hostapi-proxy',
+              detail: 'response',
+              status: response.status,
+              outcome: outcomeFromHostApiBody(json),
+            });
+          }
           return {
             ok: true,
             data: {
@@ -184,6 +224,14 @@ export function registerHostApiProxyHandlers(): void {
         }
 
         const text = await response.text();
+        if (normalizedPath === '/api/sealed-skills/export') {
+          console.info('[startup-trace]', {
+            source: 'sealed-skills-export',
+            phase: 'hostapi-proxy',
+            detail: 'text-response',
+            status: response.status,
+          });
+        }
         return {
           ok: true,
           data: {
@@ -199,6 +247,14 @@ export function registerHostApiProxyHandlers(): void {
         }
       }
     } catch {
+      if (normalizedPath === '/api/sealed-skills/export') {
+        console.info('[startup-trace]', {
+          source: 'sealed-skills-export',
+          phase: 'hostapi-proxy',
+          detail: 'failure',
+          code: inflightRequest?.failureCode ?? 'UNAVAILABLE',
+        });
+      }
       publishE2EHostApiBoundary({ stage: 'proxy-failure', method, path: normalizedPath });
       return {
         ok: false,

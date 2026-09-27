@@ -1057,7 +1057,7 @@ function isWorkspaceMediaAttachment(value: unknown): value is StagedFilePayload 
     && (value.stagedAttachmentId === undefined || (typeof value.stagedAttachmentId === 'string' && value.stagedAttachmentId.length > 0))
     && (value.entryKind === undefined || value.entryKind === 'file' || value.entryKind === 'directory')
     && (value.entryKind !== 'directory' || (value.mimeType === 'application/x-directory' && value.fileSize === 0 && value.preview === null))
-    && (value.entryKind === 'directory' || typeof value.stagedAttachmentId === 'string')
+    && (value.entryKind === 'directory' || typeof value.stagedAttachmentId === 'string' || typeof value.sourcePath === 'string')
     && typeof value.fileName === 'string'
     && value.fileName.length > 0
     && typeof value.mimeType === 'string'

@@ -107,19 +107,22 @@
         "cloudAvailable": "クラウドで利用可能",
         "cloudInstalled": "インストール済み",
         "packageSize": "{{size}} バイト",
-        "uploadLocalPackage": "パッケージをアップロード",
+        "installLocalPackage": "ローカルパッケージをインストール",
+        "uploadToCloud": "クラウドへアップロード",
         "installFromCloud": "インストール",
         "uploaded": "スキルパッケージをアップロードしました",
         "uploadFailed": "スキルパッケージのアップロードに失敗しました",
+        "installedLocal": "スキルパッケージをインストールしました",
+        "installLocalFailed": "ローカルスキルパッケージのインストールに失敗しました",
         "installedFromCloud": "スキルパッケージをインストールしました",
         "installFromCloudFailed": "クラウドスキルパッケージのインストールに失敗しました",
-        "uploadDialog": {
-            "title": "スキルパッケージをアップロード",
+        "packageFilter": "Matcha スキルパッケージ",
+        "installDialog": {
+            "title": "ローカルスキルパッケージをインストール",
             "empty": ".matcha-skillpkg をドラッグするか、クリックして選択",
-            "hint": "ローカルで生成済みの .matcha-skillpkg のみアップロードできます。",
+            "hint": "ローカルパッケージをインストールし、クラウド認証で解包します。",
             "replace": "別のパッケージをクリックまたはドラッグすると選び直せます",
-            "confirm": "クラウドにアップロード",
-            "packageFilter": "Matcha スキルパッケージ"
+            "confirm": "ローカルパッケージをインストール"
         },
         "securityNote": "スキルパッケージ（.matcha-skillpkg）は読み取り専用の実行/配布成果物です。編集可能なソースは通常のスキルフォルダまたは .md のまま残ります。生成してもソースは保持され、同じ key が両方にある場合は通常ソースが優先されます。",
         "runtimeLabel": "Runtime: {{runtime}}",
@@ -134,6 +137,8 @@
         "export": "パッケージ生成",
         "exported": "読み取り専用スキルパッケージを生成しました",
         "exportFailed": "スキルパッケージの生成に失敗しました",
+        "uninstallConfirmTitle": "スキルパッケージをアンインストール",
+        "uninstallConfirmMessage": "{{name}} をローカルのスキルパッケージから削除しますか？",
         "noExportTargets": "生成できる通常の非内蔵スキルはありません。"
     },
     "toast": {

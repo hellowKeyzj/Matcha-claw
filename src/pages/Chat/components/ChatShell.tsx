@@ -1,8 +1,8 @@
 import { useLayoutEffect, useRef, type CSSProperties, type ReactNode, type RefObject, type WheelEvent } from 'react';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
-import { CHAT_WORKSPACE_LAYOUT } from '../chat-workspace-layout';
-import type { ChatSidePanelMode, ChatWindowDockPhase } from '../chat-workspace-layout';
+import { CHAT_WORKSPACE_LAYOUT } from '@/components/layout/chat-workspace-layout';
+import type { ChatSidePanelMode, ChatWindowDockPhase } from '@/components/layout/chat-workspace-layout';
 
 const CHAT_THREAD_BOTTOM_GAP_PX = 12;
 const CHAT_THREAD_TOP_GAP_PX = 8;

@@ -101,9 +101,7 @@ impl TeamMaterializationLifecycle {
     pub fn cleanup_request(&self) -> Option<&TeamMaterializationRemoval> {
         match self {
             Self::Tombstoned(TombstonedMaterialization::Confirmed {
-                cleanup:
-                    TeamMaterializationCleanup::Pending(removal)
-                    | TeamMaterializationCleanup::OutcomeUnknown(removal),
+                cleanup: TeamMaterializationCleanup::Pending(removal),
                 ..
             }) => Some(removal),
             _ => None,

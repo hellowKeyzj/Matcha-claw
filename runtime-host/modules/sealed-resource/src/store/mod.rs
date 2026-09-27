@@ -2,7 +2,9 @@ mod agent;
 mod skill;
 
 pub use agent::{
-    SealedAgentCatalog, SealedAgentCatalogEntry, SealedAgentPackageExport,
+    SealedAgentCatalog, SealedAgentCatalogEntry, SealedAgentInstallPlan, SealedAgentPackageExport,
     SealedAgentRuntimeProjection, SealedAgentStore,
 };
-pub use skill::{SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillStore};
+pub use skill::{
+    SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillPackageExport, SealedSkillStore,
+};

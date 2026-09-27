@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, memo, useReducer } from 'rea
 import type { ChatAssistantTurnItem } from './chat-render-item-model';
 import type { AttachedFileMeta } from '@/stores/chat';
 import { AssistantMessageBody } from './assistant-message-body';
-import { MessageShell } from './chat-message-shell';
+import { MessageShell, type MessageAvatarSlot } from './chat-message-shell';
 import { ChatImageLightbox } from './components/ChatImageLightbox';
 import { AssistantPendingIndicator } from './components/AssistantPendingIndicator';
 import { getAssistantTurnPlainText } from './chat-message-view';
@@ -34,6 +34,7 @@ interface ChatAssistantTurnProps {
   item: ChatAssistantTurnItem;
   showThinking: boolean;
   replyStartedAt?: number;
+  assistantAvatarSlot?: MessageAvatarSlot;
   userAvatarImageUrl?: string | null;
   sessionIdentity?: SessionIdentity;
   endpointSessionId?: string | null;
@@ -248,6 +249,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   item,
   showThinking,
   replyStartedAt,
+  assistantAvatarSlot,
   userAvatarImageUrl,
   sessionIdentity,
   endpointSessionId,
@@ -485,6 +487,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
         assistantAgentName={item.assistantPresentation?.agentName}
         assistantAvatarSeed={item.assistantPresentation?.avatarSeed}
         assistantAvatarStyle={item.assistantPresentation?.avatarStyle}
+        assistantAvatarSlot={assistantAvatarSlot}
         userAvatarImageUrl={userAvatarImageUrl}
       >
         {renderParts.map((part) => {

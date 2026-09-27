@@ -231,7 +231,7 @@ describe('session capability dispatcher', () => {
       reference: 'media_0123456789abcdef0123456789abcdef',
     }), workspaceDeps(execute).deps);
     const oversized = await dispatchSessionCapability(workspaceMediaRequest('media.stageBuffer', {
-      fileName: 'large.bin', mimeType: 'application/octet-stream', base64: 'A'.repeat(28_000_000),
+      fileName: 'large.bin', mimeType: 'application/octet-stream', base64: 'A'.repeat(Math.ceil((5 * 1024 * 1024) / 3) * 4 + 4),
     }), workspaceDeps(execute).deps);
     expect(directResolve).toEqual({ status: 400, body: { success: false, error: 'Workspace media request is invalid' } });
     expect(oversized?.status).toBe(400);

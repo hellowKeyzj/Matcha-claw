@@ -113,24 +113,29 @@
         "cloudAvailable": "Cloud available",
         "cloudInstalled": "Installed",
         "packageSize": "{{size}} bytes",
-        "uploadLocalPackage": "Upload package",
+        "installLocalPackage": "Install local package",
+        "uploadToCloud": "Upload to cloud",
         "installFromCloud": "Install",
         "uploaded": "Skill package uploaded",
         "uploadFailed": "Failed to upload skill package",
+        "installedLocal": "Skill package installed",
+        "installLocalFailed": "Failed to install local skill package",
         "installedFromCloud": "Skill package installed",
         "installFromCloudFailed": "Failed to install cloud skill package",
-        "uploadDialog": {
-            "title": "Upload skill package",
+        "packageFilter": "Matcha Skill Package",
+        "installDialog": {
+            "title": "Install local skill package",
             "empty": "Drop a .matcha-skillpkg or click to choose",
-            "hint": "Only uploads a locally generated .matcha-skillpkg.",
+            "hint": "Install a local package and unpack it through cloud authorization.",
             "replace": "Click or drop another package to replace the current selection",
-            "confirm": "Upload to cloud",
-            "packageFilter": "Matcha Skill Package"
+            "confirm": "Install local package"
         },
         "exportTitle": "Generate skill packages",
         "export": "Generate package",
         "exported": "Read-only skill package generated",
         "exportFailed": "Failed to generate skill package",
+        "uninstallConfirmTitle": "Uninstall skill package",
+        "uninstallConfirmMessage": "Remove {{name}} from local skill packages?",
         "noExportTargets": "No plaintext non-built-in skills can generate packages."
     },
     "toast": {

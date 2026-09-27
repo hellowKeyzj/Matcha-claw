@@ -4,7 +4,10 @@ use foundation::execution::{LaneRetention, OwnerSpec};
 
 use crate::{
     application::commands::{SubagentCommandEnvelope, SubagentOwnerKey, SubagentQuery},
-    domain::model::{Command, NativeEndpoint, Outcome},
+    domain::model::{
+        AgentCreate, AgentDelete, CloudPackageMetadata, Command, NativeEndpoint, Outcome,
+        WorkspaceInitialization,
+    },
     ports::{
         SealedAgentError, SealedAgentStorePort, SubagentRequestAdmission, SubagentRuntimeDirectory,
     },
@@ -130,17 +133,45 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
                 Outcome::PackageExported,
             );
         }
-        Command::InstallPackage {
+        Command::ExportCloudPackage {
             endpoint,
-            package_path,
+            agent_id,
+            cloud_public_key,
+            cloud_key_id,
         } => {
             if endpoint != NativeEndpoint::OpenClawLocal {
                 return Outcome::Unsupported;
             }
             return sealed_outcome(
-                shared.sealed_agents.install_package(package_path),
-                Outcome::PackageInstalled,
+                shared
+                    .sealed_agents
+                    .export_cloud_package(agent_id, cloud_public_key, cloud_key_id),
+                Outcome::PackageExported,
             );
+        }
+        Command::InstallPackage {
+            endpoint,
+            package_path,
+            cloud_metadata,
+        } => return install_agent_package(shared, endpoint, package_path, cloud_metadata).await,
+        Command::Delete { endpoint, input } => {
+            let agent_id = input.agent_id.clone();
+            let Some(ops) = shared.runtime_directory.subagent_ops(endpoint) else {
+                return Outcome::Unsupported;
+            };
+            if !ops.subagent_runtime_ready() {
+                return Outcome::Unavailable;
+            }
+            let outcome = ops.subagents(Command::Delete { endpoint, input }).await;
+            if matches!(outcome, Outcome::Deleted(_)) {
+                match shared.sealed_agents.remove_package(agent_id) {
+                    Ok(_) | Err(SealedAgentError::NotFound) => {}
+                    Err(SealedAgentError::Rejected) => return Outcome::Rejected,
+                    Err(SealedAgentError::AlreadyExists) => return Outcome::Unknown,
+                    Err(SealedAgentError::Unknown) => return Outcome::Unavailable,
+                }
+            }
+            outcome
         }
         command => {
             let Some(ops) = shared.runtime_directory.subagent_ops(command.endpoint()) else {
@@ -155,15 +186,77 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
     }
 }
 
+async fn install_agent_package(
+    shared: &SubagentShared,
+    endpoint: NativeEndpoint,
+    package_path: String,
+    cloud_metadata: Option<CloudPackageMetadata>,
+) -> Outcome {
+    if endpoint != NativeEndpoint::OpenClawLocal {
+        return Outcome::Unsupported;
+    }
+    let Some(ops) = shared.runtime_directory.subagent_ops(endpoint) else {
+        return Outcome::Unsupported;
+    };
+    if !ops.subagent_runtime_ready() {
+        return Outcome::Unavailable;
+    }
+    let plan = match shared
+        .sealed_agents
+        .prepare_install(package_path.clone(), cloud_metadata.clone())
+    {
+        Ok(plan) => plan,
+        Err(error) => return sealed_error(error),
+    };
+    let outcome = ops
+        .subagents(Command::Create {
+            endpoint,
+            input: AgentCreate {
+                name: plan.agent_id().to_owned(),
+                workspace: plan.workspace().to_owned(),
+                model: None,
+            },
+            workspace_initialization: WorkspaceInitialization::EmptyWorkspace,
+        })
+        .await;
+    if !matches!(outcome, Outcome::Created(_)) {
+        return outcome;
+    }
+    match shared
+        .sealed_agents
+        .install_prepared_package(package_path, cloud_metadata)
+    {
+        Ok(receipt) => Outcome::PackageInstalled(receipt),
+        Err(error) => {
+            let _ = ops
+                .subagents(Command::Delete {
+                    endpoint,
+                    input: AgentDelete {
+                        agent_id: plan.agent_id().to_owned(),
+                        delete_files: !plan.workspace_preexisted(),
+                    },
+                })
+                .await;
+            sealed_error(error)
+        }
+    }
+}
+
 fn sealed_outcome<T>(
     result: Result<T, SealedAgentError>,
     applied: impl FnOnce(T) -> Outcome,
 ) -> Outcome {
     match result {
         Ok(value) => applied(value),
-        Err(SealedAgentError::NotFound | SealedAgentError::Rejected) => Outcome::Rejected,
-        Err(SealedAgentError::AlreadyExists) => Outcome::Unknown,
-        Err(SealedAgentError::Unknown) => Outcome::Unavailable,
+        Err(error) => sealed_error(error),
+    }
+}
+
+fn sealed_error(error: SealedAgentError) -> Outcome {
+    match error {
+        SealedAgentError::NotFound | SealedAgentError::Rejected => Outcome::Rejected,
+        SealedAgentError::AlreadyExists => Outcome::Unknown,
+        SealedAgentError::Unknown => Outcome::Unavailable,
     }
 }
 

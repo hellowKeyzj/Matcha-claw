@@ -63,11 +63,7 @@ export function registerDialogHandlers(): void {
 
     const result = await dialog.showOpenDialog({
       ...options,
-      properties: Array.from(new Set<NonNullable<Electron.OpenDialogOptions['properties']>[number]>([
-        ...(options.properties ?? []),
-        'openFile',
-        'multiSelections',
-      ])),
+      properties: ['openFile', 'multiSelections'],
     });
     if (result.canceled) {
       return { canceled: true };

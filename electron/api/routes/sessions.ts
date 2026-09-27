@@ -29,8 +29,8 @@ const SESSION_SEND_INVALID = { success: false, error: 'Session send request is i
 const WORKSPACE_MEDIA_INVALID = { success: false, error: 'Workspace media request is invalid' } as const;
 const WORKSPACE_MEDIA_UNAVAILABLE = { success: false, error: 'Workspace media is unavailable' } as const;
 const MAX_ATTACHMENTS = 16;
-const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
-const MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
 const MAX_CONTENT_REF_BYTES = 512;
 

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CHAT_WORKSPACE_LAYOUT, clampPaneWidth, getSidebarResizeMaxWidth, type ChatWindowDockPhase } from '@/pages/Chat/chat-workspace-layout';
+import { CHAT_WORKSPACE_LAYOUT, clampPaneWidth, getSidebarResizeMaxWidth, type ChatWindowDockPhase } from '@/components/layout/chat-workspace-layout';
 
 interface ChatWindowRightDockLayout {
   phase: ChatWindowDockPhase;

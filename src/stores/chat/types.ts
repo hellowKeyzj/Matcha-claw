@@ -365,6 +365,8 @@ export interface ChatStoreBaseState extends ChatViewState {
   dismissedRuntimeErrorBySession: Record<string, ChatRuntimeErrorDismissMarker | undefined>;
 }
 
+export const CHAT_INLINE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+
 export interface ChatSendAttachment {
   stagedAttachmentId: string;
   entryKind?: 'file' | 'directory';

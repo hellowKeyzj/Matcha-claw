@@ -86,6 +86,8 @@ describe('main api boundary', () => {
     expect(isHostApiRequestAllowed('POST', '/api/diagnostics/memory')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/clawhub/skills/install')).toBe(true);
     expect(isHostApiRequestAllowed('GET', '/api/clawhub/skills/install')).toBe(false);
+    expect(isHostApiRequestAllowed('POST', '/api/packages/upload/sealed-agent')).toBe(true);
+    expect(isHostApiRequestAllowed('GET', '/api/packages/upload/sealed-agent')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/plugins/configuration')).toBe(true);
     expect(isHostApiRequestAllowed('GET', '/api/plugins/configuration')).toBe(false);
     expect(isHostApiRequestAllowed('GET', '/api/files/save-image')).toBe(false);

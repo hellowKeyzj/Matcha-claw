@@ -70,8 +70,13 @@ impl OpenClawGateway {
     }
 
     pub async fn update_skill(&self, request: SkillUpdateRequest) -> SkillMutationOutcome {
-        let Ok(operations) = self.default_skill_operations().await else {
-            return SkillMutationOutcome::Unknown;
+        let operations = if matches!(request, SkillUpdateRequest::Config { .. }) {
+            OpenClawSkillOperations::new(self.client())
+        } else {
+            let Ok(operations) = self.default_skill_operations().await else {
+                return SkillMutationOutcome::Unknown;
+            };
+            operations
         };
         operations.update(request).await
     }

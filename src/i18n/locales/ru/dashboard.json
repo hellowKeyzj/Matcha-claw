@@ -1,7 +1,7 @@
 {
   "recentTokenHistory": {
-    "title": "Недавнее использование токенов",
-    "description": "Недавние сессии с данными об использовании токенов.",
+    "title": "Использование токенов",
+    "description": "Просмотр недавнего расхода токенов по моделям и времени.",
     "loading": "Загрузка истории использования токенов...",
     "refreshFailed": "Failed to refresh token usage history. Showing cached data.",
     "empty": "История использования токенов пуста",

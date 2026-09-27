@@ -17,15 +17,18 @@ import { ArrowDown } from 'lucide-react';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { sanitizeAssistantDisplayText } from '@/stores/chat/message-display';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
 import { createChatScrollChromeStore, type ChatScrollChromeStore } from '../chat-scroll-chrome-store';
 import type {
+  ChatAssistantTurnItem,
   ChatExecutionGraphItem,
   ChatRenderItem,
   ChatUserMessageItem,
 } from '../chat-render-item-model';
 import { ChatMessage } from '../ChatMessage';
 import { ChatAssistantTurn } from '../ChatAssistantTurn';
+import type { MessageAvatarSlot } from '../chat-message-shell';
 import { ExecutionGraphCard } from '../ExecutionGraphCard';
 import { useChatScroll } from '../useChatScroll';
 import type { UseChatViewResult } from '../useChatView';
@@ -41,6 +44,9 @@ import type {
 } from '../../../types/desktop/runtime-address';
 import type { WorkspaceFileContext } from '@/lib/host-api';
 import type { GeneratedFile } from '@/lib/generated-files';
+
+const STARTUP_TRACE_PREFIX = '[startup-trace]';
+const tracedFirstPaintSessionKeys = new Set<string>();
 
 export interface ChatListHandle {
   prepareCurrentLatestBottomAlign: () => void;
@@ -159,6 +165,76 @@ function buildReplyStartedAtByAssistantKey(items: ReadonlyArray<ChatRenderItem>)
   return startedAtByAssistantKey;
 }
 
+type ChatItemVisualRole = 'assistant-output' | 'boundary' | 'neutral';
+
+function hasVisibleUserOutput(item: ChatUserMessageItem): boolean {
+  return !!item.largeText
+    || item.text.trim().length > 0
+    || item.images.length > 0
+    || item.attachedFiles.length > 0;
+}
+
+function hasAssistantMessageText(item: ChatAssistantTurnItem): boolean {
+  return item.segments.some((segment) => segment.kind === 'message' && (
+    !!segment.largeText || sanitizeAssistantDisplayText(segment.text).trim().length > 0
+  ));
+}
+
+function hasVisibleAssistantOutput(item: ChatAssistantTurnItem, showThinking: boolean): boolean {
+  return hasAssistantMessageText(item)
+    || item.segments.some((segment) => {
+      if (segment.kind === 'thinking') {
+        return showThinking && segment.text.trim().length > 0;
+      }
+      if (segment.kind === 'tool') {
+        return true;
+      }
+      if (segment.kind === 'media') {
+        return segment.images.length > 0 || segment.attachedFiles.length > 0;
+      }
+      return false;
+    })
+    || item.images.length > 0
+    || item.attachedFiles.length > 0
+    || item.status === 'streaming'
+    || item.status === 'waiting_tool';
+}
+
+function readVisualRole(item: ChatRenderItem, showThinking: boolean): ChatItemVisualRole {
+  if (item.kind === 'assistant-turn') {
+    return hasVisibleAssistantOutput(item, showThinking) ? 'assistant-output' : 'neutral';
+  }
+  if (item.kind === 'user-message') {
+    return hasVisibleUserOutput(item) ? 'boundary' : 'neutral';
+  }
+  if (item.kind === 'system') {
+    return item.text.trim() ? 'boundary' : 'neutral';
+  }
+  return 'neutral';
+}
+
+function buildAssistantAvatarSlots(
+  items: ReadonlyArray<ChatRenderItem>,
+  showThinking: boolean,
+): Map<string, MessageAvatarSlot> {
+  const slots = new Map<string, MessageAvatarSlot>();
+  let inAssistantVisualGroup = false;
+
+  for (const item of items) {
+    const visualRole = readVisualRole(item, showThinking);
+    if (visualRole === 'assistant-output') {
+      slots.set(item.key, inAssistantVisualGroup ? 'placeholder' : 'visible');
+      inAssistantVisualGroup = true;
+      continue;
+    }
+    if (visualRole === 'boundary') {
+      inAssistantVisualGroup = false;
+    }
+  }
+
+  return slots;
+}
+
 function SystemInfoRow({ item }: { item: ChatRenderItem }) {
   const text = item.text.trim();
   if (!text) {
@@ -175,6 +251,7 @@ function SystemInfoRow({ item }: { item: ChatRenderItem }) {
 
 function renderChatItem(input: {
   item: ChatRenderItem;
+  assistantAvatarSlot?: MessageAvatarSlot;
   replyStartedAtByAssistantKey: ReadonlyMap<string, number>;
   showThinking: boolean;
   userAvatarImageUrl: string | null;
@@ -192,6 +269,7 @@ function renderChatItem(input: {
         item={input.item}
         showThinking={input.showThinking}
         replyStartedAt={input.replyStartedAtByAssistantKey.get(input.item.key)}
+        assistantAvatarSlot={input.assistantAvatarSlot}
         userAvatarImageUrl={input.userAvatarImageUrl}
         sessionIdentity={input.sessionIdentity}
         endpointSessionId={input.endpointSessionId}
@@ -274,6 +352,7 @@ const ChatListContent = memo(function ChatListContent({
 }: ChatListContentProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
   const replyStartedAtByAssistantKey = useMemo(() => buildReplyStartedAtByAssistantKey(items), [items]);
+  const assistantAvatarSlots = useMemo(() => buildAssistantAvatarSlots(items, showThinking), [items, showThinking]);
 
   if (showBlockingLoading) {
     return (
@@ -310,33 +389,39 @@ const ChatListContent = memo(function ChatListContent({
 
       {!isEmptyState ? (
         <>
-          {items.map((item, index) => (
-            <div key={item.key}>
-              <div
-                data-index={index}
-                className={CHAT_LAYOUT_TOKENS.threadMessageRowSpacing}
-              >
+          {items.map((item, index) => {
+            const assistantAvatarSlot = item.kind === 'assistant-turn'
+              ? assistantAvatarSlots.get(item.key)
+              : 'visible';
+            return (
+              <div key={item.key}>
                 <div
-                  {...getMessageDataAttributes(item)}
-                  className="w-full"
+                  data-index={index}
+                  className={CHAT_LAYOUT_TOKENS.threadMessageRowSpacing}
                 >
-                  {renderChatItem({
-                    item,
-                    replyStartedAtByAssistantKey,
-                    showThinking,
-                    userAvatarImageUrl,
-                    sessionIdentity,
-                    endpointSessionId,
-                    workspaceContext,
-                    onJumpToItemKey,
-                    artifactFilesByGraphKey,
-                    onOpenArtifactFile,
-                    onOpenAttachedArtifact,
-                  })}
+                  <div
+                    {...getMessageDataAttributes(item)}
+                    className="w-full"
+                  >
+                    {renderChatItem({
+                      item,
+                      assistantAvatarSlot,
+                      replyStartedAtByAssistantKey,
+                      showThinking,
+                      userAvatarImageUrl,
+                      sessionIdentity,
+                      endpointSessionId,
+                      workspaceContext,
+                      onJumpToItemKey,
+                      artifactFilesByGraphKey,
+                      onOpenArtifactFile,
+                      onOpenAttachedArtifact,
+                    })}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </>
       ) : null}
     </>
@@ -519,6 +604,61 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     ? `${lastItem.key}|${lastItem.renderSignature}`
     : '';
   const contentSignal = `${items.length}|${lastItemSignal}|${viewport.windowEndOffset}|${viewport.totalItemCount}|${viewport.isAtLatest ? '1' : '0'}|${viewport.hasMore ? '1' : '0'}|${viewport.hasNewer ? '1' : '0'}`;
+
+  useLayoutEffect(() => {
+    if (!currentSessionKey
+      || tracedFirstPaintSessionKeys.has(currentSessionKey)
+      || items.length === 0
+      || liveView.isEmptyState
+      || liveView.showBlockingLoading
+      || liveView.showBlockingError) {
+      return;
+    }
+    const handle = window.requestAnimationFrame(() => {
+      const messageContentNode = messageContentRef.current;
+      const messagesViewportNode = messagesViewportRef.current;
+      if (!messageContentNode?.querySelector('[data-chat-item-key]')) {
+        return;
+      }
+      tracedFirstPaintSessionKeys.add(currentSessionKey);
+      const firstItem = items[0];
+      const lastPaintItem = items.at(-1);
+      console.info(JSON.stringify({
+        prefix: STARTUP_TRACE_PREFIX,
+        traceScope: 'renderer-boundary',
+        source: 'chat-list',
+        phase: 'first-messages-paint',
+        at: Date.now(),
+        sessionKey: currentSessionKey,
+        itemCount: items.length,
+        totalItemCount: viewport.totalItemCount,
+        windowStartOffset: viewport.windowStartOffset,
+        windowEndOffset: viewport.windowEndOffset,
+        hasMore: viewport.hasMore,
+        hasNewer: viewport.hasNewer,
+        isAtLatest: viewport.isAtLatest,
+        firstItemKind: firstItem?.kind,
+        firstItemKey: firstItem?.key,
+        lastItemKind: lastPaintItem?.kind,
+        lastItemKey: lastPaintItem?.key,
+        contentHeight: messageContentNode.scrollHeight,
+        viewportHeight: messagesViewportNode?.clientHeight,
+      }));
+    });
+    return () => window.cancelAnimationFrame(handle);
+  }, [
+    currentSessionKey,
+    items,
+    liveView.isEmptyState,
+    liveView.showBlockingError,
+    liveView.showBlockingLoading,
+    viewport.hasMore,
+    viewport.hasNewer,
+    viewport.isAtLatest,
+    viewport.totalItemCount,
+    viewport.windowEndOffset,
+    viewport.windowStartOffset,
+  ]);
 
   const {
     handleViewportPointerDown,

@@ -30,9 +30,16 @@
     "importSuccess": "Agent config imported.",
     "exportSuccess": "Agent config exported.",
     "exportPackageSuccess": "Agent package exported: {{fileName}}",
+    "uploadPackageSuccess": "Agent package uploaded to cloud: {{fileName}}",
+    "installPackageSuccess": "Agent package installed: {{agentId}}",
     "importFailed": "Failed to import agent config: {{message}}",
     "exportFailed": "Failed to export agent config: {{message}}",
-    "exportPackageFailed": "Failed to export agent package: {{message}}"
+    "exportPackageFailed": "Failed to export agent package: {{message}}",
+    "uploadPackageFailed": "Failed to upload agent package to cloud: {{message}}",
+    "installPackageFailed": "Failed to install agent package: {{message}}",
+    "installPackageUnknownOutcome": "A local sealed Agent copy already exists. Refresh the Agent list; if it still does not appear, delete the same-name Agent and install again.",
+    "installPackageRejected": "Agent package cannot be installed. Make sure this device still has the encryption key used to export the package.",
+    "installPackageUnexpectedResult": "Agent package install result is unknown. Refresh the Agent list to confirm whether it was installed."
   },
   "status": {
     "refreshing": "Refreshing...",
@@ -178,17 +185,19 @@
       "pluginBadge": "Plugin",
       "toolCount": "{{count}} инструментов",
       "profileDefault": "По профилю",
-      "effectiveTools": "Активно сейчас",
+      "configPreview": "Предпросмотр конфигурации",
+      "globalDeny": "Глобальный запрет",
       "explicitRules": "Явные правила",
       "policyDefault": "По умолчанию",
       "inheritToolsHint": "Agent наследует инструменты по умолчанию. Переключитесь на явную настройку, чтобы менять отдельные инструменты или группы.",
-      "toolProfileSummary": "{{profile}}: активно {{enabled}}/{{total}}; по профилю {{defaultEnabled}}, явных правил {{overrides}}",
+      "toolProfileSummary": "{{profile}}: предпросмотр {{enabled}}/{{total}}; по профилю {{defaultEnabled}}, глобальный запрет {{globalDeny}}, явных правил {{overrides}}",
       "groupSummary": "активно {{enabled}}/{{total}} · явных правил {{rules}}",
       "toolStates": {
         "enabledByProfile": "Профиль вкл.",
         "disabledByProfile": "Профиль выкл.",
         "allowedByOverride": "Разрешено",
-        "deniedByOverride": "Запрещено"
+        "deniedByOverride": "Запрещено",
+        "deniedByGlobalPolicy": "Глобально запрещено"
       },
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "Текущий runtime не поддерживает настройку навыков Agent.",
@@ -196,6 +205,11 @@
         "agentNotConfigured": "Текущий runtime ещё не зарегистрировал настройки возможностей для этого Agent, поэтому здесь нельзя их настроить."
       }
     }
+  },
+  "cloudPackages": {
+    "title": "Cloud Agent Packages",
+    "empty": "No cloud agent packages.",
+    "install": "Install"
   },
   "card": {
     "system": "Системный агент",

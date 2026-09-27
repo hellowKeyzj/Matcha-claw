@@ -1277,16 +1277,16 @@ export function Settings() {
   }, [location.pathname, location.search, navigate]);
 
   return (
-    <div className="flex flex-col gap-6 p-6" data-testid="settings-page">
+    <div className="flex flex-col gap-6 text-foreground" data-testid="settings-page">
       <div>
-        <h1 className="text-2xl font-bold">{t('title')}</h1>
-        <p className="text-muted-foreground">
+        <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t('title')}</h1>
+        <p className="text-[hsl(var(--shell-text-muted))]">
           {t('subtitle')}
         </p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
-        <Card className="h-fit border-border/60 bg-card/80">
+        <Card className="h-fit bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
           <CardContent className="p-2.5">
             <nav className="space-y-1" aria-label={t('title')}>
               {sectionItems.map((section) => (
@@ -1296,8 +1296,8 @@ export function Settings() {
                   variant="ghost"
                   className={`w-full h-10 justify-start rounded-lg px-2.5 text-sm font-medium transition-colors border border-transparent ${
                     activeSection === section.key
-                      ? 'bg-primary/12 text-primary hover:bg-primary/18'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-muted/70'
+                      ? 'bg-[hsl(var(--shell-surface))] text-foreground [border-color:hsl(var(--shell-border))]'
+                      : 'text-[hsl(var(--shell-text-muted))] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-foreground'
                   }`}
                   onClick={() => switchSection(section.key)}
                 >

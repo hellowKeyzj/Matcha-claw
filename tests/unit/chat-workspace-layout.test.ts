@@ -7,17 +7,17 @@ import {
   getChatSidePanelMaxWidth,
   resolveChatWorkspaceLayout,
   resolveChatSidePanelLayout,
-} from '@/pages/Chat/chat-workspace-layout';
+} from '@/components/layout/chat-workspace-layout';
 
 describe('chat workspace layout', () => {
-  it('keeps the chat workspace width independent from the floating switchboard', () => {
+  it('gives the hidden sidebar zero occupied width', () => {
     expect(resolveChatWorkspaceLayout({
       containerWidth: 1200,
-      sidebarVisible: true,
+      sidebarVisible: false,
       sidebarWidth: CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth,
     })).toEqual({
-      sidebarWidth: CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth,
-      sidebarOccupiedWidth: CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth + CHAT_WORKSPACE_LAYOUT.paneResizerWidth,
+      sidebarWidth: 0,
+      sidebarOccupiedWidth: 0,
     });
   });
 

@@ -46,7 +46,7 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
     is_route(path).then(|| {
-        RouteHeadPlan::new(
+        RouteHeadPlan::body_deadline(
             body_policy_for_method(head.method.as_str()),
             SHORT_DEADLINE,
             timeout_response,
@@ -92,6 +92,7 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
             }
             ("GET", sealed_resource::STATUS_ENDPOINT)
             | ("POST", sealed_resource::EXPORT_ENDPOINT)
+            | ("POST", sealed_resource::EXPORT_CLOUD_ENDPOINT)
             | ("POST", sealed_resource::INSTALL_ENDPOINT)
             | ("POST", sealed_resource::UNINSTALL_ENDPOINT) => {
                 handle_sealed_resource(request, dependencies.verifier, dependencies.skills).await
@@ -152,6 +153,7 @@ fn is_route(path: &str) -> bool {
                 | bundle::IMPORT_ENDPOINT
                 | sealed_resource::STATUS_ENDPOINT
                 | sealed_resource::EXPORT_ENDPOINT
+                | sealed_resource::EXPORT_CLOUD_ENDPOINT
                 | sealed_resource::INSTALL_ENDPOINT
                 | sealed_resource::UNINSTALL_ENDPOINT
         )
@@ -179,6 +181,7 @@ fn not_found_error(path: &str) -> &'static str {
         }
         sealed_resource::STATUS_ENDPOINT
         | sealed_resource::EXPORT_ENDPOINT
+        | sealed_resource::EXPORT_CLOUD_ENDPOINT
         | sealed_resource::INSTALL_ENDPOINT
         | sealed_resource::UNINSTALL_ENDPOINT => "Sealed skills route is not available",
         path if path.starts_with(sealed_resource::READ_ENDPOINT_PREFIX) => {

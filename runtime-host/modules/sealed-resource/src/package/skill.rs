@@ -1,32 +1,25 @@
 use std::fmt;
 
-use aes_gcm::{
-    Aes256Gcm, KeyInit,
-    aead::{Aead, Payload, generic_array::GenericArray},
-};
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
-use getrandom::fill as random_fill;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
 
 use crate::{
-    api::{SealedResourceError, SealedSkillTarget},
+    api::{
+        SealedPackageAuthorizationKey, SealedResourceError, SealedResourceRejectionDetail,
+        SealedSkillTarget,
+    },
     descriptor::SealedSkillDescriptor,
     domain::{PackageRelativePath, SkillKey},
+    package::common::{
+        PACKAGE_FORMAT_VERSION, SealedPackageWire, SealedPayloadEntry, hex_digest,
+        open_payload_entries, seal_payload_entries_with_cloud_key,
+    },
 };
 
 const PACKAGE_FORMAT: &str = "matcha-skillpkg";
-const PACKAGE_FORMAT_VERSION: u8 = 1;
-const PAYLOAD_ALGORITHM: &str = "aes-256-gcm";
-const KEY_BYTES: usize = 32;
-const NONCE_BYTES: usize = 12;
-const MAX_PACKAGE_FILES: usize = 64;
-const MAX_FILE_BYTES: usize = 48 * 1024;
-const MAX_PACKAGE_BYTES: usize = 48 * 1024;
+const MAX_PACKAGE_FILES: usize = 512;
+const MAX_FILE_BYTES: usize = 1024 * 1024;
+const MAX_PACKAGE_BYTES: usize = 5 * 1024 * 1024;
 const SEALED_SKILL_PACKAGE_EXTENSION: &str = "matcha-skillpkg";
 
 #[derive(Clone, Eq, PartialEq)]
@@ -40,11 +33,14 @@ impl SealedSkillFileRequest {
         path: impl Into<String>,
         content: impl Into<Vec<u8>>,
     ) -> Result<Self, SealedResourceError> {
-        let path =
-            PackageRelativePath::parse(path.into()).map_err(|_| SealedResourceError::Rejected)?;
+        let path = PackageRelativePath::parse(path.into()).map_err(|_| rejected("invalid-path"))?;
         let content = content.into();
         if content.len() > MAX_FILE_BYTES {
-            return Err(SealedResourceError::Rejected);
+            return Err(rejected_bytes(
+                "file-too-large",
+                content.len() as u64,
+                MAX_FILE_BYTES as u64,
+            ));
         }
         Ok(Self { path, content })
     }
@@ -101,6 +97,27 @@ impl fmt::Debug for SealedSkillFile {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SealedSkillPackageManifest {
+    skill_key: SkillKey,
+    target: SealedSkillTarget,
+    descriptor: SealedSkillDescriptor,
+}
+
+impl SealedSkillPackageManifest {
+    pub(crate) fn skill_key(&self) -> &SkillKey {
+        &self.skill_key
+    }
+
+    pub(crate) fn target(&self) -> SealedSkillTarget {
+        self.target
+    }
+
+    pub(crate) fn descriptor(&self) -> &SealedSkillDescriptor {
+        &self.descriptor
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SealedSkillPackage {
     skill_key: SkillKey,
     target: SealedSkillTarget,
@@ -114,60 +131,91 @@ impl SealedSkillPackage {
         skill_key: SkillKey,
         target: SealedSkillTarget,
         files: Vec<SealedSkillFileRequest>,
-        key: &[u8],
+    ) -> Result<SealSkillPackageReceipt, SealedResourceError> {
+        Self::seal_with_cloud_key(skill_key, target, files, None, None)
+    }
+
+    pub(crate) fn seal_with_cloud_key(
+        skill_key: SkillKey,
+        target: SealedSkillTarget,
+        files: Vec<SealedSkillFileRequest>,
+        cloud_public_key: Option<&str>,
+        cloud_key_id: Option<&str>,
     ) -> Result<SealSkillPackageReceipt, SealedResourceError> {
         let files = normalize_files(files)?;
         let descriptor = descriptor_from_files(&files)?;
-        let manifest = PackageManifest::from_files(&skill_key, target, &descriptor, &files)?;
-        let mut plaintext = payload_plaintext(&files)?;
-        let payload = encrypt_payload(
-            key,
-            &payload_aad(skill_key.as_str(), target, manifest.sha256.as_str())?,
-            &plaintext,
-        )?;
-        plaintext.zeroize();
+        let manifest = PackageManifest::from_files(&skill_key, target, &descriptor, &files)
+            .map_err(|error| {
+                trace_skill_package_error("manifest", files.len(), total_file_bytes(&files), error);
+                error
+            })?;
+        let entries = payload_entries(&files).map_err(|error| {
+            trace_skill_package_error("payload-json", files.len(), total_file_bytes(&files), error);
+            error
+        })?;
+        let sealed = seal_payload_entries_with_cloud_key(
+            PACKAGE_FORMAT,
+            manifest.sha256.as_str(),
+            &entries,
+            cloud_public_key,
+            cloud_key_id,
+        )
+        .map_err(|error| {
+            trace_skill_package_error("seal", files.len(), total_file_bytes(&files), error);
+            error
+        })?;
         let wire = SealedPackageWire {
             format: PACKAGE_FORMAT.to_owned(),
             version: PACKAGE_FORMAT_VERSION,
-            skill_key: skill_key.as_str().to_owned(),
-            target: target.as_str().to_owned(),
+            skill_key: Some(skill_key.as_str().to_owned()),
+            target: Some(target.as_str().to_owned()),
             manifest_sha256: manifest.sha256.clone(),
             manifest,
-            payload,
+            payload: sealed.payload,
+            cloud_envelope: sealed.cloud_envelope,
         };
-        let bytes = serde_json::to_vec(&wire).map_err(|_| SealedResourceError::Unknown)?;
-        Ok(SealSkillPackageReceipt::from_package_bytes(bytes))
+        let bytes = serde_json::to_vec(&wire).map_err(|_| {
+            trace_skill_package_error(
+                "wire-json",
+                files.len(),
+                total_file_bytes(&files),
+                SealedResourceError::Unknown,
+            );
+            SealedResourceError::Unknown
+        })?;
+        Ok(SealSkillPackageReceipt::from_package_bytes(
+            bytes,
+            sealed.authorization_key,
+        ))
     }
 
-    pub(crate) fn open(bytes: &[u8], key: &[u8]) -> Result<Self, SealedResourceError> {
-        let wire: SealedPackageWire =
-            serde_json::from_slice(bytes).map_err(|_| SealedResourceError::Rejected)?;
-        if wire.format != PACKAGE_FORMAT || wire.version != PACKAGE_FORMAT_VERSION {
-            return Err(SealedResourceError::Rejected);
-        }
-        let skill_key =
-            SkillKey::parse(wire.skill_key).map_err(|_| SealedResourceError::Rejected)?;
-        let target = parse_skill_target_code(&wire.target)?;
-        if wire.manifest.skill_key != skill_key.as_str()
-            || wire.manifest.target != target
-            || wire.manifest_sha256 != wire.manifest.sha256
-            || manifest_digest(&wire.manifest)? != wire.manifest.sha256
-        {
-            return Err(SealedResourceError::Rejected);
-        }
-        let payload = decrypt_payload(
-            key,
-            &payload_aad(skill_key.as_str(), target, wire.manifest_sha256.as_str())?,
+    pub(crate) fn open_manifest(
+        bytes: &[u8],
+    ) -> Result<SealedSkillPackageManifest, SealedResourceError> {
+        let (wire, skill_key) = open_wire(bytes)?;
+        Ok(SealedSkillPackageManifest {
+            skill_key,
+            target: wire.manifest.target,
+            descriptor: wire.manifest.descriptor.into_descriptor()?,
+        })
+    }
+
+    pub(crate) fn open(
+        bytes: &[u8],
+        authorization_key: &SealedPackageAuthorizationKey,
+    ) -> Result<Self, SealedResourceError> {
+        let (wire, skill_key) = open_wire(bytes)?;
+        let payload = open_payload_entries(
+            PACKAGE_FORMAT,
+            wire.manifest_sha256.as_str(),
             wire.payload,
+            authorization_key,
         )?;
         let files = open_payload(payload, &wire.manifest)?;
-        let descriptor = descriptor_from_files(&files)?;
-        if wire.manifest.descriptor != ManifestDescriptor::from_descriptor(&descriptor) {
-            return Err(SealedResourceError::Rejected);
-        }
+        let descriptor = wire.manifest.descriptor.into_descriptor()?;
         Ok(Self {
             skill_key,
-            target,
+            target: wire.manifest.target,
             descriptor,
             package_sha256: hex_digest(bytes),
             files,
@@ -204,16 +252,21 @@ pub(crate) struct SealSkillPackageReceipt {
     package_file_name: String,
     package_sha256: String,
     package_bytes: Vec<u8>,
+    authorization_key: SealedPackageAuthorizationKey,
 }
 
 impl SealSkillPackageReceipt {
-    pub(crate) fn from_package_bytes(package_bytes: Vec<u8>) -> Self {
+    pub(crate) fn from_package_bytes(
+        package_bytes: Vec<u8>,
+        authorization_key: SealedPackageAuthorizationKey,
+    ) -> Self {
         let package_sha256 = hex_digest(&package_bytes);
         let package_file_name = format!("{}.{}", package_sha256, SEALED_SKILL_PACKAGE_EXTENSION);
         Self {
             package_file_name,
             package_sha256,
             package_bytes,
+            authorization_key,
         }
     }
 
@@ -227,6 +280,10 @@ impl SealSkillPackageReceipt {
 
     pub(crate) fn package_bytes(&self) -> &[u8] {
         &self.package_bytes
+    }
+
+    pub(crate) fn authorization_key(&self) -> &SealedPackageAuthorizationKey {
+        &self.authorization_key
     }
 
     pub(crate) fn into_package_bytes(self) -> Vec<u8> {
@@ -244,28 +301,9 @@ impl fmt::Debug for SealSkillPackageReceipt {
                 "package_bytes",
                 &format_args!("[REDACTED:{} bytes]", self.package_bytes.len()),
             )
+            .field("authorization_key", &"[REDACTED]")
             .finish()
     }
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SealedPackageWire {
-    format: String,
-    version: u8,
-    skill_key: String,
-    target: String,
-    manifest_sha256: String,
-    manifest: PackageManifest,
-    payload: EncryptedPayload,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EncryptedPayload {
-    algorithm: String,
-    nonce_base64: String,
-    ciphertext_base64: String,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -328,6 +366,16 @@ impl ManifestDescriptor {
             disable_model_invocation: descriptor.disable_model_invocation(),
         }
     }
+
+    fn into_descriptor(self) -> Result<SealedSkillDescriptor, SealedResourceError> {
+        SealedSkillDescriptor::try_new(
+            self.name,
+            self.description,
+            self.user_invocable,
+            self.disable_model_invocation,
+        )
+        .map_err(|_| SealedResourceError::Rejected)
+    }
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -336,24 +384,6 @@ struct PackageManifestFile {
     path: String,
     size_bytes: u64,
     sha256: String,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SealedPayloadEntry {
-    path: String,
-    data_base64: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PayloadAad<'a> {
-    format: &'a str,
-    version: u8,
-    skill_key: &'a str,
-    #[serde(serialize_with = "serialize_skill_target_code")]
-    target: SealedSkillTarget,
-    manifest_sha256: &'a str,
 }
 
 fn parse_skill_target_code(value: &str) -> Result<SealedSkillTarget, SealedResourceError> {
@@ -385,8 +415,20 @@ where
 fn normalize_files(
     files: Vec<SealedSkillFileRequest>,
 ) -> Result<Vec<SealedSkillFile>, SealedResourceError> {
-    if files.is_empty() || files.len() > MAX_PACKAGE_FILES {
-        return Err(SealedResourceError::Rejected);
+    if files.is_empty() {
+        let error = rejected("empty");
+        trace_skill_package_error("normalize-empty", 0, 0, error);
+        return Err(error);
+    }
+    if files.len() > MAX_PACKAGE_FILES {
+        let error = rejected_files("too-many-files", files.len(), MAX_PACKAGE_FILES);
+        trace_skill_package_error(
+            "normalize-too-many-files",
+            files.len(),
+            request_file_bytes(&files),
+            error,
+        );
+        return Err(error);
     }
     let mut normalized = Vec::with_capacity(files.len());
     let mut total_bytes = 0usize;
@@ -395,13 +437,41 @@ fn normalize_files(
             .iter()
             .any(|existing: &SealedSkillFile| existing.path == file.path)
         {
-            return Err(SealedResourceError::Rejected);
+            let error = rejected("duplicate-path");
+            trace_skill_package_error(
+                "normalize-duplicate-path",
+                normalized.len(),
+                total_bytes,
+                error,
+            );
+            return Err(error);
         }
-        total_bytes = total_bytes
-            .checked_add(file.content.len())
-            .ok_or(SealedResourceError::Rejected)?;
+        total_bytes = match total_bytes.checked_add(file.content.len()) {
+            Some(total) => total,
+            None => {
+                let error = rejected("total-overflow");
+                trace_skill_package_error(
+                    "normalize-total-overflow",
+                    normalized.len(),
+                    total_bytes,
+                    error,
+                );
+                return Err(error);
+            }
+        };
         if total_bytes > MAX_PACKAGE_BYTES {
-            return Err(SealedResourceError::Rejected);
+            let error = rejected_bytes(
+                "total-too-large",
+                total_bytes as u64,
+                MAX_PACKAGE_BYTES as u64,
+            );
+            trace_skill_package_error(
+                "normalize-total-too-large",
+                normalized.len(),
+                total_bytes,
+                error,
+            );
+            return Err(error);
         }
         normalized.push(SealedSkillFile {
             path: file.path,
@@ -413,35 +483,129 @@ fn normalize_files(
         .iter()
         .any(|file| file.path == PackageRelativePath::skill_manifest())
     {
-        return Err(SealedResourceError::Rejected);
+        let error = rejected("missing-skill-md");
+        trace_skill_package_error(
+            "normalize-missing-skill-md",
+            normalized.len(),
+            total_bytes,
+            error,
+        );
+        return Err(error);
     }
     Ok(normalized)
+}
+
+fn open_wire(
+    bytes: &[u8],
+) -> Result<(SealedPackageWire<PackageManifest>, SkillKey), SealedResourceError> {
+    let wire: SealedPackageWire<PackageManifest> =
+        serde_json::from_slice(bytes).map_err(|_| SealedResourceError::Rejected)?;
+    if wire.format != PACKAGE_FORMAT || wire.version != PACKAGE_FORMAT_VERSION {
+        return Err(SealedResourceError::Rejected);
+    }
+    let skill_key = SkillKey::parse(wire.manifest.skill_key.clone())
+        .map_err(|_| SealedResourceError::Rejected)?;
+    if wire.manifest_sha256.as_str() != wire.manifest.sha256.as_str()
+        || manifest_digest(&wire.manifest)? != wire.manifest_sha256.as_str()
+    {
+        return Err(SealedResourceError::Rejected);
+    }
+    Ok((wire, skill_key))
 }
 
 fn descriptor_from_files(
     files: &[SealedSkillFile],
 ) -> Result<SealedSkillDescriptor, SealedResourceError> {
     let manifest_path = PackageRelativePath::skill_manifest();
-    let manifest = files
-        .iter()
-        .find(|file| file.path == manifest_path)
-        .ok_or(SealedResourceError::Rejected)?;
-    let content =
-        std::str::from_utf8(&manifest.content).map_err(|_| SealedResourceError::Rejected)?;
-    SealedSkillDescriptor::parse_skill_manifest(content).map_err(|_| SealedResourceError::Rejected)
+    let manifest = match files.iter().find(|file| file.path == manifest_path) {
+        Some(manifest) => manifest,
+        None => {
+            let error = rejected("missing-skill-md");
+            trace_skill_package_error(
+                "descriptor-missing-skill-md",
+                files.len(),
+                total_file_bytes(files),
+                error,
+            );
+            return Err(error);
+        }
+    };
+    let content = match std::str::from_utf8(&manifest.content) {
+        Ok(content) => content,
+        Err(_) => {
+            let error = rejected("invalid-skill-md");
+            trace_skill_package_error(
+                "descriptor-non-utf8",
+                files.len(),
+                total_file_bytes(files),
+                error,
+            );
+            return Err(error);
+        }
+    };
+    SealedSkillDescriptor::parse_skill_manifest(content).map_err(|_| {
+        let error = rejected("invalid-skill-md");
+        trace_skill_package_error(
+            "descriptor-frontmatter",
+            files.len(),
+            total_file_bytes(files),
+            error,
+        );
+        error
+    })
 }
 
-fn payload_plaintext(files: &[SealedSkillFile]) -> Result<Vec<u8>, SealedResourceError> {
-    serde_json::to_vec(
-        &files
-            .iter()
-            .map(|file| SealedPayloadEntry {
+fn payload_entries(
+    files: &[SealedSkillFile],
+) -> Result<Vec<SealedPayloadEntry>, SealedResourceError> {
+    files
+        .iter()
+        .map(|file| {
+            Ok(SealedPayloadEntry {
                 path: file.path.as_str().to_owned(),
                 data_base64: STANDARD.encode(&file.content),
             })
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|_| SealedResourceError::Unknown)
+        })
+        .collect()
+}
+
+fn request_file_bytes(files: &[SealedSkillFileRequest]) -> usize {
+    files.iter().map(|file| file.content.len()).sum()
+}
+
+fn total_file_bytes(files: &[SealedSkillFile]) -> usize {
+    files.iter().map(|file| file.content.len()).sum()
+}
+
+fn rejected(reason: &'static str) -> SealedResourceError {
+    SealedResourceError::rejected_with(SealedResourceRejectionDetail::new(reason))
+}
+
+fn rejected_files(reason: &'static str, files: usize, limit: usize) -> SealedResourceError {
+    SealedResourceError::rejected_with(SealedResourceRejectionDetail::files(reason, files, limit))
+}
+
+fn rejected_bytes(reason: &'static str, bytes: u64, limit: u64) -> SealedResourceError {
+    SealedResourceError::rejected_with(SealedResourceRejectionDetail::bytes(reason, bytes, limit))
+}
+
+fn trace_skill_package_error(reason: &str, files: usize, bytes: usize, error: SealedResourceError) {
+    eprintln!(
+        "[startup-trace] source=sealed-skills-export phase=package detail={} outcome={} files={} bytes={}",
+        reason,
+        sealed_resource_error_detail(error),
+        files,
+        bytes
+    );
+}
+
+fn sealed_resource_error_detail(error: SealedResourceError) -> &'static str {
+    match error {
+        SealedResourceError::AlreadyExists => "already-exists",
+        SealedResourceError::NotFound => "not-found",
+        SealedResourceError::Rejected | SealedResourceError::RejectedWith(_) => "rejected",
+        SealedResourceError::Unknown => "unknown",
+    }
 }
 
 fn open_payload(
@@ -493,88 +657,6 @@ fn open_payload(
     Ok(files)
 }
 
-fn encrypt_payload(
-    key: &[u8],
-    aad: &[u8],
-    plaintext: &[u8],
-) -> Result<EncryptedPayload, SealedResourceError> {
-    if key.len() != KEY_BYTES {
-        return Err(SealedResourceError::Rejected);
-    }
-    let cipher = Aes256Gcm::new(GenericArray::from_slice(key));
-    let mut nonce = [0_u8; NONCE_BYTES];
-    random_fill(&mut nonce).map_err(|_| SealedResourceError::Unknown)?;
-    let ciphertext = cipher
-        .encrypt(
-            GenericArray::from_slice(&nonce),
-            Payload {
-                msg: plaintext,
-                aad,
-            },
-        )
-        .map_err(|_| SealedResourceError::Unknown)?;
-    let payload = EncryptedPayload {
-        algorithm: PAYLOAD_ALGORITHM.to_owned(),
-        nonce_base64: URL_SAFE_NO_PAD.encode(nonce),
-        ciphertext_base64: URL_SAFE_NO_PAD.encode(ciphertext),
-    };
-    nonce.zeroize();
-    Ok(payload)
-}
-
-fn decrypt_payload(
-    key: &[u8],
-    aad: &[u8],
-    payload: EncryptedPayload,
-) -> Result<Vec<SealedPayloadEntry>, SealedResourceError> {
-    if key.len() != KEY_BYTES || payload.algorithm != PAYLOAD_ALGORITHM {
-        return Err(SealedResourceError::Rejected);
-    }
-    let nonce = decode_fixed::<NONCE_BYTES>(&payload.nonce_base64)?;
-    let mut ciphertext = URL_SAFE_NO_PAD
-        .decode(payload.ciphertext_base64.as_bytes())
-        .map_err(|_| SealedResourceError::Rejected)?;
-    let cipher = Aes256Gcm::new(GenericArray::from_slice(key));
-    let mut plaintext = cipher
-        .decrypt(
-            GenericArray::from_slice(&nonce),
-            Payload {
-                msg: &ciphertext,
-                aad,
-            },
-        )
-        .map_err(|_| SealedResourceError::Rejected)?;
-    ciphertext.zeroize();
-    let decoded = serde_json::from_slice(&plaintext).map_err(|_| {
-        plaintext.zeroize();
-        SealedResourceError::Rejected
-    })?;
-    plaintext.zeroize();
-    Ok(decoded)
-}
-
-fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N], SealedResourceError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(value.as_bytes())
-        .map_err(|_| SealedResourceError::Rejected)?;
-    bytes.try_into().map_err(|_| SealedResourceError::Rejected)
-}
-
-fn payload_aad(
-    skill_key: &str,
-    target: SealedSkillTarget,
-    manifest_sha256: &str,
-) -> Result<Vec<u8>, SealedResourceError> {
-    serde_json::to_vec(&PayloadAad {
-        format: PACKAGE_FORMAT,
-        version: PACKAGE_FORMAT_VERSION,
-        skill_key,
-        target,
-        manifest_sha256,
-    })
-    .map_err(|_| SealedResourceError::Unknown)
-}
-
 fn manifest_digest(manifest: &PackageManifest) -> Result<String, SealedResourceError> {
     let mut unsigned = manifest.clone();
     unsigned.sha256.clear();
@@ -583,9 +665,92 @@ fn manifest_digest(manifest: &PackageManifest) -> Result<String, SealedResourceE
         .map_err(|_| SealedResourceError::Unknown)
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::common::seal_payload_entries;
+
+    #[test]
+    fn sealed_skill_package_encrypts_payload_and_requires_authorization() {
+        let secret = "hidden skill payload";
+        let receipt = SealedSkillPackage::seal(
+            SkillKey::parse("sealed-skill").unwrap(),
+            SealedSkillTarget::OpenClaw,
+            vec![SealedSkillFileRequest::try_new(
+                "SKILL.md",
+                format!(
+                    "---\nname: Encrypted Skill\ndescription: public descriptor\n---\n{secret}\n"
+                ),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+
+        assert!(!contains_bytes(receipt.package_bytes(), secret.as_bytes()));
+        assert_eq!(
+            SealedSkillPackage::open(receipt.package_bytes(), &wrong_authorization_key(&receipt))
+                .unwrap_err(),
+            SealedResourceError::Rejected
+        );
+        let package =
+            SealedSkillPackage::open(receipt.package_bytes(), receipt.authorization_key()).unwrap();
+
+        assert_eq!(package.descriptor().name(), "Encrypted Skill");
+        assert_eq!(
+            package
+                .file(&PackageRelativePath::skill_manifest())
+                .unwrap()
+                .content(),
+            format!("---\nname: Encrypted Skill\ndescription: public descriptor\n---\n{secret}\n")
+                .as_bytes()
+        );
+    }
+
+    #[test]
+    fn open_uses_manifest_descriptor_after_payload_integrity_check() {
+        let skill_key = SkillKey::parse("sealed-skill").unwrap();
+        let target = SealedSkillTarget::OpenClaw;
+        let descriptor =
+            SealedSkillDescriptor::try_new("Manifest Skill", "manifest description", None, None)
+                .unwrap();
+        let files = vec![SealedSkillFile {
+            path: PackageRelativePath::skill_manifest(),
+            content: b"---\nname: Payload Skill\ndescription: payload description\n---\n".to_vec(),
+        }];
+        let manifest =
+            PackageManifest::from_files(&skill_key, target, &descriptor, &files).unwrap();
+        let entries = payload_entries(&files).unwrap();
+        let sealed =
+            seal_payload_entries(PACKAGE_FORMAT, manifest.sha256.as_str(), &entries).unwrap();
+        let manifest_sha256 = manifest.sha256.clone();
+        let authorization_key = sealed.authorization_key.clone();
+        let bytes = serde_json::to_vec(&SealedPackageWire {
+            format: PACKAGE_FORMAT.to_owned(),
+            version: PACKAGE_FORMAT_VERSION,
+            skill_key: Some(skill_key.as_str().to_owned()),
+            target: Some(target.as_str().to_owned()),
+            manifest_sha256,
+            manifest,
+            payload: sealed.payload,
+            cloud_envelope: sealed.cloud_envelope,
+        })
+        .unwrap();
+
+        let package = SealedSkillPackage::open(&bytes, &authorization_key).unwrap();
+
+        assert_eq!(package.descriptor().name(), "Manifest Skill");
+        assert_eq!(package.descriptor().description(), "manifest description");
+    }
+
+    fn wrong_authorization_key(receipt: &SealSkillPackageReceipt) -> SealedPackageAuthorizationKey {
+        let mut bytes = *receipt.authorization_key().as_bytes();
+        bytes[0] ^= 1;
+        SealedPackageAuthorizationKey::from_bytes(bytes)
+    }
+
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
 }

@@ -4,7 +4,7 @@ import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 
 const ROUTE_PATH = '/api/sessions/send';
 const MAX_ATTACHMENTS = 16;
-const MAX_ATTACHMENT_DECODED_BYTES = 20 * 1024 * 1024;
+const MAX_ATTACHMENT_DECODED_BYTES = 5 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_DECODED_BYTES = 20 * 1024 * 1024;
 const UNAVAILABLE = {
   success: false,

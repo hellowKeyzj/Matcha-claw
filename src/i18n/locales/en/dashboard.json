@@ -1,7 +1,7 @@
 {
     "recentTokenHistory": {
-        "title": "Recent Token Usage",
-        "description": "Recent sessions with recorded token usage.",
+        "title": "Token usage",
+        "description": "Review recent token usage by model and time.",
         "loading": "Loading token usage history...",
         "refreshFailed": "Failed to refresh token usage history. Showing cached data.",
         "empty": "No token usage history yet",

@@ -6,6 +6,46 @@ pub enum NativeEndpoint {
     MatchaAgentLocal,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloudPackageMetadata {
+    package_version_id: String,
+    package_type: String,
+    package_sha256: Option<String>,
+    file_name: Option<String>,
+}
+
+impl CloudPackageMetadata {
+    pub fn new(
+        package_version_id: String,
+        package_type: String,
+        package_sha256: Option<String>,
+        file_name: Option<String>,
+    ) -> Self {
+        Self {
+            package_version_id,
+            package_type,
+            package_sha256,
+            file_name,
+        }
+    }
+
+    pub fn package_version_id(&self) -> &str {
+        &self.package_version_id
+    }
+
+    pub fn package_type(&self) -> &str {
+        &self.package_type
+    }
+
+    pub fn package_sha256(&self) -> Option<&str> {
+        self.package_sha256.as_deref()
+    }
+
+    pub fn file_name(&self) -> Option<&str> {
+        self.file_name.as_deref()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceInitialization {
     MainAgentTemplate,
@@ -95,9 +135,16 @@ pub enum Command {
         endpoint: NativeEndpoint,
         agent_id: String,
     },
+    ExportCloudPackage {
+        endpoint: NativeEndpoint,
+        agent_id: String,
+        cloud_public_key: String,
+        cloud_key_id: String,
+    },
     InstallPackage {
         endpoint: NativeEndpoint,
         package_path: String,
+        cloud_metadata: Option<CloudPackageMetadata>,
     },
 }
 
@@ -121,6 +168,7 @@ impl Command {
             | Self::ToolConfiguration { endpoint, .. }
             | Self::SetToolConfiguration { endpoint, .. }
             | Self::ExportPackage { endpoint, .. }
+            | Self::ExportCloudPackage { endpoint, .. }
             | Self::InstallPackage { endpoint, .. } => *endpoint,
         }
     }
@@ -352,6 +400,35 @@ impl PackageInstallReceipt {
 
     pub fn agent_id(&self) -> &str {
         &self.agent_id
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageInstallPlan {
+    agent_id: String,
+    workspace: String,
+    workspace_preexisted: bool,
+}
+
+impl PackageInstallPlan {
+    pub fn new(agent_id: String, workspace: String, workspace_preexisted: bool) -> Self {
+        Self {
+            agent_id,
+            workspace,
+            workspace_preexisted,
+        }
+    }
+
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    pub fn workspace(&self) -> &str {
+        &self.workspace
+    }
+
+    pub fn workspace_preexisted(&self) -> bool {
+        self.workspace_preexisted
     }
 }
 
@@ -810,6 +887,7 @@ pub struct ToolOption {
     pub risk: Option<String>,
     pub tags: Vec<String>,
     pub default_profiles: Vec<String>,
+    pub denied_by_global_policy: bool,
     pub group_key: Option<String>,
     pub group_display_name: Option<String>,
 }
@@ -849,6 +927,10 @@ impl ToolOption {
 
     pub fn default_profiles(&self) -> &[String] {
         &self.default_profiles
+    }
+
+    pub const fn denied_by_global_policy(&self) -> bool {
+        self.denied_by_global_policy
     }
 
     pub fn group_key(&self) -> Option<&str> {

@@ -3,7 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use platform::loopback::{Request, Response};
 use serde_json::{Map, Value};
 
-use crate::projection::public::{Delivery, map_outcome};
+use crate::{
+    domain::model::Command,
+    projection::public::{Delivery, map_outcome},
+};
 
 use super::AgentsRequest;
 
@@ -97,7 +100,24 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
         trace_id.as_deref(),
         serde_json::json!({ "operation": operation_id }),
     );
-    let delivery = match dependencies.subagents.subagents(command).await {
+    let is_query = is_short_deadline_query(&command);
+    let dispatch = dependencies.subagents.subagents(command);
+    let result = if is_query {
+        match tokio::time::timeout(super::SHORT_DEADLINE, dispatch).await {
+            Ok(result) => result,
+            Err(_) => {
+                log(
+                    "runtime.agents.timeout",
+                    trace_id.as_deref(),
+                    serde_json::json!({ "operation": operation_id }),
+                );
+                return ResponseBody::fixed(503, super::TIMEOUT_ERROR);
+            }
+        }
+    } else {
+        dispatch.await
+    };
+    let delivery = match result {
         Ok(outcome) => map_outcome(outcome),
         Err(_) => {
             log(
@@ -118,6 +138,18 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
         }),
     );
     ResponseBody::from_delivery(delivery)
+}
+
+fn is_short_deadline_query(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::List { .. }
+            | Command::ListFiles { .. }
+            | Command::GetFile { .. }
+            | Command::DisplayConfiguration { .. }
+            | Command::SkillConfiguration { .. }
+            | Command::ToolConfiguration { .. }
+    )
 }
 
 struct ResponseBody {
@@ -230,4 +262,27 @@ fn now_millis() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::domain::model::{AgentDelete, NativeEndpoint};
+
+    use super::*;
+
+    #[test]
+    fn only_read_commands_use_the_short_execution_deadline() {
+        assert!(is_short_deadline_query(&Command::List {
+            endpoint: NativeEndpoint::OpenClawLocal,
+        }));
+        assert!(!is_short_deadline_query(&Command::Delete {
+            endpoint: NativeEndpoint::OpenClawLocal,
+            input: AgentDelete::try_new("agent-1".into(), true).expect("delete input"),
+        }));
+        assert!(!is_short_deadline_query(&Command::Wait {
+            endpoint: NativeEndpoint::OpenClawLocal,
+            input: crate::domain::model::AgentWait::try_new("run-1".into(), 30_000, 10_000)
+                .expect("wait input"),
+        }));
+    }
 }

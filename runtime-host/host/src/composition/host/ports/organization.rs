@@ -57,12 +57,13 @@ impl sessions_module::ports::SessionOwnershipReader for OrganizationSessionOwner
             }
             let mut ownership = HashMap::new();
             for query in queries {
-                let agent =
-                    if query.identity.endpoint() == &RuntimeDriverIdentity::matcha_agent().endpoint() {
-                        None
-                    } else {
-                        Some(query.identity.agent_id())
-                    };
+                let agent = if query.identity.endpoint()
+                    == &RuntimeDriverIdentity::matcha_agent().endpoint()
+                {
+                    None
+                } else {
+                    Some(query.identity.agent_id())
+                };
                 if let Some(receipt) = bindings.get(&(
                     query.identity.endpoint().clone(),
                     agent,

@@ -8,7 +8,7 @@ import {
   type ChatSidePanelMode,
   type ChatSidePanelWidthPolicy,
   type ChatWindowDockPhase,
-} from './chat-workspace-layout';
+} from '@/components/layout/chat-workspace-layout';
 
 interface WindowRightDockResult {
   appliedWidth: number;

@@ -6,105 +6,12 @@ import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, options?: Record<string, unknown>) => {
-      if (key === 'taskInbox.unfinishedCount') {
-        return `count:${String(options?.count ?? 0)}`;
-      }
-      if (key === 'taskInbox.shortTitle') {
-        return '任务';
-      }
-      if (key === 'taskInbox.planStatus.building') {
-        return '执行中';
-      }
+    t: (key: string) => {
       if (key === 'artifacts.sectionLabel') {
         return '产物';
       }
       return key;
     },
-  }),
-}));
-
-const openTaskSessionMock = vi.fn(() => 'agent:main:main');
-let taskRows: Array<{
-  id: string;
-  subject?: string;
-  status: string;
-  metadata?: Record<string, unknown>;
-}> = [];
-
-vi.mock('@/stores/chat', () => ({
-  useChatStore: (selector: (state: {
-    currentSessionKey: string;
-    openTaskSession: (sessionKey: string) => string;
-  }) => unknown) => selector({
-    currentSessionKey: 'agent:main:main',
-    openTaskSession: openTaskSessionMock,
-  }),
-}));
-
-vi.mock('@/stores/chat/task-snapshot-store', () => ({
-  useTaskSnapshotStore: (selector: (state: {
-    getPersistentTaskDataList: () => Array<{
-      id: string;
-      subject?: string;
-      status: string;
-      metadata?: Record<string, unknown>;
-    }>;
-  }) => unknown) => selector({
-    getPersistentTaskDataList: () => taskRows,
-  }),
-}));
-
-vi.mock('@/stores/task-center-store', () => ({
-  useTaskCenterStore: (selector: (state: {
-    initialLoading: boolean;
-    refreshing: boolean;
-    initialized: boolean;
-    error: string | null;
-    clearError: () => void;
-    refreshTasks: () => Promise<void>;
-  }) => unknown) => selector({
-    initialLoading: false,
-    refreshing: false,
-    initialized: true,
-    error: null,
-    clearError: vi.fn(),
-    refreshTasks: vi.fn().mockResolvedValue(undefined),
-  }),
-}));
-
-vi.mock('@/stores/gateway', () => ({
-  useGatewayStore: (selector: (state: {
-    status: {
-      processState: 'running';
-      port: number;
-      gatewayReady: true;
-      healthSummary: 'healthy';
-      transportState: 'connected';
-      portReachable: true;
-      diagnostics: { consecutiveHeartbeatMisses: number; consecutiveRpcFailures: number };
-      updatedAt: number;
-    };
-    isInitialized: boolean;
-  }) => unknown) => selector({
-    status: {
-      processState: 'running',
-      port: 17621,
-      gatewayReady: true,
-      healthSummary: 'healthy',
-      transportState: 'connected',
-      portReachable: true,
-      diagnostics: { consecutiveHeartbeatMisses: 0, consecutiveRpcFailures: 0 },
-      updatedAt: 0,
-    },
-    isInitialized: true,
-  }),
-  useRuntimeHostStore: (selector: (state: {
-    runtimeHost: { lifecycle: string };
-    isInitialized: boolean;
-  }) => unknown) => selector({
-    runtimeHost: { lifecycle: 'running' },
-    isInitialized: true,
   }),
 }));
 
@@ -167,23 +74,15 @@ vi.mock('@/components/file-preview/WorkspaceBrowserBody', () => ({
   ),
 }));
 
-describe('chat shell task panel layout', () => {
+describe('chat shell side panel layout', () => {
   beforeEach(() => {
     mockShowItemInFolder.mockClear();
-    openTaskSessionMock.mockClear();
     window.electron.platform = 'darwin';
-    taskRows = [];
   });
 
   const sidePanelProps = {
     artifactWorkbenchFullscreen: false,
     onToggleArtifactWorkbenchFullscreen: vi.fn(),
-    taskInboxTasks: [],
-    taskInboxLoading: false,
-    taskInboxError: null,
-    onRefreshTaskInbox: vi.fn().mockResolvedValue(undefined),
-    onClearTaskInboxError: vi.fn(),
-    derivedPlanStatus: null,
     artifactGroups: [],
     artifactFocusedGroupFiles: [],
     artifactFocusedFile: null,
@@ -407,158 +306,49 @@ describe('chat shell task panel layout', () => {
     expect(screen.queryByTestId('chat-side-panel-resizer')).toBeNull();
   });
 
-  it('renders task, artifact, and runtime tabs inside one shared side panel shell', () => {
+  it('renders artifact and runtime tabs inside one shared side panel shell', () => {
     const onTabChange = vi.fn();
     render(
       <ChatSidePanel
         mode="docked"
         width={520}
-        activeTab="tasks"
+        activeTab="artifacts"
         onTabChange={onTabChange}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
       />,
     );
 
-    expect(screen.getAllByRole('tab')).toHaveLength(3);
-    expect(screen.getByRole('tab', { name: 'taskInbox.title' })).toBeInTheDocument();
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
     expect(screen.getByRole('tab', { name: 'artifacts.title' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '运行面' })).toBeInTheDocument();
     expect(screen.queryByTestId('chat-side-panel-tab-skills')).toBeNull();
-    expect(screen.getByRole('button', { name: 'taskInbox.collapse' })).toBeInTheDocument();
-    expect(screen.queryByTitle('taskInbox.expand')).toBeNull();
+    expect(screen.getByRole('button', { name: 'toolbar.closeSidePanel' })).toBeInTheDocument();
     expect(screen.getByTestId('chat-side-panel').className).toContain('border-l');
-    expect(screen.queryByText(/workspace/i)).toBeNull();
-    expect(screen.queryByText(/mr\.key/i)).toBeNull();
-    expect(within(screen.getByTestId('chat-side-panel-tab-tasks')).getByText('任务')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-side-panel-tab-artifacts')).getByText('产物')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-side-panel-tab-runtime')).getByText('运行面')).toBeInTheDocument();
     fireEvent.mouseDown(screen.getByRole('tab', { name: '运行面' }));
     expect(onTabChange).toHaveBeenCalledWith('runtime');
   });
 
-  it('renders the task refresh action inside the task panel header instead of the top bar', () => {
-    render(
-      <ChatSidePanel
-        mode="docked"
-        width={520}
-        activeTab="tasks"
-        onTabChange={vi.fn()}
-        onClose={vi.fn()}
-        unfinishedTaskCount={0}
-        {...sidePanelProps}
-      />,
-    );
-
-    const taskPanel = screen.getByRole('tabpanel');
-    expect(within(taskPanel).getByRole('button', { name: 'taskInbox.refresh' })).toBeInTheDocument();
-  });
-
-  it('renders only persistent task rows and opens the task execution session', () => {
-    render(
-      <ChatSidePanel
-        mode="docked"
-        width={520}
-        activeTab="tasks"
-        onTabChange={vi.fn()}
-        onClose={vi.fn()}
-        unfinishedTaskCount={1}
-        {...sidePanelProps}
-        taskInboxTasks={[{
-          id: 'task-1',
-          subject: '执行任务',
-          description: '',
-          status: 'in_progress',
-          blockedBy: [],
-          blocks: [],
-          createdAt: 1,
-          updatedAt: 2,
-          sourceSessionKey: 'agent:worker:session-1',
-          scopeKey: 'agent:worker:session-1',
-        }]}
-      />,
-    );
-
-    const taskPanel = screen.getByRole('tabpanel');
-    expect(within(taskPanel).getByText('执行任务')).toBeInTheDocument();
-    expect(within(taskPanel).queryByText('分析页面结构')).toBeNull();
-
-    fireEvent.click(within(taskPanel).getByRole('button', { name: /执行任务/ }));
-
-    expect(openTaskSessionMock).toHaveBeenCalledWith('agent:worker:session-1');
-  });
-
-  it('renders derived plan status from the task snapshot pipeline when unfinished tasks exist', () => {
-    render(
-      <ChatSidePanel
-        mode="docked"
-        width={520}
-        activeTab="tasks"
-        onTabChange={vi.fn()}
-        onClose={vi.fn()}
-        unfinishedTaskCount={1}
-        {...sidePanelProps}
-        taskInboxTasks={[{
-          id: 'task-1',
-          subject: '执行任务',
-          description: '',
-          status: 'in_progress',
-          blockedBy: [],
-          blocks: [],
-          createdAt: 1,
-          updatedAt: 2,
-          sourceSessionKey: 'agent:worker:session-1',
-          scopeKey: 'agent:worker:session-1',
-        }]}
-        derivedPlanStatus="building"
-      />,
-    );
-
-    const taskPanel = screen.getByRole('tabpanel');
-    expect(within(taskPanel).getByText('执行中')).toBeInTheDocument();
-  });
-
-  it('hides derived plan status when there are no unfinished tasks', () => {
-    render(
-      <ChatSidePanel
-        mode="docked"
-        width={520}
-        activeTab="tasks"
-        onTabChange={vi.fn()}
-        onClose={vi.fn()}
-        unfinishedTaskCount={0}
-        {...sidePanelProps}
-        derivedPlanStatus="finished"
-      />,
-    );
-
-    const taskPanel = screen.getByRole('tabpanel');
-    expect(within(taskPanel).queryByText('已完成')).toBeNull();
-  });
-
   it('switches the top tab strip to icon-only mode when per-tab space is not enough for labels', () => {
     render(
       <ChatSidePanel
         mode="docked"
-        width={220}
-        activeTab="tasks"
+        width={180}
+        activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
       />,
     );
 
-    const tasksTab = screen.getByTestId('chat-side-panel-tab-tasks');
     const artifactsTab = screen.getByTestId('chat-side-panel-tab-artifacts');
     const runtimeTab = screen.getByTestId('chat-side-panel-tab-runtime');
 
-    expect(tasksTab).toHaveAttribute('title', 'taskInbox.title');
     expect(artifactsTab).toHaveAttribute('title', 'artifacts.title');
     expect(runtimeTab).toHaveAttribute('title', '运行面');
     expect(screen.queryByTestId('chat-side-panel-tab-skills')).toBeNull();
-    expect(within(tasksTab).queryByText('任务')).toBeNull();
     expect(within(artifactsTab).queryByText('产物')).toBeNull();
     expect(within(runtimeTab).queryByText('运行面')).toBeNull();
   });
@@ -567,36 +357,15 @@ describe('chat shell task panel layout', () => {
     render(
       <ChatSidePanel
         mode="docked"
-        width={420}
-        activeTab="tasks"
+        width={320}
+        activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
       />,
     );
 
     expect(screen.queryByTestId('chat-side-panel-tab-skills')).toBeNull();
-    expect(within(screen.getByTestId('chat-side-panel-tab-tasks')).getByText('任务')).toBeInTheDocument();
-    expect(within(screen.getByTestId('chat-side-panel-tab-artifacts')).getByText('产物')).toBeInTheDocument();
-    expect(within(screen.getByTestId('chat-side-panel-tab-runtime')).getByText('运行面')).toBeInTheDocument();
-  });
-
-  it('keeps top tab labels visible when the side panel is wide enough', () => {
-    render(
-      <ChatSidePanel
-        mode="docked"
-        width={520}
-        activeTab="tasks"
-        onTabChange={vi.fn()}
-        onClose={vi.fn()}
-        unfinishedTaskCount={0}
-        {...sidePanelProps}
-      />,
-    );
-
-    expect(screen.queryByTestId('chat-side-panel-tab-skills')).toBeNull();
-    expect(within(screen.getByTestId('chat-side-panel-tab-tasks')).getByText('任务')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-side-panel-tab-artifacts')).getByText('产物')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-side-panel-tab-runtime')).getByText('运行面')).toBeInTheDocument();
   });
@@ -609,7 +378,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
       />,
     );
@@ -631,7 +399,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
       />,
     );
@@ -649,7 +416,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
       />,
     );
@@ -698,7 +464,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
         artifactWorkbenchFullscreen={false}
         onToggleArtifactWorkbenchFullscreen={onToggleArtifactWorkbenchFullscreen}
@@ -780,7 +545,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
         onOpenArtifactGroup={onOpenArtifactGroup}
         artifactGroups={[{
@@ -845,7 +609,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
         onOpenGeneratedArtifactFile={onOpenGeneratedArtifactFile}
         artifactGroups={[{
@@ -940,7 +703,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
         artifactGroups={[
           {
@@ -1019,7 +781,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
         artifactGroups={[{
           graphItemKey: 'graph-1',
@@ -1067,7 +828,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
         artifactGroups={[{
           graphItemKey: 'graph-1',
@@ -1118,7 +878,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
         artifactGroups={[{
           graphItemKey: 'graph-1',
@@ -1167,7 +926,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
         artifactGroups={[{
           graphItemKey: 'graph-1',
@@ -1220,7 +978,6 @@ describe('chat shell task panel layout', () => {
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        unfinishedTaskCount={0}
         {...sidePanelProps}
         artifactActiveSection="workspace"
         artifactViewMode="preview"

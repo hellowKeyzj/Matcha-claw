@@ -2,7 +2,6 @@ export const CHAT_WORKSPACE_LAYOUT = {
   sidebarMinWidth: 200,
   sidebarMaxWidth: 420,
   sidebarDefaultWidth: 256,
-  sidebarRailWidth: 64,
   sidePanelMinWidth: 260,
   sidePanelLightMaxWidth: 520,
   sidePanelArtifactMaxWidth: 1600,
@@ -68,7 +67,7 @@ export function getSidebarResizeMaxWidth(containerWidth: number): number {
 
 export function getSidebarRenderWidth(sidebarVisible: boolean, sidebarWidth: number): number {
   if (!sidebarVisible) {
-    return CHAT_WORKSPACE_LAYOUT.sidebarRailWidth;
+    return 0;
   }
   return clampPaneWidth(
     sidebarWidth,
@@ -78,8 +77,9 @@ export function getSidebarRenderWidth(sidebarVisible: boolean, sidebarWidth: num
 }
 
 export function getSidebarOccupiedWidth(sidebarVisible: boolean, sidebarWidth: number): number {
-  return getSidebarRenderWidth(sidebarVisible, sidebarWidth)
-    + (sidebarVisible ? CHAT_WORKSPACE_LAYOUT.paneResizerWidth : 0);
+  return sidebarVisible
+    ? getSidebarRenderWidth(sidebarVisible, sidebarWidth) + CHAT_WORKSPACE_LAYOUT.paneResizerWidth
+    : 0;
 }
 
 export function resolveChatWorkspaceLayout(
@@ -91,7 +91,7 @@ export function resolveChatWorkspaceLayout(
       CHAT_WORKSPACE_LAYOUT.sidebarMinWidth,
       getSidebarResizeMaxWidth(input.containerWidth),
     )
-    : CHAT_WORKSPACE_LAYOUT.sidebarRailWidth;
+    : 0;
 
   return {
     sidebarWidth,

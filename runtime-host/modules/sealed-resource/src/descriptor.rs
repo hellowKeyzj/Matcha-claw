@@ -12,18 +12,32 @@ pub struct SealedSkillDescriptor {
 }
 
 impl SealedSkillDescriptor {
-    pub fn parse_skill_manifest(content: &str) -> Result<Self, ()> {
-        let frontmatter = manifest_frontmatter(content).ok_or(())?;
-        let wire = DescriptorFrontmatter::parse(frontmatter);
-        let name = clean_text(wire.name, MAX_DESCRIPTOR_NAME_BYTES).ok_or(())?;
+    pub(crate) fn try_new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        user_invocable: Option<bool>,
+        disable_model_invocation: Option<bool>,
+    ) -> Result<Self, ()> {
+        let name = clean_text(Some(name.into()), MAX_DESCRIPTOR_NAME_BYTES).ok_or(())?;
         let description =
-            clean_text(wire.description, MAX_DESCRIPTOR_DESCRIPTION_BYTES).ok_or(())?;
+            clean_text(Some(description.into()), MAX_DESCRIPTOR_DESCRIPTION_BYTES).ok_or(())?;
         Ok(Self {
             name,
             description,
-            user_invocable: wire.user_invocable,
-            disable_model_invocation: wire.disable_model_invocation,
+            user_invocable,
+            disable_model_invocation,
         })
+    }
+
+    pub fn parse_skill_manifest(content: &str) -> Result<Self, ()> {
+        let frontmatter = manifest_frontmatter(content).ok_or(())?;
+        let wire: DescriptorFrontmatter = serde_yaml::from_str(frontmatter).map_err(|_| ())?;
+        Self::try_new(
+            wire.name.ok_or(())?,
+            wire.description.ok_or(())?,
+            wire.user_invocable,
+            wire.disable_model_invocation,
+        )
     }
 
     pub fn name(&self) -> &str {
@@ -47,38 +61,10 @@ impl SealedSkillDescriptor {
 struct DescriptorFrontmatter {
     name: Option<String>,
     description: Option<String>,
+    #[serde(rename = "user-invocable")]
     user_invocable: Option<bool>,
+    #[serde(rename = "disable-model-invocation")]
     disable_model_invocation: Option<bool>,
-}
-
-impl DescriptorFrontmatter {
-    fn parse(frontmatter: &str) -> Self {
-        let mut name = None;
-        let mut description = None;
-        let mut user_invocable = None;
-        let mut disable_model_invocation = None;
-        for line in frontmatter.lines() {
-            if name.is_none() {
-                name = field_value(line, "name");
-            }
-            if description.is_none() {
-                description = field_value(line, "description");
-            }
-            if user_invocable.is_none() {
-                user_invocable = field_value(line, "user-invocable").and_then(parse_bool);
-            }
-            if disable_model_invocation.is_none() {
-                disable_model_invocation =
-                    field_value(line, "disable-model-invocation").and_then(parse_bool);
-            }
-        }
-        Self {
-            name,
-            description,
-            user_invocable,
-            disable_model_invocation,
-        }
-    }
 }
 
 fn manifest_frontmatter(content: &str) -> Option<&str> {
@@ -93,21 +79,33 @@ fn manifest_frontmatter(content: &str) -> Option<&str> {
         .map(|(frontmatter, _)| frontmatter)
 }
 
-fn field_value(line: &str, field: &str) -> Option<String> {
-    line.strip_prefix(field)
-        .and_then(|rest| rest.strip_prefix(':'))
-        .map(|value| value.trim().trim_matches(['\'', '"']).to_owned())
-}
-
 fn clean_text(value: Option<String>, max_bytes: usize) -> Option<String> {
     let value = value?.trim().to_owned();
     (!value.is_empty() && value.len() <= max_bytes && !value.contains('\0')).then_some(value)
 }
 
-fn parse_bool(value: String) -> Option<bool> {
-    match value.trim() {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_yaml_block_scalar_description() {
+        let descriptor = SealedSkillDescriptor::parse_skill_manifest(
+            "---\nname: llm-wiki\ndescription: |\n  line one\n  line two\n---\n",
+        )
+        .unwrap();
+
+        assert_eq!(descriptor.name(), "llm-wiki");
+        assert_eq!(descriptor.description(), "line one\nline two");
+    }
+
+    #[test]
+    fn parses_yaml_folded_scalar_description() {
+        let descriptor = SealedSkillDescriptor::parse_skill_manifest(
+            "---\nname: folded\ndescription: >\n  line one\n  line two\n---\n",
+        )
+        .unwrap();
+
+        assert_eq!(descriptor.description(), "line one line two");
     }
 }

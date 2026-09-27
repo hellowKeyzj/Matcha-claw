@@ -114,7 +114,6 @@
         "settings": "設定",
         "devConsole": "開発者コンソール",
         "pendingBlockers": "セッション阻害",
-        "pendingBlockersEmpty": "未処理の阻害はありません",
         "pendingBlockerTask": "タスク {{taskId}}",
         "pendingBlockerStage": "ステージ {{stageId}}",
         "pendingBlockerGeneral": "一般阻害",

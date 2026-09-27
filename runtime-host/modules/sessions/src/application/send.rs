@@ -11,7 +11,7 @@ const MAX_ENDPOINT_SESSION_ID_BYTES: usize = 4096;
 const MAX_RUN_ID_BYTES: usize = 4096;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
 const MAX_ATTACHMENTS: usize = 16;
-const MAX_ATTACHMENT_DECODED_BYTES: usize = 20 * 1024 * 1024;
+const MAX_ATTACHMENT_DECODED_BYTES: usize = 5 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_DECODED_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

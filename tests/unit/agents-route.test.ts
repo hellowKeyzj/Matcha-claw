@@ -125,6 +125,68 @@ describe('agents host API route', () => {
     });
   });
 
+  it('hides sealed package export package path from public response', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      status: 200,
+      body: {
+        success: true,
+        package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1, exportedAtMs: 2 },
+      },
+    });
+    const result = response();
+    const request = {
+      id: 'subagent.management',
+      operationId: 'subagents.package.export',
+      scope: { kind: 'agent', endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' }, agentId: 'main' },
+      target: { kind: 'subagent', subagentId: 'writer' },
+      input: { kind: 'packageExport', endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' }, agentId: 'writer' },
+    };
+
+    await handleAgentsRoutes(
+      incoming(request) as never,
+      result.raw as never,
+      new URL('http://127.0.0.1/api/subagents/agents'),
+      { execute },
+    );
+
+    expect(execute).toHaveBeenCalledWith(request);
+    expect(result.state).toEqual({
+      statusCode: 200,
+      body: { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', size: 1, exportedAtMs: 2 } },
+    });
+    expect(JSON.stringify(result.state.body)).not.toMatch(/packagePath|deviceEnvelope|authorizationKey|contentKey|rawPayload|token/);
+  });
+
+  it('hides sealed package install private fields from public response', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      status: 200,
+      body: {
+        success: true,
+        package: { agentId: 'writer', authorizationKey: 'authorization-key', deviceEnvelope: 'device-envelope', contentKey: 'content-key', rawPayload: 'raw', token: 'token' },
+      },
+    });
+    const result = response();
+    const request = {
+      id: 'subagent.management',
+      operationId: 'subagents.package.install',
+      scope: { kind: 'agent', endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' }, agentId: 'main' },
+      target: { kind: 'subagent' },
+      input: { kind: 'packageInstall', endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' }, packagePath: 'C:/sealed/writer.matcha-agentpkg' },
+    };
+
+    await handleAgentsRoutes(
+      incoming(request) as never,
+      result.raw as never,
+      new URL('http://127.0.0.1/api/subagents/agents'),
+      { execute },
+    );
+
+    expect(result.state).toEqual({
+      statusCode: 200,
+      body: { success: true, package: { agentId: 'writer' } },
+    });
+  });
+
   it('redacts route-local failures as unavailable', async () => {
     const result = response();
 

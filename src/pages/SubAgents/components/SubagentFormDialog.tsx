@@ -100,7 +100,7 @@ const EMPTY_VALUES: SubagentFormValues = {
 const TOOL_PROFILE_OPTIONS = ['full', 'coding', 'minimal', 'messaging'] as const;
 const CREATE_AGENT_AVATAR_PICKER_OPTION_COUNT = 15;
 
-type ToolEffectiveState = 'enabledByProfile' | 'disabledByProfile' | 'allowedByOverride' | 'deniedByOverride';
+type ToolEffectiveState = 'enabledByProfile' | 'disabledByProfile' | 'allowedByOverride' | 'deniedByOverride' | 'deniedByGlobalPolicy';
 
 function formatToolProfileLabel(profileKey: string, displayName: string, t: (key: string, options?: Record<string, unknown>) => string): string {
   return t(`form.toolProfiles.${profileKey}`, { defaultValue: displayName || profileKey });
@@ -870,6 +870,9 @@ export function SubagentFormDialog({
       setDeniedToolKeys((prev) => nextSetting === 'deny' ? toggleStringKey(prev, toolKey, true) : toggleStringKey(prev, toolKey, false));
     };
     const readToolEffectiveState = (tool: AgentToolConfigOption, groupPolicyOption?: AgentToolConfigOption): ToolEffectiveState => {
+      if (tool.deniedByGlobalPolicy || groupPolicyOption?.deniedByGlobalPolicy) {
+        return 'deniedByGlobalPolicy';
+      }
       const toolPolicySetting = readToolPolicySetting(tool.toolKey);
       if (toolPolicySetting === 'deny') {
         return 'deniedByOverride';
@@ -889,6 +892,7 @@ export function SubagentFormDialog({
       return isEnabledByToolProfile(tool, toolProfile) ? 'enabledByProfile' : 'disabledByProfile';
     };
     const isToolEffectivelyEnabled = (state: ToolEffectiveState) => state === 'enabledByProfile' || state === 'allowedByOverride';
+    const globalDenyCount = allTools.filter((tool) => tool.deniedByGlobalPolicy).length;
     const effectiveEnabledCount = toolGroups.reduce((count, group) => {
       const groupPolicyOption = findGroupPolicyOption(group.groupKey);
       return count + group.toolOptions.filter((tool) => isToolEffectivelyEnabled(readToolEffectiveState(tool, groupPolicyOption))).length;
@@ -903,14 +907,16 @@ export function SubagentFormDialog({
         state === 'enabledByProfile' && 'bg-emerald-500/10 text-emerald-700',
         state === 'allowedByOverride' && 'bg-blue-500/10 text-blue-700',
         state === 'deniedByOverride' && 'bg-rose-500/10 text-rose-700',
+        state === 'deniedByGlobalPolicy' && 'bg-amber-500/10 text-amber-700',
         state === 'disabledByProfile' && 'bg-muted text-muted-foreground',
       )}
       >
         {t(`form.capabilities.toolStates.${state}`)}
       </span>
     );
-    const renderPolicyControl = (tool: AgentToolConfigOption) => {
+    const renderPolicyControl = (tool: AgentToolConfigOption, forceDisabled = false) => {
       const currentSetting = readToolPolicySetting(tool.toolKey);
+      const policyControlsDisabled = controlsDisabled || forceDisabled || tool.deniedByGlobalPolicy;
       const policyButtonClass = (setting: 'default' | 'allow' | 'deny') => cn(
         'h-6 rounded-full px-2 text-[11px] shadow-none',
         currentSetting === setting
@@ -922,7 +928,7 @@ export function SubagentFormDialog({
           <Button
             type="button"
             variant="ghost"
-            disabled={controlsDisabled}
+            disabled={policyControlsDisabled}
             className={policyButtonClass('default')}
             onClick={() => setToolPolicySetting(tool.toolKey, 'default')}
           >
@@ -931,7 +937,7 @@ export function SubagentFormDialog({
           <Button
             type="button"
             variant="ghost"
-            disabled={controlsDisabled}
+            disabled={policyControlsDisabled}
             className={policyButtonClass('allow')}
             onClick={() => setToolPolicySetting(tool.toolKey, 'allow')}
           >
@@ -940,7 +946,7 @@ export function SubagentFormDialog({
           <Button
             type="button"
             variant="ghost"
-            disabled={controlsDisabled}
+            disabled={policyControlsDisabled}
             className={policyButtonClass('deny')}
             onClick={() => setToolPolicySetting(tool.toolKey, 'deny')}
           >
@@ -961,6 +967,7 @@ export function SubagentFormDialog({
                   enabled: effectiveEnabledCount,
                   total: allTools.length,
                   defaultEnabled: profileEnabledCount,
+                  globalDeny: globalDenyCount,
                   overrides: explicitRuleCount,
                 })}
               </p>
@@ -1002,14 +1009,18 @@ export function SubagentFormDialog({
                   ))}
                 </Select>
               </div>
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid gap-2 sm:grid-cols-4">
+                <div className="rounded-lg border bg-card px-3 py-2">
+                  <p className="text-[11px] text-muted-foreground">{t('form.capabilities.configPreview')}</p>
+                  <p className="mt-1 text-sm font-medium text-foreground">{effectiveEnabledCount}/{allTools.length}</p>
+                </div>
                 <div className="rounded-lg border bg-card px-3 py-2">
                   <p className="text-[11px] text-muted-foreground">{t('form.capabilities.profileDefault')}</p>
                   <p className="mt-1 text-sm font-medium text-foreground">{profileEnabledCount}/{allTools.length}</p>
                 </div>
                 <div className="rounded-lg border bg-card px-3 py-2">
-                  <p className="text-[11px] text-muted-foreground">{t('form.capabilities.effectiveTools')}</p>
-                  <p className="mt-1 text-sm font-medium text-foreground">{effectiveEnabledCount}/{allTools.length}</p>
+                  <p className="text-[11px] text-muted-foreground">{t('form.capabilities.globalDeny')}</p>
+                  <p className="mt-1 text-sm font-medium text-foreground">{globalDenyCount}</p>
                 </div>
                 <div className="rounded-lg border bg-card px-3 py-2">
                   <p className="text-[11px] text-muted-foreground">{t('form.capabilities.explicitRules')}</p>
@@ -1024,6 +1035,7 @@ export function SubagentFormDialog({
               {toolGroups.map((group) => {
                 const groupPolicyOption = findGroupPolicyOption(group.groupKey);
                 const expanded = expandedToolGroupKeys.includes(group.groupKey);
+                const groupGloballyDenied = Boolean(groupPolicyOption?.deniedByGlobalPolicy) || (group.toolOptions.length > 0 && group.toolOptions.every((tool) => tool.deniedByGlobalPolicy));
                 const enabledInGroupCount = group.toolOptions.filter((tool) => isToolEffectivelyEnabled(readToolEffectiveState(tool, groupPolicyOption))).length;
                 const groupRuleCount = [
                   groupPolicyOption && readToolPolicySetting(groupPolicyOption.toolKey) !== 'default',
@@ -1058,7 +1070,7 @@ export function SubagentFormDialog({
                           </span>
                         </span>
                       </button>
-                      {groupPolicyOption ? renderPolicyControl(groupPolicyOption) : null}
+                      {groupPolicyOption ? renderPolicyControl(groupPolicyOption, groupGloballyDenied) : null}
                     </div>
                     {expanded ? (
                       <div className="divide-y border-t bg-background/60">

@@ -159,17 +159,13 @@ function setupSidebarState() {
 }
 
 describe('sidebar chat nav', () => {
-  it('keeps nav labels mounted in the collapsed rail', () => {
+  it('renders nav labels in the sidebar drawer', () => {
     setupSidebarState();
-    useLayoutStore.setState({
-      sidebarVisible: false,
-      sidebarWidth: 256,
-    });
 
     mountSidebar('/dashboard');
 
     expect(screen.getByText('New Chat')).toBeInTheDocument();
-    expect(screen.getByText('Skills')).toBeInTheDocument();
+    expect(screen.getByText('Subagents')).toBeInTheDocument();
   });
 
   it('does not animate sidebar width changes on the outer shell', () => {

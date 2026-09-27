@@ -2,22 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 import { useGatewayStore } from '@/stores/gateway';
 import { useLayoutStore } from '@/stores/layout';
 import { useChatStore } from '@/stores/chat';
-import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
-import { readSessionsFromState } from '@/stores/chat/session-helpers';
-import type { Task } from '@/services/openclaw/task-manager-client';
-import { useTaskCenterStore } from '@/stores/task-center-store';
 import { isGatewayOperational } from '@/lib/gateway-status';
-import { filterUnfinishedTasks } from '@/lib/task-domain';
 import {
   clampChatSidePanelWidth,
   getDefaultChatSidePanelWidth,
   resolveChatSidePanelLayout,
   type ChatSidePanelWidthPolicy,
   type ChatSidePanelMode,
-} from './chat-workspace-layout';
+} from '@/components/layout/chat-workspace-layout';
 
-export type ChatSidePanelTab = 'tasks' | 'artifacts' | 'runtime';
-export type TaskInboxTask = Task & { sourceSessionKey: string; scopeKey: string };
+export type ChatSidePanelTab = 'artifacts' | 'runtime';
 
 export const CHAT_RUNTIME_SURFACE_OPEN_EVENT = 'chat:open-runtime-surface';
 
@@ -80,25 +74,6 @@ function publishChatRuntimeSurface(surface: ChatRuntimeSurfaceDescriptor): void 
   }
 }
 
-function uniqueSorted(values: string[]): string[] {
-  return Array.from(new Set(values.filter((value) => value.trim().length > 0))).sort((left, right) => left.localeCompare(right));
-}
-
-function taskInboxKey(task: TaskInboxTask): string {
-  return `${task.sourceSessionKey}:${task.id}`;
-}
-
-function sortTaskInboxTasks(tasks: TaskInboxTask[]): TaskInboxTask[] {
-  return [...tasks].sort((left, right) => {
-    const leftUpdatedAt = Number.isFinite(left.updatedAt) ? left.updatedAt : 0;
-    const rightUpdatedAt = Number.isFinite(right.updatedAt) ? right.updatedAt : 0;
-    if (leftUpdatedAt !== rightUpdatedAt) {
-      return rightUpdatedAt - leftUpdatedAt;
-    }
-    return taskInboxKey(left).localeCompare(taskInboxKey(right));
-  });
-}
-
 interface ChatSidePanelState {
   open: boolean;
   activeTab: ChatSidePanelTab;
@@ -107,7 +82,7 @@ interface ChatSidePanelState {
 }
 
 function isStoredSidePanelTab(value: string | null): value is ChatSidePanelTab {
-  return value === 'tasks' || value === 'artifacts' || value === 'runtime';
+  return value === 'artifacts' || value === 'runtime';
 }
 
 function resolveSidePanelWidthPolicy(tab: ChatSidePanelTab): ChatSidePanelWidthPolicy {
@@ -121,7 +96,7 @@ function readStoredPanelState(): ChatSidePanelState {
     const storedArtifactWidth = Number(window.localStorage.getItem('chat:side-panel-artifact-width'));
     return {
       open: false,
-      activeTab: isStoredSidePanelTab(storedTab) ? storedTab : 'tasks',
+      activeTab: isStoredSidePanelTab(storedTab) ? storedTab : 'artifacts',
       lightWidth: Number.isFinite(storedLightWidth) && storedLightWidth > 0
         ? storedLightWidth
         : getDefaultChatSidePanelWidth('light'),
@@ -132,7 +107,7 @@ function readStoredPanelState(): ChatSidePanelState {
   } catch {
     return {
       open: false,
-      activeTab: 'tasks',
+      activeTab: 'artifacts',
       lightWidth: getDefaultChatSidePanelWidth('light'),
       artifactWidth: getDefaultChatSidePanelWidth('artifacts'),
     };
@@ -151,39 +126,14 @@ export function useChatSidePanelController(
   const chatTakeoverMode = useLayoutStore((state) => state.chatTakeoverMode);
   const setChatTakeoverMode = useLayoutStore((state) => state.setChatTakeoverMode);
   const clearChatTakeoverMode = useLayoutStore((state) => state.clearChatTakeoverMode);
-  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
-  const sessions = useChatStore((state) => readSessionsFromState(state));
   const sessionsLoadedOnce = useChatStore((state) => state.sessionCatalogStatus.hasLoadedOnce);
   const loadSessions = useChatStore((state) => state.loadSessions);
-  const taskSnapshots = useTaskSnapshotStore((state) => state.snapshots);
-  const getSessionTaskScopeKey = useTaskSnapshotStore((state) => state.getSessionTaskScopeKey);
-  const taskScopeKey = useTaskSnapshotStore((state) => state.getSessionTaskScopeKey(currentSessionKey ?? ''));
-  const derivedPlanStatus = useTaskSnapshotStore((state) => state.getDerivedPlanStatus(taskScopeKey));
   const resizeRafRef = useRef<number | null>(null);
-  const taskInboxRefreshPromiseRef = useRef<Promise<void> | null>(null);
-  const [taskInboxLoading, setTaskInboxLoading] = useState(false);
-  const [taskInboxError, setTaskInboxError] = useState<string | null>(null);
   const [panelState, setPanelState] = useState<ChatSidePanelState>(() => readStoredPanelState());
   const [containerWidth, setContainerWidth] = useState<number>(() => (
-    typeof window === 'undefined' ? 0 : readContainerWidth(chatLayoutRef)
+    typeof window === 'undefined' ? 0 : window.innerWidth
   ));
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
-  const taskInboxTasks = useMemo(() => sortTaskInboxTasks(filterUnfinishedTasks(sessions.flatMap((session) => {
-    const scopeKey = getSessionTaskScopeKey(session.key);
-    const snapshot = taskSnapshots[scopeKey];
-    if (!snapshot) {
-      return [];
-    }
-    const sourceSessionKey = session.key;
-    return snapshot.tasks.map((task) => ({
-      ...task,
-      createdAt: task.createdAt ?? 0,
-      updatedAt: task.updatedAt ?? task.createdAt ?? 0,
-      sourceSessionKey,
-      scopeKey: snapshot.scope?.key ?? scopeKey,
-    }));
-  }))), [getSessionTaskScopeKey, sessions, taskSnapshots]);
-  const unfinishedTaskCount = taskInboxTasks.length;
   const activeWidthPolicy = resolveSidePanelWidthPolicy(panelState.activeTab);
   const activeStoredWidth = activeWidthPolicy === 'artifacts'
     ? panelState.artifactWidth
@@ -202,44 +152,6 @@ export function useChatSidePanelController(
     () => resolveChatSidePanelLayout(panelState.open, containerWidth, activePreferredWidth, activeWidthPolicy),
     [activePreferredWidth, activeWidthPolicy, containerWidth, panelState.open],
   );
-
-  const refreshTaskInbox = useCallback(async () => {
-    if (taskInboxRefreshPromiseRef.current) {
-      return taskInboxRefreshPromiseRef.current;
-    }
-
-    const refreshPromise = (async () => {
-      setTaskInboxLoading(true);
-      setTaskInboxError(null);
-      try {
-        const chatState = useChatStore.getState();
-        const activeSessions = readSessionsFromState(chatState);
-        const sessionKeys = uniqueSorted(activeSessions.map((session) => session.key));
-        const sessionByKey = new Map(activeSessions.map((session) => [session.key, session]));
-        await Promise.all(sessionKeys.map((sessionKey) => {
-          const session = sessionByKey.get(sessionKey)!;
-          return useTaskCenterStore.getState().refreshTasks({
-            sessionKey,
-            sessionIdentity: session.sessionIdentity,
-            background: true,
-          });
-        }));
-      } catch (error) {
-        setTaskInboxError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setTaskInboxLoading(false);
-      }
-    })();
-
-    taskInboxRefreshPromiseRef.current = refreshPromise;
-    try {
-      await refreshPromise;
-    } finally {
-      if (taskInboxRefreshPromiseRef.current === refreshPromise) {
-        taskInboxRefreshPromiseRef.current = null;
-      }
-    }
-  }, []);
 
   useEffect(() => {
     try {
@@ -413,13 +325,6 @@ export function useChatSidePanelController(
     sidePanelWidthPolicy: activeWidthPolicy,
     activeSidePanelTab: panelState.activeTab,
     artifactWorkbenchFullscreen,
-    taskInboxTasks,
-    taskInboxLoading,
-    taskInboxError,
-    unfinishedTaskCount,
-    derivedPlanStatus,
-    refreshTaskInbox,
-    clearTaskInboxError: () => setTaskInboxError(null),
     openSidePanel,
     setActiveSidePanelTab,
     closeSidePanel,

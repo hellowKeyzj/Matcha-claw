@@ -407,11 +407,11 @@ export function SecurityPage() {
   }
 
   return (
-    <section className="flex flex-col gap-6 p-6">
+    <section className="flex flex-col gap-6 text-foreground">
       <header className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">{t('title')}</h1>
-          <p className="text-sm text-muted-foreground">{t('subtitle')}</p>
+          <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t('title')}</h1>
+          <p className="text-sm text-[hsl(var(--shell-text-muted))]">{t('subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
           {showPolicyRefreshingHint && (
@@ -437,7 +437,7 @@ export function SecurityPage() {
       )}
 
       <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
-        <Card className="h-fit border-border/60 bg-card/80">
+        <Card className="h-fit bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
           <CardContent className="p-2.5">
             <nav className="space-y-1" aria-label={t('sections.navAria')}>
               {sectionItems.map((section) => (
@@ -447,8 +447,8 @@ export function SecurityPage() {
                   variant="ghost"
                   className={`h-10 w-full justify-start rounded-lg border border-transparent px-2.5 text-sm font-medium transition-colors ${
                     activeSection === section.key
-                      ? 'bg-primary/12 text-primary hover:bg-primary/18'
-                      : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground'
+                      ? 'bg-[hsl(var(--shell-surface))] text-foreground [border-color:hsl(var(--shell-border))]'
+                      : 'text-[hsl(var(--shell-text-muted))] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-foreground'
                   }`}
                   onClick={() => setActiveSection(section.key)}
                 >

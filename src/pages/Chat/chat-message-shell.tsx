@@ -5,12 +5,15 @@ import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 
+export type MessageAvatarSlot = 'visible' | 'placeholder';
+
 interface MessageShellProps {
   isUser: boolean;
   assistantAgentId?: string;
   assistantAgentName?: string;
   assistantAvatarSeed?: string;
   assistantAvatarStyle?: AgentAvatarStyle;
+  assistantAvatarSlot?: MessageAvatarSlot;
   userAvatarImageUrl?: string | null;
   children: ReactNode;
 }
@@ -21,6 +24,7 @@ export function MessageShell({
   assistantAgentName,
   assistantAvatarSeed,
   assistantAvatarStyle,
+  assistantAvatarSlot = 'visible',
   userAvatarImageUrl,
   children,
 }: MessageShellProps) {
@@ -39,10 +43,13 @@ export function MessageShell({
           isUser
             ? CHAT_LAYOUT_TOKENS.messageAvatarUserOrder
             : CHAT_LAYOUT_TOKENS.messageAvatarAssistantOrder,
-          'border border-border/60 bg-card text-foreground shadow-sm',
+          !isUser && assistantAvatarSlot === 'placeholder'
+            ? 'pointer-events-none opacity-0'
+            : 'border border-border/60 bg-card text-foreground shadow-sm',
         )}
+        aria-hidden={!isUser && assistantAvatarSlot === 'placeholder' ? 'true' : undefined}
       >
-        {isUser ? (
+        {!isUser && assistantAvatarSlot === 'placeholder' ? null : isUser ? (
           userAvatarImageUrl ? (
             <img
               src={userAvatarImageUrl}

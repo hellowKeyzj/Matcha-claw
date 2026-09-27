@@ -95,7 +95,6 @@ export function SubAgents() {
   const exportAgentConfig = useSubagentsStore((state) => state.exportAgentConfig);
   const exportAgentPackage = useSubagentsStore((state) => state.exportAgentPackage);
   const uploadAgentPackageToCloud = useSubagentsStore((state) => state.uploadAgentPackageToCloud);
-  const downloadAgentPackageFromCloud = useSubagentsStore((state) => state.downloadAgentPackageFromCloud);
   const installAgentPackageFromCloud = useSubagentsStore((state) => state.installAgentPackageFromCloud);
   const importAgentConfig = useSubagentsStore((state) => state.importAgentConfig);
   const createAgentFromTemplate = useSubagentsStore((state) => state.createAgentFromTemplate);
@@ -414,15 +413,6 @@ export function SubAgents() {
       toast.error(t('transfer.uploadPackageFailed', { message: error instanceof Error ? error.message : String(error) }));
     }
   }, [loadCloudPackages, t, uploadAgentPackageToCloud]);
-
-  const handleDownloadAgentPackageFromCloud = useCallback(async (packageInfo: SubagentCloudPackage) => {
-    try {
-      const result = await downloadAgentPackageFromCloud(packageInfo.packageVersionId);
-      toast.success(t('transfer.downloadPackageSuccess', { fileName: result.fileName }));
-    } catch (error) {
-      toast.error(t('transfer.downloadPackageFailed', { message: error instanceof Error ? error.message : String(error) }));
-    }
-  }, [downloadAgentPackageFromCloud, t]);
 
   const handleInstallAgentPackageFromCloud = useCallback(async (packageInfo: SubagentCloudPackage) => {
     try {
@@ -780,9 +770,6 @@ export function SubAgents() {
                   <p className="truncate text-xs text-muted-foreground">{packageInfo.version}</p>
                 </div>
                 <div className="mt-3 flex justify-end gap-2">
-                  <Button size="sm" variant="outline" onClick={() => void handleDownloadAgentPackageFromCloud(packageInfo)}>
-                    {t('cloudPackages.download')}
-                  </Button>
                   <Button size="sm" onClick={() => void handleInstallAgentPackageFromCloud(packageInfo)}>
                     {t('cloudPackages.install')}
                   </Button>

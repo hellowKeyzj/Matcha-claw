@@ -39,7 +39,10 @@ pub(crate) async fn generate_imported_pages(
     };
 
     let context = ProjectIngestContext::read(root)?;
-    let model_limits = llm.model_limits(generation_model_ref).await?.unwrap_or_default();
+    let model_limits = llm
+        .model_limits(generation_model_ref)
+        .await?
+        .unwrap_or_default();
     let max_context_size = model_limits.context_window.and_then(u64_to_usize);
     let stable_context_len = context.purpose.chars().count()
         + context.schema.chars().count()

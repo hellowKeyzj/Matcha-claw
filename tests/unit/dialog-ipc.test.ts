@@ -291,7 +291,7 @@ describe('dialog ipc', () => {
       fileName: 'image.png',
     })).rejects.toThrow('invalid');
     await expect(handler?.({}, {
-      base64: 'A'.repeat(Math.ceil((50 * 1024 * 1024) / 3) * 4 + 4),
+      base64: 'A'.repeat(Math.ceil((5 * 1024 * 1024) / 3) * 4 + 4),
       fileName: 'image.png',
       mimeType: 'image/png',
     })).rejects.toThrow('invalid');

@@ -18,7 +18,8 @@ use tokio::sync::Mutex;
 
 pub use ports::{
     ClawHubSearchPort, ClawHubSearchResult, SealedResourceRead, SealedSkillCatalog,
-    SealedSkillCatalogEntry, SealedSkillError, SealedSkillStorePort, SkillRuntimeOps, SkillsPort,
+    SealedSkillCatalogEntry, SealedSkillError, SealedSkillPackageExport, SealedSkillStorePort,
+    SkillRuntimeOps, SkillsPort,
 };
 
 const MODULE_ID: ModuleId = ModuleId::new("skills");
@@ -98,11 +99,23 @@ impl SkillsModule {
         self.sealed.export_sealed_skill_package(skill_key)
     }
 
+    pub fn export_cloud_sealed_skill_package(
+        &self,
+        skill_key: String,
+        cloud_public_key: String,
+        cloud_key_id: String,
+    ) -> Result<ports::SealedSkillPackageExport, ports::SealedSkillError> {
+        self.sealed
+            .export_cloud_sealed_skill_package(skill_key, cloud_public_key, cloud_key_id)
+    }
+
     pub fn install_sealed_skill(
         &self,
         package_path: PathBuf,
+        cloud_metadata: Option<ports::CloudPackageMetadata>,
     ) -> Result<ports::SealedSkillCatalogEntry, ports::SealedSkillError> {
-        self.sealed.install_sealed_skill(package_path)
+        self.sealed
+            .install_sealed_skill(package_path, cloud_metadata)
     }
 
     pub fn read_sealed_skill_file(

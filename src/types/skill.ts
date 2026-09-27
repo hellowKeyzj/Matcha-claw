@@ -31,6 +31,7 @@ export interface Skill {
   config?: Record<string, unknown>;
   isCore?: boolean;
   isBundled?: boolean;
+  uninstallable?: boolean;
   dependencies?: string[];
   selectable?: boolean;
   eligible?: boolean;
@@ -74,7 +75,6 @@ export interface SealedSkillMetadata {
   skillKey: string;
   name: string;
   description: string;
-  enabled?: boolean;
   installed?: boolean;
   version?: string;
   source?: string;

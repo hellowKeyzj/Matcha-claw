@@ -31,14 +31,15 @@
     "exportSuccess": "Agent 配置已导出。",
     "exportPackageSuccess": "Agent Package 已导出：{{fileName}}",
     "uploadPackageSuccess": "Agent Package 已上传：{{fileName}}",
-    "downloadPackageSuccess": "Agent Package 已下载：{{fileName}}",
     "installPackageSuccess": "Agent Package 已安装：{{agentId}}",
     "importFailed": "导入 Agent 配置失败：{{message}}",
     "exportFailed": "导出 Agent 配置失败：{{message}}",
     "exportPackageFailed": "导出 Agent Package 失败：{{message}}",
     "uploadPackageFailed": "上传 Agent Package 失败：{{message}}",
-    "downloadPackageFailed": "下载 Agent Package 失败：{{message}}",
-    "installPackageFailed": "安装 Agent Package 失败：{{message}}"
+    "installPackageFailed": "安装 Agent Package 失败：{{message}}",
+    "installPackageUnknownOutcome": "本地已有该加密 Agent 的残留，请刷新列表；如果仍不可见，请先删除同名 Agent 后再安装",
+    "installPackageRejected": "Agent Package 无法安装，请确认本机仍使用导出该包的加密密钥",
+    "installPackageUnexpectedResult": "Agent Package 安装结果未知，请刷新 Agent 列表确认是否已安装"
   },
   "status": {
     "refreshing": "正在刷新...",
@@ -184,17 +185,19 @@
       "pluginBadge": "插件",
       "toolCount": "{{count}} 个工具",
       "profileDefault": "Profile 默认启用",
-      "effectiveTools": "当前生效",
+      "configPreview": "配置预览",
+      "globalDeny": "全局拒绝",
       "explicitRules": "显式规则",
       "policyDefault": "默认",
       "inheritToolsHint": "正在继承默认工具；切到显式配置后可调整单个工具或整组规则。",
-      "toolProfileSummary": "{{profile}}：当前启用 {{enabled}}/{{total}}；Profile 默认 {{defaultEnabled}}，显式规则 {{overrides}}",
+      "toolProfileSummary": "{{profile}}：配置预览 {{enabled}}/{{total}}；Profile 默认 {{defaultEnabled}}，全局拒绝 {{globalDeny}}，显式规则 {{overrides}}",
       "groupSummary": "启用 {{enabled}}/{{total}} · 显式规则 {{rules}}",
       "toolStates": {
         "enabledByProfile": "Profile 启用",
         "disabledByProfile": "Profile 关闭",
         "allowedByOverride": "已允许",
-        "deniedByOverride": "已拒绝"
+        "deniedByOverride": "已拒绝",
+        "deniedByGlobalPolicy": "全局拒绝"
       },
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "当前运行时不支持 Agent 技能配置。",
@@ -206,7 +209,6 @@
   "cloudPackages": {
     "title": "云端 Agent Package",
     "empty": "暂无云端 Agent Package。",
-    "download": "下载",
     "install": "安装"
   },
   "card": {

@@ -29,7 +29,7 @@
     "input": {
         "gatewayDisconnectedPlaceholder": "Runtime unavailable...",
         "gatewayRecoveringNotice": "Runtime is preparing…",
-        "messagePlaceholder": "Message (Type / to see skills, Enter to send, Shift+Enter for new line)",
+        "messagePlaceholder": "Message, / for skills, Enter to send, Shift+Enter for newline",
         "approvalWaitingPlaceholder": "Waiting for approval...",
         "imageGenerationActive": "Generating image",
         "pickModel": "Choose model",
@@ -236,45 +236,5 @@
         "withinTwoWeeks": "Within 2 Weeks",
         "withinMonth": "Within 1 Month",
         "older": "Older than 1 Month"
-    },
-    "taskInbox": {
-        "title": "Task Inbox",
-        "shortTitle": "Tasks",
-        "unfinishedCount": "{{count}} unfinished tasks",
-        "refresh": "Refresh tasks",
-        "workspaceScope": "Scope: {{scope}}",
-        "gatewayPreparing": "Gateway is starting; task list will be available shortly",
-        "gatewayStopped": "Gateway is stopped; task list and resume actions are unavailable",
-        "empty": "No unfinished tasks in current workspace",
-        "unboundSession": "No bound session yet, resume task first",
-        "taskNotFound": "Task not found or updated, please refresh",
-        "untitledTask": "Untitled task",
-        "assignedSessionReady": "Session is bound",
-        "assignedSessionMissing": "Session is not bound",
-        "openSession": "Open session",
-        "inputPlaceholder": "Please provide additional information",
-        "submitInput": "Submit input",
-        "reject": "Reject",
-        "approve": "Approve",
-        "collapse": "Collapse task inbox",
-        "expand": "Expand task inbox",
-        "status": {
-            "pending": "Pending",
-            "in_progress": "In Progress",
-            "running": "Running",
-            "waiting_for_input": "Waiting Input",
-            "waiting_approval": "Waiting Approval",
-            "completed": "Completed",
-            "deleted": "Deleted",
-            "failed": "Failed"
-        },
-        "planStatus": {
-            "finished": "Finished",
-            "building": "Building",
-            "ready": "Ready"
-        },
-        "toast": {
-            "resumed": "Task resumed"
-        }
     }
 }

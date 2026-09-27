@@ -151,6 +151,8 @@
     "/api/packages/mine",
     "/api/packages/market",
     "/api/packages/upload",
+    "/api/packages/upload/sealed-skill",
+    "/api/packages/upload/sealed-agent",
     "/api/packages/download-record",
     "/api/packages/download",
     "/api/packages/install",
@@ -187,7 +189,7 @@
     "/api/skills/readme",
     "/api/sealed-skills/status",
     "/api/sealed-skills/export",
-    "/api/sealed-skills/install",
+    "/api/sealed-skills/install-local",
     "/api/sealed-skills/uninstall",
     "/api/subagents/skill-bundles/export",
     "/api/subagents/skill-bundles/import",
@@ -625,6 +627,14 @@
     ],
     [
       "POST",
+      "/api/packages/upload/sealed-skill"
+    ],
+    [
+      "POST",
+      "/api/packages/upload/sealed-agent"
+    ],
+    [
+      "POST",
       "/api/packages/download-record"
     ],
     [
@@ -773,7 +783,7 @@
     ],
     [
       "POST",
-      "/api/sealed-skills/install"
+      "/api/sealed-skills/install-local"
     ],
     [
       "POST",

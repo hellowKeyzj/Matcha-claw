@@ -1,7 +1,8 @@
 use std::{future::Future, pin::Pin};
 
 use crate::domain::model::{
-    Command, NativeEndpoint, Outcome, PackageExportReceipt, PackageInstallReceipt,
+    CloudPackageMetadata, Command, NativeEndpoint, Outcome, PackageExportReceipt,
+    PackageInstallPlan, PackageInstallReceipt,
 };
 
 pub type SubagentFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -24,10 +25,23 @@ pub trait SubagentOps: Send + Sync {
 
 pub trait SealedAgentStorePort: Send + Sync {
     fn export_package(&self, agent_id: String) -> Result<PackageExportReceipt, SealedAgentError>;
-    fn install_package(
+    fn export_cloud_package(
+        &self,
+        agent_id: String,
+        cloud_public_key: String,
+        cloud_key_id: String,
+    ) -> Result<PackageExportReceipt, SealedAgentError>;
+    fn prepare_install(
         &self,
         package_path: String,
+        cloud_metadata: Option<CloudPackageMetadata>,
+    ) -> Result<PackageInstallPlan, SealedAgentError>;
+    fn install_prepared_package(
+        &self,
+        package_path: String,
+        cloud_metadata: Option<CloudPackageMetadata>,
     ) -> Result<PackageInstallReceipt, SealedAgentError>;
+    fn remove_package(&self, agent_id: String) -> Result<bool, SealedAgentError>;
     fn contains_agents(&self, agent_ids: &[String]) -> Result<Vec<String>, SealedAgentError>;
     fn read_file(
         &self,

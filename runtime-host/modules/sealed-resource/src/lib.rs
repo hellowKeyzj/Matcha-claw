@@ -1,3 +1,4 @@
+mod adapters;
 mod api;
 mod descriptor;
 pub mod domain;
@@ -6,10 +7,11 @@ mod ports;
 mod store;
 
 pub use api::{
-    SealedAgentCatalog, SealedAgentCatalogEntry, SealedAgentPackageExport, SealedAgentStore,
-    SealedAgentTarget, SealedResourceError, SealedResourceMeteringBinding, SealedResourceRead,
-    SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillDescriptor, SealedSkillStore,
-    SealedSkillTarget,
+    SealedAgentCatalog, SealedAgentCatalogEntry, SealedAgentInstallPlan, SealedAgentPackageExport,
+    SealedAgentStore, SealedAgentTarget, SealedCloudPackageMetadata, SealedCloudPackageType,
+    SealedPackageAuthorizationKey, SealedPackageAuthorizationKeyring, SealedResourceError,
+    SealedResourceMeteringBinding, SealedResourceRead, SealedSkillCatalog, SealedSkillCatalogEntry,
+    SealedSkillDescriptor, SealedSkillPackageExport, SealedSkillStore, SealedSkillTarget,
 };
 pub use domain::{AgentKey, PackageRelativePath, SkillKey};
 pub use ports::{SealedResourceModule, SealedResourceProvisionError};

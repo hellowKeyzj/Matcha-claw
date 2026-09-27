@@ -20,10 +20,6 @@ pub use crate::gateway::wire::agents::{
     AgentKind, AgentModelUpdate, AgentSummary, AgentUpdate, AgentUpdated, AgentWait,
     AgentWaitResult, AgentWaitStatus, AgentWaitTimeoutPhase, AgentsList,
 };
-pub use crate::native_config::sealed_agent_config::{
-    SealedAgentConfigError, ensure_sealed_agent_config,
-};
-
 pub(crate) struct OpenClawAgents {
     gateway: Arc<GatewayClient>,
 }

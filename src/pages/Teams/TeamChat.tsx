@@ -391,6 +391,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
               workflowCanvas: t('run.graphCanvas.workflowCanvas'),
               workflowEdges: t('run.graphCanvas.workflowEdges'),
               nodePalette: t('run.graphCanvas.nodePalette'),
+              nodePaletteTitle: t('run.graphCanvas.nodePaletteTitle'),
               nodeConfiguration: t('run.graphCanvas.nodeConfiguration'),
               nodeConfigurationDescription: t('run.graphCanvas.nodeConfigurationDescription'),
               edgeConfiguration: t('run.graphCanvas.edgeConfiguration'),

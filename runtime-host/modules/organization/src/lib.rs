@@ -487,10 +487,12 @@ pub fn spawn_owner(
     input: OrganizationOwnerInput,
 ) -> (OrganizationModule, OwnedTask<()>) {
     let owner = owner::actor::OrganizationOwner::new(input);
+    let command_target = owner.command_target();
     let (handle, task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(256, owner::actor::OrganizationOwner::lane_retention()),
     );
+    let _ = command_target.set(handle.clone());
     (
         OrganizationModule::new(OrganizationHandle::new(handle)),
         task,

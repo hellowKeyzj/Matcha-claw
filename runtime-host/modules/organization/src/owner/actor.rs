@@ -1,11 +1,13 @@
 use std::{
-    collections::BTreeMap,
+    collections::BTreeSet,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
+use foundation::execution::{
+    CommandRoute, LaneRetention, OwnedTask, OwnerRuntimeHandle, OwnerSpec, QueryRoute,
+};
 use organization::{
     ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId, GraphRunId,
     GraphRunLifecycleState, IdempotencyKey, MaterializationRecordOutcome, NativeDeletionEvidence,
@@ -24,12 +26,13 @@ use crate::ports::RuntimeReceiptOutcome;
 use runtime_directory::{OwnedRuntimeFuture, RuntimeDriverIdentity};
 
 use crate::{
-    ActivityExecutionOutcome, NativeRunSettled, OrganizationNativeRuntime,
-    OrganizationRuntimeDirectory, application::team_runtime::TeamRuntimeStatus,
+    ActivityExecutionOutcome, OrganizationNativeRuntime, OrganizationRuntimeDirectory,
+    application::team_runtime::TeamRuntimeStatus,
 };
 
 use super::{
     OrganizationCommand, OrganizationQuery,
+    command::TeamDeleteRunNativeSettlement,
     team_run::{
         ManualTeamCreateOutcome, ManualTeamMaterializationInput, TeamDeleteOutcome,
         TeamMaterializationCommandOutcome, TeamRunActivityError, TeamRunActivityOutcome,
@@ -48,21 +51,17 @@ pub struct OrganizationOwnerInput {
 pub struct OrganizationShared {
     runtime_directory: Arc<dyn OrganizationRuntimeDirectory>,
     store_path: PathBuf,
+    command_target: Arc<OnceLock<OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>>>,
 }
 
 pub struct OrganizationGlobalState {
     store: OrganizationStore,
     team_run: TeamRunOwner,
     team_skill_selections: TeamSkillSelectionResolver,
-    team_message_repairs: BTreeMap<String, PendingTeamMessageRepair>,
-}
-
-struct PendingTeamMessageRepair {
-    context: organization::TeamMessageTerminalContext,
-    status: organization::NativeTerminalStatus,
-    settled_at: u64,
-    attempt: usize,
-    last_invalid_output: String,
+    terminal_settlement: super::terminal_settlement::TeamRunTerminalSettlement,
+    team_delete_tasks: Vec<OwnedTask<()>>,
+    team_delete_run_tasks: BTreeSet<(String, String)>,
+    team_delete_removal_tasks: BTreeSet<String>,
 }
 
 pub struct OrganizationRunLane {
@@ -86,14 +85,24 @@ impl OrganizationOwner {
             shared: OrganizationShared {
                 runtime_directory: input.runtime_directory,
                 store_path: store_path.clone(),
+                command_target: Arc::new(OnceLock::new()),
             },
             global: OrganizationGlobalState {
                 store: input.store,
                 team_run: TeamRunOwner::new(),
                 team_skill_selections: input.team_skill_selections,
-                team_message_repairs: BTreeMap::new(),
+                terminal_settlement: super::terminal_settlement::TeamRunTerminalSettlement::new(),
+                team_delete_tasks: Vec::new(),
+                team_delete_run_tasks: BTreeSet::new(),
+                team_delete_removal_tasks: BTreeSet::new(),
             },
         }
+    }
+
+    pub fn command_target(
+        &self,
+    ) -> Arc<OnceLock<OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>>> {
+        Arc::clone(&self.shared.command_target)
     }
 
     pub const fn lane_retention() -> LaneRetention {
@@ -241,89 +250,6 @@ impl OrganizationGlobalState {
         let catalog = TeamSkillDependencyCatalog::from_installed_names(installed_names);
         self.team_skill_selections
             .dependency_plan(&selection_id, &catalog)
-    }
-
-    fn team_message_terminal_context(
-        &mut self,
-        native_run_id: &str,
-    ) -> Result<Option<organization::TeamMessageTerminalContext>, StoreFault> {
-        self.refresh()?;
-        Ok(self
-            .team_run
-            .native_delivery_by_run(&self.store, native_run_id)?
-            .and_then(|delivery_id| {
-                let target = self
-                    .team_run
-                    .native_terminal_target(&self.store, &delivery_id)?;
-                Some(organization::TeamMessageTerminalContext::new(
-                    target.graph_run_id().clone(),
-                    delivery_id,
-                    target.correlation().endpoint_session_id().clone(),
-                ))
-            }))
-    }
-
-    fn settle_team_message_plan(
-        &mut self,
-        context: organization::TeamMessageTerminalContext,
-        status: organization::NativeTerminalStatus,
-        settled_at: u64,
-        plan: organization::TeamMessageTerminalPlan,
-    ) -> Result<organization::TeamMessageTerminalObservation, StoreFault> {
-        match plan {
-            organization::TeamMessageTerminalPlan::Settle {
-                final_assistant_text,
-            } => {
-                self.native_run_settled(context, status, final_assistant_text, settled_at)?;
-                Ok(organization::TeamMessageTerminalObservation::Settled)
-            }
-            organization::TeamMessageTerminalPlan::Repair(repair) => {
-                self.team_message_repairs.insert(
-                    repair.requested_run_id().to_owned(),
-                    PendingTeamMessageRepair {
-                        context,
-                        status,
-                        settled_at,
-                        attempt: repair.attempt(),
-                        last_invalid_output: repair.last_invalid_output().to_owned(),
-                    },
-                );
-                Ok(organization::TeamMessageTerminalObservation::Repair(repair))
-            }
-        }
-    }
-
-    fn native_run_settled(
-        &mut self,
-        context: organization::TeamMessageTerminalContext,
-        status: organization::NativeTerminalStatus,
-        final_assistant_text: Option<String>,
-        settled_at: u64,
-    ) -> Result<(), StoreFault> {
-        let run_id = context.run_id().clone();
-        let delivery_id = context.delivery_id().clone();
-        let Some(target) = self
-            .team_run
-            .native_terminal_target(&self.store, &delivery_id)
-        else {
-            return Err(StoreFault::InvalidFacts);
-        };
-        if target.graph_run_id() != &run_id {
-            return Err(StoreFault::InvalidFacts);
-        }
-        self.team_run
-            .observe_native_terminal(&mut self.store, target, status, settled_at)?;
-        crate::owner::team_run::resolve_native_settled_output(
-            &mut self.store,
-            &run_id,
-            &delivery_id,
-            NativeRunSettled {
-                status,
-                final_assistant_text,
-            },
-            settled_at,
-        )?;
-        Ok(())
     }
 
     async fn materialize_team_skill_selection(
@@ -653,148 +579,281 @@ impl OrganizationGlobalState {
         idempotency_key: IdempotencyKey,
         observed_at: u64,
     ) -> Result<TeamDeleteOutcome, StoreFault> {
-        if let Some(request) = self.store.team_materialization_recovery_request(&team_id) {
-            let Some(runtime) = shared.team_runtime_for_endpoint(request.intent().endpoint())
-            else {
-                return Ok(TeamDeleteOutcome::OutcomeUnknown);
-            };
-            match runtime.recover_team_materialization(request).await {
-                organization::MaterializationOperationOutcome::Confirmed { receipt }
-                    if receipt.team() == &team_id =>
-                {
-                    self.store.confirm_team_materialization(receipt)?;
-                }
-                _ => return Ok(TeamDeleteOutcome::OutcomeUnknown),
-            }
-        }
+        let mut pending_settlement = false;
         for run_id in self.team_run_ids_for_team(&team_id) {
+            let requires_native_delete = self.team_run_requires_native_delete(&run_id);
             match self.team_run.begin_cancellation(
                 &mut self.store,
                 &run_id,
                 idempotency_key.as_str(),
                 observed_at,
             ) {
-                Ok(BeginCancellationOutcome::Started(plan)) => {
-                    let outcome = shared
-                        .team_delete_role_sessions(run_id.clone(), plan.bindings().to_vec(), true)
-                        .await;
-                    match self.complete_team_run_delete_native_evidence(
+                Ok(BeginCancellationOutcome::Started(plan))
+                | Ok(BeginCancellationOutcome::Replayed(plan)) => {
+                    if requires_native_delete {
+                        pending_settlement = true;
+                        self.spawn_team_delete_run_native_task(
+                            shared,
+                            &team_id,
+                            run_id,
+                            idempotency_key.as_str(),
+                            plan.bindings().to_vec(),
+                            true,
+                            TeamDeleteRunNativeSettlement::Cancellation,
+                            observed_at,
+                        );
+                    } else if !self.tombstone_team_delete_run_after_local_cancellation(
                         run_id,
                         idempotency_key.as_str(),
-                        outcome,
                         observed_at,
                     )? {
-                        organization::GraphRunPurgeOutcome::Purged
-                        | organization::GraphRunPurgeOutcome::Replayed => {}
-                        _ => return Ok(TeamDeleteOutcome::OutcomeUnknown),
+                        pending_settlement = true;
                     }
                 }
                 Ok(BeginCancellationOutcome::AlreadyCancelled) => {
-                    let outcome = shared
-                        .team_delete_role_sessions(
-                            run_id.clone(),
-                            self.team_run_bindings(&run_id),
+                    if requires_native_delete {
+                        pending_settlement = true;
+                        let bindings = self.team_run_bindings(&run_id);
+                        self.spawn_team_delete_run_native_task(
+                            shared,
+                            &team_id,
+                            run_id,
+                            idempotency_key.as_str(),
+                            bindings,
                             false,
-                        )
-                        .await;
-                    match self.complete_cancelled_team_run_delete_native_evidence(
+                            TeamDeleteRunNativeSettlement::Cancelled,
+                            observed_at,
+                        );
+                    } else if !self.tombstone_team_delete_cancelled_run(
                         run_id,
                         idempotency_key.as_str(),
-                        outcome,
                         observed_at,
                     )? {
-                        organization::GraphRunPurgeOutcome::Purged
-                        | organization::GraphRunPurgeOutcome::Replayed => {}
-                        _ => return Ok(TeamDeleteOutcome::OutcomeUnknown),
+                        pending_settlement = true;
                     }
                 }
                 Ok(BeginCancellationOutcome::Tombstoned) => {
-                    let outcome = shared
-                        .team_delete_role_sessions(
-                            run_id.clone(),
-                            self.team_run_bindings(&run_id),
+                    if requires_native_delete {
+                        pending_settlement = true;
+                        let bindings = self.team_run_bindings(&run_id);
+                        self.spawn_team_delete_run_native_task(
+                            shared,
+                            &team_id,
+                            run_id,
+                            idempotency_key.as_str(),
+                            bindings,
                             false,
-                        )
-                        .await;
-                    match self.purge_tombstoned_team_run_delete_native_evidence(
-                        run_id,
-                        idempotency_key.as_str(),
-                        outcome,
-                    )? {
-                        organization::GraphRunPurgeOutcome::Purged
-                        | organization::GraphRunPurgeOutcome::Replayed => {}
-                        _ => return Ok(TeamDeleteOutcome::OutcomeUnknown),
-                    }
-                }
-                Ok(BeginCancellationOutcome::Replayed(plan)) => {
-                    let outcome = shared
-                        .team_delete_role_sessions(run_id.clone(), plan.bindings().to_vec(), true)
-                        .await;
-                    match self.complete_team_run_delete_native_evidence(
-                        run_id,
-                        idempotency_key.as_str(),
-                        outcome,
-                        observed_at,
-                    )? {
-                        organization::GraphRunPurgeOutcome::Purged
-                        | organization::GraphRunPurgeOutcome::Replayed => {}
-                        _ => return Ok(TeamDeleteOutcome::OutcomeUnknown),
+                            TeamDeleteRunNativeSettlement::Tombstoned,
+                            observed_at,
+                        );
                     }
                 }
                 Ok(BeginCancellationOutcome::OutcomeUnknown) => {
-                    if !self.team_run_outcome_unknown_matches(&run_id, idempotency_key.as_str()) {
-                        return Ok(TeamDeleteOutcome::OutcomeUnknown);
-                    }
-                    let outcome = shared
-                        .team_delete_role_sessions(
-                            run_id.clone(),
-                            self.team_run_bindings(&run_id),
-                            true,
-                        )
-                        .await;
-                    match self.complete_team_run_delete_native_evidence(
-                        run_id,
-                        idempotency_key.as_str(),
-                        outcome,
-                        observed_at,
-                    )? {
-                        organization::GraphRunPurgeOutcome::Purged
-                        | organization::GraphRunPurgeOutcome::Replayed => {}
-                        _ => return Ok(TeamDeleteOutcome::OutcomeUnknown),
-                    }
+                    pending_settlement = true;
                 }
                 Err(error) => return Err(error),
             }
         }
-        let Some(removal) = self.begin_team_delete_removal(&team_id, idempotency_key.as_str())?
-        else {
-            return Ok(self.team_delete_without_pending_cleanup(&team_id));
+        let team_exists = self.tombstone_team_delete(&team_id, idempotency_key.as_str())?;
+        if !team_exists {
+            return Ok(TeamDeleteOutcome::Deleted);
+        }
+        let removal_started = self.start_team_delete_removal_if_ready(shared, &team_id)?;
+        if pending_settlement || removal_started {
+            return Ok(TeamDeleteOutcome::OutcomeUnknown);
+        }
+        Ok(self.team_delete_without_pending_cleanup(&team_id))
+    }
+
+    fn spawn_team_delete_run_native_task(
+        &mut self,
+        shared: &OrganizationShared,
+        team_id: &TeamId,
+        run_id: GraphRunId,
+        idempotency_key: &str,
+        bindings: Vec<organization::RoleSessionReceipt>,
+        abort_first: bool,
+        settlement: TeamDeleteRunNativeSettlement,
+        observed_at: u64,
+    ) {
+        self.reap_team_delete_tasks();
+        let Some(command_target) = shared.command_target.get().cloned() else {
+            return;
         };
-        let outcome = shared.team_remove(removal).await;
-        self.complete_team_delete_removal(&team_id, Some(outcome))
+        let task_key = (run_id.as_str().to_owned(), idempotency_key.to_owned());
+        if !self.team_delete_run_tasks.insert(task_key) {
+            return;
+        }
+        let team_id = team_id.clone();
+        let idempotency_key = idempotency_key.to_owned();
+        let native = shared.team_delete_role_sessions(run_id.clone(), bindings, abort_first);
+        let (task, _) = OwnedTask::spawn(move |cancellation| async move {
+            tokio::select! {
+                _ = cancellation.cancelled() => {}
+                native = native => {
+                    let _ = command_target.send_command(OrganizationCommand::TeamDeleteRunNativeSettled {
+                        team_id,
+                        run_id,
+                        idempotency_key,
+                        settlement,
+                        native,
+                        observed_at,
+                    }).await;
+                }
+            }
+        });
+        self.team_delete_tasks.push(task);
+    }
+
+    fn spawn_team_delete_removal_task(
+        &mut self,
+        shared: &OrganizationShared,
+        team_id: &TeamId,
+        removal: organization::TeamMaterializationRemoval,
+    ) {
+        self.reap_team_delete_tasks();
+        let Some(command_target) = shared.command_target.get().cloned() else {
+            return;
+        };
+        let task_key = team_id.as_str().to_owned();
+        if !self.team_delete_removal_tasks.insert(task_key) {
+            return;
+        }
+        let team_id = team_id.clone();
+        let outcome = shared.team_remove(removal);
+        let (task, _) = OwnedTask::spawn(move |cancellation| async move {
+            tokio::select! {
+                _ = cancellation.cancelled() => {}
+                outcome = outcome => {
+                    let _ = command_target.send_command(OrganizationCommand::TeamDeleteRemovalSettled {
+                        team_id,
+                        outcome,
+                    }).await;
+                }
+            }
+        });
+        self.team_delete_tasks.push(task);
+    }
+
+    fn reap_team_delete_tasks(&mut self) {
+        self.team_delete_tasks.retain(|task| !task.is_finished());
+    }
+
+    fn complete_team_delete_run_native_evidence(
+        &mut self,
+        run_id: GraphRunId,
+        idempotency_key: &str,
+        settlement: TeamDeleteRunNativeSettlement,
+        native: NativeDeletionEvidence,
+        observed_at: u64,
+    ) -> Result<organization::GraphRunPurgeOutcome, StoreFault> {
+        match settlement {
+            TeamDeleteRunNativeSettlement::Cancellation => self
+                .complete_team_run_delete_native_evidence(
+                    run_id,
+                    idempotency_key,
+                    native,
+                    observed_at,
+                ),
+            TeamDeleteRunNativeSettlement::Cancelled => self
+                .complete_cancelled_team_run_delete_native_evidence(
+                    run_id,
+                    idempotency_key,
+                    native,
+                    observed_at,
+                ),
+            TeamDeleteRunNativeSettlement::Tombstoned => self
+                .purge_tombstoned_team_run_delete_native_evidence(run_id, idempotency_key, native),
+        }
     }
 
     fn team_run_ids_for_team(&self, team_id: &TeamId) -> Vec<GraphRunId> {
-        self.store
+        let mut run_ids = self
+            .store
             .facts()
             .runs()
             .filter(|run| run.team() == team_id)
             .map(|run| run.run_id().clone())
-            .collect()
+            .collect::<Vec<_>>();
+        run_ids.sort();
+        run_ids
     }
 
-    fn begin_team_delete_removal(
+    fn team_run_requires_native_delete(&self, run_id: &GraphRunId) -> bool {
+        self.store
+            .facts()
+            .run(run_id)
+            .is_some_and(|run| run.runtime().is_some())
+    }
+
+    fn tombstone_team_delete_run_after_local_cancellation(
+        &mut self,
+        run_id: GraphRunId,
+        idempotency_key: &str,
+        observed_at: u64,
+    ) -> Result<bool, StoreFault> {
+        match self.team_run.settle_cancellation(
+            &mut self.store,
+            &run_id,
+            idempotency_key,
+            RoleAbortOutcome::Confirmed,
+            observed_at,
+        )? {
+            organization::SettleCancellationOutcome::Cancelled
+            | organization::SettleCancellationOutcome::Replayed => {
+                self.tombstone_team_delete_cancelled_run(run_id, idempotency_key, observed_at)
+            }
+            organization::SettleCancellationOutcome::Tombstoned => Ok(true),
+            organization::SettleCancellationOutcome::OutcomeUnknown => Ok(false),
+        }
+    }
+
+    fn tombstone_team_delete_cancelled_run(
+        &mut self,
+        run_id: GraphRunId,
+        idempotency_key: &str,
+        observed_at: u64,
+    ) -> Result<bool, StoreFault> {
+        Ok(matches!(
+            self.team_run
+                .tombstone(&mut self.store, &run_id, idempotency_key, observed_at)?,
+            organization::TombstoneOutcome::Tombstoned | organization::TombstoneOutcome::Replayed
+        ))
+    }
+
+    fn start_team_delete_removal_if_ready(
+        &mut self,
+        shared: &OrganizationShared,
+        team_id: &TeamId,
+    ) -> Result<bool, StoreFault> {
+        if !self
+            .store
+            .facts()
+            .runs()
+            .filter(|run| run.team() == team_id)
+            .all(|run| run.runtime().is_none())
+        {
+            return Ok(false);
+        }
+        if let Some(removal) = self.store.team_materialization_removal(team_id) {
+            self.spawn_team_delete_removal_task(shared, team_id, removal);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn tombstone_team_delete(
         &mut self,
         team_id: &TeamId,
         idempotency_key: &str,
-    ) -> Result<Option<organization::TeamMaterializationRemoval>, StoreFault> {
+    ) -> Result<bool, StoreFault> {
         if self.store.facts().team(team_id).is_none() {
-            return Ok(None);
+            return Ok(false);
         }
         let cleanup_key = IdempotencyKey::try_new(idempotency_key.to_owned())
             .map_err(|_| StoreFault::InvalidFacts)?;
         self.store.tombstone_team(team_id, cleanup_key)?;
-        Ok(self.store.team_materialization_removal(team_id))
+        Ok(true)
     }
 
     fn team_delete_without_pending_cleanup(&self, team_id: &TeamId) -> TeamDeleteOutcome {
@@ -950,18 +1009,6 @@ impl OrganizationGlobalState {
             .unwrap_or_default()
     }
 
-    fn team_run_outcome_unknown_matches(&self, run_id: &GraphRunId, idempotency_key: &str) -> bool {
-        self.store.facts().run(run_id).is_some_and(|run| {
-            matches!(
-                run.lifecycle().state(),
-                GraphRunLifecycleState::OutcomeUnknown {
-                    idempotency_key: existing,
-                    ..
-                } if existing == idempotency_key
-            )
-        })
-    }
-
     fn active_run_ids(&self) -> Vec<GraphRunId> {
         self.store
             .facts()
@@ -1086,6 +1133,8 @@ impl OwnerSpec for OrganizationOwner {
                 CommandRoute::Keyed(GraphRunId::new(command.run_id()))
             }
             OrganizationCommand::TeamDelete { .. }
+            | OrganizationCommand::TeamDeleteRunNativeSettled { .. }
+            | OrganizationCommand::TeamDeleteRemovalSettled { .. }
             | OrganizationCommand::RunDeleteAndPurge { .. }
             | OrganizationCommand::RunPurge { .. }
             | OrganizationCommand::RecoverMaterializationReceipts { .. } => CommandRoute::Exclusive,
@@ -1135,6 +1184,21 @@ impl OwnerSpec for OrganizationOwner {
 
     fn open_lane(shared: &Self::Shared, _key: &Self::Key) -> Self::LaneState {
         OrganizationRunLane::new(shared.store_path.clone())
+    }
+
+    async fn shutdown(
+        _shared: Self::Shared,
+        global: &mut Self::GlobalState,
+        _lanes: Vec<(Self::Key, Self::LaneState)>,
+    ) {
+        for task in &global.team_delete_tasks {
+            task.cancel();
+        }
+        for mut task in global.team_delete_tasks.drain(..) {
+            let _ = task.join().await;
+        }
+        global.team_delete_run_tasks.clear();
+        global.team_delete_removal_tasks.clear();
     }
 
     async fn handle_keyed_command(
@@ -1501,22 +1565,9 @@ impl OwnerSpec for OrganizationOwner {
                 reply,
             } => {
                 let outcome = state.open_store().and_then(|mut store| {
-                    let Some(target) = state.team_run.native_terminal_target(&store, &delivery_id)
-                    else {
-                        return Err(StoreFault::InvalidFacts);
-                    };
-                    if target.graph_run_id() != &run_id {
-                        return Err(StoreFault::InvalidFacts);
-                    }
-                    let native_terminal = settled.status;
-                    state.team_run.observe_native_terminal(
+                    super::terminal_settlement::settle_native_run_for_delivery(
                         &mut store,
-                        target,
-                        native_terminal,
-                        settled_at,
-                    )?;
-                    crate::owner::team_run::resolve_native_settled_output(
-                        &mut store,
+                        &state.team_run,
                         &run_id,
                         &delivery_id,
                         settled,
@@ -1530,6 +1581,8 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::ManualTeamMaterialize { .. }
             | OrganizationCommand::ManualTeamCreate { .. }
             | OrganizationCommand::TeamDelete { .. }
+            | OrganizationCommand::TeamDeleteRunNativeSettled { .. }
+            | OrganizationCommand::TeamDeleteRemovalSettled { .. }
             | OrganizationCommand::RunDeleteAndPurge { .. }
             | OrganizationCommand::RunPurge { .. }
             | OrganizationCommand::WebhookTriggerFire { .. }
@@ -1644,6 +1697,39 @@ impl OwnerSpec for OrganizationOwner {
                 };
                 let _ = reply.send(outcome);
             }
+            OrganizationCommand::TeamDeleteRunNativeSettled {
+                team_id,
+                run_id,
+                idempotency_key,
+                settlement,
+                native,
+                observed_at,
+            } => {
+                let task_key = (run_id.as_str().to_owned(), idempotency_key.clone());
+                if state.refresh().is_ok() {
+                    let settled = state.complete_team_delete_run_native_evidence(
+                        run_id,
+                        &idempotency_key,
+                        settlement,
+                        native,
+                        observed_at,
+                    );
+                    if matches!(
+                        settled,
+                        Ok(organization::GraphRunPurgeOutcome::Purged
+                            | organization::GraphRunPurgeOutcome::Replayed)
+                    ) {
+                        let _ = state.start_team_delete_removal_if_ready(&shared, &team_id);
+                    }
+                }
+                state.team_delete_run_tasks.remove(&task_key);
+            }
+            OrganizationCommand::TeamDeleteRemovalSettled { team_id, outcome } => {
+                if state.refresh().is_ok() {
+                    let _ = state.complete_team_delete_removal(&team_id, Some(outcome));
+                }
+                state.team_delete_removal_tasks.remove(team_id.as_str());
+            }
             OrganizationCommand::RunDeleteAndPurge {
                 run_id,
                 idempotency_key,
@@ -1674,34 +1760,15 @@ impl OwnerSpec for OrganizationOwner {
                 settled_at,
                 reply,
             } => {
-                let outcome = (|| {
-                    if let Some(pending) = state.team_message_repairs.remove(&native_run_id) {
-                        let plan = organization::plan_team_message_terminal(
-                            &pending.context,
-                            pending.attempt,
-                            final_assistant_text,
-                        );
-                        return state.settle_team_message_plan(
-                            pending.context,
-                            pending.status,
-                            pending.settled_at,
-                            plan,
-                        );
-                    }
-                    if let Some((delivery_id, endpoint_session_id)) = delivery_context {
-                        state.store.accept_native_terminal_context(
-                            &delivery_id,
-                            endpoint_session_id,
-                            native_run_id.clone(),
-                        )?;
-                    }
-                    let Some(context) = state.team_message_terminal_context(&native_run_id)? else {
-                        return Ok(organization::TeamMessageTerminalObservation::Ignored);
-                    };
-                    let plan =
-                        organization::plan_team_message_terminal(&context, 0, final_assistant_text);
-                    state.settle_team_message_plan(context, status, settled_at, plan)
-                })();
+                let outcome = state.terminal_settlement.observe_team_message_terminal(
+                    &mut state.store,
+                    &state.team_run,
+                    native_run_id,
+                    delivery_context,
+                    status,
+                    final_assistant_text,
+                    settled_at,
+                );
                 let _ = reply.send(outcome);
             }
             OrganizationCommand::TeamMessageRepairQueued {
@@ -1709,22 +1776,17 @@ impl OwnerSpec for OrganizationOwner {
                 repair,
                 reply,
             } => {
-                if let Some(pending) = state.team_message_repairs.remove(repair.requested_run_id())
-                {
-                    state.team_message_repairs.insert(requested_run_id, pending);
-                }
+                state
+                    .terminal_settlement
+                    .repair_queued(requested_run_id, &repair);
                 let _ = reply.send(());
             }
             OrganizationCommand::TeamMessageRepairRejected { repair, reply } => {
-                let outcome = match state.team_message_repairs.remove(repair.requested_run_id()) {
-                    Some(pending) => state.native_run_settled(
-                        pending.context,
-                        pending.status,
-                        Some(pending.last_invalid_output),
-                        pending.settled_at,
-                    ),
-                    None => Ok(()),
-                };
+                let outcome = state.terminal_settlement.repair_rejected(
+                    &mut state.store,
+                    &state.team_run,
+                    &repair,
+                );
                 let _ = reply.send(outcome);
             }
             OrganizationCommand::WebhookTriggerFire {
@@ -2183,14 +2245,16 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::owner::run_scheduler::schedule_ready_nodes;
+    use crate::{NativeRunSettled, owner::run_scheduler::schedule_ready_nodes};
     use std::{
         fs,
         num::NonZeroU32,
+        path::PathBuf,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     use organization::{
@@ -3019,45 +3083,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn team_delete_repeated_after_cleanup_unknown_remains_unknown_without_failed_store_fault()
-    {
-        let (_temp_dir, store) =
-            store_with_team_materialization(openclaw_materialization_receipt());
+    async fn team_delete_repeated_after_cleanup_unknown_remains_unknown_without_native_replay() {
+        let (temp_dir, store) = store_with_team_materialization(openclaw_materialization_receipt());
         let driver = Arc::new(FixedTeamDriver::new(
             organization::MaterializationOperationOutcome::OutcomeUnknown,
         ));
-        let shared = organization_shared(driver.clone());
-        let mut state = organization_state(store);
+        let mut running = running_organization(temp_dir, store, driver.clone());
 
         assert_eq!(
-            state
-                .team_delete(
-                    &shared,
-                    team_id(),
-                    idempotency_key("team-delete:team:one"),
-                    1
-                )
-                .await,
+            running
+                .handle
+                .team_delete(team_id(), idempotency_key("team-delete:team:one"), 1)
+                .await
+                .unwrap(),
             Ok(TeamDeleteOutcome::OutcomeUnknown)
         );
+        wait_for(|| driver.remove_count() == 1).await;
         assert_eq!(
-            state
-                .team_delete(
-                    &shared,
-                    team_id(),
-                    idempotency_key("team-delete:team:one"),
-                    2
-                )
-                .await,
+            running
+                .handle
+                .team_delete(team_id(), idempotency_key("team-delete:team:one"), 2)
+                .await
+                .unwrap(),
             Ok(TeamDeleteOutcome::OutcomeUnknown)
         );
         assert_eq!(driver.remove_count(), 1);
+        running.shutdown().await;
     }
 
     #[tokio::test]
-    async fn team_delete_tombstones_cancelled_run_before_materialization_cleanup() {
+    async fn team_delete_settles_cancelled_run_before_materialization_cleanup() {
         let receipt = openclaw_materialization_receipt();
-        let (_temp_dir, mut store) =
+        let (temp_dir, mut store) =
             store_with_openclaw_run(single_work_graph(GraphRunId::new("run:one")));
         let started = store
             .begin_graph_run_cancellation(&GraphRunId::new("run:one"), "run-cancel:one", 1)
@@ -3078,35 +3135,31 @@ mod tests {
             })
             .with_delete_evidence(confirmed_deletion_evidence_for(GraphRunId::new("run:one"))),
         );
-        let shared = organization_shared(driver.clone());
-        let mut state = organization_state(store);
+        let mut running = running_organization(temp_dir, store, driver.clone());
+        let facts_path = running.facts_path();
 
         assert_eq!(
-            state
-                .team_delete(
-                    &shared,
-                    team_id(),
-                    idempotency_key("team-delete:team:one"),
-                    3
-                )
-                .await,
-            Ok(TeamDeleteOutcome::Deleted)
+            running
+                .handle
+                .team_delete(team_id(), idempotency_key("team-delete:team:one"), 3)
+                .await
+                .unwrap(),
+            Ok(TeamDeleteOutcome::OutcomeUnknown)
         );
+        wait_for_store(&facts_path, |store| {
+            store.facts().run(&GraphRunId::new("run:one")).is_none()
+                && store.team_materialization_cleanup_confirmed(&team_id())
+        })
+        .await;
         assert_eq!(driver.delete_count(), 1);
         assert_eq!(driver.remove_count(), 1);
-        assert!(
-            state
-                .store
-                .facts()
-                .run(&GraphRunId::new("run:one"))
-                .is_none()
-        );
+        running.shutdown().await;
     }
 
     #[tokio::test]
-    async fn team_delete_recovers_same_key_unknown_run_before_materialization_cleanup() {
+    async fn team_delete_same_key_unknown_run_remains_unknown_without_native_replay() {
         let receipt = openclaw_materialization_receipt();
-        let (_temp_dir, mut store) =
+        let (temp_dir, mut store) =
             store_with_openclaw_run(single_work_graph(GraphRunId::new("run:one")));
         let started = store
             .begin_graph_run_cancellation(&GraphRunId::new("run:one"), "team-delete:team:one", 1)
@@ -3127,64 +3180,64 @@ mod tests {
             })
             .with_delete_evidence(confirmed_deletion_evidence_for(GraphRunId::new("run:one"))),
         );
-        let shared = organization_shared(driver.clone());
-        let mut state = organization_state(store);
+        let mut running = running_organization(temp_dir, store, driver.clone());
+        let facts_path = running.facts_path();
 
         assert_eq!(
-            state
-                .team_delete(
-                    &shared,
-                    team_id(),
-                    idempotency_key("team-delete:team:one"),
-                    3
-                )
-                .await,
-            Ok(TeamDeleteOutcome::Deleted)
+            running
+                .handle
+                .team_delete(team_id(), idempotency_key("team-delete:team:one"), 3)
+                .await
+                .unwrap(),
+            Ok(TeamDeleteOutcome::OutcomeUnknown)
         );
-        assert_eq!(driver.delete_count(), 1);
-        assert_eq!(driver.remove_count(), 1);
-        assert!(
-            state
-                .store
+        assert_eq!(driver.delete_count(), 0);
+        assert_eq!(driver.remove_count(), 0);
+        let store = OrganizationStore::open(&facts_path).unwrap();
+        assert!(matches!(
+            store
                 .facts()
                 .run(&GraphRunId::new("run:one"))
-                .is_none()
-        );
+                .unwrap()
+                .lifecycle()
+                .state(),
+            GraphRunLifecycleState::OutcomeUnknown { .. }
+        ));
+        running.shutdown().await;
     }
 
     #[tokio::test]
     async fn team_delete_confirmed_cleanup_replays_deleted_without_second_native_remove() {
         let receipt = openclaw_materialization_receipt();
-        let (_temp_dir, store) = store_with_team_materialization(receipt.clone());
+        let (temp_dir, store) = store_with_team_materialization(receipt.clone());
         let driver = Arc::new(FixedTeamDriver::new(
             organization::MaterializationOperationOutcome::Confirmed { receipt },
         ));
-        let shared = organization_shared(driver.clone());
-        let mut state = organization_state(store);
+        let mut running = running_organization(temp_dir, store, driver.clone());
+        let facts_path = running.facts_path();
 
         assert_eq!(
-            state
-                .team_delete(
-                    &shared,
-                    team_id(),
-                    idempotency_key("team-delete:team:one"),
-                    1
-                )
-                .await,
-            Ok(TeamDeleteOutcome::Deleted)
+            running
+                .handle
+                .team_delete(team_id(), idempotency_key("team-delete:team:one"), 1)
+                .await
+                .unwrap(),
+            Ok(TeamDeleteOutcome::OutcomeUnknown)
         );
+        wait_for_store(&facts_path, |store| {
+            store.team_materialization_cleanup_confirmed(&team_id())
+        })
+        .await;
         assert_eq!(
-            state
-                .team_delete(
-                    &shared,
-                    team_id(),
-                    idempotency_key("team-delete:team:one"),
-                    2
-                )
-                .await,
+            running
+                .handle
+                .team_delete(team_id(), idempotency_key("team-delete:team:one"), 2)
+                .await
+                .unwrap(),
             Ok(TeamDeleteOutcome::Deleted)
         );
         assert_eq!(driver.remove_count(), 1);
+        running.shutdown().await;
     }
 
     #[tokio::test]
@@ -3507,6 +3560,71 @@ mod tests {
         (temp_dir, store)
     }
 
+    struct RunningOrganization {
+        _temp_dir: tempfile::TempDir,
+        facts_path: PathBuf,
+        system: foundation::execution::OwnerRuntimeSystem,
+        owner: OwnedTask<()>,
+        handle: crate::OrganizationHandle,
+    }
+
+    impl RunningOrganization {
+        fn facts_path(&self) -> PathBuf {
+            self.facts_path.clone()
+        }
+
+        async fn shutdown(&mut self) {
+            let _ = self.owner.cancel_and_join().await;
+            let _ = self.system.cancel_and_join().await;
+        }
+    }
+
+    fn running_organization(
+        temp_dir: tempfile::TempDir,
+        store: OrganizationStore,
+        driver: Arc<FixedTeamDriver>,
+    ) -> RunningOrganization {
+        let facts_path = store.path().to_owned();
+        let system = foundation::execution::OwnerRuntimeSystem::spawn(Default::default());
+        let (module, owner) = crate::spawn_owner(
+            &system,
+            crate::OrganizationOwnerInput {
+                store,
+                runtime_directory: Arc::new(FixedRuntimeDirectory { driver }),
+                team_skill_selections: TeamSkillSelectionResolver::open(
+                    temp_dir.path().join("team-skill-selections.json"),
+                )
+                .unwrap(),
+            },
+        );
+        RunningOrganization {
+            _temp_dir: temp_dir,
+            facts_path,
+            system,
+            owner,
+            handle: module.handle().clone(),
+        }
+    }
+
+    async fn wait_for(mut done: impl FnMut() -> bool) {
+        for _ in 0..100 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(done());
+    }
+
+    async fn wait_for_store(path: &std::path::Path, done: impl Fn(&OrganizationStore) -> bool) {
+        wait_for(|| {
+            OrganizationStore::open(path)
+                .map(|store| done(&store))
+                .unwrap_or(false)
+        })
+        .await;
+    }
+
     fn organization_state(store: OrganizationStore) -> OrganizationGlobalState {
         let selections = tempfile::tempdir()
             .unwrap()
@@ -3516,7 +3634,11 @@ mod tests {
             store,
             team_run: TeamRunOwner::new(),
             team_skill_selections: TeamSkillSelectionResolver::open(selections).unwrap(),
-            team_message_repairs: BTreeMap::new(),
+            terminal_settlement: crate::owner::terminal_settlement::TeamRunTerminalSettlement::new(
+            ),
+            team_delete_tasks: Vec::new(),
+            team_delete_run_tasks: BTreeSet::new(),
+            team_delete_removal_tasks: BTreeSet::new(),
         }
     }
 
@@ -3524,6 +3646,7 @@ mod tests {
         OrganizationShared {
             runtime_directory: Arc::new(FixedRuntimeDirectory { driver }),
             store_path: PathBuf::new(),
+            command_target: Arc::new(OnceLock::new()),
         }
     }
 

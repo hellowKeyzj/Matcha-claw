@@ -312,7 +312,6 @@ impl ConfigSnapshot {
     ) -> (Value, Value, Option<ConfigBaseHash>) {
         (self.source_config, self.config, self.base_hash)
     }
-
 }
 
 mod config;

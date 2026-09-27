@@ -1,4 +1,8 @@
-use std::{fs, path::Path, path::PathBuf, sync::Arc};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use platform::state_dir::CanonicalStateDir;
 
@@ -46,22 +50,6 @@ impl sealed_resource::SealedAgentRuntimeProjection for OpenClawSealedAgentRuntim
                     .collect()
             })
             .map_err(|_| sealed_resource::SealedResourceError::Unknown)
-    }
-
-    fn ensure_agent_entry(
-        &self,
-        agent_key: &str,
-        workspace: &Path,
-    ) -> Result<(), sealed_resource::SealedResourceError> {
-        openclaw::agents::ensure_sealed_agent_config(self.state_dir.clone(), agent_key, workspace)
-            .map_err(|error| match error {
-                openclaw::agents::SealedAgentConfigError::Rejected => {
-                    sealed_resource::SealedResourceError::Rejected
-                }
-                openclaw::agents::SealedAgentConfigError::Unavailable => {
-                    sealed_resource::SealedResourceError::Unknown
-                }
-            })
     }
 }
 

@@ -152,8 +152,8 @@ export function LibraryHome(props: LibraryHomeProps): JSX.Element {
 
   return (
     <>
-      <div className="grid h-[calc(100dvh-96px)] min-h-0 overflow-hidden rounded-[28px] border border-border bg-card xl:grid-cols-[300px_minmax(0,1fr)]">
-        <aside className="flex min-h-0 min-w-0 flex-col border-r border-border/70 bg-secondary/25">
+      <div className="grid h-full min-h-0 overflow-hidden xl:grid-cols-[300px_minmax(0,1fr)]">
+        <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
           <div className="px-5 py-5">
             <div className="flex items-center justify-between gap-2">
               <h1 className="text-2xl font-semibold tracking-tight">{t('home.title')}</h1>
@@ -210,8 +210,8 @@ export function LibraryHome(props: LibraryHomeProps): JSX.Element {
               </Button>
             </div>
 
-            <div className="mt-6 overflow-hidden rounded-2xl border border-border/80">
-              <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_160px] border-b border-border/70 bg-secondary/30 px-4 py-2 text-xs text-muted-foreground">
+            <div className="mt-6 overflow-hidden">
+              <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_160px] border-b border-border/70 px-4 py-2 text-xs text-muted-foreground">
                 <span>{t('home.table.name')}</span>
                 <span>{t('home.table.location')}</span>
                 <span>{t('home.table.lastOpened')}</span>

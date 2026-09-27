@@ -11,10 +11,14 @@ path = "src/lib.rs"
 [dependencies]
 aes-gcm.workspace = true
 base64.workspace = true
+chrono.workspace = true
 getrandom.workspace = true
 platform = { version = "0.1.0", path = "../../platform" }
 serde.workspace = true
+rsa = { version = "0.10.0-rc.18", default-features = false, features = ["std", "encoding", "sha2"] }
+tokio = { workspace = true, features = ["sync"] }
 serde_json.workspace = true
+serde_yaml.workspace = true
 sha2.workspace = true
 skills-module = { package = "skills", version = "0.1.0", path = "../skills" }
 subagents = { version = "0.1.0", path = "../subagents" }

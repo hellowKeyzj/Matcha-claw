@@ -201,7 +201,6 @@ describe('subagents page', () => {
   const exportAgentPackage = vi.fn().mockResolvedValue({
     agentId: 'agent-alpha',
     fileName: 'agent-alpha.matcha-agentpkg',
-    packagePath: 'C:/sealed/agent-alpha.matcha-agentpkg',
     size: 1024,
     exportedAtMs: 1,
   });
@@ -211,13 +210,6 @@ describe('subagents page', () => {
     fileName: 'agent-alpha.matcha-agentpkg',
     size: 1024,
     uploadedAtMs: 1,
-  });
-  const downloadAgentPackageFromCloud = vi.fn().mockResolvedValue({
-    agentId: 'agent-alpha',
-    packageId: 'pkg-alpha',
-    fileName: 'agent-alpha.matcha-agentpkg',
-    size: 1024,
-    downloadedAtMs: 1,
   });
   const installAgentPackageFromCloud = vi.fn().mockResolvedValue({
     agentId: 'agent-alpha',
@@ -289,7 +281,6 @@ describe('subagents page', () => {
     exportAgentConfig.mockClear();
     exportAgentPackage.mockClear();
     uploadAgentPackageToCloud.mockClear();
-    downloadAgentPackageFromCloud.mockClear();
     installAgentPackageFromCloud.mockClear();
     __resetAgentSkillConfigStoreInternalCachesForTest();
     __resetAgentToolConfigStoreInternalCachesForTest();
@@ -401,7 +392,6 @@ describe('subagents page', () => {
       exportAgentConfig,
       exportAgentPackage,
       uploadAgentPackageToCloud,
-      downloadAgentPackageFromCloud,
       installAgentPackageFromCloud,
       importAgentConfig,
       generateDraftFromPrompt,
@@ -474,8 +464,8 @@ describe('subagents page', () => {
               displayName: 'Files',
               source: 'core',
               toolOptions: [
-                { toolKey: 'read', displayName: 'Read', optionType: 'tool', description: 'Read files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['minimal', 'coding'] },
-                { toolKey: 'write', displayName: 'Write', optionType: 'tool', description: 'Write files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['coding'] },
+                { toolKey: 'read', displayName: 'Read', optionType: 'tool', description: 'Read files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['minimal', 'coding'], deniedByGlobalPolicy: false },
+                { toolKey: 'write', displayName: 'Write', optionType: 'tool', description: 'Write files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['coding'], deniedByGlobalPolicy: true },
               ],
             },
             {
@@ -483,16 +473,16 @@ describe('subagents page', () => {
               displayName: 'Web',
               source: 'core',
               toolOptions: [
-                { toolKey: 'web_search', displayName: 'Web Search', optionType: 'tool', description: 'Search web content', source: 'core', groupKey: 'web', groupDisplayName: 'Web', defaultProfiles: ['coding'] },
+                { toolKey: 'web_search', displayName: 'Web Search', optionType: 'tool', description: 'Search web content', source: 'core', groupKey: 'web', groupDisplayName: 'Web', defaultProfiles: ['coding'], deniedByGlobalPolicy: false },
               ],
             },
           ],
           toolOptions: [
-            { toolKey: 'group:fs', displayName: 'Files tools', optionType: 'group', source: 'core', groupKey: 'fs', groupDisplayName: 'Files' },
-            { toolKey: 'read', displayName: 'Read', optionType: 'tool', description: 'Read files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['minimal', 'coding'] },
-            { toolKey: 'write', displayName: 'Write', optionType: 'tool', description: 'Write files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['coding'] },
-            { toolKey: 'group:web', displayName: 'Web tools', optionType: 'group', source: 'core', groupKey: 'web', groupDisplayName: 'Web' },
-            { toolKey: 'web_search', displayName: 'Web Search', optionType: 'tool', description: 'Search web content', source: 'core', groupKey: 'web', groupDisplayName: 'Web', defaultProfiles: ['coding'] },
+            { toolKey: 'group:fs', displayName: 'Files tools', optionType: 'group', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', deniedByGlobalPolicy: false },
+            { toolKey: 'read', displayName: 'Read', optionType: 'tool', description: 'Read files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['minimal', 'coding'], deniedByGlobalPolicy: false },
+            { toolKey: 'write', displayName: 'Write', optionType: 'tool', description: 'Write files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['coding'], deniedByGlobalPolicy: true },
+            { toolKey: 'group:web', displayName: 'Web tools', optionType: 'group', source: 'core', groupKey: 'web', groupDisplayName: 'Web', deniedByGlobalPolicy: false },
+            { toolKey: 'web_search', displayName: 'Web Search', optionType: 'tool', description: 'Search web content', source: 'core', groupKey: 'web', groupDisplayName: 'Web', defaultProfiles: ['coding'], deniedByGlobalPolicy: false },
           ],
           revision: 'tool-alpha',
           updatedAt: null,
@@ -901,7 +891,7 @@ describe('subagents page', () => {
     });
   });
 
-  it('sealed agent disables edit and editable json export but allows package export', async () => {
+  it('sealed agent disables edit and editable json export but allows cloud upload', async () => {
     useSubagentsStore.setState({
       agents: [
         ...useSubagentsStore.getState().agents,
@@ -922,17 +912,15 @@ describe('subagents page', () => {
     expect(screen.getByRole('button', { name: 'Edit sealed-agent' })).toBeDisabled();
     await openAgentActionMenu('sealed-agent');
     expect(screen.getByRole('menuitem', { name: 'Export' })).toHaveAttribute('data-disabled');
-    expect(screen.getByRole('menuitem', { name: 'Export Package' })).not.toHaveAttribute('data-disabled');
+    expect(screen.getByRole('menuitem', { name: 'Upload to Cloud' })).not.toHaveAttribute('data-disabled');
 
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Export Package' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Upload to Cloud' }));
 
     await waitFor(() => {
-      expect(exportAgentPackage).toHaveBeenCalledWith('sealed-agent');
+      expect(uploadAgentPackageToCloud).toHaveBeenCalledWith('sealed-agent');
     });
     expect(exportAgentConfig).not.toHaveBeenCalledWith('sealed-agent');
-    await waitFor(() => {
-      expect(toast.success).toHaveBeenCalledWith('Agent package exported: agent-alpha.matcha-agentpkg');
-    });
+    expect(exportAgentPackage).not.toHaveBeenCalledWith('sealed-agent');
   });
 
   it('adds cloud package actions for normal agents', async () => {
@@ -947,11 +935,8 @@ describe('subagents page', () => {
 
     await openAgentActionMenu('agent-alpha');
     fireEvent.click(screen.getByRole('menuitem', { name: 'Cloud Packages' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Download' }));
-    await waitFor(() => {
-      expect(downloadAgentPackageFromCloud).toHaveBeenCalledWith('version-alpha');
-    });
-    expect(toast.success).toHaveBeenCalledWith('Agent package downloaded: agent-alpha.matcha-agentpkg');
+    await screen.findByRole('button', { name: 'Install' });
+    expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Install' }));
     await waitFor(() => {
@@ -1059,7 +1044,7 @@ describe('subagents page', () => {
 
     expect(screen.queryByText('Skill Configuration')).toBeNull();
     expect(screen.getByText('Tool Configuration')).toBeInTheDocument();
-    expect(screen.getByText(/Full.*enabled now/i)).toBeInTheDocument();
+    expect(screen.getByText(/Full.*config preview/i)).toBeInTheDocument();
     const toolPanel = screen.getByText('Tool Configuration').closest('section') as HTMLElement;
     const toolListScrollRegion = toolPanel.querySelector('.min-h-0.flex-1.overflow-y-auto') as HTMLElement;
     expect(toolPanel).toHaveClass('flex-col');
@@ -1068,6 +1053,9 @@ describe('subagents page', () => {
     expect(screen.getByText('Files')).toBeInTheDocument();
     expect(screen.getByText('Read')).toBeInTheDocument();
     expect(screen.getByText('Write')).toBeInTheDocument();
+    expect(screen.getByText('Globally denied')).toBeInTheDocument();
+    const writeRow = screen.getByText('Write').closest('.grid') as HTMLElement;
+    writeRow.querySelectorAll('button').forEach((button) => expect(button).toBeDisabled());
     expect(screen.getByText('Web')).toBeInTheDocument();
     expect(screen.queryByText('Web Search')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /Web.*enabled/i }));

@@ -1299,24 +1299,23 @@ async fn merge_existing_page_content(
         backup_existing_page(root, relative_path, existing);
         return Ok(canonicalize_sources_field(&array_merged, identity));
     };
-    let merged =
-        match merge_page_with_llm(
-            llm,
-            existing,
-            &array_merged,
-            identity,
-            generation_model_ref,
-            cancellation.clone(),
-        )
-        .await
-        {
-            Ok(merged) => merged,
-            Err(error) if error.is_cancelled() => return Err(error),
-            Err(_) => {
-                backup_existing_page(root, relative_path, existing);
-                return Ok(canonicalize_sources_field(&array_merged, identity));
-            }
-        };
+    let merged = match merge_page_with_llm(
+        llm,
+        existing,
+        &array_merged,
+        identity,
+        generation_model_ref,
+        cancellation.clone(),
+    )
+    .await
+    {
+        Ok(merged) => merged,
+        Err(error) if error.is_cancelled() => return Err(error),
+        Err(_) => {
+            backup_existing_page(root, relative_path, existing);
+            return Ok(canonicalize_sources_field(&array_merged, identity));
+        }
+    };
     let merged_frontmatter = parse_merge_frontmatter(&merged);
     if !merged_frontmatter.has_frontmatter {
         backup_existing_page(root, relative_path, existing);

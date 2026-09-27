@@ -35,13 +35,13 @@ pub use domain::model;
 pub use domain::model::{
     AgentCreate, AgentCreated, AgentDelete, AgentDeleted, AgentFile, AgentFileName, AgentFiles,
     AgentKind, AgentModelUpdate, AgentSummary, AgentUpdate, AgentUpdated, AgentWait,
-    AgentWaitResult, AgentWaitStatus, Command, ConfigurationAgent, ConfigurationDefaults,
-    ConfigurationDisplay, ConfigurationModel, ConfigurationMutationOutcome,
+    AgentWaitResult, AgentWaitStatus, CloudPackageMetadata, Command, ConfigurationAgent,
+    ConfigurationDefaults, ConfigurationDisplay, ConfigurationModel, ConfigurationMutationOutcome,
     ConfigurationReadFailure, MissingSkillRequirements, NativeEndpoint, Outcome,
-    PackageExportReceipt, PackageInstallReceipt, SkillConfigurationOutcome, SkillConfigurationView,
-    SkillOption, SkillSelection, SkillUnavailableReason, ToolCatalog, ToolConfigurationOutcome,
-    ToolConfigurationView, ToolGroup, ToolOption, ToolPolicy, ToolProfile, ToolSelection,
-    WorkspaceInitialization, configuration, configuration_mutation,
+    PackageExportReceipt, PackageInstallPlan, PackageInstallReceipt, SkillConfigurationOutcome,
+    SkillConfigurationView, SkillOption, SkillSelection, SkillUnavailableReason, ToolCatalog,
+    ToolConfigurationOutcome, ToolConfigurationView, ToolGroup, ToolOption, ToolPolicy,
+    ToolProfile, ToolSelection, WorkspaceInitialization, configuration, configuration_mutation,
 };
 pub use owner::{SubagentOwnerInput, spawn_owner};
 pub use ports::{

@@ -21,6 +21,8 @@ import type {
   AuthTokenResult,
   BillingCheckoutInfo,
   BillingPlan,
+  CloudPackageAuthorization,
+  CloudPackageAuthorizationRequest,
   CloudPackageDownloadRecord,
   CloudPackageDownloadRecordRequest,
   CloudPackageDownloadRequest,
@@ -28,6 +30,7 @@ import type {
   CloudPackageListQuery,
   CloudPackageLocalDownload,
   CloudPackageVersion,
+  CloudSealedCloudKey,
   CloudUser,
   CreatePaymentOrderRequest,
   CreatePaymentOrderResult,
@@ -38,6 +41,7 @@ import type {
   SubscriptionSummary,
   UserSubscription,
 } from './types';
+import { getCloudPackageDevicePublicKey } from './device-key-store';
 
 export type CloudAccountService = Readonly<{
   prewarm(): void;
@@ -60,7 +64,9 @@ export type CloudAccountService = Readonly<{
   getPlatformQuotas(): Promise<PlatformQuota[]>;
   listOwnedPackages(query: CloudPackageListQuery): Promise<CloudPackageListPage>;
   listMarketPackages(query: CloudPackageListQuery): Promise<CloudPackageListPage>;
+  fetchSealedCloudKey(): Promise<CloudSealedCloudKey>;
   uploadPackage(packagePath: string): Promise<CloudPackageVersion>;
+  authorizePackage(request: Omit<CloudPackageAuthorizationRequest, 'devicePublicKey'>): Promise<CloudPackageAuthorization>;
   recordPackageDownload(request: CloudPackageDownloadRecordRequest): Promise<CloudPackageDownloadRecord>;
   downloadPackage(request: CloudPackageDownloadRequest): Promise<CloudPackageLocalDownload>;
 }>;
@@ -148,7 +154,12 @@ export function createCloudAccountService(
     getPlatformQuotas: () => withValidSession(client, providerSync, (session) => client.fetchPlatformQuotas(session.accessToken)),
     listOwnedPackages: (query) => withValidSession(client, providerSync, (session) => client.listOwnedPackages(session.accessToken, query)),
     listMarketPackages: (query) => withValidSession(client, providerSync, (session) => client.listMarketPackages(session.accessToken, query)),
+    fetchSealedCloudKey: () => withValidSession(client, providerSync, (session) => client.fetchSealedCloudKey(session.accessToken)),
     uploadPackage: (packagePath) => withValidSession(client, providerSync, (session) => client.uploadPackage(session.accessToken, packagePath)),
+    authorizePackage: (request) => withValidSession(client, providerSync, async (session) => client.authorizePackage(session.accessToken, {
+      ...request,
+      devicePublicKey: await getCloudPackageDevicePublicKey(),
+    })),
     recordPackageDownload: (request) => withValidSession(client, providerSync, (session) => client.recordPackageDownload(session.accessToken, request)),
     downloadPackage: (request) => withValidSession(client, providerSync, (session) => client.downloadPackage(session.accessToken, request)),
   };

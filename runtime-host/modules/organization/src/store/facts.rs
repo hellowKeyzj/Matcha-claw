@@ -798,10 +798,10 @@ impl OrganizationFacts {
 
         let mut template_facts = BTreeMap::new();
         for template in templates {
-            let team = team_facts
-                .get(template.team().as_str())
-                .ok_or(OrganizationFactsError::UnknownWorkflowTemplateTeam)?;
-            if team.tombstoned() || template.source_identity().trim().is_empty() {
+            if !team_facts.contains_key(template.team().as_str()) {
+                return Err(OrganizationFactsError::UnknownWorkflowTemplateTeam);
+            }
+            if template.source_identity().trim().is_empty() {
                 return Err(OrganizationFactsError::InvalidWorkflowTemplate);
             }
             if template_facts
@@ -868,14 +868,11 @@ impl OrganizationFacts {
 
         for run in run_facts.values() {
             if let Some(receipt) = run.runtime() {
-                let team = team_facts
-                    .get(run.team().as_str())
-                    .expect("run team was validated before runtime receipt alignment");
                 let materialization = materialization_facts
                     .get(run.team().as_str())
                     .and_then(TeamMaterializationLifecycle::receipt)
                     .ok_or(OrganizationFactsError::RuntimeMaterializationMissing)?;
-                validate_runtime_receipt_alignment(team, run, receipt, materialization)?;
+                validate_runtime_receipt_alignment(run, receipt, materialization)?;
             }
         }
 
@@ -1192,10 +1189,11 @@ impl OrganizationFacts {
             .values()
             .filter(|run| run.team() == team_id)
             .all(|run| {
-                matches!(
-                    run.lifecycle().state(),
-                    GraphRunLifecycleState::Tombstoned { .. }
-                )
+                run.runtime().is_none()
+                    && matches!(
+                        run.lifecycle().state(),
+                        GraphRunLifecycleState::Tombstoned { .. }
+                    )
             })
             .then_some(())?;
         self.materializations
@@ -1278,8 +1276,12 @@ impl OrganizationFacts {
         &mut self,
         template: WorkflowTemplateFacts,
     ) -> Result<(), OrganizationFactsError> {
-        if !self.teams.contains_key(template.team().as_str()) {
-            return Err(OrganizationFactsError::UnknownWorkflowTemplateTeam);
+        match self.teams.get(template.team().as_str()) {
+            Some(team) if team.tombstoned() => {
+                return Err(OrganizationFactsError::InvalidWorkflowTemplate);
+            }
+            Some(_) => {}
+            None => return Err(OrganizationFactsError::UnknownWorkflowTemplateTeam),
         }
         if self
             .templates
@@ -2435,12 +2437,15 @@ impl OrganizationFacts {
             .teams
             .get(run.team().as_str())
             .expect("run restore preserves its team");
+        if team.tombstoned() {
+            return Err(OrganizationFactsError::RuntimeTeamTombstoned);
+        }
         let materialization = self
             .materializations
             .get(run.team().as_str())
             .and_then(TeamMaterializationLifecycle::receipt)
             .ok_or(OrganizationFactsError::RuntimeMaterializationMissing)?;
-        validate_runtime_receipt_alignment(team, run, &receipt, materialization)?;
+        validate_runtime_receipt_alignment(run, &receipt, materialization)?;
         if run.runtime.is_some() {
             return Err(OrganizationFactsError::RuntimeAlreadyInstalled);
         }
@@ -3708,14 +3713,10 @@ fn map_materialization_lifecycle_error(
 }
 
 fn validate_runtime_receipt_alignment(
-    team: &TeamFacts,
     run: &GraphRunFacts,
     receipt: &RunRuntimeReceipt,
     materialization: &MaterializationReceipt,
 ) -> Result<(), OrganizationFactsError> {
-    if team.tombstoned() {
-        return Err(OrganizationFactsError::RuntimeTeamTombstoned);
-    }
     if receipt.team_run() != run.run_id() {
         return Err(OrganizationFactsError::RuntimeRunMismatch);
     }

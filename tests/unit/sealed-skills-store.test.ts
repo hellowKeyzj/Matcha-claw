@@ -51,25 +51,60 @@ describe('sealed skills store cloud packages', () => {
     expect(useSealedSkillsStore.getState().cloudError).toBe(SEALED_SKILL_CLOUD_UNAVAILABLE_ERROR);
   });
 
-  it('uploads a local .matcha-skillpkg path without exposing package content', async () => {
+  it('keeps sealed package paths out of renderer state', async () => {
+    hostApiFetchMock.mockResolvedValue({
+      skills: [{
+        skillKey: 'skill:openclaw:calendar',
+        name: 'Calendar',
+        description: 'Calendar integration',
+        enabled: true,
+        installed: true,
+        source: 'matcha-sealed',
+        runtimes: ['openclaw'],
+        packagePath: 'C:/Users/Mr.Key/.openclaw/skills/calendar.matcha-skillpkg',
+      }],
+    });
+    const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
+
+    await useSealedSkillsStore.getState().fetchSealedSkills();
+
+    expect(useSealedSkillsStore.getState().skills).toEqual([{ skillKey: 'skill:openclaw:calendar', name: 'Calendar', description: 'Calendar integration', installed: true, version: undefined, source: 'matcha-sealed', runtimes: ['openclaw'] }]);
+    expect('packagePath' in useSealedSkillsStore.getState().skills[0]).toBe(false);
+  });
+
+  it('uploads an installed sealed skill package through skill key', async () => {
     hostApiFetchMock
-      .mockResolvedValueOnce({ outcome: 'accepted' })
+      .mockResolvedValueOnce({ success: true })
       .mockResolvedValueOnce({ packages: [] });
     const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
 
-    await useSealedSkillsStore.getState().uploadLocalSkillPackageToCloud('C:/sealed/calendar.matcha-skillpkg');
+    await useSealedSkillsStore.getState().uploadInstalledSkillPackageToCloud('skill:openclaw:calendar');
 
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/packages/upload', expect.objectContaining({
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/packages/upload/sealed-skill', expect.objectContaining({
       method: 'POST',
-      body: JSON.stringify({ packagePath: 'C:/sealed/calendar.matcha-skillpkg' }),
+      body: JSON.stringify({ skillKey: 'skill:openclaw:calendar' }),
     }));
-    expect(String(hostApiFetchMock.mock.calls[0]?.[1]?.body)).not.toContain('token');
-    expect(String(hostApiFetchMock.mock.calls[0]?.[1]?.body)).not.toContain('content');
+    expect(String(hostApiFetchMock.mock.calls[0]?.[1]?.body)).not.toMatch(/packagePath|deviceEnvelope|authorizationKey|contentKey|rawPayload|token/);
   });
 
-  it('downloads and installs a cloud skill package by public package version id', async () => {
+  it('installs a local .matcha-skillpkg through the main-owned sealed install endpoint', async () => {
     hostApiFetchMock
-      .mockResolvedValueOnce({ install: { outcome: 'accepted' } })
+      .mockResolvedValueOnce({ outcome: 'accepted', skillKey: 'skill:openclaw:calendar' })
+      .mockResolvedValueOnce({ skills: [] });
+    const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
+
+    await useSealedSkillsStore.getState().installLocalSkillPackage();
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/sealed-skills/install-local', expect.objectContaining({
+      method: 'POST',
+    }));
+    expect(String(hostApiFetchMock.mock.calls[0]?.[1]?.body ?? '')).not.toMatch(/packagePath|deviceEnvelope|authorizationKey|contentKey|rawPayload|token/);
+    expect(useSealedSkillsStore.getState().localPackageInstalling).toBe(false);
+  });
+
+  it('downloads, installs, and refreshes a cloud skill package through the package install route', async () => {
+    hostApiFetchMock
+      .mockResolvedValueOnce({ install: { outcome: 'accepted', skillKey: 'skill:openclaw:calendar' } })
       .mockResolvedValueOnce({ skills: [] })
       .mockResolvedValueOnce({ items: [] });
     const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
@@ -77,7 +112,7 @@ describe('sealed skills store cloud packages', () => {
     await useSealedSkillsStore.getState().downloadAndInstallCloudSkillPackage({
       packageId: 'pkg-calendar',
       packageVersionId: 'version-calendar',
-      skillKey: 'calendar',
+      skillKey: 'skill:openclaw:calendar',
       fileName: 'calendar.matcha-skillpkg',
     });
 
@@ -85,5 +120,22 @@ describe('sealed skills store cloud packages', () => {
       method: 'POST',
       body: JSON.stringify({ packageVersionId: 'version-calendar', packageType: 'skill', source: 'skills' }),
     }));
+    expect(String(hostApiFetchMock.mock.calls[0]?.[1]?.body)).not.toMatch(/packagePath|deviceEnvelope|authorizationKey|contentKey|rawPayload|token/);
+    expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/skills/config', expect.anything());
+  });
+
+  it('uninstalls a sealed skill package through the sealed package endpoint', async () => {
+    hostApiFetchMock
+      .mockResolvedValueOnce({ outcome: 'removed', skillKey: 'skill:openclaw:calendar' })
+      .mockResolvedValueOnce({ skills: [] });
+    const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
+
+    await useSealedSkillsStore.getState().uninstallSealedSkill('skill:openclaw:calendar');
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/sealed-skills/uninstall', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ skillKey: 'skill:openclaw:calendar' }),
+    }));
+    expect(useSealedSkillsStore.getState().uninstallingBySkillKey).toEqual({});
   });
 });

@@ -30,9 +30,16 @@
     "importSuccess": "Agent設定をインポートしました。",
     "exportSuccess": "Agent設定をエクスポートしました。",
     "exportPackageSuccess": "Agentパッケージをエクスポートしました: {{fileName}}",
+    "uploadPackageSuccess": "Agentパッケージをクラウドへアップロードしました: {{fileName}}",
+    "installPackageSuccess": "Agentパッケージをインストールしました: {{agentId}}",
     "importFailed": "Agent設定のインポートに失敗しました: {{message}}",
     "exportFailed": "Agent設定のエクスポートに失敗しました: {{message}}",
-    "exportPackageFailed": "Agentパッケージのエクスポートに失敗しました: {{message}}"
+    "exportPackageFailed": "Agentパッケージのエクスポートに失敗しました: {{message}}",
+    "uploadPackageFailed": "Agentパッケージのクラウドアップロードに失敗しました: {{message}}",
+    "installPackageFailed": "Agentパッケージのインストールに失敗しました: {{message}}",
+    "installPackageUnknownOutcome": "ローカルに同じ暗号化Agentが残っています。Agent一覧を更新し、表示されない場合は同名Agentを削除してから再インストールしてください。",
+    "installPackageRejected": "Agentパッケージをインストールできません。この端末にエクスポート時の暗号化キーが残っていることを確認してください。",
+    "installPackageUnexpectedResult": "Agentパッケージのインストール結果が不明です。Agent一覧を更新して確認してください。"
   },
   "status": {
     "refreshing": "更新中...",
@@ -175,17 +182,19 @@
       "pluginBadge": "プラグイン",
       "toolCount": "{{count}} 個のツール",
       "profileDefault": "Profile 既定",
-      "effectiveTools": "有効なツール",
+      "configPreview": "設定プレビュー",
+      "globalDeny": "グローバル拒否",
       "explicitRules": "明示ルール",
       "policyDefault": "既定",
       "inheritToolsHint": "既定ツールを継承中です。明示設定に切り替えると、個別ツールまたはグループ単位で調整できます。",
-      "toolProfileSummary": "{{profile}}: 現在 {{enabled}}/{{total}} 有効、Profile 既定 {{defaultEnabled}}、明示ルール {{overrides}}",
+      "toolProfileSummary": "{{profile}}: 設定プレビュー {{enabled}}/{{total}}、Profile 既定 {{defaultEnabled}}、グローバル拒否 {{globalDeny}}、明示ルール {{overrides}}",
       "groupSummary": "{{enabled}}/{{total}} 有効 · 明示ルール {{rules}}",
       "toolStates": {
         "enabledByProfile": "Profile 有効",
         "disabledByProfile": "Profile 無効",
         "allowedByOverride": "許可済み",
-        "deniedByOverride": "拒否済み"
+        "deniedByOverride": "拒否済み",
+        "deniedByGlobalPolicy": "グローバル拒否"
       },
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "現在のランタイムはAgentスキル設定に対応していません。",
@@ -193,6 +202,11 @@
         "agentNotConfigured": "現在のランタイムにこのAgentの能力設定がまだ登録されていないため、ここでは設定できません。"
       }
     }
+  },
+  "cloudPackages": {
+    "title": "クラウドAgentパッケージ",
+    "empty": "クラウドAgentパッケージはありません。",
+    "install": "インストール"
   },
   "card": {
     "system": "システムAgent",

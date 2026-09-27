@@ -600,17 +600,17 @@ export function RemoteFleetPage() {
 
   return (
     <section className="mx-auto flex h-full min-h-0 w-full max-w-[1800px] flex-col gap-3">
-      <header className="flex min-h-16 flex-wrap items-center gap-3 rounded-2xl border border-border/70 bg-card px-4 py-3">
+      <header className="flex min-h-16 flex-wrap items-center gap-3 rounded-2xl border bg-[hsl(var(--shell-surface-muted))] px-4 py-3 [border-color:hsl(var(--shell-border))]">
         <div className="flex min-w-0 flex-1 items-center gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-foreground text-background">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[hsl(var(--shell-icon-active))] text-[hsl(var(--shell-window))]">
             <Server className="h-4 w-4" />
           </div>
           <div className="min-w-0">
             <h1 className="truncate text-lg font-semibold tracking-tight">
               {t('remoteFleet.header.title')}
             </h1>
-            <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-              <span className={cn('h-1.5 w-1.5 rounded-full', ready ? 'bg-emerald-500' : 'bg-muted-foreground/40')} />
+            <div className="flex min-w-0 items-center gap-2 text-xs text-[hsl(var(--shell-text-muted))]">
+              <span className={cn('h-1.5 w-1.5 rounded-full', ready ? 'bg-emerald-500' : 'bg-[hsl(var(--shell-border-strong))]')} />
               <span className="truncate">
                 {ready
                   ? lastSnapshotAt
@@ -631,7 +631,7 @@ export function RemoteFleetPage() {
           </div>
         </div>
 
-        <div className="flex h-9 items-center rounded-full bg-muted/70 p-1" role="tablist" aria-label={t('remoteFleet.modes.label')}>
+        <div className="flex h-9 items-center rounded-full border bg-[hsl(var(--shell-surface))] p-1 [border-color:hsl(var(--shell-border))]" role="tablist" aria-label={t('remoteFleet.modes.label')}>
           {REMOTE_FLEET_PAGE_MODES.map((pageMode) => (
             <button
               key={pageMode}
@@ -640,8 +640,8 @@ export function RemoteFleetPage() {
               aria-selected={mode === pageMode}
               onClick={() => setMode(pageMode)}
               className={cn(
-                'h-7 rounded-full px-3 text-xs font-medium text-muted-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                mode === pageMode && 'bg-card text-foreground shadow-sm',
+                'h-7 rounded-full px-3 text-xs font-medium text-[hsl(var(--shell-text-muted))] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                mode === pageMode && 'bg-[hsl(var(--shell-surface-active))] text-foreground',
               )}
             >
               {remoteFleetPageModeLabel(pageMode, t)}
@@ -671,7 +671,7 @@ export function RemoteFleetPage() {
       <div ref={workspaceRef} className="min-h-0 flex-1 overflow-hidden">
         {mode === 'resources' ? (
           !hasFleetData ? (
-            <div className="flex h-full min-h-0 items-center justify-center overflow-y-auto rounded-2xl border border-border/70 bg-card px-6">
+            <div className="flex h-full min-h-0 items-center justify-center overflow-y-auto rounded-2xl border bg-[hsl(var(--shell-surface-muted))] px-6 [border-color:hsl(var(--shell-border))]">
               <FeedbackState
                 state={loading && !ready ? 'loading' : 'empty'}
                 title={loading && !ready
@@ -689,7 +689,7 @@ export function RemoteFleetPage() {
               />
             </div>
           ) : workspaceLayout === 'single' ? (
-            <div className="h-full min-h-0 overflow-hidden rounded-2xl border border-border/70 bg-card">
+            <div className="h-full min-h-0 overflow-hidden rounded-2xl border bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
               {singlePane === 'index' ? (
                 <div ref={singleIndexRef} tabIndex={-1} className="h-full min-h-0 focus:outline-none">
                   <RemoteFleetResourceBrowser
@@ -716,7 +716,7 @@ export function RemoteFleetPage() {
           ) : (
             <div
               className={cn(
-                'grid h-full min-h-0 overflow-hidden rounded-2xl border border-border/70 bg-card',
+                'grid h-full min-h-0 overflow-hidden rounded-2xl border bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]',
                 workspaceLayout === 'wide'
                   ? 'grid-cols-[minmax(27rem,35rem)_minmax(0,1fr)]'
                   : 'grid-cols-[minmax(17rem,21rem)_minmax(0,1fr)]',
@@ -740,7 +740,7 @@ export function RemoteFleetPage() {
             </div>
           )
         ) : (
-          <div className="h-full min-h-0 overflow-hidden rounded-2xl border border-border/70 bg-card">
+          <div className="h-full min-h-0 overflow-hidden rounded-2xl border bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
             <RemoteFleetOperationsSection
               metrics={metrics}
               commands={commands}

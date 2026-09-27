@@ -267,8 +267,8 @@ export function ProvidersSettings() {
   };
 
   return (
-    <Card className="overflow-hidden rounded-lg">
-      <CardHeader className={cn('pb-4', open && 'border-b border-border/70')}>
+    <Card className="overflow-hidden rounded-[1.25rem] bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
+      <CardHeader className={cn('pb-4', open && 'border-b [border-color:hsl(var(--shell-border))]')}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <button
             type="button"
@@ -552,7 +552,7 @@ function ProviderCard({
   };
 
   return (
-    <Card className="overflow-hidden rounded-lg">
+    <Card className="overflow-hidden rounded-[1.25rem] bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
       <CardContent className="p-0">
         <div className={cn('flex items-start justify-between gap-3 px-4 py-3', open && 'border-b border-border/70')}>
           <button
@@ -1072,11 +1072,11 @@ function AddProviderDialog({
   if (typeof document === 'undefined') return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/40 p-4">
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[hsl(var(--shell-scrim))] p-4">
       <section
         role="dialog"
         aria-label={t('aiProviders.dialog.title')}
-        className="max-h-[92vh] w-full max-w-4xl overflow-y-auto overscroll-contain rounded-xl border bg-background p-6 shadow-none [scrollbar-gutter:stable]"
+        className="max-h-[92vh] w-full max-w-4xl overflow-y-auto overscroll-contain rounded-[1.25rem] border bg-[hsl(var(--shell-surface))] p-6 shadow-[var(--shell-shadow-overlay)] [border-color:hsl(var(--shell-border))] [scrollbar-gutter:stable]"
       >
         <header className="flex items-start justify-between gap-4">
           <div>

@@ -15,6 +15,7 @@ type Operation =
   | 'subagents.files.list'
   | 'subagents.displayConfig.get'
   | 'subagents.package.export'
+  | 'subagents.package.exportCloud'
   | 'subagents.package.install'
   | 'subagents.description.set'
   | 'subagents.model.set'
@@ -174,6 +175,7 @@ function isOperation(value: unknown): value is Operation {
     || value === 'subagents.files.list'
     || value === 'subagents.displayConfig.get'
     || value === 'subagents.package.export'
+    || value === 'subagents.package.exportCloud'
     || value === 'subagents.package.install'
     || value === 'subagents.description.set'
     || value === 'subagents.model.set'
@@ -316,11 +318,21 @@ function isInput(
       && isText(value.agentId, 4096)
       && endpoint.runtimeAdapterId === 'openclaw';
   }
+  if (operation === 'subagents.package.exportCloud') {
+    return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'cloudPublicKey', 'cloudKeyId'])
+      && value.kind === 'packageExportCloud'
+      && target.subagentId === value.agentId
+      && isText(value.agentId, 4096)
+      && isText(value.cloudPublicKey, 8192)
+      && isText(value.cloudKeyId, 512)
+      && endpoint.runtimeAdapterId === 'openclaw';
+  }
   if (operation === 'subagents.package.install') {
-    return hasExactKeys(value, ['kind', 'endpoint', 'packagePath'])
+    return hasAllowedKeys(value, ['kind', 'endpoint', 'packagePath', 'cloudMetadata'], ['kind', 'endpoint', 'packagePath'])
       && value.kind === 'packageInstall'
       && target.subagentId === undefined
       && isText(value.packagePath, 4096)
+      && (value.cloudMetadata === undefined || isCloudPackageInstallMetadata(value.cloudMetadata))
       && endpoint.runtimeAdapterId === 'openclaw';
   }
   if (operation === 'subagents.files.get') {
@@ -382,7 +394,7 @@ function isSuccess(value: unknown, operation: Operation): boolean {
     && value.agents.every(isAgent);
   if (operation === 'subagents.files.list') return hasExactKeys(value, ['success', 'files'])
     && Array.isArray(value.files) && value.files.every(isFile);
-  if (operation === 'subagents.package.export') return hasExactKeys(value, ['success', 'package'])
+  if (operation === 'subagents.package.export' || operation === 'subagents.package.exportCloud') return hasExactKeys(value, ['success', 'package'])
     && isPackageExport(value.package);
   if (operation === 'subagents.package.install') return hasExactKeys(value, ['success', 'package'])
     && isPackageInstall(value.package);
@@ -446,6 +458,19 @@ function isPackageInstall(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['agentId'])
     && isText(value.agentId, 4096);
+}
+
+function isCloudPackageInstallMetadata(value: unknown): boolean {
+  return isRecord(value)
+    && hasAllowedKeys(value, ['packageVersionId', 'packageType', 'packageSha256', 'fileName'], ['packageVersionId', 'packageType', 'packageSha256', 'fileName'])
+    && isText(value.packageVersionId, 512)
+    && isText(value.packageType, 128)
+    && isPackageSha256(value.packageSha256)
+    && isText(value.fileName, 512);
+}
+
+function isPackageSha256(value: unknown): boolean {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
 }
 
 function isSkillSelection(value: unknown): boolean {
@@ -545,7 +570,7 @@ function isToolProfile(value: unknown): boolean { return isRecord(value) && hasE
 function isToolGroup(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['groupKey', 'displayName', 'source', 'pluginId', 'toolOptions']) && isText(value.groupKey, 4096) && isText(value.displayName, 4096) && (value.source === 'core' || value.source === 'plugin') && (value.pluginId === null || isText(value.pluginId, 4096)) && Array.isArray(value.toolOptions) && value.toolOptions.every(isToolOption); }
 function isToolOption(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['toolKey', 'displayName', 'optionType', 'description', 'source', 'pluginId', 'optional', 'risk', 'tags', 'defaultProfiles', 'groupKey', 'groupDisplayName'])
+    && hasExactKeys(value, ['toolKey', 'displayName', 'optionType', 'description', 'source', 'pluginId', 'optional', 'risk', 'tags', 'defaultProfiles', 'deniedByGlobalPolicy', 'groupKey', 'groupDisplayName'])
     && isText(value.toolKey, 4096)
     && isText(value.displayName, 4096)
     && (value.optionType === 'tool' || value.optionType === 'group')
@@ -558,6 +583,7 @@ function isToolOption(value: unknown): boolean {
     && value.tags.every((tag) => isText(tag, 4096))
     && Array.isArray(value.defaultProfiles)
     && value.defaultProfiles.every((profile) => isText(profile, 4096))
+    && typeof value.deniedByGlobalPolicy === 'boolean'
     && (value.groupKey === null || isText(value.groupKey, 4096))
     && (value.groupDisplayName === null || isText(value.groupDisplayName, 4096));
 }

@@ -135,7 +135,6 @@ enum AgentKindResponse {
 pub(crate) struct PackageExportResponse {
     agent_id: String,
     file_name: String,
-    package_path: String,
     size: u64,
     exported_at_ms: u64,
 }
@@ -389,6 +388,7 @@ fn tool_option_value(option: &agents::ToolOption) -> Value {
         "optionType": if option.group_key().is_some() { "tool" } else { "group" },
         "description": option.description(), "source": option.source(), "pluginId": option.plugin_id(),
         "optional": option.optional(), "risk": option.risk(), "tags": option.tags(), "defaultProfiles": option.default_profiles(),
+        "deniedByGlobalPolicy": option.denied_by_global_policy(),
         "groupKey": option.group_key(), "groupDisplayName": option.group_display_name(),
     })
 }
@@ -425,7 +425,6 @@ fn package_export(package: agents::PackageExportReceipt) -> PackageExportRespons
     PackageExportResponse {
         agent_id: package.agent_id().to_owned(),
         file_name: package.file_name().to_owned(),
-        package_path: package.package_path().to_owned(),
         size: package.size(),
         exported_at_ms: package.exported_at_ms(),
     }

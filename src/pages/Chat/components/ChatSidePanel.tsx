@@ -1,15 +1,11 @@
 import { memo, useMemo, useSyncExternalStore, type CSSProperties } from 'react';
-import { AlertCircle, ArrowLeft, Copy, Eye, FileCode2, FolderOpen, FolderTree, GitCompare, ListTodo, Loader2, Maximize2, Minimize2, PanelRightClose, RefreshCw, SquareActivity } from 'lucide-react';
+import { ArrowLeft, Copy, Eye, FileCode2, FolderOpen, FolderTree, GitCompare, Maximize2, Minimize2, PanelRight, SquareActivity } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { useGatewayStore } from '@/stores/gateway';
-import { useChatStore } from '@/stores/chat';
-import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
-import type { ChatSidePanelMode } from '../chat-workspace-layout';
+import type { ChatSidePanelMode } from '@/components/layout/chat-workspace-layout';
 import {
   getChatRuntimeSurfaceSnapshot,
   subscribeChatRuntimeSurface,
@@ -25,8 +21,6 @@ import type { WorkspaceFileContext } from '@/lib/host-api';
 import type {
   SessionIdentity,
 } from '../../../types/desktop/runtime-address';
-import type { DerivedPlanStatus } from '@/stores/chat/task-snapshot-store';
-import type { TaskInboxTask } from '../useChatSidePanelController';
 
 interface ChatSidePanelProps {
   mode: ChatSidePanelMode;
@@ -36,13 +30,6 @@ interface ChatSidePanelProps {
   onTabChange: (tab: ChatSidePanelTab) => void;
   onClose: () => void;
   onToggleArtifactWorkbenchFullscreen: () => void;
-  unfinishedTaskCount: number;
-  taskInboxTasks: TaskInboxTask[];
-  taskInboxLoading: boolean;
-  taskInboxError: string | null;
-  onRefreshTaskInbox: () => Promise<void>;
-  onClearTaskInboxError: () => void;
-  derivedPlanStatus: DerivedPlanStatus;
   artifactGroups: Array<{
     graphItemKey: string;
     anchorItemKey?: string;
@@ -73,31 +60,7 @@ const SIDE_PANEL_TOP_TAB_MIN_ITEM_WIDTH = 78;
 const SIDE_PANEL_SECTION_MIN_ITEM_WIDTH = 76;
 const SIDE_PANEL_CONTENT_PAD_X = 'px-3';
 const SIDE_PANEL_CONTENT_PAD_Y = 'py-3';
-const SIDE_PANEL_ROW_HOVER_CLASSNAME = 'transition-colors hover:bg-secondary hover:text-foreground';
 const SIDE_PANEL_SEGMENT_TRIGGER_CLASSNAME = 'min-w-0 rounded-full border-0 bg-transparent text-xs font-medium text-muted-foreground !shadow-none transition-colors hover:bg-secondary hover:text-foreground focus-visible:!ring-0 focus-visible:!ring-offset-0 data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:!shadow-none';
-
-function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
-  if (status === 'in_progress') {
-    return 'default';
-  }
-  if (status === 'pending') {
-    return 'secondary';
-  }
-  if (status === 'completed') {
-    return 'success';
-  }
-  return 'destructive';
-}
-
-function statusToPercent(status: string): number {
-  if (status === 'completed') {
-    return 100;
-  }
-  if (status === 'in_progress') {
-    return 50;
-  }
-  return 0;
-}
 
 export const ChatSidePanel = memo(function ChatSidePanel({
   mode,
@@ -107,13 +70,6 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   onTabChange,
   onClose,
   onToggleArtifactWorkbenchFullscreen,
-  unfinishedTaskCount,
-  taskInboxTasks,
-  taskInboxLoading,
-  taskInboxError,
-  onRefreshTaskInbox,
-  onClearTaskInboxError,
-  derivedPlanStatus,
   artifactGroups,
   artifactFocusedGroupKey,
   artifactFocusedGroupFiles,
@@ -131,17 +87,11 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   sessionIdentity,
 }: ChatSidePanelProps) {
   const { t } = useTranslation('chat');
-  const gatewayStatus = useGatewayStore((state) => state.status);
-  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
-  const isGatewayRunning = isGatewayOperational(gatewayStatus);
-  const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
-  const openTaskSession = useChatStore((state) => state.openTaskSession);
   const runtimeSurface = useSyncExternalStore(
     subscribeChatRuntimeSurface,
     getChatRuntimeSurfaceSnapshot,
     getChatRuntimeSurfaceSnapshot,
   );
-  const loading = taskInboxLoading;
   const panelStyle = {
     ['--chat-side-panel-width' as string]: `${width}px`,
   } as CSSProperties;
@@ -154,9 +104,8 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   const artifactFocusedGeneratedFile = artifactFocusedGeneratedIndex >= 0
     ? artifactFiles[artifactFocusedGeneratedIndex]
     : null;
-  const topActionClusterWidth = activeTab === 'tasks' ? 72 : 32;
-  const topTabsAvailableWidth = Math.max(0, width - 24 - 8 - topActionClusterWidth);
-  const topTabsPerItemWidth = topTabsAvailableWidth / 3;
+  const topTabsAvailableWidth = Math.max(0, width - 24 - 8 - 32);
+  const topTabsPerItemWidth = topTabsAvailableWidth / 2;
   const sectionTabsAvailableWidth = Math.max(0, width - 32 - 8);
   const sectionTabsPerItemWidth = sectionTabsAvailableWidth / 3;
   const compactTopTabs = topTabsPerItemWidth < SIDE_PANEL_TOP_TAB_MIN_ITEM_WIDTH;
@@ -196,10 +145,6 @@ export const ChatSidePanel = memo(function ChatSidePanel({
         error: error instanceof Error ? error.message : String(error),
       }));
     }
-  };
-
-  const handleOpenSession = (task: TaskInboxTask) => {
-    openTaskSession(task.sourceSessionKey);
   };
 
   const handleOpenRelativeArtifactFile = (offset: -1 | 1) => {
@@ -446,22 +391,9 @@ export const ChatSidePanel = memo(function ChatSidePanel({
             <TabsList
               data-compact={compactTopTabs ? 'true' : 'false'}
               className={cn(
-                'grid h-8 min-h-0 flex-1 grid-cols-3 gap-1 overflow-visible rounded-none border-0 bg-transparent p-0 text-foreground shadow-none',
+                'grid h-8 min-h-0 flex-1 grid-cols-2 gap-1 overflow-visible rounded-none border-0 bg-transparent p-0 text-foreground shadow-none',
               )}
             >
-              <TabsTrigger
-                value="tasks"
-                data-testid="chat-side-panel-tab-tasks"
-                title={t('taskInbox.title')}
-                aria-label={t('taskInbox.title')}
-                className={cn(
-                  `h-8 ${SIDE_PANEL_SEGMENT_TRIGGER_CLASSNAME}`,
-                  compactTopTabs ? 'justify-center gap-0 px-0' : 'justify-center gap-1.5 px-2.5',
-                )}
-              >
-                <ListTodo className="h-3.5 w-3.5" />
-                {!compactTopTabs ? <span className="truncate">{t('taskInbox.shortTitle')}</span> : null}
-              </TabsTrigger>
               <TabsTrigger
                 value="artifacts"
                 data-testid="chat-side-panel-tab-artifacts"
@@ -492,114 +424,15 @@ export const ChatSidePanel = memo(function ChatSidePanel({
             <Button
               variant="ghost"
               size="icon"
-              aria-label={t('taskInbox.collapse')}
+              aria-label={t('toolbar.closeSidePanel')}
               className="h-8 w-8 rounded-md border border-transparent bg-transparent text-muted-foreground shadow-none hover:bg-secondary hover:text-foreground"
               onClick={onClose}
-              title={t('taskInbox.collapse')}
+              title={t('toolbar.closeSidePanel')}
             >
-              <PanelRightClose className="h-4 w-4" />
+              <PanelRight className="h-4 w-4" />
             </Button>
           </div>
         </div>
-
-        <TabsContent value="tasks" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col">
-          <div className={cn('flex items-start justify-between gap-3 border-b border-border/40', SIDE_PANEL_CONTENT_PAD_X, SIDE_PANEL_CONTENT_PAD_Y)}>
-            <div className="min-w-0">
-              <p className="text-sm font-medium text-foreground">{t('taskInbox.title')}</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {t('taskInbox.unfinishedCount', { count: unfinishedTaskCount })}
-              </p>
-            </div>
-            {derivedPlanStatus && unfinishedTaskCount > 0 ? (
-              <Badge variant={derivedPlanStatus === 'finished' ? 'success' : 'secondary'}>
-                {t(`taskInbox.planStatus.${derivedPlanStatus}`)}
-              </Badge>
-            ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 shrink-0 rounded-md border border-border/40 bg-muted/30 text-muted-foreground hover:bg-secondary hover:text-foreground"
-              onClick={() => void onRefreshTaskInbox()}
-              disabled={!isGatewayRunning || loading}
-              title={t('taskInbox.refresh')}
-              aria-label={t('taskInbox.refresh')}
-            >
-              <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
-            </Button>
-          </div>
-
-          <div className={cn('flex-1 space-y-3 overflow-y-auto', SIDE_PANEL_CONTENT_PAD_X, SIDE_PANEL_CONTENT_PAD_Y)}>
-            {!isGatewayRunning ? (
-              <div className={cn(
-                'rounded-lg border px-3 py-2 text-xs',
-                gatewayPreparing
-                  ? 'border-border bg-muted/30 text-muted-foreground'
-                  : 'border-yellow-400/45 bg-yellow-50/72 text-yellow-800 dark:border-yellow-700/60 dark:bg-yellow-950/20 dark:text-yellow-200',
-              )}>
-                <span className="inline-flex items-center gap-2">
-                  {gatewayPreparing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                  {gatewayPreparing ? t('taskInbox.gatewayPreparing') : t('taskInbox.gatewayStopped')}
-                </span>
-              </div>
-            ) : null}
-
-            {taskInboxError ? (
-              <div className="rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-xs text-destructive">
-                <div className="flex items-start gap-2">
-                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <div className="min-w-0 flex-1">
-                    <p className="break-words">{taskInboxError}</p>
-                    <button
-                      type="button"
-                      onClick={onClearTaskInboxError}
-                      className="mt-1 text-[11px] underline underline-offset-2 hover:opacity-80"
-                    >
-                      {t('common:actions.dismiss')}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ) : null}
-
-            {!loading && taskInboxTasks.length === 0 ? (
-              <p className="rounded-lg border border-border/60 bg-muted/25 px-3 py-8 text-center text-sm text-muted-foreground">
-                {t('taskInbox.empty')}
-              </p>
-            ) : null}
-
-            {taskInboxTasks.length > 0 ? (
-              <div className="divide-y divide-border/35">
-                {taskInboxTasks.map((task) => {
-                  return (
-                      <div key={`${task.sourceSessionKey}:${task.id}`} className="py-2">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenSession(task)}
-                        className={cn('w-full rounded-lg px-2 py-2 text-left', SIDE_PANEL_ROW_HOVER_CLASSNAME)}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0 flex-1">
-                            <p className="line-clamp-2 text-sm font-medium">{task.subject || t('taskInbox.untitledTask')}</p>
-                            <p className="mt-1 truncate text-[11px] text-muted-foreground">{task.id}</p>
-                          </div>
-                          <Badge variant={statusVariant(task.status)}>
-                            {t(`taskInbox.status.${task.status}`, { defaultValue: task.status })}
-                          </Badge>
-                        </div>
-
-                        <div className="mt-2 flex items-center justify-between gap-3">
-                          <p className="text-xs text-muted-foreground">{statusToPercent(task.status)}%</p>
-                          <span className="text-xs text-muted-foreground">{t('taskInbox.openSession')}</span>
-                        </div>
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null}
-          </div>
-        </TabsContent>
 
         <TabsContent value="artifacts" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col">
           <div className="border-b border-border/40 px-3 py-2">

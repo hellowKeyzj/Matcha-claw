@@ -44,11 +44,25 @@ function loadSkillEntries(workspaceDir, opts) {
 		getSkillsSnapshotVersion(workspaceDir)
 	]);
 	const managedSkillsDir = opts?.managedSkillsDir ?? path.join(CONFIG_DIR, "skills");
+	const bundledSkills = bundledSkillsDir ? loadSkills({ dir: bundledSkillsDir, source: "openclaw-bundled" }) : [];
+	const custodianSkills = custodianSkillsDir ? loadSkills({ dir: custodianSkillsDir, source: "openclaw-custodian" }) : [];
+	const extraSkills = [
+		...extraDirs.flatMap((dir) => loadSkills({ dir: resolveUserPath(dir), source: "openclaw-extra" })),
+		...loadGeneratedPluginSkillRecords({ pluginSkillsDir, pluginSkillRoots, source: "openclaw-extra", limits })
+	];
 	const managedSkills = workspaceOnly ? [] : loadSkills({
 		dir: managedSkillsDir,
 		source: "openclaw-managed"
 	});
+	const workshopSkills = !workspaceOnly && opts?.config && opts.agentId ? loadSkills({ dir: resolveWorkshopSkillsDir(opts.config, opts.agentId), source: "openclaw-workshop" }) : [];
+	const personalAgentsSkills = workspaceOnly || !isDefaultStateDir() ? [] : loadSkills({ dir: personalAgentsSkillsDir, source: "agents-skills-personal" });
+	const projectAgentsSkills = workspaceOnly ? [] : loadSkills({ dir: projectAgentsSkillsDir, source: "agents-skills-project" });
+	const workspaceSkills = loadSkills({ dir: workspaceSkillsDir, source: "openclaw-workspace" });
+	for (const record of extraSkills) mergeRecord(record);
 	for (const record of managedSkills) mergeRecord(record);
+	for (const record of personalAgentsSkills) mergeRecord(record);
+	for (const record of projectAgentsSkills) mergeRecord(record);
+	for (const record of workspaceSkills) mergeRecord(record);
 }
 `;
 
@@ -312,6 +326,17 @@ function seedDistFile(openclawDir: string, fileName: string, source: string): st
   return filePath;
 }
 
+function expectSealedSkillsFilteredByOrdinaryRecords(loaderSource: string): void {
+  expect(loaderSource).toContain('function resolveLoadedSkillRecordKey(record)');
+  expect(loaderSource).toContain('const ordinarySkillKeys = new Set([');
+  for (const records of ['bundledSkills', 'custodianSkills', 'extraSkills', 'managedSkills', 'workshopSkills', 'personalAgentsSkills', 'projectAgentsSkills', 'workspaceSkills']) {
+    expect(loaderSource).toContain(`...${records}`);
+  }
+  expect(loaderSource).toContain('!ordinarySkillKeys.has(resolveLoadedSkillRecordKey(record))');
+  expect(loaderSource.indexOf('const workspaceSkills = loadSkills({ dir: workspaceSkillsDir, source: "openclaw-workspace" });')).toBeLessThan(loaderSource.indexOf('const ordinarySkillKeys = new Set(['));
+  expect(loaderSource.indexOf('for (const record of sealedSkills) mergeRecord(record);')).toBeLessThan(loaderSource.indexOf('for (const record of extraSkills) mergeRecord(record);'));
+}
+
 function seedOpenClawBundleFixtures(openclawDir: string): {
   readFile: string;
   loaderFile: string;
@@ -410,8 +435,7 @@ describe('openclaw bundle patches', () => {
     expect(loaderSource).toContain('function loadMatchaSealedSkillRecords(');
     expect(loaderSource).toContain('metadata: JSON.stringify({ openclaw: { skillKey } })');
     expect(loaderSource).not.toContain('metadata: JSON.stringify({ skillKey })');
-    expect(loaderSource).toContain('const managedSkillKeys = new Set(managedSkills.map((record) => resolveSkillKey(record.skill, record)));');
-    expect(loaderSource.indexOf('for (const record of sealedSkills) mergeRecord(record);')).toBeLessThan(loaderSource.indexOf('for (const record of managedSkills) mergeRecord(record);'));
+    expectSealedSkillsFilteredByOrdinaryRecords(loaderSource);
     expect(workspaceSource).toContain('function loadMatchaSealedAgentBootstrapFile(');
     expect(workspaceSource).toContain('MATCHA_SEALED_AGENT_EXTENSION = ".matcha-agentpkg"');
     expect(workspaceSource).toContain('function matchaSealedAgentFilenames()');
@@ -444,12 +468,12 @@ describe('openclaw bundle patches', () => {
       fs.readFileSync(loaderFile, 'utf8')
         .replace('metadata: JSON.stringify({ openclaw: { skillKey } })', 'metadata: JSON.stringify({ skillKey })')
         .replace(
-          'for (const record of sealedSkills) mergeRecord(record);\n\tfor (const record of managedSkills) mergeRecord(record);',
-          'for (const record of managedSkills) mergeRecord(record);\n\tfor (const record of sealedSkills) mergeRecord(record);',
+          'for (const record of sealedSkills) mergeRecord(record);\n\tfor (const record of extraSkills) mergeRecord(record);',
+          'for (const record of extraSkills) mergeRecord(record);',
         )
         .replace(
+          'const ordinarySkillKeys = new Set([\n\t\t...bundledSkills,\n\t\t...custodianSkills,\n\t\t...extraSkills,\n\t\t...managedSkills,\n\t\t...workshopSkills,\n\t\t...personalAgentsSkills,\n\t\t...projectAgentsSkills,\n\t\t...workspaceSkills\n\t].map(resolveLoadedSkillRecordKey));\n\tconst sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir).filter((record) => !ordinarySkillKeys.has(resolveLoadedSkillRecordKey(record)));',
           'const managedSkillKeys = new Set(managedSkills.map((record) => resolveSkillKey(record.skill, record)));\n\tconst sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir).filter((record) => !managedSkillKeys.has(resolveSkillKey(record.skill, record)));',
-          'const sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir);',
         ),
     );
 
@@ -465,8 +489,7 @@ describe('openclaw bundle patches', () => {
     })]);
     expect(loaderSource).toContain('metadata: JSON.stringify({ openclaw: { skillKey } })');
     expect(loaderSource).not.toContain('metadata: JSON.stringify({ skillKey })');
-    expect(loaderSource).toContain('const managedSkillKeys = new Set(managedSkills.map((record) => resolveSkillKey(record.skill, record)));');
-    expect(loaderSource.indexOf('for (const record of sealedSkills) mergeRecord(record);')).toBeLessThan(loaderSource.indexOf('for (const record of managedSkills) mergeRecord(record);'));
+    expectSealedSkillsFilteredByOrdinaryRecords(loaderSource);
   });
 
   it('keeps OpenClaw sealed skill patch idempotent', () => {

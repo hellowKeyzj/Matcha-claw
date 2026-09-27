@@ -417,8 +417,8 @@ impl TeamRunOwner {
             .facts()
             .team(team_id)
             .ok_or(StoreFault::InvalidFacts)?;
-        let (template, layout) = persisted_graph_template(store.facts(), team_id)
-            .unwrap_or_else(|| {
+        let (template, layout) =
+            persisted_graph_template(store.facts(), team_id).unwrap_or_else(|| {
                 (
                     default_graph_template(team_id, team.definition().name()),
                     GraphLayout::empty(),
@@ -1346,7 +1346,12 @@ fn persisted_graph_template(
     facts
         .runs()
         .filter(|run| run.team() == team_id)
-        .map(|run| (run.graph().definition().clone(), run.graph().layout().clone()))
+        .map(|run| {
+            (
+                run.graph().definition().clone(),
+                run.graph().layout().clone(),
+            )
+        })
         .next()
 }
 

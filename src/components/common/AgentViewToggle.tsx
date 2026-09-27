@@ -13,7 +13,7 @@ export function AgentViewToggle({
   listLabel: string;
 }) {
   return (
-    <div className="inline-flex shrink-0 gap-1 rounded-lg border border-border p-1">
+    <div className="inline-flex shrink-0 gap-1 rounded-lg border bg-[hsl(var(--shell-surface-muted))] p-1 [border-color:hsl(var(--shell-border))]">
       {([
         ['grid', LayoutGrid, gridLabel],
         ['list', List, listLabel],
@@ -26,8 +26,8 @@ export function AgentViewToggle({
           title={label}
           onClick={() => onChange(view)}
           className={cn(
-            'flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none',
-            value === view && 'bg-accent text-foreground',
+            'flex size-8 items-center justify-center rounded-md text-[hsl(var(--shell-text-muted))] transition-colors hover:bg-[hsl(var(--shell-surface-hover))] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none',
+            value === view && 'bg-[hsl(var(--shell-surface))] text-foreground',
           )}
         >
           <Icon className="size-4" aria-hidden="true" />

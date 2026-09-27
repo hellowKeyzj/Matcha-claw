@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
-import { Bot, CheckCircle2, FileCode2, Flag, GitMerge, UserCheck, Zap, type LucideIcon } from 'lucide-react';
+import { Bot, CheckCircle2, FileCode2, Flag, GitMerge, Plus, UserCheck, Zap, type LucideIcon } from 'lucide-react';
 import { StableScrollArea } from '@/components/scroll';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import type {
@@ -26,6 +26,7 @@ type TeamRunGraphCanvasLabels = {
   workflowCanvas: string;
   workflowEdges: string;
   nodePalette: string;
+  nodePaletteTitle: string;
   nodeConfiguration: string;
   nodeConfigurationDescription: string;
   edgeConfiguration: string;
@@ -388,6 +389,71 @@ function positionNodes(
     };
     return { ...node, x: position.x, y: position.y };
   });
+}
+
+type NodePaletteControlProps = {
+  labels: Pick<TeamRunGraphCanvasLabels, 'nodePalette' | 'nodePaletteTitle' | 'nodePaletteDescriptions'>;
+  isOpen: boolean;
+  isSaving: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  onAddNode: (kind: TeamGraphCanvasNodeKind) => void | Promise<void>;
+};
+
+function NodePaletteControl({ labels, isOpen, isSaving, onToggle, onClose, onAddNode }: NodePaletteControlProps) {
+  return (
+    <div className="pointer-events-none absolute left-4 top-4 z-30">
+      <div
+        className="pointer-events-auto"
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.stopPropagation();
+            onClose();
+          }
+        }}
+      >
+        <button
+          type="button"
+          className="flex h-9 items-center gap-2 rounded-full border border-border/80 bg-card/95 px-3 text-xs font-medium text-foreground shadow-lg shadow-slate-950/15 transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+          onClick={onToggle}
+          disabled={isSaving}
+          aria-expanded={isOpen}
+        >
+          <Plus className="h-3.5 w-3.5" />
+          <span>{labels.nodePalette}</span>
+        </button>
+        {isOpen ? (
+          <div className="mt-2 w-[19rem] rounded-2xl border border-border/80 bg-card p-1.5 shadow-xl shadow-slate-950/20">
+            <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">{labels.nodePaletteTitle}</div>
+            <div className="grid gap-0.5">
+              {NODE_PALETTE.map((item) => {
+                const visual = NODE_VISUALS[item.kind];
+                const PaletteIcon = visual.Icon;
+                return (
+                  <button
+                    key={item.kind}
+                    type="button"
+                    title={`${item.title}: ${labels.nodePaletteDescriptions[item.kind]}`}
+                    className="group flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left text-foreground transition hover:bg-muted/70 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={() => { void onAddNode(item.kind); }}
+                    disabled={isSaving}
+                  >
+                    <span className={`grid h-8 w-8 shrink-0 place-items-center border border-border/90 ${visual.iconClassName} ${visual.iconShape}`}>
+                      <PaletteIcon className={`h-3.5 w-3.5 ${item.kind === 'join' ? '-rotate-45' : ''}`} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-xs font-semibold tracking-tight">{item.title}</span>
+                      <span className="mt-0.5 block text-[10px] leading-snug text-muted-foreground">{labels.nodePaletteDescriptions[item.kind]}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 function createEdgePath(source: PositionedNode, target: PositionedNode, sourceWidth: number, sourceHeight: number, targetHeight: number): string {
@@ -872,6 +938,7 @@ export function TeamRunGraphCanvas({
   const [isSaving, setIsSaving] = useState(false);
   const [copiedWebhookPublicUrl, setCopiedWebhookPublicUrl] = useState(false);
   const [connectionDraft, setConnectionDraft] = useState<ConnectionDraft | null>(null);
+  const [isNodePaletteOpen, setNodePaletteOpen] = useState(false);
   const [draftPositions, setDraftPositions] = useState<Record<string, { x: number; y: number }>>({});
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [nodeSizes, setNodeSizes] = useState<Record<string, NodeSize>>({});
@@ -1293,6 +1360,7 @@ export function TeamRunGraphCanvas({
     ])) {
       setDraftPositions((current) => ({ ...current, [nodeId]: position }));
       setSelectedNodeId(nodeId);
+      setNodePaletteOpen(false);
     }
   };
 
@@ -1394,12 +1462,15 @@ export function TeamRunGraphCanvas({
         </div>
       </div>
 
-      <div className="grid gap-3 2xl:grid-cols-[minmax(0,1fr)_18rem]">
+      {formError ? <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{formError}</div> : null}
+
+      <div className="relative">
         <StableScrollArea data-team-graph-canvas="true" className="relative min-h-[520px] overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner">
           <div
             aria-label={labels.workflowCanvas}
             className="relative rounded-xl"
             onClick={() => {
+              setNodePaletteOpen(false);
               setSelectedEdgeId(null);
               setHoveredEdgeId(null);
               if (configurationSheet?.kind === 'edge') setConfigurationSheet(null);
@@ -1573,38 +1644,14 @@ export function TeamRunGraphCanvas({
           </div>
         </StableScrollArea>
 
-        <aside className="space-y-3">
-          <div className="rounded-xl border border-border/80 bg-card p-2.5 shadow-sm">
-            <div className="text-xs font-medium">{labels.nodePalette}</div>
-            <StableScrollArea className="mt-2 max-h-[14rem] space-y-1.5 overflow-y-auto pr-1 text-xs">
-              {NODE_PALETTE.map((item) => {
-                const visual = NODE_VISUALS[item.kind];
-                const PaletteIcon = visual.Icon;
-                return (
-                  <button
-                    key={item.kind}
-                    type="button"
-                    className={`group relative flex w-full items-center gap-2 overflow-hidden rounded-xl border px-2.5 py-2 text-left text-foreground shadow-sm shadow-slate-900/10 transition hover:shadow-md hover:shadow-slate-900/15 disabled:cursor-not-allowed disabled:opacity-60 ${visual.paletteClassName}`}
-                    onClick={() => void handleAddNode(item.kind)}
-                    disabled={isSaving}
-                  >
-                    <span className={`absolute inset-y-0 left-0 w-0.5 ${visual.accentClassName}`} />
-                    <span className={`grid h-8 w-8 shrink-0 place-items-center border border-border/90 ${visual.iconClassName} ${visual.iconShape}`}>
-                      <PaletteIcon className={`h-3.5 w-3.5 ${item.kind === 'join' ? '-rotate-45' : ''}`} />
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-xs font-semibold tracking-tight">{item.title}</span>
-                      <span className="mt-0.5 block text-[10px] leading-snug text-muted-foreground">{labels.nodePaletteDescriptions[item.kind]}</span>
-                    </span>
-                  </button>
-                );
-              })}
-            </StableScrollArea>
-          </div>
-
-
-          {formError ? <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{formError}</div> : null}
-        </aside>
+        <NodePaletteControl
+          labels={labels}
+          isOpen={isNodePaletteOpen}
+          isSaving={isSaving}
+          onToggle={() => setNodePaletteOpen((open) => !open)}
+          onClose={() => setNodePaletteOpen(false)}
+          onAddNode={(kind) => { void handleAddNode(kind); }}
+        />
       </div>
 
       <Sheet open={configurationSheet !== null} onOpenChange={(open) => { if (!open) setConfigurationSheet(null); }}>
