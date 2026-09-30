@@ -241,191 +241,297 @@ function patchMatchaSealedSkills(openclawDir) {
     ],
   });
 
-  const readChanged = patchSealedSkillReadTool(readFile, transcriptWriteContextFile, patchId);
+  const contextChanged = patchSealedSkillContext(distDir, readFile, transcriptWriteContextFile, agentRunRegistryFile, patchId);
   const loaderChanged = patchSealedSkillLoader(loaderFile, patchId);
   const agentChanged = patchSealedAgentBootstrap(workspaceFile, sessionAccessorFile, patchId);
   const cacheChanged = patchBootstrapCacheSessionKey(bootstrapCacheFile, patchId);
   const headerChanged = patchModelFetchMeteringHeader(providerFetchFile, sessionAccessorFile, agentRunRegistryFile, transcriptWriteContextFile, patchId);
-  return readChanged || loaderChanged || agentChanged || cacheChanged || headerChanged
-    ? { status: 'applied', detail: `${path.basename(readFile)}, ${path.basename(loaderFile)}, ${path.basename(workspaceFile)}, ${path.basename(bootstrapCacheFile)}, ${path.basename(providerFetchFile)}` }
+  return contextChanged.length || loaderChanged || agentChanged || cacheChanged || headerChanged
+    ? { status: 'applied', detail: [...new Set([...contextChanged, loaderFile, workspaceFile, bootstrapCacheFile, providerFetchFile])].map((file) => path.basename(file)).join(', ') }
     : { status: 'clean', detail: 'already patched' };
 }
 
-function patchSealedSkillReadTool(filePath, transcriptWriteContextFile, patchId) {
-  let source = readText(filePath);
-  let changed = false;
-  const importPatch = ensureNamedImport(
-    source,
-    filePath,
-    transcriptWriteContextFile,
-    'getOwnedSessionTranscriptWriterFence',
-    'getOwnedSessionTranscriptWriterFence',
-    patchId,
-  );
-  source = importPatch.source;
-  changed ||= importPatch.changed;
-  const meteringHelper = `${MATCHA_METERING_BINDING_HELPERS}
-${MATCHA_METERING_RUNTIME_HELPERS}
-function rememberMatchaSealedSkillMeteringBinding(value) {
-  const bindings = normalizeMatchaMeteringBindings(value);
-  if (bindings.length === 0) return;
-  const runId = getOwnedSessionTranscriptWriterFence()?.expectedWriterRunId?.trim();
-  if (!runId) return;
-  const state = matchaMeteringState();
+const MATCHA_SEALED_SKILL_CONTEXT_HELPERS = `const SEALED_SKILL_PREFIX = 'matcha-skill://';
+const CARRY_TYPE = 'matcha.sealedSkills';
+const sealedModelMessages = new WeakSet();
+const sealedModelRuns = new Set();
+const READ_ERROR = 'Sealed skill is unavailable. Check access and read the skill again.';
+
+function sealedSkillError() {
+  return Object.assign(new Error(READ_ERROR), { code: 'MATCHA_SEALED_SKILL_UNAVAILABLE' });
+}
+
+function parseSealedSkillPath(filePath) {
+  if (typeof filePath !== 'string' || !filePath.startsWith(SEALED_SKILL_PREFIX)) return;
+  try {
+    const rest = filePath.slice(SEALED_SKILL_PREFIX.length);
+    const slash = rest.indexOf('/');
+    if (slash < 1) return;
+    const skillKey = decodeURIComponent(rest.slice(0, slash));
+    const path = rest.slice(slash + 1).split('/').map(decodeURIComponent).join('/');
+    if (!skillKey || !path || path.split('/').some((part) => !part || part === '.' || part === '..' || /[\\\\\\0]/u.test(part))) return;
+    return { skillKey, path };
+  } catch {
+    return;
+  }
+}
+
+function matchaSealedSkillKeys(skills) {
+  return new Set((skills ?? []).flatMap((skill) => {
+    const ref = parseSealedSkillPath(skill.filePath);
+    return ref ? [ref.skillKey] : [];
+  }));
+}
+
+function isSealedSkillRef(ref) {
+  return ref && typeof ref === 'object' && !Array.isArray(ref)
+    && Object.keys(ref).length === 6 && ref.type === 'matcha.sealedSkill'
+    && typeof ref.skillKey === 'string' && typeof ref.path === 'string'
+    && parseSealedSkillPath(SEALED_SKILL_PREFIX + encodeURIComponent(ref.skillKey) + '/' + ref.path.split('/').map(encodeURIComponent).join('/'))
+    && typeof ref.packageSha256 === 'string' && /^[a-f0-9]{64}$/u.test(ref.packageSha256)
+    && Number.isSafeInteger(ref.contentBytes) && ref.contentBytes >= 0
+    && Number.isSafeInteger(ref.contentTokens) && ref.contentTokens >= 0;
+}
+
+function readSealedSkillRef(message) {
+  if (message?.role !== 'toolResult' || message.toolName !== 'read' || message.isError === true
+    || !Array.isArray(message.content) || message.content.length !== 1) return;
+  const block = message.content[0];
+  if (!block || block.type !== 'text' || typeof block.text !== 'string' || Object.keys(block).length !== 2) return;
+  try {
+    const ref = JSON.parse(block.text);
+    return isSealedSkillRef(ref) && JSON.stringify(ref) === block.text ? ref : undefined;
+  } catch {
+    return;
+  }
+}
+
+function matchaSealedSkillRefs(message) {
+  const ref = readSealedSkillRef(message);
+  if (ref) return [ref];
+  if (message?.role !== 'custom' || message.customType !== CARRY_TYPE) return [];
+  const refs = message.details?.matchaSealedSkills;
+  return Array.isArray(refs) && refs.every(isSealedSkillRef) ? refs : [];
+}
+
+function refKey(ref) {
+  return JSON.stringify([ref.skillKey, ref.path, ref.packageSha256]);
+}
+
+function collectMatchaSealedSkillRefs(messages) {
+  const refs = new Map();
+  for (const message of messages) for (const ref of matchaSealedSkillRefs(message)) refs.set(refKey(ref), ref);
+  return [...refs.values()];
+}
+
+function matchaSealedSkillTokenPressure(message) {
+  return matchaSealedSkillRefs(message).reduce((sum, ref) => sum + ref.contentTokens, 0);
+}
+
+function currentRunId() {
+  return getOwnedSessionTranscriptWriterFence()?.expectedWriterRunId?.trim();
+}
+
+function rememberMeteringBinding(value, runId) {
+  if (!runId || value == null) return;
+  const stateKey = Symbol.for('matcha.openclaw.packageMetering');
+  const state = globalThis[stateKey] ??= { skillBindingsByRunId: new Map() };
   const current = state.skillBindingsByRunId.get(runId) ?? [];
-  const seen = /* @__PURE__ */ new Set(current.map((binding) => keyMatchaMeteringBinding(binding)).filter(Boolean));
-  for (const binding of bindings) {
-    const key = keyMatchaMeteringBinding(binding);
-    if (key && !seen.has(key)) {
+  const seen = new Set(current.map(JSON.stringify));
+  for (const binding of Array.isArray(value) ? value : [value]) {
+    const cloned = typeof binding === 'string' ? binding.trim() : binding && typeof binding === 'object' ? JSON.parse(JSON.stringify(binding)) : undefined;
+    if (!cloned) continue;
+    const key = JSON.stringify(cloned);
+    if (!seen.has(key)) {
       seen.add(key);
-      current.push(binding);
+      current.push(cloned);
     }
   }
   state.skillBindingsByRunId.set(runId, current);
-}`;
-  const helper = `
-${meteringHelper}
-const MATCHA_SEALED_SKILL_PREFIX = "matcha-skill://";
-function matchaSealedSkillEndpoint() {
-  const endpoint = process.env.MATCHA_SEALED_ENDPOINT?.trim();
-  const token = process.env.MATCHA_SEALED_TOKEN?.trim();
-  const runtime = process.env.MATCHA_SEALED_RUNTIME?.trim();
-  if (!endpoint || !token || runtime !== "openclaw") throw Object.assign(new Error("Matcha sealed skill runtime is unavailable"), { code: "ENOENT" });
-  return { endpoint: endpoint.replace(/\\/+$/u, ""), token, runtime };
-}
-function encodeMatchaSealedPath(pathValue) {
-  return pathValue.split("/").map((part) => encodeURIComponent(part)).join("/");
-}
-function matchaSealedSkillRequestPath(filePath) {
-  if (!filePath.startsWith(MATCHA_SEALED_SKILL_PREFIX)) return;
-  const rest = filePath.slice(MATCHA_SEALED_SKILL_PREFIX.length);
-  const slash = rest.indexOf("/");
-  if (slash <= 0 || slash === rest.length - 1) return;
-  const skillKey = decodeURIComponent(rest.slice(0, slash));
-  const relativePath = rest.slice(slash + 1).split("/").map((part) => decodeURIComponent(part)).join("/");
-  if (!skillKey || !relativePath) return;
-  return "/api/sealed-skills/read/" + encodeURIComponent(skillKey) + "/" + encodeMatchaSealedPath(relativePath);
-}
-async function readMatchaSealedSkillFile(filePath, signal) {
-  const requestPath = matchaSealedSkillRequestPath(filePath);
-  if (!requestPath) throw Object.assign(new Error("Invalid sealed skill path: " + filePath), { code: "ENOENT" });
-  const sealed = matchaSealedSkillEndpoint();
-  const response = await fetch(sealed.endpoint + requestPath, {
-    method: "GET",
-    signal,
-    headers: {
-      "x-matcha-sealed-token": sealed.token,
-      "x-matcha-sealed-runtime": sealed.runtime
-    }
-  });
-  if (response.status === 404) throw Object.assign(new Error("Virtual skill file not found: " + filePath), { code: "ENOENT" });
-  if (!response.ok) throw new Error("Sealed skill read failed: " + response.status);
-  const body = await response.json();
-  if (!body || typeof body.contentBase64 !== "string") throw new Error("Sealed skill read returned an invalid payload");
-  rememberMatchaSealedSkillMeteringBinding(body.meteringBinding);
-  return Buffer.from(body.contentBase64, "base64").toString("utf8");
-}
-`;
-  if (!source.includes('function readMatchaSealedSkillFile(')) {
-    source = replaceOnce(
-      source,
-      'function wrapReadToolWithSkillContent(tool, skills, options) {',
-      `${helper}\nfunction wrapReadToolWithSkillContent(tool, skills, options) {`,
-      patchId,
-    );
-    source = replaceVirtualPathGuard(source, patchId);
-    source = replaceOnce(
-      source,
-      'if (!normalizedPath || !instructionPath || !instructionContent.has(instructionPath)) return tool.execute(toolCallId, args, signal, onUpdate);',
-      'if (!normalizedPath || !instructionPath || !instructionContent.has(instructionPath) && !instructionPath.startsWith(MATCHA_SEALED_SKILL_PREFIX)) return tool.execute(toolCallId, args, signal, onUpdate);',
-      patchId,
-    );
-    const readContentPatch = replaceBlockOnce(
-      source,
-      'const readContent = (filePath) => {',
-      '\n\t};',
-      `const readContent = async (filePath, signal) => {
-			const content = instructionContent.get(filePath);
-			if (typeof content === "string") return content;
-			if (filePath.startsWith(MATCHA_SEALED_SKILL_PREFIX)) return readMatchaSealedSkillFile(filePath, signal);
-			throw Object.assign(/* @__PURE__ */ new Error(\`Virtual skill file not found: \${filePath}\`), { code: "ENOENT" });
-		};`,
-      patchId,
-    );
-    source = readContentPatch.source;
-    source = replaceOnce(
-      source,
-      'const instructionTool = typeof instructionContent.get(instructionPath) === "string" ? virtualRead ??= createOpenClawReadTool(eraseSessionFileTool(createReadTool("/", {',
-      'const instructionTool = typeof instructionContent.get(instructionPath) === "string" || instructionPath.startsWith(MATCHA_SEALED_SKILL_PREFIX) ? virtualRead ??= createOpenClawReadTool(eraseSessionFileTool(createReadTool("/", {',
-      patchId,
-    );
-    const virtualReadPattern = /access: async \(filePath\) => void readContent\(filePath\),\n(\s*)readFile: async \(filePath\) => Buffer\.from\(readContent\(filePath\), "utf8"\)/g;
-    const virtualReadMatches = [...source.matchAll(virtualReadPattern)];
-    if (virtualReadMatches.length !== 1) {
-      throw new Error(`${patchId}: expected one virtual read operation match, found ${virtualReadMatches.length}`);
-    }
-    source = source.replace(
-      virtualReadPattern,
-      `access: async (filePath) => { await readContent(filePath, signal); },\n${virtualReadMatches[0][1]}readFile: async (filePath) => Buffer.from(await readContent(filePath, signal), "utf8")`,
-    );
-    changed = true;
-  } else if (!source.includes('function rememberMatchaSealedSkillMeteringBinding(')) {
-    source = replaceOnce(
-      source,
-      'const MATCHA_SEALED_SKILL_PREFIX = "matcha-skill://";',
-      `${meteringHelper}\nconst MATCHA_SEALED_SKILL_PREFIX = "matcha-skill://";`,
-      patchId,
-    );
-    changed = true;
-  }
-  const endpointTrimPatch = replaceOptionalOnce(
-    source,
-    'return { endpoint: endpoint.replace(//+$/u, ""), token, runtime };',
-    'return { endpoint: endpoint.replace(/\\/+$/u, ""), token, runtime };',
-    patchId,
-  );
-  source = endpointTrimPatch.source;
-  changed ||= endpointTrimPatch.changed;
-  const bindingPatch = replaceOptionalOnce(
-    source,
-    `  if (!body || typeof body.contentBase64 !== "string") throw new Error("Sealed skill read returned an invalid payload");
-  return Buffer.from(body.contentBase64, "base64").toString("utf8");`,
-    `  if (!body || typeof body.contentBase64 !== "string") throw new Error("Sealed skill read returned an invalid payload");
-  rememberMatchaSealedSkillMeteringBinding(body.meteringBinding);
-  return Buffer.from(body.contentBase64, "base64").toString("utf8");`,
-    patchId,
-  );
-  source = bindingPatch.source;
-  changed ||= bindingPatch.changed;
-  if (changed) writeText(filePath, source);
-  return changed;
 }
 
-function replaceVirtualPathGuard(source, patchId) {
-  if (source.includes('if (filePath.startsWith("node://") || filePath.startsWith(MATCHA_SEALED_SKILL_PREFIX)) return filePath;')) {
+async function fetchSealedSkill(ref, signal, runId) {
+  try {
+    const endpoint = process.env.MATCHA_SEALED_ENDPOINT?.trim();
+    const token = process.env.MATCHA_SEALED_TOKEN?.trim();
+    if (!endpoint || !token || process.env.MATCHA_SEALED_RUNTIME?.trim() !== 'openclaw') throw sealedSkillError();
+    const response = await fetch(endpoint.replace(/\\/+$/u, '') + '/api/sealed-skills/read/' + encodeURIComponent(ref.skillKey) + '/' + ref.path.split('/').map(encodeURIComponent).join('/'), {
+      method: 'GET',
+      signal,
+      headers: {
+        'x-matcha-sealed-token': token,
+        'x-matcha-sealed-runtime': 'openclaw',
+        ...(ref.packageSha256 ? { 'x-matcha-sealed-package-sha256': ref.packageSha256 } : {})
+      }
+    });
+    if (!response.ok) throw sealedSkillError();
+    const body = await response.json();
+    if (typeof body?.contentBase64 !== 'string' || !/^[a-f0-9]{64}$/u.test(body.packageSha256)
+      || ref.packageSha256 && body.packageSha256 !== ref.packageSha256) throw sealedSkillError();
+    const bytes = Buffer.from(body.contentBase64, 'base64');
+    if (bytes.toString('base64') !== body.contentBase64 || ref.contentBytes !== undefined && bytes.length !== ref.contentBytes) throw sealedSkillError();
+    const text = bytes.toString('utf8');
+    const contentTokens = Math.max(Math.ceil(text.length / 2), Math.ceil(estimateStringChars(text) / 4));
+    if (ref.contentTokens !== undefined && contentTokens > ref.contentTokens) throw sealedSkillError();
+    rememberMeteringBinding(body.meteringBinding, runId);
+    return { text, contentBytes: bytes.length, contentTokens, packageSha256: body.packageSha256 };
+  } catch {
+    throw sealedSkillError();
+  }
+}
+
+async function readMatchaSealedSkill(filePath, allowedKeys, signal, fitsBudget, maxBytes) {
+  const path = parseSealedSkillPath(filePath);
+  if (!path || !allowedKeys.has(path.skillKey)) throw sealedSkillError();
+  const body = await fetchSealedSkill(path, signal, currentRunId());
+  if (body.contentBytes > maxBytes || !fitsBudget(body.text)) {
+    return { content: [{ type: 'text', text: "Skill instructions cannot be partially served: the whole document exceeds this call's read or model-context budget. Ask the operator to reduce the document or increase the model context." }] };
+  }
+  const ref = { type: 'matcha.sealedSkill', ...path, packageSha256: body.packageSha256, contentBytes: body.contentBytes, contentTokens: body.contentTokens };
+  return { content: [{ type: 'text', text: JSON.stringify(ref) }], details: { kind: 'text' } };
+}
+
+async function hydrateMatchaSealedSkills(messages, allowedKeys, signal, runId = currentRunId()) {
+  const refs = collectMatchaSealedSkillRefs(messages);
+  if (refs.length === 0) return messages;
+  if (runId) sealedModelRuns.add(runId);
+  const hydrated = new Map();
+  for (const ref of refs) {
+    hydrated.set(refKey(ref), allowedKeys.has(ref.skillKey)
+      ? await fetchSealedSkill(ref, signal, runId)
+      : { text: '[Historical sealed skill content is unavailable in the current skill selection. This is not current skill instructions.]' });
+  }
+  const requestMessages = messages.map((message) => {
+    const messageRefs = matchaSealedSkillRefs(message);
+    return messageRefs.length ? { ...message, content: messageRefs.map((ref) => ({ type: 'text', text: hydrated.get(refKey(ref)).text })) } : message;
+  });
+  sealedModelMessages.add(requestMessages);
+  return requestMessages;
+}
+
+function isMatchaSealedModelContext(context, runId = currentRunId()) {
+  return Boolean(runId && sealedModelRuns.has(runId)) || Boolean(context?.messages && sealedModelMessages.has(context.messages))
+    || Boolean(context?.messages && collectMatchaSealedSkillRefs(context.messages).length);
+}
+
+function markMatchaSealedModelMessages(messages, runId) {
+  if (runId && sealedModelRuns.has(runId)) sealedModelMessages.add(messages);
+  return messages;
+}
+
+function clearMatchaSealedSkillRun(runId) {
+  sealedModelRuns.delete(runId);
+  globalThis[Symbol.for('matcha.openclaw.packageMetering')]?.skillBindingsByRunId.delete(runId);
+}
+
+function withMatchaSealedCompactionDetails(details, refs, retainedMessages) {
+  if (refs.length === 0) return details;
+  const retained = new Set(collectMatchaSealedSkillRefs(retainedMessages).map(refKey));
+  const carry = refs.filter((ref) => !retained.has(refKey(ref)));
+  return { ...details, matchaSealedSkills: carry };
+}
+
+function createMatchaSealedSkillCarry(details, timestamp) {
+  const refs = details?.matchaSealedSkills;
+  if (!Array.isArray(refs) || refs.length === 0 || !refs.every(isSealedSkillRef)) return;
+  return {
+    role: 'custom', customType: CARRY_TYPE, content: 'Sealed skill references retained across compaction.',
+    display: false, details: { matchaSealedSkills: refs }, timestamp
+  };
+}`;
+
+function patchSealedSkillContext(distDir, readFile, transcriptWriteContextFile, agentRunRegistryFile, patchId) {
+  const charsFile = locateSingleJavaScriptFile(distDir, patchId, { fileNamePrefix: 'cjk-chars-', markers: ['function estimateStringChars(text) {'] });
+  const changed = [];
+  const before = readText(transcriptWriteContextFile);
+  let runtime = ensureNamedImport(before, transcriptWriteContextFile, charsFile, 'estimateStringChars', 'estimateStringChars', patchId).source;
+  if (!runtime.includes('function readMatchaSealedSkill(')) {
+    runtime += `\n${MATCHA_SEALED_SKILL_CONTEXT_HELPERS}\nexport { matchaSealedSkillKeys, readMatchaSealedSkill, hydrateMatchaSealedSkills, matchaSealedSkillRefs, collectMatchaSealedSkillRefs, matchaSealedSkillTokenPressure, isMatchaSealedModelContext, markMatchaSealedModelMessages, clearMatchaSealedSkillRun, withMatchaSealedCompactionDetails, createMatchaSealedSkillCarry };\n`;
+  } else {
+    const replacement = `${MATCHA_SEALED_SKILL_CONTEXT_HELPERS}\nexport { matchaSealedSkillKeys,`;
+    const updated = replaceBlockOnce(runtime, "const SEALED_SKILL_PREFIX = 'matcha-skill://';", '\nexport { matchaSealedSkillKeys,', replacement, patchId);
+    if (!updated.changed && !runtime.includes(replacement)) throw new Error(`${patchId}: sealed context helper boundary missing`);
+    runtime = updated.source;
+  }
+  if (runtime !== before) {
+    writeText(transcriptWriteContextFile, runtime);
+    changed.push(transcriptWriteContextFile);
+  }
+  const edit = (file, imports, replacements, transform) => {
+    const before = readText(file);
+    let source = before;
+    for (const name of imports) source = ensureNamedImport(source, file, transcriptWriteContextFile, name, name, patchId).source;
+    if (transform) source = transform(source);
+    for (const [needle, replacement] of replacements) {
+      if (!source.includes(replacement)) source = replaceOnce(source, needle, replacement, patchId);
+    }
+    if (source !== before) {
+      writeText(file, source);
+      changed.push(file);
+    }
+  };
+  const locate = (fileNamePrefix, markers) => locateSingleJavaScriptFile(distDir, patchId, { fileNamePrefix, markers });
+  edit(readFile, ['matchaSealedSkillKeys', 'readMatchaSealedSkill'], [
+    ['function wrapReadToolWithSkillContent(tool, skills, options) {', 'function wrapReadToolWithSkillContent(tool, skills, options) {\n\tconst matchaSealedAllowedKeys = matchaSealedSkillKeys(skills);'],
+    ['const resolveInstructionPath = (filePath) => {', 'const resolveInstructionPath = (filePath) => {\n\t\tif (filePath.startsWith("matcha-skill://")) return filePath;'],
+    ['if (!normalizedPath || !instructionPath || !instructionContent.has(instructionPath)) return tool.execute(toolCallId, args, signal, onUpdate);', 'if (!normalizedPath || !instructionPath || !instructionContent.has(instructionPath) && !instructionPath.startsWith("matcha-skill://")) return tool.execute(toolCallId, args, signal, onUpdate);'],
+    ['const result = await instructionTool.execute(toolCallId, instructionArgs, signal, onUpdate);', `const result = instructionPath.startsWith("matcha-skill://")
+					? await readMatchaSealedSkill(instructionPath, matchaSealedAllowedKeys, signal, (text) => toolResultFitsBudget(text, resolveToolResultBudget(options?.modelContextWindowTokens)), resolveAdaptiveReadMaxBytes(options) * MAX_ADAPTIVE_READ_PAGES)
+					: await instructionTool.execute(toolCallId, instructionArgs, signal, onUpdate);`]
+  ], (source) => {
+    if (source.includes('function readMatchaSealedSkillFile(')) {
+      const start = source.indexOf('function cloneMatchaMeteringBinding(');
+      const end = source.indexOf('function wrapReadToolWithSkillContent(tool, skills, options) {', start);
+      if (start < 0 || end < 0) throw new Error(`${patchId}: sealed read helper boundary missing`);
+      source = source.slice(0, start) + source.slice(end);
+      source = source.replace('if (filePath.startsWith("node://") || filePath.startsWith(MATCHA_SEALED_SKILL_PREFIX)) return filePath;', 'if (filePath.startsWith("node://")) return filePath;');
+      source = source.replaceAll('filePath.startsWith(MATCHA_SEALED_SKILL_PREFIX)', 'filePath.startsWith("matcha-skill://")');
+      source = replaceOnce(source, 'if (!normalizedPath || !instructionPath || !instructionContent.has(instructionPath) && !instructionPath.startsWith(MATCHA_SEALED_SKILL_PREFIX)) return tool.execute(toolCallId, args, signal, onUpdate);', 'if (!normalizedPath || !instructionPath || !instructionContent.has(instructionPath)) return tool.execute(toolCallId, args, signal, onUpdate);', patchId);
+      source = replaceOnce(source, 'if (filePath.startsWith("matcha-skill://")) return readMatchaSealedSkillFile(filePath, signal);', '', patchId);
+      source = replaceOnce(source, 'typeof instructionContent.get(instructionPath) === "string" || instructionPath.startsWith(MATCHA_SEALED_SKILL_PREFIX) ? virtualRead', 'typeof instructionContent.get(instructionPath) === "string" ? virtualRead', patchId);
+    }
+    source = source.replace(/^import \{ [^}]*\bgetOwnedSessionTranscriptWriterFence\b[^}]* \} from "[^"]+";\n/gm, '');
+    // Require the native delivery boundary; sealed results reuse its settlement rules.
+    if (!source.includes('const result = await instructionTool.execute(toolCallId, instructionArgs, signal, onUpdate);') && !source.includes('const result = instructionPath.startsWith("matcha-skill://")')) throw new Error(`${patchId}: read result boundary missing`);
     return source;
-  }
-  if (source.includes('if (filePath.startsWith("node://")) return filePath;')) {
-    return replaceOnce(
-      source,
-      'if (filePath.startsWith("node://")) return filePath;',
-      'if (filePath.startsWith("node://") || filePath.startsWith(MATCHA_SEALED_SKILL_PREFIX)) return filePath;',
-      patchId,
-    );
-  }
-  const mappedNeedle = `const mapped = mapContainerPathToWorkspaceRoot({
-				filePath,`;
-  if (source.includes(mappedNeedle)) {
-    return replaceOnce(
-      source,
-      mappedNeedle,
-      `if (filePath.startsWith(MATCHA_SEALED_SKILL_PREFIX)) return filePath;
-			const mapped = mapContainerPathToWorkspaceRoot({
-				filePath,`,
-      patchId,
-    );
-  }
-  throw new Error(`${patchId}: expected read path guard target`);
+  });
+  const builtinFile = locate('builtin-openclaw-', ['async function prepareEmbeddedAttemptSessionBoundary(input) {', 'function createCacheTrace(params) {', 'function createAnthropicPayloadLogger(params) {']);
+  edit(builtinFile, ['matchaSealedSkillKeys', 'hydrateMatchaSealedSkills', 'isMatchaSealedModelContext', 'markMatchaSealedModelMessages'], [
+    ['\t\tcomputerContextEpoch,\n\t\tskillInstructionDeliveryCache,', '\t\tcomputerContextEpoch,\n\t\tmatchaSealedSkillKeys: matchaSealedSkillKeys(params.skillsSnapshot?.resolvedSkills),\n\t\tskillInstructionDeliveryCache,'],
+    ['\t\tabortSignal: runAbortSignal,\n\t\tactiveSession,\n\t\tappendOnlyRuntimeContext:', '\t\tabortSignal: runAbortSignal,\n\t\tactiveSession,\n\t\tmatchaSealedAllowedKeys: toolBase.matchaSealedSkillKeys,\n\t\tappendOnlyRuntimeContext:'],
+    ['return await baseConvertToLlm(input.appendOnlyRuntimeContext ? normalized : relocateCurrentRuntimeContextCarrierToTail(normalized));', `const requestMessages = await hydrateMatchaSealedSkills(normalized, input.matchaSealedAllowedKeys, input.abortSignal, attempt.runId);
+			const converted = await baseConvertToLlm(input.appendOnlyRuntimeContext ? requestMessages : relocateCurrentRuntimeContextCarrierToTail(requestMessages));
+			return markMatchaSealedModelMessages(converted, attempt.runId);`],
+    ['const recordStage = (stage, payload = {}) => {', 'const recordStage = (stage, payload = {}) => {\n\t\tif (isMatchaSealedModelContext(payload, params.runId)) return;'],
+    ['const nextOnPayload = (payload) => {\n\t\t\t\tconst redactedPayload', 'const nextOnPayload = (payload) => {\n\t\t\t\tif (isMatchaSealedModelContext(context, params.runId)) return;\n\t\t\t\tconst redactedPayload']
+  ]);
+  const resourceFile = locate('resource-loader-', ['function estimateMessageTokenPressure(message) {', 'const projectReplacement = (result, summary) => buildSessionContext(', 'summary: capCompactionSummary(compactionResult.summary)']);
+  edit(resourceFile, ['matchaSealedSkillTokenPressure', 'collectMatchaSealedSkillRefs', 'withMatchaSealedCompactionDetails'], [
+    ['let tokens = MESSAGE_BOUNDARY_OVERHEAD_TOKENS;', 'let tokens = MESSAGE_BOUNDARY_OVERHEAD_TOKENS + matchaSealedSkillTokenPressure(message);'],
+    ['const projectReplacement = (result, summary) => buildSessionContext(', `const matchaSealedRefs = collectMatchaSealedSkillRefs(buildSessionContext(pathEntries).messages);
+		const matchaSealedCompactionDetails = (result) => {
+			const keptIndex = pathEntries.findIndex((entry) => entry.id === result.firstKeptEntryId);
+			const retainedMessages = keptIndex >= 0 ? buildSessionContext(pathEntries.slice(keptIndex).filter((entry) => entry.type === "message" || entry.type === "custom_message")).messages : [];
+			return withMatchaSealedCompactionDetails(result.details, matchaSealedRefs, retainedMessages);
+		};
+		const projectReplacement = (result, summary) => buildSessionContext(`],
+    ['\t\t\t...result,\n\t\t\ttype: "compaction",', '\t\t\t...result,\n\t\t\tdetails: matchaSealedCompactionDetails(result),\n\t\t\ttype: "compaction",'],
+    ['summary: capCompactionSummary(compactionResult.summary)', 'summary: capCompactionSummary(compactionResult.summary),\n\t\t\tdetails: matchaSealedCompactionDetails(compactionResult)']
+  ]);
+  const sessionFile = locate('session-', ['function projectSessionEntryMessage(entry) {', 'function* iterateSessionContextMessages(']);
+  edit(sessionFile, ['createMatchaSealedSkillCarry'], [
+    ['\t\tyield message;\n\t}\n}\n/** Build model context', '\t\tyield message;\n\t\tif (hydrated.type === "compaction") {\n\t\t\tconst carry = createMatchaSealedSkillCarry(hydrated.details, message.timestamp);\n\t\t\tif (carry) yield carry;\n\t\t}\n\t}\n}\n/** Build model context']
+  ]);
+  const diagnosticFile = locate('attempt.model-diagnostic-events-', ['function createModelObserver(params) {']);
+  edit(diagnosticFile, ['isMatchaSealedModelContext'], [
+    ['contentCapture: ctx.contentCapture,', 'contentCapture: isMatchaSealedModelContext(streamContext, ctx.runId) ? void 0 : ctx.contentCapture,']
+  ]);
+  edit(agentRunRegistryFile, ['clearMatchaSealedSkillRun'], [
+    ['const removed = state.contexts.delete(runId);', 'clearMatchaSealedSkillRun(runId);\n\tconst removed = state.contexts.delete(runId);'],
+    ['\tstate.owners.delete(runId);\n\tif (owners.clearRequested', '\tclearMatchaSealedSkillRun(runId);\n\tstate.owners.delete(runId);\n\tif (owners.clearRequested'],
+    ['\t\t\tstate.contexts.delete(runId);', '\t\t\tclearMatchaSealedSkillRun(runId);\n\t\t\tstate.contexts.delete(runId);']
+  ]);
+  return changed;
 }
 
 function patchSealedSkillLoader(filePath, patchId) {

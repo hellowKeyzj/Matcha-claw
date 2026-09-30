@@ -53,6 +53,7 @@ const IMPORT_SOURCE_PATH: &str = "/api/wiki/import-source";
 const IMPORT_FOLDER_PATH: &str = "/api/wiki/import-folder";
 const APPLY_GENERATED_PAGES_PATH: &str = "/api/wiki/apply-generated-pages";
 const DELETE_SOURCE_PATH: &str = "/api/wiki/delete-source";
+const CALL_RESULT_PATH: &str = "/api/wiki/call-result";
 const SOURCE_FILES_PATH: &str = "/api/wiki/source-files";
 const SOURCE_TASKS_PATH: &str = "/api/wiki/source-tasks";
 const CANCEL_SOURCE_TASK_PATH: &str = "/api/wiki/source-task/cancel";
@@ -101,7 +102,14 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     } else {
         DEFAULT_REQUEST_BYTES
     };
-    Some(RouteHeadPlan::new(
+    let plan = if Route::match_request(&head.method, path).is_some_and(|route| {
+        route.scope() == AUTHORIZATION_SCOPE_WRITE && !matches!(route, Route::CallResult)
+    }) {
+        RouteHeadPlan::body_deadline
+    } else {
+        RouteHeadPlan::new
+    };
+    Some(plan(
         match head.method.as_str() {
             "GET" => BodyPolicy::Empty,
             "POST" => BodyPolicy::Required { max_bytes },
@@ -200,13 +208,13 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             let input = decode_body::<ProjectInput>(&request)
                 .map(ProjectInput::selector)
                 .unwrap_or(WikiProjectSelector { project_id: None });
-            deliver(dependencies.wiki.rescan(input).await)
+            admit(dependencies.wiki.admit_rescan(input).await)
         }
         Route::RefreshSources => {
             let input = decode_body::<ProjectInput>(&request)
                 .map(ProjectInput::selector)
                 .unwrap_or(WikiProjectSelector { project_id: None });
-            deliver(dependencies.wiki.refresh_sources(input).await)
+            admit(dependencies.wiki.admit_refresh_sources(input).await)
         }
         Route::SourceTasks => {
             let input = decode_body::<ProjectInput>(&request)
@@ -224,7 +232,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             let Some(input) = decode_body::<WikiSourceTaskActionInput>(&request) else {
                 return invalid();
             };
-            deliver(dependencies.wiki.retry_source_task(input).await)
+            admit(dependencies.wiki.admit_retry_source_task(input).await)
         }
         Route::PauseSourceTask => {
             let Some(input) = decode_body::<WikiSourceTaskActionInput>(&request) else {
@@ -236,7 +244,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             let Some(input) = decode_body::<WikiSourceTaskActionInput>(&request) else {
                 return invalid();
             };
-            deliver(dependencies.wiki.resume_source_task(input).await)
+            admit(dependencies.wiki.admit_resume_source_task(input).await)
         }
         Route::ReorderSourceTask => {
             let Some(input) = decode_body::<WikiReorderSourceTaskInput>(&request) else {
@@ -298,7 +306,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             else {
                 return invalid();
             };
-            deliver(dependencies.wiki.import_source(input).await)
+            admit(dependencies.wiki.admit_import_source(input).await)
         }
         Route::ImportFolder => {
             let Some(input) =
@@ -306,7 +314,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             else {
                 return invalid();
             };
-            deliver(dependencies.wiki.import_folder(input).await)
+            admit(dependencies.wiki.admit_import_folder(input).await)
         }
         Route::ApplyGeneratedPages => {
             let Some(input) = decode_body::<ApplyGeneratedPagesInput>(&request)
@@ -314,7 +322,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             else {
                 return invalid();
             };
-            deliver(dependencies.wiki.apply_generated_pages(input).await)
+            admit(dependencies.wiki.admit_apply_generated_pages(input).await)
         }
         Route::DeleteSource => {
             let Some(input) =
@@ -322,14 +330,20 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             else {
                 return invalid();
             };
-            deliver(dependencies.wiki.delete_source(input).await)
+            admit(dependencies.wiki.admit_delete_source(input).await)
+        }
+        Route::CallResult => {
+            let Some(input) = decode_body::<CallResultInput>(&request) else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.call_result(&input.call_id))
         }
         Route::EmbedPage => {
             let Some(input) = decode_body::<PathInput>(&request).and_then(PathInput::selector)
             else {
                 return invalid();
             };
-            deliver_unit(dependencies.wiki.embed_page(input).await)
+            admit(dependencies.wiki.admit_embed_page(input).await)
         }
         Route::RetrieveContext => {
             let Some(input) = decode_body::<SearchInput>(&request).and_then(SearchInput::retrieve)
@@ -362,6 +376,7 @@ enum Route {
     ImportFolder,
     ApplyGeneratedPages,
     DeleteSource,
+    CallResult,
     SourceFiles,
     SourceTasks,
     CancelSourceTask,
@@ -401,6 +416,7 @@ impl Route {
             ("POST", IMPORT_FOLDER_PATH) => Self::ImportFolder,
             ("POST", APPLY_GENERATED_PAGES_PATH) => Self::ApplyGeneratedPages,
             ("POST", DELETE_SOURCE_PATH) => Self::DeleteSource,
+            ("POST", CALL_RESULT_PATH) => Self::CallResult,
             ("GET", SOURCE_FILES_PATH) => Self::SourceFiles,
             ("POST", SOURCE_TASKS_PATH) => Self::SourceTasks,
             ("POST", CANCEL_SOURCE_TASK_PATH) => Self::CancelSourceTask,
@@ -431,6 +447,7 @@ impl Route {
             | Self::ImportFolder
             | Self::ApplyGeneratedPages
             | Self::DeleteSource
+            | Self::CallResult
             | Self::UpdateSourceWatchConfig
             | Self::CancelSourceTask
             | Self::RetrySourceTask
@@ -458,6 +475,12 @@ impl Route {
             | Self::RetrieveContext => AUTHORIZATION_SCOPE_READ,
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CallResultInput {
+    call_id: platform::call::CallId,
 }
 
 #[derive(Deserialize)]
@@ -664,7 +687,12 @@ async fn authorize(
             AUTHORIZATION_CAPABILITY,
             AUTHORIZATION_SUBJECT,
         )
-        .is_ok()
+        .is_ok_and(|decision| {
+            !matches!(
+                endpoint,
+                APPLY_GENERATED_PAGES_PATH | DELETE_SOURCE_PATH | CALL_RESULT_PATH
+            ) || decision.principal() == "electron-main-local"
+        })
 }
 
 fn decode_body<T: for<'de> Deserialize<'de>>(request: &Request) -> Option<T> {
@@ -678,9 +706,9 @@ fn deliver<T: serde::Serialize>(result: Result<T, WikiFailure>) -> Response {
     }
 }
 
-fn deliver_unit(result: Result<(), WikiFailure>) -> Response {
+fn admit(result: Result<platform::call::CallReceipt, WikiFailure>) -> Response {
     match result {
-        Ok(()) => Response::json(200, json!({ "success": true })),
+        Ok(receipt) => Response::json(202, json!(receipt)),
         Err(error) => failure(error),
     }
 }
@@ -761,6 +789,7 @@ fn is_wiki_path(path: &str) -> bool {
             | IMPORT_FOLDER_PATH
             | APPLY_GENERATED_PAGES_PATH
             | DELETE_SOURCE_PATH
+            | CALL_RESULT_PATH
             | SOURCE_FILES_PATH
             | SOURCE_TASKS_PATH
             | CANCEL_SOURCE_TASK_PATH

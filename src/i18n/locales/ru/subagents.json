@@ -207,7 +207,27 @@
     }
   },
   "cloudPackages": {
-    "title": "Cloud Agent Packages",
+    "title": "Облачные пакеты агентов",
+    "mineTitle": "Мои облачные пакеты",
+    "mineDescription": "Загрузки сохраняются как черновики до публикации в маркете.",
+    "mineEmpty": "Загруженных пакетов пока нет.",
+    "marketTitle": "Маркет пакетов",
+    "loading": "Загрузка пакетов…",
+    "loadFailed": "Не удалось загрузить пакеты. Повторите попытку.",
+    "retry": "Повторить",
+    "publish": "Опубликовать",
+    "publishing": "Публикация…",
+    "published": "Пакет опубликован",
+    "publishFailed": "Не удалось опубликовать пакет",
+    "uploadFailed": "Не удалось загрузить пакет",
+    "installFailed": "Не удалось установить пакет",
+    "installed": "Установлен",
+    "installing": "Установка…",
+    "status": { "draft": "Черновик", "published": "Опубликован", "disabled": "Отключён", "unknown": "Неизвестный статус" },
+    "errors": {
+      "MATCHA_PACKAGE_CLOUD_ENVELOPE_REQUIRED": "Повторно экспортируйте пакет для облака и загрузите его.",
+      "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "Эту версию нельзя опубликовать. Обновите список своих пакетов."
+    },
     "empty": "No cloud agent packages.",
     "install": "Install"
   },

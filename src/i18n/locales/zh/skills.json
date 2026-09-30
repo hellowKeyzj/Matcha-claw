@@ -99,6 +99,21 @@
         "missingPrefix": "缺失: {{items}}"
     },
     "sealed": {
+        "tabs": {
+            "installed": "已安装",
+            "mine": "我的云端包",
+            "market": "云端市场"
+        },
+        "searchInstalled": "搜索已安装包",
+        "searchMine": "搜索我的云端包",
+        "searchMarket": "搜索云端技能包",
+        "exportSkills": "导出技能",
+        "exportSearch": "搜索可导出的技能",
+        "exportDescription": "选择技能并导出为加密技能包。",
+        "packageActions": "技能包操作",
+        "viewCloudPackages": "查看云端包",
+        "installedDescription": "管理本地安装的技能包。",
+        "marketDescription": "从云端发现并安装技能包。",
         "search": "搜索技能包",
         "runtimeLabel": "Runtime: {{runtime}}",
         "runtimeAny": "不限",
@@ -106,7 +121,20 @@
         "emptyTitle": "暂无技能包",
         "packageInstalled": "已安装",
         "packageAvailable": "未安装",
-        "cloudTitle": "云端技能包",
+        "mineTitle": "我的云端包",
+        "mineDescription": "上传后保留为草稿，点击发布才会进入市场。",
+        "mineEmpty": "暂无已上传的包。",
+        "publish": "发布",
+        "publishing": "发布中…",
+        "published": "资源包已发布",
+        "publishFailed": "发布资源包失败",
+        "retry": "重试",
+        "status": { "draft": "草稿", "published": "已发布", "disabled": "已停用", "unknown": "未知状态" },
+        "errors": {
+            "MATCHA_PACKAGE_CLOUD_ENVELOPE_REQUIRED": "请重新为云端导出资源包后上传。",
+            "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "该版本不能发布，请刷新我的云端包。"
+        },
+        "cloudTitle": "云端技能包市场",
         "cloudEmpty": "暂无云端技能包。",
         "cloudUnavailableTitle": "云端技能包暂不可用",
         "cloudUnavailableDescription": "无法连接后端平台，请稍后刷新。",

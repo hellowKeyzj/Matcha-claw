@@ -26,6 +26,8 @@ type HostEventName =
   | 'runtime-host:status'
   | 'runtime-host:error'
   | 'runtime-host:restart'
+  | 'runtime-host:disconnected'
+  | 'package:changed'
   | 'team:event'
   | 'matcha-agent:status'
   | 'openclaw:cli-installed'
@@ -34,13 +36,15 @@ type HostEventName =
   | 'oauth:success'
   | 'oauth:error'
   | 'openclaw:lifecycle'
-  | 'openclaw:cron';
+  | 'openclaw:cron'
+  | 'call:changed'
+  | 'calls:resync';
 
 type EmitHostEvent = (eventName: HostEventName, payload: unknown) => void;
 
 type RuntimeHostBridge = Pick<
   RuntimeHostLifecycle,
-  'command' | 'onExit' | 'onRestart' | 'onSafeEvent'
+  'command' | 'onDisconnect' | 'onExit' | 'onRestart' | 'onSafeEvent'
 >;
 
 type SessionEventsTransport = Readonly<{
@@ -108,6 +112,7 @@ export function registerHostEventBridge(deps: {
     'gateway:channel-status',
     'gateway:exit',
     'team:event',
+    'package:changed',
   ] as const) {
     deps.hostEventBus.on(eventName, (payload) => {
       sendRendererHostEvent(deps.getMainWindow(), eventName, payload);
@@ -120,6 +125,12 @@ export function registerHostEventBridge(deps: {
 
   deps.runtimeHost.onSafeEvent((event) => {
     switch (event.type) {
+      case 'call.changed':
+        emit('call:changed', { callId: event.callId, revision: event.revision });
+        return;
+      case 'calls.resync':
+        emit('calls:resync', {});
+        return;
       case 'openclaw.lifecycle':
         emit('openclaw:lifecycle', {
           active: event.hasRun || event.hasMessage || event.hasSessionActivity,
@@ -153,6 +164,9 @@ export function registerHostEventBridge(deps: {
       case 'openclaw.session.update':
         return;
     }
+  });
+  deps.runtimeHost.onDisconnect(() => {
+    emit('runtime-host:disconnected', {});
   });
   deps.runtimeHost.onExit((exit) => {
     emitHostExit(emit, exit);

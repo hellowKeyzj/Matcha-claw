@@ -21,6 +21,7 @@ export const DashboardRoute = lazyWithPreload(() => import('../pages/Dashboard')
 export const ChannelsRoute = lazyWithPreload(() => import('../pages/Channels'));
 export const SubAgentsRoute = lazyWithPreload(() => import('../pages/SubAgents'));
 export const TasksRoute = lazyWithPreload(() => import('../pages/Tasks'));
+export const CallsRoute = lazyWithPreload(() => import('../pages/Calls'));
 export const PluginsRoute = lazyWithPreload(() => import('../pages/Plugins'));
 export const ExternalConnectorsRoute = lazyWithPreload(() => import('../pages/ExternalConnectors'));
 export const RemoteFleetRoute = lazyWithPreload(() => import('../pages/RemoteFleet'));

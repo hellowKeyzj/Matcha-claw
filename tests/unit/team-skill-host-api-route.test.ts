@@ -63,7 +63,7 @@ describe('TeamSkill Host API route', () => {
   });
 
   it('forwards only materialize identifiers through the dedicated transport', async () => {
-    const materialize = vi.fn().mockResolvedValue({ status: 200, body: { status: 'materialized' } });
+    const materialize = vi.fn().mockResolvedValue({ status: 202, body: { callId: 'a'.repeat(32), accepted: true } });
     const result = response();
 
     await handleTeamSkillRoutes(
@@ -74,7 +74,7 @@ describe('TeamSkill Host API route', () => {
     );
 
     expect(materialize).toHaveBeenCalledWith(selectionId, teamId, idempotencyKey);
-    expect(result.state).toEqual({ statusCode: 200, body: { status: 'materialized' } });
+    expect(result.state).toEqual({ statusCode: 202, body: { callId: 'a'.repeat(32), accepted: true } });
   });
 
   it('rejects raw roots and extra fields without transport calls', async () => {

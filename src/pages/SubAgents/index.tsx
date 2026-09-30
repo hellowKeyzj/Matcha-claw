@@ -67,6 +67,16 @@ export function SubAgents() {
   const agents = Array.isArray(agentsResource.data) ? agentsResource.data : EMPTY_AGENTS;
   const cloudPackages = useSubagentsStore((state) => state.cloudPackages);
   const loadCloudPackages = useSubagentsStore((state) => state.loadCloudPackages);
+  const installedCloudPackages = useSubagentsStore((state) => state.installedCloudPackages);
+  const cloudLoading = useSubagentsStore((state) => state.cloudLoading);
+  const cloudError = useSubagentsStore((state) => state.cloudError);
+  const myCloudPackages = useSubagentsStore((state) => state.myCloudPackages);
+  const myCloudLoading = useSubagentsStore((state) => state.myCloudLoading);
+  const myCloudError = useSubagentsStore((state) => state.myCloudError);
+  const cloudPublishingByVersionId = useSubagentsStore((state) => state.cloudPublishingByVersionId);
+  const cloudInstallingByVersionId = useSubagentsStore((state) => state.cloudInstallingByVersionId);
+  const loadMyCloudPackages = useSubagentsStore((state) => state.loadMyCloudPackages);
+  const publishCloudAgentPackage = useSubagentsStore((state) => state.publishCloudAgentPackage);
   const mutating = useSubagentsStore((state) => state.mutating);
   const error = useSubagentsStore((state) => state.error);
   const availableModels = useSubagentsStore((state) => state.availableModels);
@@ -170,8 +180,13 @@ export function SubAgents() {
       return;
     }
     void loadAvailableModels();
-    void loadCloudPackages().catch(() => undefined);
-  }, [gatewayOperational, loadAvailableModels, loadCloudPackages]);
+  }, [gatewayOperational, loadAvailableModels]);
+
+  useEffect(() => {
+    if (!cloudPackagesOpen) return;
+    void loadCloudPackages();
+    void loadMyCloudPackages();
+  }, [cloudPackagesOpen, loadCloudPackages, loadMyCloudPackages]);
 
   useEffect(() => {
     if (!gatewayOperational) {
@@ -404,15 +419,29 @@ export function SubAgents() {
     }
   }, [exportAgentPackage, t]);
 
+  const cloudPackageErrorMessage = useCallback((error: unknown, fallback: string) => {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = ['MATCHA_PACKAGE_CLOUD_ENVELOPE_REQUIRED', 'MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE'].find((value) => message.includes(value));
+    return t(code ? `cloudPackages.errors.${code}` : fallback);
+  }, [t]);
+
+  const handlePublishCloudAgentPackage = async (packageVersionId: string) => {
+    try {
+      await publishCloudAgentPackage(packageVersionId);
+      toast.success(t('cloudPackages.published'));
+    } catch (error) {
+      toast.error(cloudPackageErrorMessage(error, 'cloudPackages.publishFailed'));
+    }
+  };
+
   const handleUploadAgentPackageToCloud = useCallback(async (agent: SubagentSummary) => {
     try {
       const result = await uploadAgentPackageToCloud(agent.id);
       toast.success(t('transfer.uploadPackageSuccess', { fileName: result.fileName ?? agent.name ?? agent.id }));
-      void loadCloudPackages().catch(() => undefined);
     } catch (error) {
-      toast.error(t('transfer.uploadPackageFailed', { message: error instanceof Error ? error.message : String(error) }));
+      toast.error(cloudPackageErrorMessage(error, 'cloudPackages.uploadFailed'));
     }
-  }, [loadCloudPackages, t, uploadAgentPackageToCloud]);
+  }, [cloudPackageErrorMessage, t, uploadAgentPackageToCloud]);
 
   const handleInstallAgentPackageFromCloud = useCallback(async (packageInfo: SubagentCloudPackage) => {
     try {
@@ -424,9 +453,9 @@ export function SubAgents() {
       }
       void loadPersistedFilesForAgent(result.agentId);
     } catch (error) {
-      toast.error(t('transfer.installPackageFailed', { message: error instanceof Error ? error.message : String(error) }));
+      toast.error(cloudPackageErrorMessage(error, 'cloudPackages.installFailed'));
     }
-  }, [installAgentPackageFromCloud, loadPersistedFilesForAgent, t]);
+  }, [cloudPackageErrorMessage, installAgentPackageFromCloud, loadPersistedFilesForAgent, t]);
 
   const handleImportAgentConfig = useCallback(async () => {
     try {
@@ -609,6 +638,8 @@ export function SubAgents() {
           try {
             await deleteAgent(deletingAgentId);
             setDeletingAgentId(null);
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : String(error));
           } finally {
             setDeleting(false);
           }
@@ -692,7 +723,7 @@ export function SubAgents() {
                 avatarSeed: values.avatarSeed,
                 avatarStyle: values.avatarStyle,
               });
-              const resolvedAgentId = createResult.agentId || normalizeSubagentNameToSlug(values.name);
+              const resolvedAgentId = createResult.agentId;
               setDraftPromptForAgent(resolvedAgentId, values.prompt);
               setEditingAgentId(resolvedAgentId);
               setManagedAgentId(resolvedAgentId);
@@ -756,12 +787,35 @@ export function SubAgents() {
       />
 
       <Sheet open={cloudPackagesOpen} onOpenChange={setCloudPackagesOpen}>
-        <SheetContent aria-describedby={undefined} className="w-[28rem] sm:max-w-[28rem]">
+        <SheetContent aria-describedby={undefined} className="w-[28rem] overflow-y-auto sm:max-w-[28rem]">
           <SheetHeader>
             <SheetTitle>{t('cloudPackages.title')}</SheetTitle>
           </SheetHeader>
           <div className="mt-4 space-y-2">
-            {cloudPackages.length === 0 ? (
+            <h3 className="text-sm font-semibold">{t('cloudPackages.mineTitle')}</h3>
+            <p className="text-sm text-muted-foreground">{t('cloudPackages.mineDescription')}</p>
+            {myCloudLoading ? <p role="status">{t('cloudPackages.loading')}</p> : myCloudError ? (
+              <div role="alert">
+                <p className="text-sm text-destructive">{t('cloudPackages.loadFailed')}</p>
+                <Button variant="outline" size="sm" onClick={() => void loadMyCloudPackages()}>{t('cloudPackages.retry')}</Button>
+              </div>
+            ) : myCloudPackages.length === 0 ? <p className="text-sm text-muted-foreground">{t('cloudPackages.mineEmpty')}</p> : myCloudPackages.map((item) => (
+              <div key={item.packageVersionId} className="rounded-lg border p-3">
+                <p className="truncate text-sm font-medium">{packageLabel(item)}</p>
+                <p className="truncate font-mono text-xs text-muted-foreground">{item.version}</p>
+                <div className="mt-3 flex items-center justify-between gap-2">
+                  <span className="text-xs">{t(`cloudPackages.status.${item.status}`, { defaultValue: t('cloudPackages.status.unknown') })}</span>
+                  {item.status === 'draft' && <Button size="sm" disabled={Boolean(cloudPublishingByVersionId[item.packageVersionId])} onClick={() => void handlePublishCloudAgentPackage(item.packageVersionId)}>{t(cloudPublishingByVersionId[item.packageVersionId] ? 'cloudPackages.publishing' : 'cloudPackages.publish')}</Button>}
+                </div>
+              </div>
+            ))}
+            <h3 className="pt-4 text-sm font-semibold">{t('cloudPackages.marketTitle')}</h3>
+            {cloudLoading ? <p role="status">{t('cloudPackages.loading')}</p> : cloudError ? (
+              <div role="alert">
+                <p className="text-sm text-destructive">{t('cloudPackages.loadFailed')}</p>
+                <Button variant="outline" size="sm" onClick={() => void loadCloudPackages()}>{t('cloudPackages.retry')}</Button>
+              </div>
+            ) : cloudPackages.length === 0 ? (
               <p className="text-sm text-muted-foreground">{t('cloudPackages.empty')}</p>
             ) : cloudPackages.map((packageInfo) => (
               <div key={packageInfo.packageVersionId} className="rounded-lg border p-3">
@@ -770,9 +824,11 @@ export function SubAgents() {
                   <p className="truncate text-xs text-muted-foreground">{packageInfo.version}</p>
                 </div>
                 <div className="mt-3 flex justify-end gap-2">
-                  <Button size="sm" onClick={() => void handleInstallAgentPackageFromCloud(packageInfo)}>
-                    {t('cloudPackages.install')}
-                  </Button>
+                  {installedCloudPackages.some((item) => item.packageType === 'agent' && (item.packageVersionId === packageInfo.packageVersionId || item.packageSha256 === packageInfo.version)) ? <span className="text-sm text-muted-foreground">{t('cloudPackages.installed')}</span> : (
+                    <Button size="sm" disabled={!packageInfo.downloadable || Boolean(cloudInstallingByVersionId[packageInfo.packageVersionId])} onClick={() => void handleInstallAgentPackageFromCloud(packageInfo)}>
+                      {t(cloudInstallingByVersionId[packageInfo.packageVersionId] ? 'cloudPackages.installing' : 'cloudPackages.install')}
+                    </Button>
+                  )}
                 </div>
               </div>
             ))}

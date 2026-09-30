@@ -55,10 +55,11 @@ pub fn spawn_owner(
     system: &OwnerRuntimeSystem,
     input: ToolchainOwnerInput,
 ) -> (ToolchainModule, OwnedTask<()>) {
+    let admission = input.admission.clone();
     let owner = owner::actor::ToolchainOwner::new(input);
     let (handle, task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(16, owner::actor::ToolchainOwner::lane_retention()),
     );
-    (ToolchainModule::new(handle), task)
+    (ToolchainModule::new(handle, admission), task)
 }

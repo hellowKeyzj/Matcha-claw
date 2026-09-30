@@ -1,4 +1,9 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import type { CallReceipt } from '../../../../../src/types/call-log';
+import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
+import { isCallId } from '../../../../../src/types/call-log/decode';
+import { decodeSkillsOperationResult, type SkillsOperationResultResponse } from '../../../../../src/types/skills-operation-result';
+import { createCallLogTransport } from '../call-log';
 import { hasExactKeys, isBoundedText, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from '../client';
 
 export const SKILLS_ENDPOINTS = Object.freeze({
@@ -17,7 +22,13 @@ export const SKILLS_ENDPOINTS = Object.freeze({
 });
 
 type SkillsEndpoint = typeof SKILLS_ENDPOINTS[keyof typeof SKILLS_ENDPOINTS];
-type SkillsStatus = 200 | 400 | 404 | 503;
+type SkillsStatus = 200 | 202 | 400 | 404 | 503;
+
+export type SkillsCallReceipt = CallReceipt;
+
+export function isSkillsCallReceipt(value: unknown): value is SkillsCallReceipt {
+  try { decodeCallReceipt(value); return true; } catch { return false; }
+}
 type SkillCapabilityOperation =
   | 'skills.refreshStatus'
   | 'skills.updateConfig'
@@ -202,9 +213,10 @@ export type SkillsReadmeResult = Readonly<{
 }>;
 
 export type SkillsTransportResponse<T> = Readonly<{
-  status: SkillsStatus;
+  status: Exclude<SkillsStatus, 202 | 404>;
   body: T | SkillsTransportFailure;
-}>;
+}> | Readonly<{ status: 202; body: SkillsCallReceipt }>
+  | Readonly<{ status: 404; body: Readonly<{ outcome: 'notFound' }> }>;
 export type SkillsStatusTransportResponse = SkillsTransportResponse<SkillsStatusResult>;
 export type SkillsDetailTransportResponse = SkillsTransportResponse<SkillsDetailResult>;
 export type SkillsConfigMutationTransportResponse = SkillsTransportResponse<SkillsMutationResult>;
@@ -215,12 +227,13 @@ export type SkillsUploadChunkTransportResponse = SkillsTransportResponse<SkillsU
 export type SkillsUploadCommitTransportResponse = SkillsTransportResponse<SkillsUploadCommitResult>;
 export type SkillsReadmeTransportResponse = SkillsTransportResponse<SkillsReadmeResult>;
 export type SkillCapabilityTransportResponse = Readonly<{
-  status: 200 | 400 | 503;
+  status: 200 | 202 | 400 | 503;
   body: unknown;
 }>;
 
 export interface SkillsManagementTransport {
   execute(request: unknown): Promise<SkillCapabilityTransportResponse>;
+  operationResult(request: unknown): Promise<SkillsTransportResponse<SkillsOperationResultResponse>>;
   readStatus(): Promise<SkillsStatusTransportResponse>;
   detail(request: unknown): Promise<SkillsDetailTransportResponse>;
   mutateConfig(request: unknown): Promise<SkillsConfigMutationTransportResponse>;
@@ -242,6 +255,29 @@ export function createSkillsManagementTransport(
 ): SkillsManagementTransport {
   return {
     execute: (request) => executeCapability(issuer, runtimeHostTransportPort, fetcher, request),
+    async operationResult(request) {
+      if (!isRecord(request) || !hasExactKeys(request, ['callId']) || !isCallId(request.callId)) return rejectedResponse();
+      const observed = await createCallLogTransport(issuer, runtimeHostTransportPort, fetcher).get(request);
+      if (observed.status !== 200 || !('module' in observed.body) || observed.body.module !== 'skills') return unknownResponse();
+      const call = observed.body;
+      if (!['succeeded', 'failed', 'rejected', 'unknown'].includes(call.status) || call.detail.resultReady !== true) return unknownResponse();
+      const decision = resultDecision(call.command);
+      if (!decision) return rejectedResponse();
+      const endpoint = '/api/skills/operations/result';
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort, path: endpoint, issuer, method: 'POST', fetcher, body: request,
+        decision: { endpoint, ...decision },
+      });
+      if (response?.status === 200) {
+        try {
+          const result = decodeSkillsOperationResult(response.body);
+          if (result.callId !== call.callId || result.command !== call.command || result.result.outcome !== call.detail.result) return unknownResponse();
+          return { status: 200, body: result };
+        } catch { /* closed owner result boundary */ }
+      }
+      if (response?.status === 404 && isSkillsUninstallNotFoundResult(response.body)) return { status: 404, body: response.body };
+      return unknownResponse();
+    },
     readStatus: () => readStatus(issuer, runtimeHostTransportPort, fetcher),
     detail: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.detail, request, 'skills:read', 'skills.detail', 'skills-detail', isSkillsDetailRequest, isSkillsDetailResult),
     mutateConfig: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.config, request, 'skills:config:write', 'skills.config.update', 'skills-config', isSkillsConfigMutationRequest, isSkillsMutationResult),
@@ -255,6 +291,15 @@ export function createSkillsManagementTransport(
     importBundle: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.importBundle, request, 'skills:import', 'skills.import.bundle', 'skills-import-bundle', isSkillsImportBundleRequest, isSkillsMutationResult),
     readme: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.readme, request, 'skills:read', 'skills.readme', 'skills-readme', isSkillsReadmeRequest, isSkillsReadmeResult),
   };
+}
+
+function resultDecision(command: string): { scope: string; capability: string; subject: string } | undefined {
+  if (command === 'skills.config') return { scope: 'skills:config:write', capability: 'skills.config.update', subject: 'skills-config' };
+  if (['skills.updateConfig', 'skills.updateState', 'skills.updateBatchState', 'skills.exportBundles'].includes(command)) {
+    return { scope: 'skill.management', capability: command, subject: 'skill-management' };
+  }
+  if (command === 'skills.upload.commit') return { scope: 'skills:upload', capability: command, subject: 'skills-upload-commit' };
+  if (command === 'skills.bundles.export') return { scope: 'subagents:skill-bundles', capability: 'subagentSkillBundles.transfer', subject: 'subagent-skill-bundles' };
 }
 
 async function executeCapability(
@@ -280,6 +325,11 @@ async function executeCapability(
   });
   if (response?.status === 401) return { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
   if (response?.status === 400) return { status: 400, body: CAPABILITY_REJECTED };
+  if (['skills.updateConfig', 'skills.updateState', 'skills.updateBatchState', 'skills.exportBundles', 'skills.importBundles'].includes(request.operationId)) {
+    return response?.status === 202 && isSkillsCallReceipt(response.body)
+      ? { status: 202, body: response.body }
+      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
+  }
   if (response?.status === 200) return projectSkillCapabilityResult(request.operationId, response.body);
   return { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
 }
@@ -317,16 +367,6 @@ function projectSkillCapabilityResult(
       ? { status: 200, body: projectSkillsStatus(native) }
       : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
   }
-  if (operation === 'skills.exportBundles') {
-    return hasExactKeys(body, ['skillBundles']) && Array.isArray(body.skillBundles)
-      ? { status: 200, body: body.skillBundles }
-      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
-  }
-  if (operation === 'skills.importBundles') {
-    return hasExactKeys(body, ['ok']) && body.ok === true
-      ? { status: 200, body: { ok: true } }
-      : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
-  }
   if (operation === 'clawhub.openReadme') {
     return hasExactKeys(body, ['success', 'content', 'filePath'])
       && body.success === true
@@ -341,9 +381,7 @@ function projectSkillCapabilityResult(
       ? { status: 200, body: { success: true } }
       : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
   }
-  return body.success === true
-    ? { status: 200, body: { success: true } }
-    : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
+  return { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
 }
 
 export function decodeSkillsStatus(value: unknown): NativeSkillsStatusResult | null {
@@ -612,7 +650,17 @@ async function send<T>(
     fetcher,
     ...(method === 'POST' ? { body: request } : {}),
   });
-  if (response?.status === 200 && isSuccess(response.body)) return { status: 200, body: response.body };
+  const admitted = endpoint === SKILLS_ENDPOINTS.clawHubInstall
+    || endpoint === SKILLS_ENDPOINTS.clawHubUpdate
+    || endpoint === SKILLS_ENDPOINTS.importMarkdown
+    || endpoint === SKILLS_ENDPOINTS.importBundle
+    || endpoint === SKILLS_ENDPOINTS.config
+    || endpoint === SKILLS_ENDPOINTS.uploadCommit
+    || endpoint === SKILLS_ENDPOINTS.uninstall;
+  if (admitted && response?.status === 202 && isSkillsCallReceipt(response.body)) {
+    return { status: 202, body: response.body };
+  }
+  if (!admitted && response?.status === 200 && isSuccess(response.body)) return { status: 200, body: response.body };
   if (endpoint === SKILLS_ENDPOINTS.uninstall && response?.status === 404 && isSkillsUninstallNotFoundResult(response.body)) {
     return { status: 404, body: response.body };
   }
@@ -846,7 +894,7 @@ function isText(value: unknown, maxLength: number): value is string {
 }
 
 function isBoundedInteger(value: unknown, minimum: number, maximum: number): value is number {
-  return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 }
 
 function isSha256(value: unknown): value is string {

@@ -1,3 +1,5 @@
+import type { CallReceipt } from '../../../../src/types/call-log';
+import { decodeCallReceipt } from '../../../../src/types/call-log/receipt';
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { hasExactKeys, isBoundedText, isRecord, sendLoopbackJson } from './client';
 
@@ -74,15 +76,15 @@ export type RuntimeControlUiUrlResponse = Readonly<{
   result: Readonly<{ url: string }>;
 }>;
 
-export type RuntimeControlTransportResponse<T> =
-  | Readonly<{ status: 200; body: T }>
+export type RuntimeControlTransportResponse<T, S extends 200 | 202 = 200> =
+  | Readonly<{ status: S; body: T }>
   | Readonly<{ status: 400 | 401 | 422 | 500 | 503; body: typeof RUNTIME_CONTROL_UNAVAILABLE }>;
 
 export interface RuntimeControlTransport {
   lifecycleStatus(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<RuntimeLifecycleResponse>>;
-  lifecycleStart(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<RuntimeLifecycleResponse>>;
-  lifecycleStop(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<RuntimeLifecycleResponse>>;
-  lifecycleRestart(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<RuntimeLifecycleResponse>>;
+  lifecycleStart(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<CallReceipt, 202>>;
+  lifecycleStop(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<CallReceipt, 202>>;
+  lifecycleRestart(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<CallReceipt, 202>>;
   logs(input?: Readonly<{ endpoint?: RuntimeEndpointAddress; cursor?: number }>): Promise<RuntimeControlTransportResponse<RuntimeLogsResponse>>;
   controlReady(input?: Readonly<{ endpoint?: RuntimeEndpointAddress; timeoutMs?: number }>): Promise<RuntimeControlTransportResponse<RuntimeControlReadyResponse>>;
   gatewayHealth(input?: Readonly<{ endpoint?: RuntimeEndpointAddress; probe?: boolean }>): Promise<RuntimeControlTransportResponse<RuntimeGatewayHealthResponse>>;
@@ -159,12 +161,13 @@ export function createRuntimeControlTransport(
   runtimeHostTransportPort: number,
   fetcher: typeof fetch = fetch,
 ): RuntimeControlTransport {
-  const send = async <T>(
+  const send = async <T, S extends 200 | 202>(
     operation: RuntimeControlOperation,
     body: unknown,
     validate: (value: unknown) => value is T,
+    status: S,
     timeoutMs?: number,
-  ): Promise<RuntimeControlTransportResponse<T>> => {
+  ): Promise<RuntimeControlTransportResponse<T, S>> => {
     const response = await sendLoopbackJson({
       port: runtimeHostTransportPort,
       path: operation.path,
@@ -180,42 +183,43 @@ export function createRuntimeControlTransport(
       body,
       timeoutMs,
     });
-    if (response?.status === 200 && validate(response.body)) return { status: 200, body: response.body };
+    if (response?.status === status && validate(response.body)) return { status, body: response.body };
     return { status: response?.status === 400 || response?.status === 401 || response?.status === 422 || response?.status === 500 ? response.status : 503, body: RUNTIME_CONTROL_UNAVAILABLE };
   };
 
   return {
     lifecycleStatus(endpoint = OPEN_CLAW_RUNTIME_ENDPOINT) {
-      return send(operations.lifecycleStatus, { endpoint }, isRuntimeLifecycleResponse);
+      return send(operations.lifecycleStatus, { endpoint }, isRuntimeLifecycleResponse, 200);
     },
     lifecycleStart(endpoint = OPEN_CLAW_RUNTIME_ENDPOINT) {
-      return send(operations.lifecycleStart, { endpoint }, isRuntimeLifecycleResponse);
+      return send(operations.lifecycleStart, { endpoint }, isRuntimeControlCallReceipt, 202);
     },
     lifecycleStop(endpoint = OPEN_CLAW_RUNTIME_ENDPOINT) {
-      return send(operations.lifecycleStop, { endpoint }, isRuntimeLifecycleResponse);
+      return send(operations.lifecycleStop, { endpoint }, isRuntimeControlCallReceipt, 202);
     },
     lifecycleRestart(endpoint = OPEN_CLAW_RUNTIME_ENDPOINT) {
-      return send(operations.lifecycleRestart, { endpoint }, isRuntimeLifecycleResponse);
+      return send(operations.lifecycleRestart, { endpoint }, isRuntimeControlCallReceipt, 202);
     },
     logs(input) {
-      return send(operations.logs, body(input?.endpoint, { cursor: input?.cursor }), isRuntimeLogsResponse);
+      return send(operations.logs, body(input?.endpoint, { cursor: input?.cursor }), isRuntimeLogsResponse, 200);
     },
     controlReady(input) {
       return send(
         operations.controlReady,
         { endpoint: input?.endpoint ?? OPEN_CLAW_RUNTIME_ENDPOINT },
         isRuntimeControlReadyResponse,
+        200,
         input?.timeoutMs,
       );
     },
     gatewayHealth(input) {
-      return send(operations.gatewayHealth, body(input?.endpoint, { probe: input?.probe }), isRuntimeGatewayHealthResponse);
+      return send(operations.gatewayHealth, body(input?.endpoint, { probe: input?.probe }), isRuntimeGatewayHealthResponse, 200);
     },
     gatewayStatus(input) {
-      return send(operations.gatewayStatus, body(input?.endpoint, { includeChannelSummary: input?.includeChannelSummary }), isRuntimeGatewayStatusResponse);
+      return send(operations.gatewayStatus, body(input?.endpoint, { includeChannelSummary: input?.includeChannelSummary }), isRuntimeGatewayStatusResponse, 200);
     },
     controlUiUrl(endpoint = OPEN_CLAW_RUNTIME_ENDPOINT) {
-      return send(operations.controlUiUrl, { endpoint }, isRuntimeControlUiUrlResponse);
+      return send(operations.controlUiUrl, { endpoint }, isRuntimeControlUiUrlResponse, 200);
     },
   };
 }
@@ -224,6 +228,15 @@ function body(endpoint: RuntimeEndpointAddress | undefined, extra: Record<string
   return Object.fromEntries(
     Object.entries({ endpoint: endpoint ?? OPEN_CLAW_RUNTIME_ENDPOINT, ...extra }).filter(([, value]) => value !== undefined),
   );
+}
+
+function isRuntimeControlCallReceipt(value: unknown): value is CallReceipt {
+  try {
+    decodeCallReceipt(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isRuntimeLifecycleResponse(value: unknown): value is RuntimeLifecycleResponse {

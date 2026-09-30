@@ -1,6 +1,5 @@
 import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
-import { RuntimeHostControlError } from '../../electron/main/runtime-host-delivery/control';
 import { handleRuntimeHostProcessRoutes } from '../../electron/api/routes/runtime-host-process';
 
 function createRequest(method: string) {
@@ -80,40 +79,39 @@ describe('Runtime Host process routes', () => {
     });
   });
 
-  it('restarts the lifecycle owner and preserves the public success envelope', async () => {
-    const restart = vi.fn().mockResolvedValue(undefined);
+  it('admits a restart through the lifecycle owner without claiming success', async () => {
+    const admission = { accepted: true, restartId: '11111111-1111-4111-8111-111111111111' };
+    const restart = vi.fn().mockReturnValue(admission);
     const fixture = createResponse();
 
     await expect(handleRuntimeHostProcessRoutes(
       createRequest('POST') as never,
       fixture.raw as never,
       new URL('http://localhost/api/runtime-host/restart'),
-      { runtimeHost: { restart } } as never,
+      { runtimeHost: { admitRestart: restart } } as never,
     )).resolves.toBe(true);
 
     expect(restart).toHaveBeenCalledOnce();
-    expect(fixture.response.statusCode).toBe(200);
-    expect(fixture.response.body).toEqual({ success: true });
+    expect(fixture.response.statusCode).toBe(202);
+    expect(fixture.response.body).toEqual(admission);
   });
 
-  it('maps unknown delivery without exposing private error details', async () => {
-    const restart = vi.fn().mockRejectedValue(
-      new RuntimeHostControlError('timeout-exceeded', 'unknown-delivery'),
-    );
+  it('observes unknown delivery without claiming restart success', async () => {
+    const restartId = '11111111-1111-4111-8111-111111111111';
+    const result = { restartId, status: 'unknown', error: 'Runtime Host restart outcome is unknown' };
+    const readRestart = vi.fn().mockReturnValue(result);
     const fixture = createResponse();
 
     await handleRuntimeHostProcessRoutes(
-      createRequest('POST') as never,
+      createRequest('GET') as never,
       fixture.raw as never,
-      new URL('http://localhost/api/runtime-host/restart'),
-      { runtimeHost: { restart } } as never,
+      new URL(`http://localhost/api/runtime-host/restart?restartId=${restartId}`),
+      { runtimeHost: { readRestart } } as never,
     );
 
-    expect(fixture.response.statusCode).toBe(503);
-    expect(fixture.response.body).toEqual({
-      success: false,
-      error: 'Runtime Host restart outcome is unknown',
-    });
+    expect(readRestart).toHaveBeenCalledWith(restartId);
+    expect(fixture.response.statusCode).toBe(200);
+    expect(fixture.response.body).toEqual(result);
     expect(JSON.stringify(fixture.response.body)).not.toContain('timeout-exceeded');
   });
 
@@ -122,7 +120,7 @@ describe('Runtime Host process routes', () => {
     const fixture = createResponse();
 
     await expect(handleRuntimeHostProcessRoutes(
-      createRequest('GET') as never,
+      createRequest('PUT') as never,
       fixture.raw as never,
       new URL('http://localhost/api/runtime-host/restart'),
       { runtimeHost: { restart } } as never,

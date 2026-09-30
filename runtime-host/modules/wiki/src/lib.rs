@@ -2,6 +2,8 @@ mod adapters;
 mod api;
 mod application;
 pub mod archive;
+mod call;
+mod call_result;
 pub mod capability;
 mod domain;
 pub mod embedding;
@@ -76,6 +78,11 @@ impl WikiModule {
         Self { handle }
     }
 
+    pub fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
+        self.handle = self.handle.with_call_recorder(recorder);
+        self
+    }
+
     pub fn handle(&self) -> &WikiHandle {
         &self.handle
     }
@@ -121,25 +128,31 @@ pub fn spawn_owner(
     let handle = WikiHandle::new(handle);
     let mut source_watch_task =
         owner::source_watcher::spawn(handle.clone(), source_watch_control, source_watch_receiver);
-    let (task, _) = OwnedTask::spawn(|cancellation| async move {
-        tokio::select! {
+    let workflow_handle = handle.clone();
+    let (task, shutdown) = OwnedTask::spawn(|cancellation| async move {
+        let failed = tokio::select! {
             _ = cancellation.cancelled() => {
                 source_watch_task.cancel();
-                owner_task.cancel();
-                let _ = source_watch_task.join().await;
-                let _ = owner_task.join().await;
+                workflow_handle.drain_call_workflows().await;
+                let watcher_failed = call::report_task_exit(source_watch_task.join().await);
+                let owner_failed = call::report_task_exit(owner_task.drain_and_join().await);
+                watcher_failed || owner_failed
             }
             result = &mut source_watch_task => {
-                let _ = result;
-                owner_task.cancel();
-                let _ = owner_task.join().await;
+                let watcher_failed = call::report_task_exit(result);
+                workflow_handle.drain_call_workflows().await;
+                let owner_failed = call::report_task_exit(owner_task.drain_and_join().await);
+                watcher_failed || owner_failed
             }
             result = &mut owner_task => {
-                let _ = result;
+                let owner_failed = call::report_task_exit(result);
                 source_watch_task.cancel();
-                let _ = source_watch_task.join().await;
+                workflow_handle.drain_call_workflows().await;
+                let watcher_failed = call::report_task_exit(source_watch_task.join().await);
+                watcher_failed || owner_failed
             }
-        }
+        };
+        assert!(!failed, "Wiki managed owner shutdown failed");
     });
-    Ok((WikiModule::new(handle), task))
+    Ok((WikiModule::new(handle.with_shutdown(shutdown)), task))
 }

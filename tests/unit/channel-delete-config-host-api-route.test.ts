@@ -25,7 +25,8 @@ function response() {
 describe('channel delete-config Host API route', () => {
   it('forwards the exact delete DTO to the dedicated transport', async () => {
     const body = { channel: 'feishu' } as const;
-    const deleteConfig = vi.fn().mockResolvedValue({ status: 200, body: { outcome: 'confirmed' } });
+    const receipt = { callId: '0123456789abcdef0123456789abcdef', accepted: true };
+    const deleteConfig = vi.fn().mockResolvedValue({ status: 202, body: receipt });
     const result = response();
 
     await expect(handleChannelDeleteConfigRoutes(
@@ -37,8 +38,8 @@ describe('channel delete-config Host API route', () => {
 
     expect(deleteConfig).toHaveBeenCalledWith(body, '12345678-1234-4234-8234-123456789abc');
     expect(result.state).toEqual({
-      statusCode: 200,
-      body: { outcome: 'confirmed' },
+      statusCode: 202,
+      body: receipt,
     });
   });
 
@@ -66,18 +67,18 @@ describe('channel delete-config Host API route', () => {
     expect(deleteConfig).not.toHaveBeenCalled();
   });
 
-  it.each(['target_rejected', 'unknown'] as const)('preserves the sealed %s outcome as HTTP 200', async (outcome) => {
+  it.each([[400, 'rejected'], [503, 'unknown']] as const)('preserves HTTP %s with the sealed %s outcome', async (status, outcome) => {
     const result = response();
 
     await handleChannelDeleteConfigRoutes(
       request({ channel: 'feishu', accountId: 'default' }) as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/channels/delete-config'),
-      { deleteConfig: vi.fn().mockResolvedValue({ status: 200, body: { outcome } }) },
+      { deleteConfig: vi.fn().mockResolvedValue({ status, body: { outcome } }) },
     );
 
     expect(result.state).toEqual({
-      statusCode: 200,
+      statusCode: status,
       body: { outcome },
     });
   });

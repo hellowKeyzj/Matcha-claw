@@ -367,17 +367,17 @@ describe('Team runtime client compatibility verification', () => {
     await expect(cancelTeamRun({ runId, idempotencyKey: 'cancel:unknown' })).rejects.toThrow('Team runtime response is unavailable');
 
     hostApiFetch.mockResolvedValueOnce({ runId, state: 'outcome_unknown' });
-    await expect(deleteTeamRun({ runId })).rejects.toThrow('Team runtime response is unavailable');
+    await expect(deleteTeamRun({ runId })).rejects.toThrow('Invalid call receipt');
 
     hostApiFetch.mockResolvedValueOnce({ runId, outcome: 'outcome-unknown' });
     await expect(exportTeamRunGraphYaml({ runId })).rejects.toThrow('Team runtime response is unavailable');
   });
 
-  it('accepts team delete outcome-unknown as the durable tombstone result', async () => {
+  it('rejects team delete outcome-unknown as an admission receipt', async () => {
     const projection = { teamId, state: 'outcome_unknown' };
     hostApiFetch.mockResolvedValueOnce(projection);
 
-    await expect(deleteTeamInstance({ teamId })).resolves.toEqual(projection);
+    await expect(deleteTeamInstance({ teamId })).rejects.toThrow('Invalid call receipt');
   });
 
   it('decodes Rust graph export projection without requiring the old success wrapper', async () => {

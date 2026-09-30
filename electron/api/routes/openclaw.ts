@@ -420,12 +420,11 @@ async function handleLifecycleRestart(ctx: OpenClawApiContext, res: ServerRespon
       sendUnavailable(res, LIFECYCLE_RESTART_UNKNOWN);
       return;
     }
-    const status = response.status === 200 ? readLifecycleStatus(response.body) : null;
-    if (!status) {
+    if (response.status !== 202) {
       sendJson(res, 500, { success: false, error: LIFECYCLE_RESTART_FAILED });
       return;
     }
-    sendJson(res, 200, { success: true, status });
+    sendJson(res, 202, response.body);
   } catch (error) {
     const unknown = error instanceof RuntimeHostControlError
       && error.delivery === 'unknown-delivery';

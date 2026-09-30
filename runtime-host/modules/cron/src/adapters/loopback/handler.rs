@@ -10,12 +10,12 @@ use tokio::{sync::Mutex, time::timeout};
 
 use platform::loopback;
 
-use crate::api::CronHandle;
+use crate::{api::CronHandle, application::commands::MutationCommand};
 
 use super::wire::{
-    CREATE_PATH, CronHistoryQuery, CronRequest, DELETE_PATH, DecodeError, LIST_PATH,
-    SESSION_HISTORY_PATH, TOGGLE_PATH, TRIGGER_PATH, UPDATE_PATH, delete_body, history_body,
-    job_body, list_body, trigger_body,
+    CREATE_PATH, CronHistoryQuery, CronRequest, DELETE_PATH, DecodeError, LIST_PATH, RESULT_PATH,
+    ResultRequest, SESSION_HISTORY_PATH, TOGGLE_PATH, TRIGGER_PATH, UPDATE_PATH, history_body,
+    list_body, result_body, trigger_body,
 };
 
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024 + 64 * 1024;
@@ -141,7 +141,13 @@ async fn handle(
     if request.method != "POST"
         || !matches!(
             request.path.as_str(),
-            LIST_PATH | CREATE_PATH | UPDATE_PATH | DELETE_PATH | TOGGLE_PATH | TRIGGER_PATH
+            LIST_PATH
+                | CREATE_PATH
+                | UPDATE_PATH
+                | DELETE_PATH
+                | TOGGLE_PATH
+                | TRIGGER_PATH
+                | RESULT_PATH
         )
         || request.query.is_some()
     {
@@ -156,7 +162,18 @@ async fn handle(
         }
     };
     let mut verifier = verifier.lock().await;
-    let request = match CronRequest::decode(
+    if request.path == RESULT_PATH {
+        let (input, subject) =
+            match ResultRequest::decode(value, authorization, &mut verifier, now_millis()) {
+                Ok(input) => input,
+                Err(DecodeError::Unauthorized) => return Response::unauthorized(),
+                Err(DecodeError::Invalid) => return Response::bad_request(),
+            };
+        drop(verifier);
+        let (status, body) = result_body(cron.read_result(&input.call_id, &subject));
+        return Response { status, body };
+    }
+    let (request, principal) = match CronRequest::decode(
         &request.path,
         value,
         authorization,
@@ -187,21 +204,15 @@ async fn handle(
             }
             list_body(outcome)
         }
-        CronRequest::Create(command) => job_body(
-            cron.create(command)
-                .await
-                .unwrap_or(crate::model::CronJobMutationOutcome::Unavailable),
-        ),
-        CronRequest::Update(command) => job_body(
-            cron.update(command)
-                .await
-                .unwrap_or(crate::model::CronJobMutationOutcome::Unavailable),
-        ),
-        CronRequest::Delete(command) => delete_body(
-            cron.delete(command)
-                .await
-                .unwrap_or(crate::model::CronDeleteOutcome::Unavailable),
-        ),
+        CronRequest::Create(command) => {
+            admit_body(&cron, MutationCommand::Create(command), principal).await
+        }
+        CronRequest::Update(command) => {
+            admit_body(&cron, MutationCommand::Update(command), principal).await
+        }
+        CronRequest::Delete(command) => {
+            admit_body(&cron, MutationCommand::Delete(command), principal).await
+        }
         CronRequest::Trigger(job_id) => trigger_body(
             cron.trigger(job_id)
                 .await
@@ -209,6 +220,23 @@ async fn handle(
         ),
     };
     Response { status, body }
+}
+
+async fn admit_body(
+    cron: &CronHandle,
+    command: MutationCommand,
+    principal: String,
+) -> (u16, Value) {
+    match cron.admit(command, principal).await {
+        Ok(receipt) => (
+            202,
+            serde_json::json!({ "callId": receipt.call_id, "accepted": true }),
+        ),
+        Err(()) => (
+            503,
+            serde_json::json!({ "success": false, "error": "Cron service is unavailable" }),
+        ),
+    }
 }
 
 fn is_loopback_candidate_target(target: &str) -> bool {
@@ -222,6 +250,7 @@ fn is_loopback_candidate_target(target: &str) -> bool {
             | TOGGLE_PATH
             | TRIGGER_PATH
             | SESSION_HISTORY_PATH
+            | RESULT_PATH
     )
 }
 

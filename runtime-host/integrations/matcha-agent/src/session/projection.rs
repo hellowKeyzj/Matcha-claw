@@ -293,6 +293,9 @@ fn append_event_facts<'facts>(
             EventActivity::Approval(_) => {
                 ordered.push(NativeOrderedFact::ApprovalEvent { provenance, event });
             }
+            EventActivity::RunFailed { .. } => {
+                ordered.push(NativeOrderedFact::TerminalEvent { provenance, event });
+            }
             EventActivity::Run(lifecycle) if is_terminal_lifecycle(*lifecycle) => {
                 ordered.push(NativeOrderedFact::TerminalEvent { provenance, event });
             }
@@ -304,10 +307,7 @@ fn append_event_facts<'facts>(
 fn is_terminal_lifecycle(lifecycle: RunLifecycle) -> bool {
     matches!(
         lifecycle,
-        RunLifecycle::Cancelled
-            | RunLifecycle::Completed
-            | RunLifecycle::Failed
-            | RunLifecycle::Interrupted
+        RunLifecycle::Cancelled | RunLifecycle::Completed | RunLifecycle::Interrupted
     )
 }
 

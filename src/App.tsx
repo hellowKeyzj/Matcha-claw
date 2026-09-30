@@ -17,7 +17,7 @@ import { useUpdateStore } from './stores/update';
 import { useAccountStore } from './stores/account';
 import { AuthPage } from './pages/Auth';
 import { AccountOrbitCore } from './components/account/AccountOrbitCore';
-import { hostToolchainPrepare } from './lib/host-api';
+import { prepareToolchain } from './lib/toolchain';
 import { useDelayedFlag } from './lib/use-delayed-flag';
 import { applyResolvedTheme, useResolvedTheme } from './lib/use-resolved-theme';
 import { UpdateNotifier } from './components/update/UpdateNotifier';
@@ -74,7 +74,7 @@ function MainLayoutWithLazyToolchainPrepare() {
       return;
     }
     toolchainPrepareStarted = true;
-    void hostToolchainPrepare().catch((error) => {
+    void prepareToolchain().catch((error) => {
       console.debug('Toolchain prepare failed', error);
     });
   }, []);

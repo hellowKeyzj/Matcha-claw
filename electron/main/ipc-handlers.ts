@@ -11,7 +11,7 @@ import { registerWindowHandlers } from './ipc/window-ipc';
 import { registerGatewayHandlers } from './ipc/gateway-ipc';
 import { registerHostApiProxyHandlers } from './ipc/hostapi-proxy-ipc';
 import { registerSettingsPrivateProxyHandlers } from './ipc/settings-private-proxy';
-import { registerProviderPrivateAuthHandlers } from './ipc/provider-private-auth';
+import { registerProviderPrivateAuthHandlers, type AwaitProviderCall } from './ipc/provider-private-auth';
 import { registerFleetPrivateHandlers } from './ipc/fleet-private';
 import type { FleetCredentialsTransport } from './runtime-host-delivery/transport/fleet-credentials';
 import type { ProviderAccountsTransport } from './runtime-host-delivery/transport/providers/accounts';
@@ -36,10 +36,11 @@ export function registerRuntimeIpcHandlers(
   runtimeHost: DirectRuntimeHost,
   getMainWindow: () => BrowserWindow | null,
   providerAccountsTransport: ProviderAccountsTransport,
+  awaitProviderCall: AwaitProviderCall,
   fleetCredentialsTransport: FleetCredentialsTransport,
   diagnosticsExportDependencies: DiagnosticsExportDependencies,
 ): void {
-  registerProviderPrivateAuthHandlers(getMainWindow, providerAccountsTransport);
+  registerProviderPrivateAuthHandlers(getMainWindow, providerAccountsTransport, awaitProviderCall);
   registerFleetPrivateHandlers(fleetCredentialsTransport);
   registerDiagnosticsExportHandler(diagnosticsExportDependencies);
   registerGatewayHandlers(runtimeHost);
@@ -49,6 +50,7 @@ export function registerIpcHandlers(
   runtimeHost: DirectRuntimeHost,
   getMainWindow: () => BrowserWindow | null,
   providerAccountsTransport: ProviderAccountsTransport,
+  awaitProviderCall: AwaitProviderCall,
   fleetCredentialsTransport: FleetCredentialsTransport,
   diagnosticsExportDependencies: DiagnosticsExportDependencies,
 ): void {
@@ -57,6 +59,7 @@ export function registerIpcHandlers(
     runtimeHost,
     getMainWindow,
     providerAccountsTransport,
+    awaitProviderCall,
     fleetCredentialsTransport,
     diagnosticsExportDependencies,
   );

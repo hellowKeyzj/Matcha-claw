@@ -1,3 +1,6 @@
+import type { CloudPackageMeteringBinding } from '../../../src/types/cloud-package';
+export type { CloudPackageMeteringBinding, CloudPackageVersion, CloudPackageListPage } from '../../../src/types/cloud-package';
+
 export type JsonRecord = Record<string, unknown>;
 
 export type CloudUserRole = 'admin' | 'user';
@@ -346,14 +349,6 @@ export type CloudPackageListQuery = Readonly<{
   packageType?: string;
 }>;
 
-export type CloudPackageMeteringBinding = Readonly<{
-  id?: string;
-  type?: string;
-  unit?: string;
-  amount?: number;
-  currency?: string;
-}>;
-
 export type CloudSealedCloudKey = Readonly<{
   version: 1;
   publicKey: string;
@@ -361,43 +356,11 @@ export type CloudSealedCloudKey = Readonly<{
   algorithm: string;
 }>;
 
-export type CloudPackageVersion = Readonly<{
-  packageId: string;
-  packageVersionId: string;
-  name: string;
-  displayName?: string;
-  packageType: string;
-  version: string;
-  description?: string;
-  status: string;
-  entitlementStatus?: string;
-  downloadable: boolean;
-  meteringBinding?: CloudPackageMeteringBinding;
-  downloadCount?: number;
-  createdAt?: string;
-  updatedAt?: string;
-}>;
-
-export type CloudPackageListPage = Readonly<{
-  items: CloudPackageVersion[];
-  total: number;
-  page: number;
-  pageSize: number;
-  pages: number;
-}>;
-
 export type CloudPackageDownloadRequest = Readonly<{
   packageVersionId: string;
   destinationPath?: string;
   packageType?: string;
   filename?: string;
-  clientVersion?: string;
-  installId?: string;
-  source?: string;
-}>;
-
-export type CloudPackageDownloadRecordRequest = Readonly<{
-  packageVersionId: string;
   clientVersion?: string;
   installId?: string;
   source?: string;
@@ -427,14 +390,6 @@ export type CloudPackageAuthorization = Readonly<{
   leaseExpiresAt: string;
 }>;
 
-export type CloudPackageDownloadRecord = Readonly<{
-  packageVersionId: string;
-  meteringBinding?: CloudPackageMeteringBinding;
-  entitlementStatus?: string;
-  recorded: boolean;
-  recordedAt?: string;
-}>;
-
 export type CloudPackageLocalDownload = Readonly<{
   packagePath: string;
   packageVersionId: string;
@@ -444,6 +399,4 @@ export type CloudPackageLocalDownload = Readonly<{
   packageSha256: string;
   meteringBinding?: CloudPackageMeteringBinding;
   entitlementStatus?: string;
-  recorded?: boolean;
-  recordedAt?: string;
 }>;

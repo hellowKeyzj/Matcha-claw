@@ -773,6 +773,14 @@ impl WikiImportFolderReceipt {
     pub fn new(imported: Vec<WikiImportSourceReceipt>, skipped: Vec<WikiSourceSkip>) -> Self {
         Self { imported, skipped }
     }
+
+    pub(crate) fn imported(&self) -> &[WikiImportSourceReceipt] {
+        &self.imported
+    }
+
+    pub(crate) fn skipped(&self) -> &[WikiSourceSkip] {
+        &self.skipped
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -819,6 +827,22 @@ impl WikiRefreshSourcesReceipt {
             skipped,
         }
     }
+
+    pub(crate) fn imported(&self) -> &[WikiImportSourceReceipt] {
+        &self.imported
+    }
+
+    pub(crate) fn skipped(&self) -> &[WikiSourceSkip] {
+        &self.skipped
+    }
+
+    pub(crate) fn deleted(&self) -> &[WikiDeleteSourceReceipt] {
+        &self.deleted
+    }
+
+    pub(crate) fn moved(&self) -> &[WikiSourceMoveReceipt] {
+        &self.moved
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -851,6 +875,16 @@ impl WikiDeleteSourceReceipt {
             updated_pages,
             deleted_media,
         }
+    }
+
+    pub(crate) fn deleted_pages(&self) -> &[String] {
+        &self.deleted_pages
+    }
+    pub(crate) fn updated_pages(&self) -> &[String] {
+        &self.updated_pages
+    }
+    pub(crate) fn deleted_media(&self) -> &[String] {
+        &self.deleted_media
     }
 }
 
@@ -1004,6 +1038,10 @@ pub struct WikiSourceTasksReceipt {
 impl WikiSourceTasksReceipt {
     pub fn new(tasks: Vec<WikiSourceTask>) -> Self {
         Self { tasks }
+    }
+
+    pub(crate) fn tasks(&self) -> &[WikiSourceTask] {
+        &self.tasks
     }
 }
 

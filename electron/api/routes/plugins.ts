@@ -2,9 +2,8 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import type {
   PluginCatalogItem,
   PluginConfigurationInput,
-  PluginConfigurationOutcome,
+  PluginMutationReceipt,
   PluginOperationInput,
-  PluginOperationOutcome,
   PluginRuntime,
   PluginsTransport,
 } from '../../main/runtime-host-delivery/transport/plugins';
@@ -88,7 +87,7 @@ export async function handlePluginsRoutes(
 async function handleMutation<T extends PluginConfigurationInput | PluginOperationInput>(
   req: IncomingMessage,
   res: ServerResponse,
-  execute: (input: unknown) => Promise<PluginConfigurationOutcome | PluginOperationOutcome>,
+  execute: (input: unknown) => Promise<PluginMutationReceipt>,
   validate: (value: unknown) => value is T,
   _transport: PluginsTransport,
 ): Promise<true> {
@@ -105,7 +104,7 @@ async function handleMutation<T extends PluginConfigurationInput | PluginOperati
   }
   try {
     const result = await execute(body);
-    if (isOutcome(result)) sendJson(res, 200, result);
+    if (isReceipt(result)) sendJson(res, 202, result);
     else sendJson(res, 503, UNKNOWN);
   } catch {
     sendJson(res, 503, UNKNOWN);
@@ -129,10 +128,12 @@ function isOperationInput(value: unknown): value is PluginOperationInput {
     && isIdentity(value.pluginId);
 }
 
-function isOutcome(value: unknown): value is PluginConfigurationOutcome | PluginOperationOutcome {
+function isReceipt(value: unknown): value is PluginMutationReceipt {
   return isRecord(value)
-    && hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'configured' || value.outcome === 'rejected' || value.outcome === 'unknown');
+    && hasExactKeys(value, ['callId', 'accepted'])
+    && typeof value.callId === 'string'
+    && /^[a-f0-9]{32}$/.test(value.callId)
+    && value.accepted === true;
 }
 
 function isCatalog(value: unknown): value is Readonly<{

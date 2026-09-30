@@ -1,10 +1,14 @@
 use std::sync::Arc;
 
 use foundation::execution::{LaneRetention, OwnerSpec};
+use platform::call::{CallContext, CallStatus};
 
 use crate::{
     NativeToolchain, PrepareOutcome, ToolchainRequestAdmissionClosed, ToolchainStatus,
-    application::commands::{ToolchainCommand, ToolchainOwnerKey, ToolchainQuery},
+    application::{
+        call::{self, CallFailure, ToolchainCallDetail},
+        commands::{ToolchainCommand, ToolchainOwnerKey, ToolchainQuery},
+    },
     ports::ToolchainRequestAdmission,
 };
 
@@ -79,8 +83,24 @@ impl OwnerSpec for ToolchainOwner {
         command: Self::Command,
     ) {
         match command {
-            ToolchainCommand::Prepare { reply } => {
-                let _ = reply.send(prepare(&shared).await);
+            ToolchainCommand::AdmitPrepare { call } => {
+                if let Err(error) = call.running().await {
+                    eprintln!(
+                        "[toolchain:call] running record failed call_id={} error={error}",
+                        call.id().as_str()
+                    );
+                    call::finish(
+                        Some(&call),
+                        CallStatus::Rejected,
+                        &ToolchainCallDetail::prepare().failed(CallFailure::RecordingUnavailable),
+                    )
+                    .await;
+                    return;
+                }
+                execute_prepare(&shared, Some(&call)).await;
+            }
+            ToolchainCommand::Prepare { call, reply } => {
+                let _ = reply.send(prepare(&shared, call.as_ref()).await);
             }
         }
     }
@@ -101,8 +121,8 @@ impl OwnerSpec for ToolchainOwner {
         query: Self::Query,
     ) {
         match query {
-            ToolchainQuery::Status { reply } => {
-                let _ = reply.send(status(&shared).await);
+            ToolchainQuery::Status { call, reply } => {
+                let _ = reply.send(status(&shared, call.as_ref()).await);
             }
         }
     }
@@ -118,14 +138,74 @@ impl OwnerSpec for ToolchainOwner {
 
 async fn status(
     shared: &ToolchainShared,
+    context: Option<&CallContext<ToolchainCallDetail>>,
 ) -> Result<ToolchainStatus, ToolchainRequestAdmissionClosed> {
-    shared.admission.admit_toolchain_request()?;
-    Ok(shared.toolchain.status().await)
+    admit(shared, context, ToolchainCallDetail::status()).await?;
+    let status = shared.toolchain.status().await;
+    call::finish(
+        context,
+        call::observed_status(&status),
+        &ToolchainCallDetail::observed(&status),
+    )
+    .await;
+    Ok(status)
 }
 
 async fn prepare(
     shared: &ToolchainShared,
+    context: Option<&CallContext<ToolchainCallDetail>>,
 ) -> Result<PrepareOutcome, ToolchainRequestAdmissionClosed> {
-    shared.admission.admit_toolchain_request()?;
-    Ok(shared.toolchain.prepare().await)
+    admit(shared, context, ToolchainCallDetail::prepare()).await?;
+    Ok(execute_prepare(shared, context).await)
+}
+
+async fn execute_prepare(
+    shared: &ToolchainShared,
+    context: Option<&CallContext<ToolchainCallDetail>>,
+) -> PrepareOutcome {
+    let outcome = shared.toolchain.prepare().await;
+    call::finish(
+        context,
+        call::prepared_status(outcome),
+        &ToolchainCallDetail::prepared(outcome),
+    )
+    .await;
+    outcome
+}
+
+async fn admit(
+    shared: &ToolchainShared,
+    context: Option<&CallContext<ToolchainCallDetail>>,
+    detail: ToolchainCallDetail,
+) -> Result<(), ToolchainRequestAdmissionClosed> {
+    if let Err(error) = shared.admission.admit_toolchain_request() {
+        call::finish(
+            context,
+            CallStatus::Rejected,
+            &detail.failed(CallFailure::AdmissionClosed),
+        )
+        .await;
+        return Err(error);
+    }
+    if let Some(context) = context {
+        let recorded = async {
+            context.accepted().await?;
+            context.running().await
+        }
+        .await;
+        if let Err(error) = recorded {
+            eprintln!(
+                "[toolchain:call] admission record failed call_id={} error={error}",
+                context.id().as_str()
+            );
+            call::finish(
+                Some(context),
+                CallStatus::Rejected,
+                &detail.failed(CallFailure::RecordingUnavailable),
+            )
+            .await;
+            return Err(ToolchainRequestAdmissionClosed);
+        }
+    }
+    Ok(())
 }

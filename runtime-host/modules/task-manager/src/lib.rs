@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use foundation::execution::{OwnedTask, OwnerRuntimeConfig, OwnerRuntimeSystem};
 use platform::{
+    call::CallRecorder,
     capability::CapabilityDecisionVerifier,
     module::{CapabilityDescriptorProvider, CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
 };
@@ -44,6 +45,11 @@ pub struct TaskModule {
 impl TaskModule {
     fn new(handle: TaskHandle) -> Self {
         Self { handle }
+    }
+
+    pub fn with_call_recorder(mut self, recorder: CallRecorder) -> Self {
+        self.handle = self.handle.with_call_recorder(recorder);
+        self
     }
 
     pub async fn task_manager(&self, command: TaskCommand) -> Result<TaskOutcome, ()> {

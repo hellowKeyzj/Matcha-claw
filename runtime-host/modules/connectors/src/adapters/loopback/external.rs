@@ -1,4 +1,6 @@
-use platform::capability::CapabilityDecisionVerifier;
+use platform::{call::CallId, capability::CapabilityDecisionVerifier};
+
+use crate::owner::observations::ObservationResult;
 
 use std::collections::BTreeMap;
 
@@ -8,8 +10,8 @@ use serde_json::{Value, json};
 
 use crate::delivery::{
     CatalogOutcome, ConnectorObservation, ConnectorProjectionEffect, ConnectorReadModel,
-    GetOutcome, ListOutcome, MutationOutcome, SessionConnectorStatus, SessionIdentity,
-    SessionMcpServerEnabledOutcome, SessionMcpServerEnabledTarget, SessionStatusTarget,
+    GetOutcome, ListOutcome, MutationOutcome, SessionIdentity, SessionMcpServerEnabledOutcome,
+    SessionMcpServerEnabledTarget, SessionStatusTarget,
 };
 
 pub(crate) const ENDPOINT: &str = "/api/external-connectors";
@@ -31,6 +33,8 @@ pub(crate) struct Request {
     scope: Kind,
     target: Kind,
     input: Input,
+    #[serde(skip)]
+    principal: String,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +54,11 @@ enum Input {
     List {},
     Catalog {},
     Status {},
+    ObservationResult {
+        call_id: CallId,
+        #[serde(default, deserialize_with = "deserialize_session_identity")]
+        session_identity: Option<SessionIdentity>,
+    },
     SessionStatus {
         session_identity: SessionIdentity,
     },
@@ -71,6 +80,15 @@ enum Input {
     Remove {
         connector_id: String,
     },
+}
+
+fn deserialize_session_identity<'de, D>(
+    deserializer: D,
+) -> Result<Option<SessionIdentity>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    SessionIdentity::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_public_connector<'de, D>(deserializer: D) -> Result<Box<Connector>, D::Error>
@@ -227,7 +245,8 @@ pub(crate) enum Command {
     List,
     Catalog,
     Status,
-    SessionStatus(SessionStatusTarget),
+    ObservationResult(CallId, Option<SessionIdentity>, String),
+    SessionStatus(SessionStatusTarget, String),
     SessionMcpServerEnabled(SessionMcpServerEnabledTarget),
     Probe(String),
     Get(String),
@@ -247,10 +266,12 @@ impl Request {
             .and_then(Value::as_str)
             .filter(|operation| operation_name(operation).is_some())
             .ok_or(RequestError::Invalid)?;
-        verifier
+        let decision = verifier
             .verify(authorization, now, ENDPOINT, SCOPE, operation, SUBJECT)
             .map_err(|_| RequestError::Unauthorized)?;
-        let request = serde_json::from_value::<Self>(value).map_err(|_| RequestError::Invalid)?;
+        let mut request =
+            serde_json::from_value::<Self>(value).map_err(|_| RequestError::Invalid)?;
+        request.principal = decision.principal().to_owned();
         request
             .valid()
             .then_some(request)
@@ -265,6 +286,14 @@ impl Request {
                 (Input::List {}, "list")
                 | (Input::Catalog {}, "catalog")
                 | (Input::Status {}, "status") => true,
+                (
+                    Input::ObservationResult {
+                        session_identity, ..
+                    },
+                    "observationResult",
+                ) => session_identity
+                    .as_ref()
+                    .is_none_or(SessionIdentity::is_valid),
                 (Input::SessionStatus { session_identity }, "sessionStatus") => {
                     SessionStatusTarget {
                         session_identity: session_identity.clone(),
@@ -299,8 +328,12 @@ impl Request {
             Input::List {} => Command::List,
             Input::Catalog {} => Command::Catalog,
             Input::Status {} => Command::Status,
+            Input::ObservationResult {
+                call_id,
+                session_identity,
+            } => Command::ObservationResult(call_id, session_identity, self.principal),
             Input::SessionStatus { session_identity } => {
-                Command::SessionStatus(SessionStatusTarget { session_identity })
+                Command::SessionStatus(SessionStatusTarget { session_identity }, self.principal)
             }
             Input::SessionMcpServerEnabled {
                 session_identity,
@@ -324,6 +357,7 @@ fn operation_name(operation: &str) -> Option<&'static str> {
         "externalConnectors.list" => Some("list"),
         "externalConnectors.catalog" => Some("catalog"),
         "externalConnectors.status" => Some("status"),
+        "externalConnectors.observationResult" => Some("observationResult"),
         "externalConnectors.sessionStatus" => Some("sessionStatus"),
         "externalConnectors.sessionMcpServerEnabled" => Some("sessionMcpServerEnabled"),
         "externalConnectors.probe" => Some("probe"),
@@ -345,12 +379,12 @@ fn is_private_system_runtime_connector(connector: &Connector) -> bool {
 }
 
 pub(crate) enum Delivery {
+    Accepted(platform::call::CallReceipt),
     List(ListOutcome),
     Catalog(CatalogOutcome),
-    Status(Vec<(String, ConnectorObservation)>),
-    SessionStatus(Vec<SessionConnectorStatus>),
+    ObservationResult(CallId, ObservationResult),
+    Pending,
     SessionMcpServerEnabled(SessionMcpServerEnabledOutcome),
-    Probe(String, ConnectorObservation),
     Missing,
     Get(GetOutcome),
     Mutation(MutationOutcome),
@@ -360,12 +394,11 @@ pub(crate) enum Delivery {
 impl Delivery {
     pub(crate) fn status_code(&self) -> u16 {
         match self {
+            Self::Accepted(_) => 202,
             Self::List(ListOutcome::Available(_))
             | Self::Catalog(CatalogOutcome::Available(_))
-            | Self::Status(_)
-            | Self::SessionStatus(_)
+            | Self::ObservationResult(..)
             | Self::SessionMcpServerEnabled(SessionMcpServerEnabledOutcome::Applied)
-            | Self::Probe(..)
             | Self::Get(GetOutcome::Found(_))
             | Self::Mutation(MutationOutcome::Stored { .. } | MutationOutcome::Removed { .. }) => {
                 200
@@ -374,7 +407,7 @@ impl Delivery {
             | Self::Get(GetOutcome::Missing)
             | Self::Mutation(MutationOutcome::Missing) => 404,
             Self::Mutation(MutationOutcome::Rejected) => 422,
-            Self::Mutation(MutationOutcome::Unknown) => 409,
+            Self::Pending | Self::Mutation(MutationOutcome::Unknown) => 409,
             Self::Catalog(CatalogOutcome::Unavailable)
             | Self::List(ListOutcome::Unavailable)
             | Self::Get(GetOutcome::Unavailable)
@@ -386,23 +419,35 @@ impl Delivery {
 
     pub(crate) fn body(&self) -> Value {
         match self {
+            Self::Accepted(receipt) => json!(receipt),
             Self::List(ListOutcome::Available(connectors)) => {
                 json!({ "connectors": connectors.iter().map(public_connector_json).collect::<Vec<_>>() })
             }
             Self::Catalog(CatalogOutcome::Available(programs)) => {
                 json!({ "programs": programs.iter().map(catalog_program_json).collect::<Vec<_>>() })
             }
-            Self::Status(statuses) => {
-                json!({ "statuses": statuses.iter().map(|(id, result)| status_json(id, result)).collect::<Vec<_>>() })
+            Self::ObservationResult(call_id, ObservationResult::Status(statuses)) => {
+                json!({ "callId": call_id, "kind": "status", "statuses": statuses.iter().map(|(id, result)| status_json(id, &crate::api::map_observation_receipt(result.clone()))).collect::<Vec<_>>() })
             }
-            Self::SessionStatus(statuses) => json!({ "statuses": statuses }),
+            Self::ObservationResult(call_id, ObservationResult::Probe(id, result)) => {
+                json!({ "callId": call_id, "kind": "probe", "status": status_json(id, &crate::api::map_observation_receipt(result.clone())) })
+            }
+            Self::ObservationResult(
+                call_id,
+                ObservationResult::SessionStatus {
+                    session_identity,
+                    statuses,
+                },
+            ) => {
+                json!({ "callId": call_id, "kind": "sessionStatus", "sessionIdentity": session_identity, "statuses": statuses })
+            }
+            Self::Pending => error("Connector observation is pending"),
             Self::SessionMcpServerEnabled(SessionMcpServerEnabledOutcome::Applied) => {
                 json!({ "success": true, "effectiveNextRun": true })
             }
             Self::SessionMcpServerEnabled(SessionMcpServerEnabledOutcome::Unavailable) => {
                 error("External connectors are unavailable")
             }
-            Self::Probe(id, result) => json!({ "status": status_json(id, result) }),
             Self::Get(GetOutcome::Found(connector)) => {
                 json!({ "connector": public_connector_json(connector) })
             }
@@ -659,6 +704,7 @@ mod tests {
             input: Input::Upsert {
                 connector: Box::new(connector),
             },
+            principal: String::new(),
         };
         assert!(!request.valid());
     }

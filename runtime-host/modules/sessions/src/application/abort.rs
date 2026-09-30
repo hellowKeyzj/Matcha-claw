@@ -17,6 +17,8 @@ pub struct SessionAbortCommand {
     pub endpoint_session_id: Option<String>,
     pub run_id: Option<String>,
     pub approval_ids: Option<Vec<String>>,
+    /// Host-private transport correlation; never serialized or projected to a peer.
+    trace_id: Option<String>,
 }
 
 impl SessionAbortCommand {
@@ -52,7 +54,17 @@ impl SessionAbortCommand {
             endpoint_session_id,
             run_id,
             approval_ids,
+            trace_id: None,
         })
+    }
+
+    pub fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
+        self.trace_id = trace_id;
+        self
+    }
+
+    pub fn trace_id(&self) -> Option<&str> {
+        self.trace_id.as_deref()
     }
 
     pub fn with_endpoint_session_id(mut self, session_id: String) -> Result<Self, InvalidCommand> {

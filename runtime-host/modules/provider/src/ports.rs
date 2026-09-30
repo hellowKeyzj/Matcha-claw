@@ -371,6 +371,15 @@ pub struct ResolverFailure {
 }
 
 impl ResolverFailure {
+    pub(crate) fn safe_code(&self) -> crate::call::ProviderCallPrivateResolverCode {
+        self.reason
+            .strip_prefix("private-resolver-")
+            .and_then(|code| {
+                serde_json::from_value(serde_json::Value::String(code.to_owned())).ok()
+            })
+            .unwrap_or(crate::call::ProviderCallPrivateResolverCode::Unknown)
+    }
+
     fn new(reason: impl Into<String>, status: Option<u16>) -> Self {
         Self {
             reason: reason.into(),
@@ -428,6 +437,29 @@ impl Resolver {
             endpoint,
             authorization,
         })
+    }
+
+    pub fn claim_account_transaction(
+        &self,
+        transaction_id: &str,
+        reference: &str,
+        revision: u64,
+    ) -> Result<(), ResolverFailure> {
+        self.request_no_content(reqwest::Method::POST, serde_json::json!({
+            "operation": "claim", "transactionId": transaction_id, "reference": reference, "revision": revision,
+        }))
+    }
+
+    pub fn settle_account_transaction(
+        &self,
+        transaction_id: &str,
+        reference: &str,
+        revision: u64,
+        settlement: &str,
+    ) -> Result<(), ResolverFailure> {
+        self.request_no_content(reqwest::Method::POST, serde_json::json!({
+            "operation": "settle", "transactionId": transaction_id, "reference": reference, "revision": revision, "settlement": settlement,
+        }))
     }
 
     pub fn apply(

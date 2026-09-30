@@ -231,7 +231,8 @@
     "dismissedReview": "已忽略 Review",
     "clearedReviews": "已清除已处理 Review",
     "createdReviewPage": "已创建 Review 页面",
-    "failed": "{{label}} 失败"
+    "failed": "{{label}} 失败",
+    "resultUnconfirmed": "暂时无法确认操作结果，请查看调用记录或刷新知识库核对，避免重复操作。"
   },
   "time": {
     "unrecorded": "未记录"

@@ -35,7 +35,11 @@ These are existing observable recovery semantics. Rust must not assume events ar
 | `gateway:channel-status` | child channel / gateway projection. | Renderer expects root `channelId` / `status`; see `OPEN` shape discrepancy below. |
 | `runtime-host:status` | Electron-generated observed child status. | `{ status, hostLifecycle, runtimeLifecycle, activePluginCount, pid?, error?, updatedAt }`. |
 | `runtime-host:error` | Electron-generated child status failure. | `{ status, message, pid?, updatedAt }`. |
-| `runtime-host:restart` | Electron detects child recovery. | `{ previousPid?, pid?, status, recoveredAt }`. |
+| `runtime-host:restart` | Electron detects child recovery. | `{ previousPid?, pid?, status, recoveredAt }`; active Call observers re-read the same callId. |
+| `call:changed` | Rust CallLog transaction commit → private control → Electron bridge. | `{callId, revision}`; safe hint only, observers query the same identity. |
+| `calls:resync` | Rust CallLog broadcast lag → `calls.resync` → Electron bridge. | `{}`; active Call observers and Calls store re-read, no periodic fallback. |
+| `runtime-host:disconnected` | Main observes loss of the active control channel, including replacement. | `{}`; ends observation as unconfirmed, not business failure or execution cancellation. |
+| `package:changed` | Main CloudAccountService stores terminal result/TTL, or invalidates an old account epoch. | `{operationId}`; Renderer re-reads the specific Main package result, without bytes/token/epoch. |
 | `matcha-agent:status` | Electron bridges Rust `matcha.lifecycle` safe events. | `{ processState, ready, port: null, pid: null, lastError: null, updatedAt }`; Settings consumes it as a best-effort hint and `/api/matcha-agent/app-server/status` remains the recovery query. |
 | owner/facade operation event | typed owner-local operation projection. | optional fast-path hint; query remains the recovery path. |
 | `oauth:code`, `oauth:success`, `oauth:error` | Electron/OAuth path, not child gateway-event allowlist. | Providers Settings consumes them; child callback does not define these names. |

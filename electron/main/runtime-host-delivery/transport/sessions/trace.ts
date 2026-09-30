@@ -1,3 +1,5 @@
+import { logger } from '../../../../utils/logger';
+
 const SESSION_TRACE_PREFIX = 'session-trace';
 export const SESSION_TRACE_HEADER = 'X-MatchaClaw-Session-Trace';
 
@@ -11,7 +13,7 @@ export function logSessionTrace(stage: string, traceId: string | null | undefine
   if (!traceId || !isSessionTraceEnabled()) {
     return;
   }
-  console.info(JSON.stringify({
+  logger.info(JSON.stringify({
     prefix: SESSION_TRACE_PREFIX,
     source: 'electron-main',
     traceId,

@@ -51,6 +51,7 @@ function createRuntimeHost(name: string): TestRuntimeHost {
       safeEventHandlers.add(handler);
       return () => safeEventHandlers.delete(handler);
     },
+    onDisconnect: () => () => {},
     onExit: (handler) => {
       exitHandlers.add(handler);
       return () => exitHandlers.delete(handler);

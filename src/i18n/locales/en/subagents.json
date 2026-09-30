@@ -208,6 +208,26 @@
   },
   "cloudPackages": {
     "title": "Cloud Agent Packages",
+    "mineTitle": "My cloud packages",
+    "mineDescription": "Uploads remain drafts until you publish them to the market.",
+    "mineEmpty": "No uploaded packages yet.",
+    "marketTitle": "Package market",
+    "loading": "Loading packages...",
+    "loadFailed": "Unable to load packages. Please retry.",
+    "retry": "Retry",
+    "publish": "Publish",
+    "publishing": "Publishing...",
+    "published": "Package published",
+    "publishFailed": "Failed to publish package",
+    "uploadFailed": "Failed to upload package",
+    "installFailed": "Failed to install package",
+    "installed": "Installed",
+    "installing": "Installing...",
+    "status": { "draft": "Draft", "published": "Published", "disabled": "Disabled", "unknown": "Unknown status" },
+    "errors": {
+      "MATCHA_PACKAGE_CLOUD_ENVELOPE_REQUIRED": "Export the package again for the cloud, then upload it.",
+      "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "This version cannot be published. Refresh your uploaded packages."
+    },
     "empty": "No cloud agent packages.",
     "install": "Install"
   },

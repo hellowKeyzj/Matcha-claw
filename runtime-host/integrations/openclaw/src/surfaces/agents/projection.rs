@@ -146,6 +146,11 @@ pub(crate) fn agent_updated(agent: super::AgentUpdated) -> agents::AgentUpdated 
 pub(crate) fn agent_deleted(agent: super::AgentDeleted) -> agents::AgentDeleted {
     agents::AgentDeleted {
         agent_id: agent.agent_id,
+        native_ok: agent.ok,
+        removed_bindings: agent.removed_bindings,
+        failed_count: agent.failed_count,
+        purge_failed_count: agent.purge_failed_count,
+        sealed_purge: agents::SealedPurge::NotAttempted,
     }
 }
 

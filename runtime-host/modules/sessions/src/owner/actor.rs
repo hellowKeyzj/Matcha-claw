@@ -25,7 +25,7 @@ use crate::{
     abort::SessionAbortOutcome,
     approval::{PendingApprovalsOutcome, SessionApprovalOutcome},
     command::{
-        SessionAbortRequest, SessionCommand, SessionEnsureOutcome, SessionEvent,
+        SessionCommand, SessionEnsureOutcome, SessionEvent,
         SessionEvictOutcome, SessionIngestOutcome, SessionSendRequest, openclaw_agent_lane_key,
         session_lane_key,
     },
@@ -81,7 +81,7 @@ pub struct SessionShared {
     ownership_reader: Arc<dyn SessionOwnershipReader>,
     provider_handle: ProviderHandle,
     private_resolver: Arc<StdMutex<Arc<dyn ConnectorSecretResolverPort>>>,
-    snapshot: Arc<ArcSwap<SessionSnapshot>>,
+    pub(super) snapshot: Arc<ArcSwap<SessionSnapshot>>,
     snapshot_writer: Arc<Mutex<()>>,
     session_delta: Option<SessionDeltaSource>,
     terminal_hook: Option<Arc<dyn SessionTerminalHook>>,
@@ -291,7 +291,7 @@ impl SessionShared {
         }
     }
 
-    fn running_session_driver(
+    pub(super) fn running_session_driver(
         &self,
         endpoint: Option<RuntimeEndpoint>,
     ) -> Result<Arc<dyn RuntimeDriver>, RuntimeOperationFailure> {
@@ -674,20 +674,29 @@ impl SessionShared {
     }
 
     async fn handle_global_query(&self, query: SessionQuery) {
+        let Ok((query, call)) = crate::call::query_parts(query).await else {
+            return;
+        };
         match query {
+            SessionQuery::BoundaryOutcome { outcome, reply, .. } => {
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
+            SessionQuery::EventsSubscribed { reply } => {
+                crate::call::reply(call.as_ref(), reply, ()).await;
+            }
             SessionQuery::ListSessions { reply } => {
-                let _ = reply.send(self.list_session_views().await);
+                crate::call::reply(call.as_ref(), reply, self.list_session_views().await).await;
             }
             SessionQuery::GetSession { session_key, reply } => {
-                let _ = reply.send(self.get_session_view(&session_key).await);
+                crate::call::reply(call.as_ref(), reply, self.get_session_view(&session_key).await).await;
             }
             SessionQuery::Catalog { command, reply } => {
                 let outcome = self.handle_session_catalog(command).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             SessionQuery::History { command, reply } => {
                 let outcome = self.handle_session_history(command).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             query => query.send_unavailable(),
         }
@@ -702,6 +711,9 @@ impl SessionLane {
         command: SessionCommand,
     ) {
         use SessionCommand::*;
+        let Ok((command, call)) = crate::call::command_parts(command).await else {
+            return;
+        };
         match command {
             Ensure {
                 identity,
@@ -723,47 +735,42 @@ impl SessionLane {
             }
             Evict { reply, .. } => {
                 let outcome = self.handle_evict(shared, key).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             Create { command, reply } => {
                 let outcome = self.handle_create(shared, &key, command).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             Send { request } => match request {
                 SessionSendRequest::Session { command, reply } => {
                     let outcome = self.handle_send(shared, command).await;
-                    let _ = reply.send(outcome);
-                }
-            },
-            Abort { request } => match request {
-                SessionAbortRequest::Session { command, reply } => {
-                    let outcome = self.handle_abort(shared, command).await;
-                    let _ = reply.send(outcome);
+                    crate::call::reply(call.as_ref(), reply, outcome).await;
                 }
             },
             Delete { command, reply } => {
                 let outcome = self.handle_delete(shared, command).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             Rename { command, reply } => {
                 let outcome = self.handle_rename(shared, command).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             Approval { command, reply } => {
                 let outcome = self.handle_approval(shared, command).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             ModelSelection { command, reply } => {
                 let outcome = self.handle_model_selection(shared, command).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             Permission { command, reply } => {
                 let outcome = self.handle_permission(shared, command).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             ConfigurePrivateResolver { reply, .. } => {
                 let _ = reply.send(());
             }
+            command @ Audited { .. } => command.send_unavailable(),
         }
     }
 
@@ -1092,22 +1099,6 @@ impl SessionLane {
             .map_err(|_| SessionSendOutcome::Rejected)
     }
 
-    fn bind_matcha_abort_command(
-        &mut self,
-        shared: &SessionShared,
-        command: crate::abort::SessionAbortCommand,
-    ) -> Result<crate::abort::SessionAbortCommand, SessionAbortOutcome> {
-        if command.endpoint != crate::abort::NativeEndpoint::MatchaAgentLocal {
-            return Ok(command);
-        }
-        let Some(session_id) = self.matcha_native_session_id(shared, &command.session_key) else {
-            return Err(SessionAbortOutcome::Rejected);
-        };
-        command
-            .with_endpoint_session_id(session_id)
-            .map_err(|_| SessionAbortOutcome::Rejected)
-    }
-
     fn bind_matcha_model_selection_command(
         &mut self,
         shared: &SessionShared,
@@ -1334,29 +1325,6 @@ impl SessionLane {
             .await;
     }
 
-    async fn handle_abort(
-        &mut self,
-        shared: &SessionShared,
-        command: crate::abort::SessionAbortCommand,
-    ) -> SessionAbortOutcome {
-        let command = match self.bind_matcha_abort_command(shared, command) {
-            Ok(command) => command,
-            Err(outcome) => return outcome,
-        };
-        let driver = match shared.running_session_driver(command.endpoint.runtime_endpoint()) {
-            Ok(driver) => driver,
-            Err(RuntimeOperationFailure::Unsupported) => return SessionAbortOutcome::Unsupported,
-            Err(RuntimeOperationFailure::Unavailable) => return SessionAbortOutcome::Unavailable,
-            Err(RuntimeOperationFailure::TargetRejected | RuntimeOperationFailure::Unknown) => {
-                return SessionAbortOutcome::Unknown;
-            }
-        };
-        let Some(ops) = driver.session_ops() else {
-            return SessionAbortOutcome::Unsupported;
-        };
-        ops.abort_session(command).await
-    }
-
     async fn handle_delete(
         &mut self,
         shared: &SessionShared,
@@ -1504,16 +1472,25 @@ impl SessionLane {
     }
 
     async fn handle_query(&mut self, shared: &SessionShared, query: SessionQuery) {
+        let Ok((query, call)) = crate::call::query_parts(query).await else {
+            return;
+        };
         match query {
+            SessionQuery::BoundaryOutcome { outcome, reply, .. } => {
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
+            SessionQuery::EventsSubscribed { reply } => {
+                crate::call::reply(call.as_ref(), reply, ()).await;
+            }
             SessionQuery::ListSessions { reply } => {
-                let _ = reply.send(shared.list_session_views().await);
+                crate::call::reply(call.as_ref(), reply, shared.list_session_views().await).await;
             }
             SessionQuery::GetSession { session_key, reply } => {
-                let _ = reply.send(shared.get_session_view(&session_key).await);
+                crate::call::reply(call.as_ref(), reply, shared.get_session_view(&session_key).await).await;
             }
             SessionQuery::PendingApprovals { command, reply } => {
                 let outcome = shared.handle_pending_approvals(command).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             SessionQuery::Timeline { command, reply } => {
                 let mut outcome = match self.bind_matcha_timeline_command(shared, command) {
@@ -1523,22 +1500,24 @@ impl SessionLane {
                 session_ownership::enrich_timeline(shared.ownership_reader.as_ref(), &mut outcome)
                     .await;
                 self.store_timeline_outcome(shared, &outcome).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             SessionQuery::Content { command, reply } => {
                 let outcome = match self.bind_matcha_content_command(shared, command) {
                     Ok(command) => shared.handle_content(command).await,
                     Err(outcome) => outcome,
                 };
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             SessionQuery::History { command, reply } => {
                 let outcome = shared.handle_session_history(command).await;
-                let _ = reply.send(outcome);
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
-            query @ SessionQuery::Catalog { .. } => {
-                shared.handle_global_query(query).await;
+            SessionQuery::Catalog { command, reply } => {
+                let outcome = shared.handle_session_catalog(command).await;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
+            query @ (SessionQuery::Abort { .. } | SessionQuery::Audited { .. }) => query.send_unavailable(),
         }
     }
 }
@@ -1585,12 +1564,25 @@ impl OwnerSpec for SessionOwner {
     }
 
     async fn handle_direct_query(shared: Self::Shared, query: Self::Query) {
+        let Ok((query, call)) = crate::call::query_parts(query).await else {
+            return;
+        };
         match query {
+            SessionQuery::BoundaryOutcome { outcome, reply, .. } => {
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
+            SessionQuery::EventsSubscribed { reply } => {
+                crate::call::reply(call.as_ref(), reply, ()).await;
+            }
             SessionQuery::ListSessions { reply } => {
-                let _ = reply.send(shared.list_session_views().await);
+                crate::call::reply(call.as_ref(), reply, shared.list_session_views().await).await;
             }
             SessionQuery::GetSession { session_key, reply } => {
-                let _ = reply.send(shared.get_session_view(&session_key).await);
+                crate::call::reply(call.as_ref(), reply, shared.get_session_view(&session_key).await).await;
+            }
+            SessionQuery::Abort { command, reply } => {
+                let outcome: SessionAbortOutcome = shared.handle_abort(command).await;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             query => query.send_unavailable(),
         }

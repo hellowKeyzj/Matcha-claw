@@ -1,6 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use platform::{
+    call::{CallReceipt, CallRecorder, CallStatus},
     capability::CapabilityDecisionVerifier,
     endpoint::runtime_address::RuntimeEndpoint,
     loopback::{
@@ -12,7 +13,13 @@ use platform::{
 use serde::{Deserialize, de};
 use tokio::sync::Mutex;
 
-use crate::{RuntimeControlFailure, RuntimeControlLifecycleError, RuntimeControlLifecycleStatus};
+use crate::{
+    RuntimeControlFailure, RuntimeControlLifecycleError, RuntimeControlLifecycleStatus,
+    call::{
+        RuntimeControlCallContext, RuntimeControlCallDetail, RuntimeControlCallResult,
+        begin_runtime_control_call, finish_runtime_control_call,
+    },
+};
 
 const MODULE_ID: CatalogModuleId = CatalogModuleId::new("runtime-control");
 const LOOPBACK_MODULE_ID: LoopbackModuleId = LoopbackModuleId::new("runtime-control");
@@ -73,12 +80,29 @@ pub enum RuntimeControlOperation {
     ControlUiUrl,
 }
 
+impl RuntimeControlOperation {
+    pub const fn command(self) -> &'static str {
+        match self {
+            Self::LifecycleStatus => "lifecycle.status",
+            Self::LifecycleStart => "lifecycle.start",
+            Self::LifecycleStop => "lifecycle.stop",
+            Self::LifecycleRestart => "lifecycle.restart",
+            Self::Logs => "logs",
+            Self::ControlReady => "control.ready",
+            Self::GatewayHealth => "gateway.health",
+            Self::GatewayStatus => "gateway.status",
+            Self::ControlUiUrl => "control-ui.url",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RuntimeControlRequest {
     pub endpoint: RuntimeEndpoint,
     pub cursor: Option<u64>,
     pub probe: Option<bool>,
     pub include_channel_summary: Option<bool>,
+    pub call: Option<RuntimeControlCallContext>,
 }
 
 pub trait RuntimeControlRouteFragment: Send + Sync {
@@ -100,29 +124,23 @@ pub trait RuntimeControlLifecyclePort: Send + Sync {
         Result<RuntimeControlLifecycleStatus, RuntimeControlLifecycleError>,
     >;
 
-    fn lifecycle_start<'a>(
+    fn admit_lifecycle_start<'a>(
         &'a self,
         endpoint: RuntimeEndpoint,
-    ) -> RuntimeControlLifecycleFuture<
-        'a,
-        Result<RuntimeControlLifecycleStatus, RuntimeControlLifecycleError>,
-    >;
+        call: RuntimeControlCallContext,
+    ) -> RuntimeControlLifecycleFuture<'a, Result<CallReceipt, RuntimeControlLifecycleError>>;
 
-    fn lifecycle_stop<'a>(
+    fn admit_lifecycle_stop<'a>(
         &'a self,
         endpoint: RuntimeEndpoint,
-    ) -> RuntimeControlLifecycleFuture<
-        'a,
-        Result<RuntimeControlLifecycleStatus, RuntimeControlLifecycleError>,
-    >;
+        call: RuntimeControlCallContext,
+    ) -> RuntimeControlLifecycleFuture<'a, Result<CallReceipt, RuntimeControlLifecycleError>>;
 
-    fn lifecycle_restart<'a>(
+    fn admit_lifecycle_restart<'a>(
         &'a self,
         endpoint: RuntimeEndpoint,
-    ) -> RuntimeControlLifecycleFuture<
-        'a,
-        Result<RuntimeControlLifecycleStatus, RuntimeControlLifecycleError>,
-    >;
+        call: RuntimeControlCallContext,
+    ) -> RuntimeControlLifecycleFuture<'a, Result<CallReceipt, RuntimeControlLifecycleError>>;
 }
 
 pub trait RuntimeControlAdmission: Send + Sync {
@@ -132,13 +150,20 @@ pub trait RuntimeControlAdmission: Send + Sync {
 #[derive(Clone)]
 pub struct RuntimeControlModule {
     fragments: Arc<[Arc<dyn RuntimeControlRouteFragment>]>,
+    call_recorder: Option<CallRecorder>,
 }
 
 impl RuntimeControlModule {
     pub fn new(fragments: Vec<Arc<dyn RuntimeControlRouteFragment>>) -> Self {
         Self {
             fragments: fragments.into(),
+            call_recorder: None,
         }
+    }
+
+    pub fn with_call_recorder(mut self, call_recorder: CallRecorder) -> Self {
+        self.call_recorder = Some(call_recorder);
+        self
     }
 
     pub fn descriptor(&self, verifier: Arc<Mutex<CapabilityDecisionVerifier>>) -> ModuleDescriptor {
@@ -152,6 +177,7 @@ impl RuntimeControlModule {
             Some(descriptor(Dependencies::new(
                 verifier,
                 Arc::clone(&self.fragments),
+                self.call_recorder.clone(),
             ))),
         )
     }
@@ -161,16 +187,19 @@ impl RuntimeControlModule {
 struct Dependencies {
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     fragments: Arc<[Arc<dyn RuntimeControlRouteFragment>]>,
+    call_recorder: Option<CallRecorder>,
 }
 
 impl Dependencies {
     fn new(
         verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
         fragments: Arc<[Arc<dyn RuntimeControlRouteFragment>]>,
+        call_recorder: Option<CallRecorder>,
     ) -> Self {
         Self {
             verifier,
             fragments,
+            call_recorder,
         }
     }
 }
@@ -205,20 +234,50 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
         else {
             return Response::not_found().into();
         };
-        let input = match authorized_input(request, dependencies.verifier, authorization).await {
+        let mut input = match authorized_input(request, dependencies.verifier, authorization).await
+        {
             Ok(input) => input,
             Err(response) => return response.into(),
         };
-        let Some(fragment) = dependencies
+        input.call = match begin_runtime_control_call(
+            dependencies.call_recorder.as_ref(),
+            operation,
+            &input.endpoint,
+        )
+        .await
+        {
+            Ok(call) => call,
+            Err(error) => {
+                eprintln!("[runtime-control] call could not be recorded: {error}");
+                return unavailable().into();
+            }
+        };
+        let call = input.call.clone();
+        if !matches!(
+            operation,
+            RuntimeControlOperation::LifecycleStart
+                | RuntimeControlOperation::LifecycleStop
+                | RuntimeControlOperation::LifecycleRestart
+        ) {
+            if let Some(call) = &call {
+                if let Err(error) = call.running().await {
+                    eprintln!("[runtime-control] call start could not be recorded: {error}");
+                }
+            }
+        }
+        let mut detail = RuntimeControlCallDetail::new(&input.endpoint);
+        let response = dependencies
             .fragments
             .iter()
             .find(|fragment| fragment.endpoint() == input.endpoint)
-        else {
-            return unsupported().into();
-        };
-        match fragment.handle(operation, input) {
+            .and_then(|fragment| fragment.handle(operation, input));
+        match response {
             Some(response) => response.await.into(),
-            None => unsupported().into(),
+            None => {
+                detail.result = Some(RuntimeControlCallResult::Unsupported);
+                finish_runtime_control_call(call, CallStatus::Rejected, &detail).await;
+                unsupported().into()
+            }
         }
     })
 }
@@ -360,6 +419,7 @@ fn decode_request(body: &[u8]) -> Result<RuntimeControlRequest, serde_json::Erro
         cursor: body.cursor,
         probe: body.probe,
         include_channel_summary: body.include_channel_summary,
+        call: None,
     })
 }
 

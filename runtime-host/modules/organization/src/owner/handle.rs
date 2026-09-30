@@ -52,6 +52,7 @@ use super::{
 pub struct OrganizationHandle {
     inner: OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>,
     schedule_changes: tokio::sync::watch::Sender<TeamRunWake>,
+    call: Option<crate::call::CallScope>,
 }
 
 impl OrganizationHandle {
@@ -61,7 +62,18 @@ impl OrganizationHandle {
         Self {
             inner,
             schedule_changes,
+            call: None,
         }
+    }
+
+    pub(crate) fn with_call(mut self, call: crate::call::CallScope) -> Self {
+        self.call = Some(call);
+        self
+    }
+
+    fn reply_channel<T>(&self) -> (crate::call::CallReply<T>, tokio::sync::oneshot::Receiver<T>) {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        (crate::call::CallReply::new(reply, self.call.clone()), receiver)
     }
 
     pub fn subscribe_schedule_changes(&self) -> tokio::sync::watch::Receiver<TeamRunWake> {
@@ -77,16 +89,126 @@ impl OrganizationHandle {
         &self,
         command: TeamRuntimeCommand,
     ) -> Result<TeamRuntimeCommandOutcome, RequestAdmissionClosed> {
-        execute_team_runtime(self, command)
+        if let Some(workflows) = self.call.as_ref().and_then(crate::call::CallScope::workflows) {
+            if !crate::call::runtime_single_stage(&command) {
+                return workflows.runtime(self.clone(), command).await;
+            }
+        }
+        self.execute_team_runtime_inline(command).await
+    }
+
+    pub(crate) async fn execute_team_runtime_inline(
+        &self,
+        command: TeamRuntimeCommand,
+    ) -> Result<TeamRuntimeCommandOutcome, RequestAdmissionClosed> {
+        let outcome = execute_team_runtime(self, command).await.ok_or_else(closed_error);
+        if let (Some(call), Ok(outcome)) = (&self.call, &outcome) {
+            call.summarize(outcome).await;
+        }
+        outcome
+    }
+
+    pub(crate) async fn execute_team_runtime_capability_request(
+        &self,
+        resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
+        request: crate::TeamRuntimeCapabilityRequest,
+    ) -> Result<(String, crate::TeamRuntimeControlOutcome), crate::TeamRuntimeDecodeError> {
+        if let Some(workflows) = self.call.as_ref().and_then(crate::call::CallScope::workflows) {
+            if !request.single_stage() {
+                return workflows.capability(self.clone(), request, resolver).await;
+            }
+        }
+        self.execute_runtime_capability_inline(resolver.as_ref(), request).await
+    }
+
+    pub(crate) async fn admit_team_capability(
+        &self,
+        resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
+        request: crate::TeamRuntimeCapabilityRequest,
+    ) -> Result<platform::call::CallReceipt, crate::TeamRuntimeDecodeError> {
+        let call = self
+            .call
+            .as_ref()
+            .ok_or(crate::TeamRuntimeDecodeError::Unavailable)?;
+        let workflows = call
+            .workflows()
+            .ok_or(crate::TeamRuntimeDecodeError::Unavailable)?;
+        workflows
+            .admit_capability(self.clone(), call, request, resolver)
             .await
-            .ok_or_else(closed_error)
+    }
+
+    pub(crate) async fn admit_team_workflow(
+        &self,
+        request: crate::call::TeamWorkflow,
+    ) -> Result<platform::call::CallReceipt, crate::TeamRuntimeDecodeError> {
+        let call = self.call.as_ref().ok_or(crate::TeamRuntimeDecodeError::Unavailable)?;
+        let workflows = call.workflows().ok_or(crate::TeamRuntimeDecodeError::Unavailable)?;
+        workflows.admit_team(self.clone(), call, request).await
+    }
+
+    pub(crate) async fn execute_runtime_capability_inline(
+        &self,
+        resolver: &dyn crate::RoleSessionIdentityResolver,
+        request: crate::TeamRuntimeCapabilityRequest,
+    ) -> Result<(String, crate::TeamRuntimeControlOutcome), crate::TeamRuntimeDecodeError> {
+        let outcome = crate::application::team_runtime_control::execute_inline(self, resolver, request).await;
+        if let Ok((_, outcome)) = &outcome {
+            self.summarize_call(outcome).await;
+        }
+        outcome
+    }
+
+    pub(crate) async fn drain_team_delete_tasks(&self) -> Result<(), RequestAdmissionClosed> {
+        loop {
+            let (reply, receiver) = tokio::sync::oneshot::channel();
+            self.inner.send_command(OrganizationCommand::DrainTeamDeleteTasks { reply })
+                .await.map_err(closed)?;
+            let tasks = receiver.await.map_err(|_| closed_error())?;
+            if tasks.is_empty() { return Ok(()); }
+            for mut task in tasks {
+                let _ = task.join().await;
+            }
+            // The next exclusive command follows all settlements sent by the joined producers.
+        }
+    }
+
+    pub(crate) async fn call_admitted(&self) {
+        if let Some(call) = &self.call { call.admitted().await; }
+    }
+
+    pub(crate) async fn call_running(&self) -> bool {
+        match &self.call {
+            Some(call) => call.running().await,
+            None => true,
+        }
+    }
+
+    pub(crate) async fn summarize_call<T: crate::call::outcome::AuditOutcome>(&self, value: &T) {
+        if let Some(call) = &self.call { call.summarize(value).await; }
+    }
+
+    pub(crate) async fn finish_workflow(&self, failed: bool) {
+        if let Some(call) = &self.call { call.finish(failed).await; }
+    }
+
+    pub(crate) async fn execute_graph_workflow(
+        &self,
+        request: crate::adapters::loopback::graph::Request,
+    ) -> crate::adapters::loopback::graph::Delivery {
+        if !matches!(request, crate::adapters::loopback::graph::Request::Export { .. }) {
+            if let Some(workflows) = self.call.as_ref().and_then(crate::call::CallScope::workflows) {
+                return workflows.graph(self.clone(), request).await;
+            }
+        }
+        crate::adapters::loopback::graph::handle(self, request).await
     }
 
     pub async fn team_skill_authorize(
         &self,
         package_root: PathBuf,
     ) -> Result<Result<TeamSkillSelectionId, TeamSkillSelectionError>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::TeamSkillAuthorize {
                 package_root,
@@ -94,6 +216,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -101,7 +224,7 @@ impl OrganizationHandle {
         &self,
         package_root: PathBuf,
     ) -> Result<TeamSkillPackageValidation, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::TeamSkillValidate {
                 package_root,
@@ -109,6 +232,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -116,7 +240,7 @@ impl OrganizationHandle {
         &self,
         package_root: PathBuf,
     ) -> Result<TeamSkillDependencyPlanResult, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::TeamSkillDependencyPlan {
                 package_root,
@@ -124,6 +248,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -131,7 +256,7 @@ impl OrganizationHandle {
         &self,
         selection_id: TeamSkillSelectionId,
     ) -> Result<TeamSkillPackageValidation, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::TeamSkillSelectionValidate {
                 selection_id,
@@ -139,6 +264,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -146,7 +272,7 @@ impl OrganizationHandle {
         &self,
         selection_id: TeamSkillSelectionId,
     ) -> Result<TeamSkillDependencyPlanResult, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::TeamSkillSelectionDependencyPlan {
                 selection_id,
@@ -154,6 +280,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -163,7 +290,8 @@ impl OrganizationHandle {
         team_id: TeamId,
         idempotency_key: IdempotencyKey,
     ) -> Result<TeamMaterializationCommandOutcome, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        if let Some(call) = &self.call { call.references(Some(team_id.as_str()), None, None).await; }
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::TeamSkillMaterialize {
                 selection_id,
@@ -173,6 +301,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -184,7 +313,7 @@ impl OrganizationHandle {
         roles: Vec<organization::ManualTeamRoleBinding>,
         idempotency_key: IdempotencyKey,
     ) -> Result<TeamMaterializationCommandOutcome, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::ManualTeamMaterialize {
                 team_id,
@@ -196,6 +325,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -209,7 +339,8 @@ impl OrganizationHandle {
         run: organization::GraphRunFacts,
         run_idempotency_key: String,
     ) -> Result<ManualTeamCreateOutcome, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        if let Some(call) = &self.call { call.references(Some(team_id.as_str()), Some(run.run_id().as_str()), None).await; }
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::ManualTeamCreate {
                 team_id,
@@ -223,6 +354,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -232,7 +364,7 @@ impl OrganizationHandle {
         idempotency_key: IdempotencyKey,
         observed_at: u64,
     ) -> Result<Result<TeamDeleteOutcome, StoreFault>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::TeamDelete {
                 team_id,
@@ -242,6 +374,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -256,7 +389,7 @@ impl OrganizationHandle {
         created_at: u64,
     ) -> Result<Result<CreateGraphRunOutcome, StoreFault>, RequestAdmissionClosed> {
         let wake_run_id = run_id.clone();
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::RunCreate {
                 team_id,
@@ -270,6 +403,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::RunStarted, Some(wake_run_id));
@@ -284,8 +418,11 @@ impl OrganizationHandle {
         idempotency_key: IdempotencyKey,
         created_at: u64,
     ) -> Result<Result<CreateGraphRunOutcome, TeamRuntimeStatus>, RequestAdmissionClosed> {
+        if let Some(call) = &self.call {
+            call.references(Some(team_id.as_str()), Some(run_id.as_str()), None).await;
+        }
         let wake_run_id = run_id.clone();
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::RunCreateFromTeamTemplate {
                 team_id,
@@ -296,6 +433,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::RunStarted, Some(wake_run_id));
@@ -307,11 +445,12 @@ impl OrganizationHandle {
         &self,
         team_id: TeamId,
     ) -> Result<Vec<TeamRunQueryOutcome>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::RunList { team_id, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -319,11 +458,12 @@ impl OrganizationHandle {
         &self,
         query: TeamRunQuery,
     ) -> Result<TeamRunQueryOutcome, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::RunSnapshot { query, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -332,7 +472,7 @@ impl OrganizationHandle {
         team_id: TeamId,
         run_id: GraphRunId,
     ) -> Result<TeamPublicQueryOutcome, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::TeamRunPublicProjection {
                 team_id,
@@ -341,6 +481,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -351,7 +492,7 @@ impl OrganizationHandle {
         event_cursor: Option<u64>,
         event_limit: Option<u64>,
     ) -> Result<Option<TeamRunPublicSnapshotQueryOutcome>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::TeamRunPublicSnapshot {
                 team_id,
@@ -362,6 +503,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -369,11 +511,12 @@ impl OrganizationHandle {
         &self,
         run_id: GraphRunId,
     ) -> Result<organization::TeamRunDiagnosticsQueryOutcome, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::TeamRunDiagnostics { run_id, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -381,11 +524,12 @@ impl OrganizationHandle {
         &self,
         team_id: TeamId,
     ) -> Result<organization::TeamRoleSessionQueryOutcome, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::RoleSessions { team_id, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -393,11 +537,12 @@ impl OrganizationHandle {
         &self,
     ) -> Result<Result<Vec<organization::RoleSessionReceipt>, StoreFault>, RequestAdmissionClosed>
     {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::RoleSessionReceipts { reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -451,7 +596,7 @@ impl OrganizationHandle {
     ) -> Result<Result<organization::ConfirmRunStartOutcome, StoreFault>, RequestAdmissionClosed>
     {
         let wake_run_id = run_id.clone();
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::RunStartConfirm {
                 run_id,
@@ -460,6 +605,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::RunStarted, Some(wake_run_id));
@@ -475,7 +621,7 @@ impl OrganizationHandle {
         Result<organization::ContinueRunDiscussionOutcome, StoreFault>,
         RequestAdmissionClosed,
     > {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::RunStartContinue {
                 run_id,
@@ -484,6 +630,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -493,7 +640,7 @@ impl OrganizationHandle {
         idempotency_key: String,
         requested_at: u64,
     ) -> Result<Result<BeginCancellationOutcome, StoreFault>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::RunCancel {
                 run_id,
@@ -503,6 +650,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -512,7 +660,7 @@ impl OrganizationHandle {
         idempotency_key: String,
         tombstoned_at: u64,
     ) -> Result<Result<TombstoneOutcome, StoreFault>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::RunDelete {
                 run_id,
@@ -522,6 +670,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -532,7 +681,8 @@ impl OrganizationHandle {
         observed_at: u64,
     ) -> Result<Result<organization::GraphRunPurgeOutcome, StoreFault>, RequestAdmissionClosed>
     {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        if let Some(call) = &self.call { call.references(None, Some(run_id.as_str()), None).await; }
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::RunDeleteAndPurge {
                 run_id,
@@ -542,6 +692,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -550,11 +701,12 @@ impl OrganizationHandle {
         request: organization::TeamRunPurgeRequest,
     ) -> Result<Result<organization::GraphRunPurgeOutcome, StoreFault>, RequestAdmissionClosed>
     {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::RunPurge { request, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -562,11 +714,12 @@ impl OrganizationHandle {
         &self,
         team_id: Option<TeamId>,
     ) -> Result<Vec<ArmedTrigger>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::TriggerList { team_id, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -576,7 +729,7 @@ impl OrganizationHandle {
         fired_at: u64,
     ) -> Result<Result<TeamRunTriggerOutcome, StoreFault>, RequestAdmissionClosed> {
         let wake_run_id = GraphRunId::new(request.run_id.clone());
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::TriggerFire {
                 request,
@@ -585,6 +738,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::TriggerFired, Some(wake_run_id));
@@ -598,7 +752,7 @@ impl OrganizationHandle {
         idempotency_key: String,
         fired_at: u64,
     ) -> Result<Result<TeamTriggerFireOutcome, TeamRuntimeStatus>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::WebhookTriggerFire {
                 webhook_path,
@@ -608,6 +762,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
             let run_id = match &outcome {
@@ -628,7 +783,10 @@ impl OrganizationHandle {
         definition: GraphDefinition,
     ) -> Result<Result<TeamRunCommandOutcome, StoreFault>, RequestAdmissionClosed> {
         let wake_run_id = GraphRunId::new(command.run_id().as_str().to_owned());
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        if let Some(call) = &self.call {
+            call.references(None, Some(command.run_id().as_str()), Some(command.command_id().as_str())).await;
+        }
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::GraphSave {
                 command,
@@ -637,6 +795,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::GraphChanged, Some(wake_run_id));
@@ -648,11 +807,15 @@ impl OrganizationHandle {
         &self,
         patch: crate::application::team_runtime::TeamGraphPatchDraft,
     ) -> Result<Result<TeamRunCommandOutcome, StoreFault>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        if let Some(call) = &self.call {
+            call.references(None, Some(patch.run_id.as_str()), Some(patch.command_id.as_str())).await;
+        }
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::GraphPatch { patch, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::GraphChanged, None);
@@ -664,11 +827,12 @@ impl OrganizationHandle {
         &self,
         query: TeamGraphContextQuery,
     ) -> Result<TeamGraphContextResult, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::GraphContext { query, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -677,7 +841,7 @@ impl OrganizationHandle {
         team_id: TeamId,
         run_id: GraphRunId,
     ) -> Result<Option<GraphDefinition>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::GraphDefinition {
                 team_id,
@@ -686,6 +850,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -693,11 +858,12 @@ impl OrganizationHandle {
         &self,
         run_id: GraphRunId,
     ) -> Result<Option<String>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::GraphYaml { run_id, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -707,7 +873,7 @@ impl OrganizationHandle {
         event: TeamNodeEvent,
     ) -> Result<Result<TeamNodeEventOutcome, StoreFault>, RequestAdmissionClosed> {
         let wake_run_id = GraphRunId::new(command.run_id().as_str().to_owned());
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::NodeEvent {
                 command,
@@ -716,6 +882,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::NodeEventRecorded, Some(wake_run_id));
@@ -727,11 +894,12 @@ impl OrganizationHandle {
         &self,
         run_id: GraphRunId,
     ) -> Result<NodePromptRetryDueQueryOutcome, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::NodePromptRetryDue { run_id, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -747,7 +915,7 @@ impl OrganizationHandle {
         resolved_at: u64,
     ) -> Result<Result<TeamNodeTerminalResult, StoreFault>, RequestAdmissionClosed> {
         let wake_run_id = run_id.clone();
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::NodeTerminalResolve {
                 run_id,
@@ -762,6 +930,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::TerminalSettled, Some(wake_run_id));
@@ -774,11 +943,12 @@ impl OrganizationHandle {
         command: HumanDecisionCommand,
     ) -> Result<Result<HumanDecisionOutcome, StoreFault>, RequestAdmissionClosed> {
         let wake_run_id = command.run_id().clone();
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::ApprovalResolve { command, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::ApprovalResolved, Some(wake_run_id));
@@ -791,11 +961,12 @@ impl OrganizationHandle {
         command: TeamDecisionCommand,
     ) -> Result<Result<TeamDecisionReceipt, StoreFault>, RequestAdmissionClosed> {
         let wake_run_id = GraphRunId::new(command.run_id().to_owned());
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::DecisionSubmit { command, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
         if outcome.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::DecisionSubmitted, Some(wake_run_id));
@@ -808,7 +979,7 @@ impl OrganizationHandle {
         team_id: TeamId,
         run_id: GraphRunId,
     ) -> Result<TaskBoardFacts, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::TaskBoardRead {
                 team_id,
@@ -817,6 +988,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -829,7 +1001,7 @@ impl OrganizationHandle {
         Result<crate::application::task_board::MutationResult, StoreFault>,
         RequestAdmissionClosed,
     > {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_command(OrganizationCommand::TaskBoardMutate {
                 team_id,
@@ -839,6 +1011,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -847,7 +1020,7 @@ impl OrganizationHandle {
         team_id: TeamId,
         run_id: GraphRunId,
     ) -> Result<organization::run::TeamPendingApprovalsQueryOutcome, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::PendingApprovals {
                 team_id,
@@ -856,6 +1029,7 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -863,11 +1037,12 @@ impl OrganizationHandle {
         &self,
         team_id: TeamId,
     ) -> Result<Vec<ResumeOutcome>, RequestAdmissionClosed> {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::Resume { team_id, reply })
             .await
             .map_err(closed)?;
+        self.call_admitted().await;
         reply_rx.await.map_err(|_| closed_error())
     }
 
@@ -1628,6 +1803,6 @@ fn closed(_error: foundation::execution::OwnerRuntimeSendError) -> RequestAdmiss
     closed_error()
 }
 
-fn closed_error() -> RequestAdmissionClosed {
+pub(crate) fn closed_error() -> RequestAdmissionClosed {
     RequestAdmissionClosed::new(OrganizationPhase::ShutDown)
 }

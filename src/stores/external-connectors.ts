@@ -1,5 +1,9 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
+import { probeConnector, readConnectorStatuses, removeConnector, upsertConnector } from '@/lib/connectors-call';
+import type { ExternalConnectorConnectionStatus } from '@/types/connectors-observation';
+
+export type { ExternalConnectorConnectionStatus, ExternalConnectorConnectionStatusResultType } from '@/types/connectors-observation';
 
 export type ExternalConnectorKind = 'mcp-stdio' | 'mcp-http' | 'cli' | 'sdk' | 'http';
 
@@ -98,17 +102,6 @@ export type ExternalConnectorSpec =
   | ExternalConnectorHttpSpec
   | ExternalConnectorSdkSpec;
 
-export type ExternalConnectorConnectionStatusResultType = 'connected' | 'disconnected' | 'unsupported' | 'disabled' | 'unknown';
-
-export interface ExternalConnectorConnectionStatus {
-  readonly connectorId: string;
-  readonly resultType: ExternalConnectorConnectionStatusResultType;
-  readonly checkedAt?: string;
-  readonly latencyMs?: number;
-  readonly reason?: string;
-  readonly safeProbe: boolean;
-}
-
 type ExternalConnectorListPayload = {
   connectors: ExternalConnectorSpec[];
 };
@@ -119,14 +112,6 @@ type OpenClawMcpServerListPayload = {
 
 type ExternalMcpServerProgramCatalogPayload = {
   programs: ExternalMcpServerProgramDescriptor[];
-};
-
-type ExternalConnectorConnectionStatusListPayload = {
-  statuses: ExternalConnectorConnectionStatus[];
-};
-
-type ExternalConnectorConnectionStatusPayload = {
-  status: ExternalConnectorConnectionStatus;
 };
 
 export type ExternalConnectorMutationDesiredStatus = 'stored' | 'removed';
@@ -189,13 +174,6 @@ type ExternalConnectorsState = {
   clearError: () => void;
 };
 
-async function externalConnectorPost<TResult>(path: string, body: Record<string, unknown>): Promise<TResult> {
-  return await hostApiFetch<TResult>(path, {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-}
-
 function toConnectorStatusMap(statuses: ExternalConnectorConnectionStatus[]): Record<string, ExternalConnectorConnectionStatus> {
   return Object.fromEntries(statuses.map((status) => [status.connectorId, status]));
 }
@@ -218,15 +196,15 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set, 
   refresh: async () => {
     set({ loading: true, error: null });
     try {
-      const [payload, catalog, statusPayload, mcpServers] = await Promise.all([
+      const [payload, catalog, statuses, mcpServers] = await Promise.all([
         hostApiFetch<ExternalConnectorListPayload>('/api/external-connectors'),
         hostApiFetch<ExternalMcpServerProgramCatalogPayload>('/api/external-connectors/mcp-server-programs'),
-        hostApiFetch<ExternalConnectorConnectionStatusListPayload>('/api/external-connectors/status'),
+        readConnectorStatuses(),
         readOpenClawMcpServers(),
       ]);
       set({
         connectors: Array.isArray(payload.connectors) ? payload.connectors : [],
-        connectorStatuses: toConnectorStatusMap(Array.isArray(statusPayload.statuses) ? statusPayload.statuses : []),
+        connectorStatuses: toConnectorStatusMap(statuses),
         mcpServers,
         mcpServerPrograms: Array.isArray(catalog.programs) ? catalog.programs : [],
         ready: true,
@@ -244,14 +222,14 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set, 
   probe: async (connectorId) => {
     set({ mutatingId: connectorId, error: null });
     try {
-      const result = await externalConnectorPost<ExternalConnectorConnectionStatusPayload>('/api/external-connectors/probe', { connectorId });
+      const status = await probeConnector(connectorId);
       set((state) => ({
         connectorStatuses: {
           ...state.connectorStatuses,
-          [result.status.connectorId]: result.status,
+          [status.connectorId]: status,
         },
       }));
-      return result.status;
+      return status;
     } catch (error) {
       set({ error: error instanceof Error ? error.message : '检测连接器失败' });
       throw error;
@@ -263,7 +241,7 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set, 
   upsert: async (connector) => {
     set({ mutatingId: connector.id, error: null });
     try {
-      const result = await externalConnectorPost<ExternalConnectorMutationPayload>('/api/external-connectors/upsert', { connector });
+      const result = await upsertConnector(connector);
       const mcpServers = await readOpenClawMcpServers();
       const connectors = get().connectors.filter((item) => item.id !== result.connector.id);
       set((state) => ({
@@ -291,7 +269,7 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set, 
   remove: async (connectorId) => {
     set({ mutatingId: connectorId, error: null });
     try {
-      await externalConnectorPost<ExternalConnectorRemoveMutationReceipt>('/api/external-connectors/remove', { connectorId });
+      await removeConnector(connectorId);
       const mcpServers = await readOpenClawMcpServers();
       set((state) => {
         const { [connectorId]: _removedStatus, ...connectorStatuses } = state.connectorStatuses;

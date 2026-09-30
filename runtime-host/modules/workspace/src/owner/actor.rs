@@ -92,14 +92,14 @@ impl OwnerSpec for WorkspaceOwner {
                 relative_path,
                 limit,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_read_text(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &relative_path,
-                    limit,
-                ));
+                let result = call
+                    .execute(WorkspaceReadFailure::Unavailable, || {
+                        execute_read_text(&shared, &endpoint, &session_key, &relative_path, limit)
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
             WorkspaceCommand::ReadBinary {
                 endpoint,
@@ -107,27 +107,28 @@ impl OwnerSpec for WorkspaceOwner {
                 relative_path,
                 limit,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_read_binary(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &relative_path,
-                    limit,
-                ));
+                let result = call
+                    .execute(WorkspaceBinaryFailure::Unavailable, || {
+                        execute_read_binary(&shared, &endpoint, &session_key, &relative_path, limit)
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
             WorkspaceCommand::StatFile {
                 endpoint,
                 session_key,
                 relative_path,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_stat_file(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &relative_path,
-                ));
+                let result = call
+                    .execute(WorkspaceStatFailure::Unavailable, || {
+                        execute_stat_file(&shared, &endpoint, &session_key, &relative_path)
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
             WorkspaceCommand::ListDirectory {
                 endpoint,
@@ -135,14 +136,20 @@ impl OwnerSpec for WorkspaceOwner {
                 relative_path,
                 include_hidden,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_list_directory(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &relative_path,
-                    include_hidden,
-                ));
+                let result = call
+                    .execute(WorkspaceListFailure::Unavailable, || {
+                        execute_list_directory(
+                            &shared,
+                            &endpoint,
+                            &session_key,
+                            &relative_path,
+                            include_hidden,
+                        )
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
             WorkspaceCommand::WriteText {
                 endpoint,
@@ -150,14 +157,20 @@ impl OwnerSpec for WorkspaceOwner {
                 relative_path,
                 content,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_write_text(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &relative_path,
-                    &content,
-                ));
+                let result = call
+                    .execute(WorkspaceWriteFailure::Unavailable, || {
+                        execute_write_text(
+                            &shared,
+                            &endpoint,
+                            &session_key,
+                            &relative_path,
+                            &content,
+                        )
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
             WorkspaceCommand::PrepareMedia {
                 endpoint,
@@ -165,27 +178,34 @@ impl OwnerSpec for WorkspaceOwner {
                 relative_path,
                 mime_type,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_prepare_media(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &relative_path,
-                    &mime_type,
-                ));
+                let result = call
+                    .execute(WorkspaceMediaFailure::Unavailable, || {
+                        execute_prepare_media(
+                            &shared,
+                            &endpoint,
+                            &session_key,
+                            &relative_path,
+                            &mime_type,
+                        )
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
             WorkspaceCommand::ResolveMedia {
                 endpoint,
                 session_key,
                 reference,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_resolve_media(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &reference,
-                ));
+                let result = call
+                    .execute(WorkspaceMediaFailure::Unavailable, || {
+                        execute_resolve_media(&shared, &endpoint, &session_key, &reference)
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
             WorkspaceCommand::ThumbnailMedia {
                 endpoint,
@@ -193,14 +213,20 @@ impl OwnerSpec for WorkspaceOwner {
                 relative_path,
                 mime_type,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_thumbnail_media(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &relative_path,
-                    &mime_type,
-                ));
+                let result = call
+                    .execute(WorkspaceMediaFailure::Unavailable, || {
+                        execute_thumbnail_media(
+                            &shared,
+                            &endpoint,
+                            &session_key,
+                            &relative_path,
+                            &mime_type,
+                        )
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
             WorkspaceCommand::ThumbnailMediaGateway {
                 endpoint,
@@ -209,41 +235,49 @@ impl OwnerSpec for WorkspaceOwner {
                 mime_type,
                 agent_id,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_thumbnail_media_gateway(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &gateway_url,
-                    &mime_type,
-                    &agent_id,
-                ));
+                let result = call
+                    .execute(WorkspaceMediaFailure::Unavailable, || {
+                        execute_thumbnail_media_gateway(
+                            &shared,
+                            &endpoint,
+                            &session_key,
+                            &gateway_url,
+                            &mime_type,
+                            &agent_id,
+                        )
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
             WorkspaceCommand::ThumbnailsMedia {
                 endpoint,
                 session_key,
                 paths,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_thumbnails_media(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &paths,
-                ));
+                let result = call
+                    .execute(WorkspaceMediaFailure::Unavailable, || {
+                        execute_thumbnails_media(&shared, &endpoint, &session_key, &paths)
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
             WorkspaceCommand::StagePathsMedia {
                 endpoint,
                 session_key,
                 paths,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_stage_paths_media(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &paths,
-                ));
+                let result = call
+                    .execute(WorkspaceMediaFailure::Unavailable, || {
+                        execute_stage_paths_media(&shared, &endpoint, &session_key, &paths)
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
             WorkspaceCommand::StageBufferMedia {
                 endpoint,
@@ -252,15 +286,21 @@ impl OwnerSpec for WorkspaceOwner {
                 file_name,
                 mime_type,
                 reply,
+                call,
             } => {
-                let _ = reply.send(execute_stage_buffer_media(
-                    &shared,
-                    &endpoint,
-                    &session_key,
-                    &base64,
-                    &file_name,
-                    &mime_type,
-                ));
+                let result = call
+                    .execute(WorkspaceMediaFailure::Unavailable, || {
+                        execute_stage_buffer_media(
+                            &shared,
+                            &endpoint,
+                            &session_key,
+                            &base64,
+                            &file_name,
+                            &mime_type,
+                        )
+                    })
+                    .await;
+                let _ = reply.send(result);
             }
         }
     }

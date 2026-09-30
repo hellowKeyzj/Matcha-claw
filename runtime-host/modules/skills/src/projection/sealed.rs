@@ -18,6 +18,7 @@ pub trait SealedEntryProjection {
 pub trait SealedReadProjection {
     fn content(&self) -> &[u8];
     fn metering_binding(&self) -> Option<&str>;
+    fn package_sha256(&self) -> &str;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +54,7 @@ where
     SealedResourceRead::new(
         read.content().to_vec(),
         read.metering_binding().map(str::to_owned),
+        read.package_sha256().to_owned(),
     )
 }
 

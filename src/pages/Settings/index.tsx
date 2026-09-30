@@ -2,7 +2,7 @@
  * Settings Page
  * Application configuration
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Sun,
@@ -31,6 +31,7 @@ import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { CallsRoute } from '@/lib/route-preload';
 import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
@@ -60,6 +61,8 @@ import {
   hostOpenClawGetCliCommand,
 } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
+import { waitForCall } from '@/lib/call-log-await';
+import { decodeCallReceipt } from '@/types/call-log/receipt';
 import {
   collectDiagnosticsArchive,
   exportDiagnosticsArchive,
@@ -399,6 +402,7 @@ async function cropImageToSquareDataUrl(src: string, size = 128): Promise<string
 
 export function Settings() {
   const { t } = useTranslation(['settings', 'plugins', 'common']);
+  const { t: commonT } = useTranslation('common');
   const location = useLocation();
   const navigate = useNavigate();
   const theme = useSettingsStore((state) => state.theme);
@@ -1080,7 +1084,19 @@ export function Settings() {
     setMatchaAgentAppServerRestarting(true);
     setMatchaAgentAppServerError('');
     try {
-      await hostApiFetch<{ success: true }>('/api/matcha-agent/app-server/restart', { method: 'POST' });
+      const receipt = decodeCallReceipt(await hostApiFetch<unknown>('/api/matcha-agent/app-server/restart', { method: 'POST' }));
+      const call = await waitForCall(receipt, 'runtime-control');
+      const { detail } = call;
+      if (call.command !== 'lifecycle.restart'
+        || detail.endpoint?.runtimeAdapterId !== 'matcha-agent'
+        || detail.endpoint.runtimeInstanceId !== 'local') {
+        throw new Error('Matcha Agent restart call does not match the requested operation');
+      }
+      if (call.status !== 'succeeded' || detail.result !== 'succeeded'
+        || detail.lifecycle !== 'running' || detail.error !== null || detail.failure !== null) {
+        throw new Error(detail.startupDiagnostic ?? detail.failure ?? detail.error
+          ?? `Matcha Agent restart outcome: ${detail.lifecycle ?? call.status}`);
+      }
       await loadMatchaAgentAppServerStatus();
     } catch (error) {
       const message = toUserMessage(error);
@@ -1260,6 +1276,7 @@ export function Settings() {
     { key: 'updates', label: t('updates.title') },
     { key: 'advanced', label: t('advanced.title') },
     { key: 'diagnostics', label: t('diagnostics.title') },
+    { key: 'calls', label: commonT('calls.title') },
   ];
 
   const switchSection = useCallback((section: SettingsSectionKey) => {
@@ -1314,7 +1331,12 @@ export function Settings() {
           </CardContent>
         </Card>
 
-        <div className="space-y-6">
+        <div className="min-w-0 space-y-6">
+          {activeSection === 'calls' && (
+            <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">{commonT('calls.loading')}</p>}>
+              <CallsRoute />
+            </Suspense>
+          )}
           {/* Appearance */}
           {activeSection === 'appearance' && (
       <Card className="order-2">

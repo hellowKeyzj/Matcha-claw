@@ -8,13 +8,14 @@ use crate::{
     ProviderAccount, ProviderAccountId, ProviderCascade, ProviderModel, ProviderModelCapability,
     ProviderModelCatalog, ProviderNativeConfigurationEffect, ProviderPrivateProjectionCommand,
     ProviderPrivateProjectionEffect, ProviderRouting, Resolver,
-    api::{ProviderCommand, ProviderQuery},
+    api::{ProviderAccountPrivateTransaction, ProviderCommand, ProviderQuery},
     application::receipts::{
         ProviderAccountView, ProviderAccountsDelivery, ProviderCommitOutcome,
         ProviderModelListOutcome, ProviderModelSelectableOutcome, ProviderModelView,
         ProviderNativeConfigurationView, ProviderRoutingListOutcome, ProviderRoutingView,
         SelectableProviderModelView,
     },
+    call::{ProviderCall, ProviderCallDiagnosticReason, send_reply},
     ports::ProviderRuntimeDirectory,
 };
 
@@ -147,7 +148,41 @@ impl OwnerSpec for ProviderOwner {
 }
 
 impl ProviderOwner {
-    async fn handle_provider_command(&mut self, command: ProviderCommand) {
+    async fn handle_provider_command(&mut self, mut command: ProviderCommand) {
+        let mut call = command.take_call();
+        if ProviderCall::start(&mut call).await.is_err() {
+            match command {
+                ProviderCommand::ReplaceAccount {
+                    transaction, reply, ..
+                }
+                | ProviderCommand::DeleteAccount {
+                    transaction, reply, ..
+                } => {
+                    let outcome = self.settle_account_transaction(
+                        &mut call,
+                        transaction.as_ref(),
+                        ProviderAccountsDelivery::Rejected,
+                    );
+                    send_reply(call, reply, outcome).await;
+                }
+                ProviderCommand::DiscoverModels { reply, .. } => {
+                    send_reply(call, reply, crate::ProviderModelDiscoverOutcome::Unavailable).await
+                }
+                ProviderCommand::ReplaceModels { reply, .. } => {
+                    send_reply(call, reply, crate::ProviderModelReplaceOutcome::Unavailable).await
+                }
+                ProviderCommand::ReplaceRouting { reply, .. } => {
+                    send_reply(
+                        call,
+                        reply,
+                        crate::ProviderRoutingReplaceOutcome::Unavailable,
+                    )
+                    .await
+                }
+                _ => {}
+            }
+            return;
+        }
         match command {
             ProviderCommand::ConfigurePrivateResolver { resolver, reply } => {
                 self.accounts.set_private_resolver(resolver.clone());
@@ -155,40 +190,106 @@ impl ProviderOwner {
                 self.update_snapshot();
                 let _ = reply.send(());
             }
-            ProviderCommand::ReplaceAccount { draft, reply } => {
+            ProviderCommand::ReplaceAccount {
+                draft,
+                transaction,
+                reply,
+                ..
+            } => {
+                if !self.claim_account_transaction(&mut call, transaction.as_ref()) {
+                    send_reply(call, reply, ProviderAccountsDelivery::Unavailable).await;
+                    return;
+                }
                 let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops()
                 else {
-                    let _ = reply.send(ProviderAccountsDelivery::Unavailable);
+                    let outcome = self.settle_account_transaction(
+                        &mut call,
+                        transaction.as_ref(),
+                        ProviderAccountsDelivery::Unavailable,
+                    );
+                    send_reply(call, reply, outcome).await;
                     return;
                 };
                 let outcome = self
                     .accounts
                     .replace(&mut self.cascade, identity_ops, draft);
                 self.update_snapshot();
+                if matches!(
+                    outcome.desired,
+                    ProviderAccountsDesiredOutcome::Stored
+                        | ProviderAccountsDesiredOutcome::Deleted
+                        | ProviderAccountsDesiredOutcome::Unknown
+                ) {
+                    ProviderCall::persisted(&mut call, outcome.persisted, outcome.commit).await;
+                }
+                self.record_private_profile_error(&mut call, &outcome);
                 let outcome = self.finish_account_mutation(outcome).await;
-                let _ = reply.send(outcome);
+                let outcome =
+                    self.settle_account_transaction(&mut call, transaction.as_ref(), outcome);
+                send_reply(call, reply, outcome).await;
             }
             ProviderCommand::DeleteAccount {
                 id,
                 revision,
+                transaction,
                 reply,
+                ..
             } => {
+                if !self.claim_account_transaction(&mut call, transaction.as_ref()) {
+                    send_reply(call, reply, ProviderAccountsDelivery::Unavailable).await;
+                    return;
+                }
                 let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops()
                 else {
-                    let _ = reply.send(ProviderAccountsDelivery::Unavailable);
+                    let outcome = self.settle_account_transaction(
+                        &mut call,
+                        transaction.as_ref(),
+                        ProviderAccountsDelivery::Unavailable,
+                    );
+                    send_reply(call, reply, outcome).await;
                     return;
                 };
                 let outcome = self
                     .accounts
                     .delete(&mut self.cascade, identity_ops, id, revision);
                 self.update_snapshot();
+                if matches!(
+                    outcome.desired,
+                    ProviderAccountsDesiredOutcome::Stored
+                        | ProviderAccountsDesiredOutcome::Deleted
+                        | ProviderAccountsDesiredOutcome::Unknown
+                ) {
+                    ProviderCall::persisted(&mut call, outcome.persisted, outcome.commit).await;
+                }
+                self.record_private_profile_error(&mut call, &outcome);
                 let outcome = self.finish_account_mutation(outcome).await;
-                let _ = reply.send(outcome);
+                let outcome =
+                    self.settle_account_transaction(&mut call, transaction.as_ref(), outcome);
+                send_reply(call, reply, outcome).await;
+            }
+            ProviderCommand::DiscoverModels {
+                account_id,
+                mut reservation,
+                reply,
+                ..
+            } => {
+                let mut outcome = self
+                    .models
+                    .discover(self.runtime_directory.as_ref(), &mut self.cascade, &account_id)
+                    .await;
+                if let crate::ProviderModelDiscoverOutcome::Discovered(models) = &outcome {
+                    if reservation.complete(models.clone()).is_err() {
+                        outcome = crate::ProviderModelDiscoverOutcome::Unavailable;
+                    }
+                }
+                drop(reservation);
+                send_reply(call, reply, outcome).await;
             }
             ProviderCommand::ReplaceModels {
                 account_id,
                 drafts,
                 reply,
+                ..
             } => {
                 let account_id_str = account_id.as_ref().map(|id| id.as_str().to_string());
                 let (outcome, returned_id) = account_id_str
@@ -202,14 +303,28 @@ impl ProviderOwner {
                     })
                     .unwrap_or((crate::ProviderModelReplaceOutcome::Rejected, None));
                 self.update_snapshot();
+                if let crate::ProviderModelReplaceOutcome::DesiredStored {
+                    persisted, commit, ..
+                } = &outcome
+                {
+                    ProviderCall::persisted(&mut call, *persisted, *commit).await;
+                }
                 let outcome = self.finish_model_mutation(outcome, returned_id).await;
-                let _ = reply.send(outcome);
+                send_reply(call, reply, outcome).await;
             }
-            ProviderCommand::ReplaceRouting { routing, reply } => {
+            ProviderCommand::ReplaceRouting { routing, reply, .. } => {
                 let outcome = self.routing.replace(&mut self.cascade, routing);
                 self.update_snapshot();
+                if let crate::ProviderRoutingReplaceOutcome::DesiredStored {
+                    persisted,
+                    commit,
+                    ..
+                } = &outcome
+                {
+                    ProviderCall::persisted(&mut call, *persisted, *commit).await;
+                }
                 let outcome = self.finish_routing_mutation(outcome).await;
-                let _ = reply.send(outcome);
+                send_reply(call, reply, outcome).await;
             }
             ProviderCommand::PreparePrivateProjection { reply } => {
                 let effect = self.prepare_private_projection();
@@ -219,50 +334,131 @@ impl ProviderOwner {
         }
     }
 
-    async fn handle_provider_query(&mut self, query: ProviderQuery) {
+    fn claim_account_transaction(
+        &self,
+        call: &mut Option<ProviderCall>,
+        transaction: Option<&ProviderAccountPrivateTransaction>,
+    ) -> bool {
+        let Some(transaction) = transaction else {
+            return true;
+        };
+        let Err(error) = self.accounts.claim_transaction(transaction) else {
+            return true;
+        };
+        if let Some(call) = call {
+            call.diagnostic(
+                ProviderCallDiagnosticReason::PrivateTransactionSettleFailed,
+                Some(error.safe_code()),
+            );
+        }
+        false
+    }
+
+    fn settle_account_transaction(
+        &self,
+        call: &mut Option<ProviderCall>,
+        transaction: Option<&ProviderAccountPrivateTransaction>,
+        outcome: ProviderAccountsDelivery,
+    ) -> ProviderAccountsDelivery {
+        let Some(transaction) = transaction else {
+            return outcome;
+        };
+        let settlement = match &outcome {
+            ProviderAccountsDelivery::Stored { .. } | ProviderAccountsDelivery::Deleted { .. } => {
+                "retained"
+            }
+            ProviderAccountsDelivery::Unknown { .. } => "unknown",
+            _ => "rejected",
+        };
+        let Err(error) = self.accounts.settle_transaction(transaction, settlement) else {
+            return outcome;
+        };
+        if let Some(call) = call {
+            call.diagnostic(
+                ProviderCallDiagnosticReason::PrivateTransactionSettleFailed,
+                Some(error.safe_code()),
+            );
+        }
+        // Desired facts already committed remain committed; private confirmation is unknown.
+        outcome
+    }
+
+    fn record_private_profile_error(
+        &self,
+        call: &mut Option<ProviderCall>,
+        outcome: &ProviderAccountsMutation,
+    ) {
+        if let (Some(call), Err(error)) = (call.as_mut(), &outcome.private) {
+            let (reason, code) = error.diagnostic();
+            call.diagnostic(reason, code);
+        }
+    }
+
+    async fn handle_provider_query(&mut self, mut query: ProviderQuery) {
+        let mut call = query.take_call();
+        if ProviderCall::start(&mut call).await.is_err() {
+            return;
+        }
         match query {
-            ProviderQuery::ListAccounts { reply } => {
-                let _ = reply.send(list_provider_accounts_for_snapshot(&self.snapshot));
+            ProviderQuery::ListAccounts { reply, .. } => {
+                send_reply(
+                    call,
+                    reply,
+                    list_provider_accounts_for_snapshot(&self.snapshot),
+                )
+                .await;
             }
-            ProviderQuery::GetAccount { id, reply } => {
-                let _ = reply.send(get_provider_account_for_snapshot(&self.snapshot, &id));
+            ProviderQuery::GetAccount { id, reply, .. } => {
+                send_reply(
+                    call,
+                    reply,
+                    get_provider_account_for_snapshot(&self.snapshot, &id),
+                )
+                .await;
             }
-            ProviderQuery::ListModels { reply } => {
-                let _ = reply.send(list_provider_models_for_snapshot(&self.snapshot));
+            ProviderQuery::ListModels { reply, .. } => {
+                send_reply(
+                    call,
+                    reply,
+                    list_provider_models_for_snapshot(&self.snapshot),
+                )
+                .await;
             }
-            ProviderQuery::SelectableModels { capability, reply } => {
-                let _ = reply.send(selectable_provider_models_for_snapshot(
-                    &self.snapshot,
-                    self.runtime_directory.as_ref(),
-                    capability,
-                ));
+            ProviderQuery::SelectableModels {
+                capability, reply, ..
+            } => {
+                send_reply(
+                    call,
+                    reply,
+                    selectable_provider_models_for_snapshot(
+                        &self.snapshot,
+                        self.runtime_directory.as_ref(),
+                        capability,
+                    ),
+                )
+                .await;
             }
-            ProviderQuery::DiscoverModels { account_id, reply } => {
-                let _ = reply.send(
-                    self.models
-                        .discover(
-                            self.runtime_directory.as_ref(),
-                            &mut self.cascade,
-                            &account_id,
-                        )
-                        .await,
-                );
+            ProviderQuery::ListRouting { reply, .. } => {
+                send_reply(
+                    call,
+                    reply,
+                    list_provider_routing_for_snapshot(&self.snapshot),
+                )
+                .await;
             }
-            ProviderQuery::ListRouting { reply } => {
-                let _ = reply.send(list_provider_routing_for_snapshot(&self.snapshot));
-            }
-            ProviderQuery::TextGenerationModelLimits { request, reply } => {
+            ProviderQuery::TextGenerationModelLimits { request, reply, .. } => {
                 let outcome = self.models.text_generation_model_limits(
                     self.runtime_directory.as_ref(),
                     &self.cascade,
                     request,
                 );
-                let _ = reply.send(outcome);
+                send_reply(call, reply, outcome).await;
             }
             ProviderQuery::GenerateText {
                 request,
                 cancellation,
                 reply,
+                ..
             } => {
                 let outcome = self
                     .models
@@ -273,7 +469,7 @@ impl ProviderOwner {
                         cancellation,
                     )
                     .await;
-                let _ = reply.send(outcome);
+                send_reply(call, reply, outcome).await;
             }
             ProviderQuery::SelectSessionModel {
                 endpoint,
@@ -282,6 +478,7 @@ impl ProviderOwner {
                 model_selection_id,
                 trace_id,
                 reply,
+                ..
             } => {
                 let outcome = self.models.select_session_model(
                     self.runtime_directory.as_ref(),
@@ -292,7 +489,7 @@ impl ProviderOwner {
                     model_selection_id,
                     trace_id,
                 );
-                let _ = reply.send(outcome);
+                send_reply(call, reply, outcome).await;
             }
             ProviderQuery::SelectMatchaSessionModelRuntime {
                 session_key,
@@ -302,6 +499,7 @@ impl ProviderOwner {
                 provider_fingerprint,
                 trace_id,
                 reply,
+                ..
             } => {
                 let outcome = self.models.select_matcha_session_model_runtime(
                     self.runtime_directory.as_ref(),
@@ -313,12 +511,13 @@ impl ProviderOwner {
                     provider_fingerprint,
                     trace_id,
                 );
-                let _ = reply.send(outcome);
+                send_reply(call, reply, outcome).await;
             }
             ProviderQuery::AcceptSessionRuntimeModels {
                 endpoint,
                 model_refs,
                 reply,
+                ..
             } => {
                 let outcome = self.models.accept_runtime_model_refs(
                     self.runtime_directory.as_ref(),
@@ -326,7 +525,7 @@ impl ProviderOwner {
                     endpoint,
                     &model_refs,
                 );
-                let _ = reply.send(outcome);
+                send_reply(call, reply, outcome).await;
             }
             ProviderQuery::SelectSessionModelRebound {
                 endpoint,
@@ -336,6 +535,7 @@ impl ProviderOwner {
                 default_model,
                 trace_id,
                 reply,
+                ..
             } => {
                 let outcome = self.models.select_session_model_rebound(
                     self.runtime_directory.as_ref(),
@@ -347,7 +547,7 @@ impl ProviderOwner {
                     default_model,
                     trace_id,
                 );
-                let _ = reply.send(outcome);
+                send_reply(call, reply, outcome).await;
             }
         }
     }
@@ -564,43 +764,91 @@ impl ProviderOwner {
     }
 }
 
-async fn handle_provider_snapshot_query(shared: &ProviderShared, query: ProviderQuery) {
+async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: ProviderQuery) {
+    let mut call = query.take_call();
+    if ProviderCall::start(&mut call).await.is_err() {
+        return;
+    }
     match query {
-        ProviderQuery::ListAccounts { reply } => {
-            let _ = reply.send(list_provider_accounts_for_snapshot(&shared.snapshot));
+        ProviderQuery::ListAccounts { reply, .. } => {
+            send_reply(
+                call,
+                reply,
+                list_provider_accounts_for_snapshot(&shared.snapshot),
+            )
+            .await;
         }
-        ProviderQuery::GetAccount { id, reply } => {
-            let _ = reply.send(get_provider_account_for_snapshot(&shared.snapshot, &id));
+        ProviderQuery::GetAccount { id, reply, .. } => {
+            send_reply(
+                call,
+                reply,
+                get_provider_account_for_snapshot(&shared.snapshot, &id),
+            )
+            .await;
         }
-        ProviderQuery::ListModels { reply } => {
-            let _ = reply.send(list_provider_models_for_snapshot(&shared.snapshot));
+        ProviderQuery::ListModels { reply, .. } => {
+            send_reply(
+                call,
+                reply,
+                list_provider_models_for_snapshot(&shared.snapshot),
+            )
+            .await;
         }
-        ProviderQuery::SelectableModels { capability, reply } => {
-            let _ = reply.send(selectable_provider_models_for_snapshot(
-                &shared.snapshot,
-                shared.runtime_directory.as_ref(),
-                capability,
-            ));
+        ProviderQuery::SelectableModels {
+            capability, reply, ..
+        } => {
+            send_reply(
+                call,
+                reply,
+                selectable_provider_models_for_snapshot(
+                    &shared.snapshot,
+                    shared.runtime_directory.as_ref(),
+                    capability,
+                ),
+            )
+            .await;
         }
-        ProviderQuery::ListRouting { reply } => {
-            let _ = reply.send(list_provider_routing_for_snapshot(&shared.snapshot));
-        }
-        ProviderQuery::DiscoverModels { reply, .. } => {
-            let _ = reply.send(crate::ProviderModelDiscoverOutcome::Unavailable);
+        ProviderQuery::ListRouting { reply, .. } => {
+            send_reply(
+                call,
+                reply,
+                list_provider_routing_for_snapshot(&shared.snapshot),
+            )
+            .await;
         }
         ProviderQuery::TextGenerationModelLimits { reply, .. } => {
-            let _ = reply.send(crate::ProviderTextGenerationModelLimitsOutcome::Rejected);
+            send_reply(
+                call,
+                reply,
+                crate::ProviderTextGenerationModelLimitsOutcome::Rejected,
+            )
+            .await;
         }
         ProviderQuery::GenerateText { reply, .. } => {
-            let _ = reply.send(crate::ProviderTextGenerationOutcome::Unavailable);
+            send_reply(
+                call,
+                reply,
+                crate::ProviderTextGenerationOutcome::Unavailable,
+            )
+            .await;
         }
         ProviderQuery::SelectSessionModel { reply, .. }
         | ProviderQuery::SelectMatchaSessionModelRuntime { reply, .. }
         | ProviderQuery::SelectSessionModelRebound { reply, .. } => {
-            let _ = reply.send(crate::ProviderSessionModelSelectionOutcome::Unavailable);
+            send_reply(
+                call,
+                reply,
+                crate::ProviderSessionModelSelectionOutcome::Unavailable,
+            )
+            .await;
         }
         ProviderQuery::AcceptSessionRuntimeModels { reply, .. } => {
-            let _ = reply.send(crate::ProviderSessionRuntimeModelsOutcome::Unavailable);
+            send_reply(
+                call,
+                reply,
+                crate::ProviderSessionRuntimeModelsOutcome::Unavailable,
+            )
+            .await;
         }
     }
 }

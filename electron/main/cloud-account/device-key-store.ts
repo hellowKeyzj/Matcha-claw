@@ -22,13 +22,20 @@ type PersistedDeviceKey = Readonly<{
 }>;
 
 let deviceKeyStoreWrite = Promise.resolve();
+let deviceKeyInitialization: Promise<CloudPackageDeviceKey> | undefined;
 
 export async function getCloudPackageDevicePublicKey(): Promise<string> {
-  const existing = await readCloudPackageDeviceKey();
-  if (existing) return existing.publicKey;
-  const generated = generateCloudPackageDeviceKey();
-  await writeCloudPackageDeviceKey(generated);
-  return generated.publicKey;
+  if (!deviceKeyInitialization) {
+    deviceKeyInitialization = (async () => {
+      const existing = await readCloudPackageDeviceKey();
+      if (existing) return existing;
+      const generated = generateCloudPackageDeviceKey();
+      await writeCloudPackageDeviceKey(generated);
+      return generated;
+    })();
+    void deviceKeyInitialization.finally(() => { deviceKeyInitialization = undefined; }).catch(() => undefined);
+  }
+  return (await deviceKeyInitialization).publicKey;
 }
 
 export async function unwrapCloudPackageDeviceEnvelope(envelope: CloudPackageEnvelope | undefined): Promise<string | undefined> {

@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use platform::{
+    call::{CallDetail, CallRecorder, CallStatus},
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor as LoopbackModuleDescriptor, ModuleId as LoopbackModuleId,
@@ -8,7 +9,7 @@ use platform::{
     },
     module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId as CatalogModuleId},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -48,6 +49,24 @@ pub fn descriptor(
     driver: Arc<OpenClawDriver>,
     admission: Arc<dyn OpenClawPlatformAdmissionPort>,
 ) -> ModuleDescriptor {
+    build_descriptor(verifier, driver, admission, None)
+}
+
+pub fn descriptor_with_calls(
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    driver: Arc<OpenClawDriver>,
+    admission: Arc<dyn OpenClawPlatformAdmissionPort>,
+    calls: CallRecorder,
+) -> ModuleDescriptor {
+    build_descriptor(verifier, driver, admission, Some(calls))
+}
+
+fn build_descriptor(
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    driver: Arc<OpenClawDriver>,
+    admission: Arc<dyn OpenClawPlatformAdmissionPort>,
+    calls: Option<CallRecorder>,
+) -> ModuleDescriptor {
     ModuleDescriptor::new(
         MODULE_ID,
         PROVIDES,
@@ -55,9 +74,7 @@ pub fn descriptor(
         EFFECTS,
         ROUTES,
         EVENTS,
-        Some(loopback_descriptor(Dependencies::new(
-            verifier, admission, driver,
-        ))),
+        Some(loopback_descriptor(Dependencies { verifier, admission, driver, calls })),
     )
 }
 
@@ -66,20 +83,17 @@ struct Dependencies {
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     admission: Arc<dyn OpenClawPlatformAdmissionPort>,
     driver: Arc<OpenClawDriver>,
+    calls: Option<CallRecorder>,
 }
 
-impl Dependencies {
-    fn new(
-        verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-        admission: Arc<dyn OpenClawPlatformAdmissionPort>,
-        driver: Arc<OpenClawDriver>,
-    ) -> Self {
-        Self {
-            verifier,
-            admission,
-            driver,
-        }
-    }
+#[derive(Serialize)]
+struct PlatformCallDetail {
+    runtime: &'static str,
+    operation: &'static str,
+}
+
+impl CallDetail for PlatformCallDetail {
+    const MODULE: &'static str = "openclaw-platform";
 }
 
 fn loopback_descriptor(dependencies: Dependencies) -> LoopbackModuleDescriptor {
@@ -129,11 +143,27 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
     {
         return unauthorized();
     }
+    let detail = PlatformCallDetail { runtime: "openclaw", operation: authorization.capability };
+    let call = match &dependencies.calls {
+        Some(calls) => match calls.begin(authorization.capability, &detail).await {
+            Ok(call) => Some(call),
+            Err(_) => return unavailable(),
+        },
+        None => None,
+    };
     if !dependencies.admission.admit_openclaw_platform_request() {
+        if let Some(call) = &call {
+            let _ = call.finish(CallStatus::Rejected, &detail).await;
+        }
         return unavailable();
     }
+    if let Some(call) = &call {
+        if call.running().await.is_err() {
+            return unavailable();
+        }
+    }
 
-    match operation {
+    let response = match operation {
         Operation::Status => status_response(&dependencies.driver),
         Operation::RuntimePaths => runtime_paths_response(&dependencies.driver),
         Operation::CliCommand => cli_command_response(&dependencies.driver),
@@ -147,7 +177,19 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
         Operation::SubagentTemplateDetail => {
             subagent_template_detail_response(&dependencies.driver, &request.body)
         }
+    };
+    if let Some(call) = &call {
+        let status = match response.status() {
+            200 => CallStatus::Succeeded,
+            400 => CallStatus::Rejected,
+            500 if matches!(operation, Operation::ToolPermissionSet) => CallStatus::Unknown,
+            _ => CallStatus::Failed,
+        };
+        if call.finish(status, &detail).await.is_err() {
+            eprintln!("OpenClaw platform call could not be persisted");
+        }
     }
+    response
 }
 
 #[derive(Clone, Copy)]

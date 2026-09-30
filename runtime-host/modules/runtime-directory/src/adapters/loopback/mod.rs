@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use platform::{
     capability::CapabilityDecisionVerifier,
+    call::{CallRecorder, CallStatus},
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
         RouteFuture, RouteHeadPlan,
@@ -9,7 +10,10 @@ use platform::{
 };
 use tokio::sync::Mutex;
 
-use crate::{RuntimeEndpointDirectorySource, projection::Delivery};
+use crate::{
+    RuntimeEndpointDirectorySource, projection::Delivery,
+    call::{DirectoryCallDetail, RuntimeControlCallResult},
+};
 
 const DEFAULT_REQUEST_BYTES: usize = 64 * 1024;
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
@@ -22,6 +26,7 @@ const RUNTIME_DIRECTORY_SUBJECT: &str = "runtime-endpoint-directory";
 pub struct Dependencies {
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     directory: Arc<dyn RuntimeEndpointDirectorySource>,
+    call_recorder: Option<CallRecorder>,
 }
 
 impl Dependencies {
@@ -32,7 +37,13 @@ impl Dependencies {
         Self {
             verifier,
             directory,
+            call_recorder: None,
         }
+    }
+
+    pub fn with_call_recorder(mut self, call_recorder: Option<CallRecorder>) -> Self {
+        self.call_recorder = call_recorder;
+        self
     }
 }
 
@@ -88,11 +99,39 @@ async fn handle_runtime_endpoints(request: &Request, dependencies: Dependencies)
     }
     drop(verifier);
 
-    let directory = match dependencies.directory.runtime_endpoint_directory().await {
-        Ok(directory) => directory,
-        Err(_) => return runtime_endpoints_unavailable(),
+    let mut detail = DirectoryCallDetail::default();
+    let call = match &dependencies.call_recorder {
+        Some(recorder) => match recorder.begin("list", &detail).await {
+            Ok(call) => Some(call),
+            Err(error) => {
+                eprintln!("[runtime-directory] call could not be recorded: {error}");
+                return runtime_endpoints_unavailable();
+            }
+        },
+        None => None,
     };
-    Response::json(200, Delivery::Ok(directory).body())
+    if let Some(call) = &call {
+        if let Err(error) = call.running().await {
+            eprintln!("[runtime-directory] call start could not be recorded: {error}");
+        }
+    }
+    let (status, response) = match dependencies.directory.runtime_endpoint_directory().await {
+        Ok(directory) => {
+            detail.count = Some(directory.endpoints().len());
+            detail.result = Some(RuntimeControlCallResult::Succeeded);
+            (CallStatus::Succeeded, Response::json(200, Delivery::Ok(directory).body()))
+        }
+        Err(_) => {
+            detail.result = Some(RuntimeControlCallResult::Unavailable);
+            (CallStatus::Failed, runtime_endpoints_unavailable())
+        }
+    };
+    if let Some(call) = call {
+        if let Err(error) = call.finish(status, &detail).await {
+            eprintln!("[runtime-directory] call completion could not be recorded: {error}");
+        }
+    }
+    response
 }
 
 fn body_policy_for_get_route(method: &str) -> BodyPolicy {

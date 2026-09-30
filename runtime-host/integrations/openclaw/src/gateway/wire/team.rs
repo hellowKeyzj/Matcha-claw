@@ -350,9 +350,11 @@ pub(crate) fn decode_agents_update(response: GatewayResponse) -> Result<AgentUpd
 }
 
 pub(crate) fn decode_agents_delete(response: GatewayResponse) -> Result<AgentDeleted, WireError> {
-    super::agents::decode_delete(response).map(|deleted| AgentDeleted {
-        agent_id: deleted.agent_id,
-    })
+    let deleted = super::agents::decode_delete(response)?;
+    if !deleted.ok || deleted.failed_count != 0 || deleted.purge_failed_count != 0 {
+        return Err(WireError::InvalidAgentsDelete);
+    }
+    Ok(AgentDeleted { agent_id: deleted.agent_id })
 }
 
 pub(crate) fn decode_config_get(response: GatewayResponse) -> Result<ConfigSnapshot, WireError> {

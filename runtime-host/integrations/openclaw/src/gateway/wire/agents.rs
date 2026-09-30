@@ -547,7 +547,10 @@ pub struct AgentUpdated {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentDeleted {
     pub agent_id: String,
+    pub ok: bool,
     pub removed_bindings: u64,
+    pub failed_count: usize,
+    pub purge_failed_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1090,16 +1093,23 @@ struct AgentDeletedWire {
     ok: bool,
     agent_id: String,
     removed_bindings: u64,
+    #[serde(default)]
+    failed: Vec<Value>,
+    #[serde(default)]
+    purge_failed: Vec<Value>,
 }
 
 impl AgentDeletedWire {
     fn into_public(self) -> Result<AgentDeleted, WireError> {
-        if !self.ok || !valid_string(&self.agent_id) {
+        if !valid_string(&self.agent_id) {
             return Err(WireError::InvalidAgentsDelete);
         }
         Ok(AgentDeleted {
             agent_id: self.agent_id,
+            ok: self.ok,
             removed_bindings: self.removed_bindings,
+            failed_count: self.failed.len(),
+            purge_failed_count: self.purge_failed.len(),
         })
     }
 }

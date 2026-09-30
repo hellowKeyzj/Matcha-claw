@@ -11,16 +11,14 @@ use tokio::sync::Mutex;
 
 use super::{
     AUDIT_ENDPOINT, AUDIT_READ_SUBJECT, DecodeError, ENDPOINT, OPERATION_ENDPOINT,
-    POLICY_READ_SUBJECT, READ_CAPABILITY, READ_ENDPOINT, READ_SCOPE, catalog, decode,
+    POLICY_READ_SUBJECT, READ_CAPABILITY, READ_ENDPOINT, READ_SCOPE,
+    OPERATION_RECEIPT_ENDPOINT, OPERATION_RECEIPT_SUBJECT, catalog, decode,
     decode_operation, wire::bearer_token,
 };
 use crate::{
     api::SecurityHandle,
     application::trace::security_trace,
     audit as security_audit,
-    delivery::{
-        Outcome as SecurityPolicyDeliveryOutcome, Settlement as SecurityPolicyDeliverySettlement,
-    },
     operation as security_operation,
 };
 
@@ -97,6 +95,7 @@ async fn handle_request(
             return Ok(Response::policy(policy));
         }
         if let Some(platform) = catalog::parse_target(&request.path) {
+            security.rule_catalog_call().await.map_err(|_| io::Error::from(io::ErrorKind::Other))?;
             return Ok(Response::catalog(platform.as_deref()));
         }
         let query = match parse_audit_target(&request.path) {
@@ -120,6 +119,24 @@ async fn handle_request(
             .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
         return Ok(Response::from_audit(outcome));
     }
+    if request.method == "POST" && request.path == OPERATION_RECEIPT_ENDPOINT {
+        if !verify_read(&verifier, request.authorization.as_deref(), OPERATION_RECEIPT_ENDPOINT, OPERATION_RECEIPT_SUBJECT).await {
+            return Ok(Response::operation_unauthorized());
+        }
+        let value = match serde_json::from_slice::<Value>(&request.body) {
+            Ok(Value::Object(value)) if value.len() == 1 => value,
+            _ => return Ok(Response::operation_bad_request()),
+        };
+        let Some(correlation) = value.get("correlation").and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 256 && !value.contains('\0')) else {
+            return Ok(Response::operation_bad_request());
+        };
+        return security.operation_receipt(correlation.to_owned()).await
+            .map(|outcome| match outcome {
+                Some(outcome) => Response::from_security_operation(outcome),
+                None => Response::fixed(404, "Security operation receipt is not available"),
+            }).map_err(|_| io::Error::from(io::ErrorKind::Other));
+    }
     if request.method == "POST" && request.path == OPERATION_ENDPOINT {
         let Some(token) = bearer_token(request.authorization.as_deref()) else {
             return Ok(Response::operation_unauthorized());
@@ -139,7 +156,7 @@ async fn handle_request(
         return security
             .operation(correlation, operation_id, input)
             .await
-            .map(|outcome| Response::from_security_operation(outcome))
+            .map(Response::accepted)
             .map_err(|_| io::Error::from(io::ErrorKind::Other));
     }
     if request.method != "POST" || request.path != ENDPOINT {
@@ -159,11 +176,11 @@ async fn handle_request(
         Err(DecodeError::Invalid) => return Ok(Response::bad_request()),
     };
     drop(verifier);
-    let settlement = security
+    let receipt = security
         .replace_policy(correlation, decision)
         .await
         .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
-    Ok(Response::settled(settlement))
+    Ok(Response::accepted(receipt))
 }
 
 async fn verify_read(
@@ -248,20 +265,8 @@ impl Response {
             }
         }
     }
-    fn settled(settlement: SecurityPolicyDeliverySettlement) -> Self {
-        match settlement.outcome {
-            SecurityPolicyDeliveryOutcome::Rejected => {
-                Self::fixed(422, "Security policy effect was rejected")
-            }
-            SecurityPolicyDeliveryOutcome::Confirmed | SecurityPolicyDeliveryOutcome::Unknown => {
-                Self::ok(json!({
-                    "desired": {
-                        "revision": settlement.revision,
-                        "outcome": settlement.outcome.as_str()
-                    }
-                }))
-            }
-        }
+    fn accepted(receipt: platform::call::CallReceipt) -> Self {
+        Self { status: 202, body: json!(receipt) }
     }
     fn fixed(status: u16, error: &'static str) -> Self {
         Self {

@@ -171,17 +171,6 @@ pub enum MutationOutcome {
     Unavailable,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProbeOutcome {
-    Observed(ConnectorObservation),
-    Missing,
-    Unavailable,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StatusOutcome {
-    Available(Vec<(String, ConnectorObservation)>),
-    Unavailable,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatalogOutcome {
     Available(Vec<ExternalMcpProgram>),
     Unavailable,
@@ -226,7 +215,7 @@ pub enum OpenClawMcpServersOutcome {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SessionEndpoint {
     #[serde(rename = "native-runtime")]
@@ -247,7 +236,7 @@ pub enum SessionEndpoint {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionIdentity {
     pub endpoint: SessionEndpoint,
@@ -333,12 +322,6 @@ pub struct SessionConnectorStatus {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<SessionConnectorStatusDetails>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SessionStatusOutcome {
-    Available(Vec<SessionConnectorStatus>),
-    Unavailable,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

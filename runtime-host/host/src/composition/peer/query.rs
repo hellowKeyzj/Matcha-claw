@@ -91,18 +91,21 @@ pub(crate) enum PeerQuery {
     },
     OpenClawBrowserRequest {
         request: OpenClawBrowserGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
         reply: oneshot::Sender<
             Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
         >,
     },
     OpenClawMcpAppRequest {
         request: OpenClawMcpAppGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
         reply: oneshot::Sender<
             Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
         >,
     },
     OpenClawQuestionResolve {
         request: OpenClawQuestionResolveGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
         reply: oneshot::Sender<
             Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
         >,

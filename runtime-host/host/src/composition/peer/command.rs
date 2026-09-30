@@ -1,4 +1,8 @@
-use tokio::sync::oneshot;
+use std::sync::Arc;
+
+use platform::call::{CallLogError, CallReceipt};
+use runtime_directory::call::RuntimeControlCallContext;
+use tokio::sync::{OnceCell, oneshot};
 
 use foundation::execution::CommandRoute;
 
@@ -8,26 +12,47 @@ use super::PeerKey;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeStartCommandError {
-    AdmissionClosed,
-    RuntimeStart,
+    RuntimeStart(crate::RuntimeStartFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeStopCommandError {
     AdmissionClosed,
-    RuntimeStop,
+    RuntimeStop(crate::RuntimeLifecycleFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeRestartCommandError {
-    AdmissionClosed,
-    RuntimeRestart,
+    RuntimeRestart(crate::RuntimeLifecycleFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AutostartOpenClawError {
     PeerUnavailable,
     RuntimeStart,
+}
+
+#[derive(Clone)]
+pub(crate) struct RuntimeLifecycleCall {
+    pub(super) context: RuntimeControlCallContext,
+    admission: Arc<OnceCell<Result<CallReceipt, CallLogError>>>,
+}
+
+impl RuntimeLifecycleCall {
+    pub(super) fn new(context: RuntimeControlCallContext) -> Self {
+        Self {
+            context,
+            admission: Arc::new(OnceCell::new()),
+        }
+    }
+
+    pub(super) async fn accepted(&self) -> Result<CallReceipt, CallLogError> {
+        // The queued owner shares admission and can finish it after the HTTP waiter drops.
+        self.admission
+            .get_or_init(|| self.context.accepted())
+            .await
+            .clone()
+    }
 }
 
 pub(crate) enum PeerCommand {
@@ -37,14 +62,18 @@ pub(crate) enum PeerCommand {
     },
     StartRuntime {
         endpoint: PeerKey,
-        reply: oneshot::Sender<Result<RuntimeState, RuntimeStartCommandError>>,
+        call: RuntimeLifecycleCall,
     },
     StopRuntime {
         endpoint: PeerKey,
-        reply: oneshot::Sender<Result<RuntimeState, RuntimeStopCommandError>>,
+        call: Option<RuntimeLifecycleCall>,
+        reply: Option<oneshot::Sender<Result<RuntimeState, RuntimeStopCommandError>>>,
     },
     RestartRuntime {
         endpoint: PeerKey,
+        call: RuntimeLifecycleCall,
+    },
+    RestartOpenClawAfterPluginChange {
         reply: oneshot::Sender<Result<RuntimeState, RuntimeRestartCommandError>>,
     },
 }
@@ -55,7 +84,7 @@ impl PeerCommand {
             Self::AutostartMatcha => {
                 CommandRoute::Keyed(RuntimeDriverIdentity::matcha_agent().endpoint())
             }
-            Self::AutostartOpenClaw { .. } => {
+            Self::AutostartOpenClaw { .. } | Self::RestartOpenClawAfterPluginChange { .. } => {
                 CommandRoute::Keyed(RuntimeDriverIdentity::open_claw().endpoint())
             }
             Self::StartRuntime { endpoint, .. }

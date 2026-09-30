@@ -13,6 +13,7 @@ import type { ChannelStatusTransport } from './channels/status';
 import type { ExternalConnectorsTransport } from './connectors/external';
 import type { OpenClawMcpServersTransport } from './connectors/openclaw-mcp-servers';
 import type { CronTransport } from './cron';
+import type { CallLogTransport } from './call-log';
 import type { OpenClawGatewayTransport } from './openclaw-gateway';
 import type { OpenClawPlatformTransport } from './openclaw-platform';
 import type { DiagnosticsArchiveTransport } from './diagnostics';
@@ -102,6 +103,7 @@ export interface RuntimeHostTransports {
   securityPolicyTransport: SecurityPolicyTransport;
   securityRuleCatalogTransport: SecurityRuleCatalogTransport;
   cronTransport: CronTransport;
+  callLogTransport: CallLogTransport;
   taskManagerTransport: TaskManagerTransport;
   agentsTransport: AgentsTransport;
   teamPublicTransport: TeamPublicTransport;

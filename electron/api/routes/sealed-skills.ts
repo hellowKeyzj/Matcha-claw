@@ -7,7 +7,7 @@ import { parseJsonBody, sendJson } from '../route-utils';
 const INVALID = { outcome: 'rejected' } as const;
 const UNKNOWN = { outcome: 'unknown' } as const;
 
-type SealedSkillsRouteOperation = Exclude<keyof SealedSkillsTransport, 'readStatus'> | 'status' | 'installLocal';
+type SealedSkillsRouteOperation = 'export' | 'install' | 'uninstall' | 'status' | 'installLocal';
 
 export async function handleSealedSkillsRoutes(
   req: IncomingMessage,

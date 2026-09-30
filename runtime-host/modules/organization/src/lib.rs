@@ -4,6 +4,7 @@ extern crate self as organization;
 
 pub mod adapters;
 mod api;
+mod call;
 pub mod application;
 pub mod capability;
 pub mod owner;
@@ -472,7 +473,7 @@ impl OrganizationModule {
                     self.handle().clone(),
                     webhook_token,
                     role_session_identity,
-                ),
+                ).with_call_workflows(self.call_workflows.clone()),
             )),
             Some(CapabilityDescriptorProvider::new(
                 capability::listed,

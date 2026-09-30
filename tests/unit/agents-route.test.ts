@@ -126,13 +126,8 @@ describe('agents host API route', () => {
   });
 
   it('hides sealed package export package path from public response', async () => {
-    const execute = vi.fn().mockResolvedValue({
-      status: 200,
-      body: {
-        success: true,
-        package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1, exportedAtMs: 2 },
-      },
-    });
+    const receipt = { callId: 'a'.repeat(32), accepted: true };
+    const execute = vi.fn().mockResolvedValue({ status: 202, body: receipt });
     const result = response();
     const request = {
       id: 'subagent.management',
@@ -150,10 +145,21 @@ describe('agents host API route', () => {
     );
 
     expect(execute).toHaveBeenCalledWith(request);
-    expect(result.state).toEqual({
-      statusCode: 200,
+    expect(result.state).toEqual({ statusCode: 202, body: receipt });
+    const completed = {
+      callId: receipt.callId, operationId: request.operationId, status: 200,
       body: { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', size: 1, exportedAtMs: 2 } },
-    });
+    };
+    const readResult = vi.fn().mockResolvedValue({ status: 200, body: completed });
+    const resultRequest = { callId: receipt.callId, operationId: request.operationId, endpoint: request.input.endpoint, agentId: 'writer' };
+    await handleAgentsRoutes(
+      incoming(resultRequest) as never,
+      result.raw as never,
+      new URL('http://127.0.0.1/api/subagents/results'),
+      { execute, result: readResult } as never,
+    );
+    expect(readResult).toHaveBeenCalledWith(resultRequest);
+    expect(result.state).toEqual({ statusCode: 200, body: completed });
     expect(JSON.stringify(result.state.body)).not.toMatch(/packagePath|deviceEnvelope|authorizationKey|contentKey|rawPayload|token/);
   });
 

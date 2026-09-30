@@ -84,7 +84,7 @@ impl OpenClawGateway {
         &self,
         agent_id: String,
         skills: Vec<String>,
-    ) -> AgentConfigurationMutationOutcome {
+    ) -> Result<AgentConfigurationMutationOutcome, (Vec<String>, Vec<String>)> {
         AgentConfiguration::new(self.client())
             .set_skills(agent_id, skills)
             .await

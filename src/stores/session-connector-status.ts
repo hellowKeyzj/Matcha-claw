@@ -1,42 +1,13 @@
 import { create } from 'zustand';
-import { hostApiFetch } from '@/lib/host-api';
+import { readSessionConnectorStatuses, setSessionMcpServerEnabled } from '@/lib/connectors-call';
+import type { SessionConnectorStatus, SessionConnectorStatusResultType as ConnectorResultType } from '@/types/connectors-observation';
 import {
   buildSessionIdentityKey,
   type SessionIdentity,
 } from '../types/desktop/runtime-address';
 
-export type SessionConnectorStatusResultType =
-  | 'connected'
-  | 'disconnected'
-  | 'pending'
-  | 'unsupported'
-  | 'disabled'
-  | 'unknown'
-  | 'error';
-
-export interface SessionConnectorStatusDetails {
-  readonly serverId?: string;
-  readonly sessionKey?: string;
-  readonly toolCount?: number;
-  readonly launchSummary?: string;
-  readonly enabledNextRun?: boolean;
-  readonly enabledConfigurable?: boolean;
-}
-
-export interface SessionConnectorStatus {
-  readonly connectorId: string;
-  readonly displayName?: string;
-  readonly adapterId: string;
-  readonly targetKind: 'session';
-  readonly resultType: SessionConnectorStatusResultType;
-  readonly checkedAt?: string;
-  readonly reason?: string;
-  readonly details?: SessionConnectorStatusDetails;
-}
-
-type SessionConnectorStatusPayload = {
-  statuses: SessionConnectorStatus[];
-};
+export type { SessionConnectorStatus, SessionConnectorStatusDetails } from '@/types/connectors-observation';
+export type SessionConnectorStatusResultType = ConnectorResultType | 'error';
 
 type SessionConnectorStatusState = {
   statusesBySessionKey: Record<string, SessionConnectorStatus[]>;
@@ -59,11 +30,7 @@ export const useSessionConnectorStatusStore = create<SessionConnectorStatusState
       errorBySessionKey: { ...state.errorBySessionKey, [key]: null },
     }));
     try {
-      const payload = await hostApiFetch<SessionConnectorStatusPayload>('/api/external-connectors/session-status', {
-        method: 'POST',
-        body: JSON.stringify({ sessionIdentity }),
-      });
-      const statuses = Array.isArray(payload.statuses) ? payload.statuses : [];
+      const statuses = await readSessionConnectorStatuses(sessionIdentity);
       set((state) => ({
         statusesBySessionKey: { ...state.statusesBySessionKey, [key]: statuses },
         loadingBySessionKey: { ...state.loadingBySessionKey, [key]: false },
@@ -85,10 +52,7 @@ export const useSessionConnectorStatusStore = create<SessionConnectorStatusState
       errorBySessionKey: { ...state.errorBySessionKey, [key]: null },
     }));
     try {
-      await hostApiFetch('/api/external-connectors/session-mcp-server-enabled', {
-        method: 'POST',
-        body: JSON.stringify({ sessionIdentity, serverId, enabled }),
-      });
+      await setSessionMcpServerEnabled(sessionIdentity, serverId, enabled);
       set((state) => ({
         statusesBySessionKey: {
           ...state.statusesBySessionKey,

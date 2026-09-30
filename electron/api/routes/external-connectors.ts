@@ -15,6 +15,7 @@ type ExternalConnectorOperation =
   | 'externalConnectors.list'
   | 'externalConnectors.catalog'
   | 'externalConnectors.status'
+  | 'externalConnectors.observationResult'
   | 'externalConnectors.sessionStatus'
   | 'externalConnectors.sessionMcpServerEnabled'
   | 'externalConnectors.probe'
@@ -96,6 +97,22 @@ export async function handleExternalConnectorsRoutes(
     await deliver(transport, res, createRequest('externalConnectors.get', {
       kind: 'get',
       connectorId: body.connectorId,
+    }));
+    return true;
+  }
+
+  if (url.pathname === '/api/external-connectors/observation-result' && req.method === 'POST') {
+    const body = await parseLegacyBody(req, res);
+    if (!body) return true;
+    if (!(hasExactKeys(body, ['callId'])
+      || (hasExactKeys(body, ['callId', 'sessionIdentity']) && !validateSessionIdentity(body.sessionIdentity)))
+      || typeof body.callId !== 'string' || !/^[a-f0-9]{32}$/.test(body.callId)) {
+      sendJson(res, 400, INVALID);
+      return true;
+    }
+    await deliver(transport, res, createRequest('externalConnectors.observationResult', {
+      kind: 'observationResult', callId: body.callId,
+      ...(body.sessionIdentity === undefined ? {} : { sessionIdentity: body.sessionIdentity }),
     }));
     return true;
   }

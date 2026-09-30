@@ -15,6 +15,7 @@ mod bundle;
 mod clawhub_search;
 mod clawhub_skill;
 mod management;
+mod result;
 mod sealed_resource;
 
 const DEFAULT_REQUEST_BYTES: usize = 64 * 1024;
@@ -57,12 +58,43 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
         let path = pathname(request.path()).to_owned();
-        match (request.method(), path.as_str()) {
+        let recorded = match (
+            &dependencies.skills.recorder,
+            crate::call::request(&path, &request.body),
+        ) {
+            (Some(recorder), Some((command, detail))) => {
+                match recorder.begin(command, &detail).await {
+                    Ok(context) => Some(crate::operation::RecordedCall {
+                        context,
+                        detail,
+                        command,
+                        accepted: Arc::new(tokio::sync::OnceCell::new()),
+                    }),
+                    Err(_) => return fixed(503, "Skills call recording is unavailable").into(),
+                }
+            }
+            _ => None,
+        };
+        if let Some(call) = &recorded {
+            if !is_long_operation(&path, &request.body) && call.context.running().await.is_err() {
+                return fixed(503, "Skills call recording is unavailable").into();
+            }
+        }
+        let mut response = match (request.method(), path.as_str()) {
+            ("POST", result::ENDPOINT | result::PRIVATE_ENDPOINT) => {
+                result::handle(request, dependencies.verifier, dependencies.skills).await
+            }
             ("GET", management::ENDPOINT) => {
                 handle_status(request, dependencies.verifier, dependencies.skills).await
             }
             ("POST", management::CAPABILITY_EXECUTE_ENDPOINT) => {
-                handle_capability_execute(request, dependencies.verifier, dependencies.skills).await
+                handle_capability_execute(
+                    request,
+                    dependencies.verifier,
+                    dependencies.skills,
+                    recorded.clone(),
+                )
+                .await
             }
             ("POST", management::DETAIL_ENDPOINT)
             | ("POST", management::CONFIG_ENDPOINT)
@@ -75,38 +107,121 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
             | ("POST", management::IMPORT_MARKDOWN_ENDPOINT)
             | ("POST", management::IMPORT_BUNDLE_ENDPOINT)
             | ("POST", management::README_ENDPOINT) => {
-                handle_management(request, dependencies.verifier, dependencies.skills).await
+                handle_management(
+                    request,
+                    dependencies.verifier,
+                    dependencies.skills,
+                    recorded.clone(),
+                )
+                .await
             }
             ("POST", clawhub_search::ENDPOINT) => {
                 handle_clawhub_search(request, dependencies.verifier, dependencies.skills).await
             }
             ("POST", clawhub_skill::ENDPOINT) => {
-                handle_clawhub_skill_install(request, dependencies.verifier, dependencies.skills)
-                    .await
+                handle_clawhub_skill_install(
+                    request,
+                    dependencies.verifier,
+                    dependencies.skills,
+                    recorded.clone(),
+                )
+                .await
             }
             ("POST", bundle::EXPORT_ENDPOINT) => {
-                handle_bundle_export(request, dependencies.verifier, dependencies.skills).await
+                handle_bundle_export(
+                    request,
+                    dependencies.verifier,
+                    dependencies.skills,
+                    recorded.clone(),
+                )
+                .await
             }
             ("POST", bundle::IMPORT_ENDPOINT) => {
-                handle_bundle_import(request, dependencies.verifier, dependencies.skills).await
+                handle_bundle_import(
+                    request,
+                    dependencies.verifier,
+                    dependencies.skills,
+                    recorded.clone(),
+                )
+                .await
             }
             ("GET", sealed_resource::STATUS_ENDPOINT)
             | ("POST", sealed_resource::EXPORT_ENDPOINT)
             | ("POST", sealed_resource::EXPORT_CLOUD_ENDPOINT)
             | ("POST", sealed_resource::INSTALL_ENDPOINT)
             | ("POST", sealed_resource::UNINSTALL_ENDPOINT) => {
-                handle_sealed_resource(request, dependencies.verifier, dependencies.skills).await
+                handle_sealed_resource(
+                    request,
+                    dependencies.verifier,
+                    dependencies.skills,
+                    recorded.clone(),
+                )
+                .await
             }
             ("GET", path) if path.starts_with(sealed_resource::READ_ENDPOINT_PREFIX) => {
-                handle_sealed_resource(request, dependencies.verifier, dependencies.skills).await
+                handle_sealed_resource(
+                    request,
+                    dependencies.verifier,
+                    dependencies.skills,
+                    recorded.clone(),
+                )
+                .await
             }
             _ => Response::json(
                 404,
                 serde_json::json!({ "success": false, "error": not_found_error(&path) }),
             ),
+        };
+        if let Some(call) = recorded {
+            response = response.with_header("X-Matcha-Call-Id", call.context.id().as_str());
+            if response.status() != 202 {
+                let (status, detail) = crate::call::terminal(call.detail, &response);
+                if let Err(error) = call.context.finish(status, &detail).await {
+                    eprintln!("[skills-call] terminal transition failed: {error}");
+                }
+            }
         }
-        .into()
+        response.into()
     })
+}
+
+fn is_long_operation(path: &str, body: &[u8]) -> bool {
+    matches!(
+        path,
+        management::CLAWHUB_INSTALL_ENDPOINT
+            | management::CLAWHUB_UPDATE_ENDPOINT
+            | management::IMPORT_MARKDOWN_ENDPOINT
+            | management::IMPORT_BUNDLE_ENDPOINT
+            | clawhub_skill::ENDPOINT
+            | bundle::IMPORT_ENDPOINT
+            | bundle::EXPORT_ENDPOINT
+            | management::CONFIG_ENDPOINT
+            | management::UPLOAD_COMMIT_ENDPOINT
+            | management::UNINSTALL_ENDPOINT
+            | sealed_resource::INSTALL_ENDPOINT
+            | sealed_resource::EXPORT_ENDPOINT
+            | sealed_resource::EXPORT_CLOUD_ENDPOINT
+            | sealed_resource::UNINSTALL_ENDPOINT
+    ) || path == management::CAPABILITY_EXECUTE_ENDPOINT
+        && serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("operationId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .as_deref()
+            .is_some_and(|operation| {
+                matches!(
+                    operation,
+                    "skills.importBundles"
+                        | "skills.exportBundles"
+                        | "skills.updateConfig"
+                        | "skills.updateState"
+                        | "skills.updateBatchState"
+                )
+            })
 }
 
 fn body_policy_for_method(method: &str) -> BodyPolicy {
@@ -135,6 +250,8 @@ fn is_route(path: &str) -> bool {
         || matches!(
             path,
             management::ENDPOINT
+                | result::ENDPOINT
+                | result::PRIVATE_ENDPOINT
                 | management::CAPABILITY_EXECUTE_ENDPOINT
                 | management::DETAIL_ENDPOINT
                 | management::CONFIG_ENDPOINT
@@ -198,6 +315,7 @@ async fn handle_status(
 ) -> Response {
     match management::handle_status(&request.head.headers, verifier, skills, now_millis()).await {
         Ok(body) => Response::json(200, body),
+        Err(management::RequestError::Admission(error)) => admission_response(error),
         Err(management::RequestError::Unauthorized) => {
             fixed(401, "Skills status authorization is invalid")
         }
@@ -211,6 +329,7 @@ async fn handle_management(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     skills: SkillsModule,
+    call: Option<crate::operation::RecordedCall>,
 ) -> Response {
     match management::handle_management(
         request.path(),
@@ -219,16 +338,15 @@ async fn handle_management(
         verifier,
         skills,
         now_millis(),
+        call,
     )
     .await
     {
-        Ok(outcome) => {
-            let (status, body) = management::response(outcome);
-            Response::json(status, body)
-        }
+        Ok((status, body)) => Response::json(status, body),
         Err(management::RequestError::Invalid) => {
             Response::json(400, serde_json::json!({ "outcome": "rejected" }))
         }
+        Err(management::RequestError::Admission(error)) => admission_response(error),
         Err(management::RequestError::Unauthorized) => {
             fixed(401, "Skills management authorization is invalid")
         }
@@ -239,6 +357,7 @@ async fn handle_capability_execute(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     skills: SkillsModule,
+    call: Option<crate::operation::RecordedCall>,
 ) -> Response {
     match management::handle_capability_execute(
         &request.head.headers,
@@ -246,6 +365,7 @@ async fn handle_capability_execute(
         verifier,
         skills,
         now_millis(),
+        call,
     )
     .await
     {
@@ -253,6 +373,7 @@ async fn handle_capability_execute(
         Err(management::RequestError::Invalid) => {
             Response::json(400, serde_json::json!({ "outcome": "rejected" }))
         }
+        Err(management::RequestError::Admission(error)) => admission_response(error),
         Err(management::RequestError::Unauthorized) => {
             fixed(401, "Skills capability authorization is invalid")
         }
@@ -261,7 +382,14 @@ async fn handle_capability_execute(
 
 fn capability_response(outcome: crate::control::ManagementOutcome) -> Response {
     match outcome {
-        crate::control::ManagementOutcome::Succeeded(body) => Response::json(200, body),
+        crate::control::ManagementOutcome::Succeeded(body) => {
+            let status = if body.get("callId").is_some() {
+                202
+            } else {
+                200
+            };
+            Response::json(status, body)
+        }
         crate::control::ManagementOutcome::Unknown(body) => Response::json(503, body),
         crate::control::ManagementOutcome::InvalidInput => {
             Response::json(400, serde_json::json!({ "outcome": "rejected" }))
@@ -304,6 +432,7 @@ async fn handle_clawhub_skill_install(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     skills: SkillsModule,
+    call: Option<crate::operation::RecordedCall>,
 ) -> Response {
     match clawhub_skill::handle(
         &request.head.headers,
@@ -311,13 +440,15 @@ async fn handle_clawhub_skill_install(
         verifier,
         skills,
         now_millis(),
+        call,
     )
     .await
     {
-        Ok(delivery) => Response::json(200, delivery.body()),
+        Ok(delivery) => Response::json(delivery.status_code(), delivery.body()),
         Err(clawhub_skill::RequestError::Invalid) => {
             fixed(400, "ClawHub skill install request is invalid")
         }
+        Err(clawhub_skill::RequestError::Admission(error)) => admission_response(error),
         Err(clawhub_skill::RequestError::Unauthorized) => {
             fixed(401, "ClawHub skill install authorization is invalid")
         }
@@ -328,6 +459,7 @@ async fn handle_bundle_export(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     skills: SkillsModule,
+    call: Option<crate::operation::RecordedCall>,
 ) -> Response {
     match bundle::export(
         &request.head.headers,
@@ -335,13 +467,15 @@ async fn handle_bundle_export(
         verifier,
         skills,
         now_millis(),
+        call,
     )
     .await
     {
-        Ok(body) => Response::json(200, body),
+        Ok((status, body)) => Response::json(status, body),
         Err(bundle::RequestError::Invalid) => {
             fixed(400, "Subagent skill bundle request is invalid")
         }
+        Err(bundle::RequestError::Admission(error)) => admission_response(error),
         Err(bundle::RequestError::Unauthorized) => {
             fixed(401, "Subagent skill bundle authorization is invalid")
         }
@@ -352,6 +486,7 @@ async fn handle_bundle_import(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     skills: SkillsModule,
+    call: Option<crate::operation::RecordedCall>,
 ) -> Response {
     match bundle::import(
         &request.head.headers,
@@ -359,13 +494,15 @@ async fn handle_bundle_import(
         verifier,
         skills,
         now_millis(),
+        call,
     )
     .await
     {
-        Ok(body) => Response::json(200, body),
+        Ok((status, body)) => Response::json(status, body),
         Err(bundle::RequestError::Invalid) => {
             fixed(400, "Subagent skill bundle request is invalid")
         }
+        Err(bundle::RequestError::Admission(error)) => admission_response(error),
         Err(bundle::RequestError::Unauthorized) => {
             fixed(401, "Subagent skill bundle authorization is invalid")
         }
@@ -376,6 +513,7 @@ async fn handle_sealed_resource(
     request: Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     skills: SkillsModule,
+    call: Option<crate::operation::RecordedCall>,
 ) -> Response {
     match sealed_resource::handle(
         request.path(),
@@ -385,6 +523,7 @@ async fn handle_sealed_resource(
         verifier,
         skills,
         now_millis(),
+        call,
     )
     .await
     {
@@ -392,6 +531,7 @@ async fn handle_sealed_resource(
         Err(sealed_resource::RequestError::Invalid) => {
             Response::json(400, serde_json::json!({ "outcome": "rejected" }))
         }
+        Err(sealed_resource::RequestError::Admission(error)) => admission_response(error),
         Err(sealed_resource::RequestError::Unauthorized) => {
             fixed(401, "Sealed resource authorization is invalid")
         }
@@ -399,6 +539,13 @@ async fn handle_sealed_resource(
             Response::json(503, serde_json::json!({ "outcome": "unknown" }))
         }
     }
+}
+
+fn admission_response(error: platform::call::CallLogError) -> Response {
+    Response::json(
+        503,
+        serde_json::json!({ "outcome": "rejected", "error": error.to_string() }),
+    )
 }
 
 fn fixed(status: u16, error: &'static str) -> Response {

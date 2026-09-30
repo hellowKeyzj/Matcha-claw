@@ -104,7 +104,7 @@ function isSearchSuccess(value: unknown): value is ClawHubSkillSearchSuccess {
 
 function isSearchFailure(
   value: unknown,
-  error: typeof REJECTED | typeof UNAVAILABLE,
+  error: ClawHubSkillSearchFailure['error'],
 ): value is ClawHubSkillSearchFailure {
   return isRecord(value)
     && hasExactKeys(value, ['success', 'error'])

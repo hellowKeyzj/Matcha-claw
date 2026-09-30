@@ -1,16 +1,10 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
-import {
-  decodeProviderMutationCommittedAccountResponse,
-  decodeProviderMutationCommittedResponse,
-  decodeProviderMutationCommitUnknownResponse,
-  type ProviderMutationCommittedAccountResponse,
-  type ProviderMutationCommittedResponse,
-  type ProviderMutationCommitUnknownResponse,
-} from './mutation-receipt';
+import type { CallReceipt } from '../../../../../src/types/call-log';
+import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 
 const PROVIDER_ACCOUNTS_PATH = '/api/provider-accounts';
-const MUTATION_UNKNOWN_ERROR = 'Provider mutation commit outcome is unknown; reopen before retrying';
+const NOT_ADMITTED = { success: false, error: 'Provider account mutation was not admitted', code: 'not-admitted' } as const;
 
 const UNAVAILABLE = {
   success: false,
@@ -73,26 +67,19 @@ type Request =
     operationId: 'providerAccounts.replace';
     scope: Readonly<{ kind: 'provider-account-catalog' }>;
     target: Readonly<{ kind: 'provider-accounts' }>;
-    input: Readonly<{ kind: 'replace'; account: ProviderAccount }>;
+    input: Readonly<{ kind: 'replace'; account: ProviderAccount; privateTransactionId?: string }>;
   }>
   | Readonly<{
     id: 'provider.accounts';
     operationId: 'providerAccounts.delete';
     scope: Readonly<{ kind: 'provider-account-catalog' }>;
     target: Readonly<{ kind: 'provider-accounts' }>;
-    input: Readonly<{ kind: 'delete'; accountId: string; revision: number }>;
+    input: Readonly<{ kind: 'delete'; accountId: string; revision: number; privateTransactionId?: string }>;
   }>;
 
 export type ProviderAccountsListResponse = Readonly<{ accounts: ProviderAccount[] }>;
 type AccountResponse = Readonly<{ account: ProviderAccount }>;
-export type ProviderAccountsMutationResponse =
-  | ProviderMutationCommittedAccountResponse
-  | ProviderMutationCommittedResponse
-  | ProviderMutationCommitUnknownResponse;
-
-type ReplaceResponse = ProviderMutationCommittedAccountResponse | ProviderMutationCommitUnknownResponse;
-
-type DeleteResponse = ProviderMutationCommittedResponse | ProviderMutationCommitUnknownResponse;
+export type ProviderAccountsMutationResponse = CallReceipt;
 
 const PROVIDER_ACCOUNT_KEYS: readonly string[] = [
   'id', 'provider', 'label', 'enabled', 'kind', 'endpoint', 'protocol', 'mediaProtocol', 'authMode', 'revision',
@@ -137,31 +124,9 @@ function requestTrace(request: Request): Record<string, unknown> {
   return { operationId: request.operationId };
 }
 
-function receiptTrace(body: unknown): Record<string, unknown> {
-  if (!isRecord(body)) return { receipt: false };
-  const receipt = isRecord(body.receipt) ? body.receipt : body;
-  const native = isRecord(receipt.native) ? receipt.native : undefined;
-  const applied = isRecord(native?.applied) ? native.applied : undefined;
-  const observed = isRecord(native?.observed) ? native.observed : undefined;
-  const diagnostic = isRecord(native?.diagnostic) ? native.diagnostic : undefined;
-  return {
-    receipt: Boolean(native),
-    nativeChanged: typeof native?.changed === 'boolean' ? native.changed : undefined,
-    nativeApplied: typeof applied?.status === 'string' ? applied.status : undefined,
-    nativeObserved: typeof observed?.status === 'string' ? observed.status : undefined,
-    nativeDiagnostic: diagnostic ? {
-      phase: typeof diagnostic.phase === 'string' ? diagnostic.phase : undefined,
-      reason: typeof diagnostic.reason === 'string' ? diagnostic.reason : undefined,
-      method: typeof diagnostic.method === 'string' ? diagnostic.method : undefined,
-      expectedPath: typeof diagnostic.expectedPath === 'string' ? diagnostic.expectedPath : undefined,
-      detail: idShape(typeof diagnostic.detail === 'string' ? diagnostic.detail : undefined),
-    } : undefined,
-  };
-}
-
 export type ProviderAccountsTransportResponse = Readonly<{
-  status: 200 | 400 | 409 | 404 | 422 | 503;
-  body: ProviderAccountsListResponse | AccountResponse | ReplaceResponse | DeleteResponse | typeof INVALID_REQUEST | typeof REJECTED | typeof MISSING | typeof UNAVAILABLE;
+  status: 200 | 202 | 400 | 404 | 422 | 503;
+  body: ProviderAccountsListResponse | AccountResponse | CallReceipt | typeof INVALID_REQUEST | typeof REJECTED | typeof MISSING | typeof UNAVAILABLE | typeof NOT_ADMITTED;
 }>;
 
 export interface ProviderAccountsTransport {
@@ -212,42 +177,18 @@ async function executeRequest(
   }
   providerAccountsTransportTrace('response.http', { ...trace, httpStatus: response.status });
   const body = response.body;
-  if (response.status === 200) {
-    if (request.operationId === 'providerAccounts.replace') {
-      const decoded = decodeProviderMutationCommittedAccountResponse(body, {
-        desiredStatus: 'stored',
-        desiredRevision: 'optional',
-        unknownError: MUTATION_UNKNOWN_ERROR,
-      });
-      if (decoded) {
-        providerAccountsTransportTrace('response.decoded', { ...trace, status: 200, ...receiptTrace(decoded) });
-        return { status: 200, body: decoded };
-      }
-    } else if (request.operationId === 'providerAccounts.delete') {
-      const decoded = decodeProviderMutationCommittedResponse(body, {
-        desiredStatus: 'deleted',
-        desiredRevision: 'optional',
-        unknownError: MUTATION_UNKNOWN_ERROR,
-      });
-      if (decoded) {
-        providerAccountsTransportTrace('response.decoded', { ...trace, status: 200, ...receiptTrace(decoded) });
-        return { status: 200, body: decoded };
-      }
-    } else if (isListResponse(body) || isAccountResponse(body)) {
-      providerAccountsTransportTrace('response.decoded', { ...trace, status: 200, receipt: false });
-      return { status: 200, body };
-    }
+  const mutation = request.operationId === 'providerAccounts.replace' || request.operationId === 'providerAccounts.delete';
+  if (mutation && response.status === 202) {
+    try { return { status: 202, body: decodeCallReceipt(body) }; } catch { /* closed admission boundary */ }
   }
-  if (response.status === 409
-    && (request.operationId === 'providerAccounts.replace' || request.operationId === 'providerAccounts.delete')) {
-    const unknown = decodeProviderMutationCommitUnknownResponse(body, {
-      desiredRevision: 'optional',
-      unknownError: MUTATION_UNKNOWN_ERROR,
-    });
-    providerAccountsTransportTrace('response.decoded', { ...trace, status: unknown ? 409 : 503, ...receiptTrace(unknown) });
-    return unknown
-      ? { status: 409, body: unknown }
-      : { status: 503, body: UNAVAILABLE };
+  if (!mutation && response.status === 200
+    && (request.operationId === 'providerAccounts.list' ? isListResponse(body) : isAccountResponse(body))) {
+    return { status: 200, body: body as ProviderAccountsListResponse | AccountResponse };
+  }
+  if (mutation && response.status === 503 && isRecord(body)
+    && hasExactKeys(body, ['success', 'error', 'code'])
+    && body.success === false && body.error === NOT_ADMITTED.error && body.code === NOT_ADMITTED.code) {
+    return { status: 503, body: NOT_ADMITTED };
   }
   if (response.status === 400) {
     providerAccountsTransportTrace('response.rejected', { ...trace, status: 400 });
@@ -288,15 +229,21 @@ function isRequest(value: unknown): value is Request {
     return hasExactKeys(value.input, ['kind', 'accountId']) && value.input.kind === 'get' && isIdentifier(value.input.accountId);
   }
   if (value.operationId === 'providerAccounts.replace') {
-    return hasExactKeys(value.input, ['kind', 'account'])
+    return hasExactKeys(value.input, value.input.privateTransactionId === undefined ? ['kind', 'account'] : ['kind', 'account', 'privateTransactionId'])
+      && validTransactionId(value.input.privateTransactionId)
       && value.input.kind === 'replace'
       && isProviderAccount(value.input.account);
   }
   return value.operationId === 'providerAccounts.delete'
-    && hasExactKeys(value.input, ['kind', 'accountId', 'revision'])
+    && hasExactKeys(value.input, value.input.privateTransactionId === undefined ? ['kind', 'accountId', 'revision'] : ['kind', 'accountId', 'revision', 'privateTransactionId'])
+    && validTransactionId(value.input.privateTransactionId)
     && value.input.kind === 'delete'
     && isIdentifier(value.input.accountId)
     && isRevision(value.input.revision);
+}
+
+function validTransactionId(value: unknown): boolean {
+  return value === undefined || typeof value === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
 }
 
 function isListResponse(value: unknown): value is ProviderAccountsListResponse {

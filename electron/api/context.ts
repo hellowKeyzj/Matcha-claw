@@ -1,14 +1,12 @@
 import type { RendererEventRouteRegistry } from '../main/renderer-event-routes';
 import type { HostEventBus } from './event-bus';
-import type { DirectRuntimeHost } from '../main/runtime-host-delivery/direct-host';
 import type { RuntimeHostTransports } from '../main/runtime-host-delivery/transport/host-api-transports';
 import type { ProviderCredentialStatusTransport } from '../main/ipc/provider-private-auth';
 import type { RemoteFleetCredentialWriteAdapter } from '../main/ipc/fleet-private';
 import type { CloudAccountService } from '../main/cloud-account/service';
 
-export type RuntimeHostLifecycle = DirectRuntimeHost & Readonly<{
-  restart: () => Promise<void>;
-}>;
+export type { RuntimeHostLifecycle } from '../main/runtime-host-delivery/lifecycle-owner';
+import type { RuntimeHostLifecycle } from '../main/runtime-host-delivery/lifecycle-owner';
 
 export type RuntimeHostTransportContext<K extends keyof RuntimeHostTransports> = Readonly<{
   runtimeHostTransports: Pick<RuntimeHostTransports, K>;

@@ -402,14 +402,14 @@ pub(super) async fn load_session_catalog(
     if command.endpoint() != &identity.endpoint() {
         return SessionCatalogOutcome::Unavailable;
     }
-    match session.list_local_history().await {
+    match session.list_history().await {
         HistoryResult::Complete(catalog) => SessionCatalogOutcome::Listed(SessionCatalog {
             sessions: catalog
                 .sessions()
                 .iter()
-                .filter_map(|session| {
+                .map(|session| {
                     let endpoint_session_id = session.session_id().as_str().to_owned();
-                    Some(SessionCatalogEntry {
+                    SessionCatalogEntry {
                         endpoint: identity.endpoint(),
                         key: format!(
                             "{}:{}:{}",
@@ -421,11 +421,15 @@ pub(super) async fn load_session_catalog(
                         endpoint_session_id,
                         ownership: None,
                         model_state: None,
-                        updated_at: session.updated_at(),
+                        updated_at: chrono::DateTime::parse_from_rfc3339(
+                            session.session_facts().updated_at(),
+                        )
+                        .ok()
+                        .and_then(|timestamp| u64::try_from(timestamp.timestamp_millis()).ok()),
                         preferred: Some(false),
                         protocol_id: Some(identity.protocol_id().to_owned()),
                         runtime_endpoint_id: Some(identity.endpoint_id()),
-                    })
+                    }
                 })
                 .collect(),
         }),

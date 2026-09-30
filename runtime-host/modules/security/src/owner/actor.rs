@@ -5,7 +5,10 @@ use serde_json::Value;
 
 use crate::{
     adapters::store::{SecurityOperationReceiptStore, SecurityPolicyDeliveryStore},
-    application::{commands::SecurityCommand, queries::SecurityQuery},
+    application::{
+        call::{Effect, EmergencyEffect, SecurityCallDetail},
+        commands::SecurityCommand, queries::SecurityQuery,
+    },
     audit as security_audit,
     delivery::{
         Outcome as SecurityPolicyDeliveryOutcome, Settlement as SecurityPolicyDeliverySettlement,
@@ -25,11 +28,12 @@ pub enum SecurityPartitionKey {
 #[derive(Clone)]
 pub struct SecurityShared {
     runtime_directory: Arc<dyn SecurityRuntimeDirectory>,
+    operation_receipts: Arc<SecurityOperationReceiptStore>,
 }
 
 pub struct SecurityGlobalState {
     policy_delivery: SecurityPolicyDeliveryStore,
-    operation_receipts: SecurityOperationReceiptStore,
+    operation_receipts: Arc<SecurityOperationReceiptStore>,
     serialized_effect: tokio::sync::Mutex<()>,
 }
 
@@ -45,13 +49,15 @@ pub struct SecurityOwner {
 
 impl SecurityOwner {
     pub fn new(input: SecurityOwnerInput) -> Result<Self, ()> {
+        let operation_receipts = Arc::new(SecurityOperationReceiptStore::open(&input.state_dir)?);
         Ok(Self {
             shared: SecurityShared {
                 runtime_directory: input.runtime_directory,
+                operation_receipts: operation_receipts.clone(),
             },
             state: SecurityGlobalState {
                 policy_delivery: SecurityPolicyDeliveryStore::open(&input.state_dir)?,
-                operation_receipts: SecurityOperationReceiptStore::open(&input.state_dir)?,
+                operation_receipts,
                 serialized_effect: tokio::sync::Mutex::new(()),
             },
         })
@@ -127,7 +133,9 @@ impl SecurityGlobalState {
                 _ => SecurityPolicyDeliveryOutcome::Unknown,
             };
             let settlement = SecurityPolicyDeliverySettlement { revision, outcome };
-            let _ = self.policy_delivery.settle(settlement);
+            if self.policy_delivery.settle(settlement).is_err() {
+                return SecurityPolicyDeliverySettlement { revision, outcome: SecurityPolicyDeliveryOutcome::Unknown };
+            }
             settlement
         })
         .await
@@ -165,9 +173,9 @@ impl SecurityGlobalState {
                 }
                 _ => SecurityPolicyDeliveryOutcome::Unknown,
             };
-            let _ = self
-                .policy_delivery
-                .settle(SecurityPolicyDeliverySettlement { revision, outcome });
+            if self.policy_delivery.settle(SecurityPolicyDeliverySettlement { revision, outcome }).is_err() {
+                return SecurityEmergencyOutcome::OutcomeUnknown;
+            }
 
             if outcome != SecurityPolicyDeliveryOutcome::Confirmed {
                 return SecurityEmergencyOutcome::OutcomeUnknown;
@@ -178,16 +186,6 @@ impl SecurityGlobalState {
                 .unwrap_or(SecurityEmergencyOutcome::OutcomeUnknown)
         })
         .await
-    }
-
-    async fn audit(
-        &self,
-        shared: &SecurityShared,
-        query: security_audit::Query,
-    ) -> security_audit::Outcome {
-        self.query_security_audit(shared, query)
-            .await
-            .unwrap_or(security_audit::Outcome::Unavailable)
     }
 
     async fn operation(
@@ -210,9 +208,9 @@ impl SecurityGlobalState {
                 .run_security_operation(shared, operation_id, input)
                 .await
                 .unwrap_or(security_operation::Outcome::Unavailable);
-            let _ = self
-                .operation_receipts
-                .settle(&correlation, outcome.clone());
+            if self.operation_receipts.settle(&correlation, outcome.clone()).is_err() {
+                return security_operation::Outcome::Unknown;
+            }
             outcome
         })
         .await
@@ -294,14 +292,6 @@ impl SecurityGlobalState {
         Some(shared.security_ops()?.run_security_emergency().await)
     }
 
-    async fn query_security_audit(
-        &self,
-        shared: &SecurityShared,
-        query: security_audit::Query,
-    ) -> Option<security_audit::Outcome> {
-        Some(shared.security_ops()?.query_security_audit(query).await)
-    }
-
     async fn run_security_operation(
         &self,
         shared: &SecurityShared,
@@ -362,31 +352,62 @@ impl OwnerSpec for SecurityOwner {
             SecurityCommand::ApplySavedPolicyProjection { reply } => {
                 let _ = reply.send(state.apply_saved_policy_projection(&shared).await);
             }
-            SecurityCommand::ReplacePolicy {
-                correlation,
-                policy,
-                reply,
-            } => {
-                let _ = reply.send(state.replace_policy(&shared, correlation, policy).await);
+            SecurityCommand::ReplacePolicy { correlation, policy, call } => {
+                if call.running().await.is_err() {
+                    call.finish(&call.detail, Effect::Unknown).await;
+                    return;
+                }
+                let settlement = state.replace_policy(&shared, correlation.clone(), policy).await;
+                let effect = match settlement.outcome {
+                    SecurityPolicyDeliveryOutcome::Confirmed => Effect::Confirmed,
+                    SecurityPolicyDeliveryOutcome::Rejected => Effect::Rejected,
+                    SecurityPolicyDeliveryOutcome::Unknown => Effect::Unknown,
+                };
+                call.finish(&SecurityCallDetail::PolicyReplace {
+                    correlation, revision: Some(settlement.revision), effect: Some(effect),
+                }, effect).await;
             }
             SecurityCommand::RecoverPending { reply } => {
                 state.recover_pending(&shared).await;
                 let _ = reply.send(());
             }
-            SecurityCommand::Emergency { correlation, reply } => {
-                let _ = reply.send(state.emergency(&shared, correlation).await);
+            SecurityCommand::Emergency { correlation, call } => {
+                if call.running().await.is_err() {
+                    call.finish(&call.detail, Effect::Unknown).await;
+                    return;
+                }
+                let outcome = match state.emergency(&shared, correlation.clone()).await {
+                    SecurityEmergencyOutcome::Applied => EmergencyEffect::Applied,
+                    SecurityEmergencyOutcome::Rejected => EmergencyEffect::TargetRejected,
+                    SecurityEmergencyOutcome::OutcomeUnknown => EmergencyEffect::OutcomeUnknown,
+                    SecurityEmergencyOutcome::Unavailable => EmergencyEffect::Unavailable,
+                };
+                call.finish(&SecurityCallDetail::Emergency {
+                    correlation, outcome: Some(outcome),
+                }, outcome.effect()).await;
             }
             SecurityCommand::Operation {
                 correlation,
                 operation_id,
                 input,
-                reply,
+                call,
             } => {
-                let _ = reply.send(
-                    state
-                        .operation(&shared, correlation, operation_id, input)
-                        .await,
-                );
+                if call.running().await.is_err() {
+                    call.finish(&call.detail, Effect::Unknown).await;
+                    return;
+                }
+                let outcome = state.operation(&shared, correlation, operation_id, input).await;
+                let effect = match &outcome {
+                    security_operation::Outcome::Confirmed(_) => Effect::Confirmed,
+                    security_operation::Outcome::Rejected => Effect::Rejected,
+                    security_operation::Outcome::Unavailable => Effect::Unavailable,
+                    security_operation::Outcome::Unknown => Effect::Unknown,
+                };
+                let mut detail = call.detail.clone();
+                if let SecurityCallDetail::Operation { outcome, .. } = &mut detail {
+                    *outcome = Some(effect);
+                }
+                call.finish(&detail, effect).await;
             }
         }
     }
@@ -426,24 +447,42 @@ async fn handle_security_query(
     global: Option<&SecurityGlobalState>,
     query: SecurityQuery,
 ) {
-    let Some(global) = global else {
-        match query {
-            SecurityQuery::CurrentPolicy { reply } => {
-                let _ = reply.send(Err(()));
-            }
-            SecurityQuery::Audit { reply, .. } => {
-                let _ = reply.send(security_audit::Outcome::Unavailable);
-            }
-        }
-        return;
-    };
-
     match query {
-        SecurityQuery::CurrentPolicy { reply } => {
-            let _ = reply.send(global.current_policy().await);
+        SecurityQuery::CurrentPolicy { reply, context } => {
+            let result = match global {
+                Some(global) if context.running().await.is_ok() => global.current_policy().await,
+                _ => Err(()),
+            };
+            let effect = if result.is_ok() { Effect::Confirmed } else { Effect::Unavailable };
+            let _ = context.finish(effect.status(), &SecurityCallDetail::PolicyRead).await;
+            let _ = reply.send(result);
         }
-        SecurityQuery::Audit { query, reply } => {
-            let _ = reply.send(global.audit(&shared, query).await);
+        SecurityQuery::Audit { query, reply, context } => {
+            let outcome = if context.running().await.is_err() {
+                security_audit::Outcome::Unknown
+            } else if let Some(security) = shared.security_ops() {
+                security.query_security_audit(query).await
+            } else {
+                security_audit::Outcome::Unavailable
+            };
+            let (effect, total) = match &outcome {
+                security_audit::Outcome::Observed(receipt) => (Effect::Confirmed, Some(receipt.total)),
+                security_audit::Outcome::Rejected => (Effect::Rejected, None),
+                security_audit::Outcome::Unavailable => (Effect::Unavailable, None),
+                security_audit::Outcome::Unknown => (Effect::Unknown, None),
+            };
+            let _ = context.finish(effect.status(), &SecurityCallDetail::Audit {
+                page: query.page, page_size: query.page_size, total, outcome: Some(effect),
+            }).await;
+            let _ = reply.send(outcome);
+        }
+        SecurityQuery::OperationReceipt { correlation, reply, context } => {
+            let result = if context.running().await.is_ok() {
+                shared.operation_receipts.receipt(&correlation)
+            } else { Err(()) };
+            let effect = if result.is_ok() { Effect::Confirmed } else { Effect::Unavailable };
+            let _ = context.finish(effect.status(), &SecurityCallDetail::OperationReceipt { correlation }).await;
+            let _ = reply.send(result);
         }
     }
 }

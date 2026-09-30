@@ -33,7 +33,7 @@ const body = {
 
 describe('Manual Team Host API route', () => {
   it('forwards only the closed Manual Team DTO', async () => {
-    const materializeAndCreate = vi.fn().mockResolvedValue({ status: 200, body: { status: 'materialized' } });
+    const materializeAndCreate = vi.fn().mockResolvedValue({ status: 202, body: { callId: 'a'.repeat(32), accepted: true } });
     const result = response();
     await expect(handleManualTeamRoutes(
       request(body) as never,
@@ -42,7 +42,7 @@ describe('Manual Team Host API route', () => {
       { materializeAndCreate },
     )).resolves.toBe(true);
     expect(materializeAndCreate).toHaveBeenCalledWith(body);
-    expect(result.state).toEqual({ statusCode: 200, body: { status: 'materialized' } });
+    expect(result.state).toEqual({ statusCode: 202, body: { callId: 'a'.repeat(32), accepted: true } });
   });
 
   it('rejects legacy workspaceBinding and private or expanded fields before transport invocation', async () => {

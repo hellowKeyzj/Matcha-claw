@@ -2,6 +2,13 @@ use std::sync::Arc;
 
 use crate::{domain::Connector, ports::ConnectorSecretResolverPort};
 use foundation::execution::OwnerRuntimeHandle;
+use platform::call::{CallId, CallReceipt, CallRecorder, CallStatus};
+
+use crate::owner::observations::{
+    ObservationReadError, ObservationResult, ObservationResults, SessionObservationSubject,
+};
+
+use crate::call::{CallResult, ConnectorCall, ConnectorCallDetail};
 use tokio::sync::oneshot;
 
 use crate::application::{
@@ -9,141 +16,389 @@ use crate::application::{
     receipts::{
         ConnectorCatalogProgram, ConnectorCatalogReceipt, ConnectorGetReceipt,
         ConnectorListReceipt, ConnectorMutationReceipt, ConnectorObservationReceipt,
-        ConnectorProbeReceipt, ConnectorProjectionReceipt, ConnectorRecord,
-        ConnectorSessionEndpoint, ConnectorSessionMcpServerEnabledReceipt,
-        ConnectorSessionMcpServerEnabledTarget, ConnectorSessionMcpServerState,
-        ConnectorSessionMcpServerStatus, ConnectorSessionMcpServerStatusDetails,
-        ConnectorSessionStatusReceipt, ConnectorSessionTarget, ConnectorStatusReceipt,
-        OpenClawMcpServersReceipt, RuntimeMcpServerKind, RuntimeMcpServerSource,
-        RuntimeMcpServerSummary,
+        ConnectorProjectionReceipt, ConnectorRecord, ConnectorSessionEndpoint,
+        ConnectorSessionMcpServerEnabledReceipt, ConnectorSessionMcpServerEnabledTarget,
+        ConnectorSessionMcpServerState, ConnectorSessionMcpServerStatus,
+        ConnectorSessionMcpServerStatusDetails, ConnectorSessionTarget, OpenClawMcpServersReceipt,
+        RuntimeMcpServerKind, RuntimeMcpServerSource, RuntimeMcpServerSummary,
     },
 };
 use crate::delivery::{
     CatalogOutcome, ConnectorObservation, ConnectorProjectionEffect, ConnectorReadModel,
     ConnectorSecretReference, ConnectorSecretReferenceKind, ExternalMcpProgram, GetOutcome,
     ListOutcome, McpServerKind, MutationOutcome, OpenClawMcpServerSource, OpenClawMcpServerSummary,
-    OpenClawMcpServersOutcome, ProbeOutcome, SessionConnectorResultType, SessionConnectorStatus,
-    SessionConnectorStatusDetails, SessionEndpoint, SessionMcpServerEnabledOutcome,
-    SessionMcpServerEnabledTarget, SessionStatusOutcome, SessionStatusTarget, StatusOutcome,
+    OpenClawMcpServersOutcome, SessionConnectorResultType, SessionConnectorStatus,
+    SessionConnectorStatusDetails, SessionEndpoint, SessionIdentity,
+    SessionMcpServerEnabledOutcome, SessionMcpServerEnabledTarget, SessionStatusTarget,
 };
 
 #[derive(Clone)]
 pub struct ConnectorHandle {
     owner: OwnerRuntimeHandle<ConnectorCommand, ConnectorQuery>,
+    recorder: Option<CallRecorder>,
+    observations: Arc<ObservationResults>,
 }
 
 impl ConnectorHandle {
-    pub(crate) fn new(owner: OwnerRuntimeHandle<ConnectorCommand, ConnectorQuery>) -> Self {
-        Self { owner }
+    pub(crate) fn new(
+        owner: OwnerRuntimeHandle<ConnectorCommand, ConnectorQuery>,
+        observations: Arc<ObservationResults>,
+    ) -> Self {
+        Self {
+            owner,
+            recorder: None,
+            observations,
+        }
+    }
+
+    pub(crate) fn with_call_recorder(mut self, recorder: CallRecorder) -> Self {
+        self.recorder = Some(recorder);
+        self
+    }
+
+    async fn begin(
+        &self,
+        command: &'static str,
+        detail: ConnectorCallDetail,
+    ) -> Result<Option<ConnectorCall>, ()> {
+        let Some(recorder) = &self.recorder else {
+            return Ok(None);
+        };
+        let context = recorder.begin(command, &detail).await.map_err(|_| ())?;
+        Ok(Some(ConnectorCall::new(context, detail)))
+    }
+
+    async fn send_query(
+        &self,
+        query: ConnectorQuery,
+        call: Option<ConnectorCall>,
+    ) -> Result<(), ()> {
+        if self.owner.send_query(query).await.is_err() {
+            if let Some(mut call) = call {
+                call.detail.result = Some(CallResult::Unavailable);
+                call.finish(CallStatus::Rejected).await;
+            }
+            return Err(());
+        }
+        if let Some(call) = call {
+            call.context.accepted().await.map_err(|_| ())?;
+        }
+        Ok(())
+    }
+
+    async fn send_command(
+        &self,
+        command: ConnectorCommand,
+        call: Option<ConnectorCall>,
+    ) -> Result<Option<CallReceipt>, ()> {
+        if self.owner.try_send_command(command).is_err() {
+            if let Some(mut call) = call {
+                call.detail.result = Some(CallResult::Unavailable);
+                call.finish(CallStatus::Rejected).await;
+            }
+            return Err(());
+        }
+        match call {
+            Some(call) => call.context.accepted().await.map(Some).map_err(|_| ()),
+            None => Ok(None),
+        }
     }
 
     pub(crate) async fn list(&self) -> Result<ListOutcome, ()> {
+        let call = self
+            .begin("externalConnectors.list", ConnectorCallDetail::default())
+            .await?;
         let (reply, rx) = oneshot::channel();
-        self.owner
-            .send_query(ConnectorQuery::List { reply })
-            .await
-            .map_err(|_| ())?;
+        self.send_query(
+            ConnectorQuery::List {
+                call: call.clone(),
+                reply,
+            },
+            call,
+        )
+        .await?;
         rx.await.map(map_list_receipt).map_err(|_| ())
     }
 
     pub(crate) async fn catalog(&self) -> Result<CatalogOutcome, ()> {
+        let call = self
+            .begin("externalConnectors.catalog", ConnectorCallDetail::default())
+            .await?;
         let (reply, rx) = oneshot::channel();
-        self.owner
-            .send_query(ConnectorQuery::Catalog { reply })
-            .await
-            .map_err(|_| ())?;
+        self.send_query(
+            ConnectorQuery::Catalog {
+                call: call.clone(),
+                reply,
+            },
+            call,
+        )
+        .await?;
         rx.await.map(map_catalog_receipt).map_err(|_| ())
     }
 
-    pub(crate) async fn status(&self) -> Result<StatusOutcome, ()> {
-        let (reply, rx) = oneshot::channel();
-        self.owner
-            .send_query(ConnectorQuery::Status { reply })
+    pub(crate) async fn admit_status(&self) -> Result<CallReceipt, ()> {
+        let call = self
+            .begin("externalConnectors.status", ConnectorCallDetail::default())
+            .await?
+            .ok_or(())?;
+        self.admit_observation(ConnectorQuery::Status { call: call.clone() }, call, None)
             .await
-            .map_err(|_| ())?;
-        rx.await.map(map_status_receipt).map_err(|_| ())
+    }
+
+    async fn admit_observation(
+        &self,
+        query: ConnectorQuery,
+        mut call: ConnectorCall,
+        session: Option<SessionObservationSubject>,
+    ) -> Result<CallReceipt, ()> {
+        if self
+            .observations
+            .reserve(call.context.id(), session)
+            .is_err()
+        {
+            call.detail.result = Some(CallResult::Unavailable);
+            call.finish(CallStatus::Rejected).await;
+            return Err(());
+        }
+        if self.owner.try_send_query(query).is_err() {
+            self.observations.discard(call.context.id());
+            call.detail.result = Some(CallResult::Unavailable);
+            call.finish(CallStatus::Rejected).await;
+            return Err(());
+        }
+        call.accepted().await
+    }
+
+    pub(crate) fn observation_result(
+        &self,
+        call_id: &CallId,
+        principal: &str,
+        session_identity: Option<&SessionIdentity>,
+    ) -> Result<ObservationResult, ObservationReadError> {
+        self.observations.read(call_id, principal, session_identity)
     }
 
     pub(crate) async fn get(&self, id: String) -> Result<GetOutcome, ()> {
+        let call = self
+            .begin(
+                "externalConnectors.get",
+                ConnectorCallDetail::connector(&id),
+            )
+            .await?;
         let (reply, rx) = oneshot::channel();
-        self.owner
-            .send_query(ConnectorQuery::Get { id, reply })
-            .await
-            .map_err(|_| ())?;
+        self.send_query(
+            ConnectorQuery::Get {
+                id,
+                call: call.clone(),
+                reply,
+            },
+            call,
+        )
+        .await?;
         rx.await.map(map_get_receipt).map_err(|_| ())
     }
 
-    pub(crate) async fn upsert(&self, connector: Connector) -> Result<MutationOutcome, ()> {
+    async fn enqueue_upsert(
+        &self,
+        connector: Connector,
+    ) -> Result<
+        (
+            oneshot::Receiver<ConnectorMutationReceipt>,
+            Option<CallReceipt>,
+        ),
+        (),
+    > {
+        let call = self
+            .begin(
+                "externalConnectors.upsert",
+                ConnectorCallDetail::connector(connector.id()),
+            )
+            .await?;
         let (reply, rx) = oneshot::channel();
-        self.owner
-            .send_command(ConnectorCommand::Upsert {
-                connector: Box::new(connector),
-                reply,
-            })
-            .await
-            .map_err(|_| ())?;
+        let receipt = self
+            .send_command(
+                ConnectorCommand::Upsert {
+                    connector: Box::new(connector),
+                    call: call.clone(),
+                    reply,
+                },
+                call,
+            )
+            .await?;
+        Ok((rx, receipt))
+    }
+
+    pub(crate) async fn upsert(&self, connector: Connector) -> Result<MutationOutcome, ()> {
+        let (rx, _) = self.enqueue_upsert(connector).await?;
         rx.await.map(map_mutation_receipt).map_err(|_| ())
+    }
+
+    pub(crate) async fn admit_upsert(&self, connector: Connector) -> Result<CallReceipt, ()> {
+        self.recorder.as_ref().ok_or(())?;
+        self.enqueue_upsert(connector).await?.1.ok_or(())
+    }
+
+    async fn enqueue_remove(
+        &self,
+        id: String,
+    ) -> Result<
+        (
+            oneshot::Receiver<ConnectorMutationReceipt>,
+            Option<CallReceipt>,
+        ),
+        (),
+    > {
+        let call = self
+            .begin(
+                "externalConnectors.remove",
+                ConnectorCallDetail::connector(&id),
+            )
+            .await?;
+        let (reply, rx) = oneshot::channel();
+        let receipt = self
+            .send_command(
+                ConnectorCommand::Remove {
+                    id,
+                    call: call.clone(),
+                    reply,
+                },
+                call,
+            )
+            .await?;
+        Ok((rx, receipt))
     }
 
     pub(crate) async fn remove(&self, id: String) -> Result<MutationOutcome, ()> {
-        let (reply, rx) = oneshot::channel();
-        self.owner
-            .send_command(ConnectorCommand::Remove { id, reply })
-            .await
-            .map_err(|_| ())?;
+        let (rx, _) = self.enqueue_remove(id).await?;
         rx.await.map(map_mutation_receipt).map_err(|_| ())
     }
 
-    pub(crate) async fn probe(&self, id: String) -> Result<ProbeOutcome, ()> {
-        let (reply, rx) = oneshot::channel();
-        self.owner
-            .send_query(ConnectorQuery::Probe { id, reply })
-            .await
-            .map_err(|_| ())?;
-        rx.await.map(map_probe_receipt).map_err(|_| ())
+    pub(crate) async fn admit_remove(&self, id: String) -> Result<CallReceipt, ()> {
+        self.recorder.as_ref().ok_or(())?;
+        self.enqueue_remove(id).await?.1.ok_or(())
     }
 
-    pub(crate) async fn session_status(
+    pub(crate) async fn admit_probe(&self, id: String) -> Result<CallReceipt, ()> {
+        let call = self
+            .begin(
+                "externalConnectors.probe",
+                ConnectorCallDetail::connector(&id),
+            )
+            .await?
+            .ok_or(())?;
+        self.admit_observation(
+            ConnectorQuery::Probe {
+                id,
+                call: call.clone(),
+            },
+            call,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn admit_session_status(
         &self,
         target: SessionStatusTarget,
-    ) -> Result<SessionStatusOutcome, ()> {
-        let Some(target) = connector_session_target(target) else {
-            return Ok(SessionStatusOutcome::Unavailable);
-        };
-        let (reply, rx) = oneshot::channel();
-        self.owner
-            .send_query(ConnectorQuery::SessionStatus { target, reply })
-            .await
-            .map_err(|_| ())?;
-        rx.await.map(map_session_status_receipt).map_err(|_| ())
+        principal: String,
+    ) -> Result<CallReceipt, ()> {
+        let session_identity = target.session_identity.clone();
+        let target = connector_session_target(target).ok_or(())?;
+        let call = self
+            .begin(
+                "externalConnectors.sessionStatus",
+                ConnectorCallDetail::default(),
+            )
+            .await?
+            .ok_or(())?;
+        self.admit_observation(
+            ConnectorQuery::SessionStatus {
+                target,
+                session_identity: session_identity.clone(),
+                call: call.clone(),
+            },
+            call,
+            Some(SessionObservationSubject {
+                principal,
+                session_identity,
+            }),
+        )
+        .await
     }
 
     pub(crate) async fn openclaw_mcp_servers(&self) -> Result<OpenClawMcpServersOutcome, ()> {
+        let call = self
+            .begin("openClawMcpServers.list", ConnectorCallDetail::default())
+            .await?;
         let (reply, rx) = oneshot::channel();
-        self.owner
-            .send_query(ConnectorQuery::OpenClawMcpServers { reply })
-            .await
-            .map_err(|_| ())?;
+        self.send_query(
+            ConnectorQuery::OpenClawMcpServers {
+                call: call.clone(),
+                reply,
+            },
+            call,
+        )
+        .await?;
         rx.await
             .map(map_openclaw_mcp_servers_receipt)
             .map_err(|_| ())
+    }
+
+    async fn enqueue_session_mcp_server_enabled(
+        &self,
+        target: SessionMcpServerEnabledTarget,
+    ) -> Result<
+        (
+            oneshot::Receiver<ConnectorSessionMcpServerEnabledReceipt>,
+            Option<CallReceipt>,
+        ),
+        (),
+    > {
+        let target = connector_session_mcp_server_enabled_target(target).ok_or(())?;
+        let detail = ConnectorCallDetail {
+            server_id: Some(target.server_id.clone()),
+            enabled: Some(target.enabled),
+            ..ConnectorCallDetail::default()
+        };
+        let call = self
+            .begin("externalConnectors.sessionMcpServerEnabled", detail)
+            .await?;
+        let (reply, rx) = oneshot::channel();
+        let receipt = self
+            .send_command(
+                ConnectorCommand::SetSessionMcpServerEnabled {
+                    target,
+                    call: call.clone(),
+                    reply,
+                },
+                call,
+            )
+            .await?;
+        Ok((rx, receipt))
     }
 
     pub(crate) async fn set_session_mcp_server_enabled(
         &self,
         target: SessionMcpServerEnabledTarget,
     ) -> Result<SessionMcpServerEnabledOutcome, ()> {
-        let Some(target) = connector_session_mcp_server_enabled_target(target) else {
+        if !target.is_valid() {
             return Ok(SessionMcpServerEnabledOutcome::Unavailable);
-        };
-        let (reply, rx) = oneshot::channel();
-        self.owner
-            .send_command(ConnectorCommand::SetSessionMcpServerEnabled { target, reply })
-            .await
-            .map_err(|_| ())?;
+        }
+        let (rx, _) = self.enqueue_session_mcp_server_enabled(target).await?;
         rx.await
             .map(map_session_mcp_server_enabled_receipt)
             .map_err(|_| ())
+    }
+
+    pub(crate) async fn admit_session_mcp_server_enabled(
+        &self,
+        target: SessionMcpServerEnabledTarget,
+    ) -> Result<CallReceipt, ()> {
+        self.recorder.as_ref().ok_or(())?;
+        self.enqueue_session_mcp_server_enabled(target)
+            .await?
+            .1
+            .ok_or(())
     }
 
     pub(crate) async fn configure_private_resolver(
@@ -242,28 +497,6 @@ fn map_mutation_receipt(receipt: ConnectorMutationReceipt) -> MutationOutcome {
     }
 }
 
-fn map_probe_receipt(receipt: ConnectorProbeReceipt) -> ProbeOutcome {
-    match receipt {
-        ConnectorProbeReceipt::Observed(observation) => {
-            ProbeOutcome::Observed(map_observation_receipt(observation))
-        }
-        ConnectorProbeReceipt::Missing => ProbeOutcome::Missing,
-        ConnectorProbeReceipt::Unavailable => ProbeOutcome::Unavailable,
-    }
-}
-
-fn map_status_receipt(receipt: ConnectorStatusReceipt) -> StatusOutcome {
-    match receipt {
-        ConnectorStatusReceipt::Available(statuses) => StatusOutcome::Available(
-            statuses
-                .into_iter()
-                .map(|(id, observation)| (id, map_observation_receipt(observation)))
-                .collect(),
-        ),
-        ConnectorStatusReceipt::Unavailable => StatusOutcome::Unavailable,
-    }
-}
-
 fn map_catalog_receipt(receipt: ConnectorCatalogReceipt) -> CatalogOutcome {
     match receipt {
         ConnectorCatalogReceipt::Available(programs) => {
@@ -349,7 +582,9 @@ fn map_projection_receipt(receipt: ConnectorProjectionReceipt) -> ConnectorProje
     }
 }
 
-fn map_observation_receipt(receipt: ConnectorObservationReceipt) -> ConnectorObservation {
+pub(crate) fn map_observation_receipt(
+    receipt: ConnectorObservationReceipt,
+) -> ConnectorObservation {
     match receipt {
         ConnectorObservationReceipt::Connected => ConnectorObservation::Connected,
         ConnectorObservationReceipt::Disconnected => ConnectorObservation::Disconnected,
@@ -370,17 +605,6 @@ fn map_openclaw_mcp_servers_receipt(
                 .collect(),
         ),
         OpenClawMcpServersReceipt::Unavailable => OpenClawMcpServersOutcome::Unavailable,
-    }
-}
-
-fn map_session_status_receipt(receipt: ConnectorSessionStatusReceipt) -> SessionStatusOutcome {
-    match receipt {
-        ConnectorSessionStatusReceipt::Available(statuses) => SessionStatusOutcome::Available(
-            statuses
-                .into_iter()
-                .map(map_session_mcp_server_status)
-                .collect(),
-        ),
     }
 }
 
@@ -426,7 +650,7 @@ fn map_runtime_mcp_server_source(source: RuntimeMcpServerSource) -> OpenClawMcpS
     }
 }
 
-fn map_session_mcp_server_status(
+pub(crate) fn map_session_mcp_server_status(
     status: ConnectorSessionMcpServerStatus,
 ) -> SessionConnectorStatus {
     let connector_id = status
@@ -458,7 +682,9 @@ fn map_session_status_details(
     }
 }
 
-fn session_result_type(state: ConnectorSessionMcpServerState) -> SessionConnectorResultType {
+pub(crate) fn session_result_type(
+    state: ConnectorSessionMcpServerState,
+) -> SessionConnectorResultType {
     match state {
         ConnectorSessionMcpServerState::DisabledByConfiguration
         | ConnectorSessionMcpServerState::NativeDisabled

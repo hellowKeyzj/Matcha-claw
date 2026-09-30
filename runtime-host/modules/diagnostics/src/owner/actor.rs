@@ -4,7 +4,10 @@ use foundation::execution::{LaneRetention, OwnerSpec};
 
 use crate::{
     DiagnosticsArchiveError, DiagnosticsArchiveReceipt,
-    application::commands::{DiagnosticsCommand, DiagnosticsOwnerKey, DiagnosticsQuery},
+    application::{
+        call::{self, DiagnosticsCallDetail},
+        commands::{DiagnosticsCommand, DiagnosticsOwnerKey, DiagnosticsQuery},
+    },
     ports::{DiagnosticsArchiveCancellation, DiagnosticsArchivePort, DiagnosticsRequestAdmission},
 };
 
@@ -80,10 +83,19 @@ impl OwnerSpec for DiagnosticsOwner {
     ) {
         match command {
             DiagnosticsCommand::CollectArchive {
+                call,
+                observation,
                 cancellation,
                 reply,
             } => {
-                let _ = reply.send(collect_archive(&shared, cancellation).await);
+                let result = if call::running(call.as_ref()).await.is_err() {
+                    Err(DiagnosticsArchiveError::OutputUnavailable)
+                } else {
+                    collect_archive(&shared, cancellation).await
+                };
+                call::observe_collection(&observation, &result);
+                call::finish_collection(call.as_ref(), &result).await;
+                let _ = reply.send(result);
             }
         }
     }
@@ -104,8 +116,31 @@ impl OwnerSpec for DiagnosticsOwner {
         query: Self::Query,
     ) {
         match query {
-            DiagnosticsQuery::DownloadArchive { archive_id, reply } => {
-                let _ = reply.send(download_archive(&shared, archive_id).await);
+            DiagnosticsQuery::DownloadArchive {
+                call,
+                archive_id,
+                reply,
+            } => {
+                let mut detail = DiagnosticsCallDetail::download(&archive_id);
+                let result = if call::running(call.as_ref()).await.is_err() {
+                    Err(DiagnosticsArchiveError::OutputUnavailable)
+                } else {
+                    download_archive(&shared, archive_id).await
+                };
+                let status = match &result {
+                    Ok(image) => {
+                        if let DiagnosticsCallDetail::DownloadArchive { bytes, .. } = &mut detail {
+                            *bytes = Some(image.len() as u64);
+                        }
+                        platform::call::CallStatus::Succeeded
+                    }
+                    Err(error) => {
+                        detail = detail.failed((*error).into());
+                        platform::call::CallStatus::Failed
+                    }
+                };
+                call::finish(call.as_ref(), status, &detail).await;
+                let _ = reply.send(result);
             }
         }
     }

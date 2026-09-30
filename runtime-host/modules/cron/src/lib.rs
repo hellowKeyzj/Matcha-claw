@@ -1,10 +1,12 @@
 mod adapters;
 mod api;
 mod application;
+mod call;
 pub mod capability;
 mod domain;
 mod owner;
 pub mod ports;
+mod projection;
 
 use std::sync::Arc;
 
@@ -42,6 +44,11 @@ impl CronModule {
         Self { handle }
     }
 
+    pub fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
+        self.handle = self.handle.with_call_recorder(recorder);
+        self
+    }
+
     pub async fn cancel_operations(&self) {
         let _ = self.handle.cancel_operations().await;
     }
@@ -77,10 +84,11 @@ pub fn spawn_owner(
     system: &OwnerRuntimeSystem,
     input: CronOwnerInput,
 ) -> (CronModule, OwnedTask<()>) {
-    let owner = CronOwner::new(input);
+    let results = application::results::MutationResults::default();
+    let owner = CronOwner::new(input, results.clone());
     let (handle, task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(64, CronOwner::lane_retention()),
     );
-    (CronModule::new(CronHandle::new(handle)), task)
+    (CronModule::new(CronHandle::new(handle, results)), task)
 }

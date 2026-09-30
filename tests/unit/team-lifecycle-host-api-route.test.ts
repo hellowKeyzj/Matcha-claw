@@ -57,7 +57,9 @@ describe('Team lifecycle Host API route', () => {
   it('forwards only the fixed lifecycle actions', async () => {
     const list = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'list', runs: [] } });
     const create = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'create', runId: 'run-1', outcome: 'created' } });
-    const remove = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'delete', teamId: 'team-1', outcome: 'deleted' } });
+    const remove = vi.fn().mockImplementation(async (target) => 'runId' in target
+      ? { status: 202, body: { callId: 'a'.repeat(32), accepted: true } }
+      : { status: 200, body: { success: true, action: 'delete', teamId: 'team-1', outcome: 'deleted' } });
     const resume = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'resume', runs: [] } });
     const cancel = vi.fn().mockResolvedValue({ status: 200, body: { success: true, action: 'cancel', runId: 'run-1', state: 'cancelling' } });
     const transport = { list, create, delete: remove, resume, cancel };

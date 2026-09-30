@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     SkillsModule,
-    bundle::{Bundle, BundleFile, Command, Outcome},
+    bundle::{BundleFile, Command, Outcome},
 };
 
 pub(super) const EXPORT_ENDPOINT: &str = "/api/subagents/skill-bundles/export";
@@ -23,6 +23,7 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(super) enum RequestError {
     Invalid,
     Unauthorized,
+    Admission(platform::call::CallLogError),
 }
 
 #[derive(Deserialize)]
@@ -57,22 +58,58 @@ pub(super) async fn export(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     handle: SkillsModule,
     now: u64,
-) -> Result<Value, RequestError> {
-    authorize(headers, &verifier, EXPORT_ENDPOINT, now).await?;
+    call: Option<crate::operation::RecordedCall>,
+) -> Result<(u16, Value), RequestError> {
+    let token = headers
+        .iter()
+        .find(|(name, _)| name == AUTHORIZATION_HEADER)
+        .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
+        .ok_or(RequestError::Unauthorized)?;
+    let principal = verifier
+        .lock()
+        .await
+        .verify(
+            token,
+            now,
+            EXPORT_ENDPOINT,
+            AUTHORIZATION_SCOPE,
+            AUTHORIZATION_CAPABILITY,
+            AUTHORIZATION_SUBJECT,
+        )
+        .map_err(|_| RequestError::Unauthorized)?
+        .principal()
+        .to_owned();
     let request =
         serde_json::from_slice::<ExportRequest>(body).map_err(|_| RequestError::Invalid)?;
-    match handle
-        .skill_bundles(Command::Export {
-            skill_keys: request.skill_keys,
-        })
+    let call = call.ok_or(RequestError::Admission(
+        platform::call::CallLogError::Unavailable,
+    ))?;
+    let access = crate::result::ResultAccess {
+        principal,
+        scope: AUTHORIZATION_SCOPE.into(),
+        capability: AUTHORIZATION_CAPABILITY.into(),
+        subject: AUTHORIZATION_SUBJECT.into(),
+        private: false,
+    };
+    let worker = handle.clone();
+    let receipt = handle
+        .submit_result(
+            call,
+            access,
+            crate::result::BUNDLE_RESULT_BUDGET,
+            async move {
+                Ok(crate::result::export_bundles(
+                    &worker,
+                    Command::Export {
+                        skill_keys: request.skill_keys,
+                    },
+                )
+                .await)
+            },
+        )
         .await
-    {
-        Ok(Outcome::Exported(bundles)) => {
-            Ok(json!({ "outcome": "accepted", "skillBundles": encode(bundles) }))
-        }
-        Ok(Outcome::Rejected) => Ok(json!({ "outcome": "rejected" })),
-        Ok(Outcome::Accepted | Outcome::Unknown) | Err(_) => Ok(json!({ "outcome": "unknown" })),
-    }
+        .map_err(RequestError::Admission)?;
+    Ok((202, json!(receipt)))
 }
 
 pub(super) async fn import(
@@ -81,7 +118,8 @@ pub(super) async fn import(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     handle: SkillsModule,
     now: u64,
-) -> Result<Value, RequestError> {
+    call: Option<crate::operation::RecordedCall>,
+) -> Result<(u16, Value), RequestError> {
     authorize(headers, &verifier, IMPORT_ENDPOINT, now).await?;
     let request =
         serde_json::from_slice::<ImportRequest>(body).map_err(|_| RequestError::Invalid)?;
@@ -99,10 +137,27 @@ pub(super) async fn import(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| RequestError::Invalid)?;
     crate::bundle::validate_batch(&bundles).map_err(|_| RequestError::Invalid)?;
-    match handle.skill_bundles(Command::Import { bundles }).await {
-        Ok(Outcome::Accepted) => Ok(json!({ "outcome": "accepted" })),
-        Ok(Outcome::Rejected) => Ok(json!({ "outcome": "rejected" })),
-        Ok(Outcome::Exported(_) | Outcome::Unknown) | Err(_) => Ok(json!({ "outcome": "unknown" })),
+    let call = call.ok_or(RequestError::Admission(
+        platform::call::CallLogError::Unavailable,
+    ))?;
+    {
+        let worker = handle.clone();
+        let receipt = handle
+            .submit_operation(call, async move {
+                let body = import_response(worker.skill_bundles(Command::Import { bundles }).await);
+                platform::loopback::Response::json(200, body)
+            })
+            .await
+            .map_err(RequestError::Admission)?;
+        return Ok((202, json!(receipt)));
+    }
+}
+
+fn import_response(outcome: Result<Outcome, ()>) -> Value {
+    match outcome {
+        Ok(Outcome::Accepted) => json!({ "outcome": "accepted" }),
+        Ok(Outcome::Rejected) => json!({ "outcome": "rejected" }),
+        Ok(Outcome::Exported(_) | Outcome::Unknown) | Err(_) => json!({ "outcome": "unknown" }),
     }
 }
 
@@ -130,21 +185,6 @@ async fn authorize(
         )
         .map(|_| ())
         .map_err(|_| RequestError::Unauthorized)
-}
-
-fn encode(bundles: Vec<Bundle>) -> Vec<Value> {
-    bundles
-        .into_iter()
-        .map(|bundle| {
-            json!({
-                "skillKey": bundle.skill_key(),
-                "files": bundle.files().iter().map(|file| json!({
-                    "path": file.path(),
-                    "content": file.content(),
-                })).collect::<Vec<_>>(),
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]

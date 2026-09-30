@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -60,8 +60,14 @@ pub struct OrganizationGlobalState {
     team_skill_selections: TeamSkillSelectionResolver,
     terminal_settlement: super::terminal_settlement::TeamRunTerminalSettlement,
     team_delete_tasks: Vec<OwnedTask<()>>,
-    team_delete_run_tasks: BTreeSet<(String, String)>,
+    team_delete_run_tasks: BTreeMap<(String, String), TeamId>,
     team_delete_removal_tasks: BTreeSet<String>,
+    team_delete_replies: BTreeMap<String, Vec<PendingTeamDelete>>,
+}
+
+struct PendingTeamDelete {
+    reply: crate::call::CallReply<Result<TeamDeleteOutcome, StoreFault>>,
+    outcome: Result<TeamDeleteOutcome, StoreFault>,
 }
 
 pub struct OrganizationRunLane {
@@ -93,8 +99,9 @@ impl OrganizationOwner {
                 team_skill_selections: input.team_skill_selections,
                 terminal_settlement: super::terminal_settlement::TeamRunTerminalSettlement::new(),
                 team_delete_tasks: Vec::new(),
-                team_delete_run_tasks: BTreeSet::new(),
+                team_delete_run_tasks: BTreeMap::new(),
                 team_delete_removal_tasks: BTreeSet::new(),
+                team_delete_replies: BTreeMap::new(),
             },
         }
     }
@@ -258,6 +265,7 @@ impl OrganizationGlobalState {
         selection_id: TeamSkillSelectionId,
         team_id: TeamId,
         idempotency_key: IdempotencyKey,
+        call: Option<&crate::call::CallReply<TeamMaterializationCommandOutcome>>,
     ) -> TeamMaterializationCommandOutcome {
         let Some(runtime) = shared.team_skill_runtime() else {
             return TeamMaterializationCommandOutcome::Unavailable;
@@ -301,22 +309,28 @@ impl OrganizationGlobalState {
             };
         let team = materialization.definition().team_id().clone();
         let managed_agent_count = materialization.request().intent().agents().len();
-        let request = match self.begin_team_materialization(materialization) {
+        let request = match self.begin_team_materialization(materialization, call).await {
             Ok((_, request)) => request,
             Err(outcome) => return outcome,
         };
         let outcome = shared.team_materialize(request).await;
-        self.settle_team_materialization_outcome(&team, managed_agent_count, outcome)
+        self.settle_team_materialization_outcome(&team, managed_agent_count, outcome, call)
+            .await
     }
 
-    fn begin_team_materialization(
+    async fn begin_team_materialization<T>(
         &mut self,
         materialization: organization::TeamMaterialization,
+        call: Option<&crate::call::CallReply<T>>,
     ) -> Result<(TeamId, organization::TeamMaterializationRequest), TeamMaterializationCommandOutcome>
     {
         let team = materialization.definition().team_id().clone();
         let request = materialization.request().clone();
-        match self.store.create_team_materialization(materialization) {
+        let committed = self.store.create_team_materialization(materialization);
+        if let (Some(call), Err(error)) = (call, &committed) {
+            call.materialization(None, Err(error)).await;
+        }
+        match committed {
             Ok(MaterializationRecordOutcome::Recorded) => Ok((team, request)),
             Ok(MaterializationRecordOutcome::Replayed) => {
                 Err(TeamMaterializationCommandOutcome::OutcomeUnknown)
@@ -325,32 +339,44 @@ impl OrganizationGlobalState {
         }
     }
 
-    fn settle_team_materialization_outcome(
+    async fn settle_team_materialization_outcome(
         &mut self,
         team: &TeamId,
         managed_agent_count: usize,
         outcome: organization::MaterializationOperationOutcome,
+        call: Option<&crate::call::CallReply<TeamMaterializationCommandOutcome>>,
     ) -> TeamMaterializationCommandOutcome {
-        self.store
-            .record_team_materialization_outcome(team, outcome.clone())
-            .map_or(
-                TeamMaterializationCommandOutcome::Unavailable,
-                |_| match outcome {
-                    organization::MaterializationOperationOutcome::Confirmed { .. } => {
-                        TeamMaterializationCommandOutcome::Materialized {
-                            team_id: team.clone(),
-                            managed_agent_count,
-                        }
+        let committed = self
+            .store
+            .record_team_materialization_outcome(team, outcome.clone());
+        if let Some(call) = call {
+            let installed = match &outcome {
+                organization::MaterializationOperationOutcome::Confirmed { .. } => Some(true),
+                organization::MaterializationOperationOutcome::Rejected { .. } => Some(false),
+                organization::MaterializationOperationOutcome::Accepted { .. }
+                | organization::MaterializationOperationOutcome::OutcomeUnknown => None,
+            };
+            call.materialization(installed, committed.as_ref().map(|_| ()))
+                .await;
+        }
+        committed.map_or(
+            TeamMaterializationCommandOutcome::Unavailable,
+            |_| match outcome {
+                organization::MaterializationOperationOutcome::Confirmed { .. } => {
+                    TeamMaterializationCommandOutcome::Materialized {
+                        team_id: team.clone(),
+                        managed_agent_count,
                     }
-                    organization::MaterializationOperationOutcome::Rejected { .. } => {
-                        TeamMaterializationCommandOutcome::Rejected
-                    }
-                    organization::MaterializationOperationOutcome::Accepted { .. }
-                    | organization::MaterializationOperationOutcome::OutcomeUnknown => {
-                        TeamMaterializationCommandOutcome::OutcomeUnknown
-                    }
-                },
-            )
+                }
+                organization::MaterializationOperationOutcome::Rejected { .. } => {
+                    TeamMaterializationCommandOutcome::Rejected
+                }
+                organization::MaterializationOperationOutcome::Accepted { .. }
+                | organization::MaterializationOperationOutcome::OutcomeUnknown => {
+                    TeamMaterializationCommandOutcome::OutcomeUnknown
+                }
+            },
+        )
     }
 
     async fn manual_team_materialize(
@@ -361,6 +387,7 @@ impl OrganizationGlobalState {
         endpoint: RuntimeEndpointReference,
         roles: Vec<organization::ManualTeamRoleBinding>,
         idempotency_key: IdempotencyKey,
+        call: Option<&crate::call::CallReply<TeamMaterializationCommandOutcome>>,
     ) -> TeamMaterializationCommandOutcome {
         let materialization = match organization::compile_manual_team_materialization(
             team_id,
@@ -374,18 +401,20 @@ impl OrganizationGlobalState {
         };
         let team_id = materialization.definition().team_id().clone();
         let managed_agent_count = materialization.request().intent().agents().len();
-        let request = match self.begin_team_materialization(materialization) {
+        let request = match self.begin_team_materialization(materialization, call).await {
             Ok((_, request)) => request,
             Err(outcome) => return outcome,
         };
         let outcome = shared.team_materialize(request).await;
-        self.settle_team_materialization_outcome(&team_id, managed_agent_count, outcome)
+        self.settle_team_materialization_outcome(&team_id, managed_agent_count, outcome, call)
+            .await
     }
 
     async fn manual_team_create(
         &mut self,
         shared: &OrganizationShared,
         input: ManualTeamMaterializationInput,
+        call: &crate::call::CallReply<ManualTeamCreateOutcome>,
     ) -> ManualTeamCreateOutcome {
         let ManualTeamMaterializationInput {
             team_id,
@@ -407,7 +436,7 @@ impl OrganizationGlobalState {
             Err(_) => return ManualTeamCreateOutcome::Rejected,
         };
         let team_id = materialization.definition().team_id().clone();
-        let request = match self.begin_team_materialization(materialization) {
+        let request = match self.begin_team_materialization(materialization, Some(call)).await {
             Ok((_, request)) => request,
             Err(TeamMaterializationCommandOutcome::Rejected) => {
                 return ManualTeamCreateOutcome::Rejected;
@@ -423,11 +452,17 @@ impl OrganizationGlobalState {
             }
         };
         let outcome = shared.team_materialize(request).await;
-        if self
+        let committed = self
             .store
-            .record_team_materialization_outcome(&team_id, outcome.clone())
-            .is_err()
-        {
+            .record_team_materialization_outcome(&team_id, outcome.clone());
+        let native = match &outcome {
+            organization::MaterializationOperationOutcome::Confirmed { .. } => Some(true),
+            organization::MaterializationOperationOutcome::Rejected { .. } => Some(false),
+            _ => None,
+        };
+        call.materialization(native, committed.as_ref().map(|_| ()))
+            .await;
+        if committed.is_err() {
             return ManualTeamCreateOutcome::Unavailable;
         }
         if !matches!(
@@ -437,29 +472,57 @@ impl OrganizationGlobalState {
             return manual_materialization_outcome(outcome);
         }
         let run_id = run.run_id().clone();
-        let created = match self
+        let committed = self
             .team_run
-            .create(&mut self.store, run, &run_idempotency_key)
-        {
+            .create(&mut self.store, run, &run_idempotency_key);
+        if let Err(error) = &committed {
+            call.creation(None, Err(error)).await;
+        }
+        let created = match committed {
             Ok(created) => created,
             Err(_) => return ManualTeamCreateOutcome::Unavailable,
         };
         if matches!(created, CreateGraphRunOutcome::ConflictingIdempotency) {
             return ManualTeamCreateOutcome::Unavailable;
         }
+        call.creation(None, Ok(())).await;
         let receipt = match prepare_runtime_receipt(&self.store, &team_id, &run_id) {
             Ok(receipt) => receipt,
-            Err(outcome) => return manual_runtime_receipt_outcome(outcome),
+            Err(outcome) => {
+                call.creation(
+                    if matches!(outcome, RuntimeReceiptOutcome::Rejected) {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                    Ok(()),
+                )
+                .await;
+                return manual_runtime_receipt_outcome(outcome);
+            }
         };
         let outcome = shared.team_confirm_receipt(receipt.clone()).await;
         match outcome {
             RuntimeReceiptOutcome::Installed => {
-                install_prepared_runtime_receipt(&mut self.store, receipt)
-                    .map_or(ManualTeamCreateOutcome::Unavailable, |_| {
-                        ManualTeamCreateOutcome::Created(created)
-                    })
+                let committed = install_prepared_runtime_receipt(&mut self.store, receipt);
+                call.creation(Some(true), committed.as_ref().map(|_| ()))
+                    .await;
+                committed.map_or(ManualTeamCreateOutcome::Unavailable, |_| {
+                    ManualTeamCreateOutcome::Created(created)
+                })
             }
-            outcome => manual_runtime_receipt_outcome(outcome),
+            outcome => {
+                call.creation(
+                    if matches!(outcome, RuntimeReceiptOutcome::Rejected) {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                    Ok(()),
+                )
+                .await;
+                manual_runtime_receipt_outcome(outcome)
+            }
         }
     }
 
@@ -681,9 +744,10 @@ impl OrganizationGlobalState {
             return;
         };
         let task_key = (run_id.as_str().to_owned(), idempotency_key.to_owned());
-        if !self.team_delete_run_tasks.insert(task_key) {
+        if self.team_delete_run_tasks.contains_key(&task_key) {
             return;
         }
+        self.team_delete_run_tasks.insert(task_key, team_id.clone());
         let team_id = team_id.clone();
         let idempotency_key = idempotency_key.to_owned();
         let native = shared.team_delete_role_sessions(run_id.clone(), bindings, abort_first);
@@ -857,6 +921,12 @@ impl OrganizationGlobalState {
     }
 
     fn team_delete_without_pending_cleanup(&self, team_id: &TeamId) -> TeamDeleteOutcome {
+        if !self.store.facts().runs().filter(|run| run.team() == team_id).all(|run| {
+            run.runtime().is_none()
+                && matches!(run.lifecycle().state(), GraphRunLifecycleState::Tombstoned { .. })
+        }) {
+            return TeamDeleteOutcome::OutcomeUnknown;
+        }
         let lifecycle = self
             .store
             .facts()
@@ -872,6 +942,41 @@ impl OrganizationGlobalState {
                 },
             )) => TeamDeleteOutcome::Deleted,
             _ => TeamDeleteOutcome::OutcomeUnknown,
+        }
+    }
+
+    fn team_delete_has_pending_tasks(&self, team_id: &TeamId) -> bool {
+        self.team_delete_run_tasks.values().any(|team| team == team_id)
+            || self.team_delete_removal_tasks.contains(team_id.as_str())
+    }
+
+    async fn settle_team_delete_reply(
+        &mut self,
+        team_id: &TeamId,
+        settled: Result<TeamDeleteOutcome, StoreFault>,
+    ) {
+        if let Some(replies) = self.team_delete_replies.get_mut(team_id.as_str()) {
+            for pending in replies {
+                if matches!(settled, Ok(TeamDeleteOutcome::OutcomeUnknown)
+                    | Err(StoreFault::CommitOutcomeUnknown(_) | StoreFault::RecoveryRequired))
+                    || (matches!(pending.outcome, Ok(TeamDeleteOutcome::Deleted))
+                        && !matches!(settled, Ok(TeamDeleteOutcome::Deleted)))
+                {
+                    pending.outcome = settled.clone();
+                }
+            }
+        }
+        if self.team_delete_has_pending_tasks(team_id) {
+            return;
+        }
+        if let Some(replies) = self.team_delete_replies.remove(team_id.as_str()) {
+            for pending in replies {
+                let outcome = match pending.outcome {
+                    Ok(TeamDeleteOutcome::Deleted) => Ok(self.team_delete_without_pending_cleanup(team_id)),
+                    outcome => outcome,
+                };
+                let _ = pending.reply.send(outcome).await;
+            }
         }
     }
 
@@ -1137,7 +1242,8 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::TeamDeleteRemovalSettled { .. }
             | OrganizationCommand::RunDeleteAndPurge { .. }
             | OrganizationCommand::RunPurge { .. }
-            | OrganizationCommand::RecoverMaterializationReceipts { .. } => CommandRoute::Exclusive,
+            | OrganizationCommand::RecoverMaterializationReceipts { .. }
+            | OrganizationCommand::DrainTeamDeleteTasks { .. } => CommandRoute::Exclusive,
             OrganizationCommand::TeamSkillAuthorize { .. }
             | OrganizationCommand::TeamSkillMaterialize { .. }
             | OrganizationCommand::ManualTeamMaterialize { .. }
@@ -1199,6 +1305,11 @@ impl OwnerSpec for OrganizationOwner {
         }
         global.team_delete_run_tasks.clear();
         global.team_delete_removal_tasks.clear();
+        for (_, replies) in std::mem::take(&mut global.team_delete_replies) {
+            for pending in replies {
+                let _ = pending.reply.send(Ok(TeamDeleteOutcome::OutcomeUnknown)).await;
+            }
+        }
     }
 
     async fn handle_keyed_command(
@@ -1207,6 +1318,7 @@ impl OwnerSpec for OrganizationOwner {
         state: &mut Self::LaneState,
         command: Self::Command,
     ) {
+        if !command.call_running().await { return; }
         match command {
             OrganizationCommand::RunCreate {
                 team_id,
@@ -1236,7 +1348,7 @@ impl OwnerSpec for OrganizationOwner {
                     }
                     Err(error) => Err(error),
                 };
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::RunCreateFromTeamTemplate {
                 team_id,
@@ -1307,7 +1419,7 @@ impl OwnerSpec for OrganizationOwner {
                     }
                     Err(_) => Err(TeamRuntimeStatus::Unavailable),
                 };
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::RunCancel {
                 run_id,
@@ -1326,11 +1438,11 @@ impl OwnerSpec for OrganizationOwner {
                             Ok(BeginCancellationOutcome::Started(plan))
                             | Ok(BeginCancellationOutcome::Replayed(plan)) => plan,
                             Ok(outcome) => {
-                                let _ = reply.send(Ok(outcome));
+                                let _ = reply.send(Ok(outcome)).await;
                                 return;
                             }
                             Err(error) => {
-                                let _ = reply.send(Err(error));
+                                let _ = reply.send(Err(error)).await;
                                 return;
                             }
                         };
@@ -1348,7 +1460,7 @@ impl OwnerSpec for OrganizationOwner {
                     }
                     Err(error) => Err(error),
                 };
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::RunDelete {
                 run_id,
@@ -1361,7 +1473,7 @@ impl OwnerSpec for OrganizationOwner {
                         .team_run
                         .tombstone(&mut store, &run_id, &idempotency_key, tombstoned_at)
                 });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::StartGateTerminalProposalSet {
                 run_id,
@@ -1401,7 +1513,7 @@ impl OwnerSpec for OrganizationOwner {
                 let outcome = state
                     .open_store()
                     .and_then(|mut store| store.confirm_run_start(&run_id, &proposal_id));
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::RunStartContinue {
                 run_id,
@@ -1411,7 +1523,7 @@ impl OwnerSpec for OrganizationOwner {
                 let outcome = state
                     .open_store()
                     .and_then(|mut store| store.continue_run_discussion(&run_id, &proposal_id));
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::TriggerFire {
                 request,
@@ -1421,7 +1533,7 @@ impl OwnerSpec for OrganizationOwner {
                 let outcome = state.open_store().and_then(|mut store| {
                     state.team_run.fire_trigger(&mut store, request, fired_at)
                 });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::GraphSave {
                 command,
@@ -1433,13 +1545,13 @@ impl OwnerSpec for OrganizationOwner {
                         .team_run
                         .replace_graph(&mut store, command, definition)
                 });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::GraphPatch { patch, reply } => {
                 let outcome = state
                     .open_store()
                     .and_then(|mut store| state.team_run.apply_graph_patch(&mut store, patch));
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::NodeEvent {
                 command,
@@ -1449,7 +1561,7 @@ impl OwnerSpec for OrganizationOwner {
                 let outcome = state.open_store().and_then(|mut store| {
                     state.team_run.record_node_event(&mut store, command, event)
                 });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::NodeTerminalResolve {
                 run_id,
@@ -1475,19 +1587,19 @@ impl OwnerSpec for OrganizationOwner {
                         resolved_at,
                     )
                 });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::ApprovalResolve { command, reply } => {
                 let outcome = state.open_store().and_then(|mut store| {
                     state.team_run.resolve_human_decision(&mut store, command)
                 });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::DecisionSubmit { command, reply } => {
                 let outcome = state
                     .open_store()
                     .and_then(|mut store| state.team_run.record_decision(&mut store, command));
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::TaskBoardMutate {
                 team_id,
@@ -1498,7 +1610,7 @@ impl OwnerSpec for OrganizationOwner {
                 let outcome = state.open_store().and_then(|mut store| {
                     crate::application::task_board::mutate(&mut store, team_id, run_id, operation)
                 });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::ScheduleReadyNodes { run_id, now, reply } => {
                 let outcome = state.open_store().and_then(|mut store| {
@@ -1587,6 +1699,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::RunPurge { .. }
             | OrganizationCommand::WebhookTriggerFire { .. }
             | OrganizationCommand::RecoverMaterializationReceipts { .. }
+            | OrganizationCommand::DrainTeamDeleteTasks { .. }
             | OrganizationCommand::TeamMessageTerminalObserved { .. }
             | OrganizationCommand::TeamMessageRepairQueued { .. }
             | OrganizationCommand::TeamMessageRepairRejected { .. } => {
@@ -1600,12 +1713,13 @@ impl OwnerSpec for OrganizationOwner {
         state: &mut Self::GlobalState,
         command: Self::Command,
     ) {
+        if !command.call_running().await { return; }
         match command {
             OrganizationCommand::TeamSkillAuthorize {
                 package_root,
                 reply,
             } => {
-                let _ = reply.send(state.authorize_team_skill_selection(package_root));
+                let _ = reply.send(state.authorize_team_skill_selection(package_root)).await;
             }
             OrganizationCommand::TeamSkillMaterialize {
                 selection_id,
@@ -1614,7 +1728,7 @@ impl OwnerSpec for OrganizationOwner {
                 reply,
             } => {
                 if state.refresh().is_err() {
-                    let _ = reply.send(TeamMaterializationCommandOutcome::Unavailable);
+                    let _ = reply.send(TeamMaterializationCommandOutcome::Unavailable).await;
                     return;
                 }
                 let outcome = state
@@ -1623,9 +1737,10 @@ impl OwnerSpec for OrganizationOwner {
                         selection_id,
                         team_id,
                         idempotency_key,
+                        Some(&reply),
                     )
                     .await;
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::ManualTeamMaterialize {
                 team_id,
@@ -1636,7 +1751,7 @@ impl OwnerSpec for OrganizationOwner {
                 reply,
             } => {
                 if state.refresh().is_err() {
-                    let _ = reply.send(TeamMaterializationCommandOutcome::Unavailable);
+                    let _ = reply.send(TeamMaterializationCommandOutcome::Unavailable).await;
                     return;
                 }
                 let outcome = state
@@ -1647,9 +1762,10 @@ impl OwnerSpec for OrganizationOwner {
                         endpoint,
                         roles,
                         idempotency_key,
+                        Some(&reply),
                     )
                     .await;
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::ManualTeamCreate {
                 team_id,
@@ -1662,7 +1778,7 @@ impl OwnerSpec for OrganizationOwner {
                 reply,
             } => {
                 if state.refresh().is_err() {
-                    let _ = reply.send(ManualTeamCreateOutcome::Unavailable);
+                    let _ = reply.send(ManualTeamCreateOutcome::Unavailable).await;
                     return;
                 }
                 let outcome = state
@@ -1677,9 +1793,10 @@ impl OwnerSpec for OrganizationOwner {
                             run,
                             run_idempotency_key,
                         },
+                        &reply,
                     )
                     .await;
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::TeamDelete {
                 team_id,
@@ -1690,12 +1807,27 @@ impl OwnerSpec for OrganizationOwner {
                 let outcome = match state.refresh() {
                     Ok(()) => {
                         state
-                            .team_delete(&shared, team_id, idempotency_key, observed_at)
+                            .team_delete(&shared, team_id.clone(), idempotency_key, observed_at)
                             .await
                     }
                     Err(error) => Err(error),
                 };
-                let _ = reply.send(outcome);
+                if reply.awaits_workflow_settlement() && state.team_delete_has_pending_tasks(&team_id) {
+                    let outcome = match outcome {
+                        Err(error) => Err(error),
+                        Ok(_) if state.store.facts().runs().filter(|run| run.team() == &team_id).any(|run| {
+                            !matches!(run.lifecycle().state(), GraphRunLifecycleState::Tombstoned { .. })
+                                && !state.team_delete_run_tasks.keys().any(|(id, _)| id == run.run_id().as_str())
+                        }) => Ok(TeamDeleteOutcome::OutcomeUnknown),
+                        Ok(_) => Ok(TeamDeleteOutcome::Deleted),
+                    };
+                    state.team_delete_replies.entry(team_id.as_str().to_owned()).or_default().push(PendingTeamDelete { reply, outcome });
+                } else {
+                    let _ = reply.send(outcome).await;
+                }
+            }
+            OrganizationCommand::DrainTeamDeleteTasks { reply } => {
+                let _ = reply.send(std::mem::take(&mut state.team_delete_tasks));
             }
             OrganizationCommand::TeamDeleteRunNativeSettled {
                 team_id,
@@ -1706,29 +1838,33 @@ impl OwnerSpec for OrganizationOwner {
                 observed_at,
             } => {
                 let task_key = (run_id.as_str().to_owned(), idempotency_key.clone());
-                if state.refresh().is_ok() {
-                    let settled = state.complete_team_delete_run_native_evidence(
+                let settled = match state.refresh() {
+                    Ok(()) => match state.complete_team_delete_run_native_evidence(
                         run_id,
                         &idempotency_key,
                         settlement,
                         native,
                         observed_at,
-                    );
-                    if matches!(
-                        settled,
-                        Ok(organization::GraphRunPurgeOutcome::Purged
-                            | organization::GraphRunPurgeOutcome::Replayed)
                     ) {
-                        let _ = state.start_team_delete_removal_if_ready(&shared, &team_id);
-                    }
-                }
+                        Ok(organization::GraphRunPurgeOutcome::Purged
+                            | organization::GraphRunPurgeOutcome::Replayed) => state
+                            .start_team_delete_removal_if_ready(&shared, &team_id)
+                            .map(|_| TeamDeleteOutcome::Deleted),
+                        Ok(_) => Ok(TeamDeleteOutcome::OutcomeUnknown),
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => Err(error),
+                };
                 state.team_delete_run_tasks.remove(&task_key);
+                state.settle_team_delete_reply(&team_id, settled).await;
             }
             OrganizationCommand::TeamDeleteRemovalSettled { team_id, outcome } => {
-                if state.refresh().is_ok() {
-                    let _ = state.complete_team_delete_removal(&team_id, Some(outcome));
-                }
+                let settled = match state.refresh() {
+                    Ok(()) => state.complete_team_delete_removal(&team_id, Some(outcome)),
+                    Err(error) => Err(error),
+                };
                 state.team_delete_removal_tasks.remove(team_id.as_str());
+                state.settle_team_delete_reply(&team_id, settled).await;
             }
             OrganizationCommand::RunDeleteAndPurge {
                 run_id,
@@ -1744,13 +1880,13 @@ impl OwnerSpec for OrganizationOwner {
                     }
                     Err(error) => Err(error),
                 };
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::RunPurge { request, reply } => {
                 let outcome = state
                     .refresh()
                     .and_then(|_| state.team_run.purge(&mut state.store, request));
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::TeamMessageTerminalObserved {
                 native_run_id,
@@ -1796,7 +1932,7 @@ impl OwnerSpec for OrganizationOwner {
                 reply,
             } => {
                 if state.refresh().is_err() {
-                    let _ = reply.send(Err(TeamRuntimeStatus::Unavailable));
+                    let _ = reply.send(Err(TeamRuntimeStatus::Unavailable)).await;
                     return;
                 }
                 let outcome = match state.team_run.resolve_webhook_fire(
@@ -1815,7 +1951,7 @@ impl OwnerSpec for OrganizationOwner {
                         Ok(organization::TeamTriggerFireOutcome::Rejected)
                     }
                 };
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationCommand::RecoverMaterializationReceipts { reply } => {
                 if state.refresh().is_ok() {
@@ -1855,6 +1991,7 @@ impl OwnerSpec for OrganizationOwner {
         state: &mut Self::LaneState,
         query: Self::Query,
     ) {
+        if !query.call_running().await { return; }
         match query {
             OrganizationQuery::RunSnapshot { query, reply } => {
                 let outcome = state
@@ -1862,7 +1999,7 @@ impl OwnerSpec for OrganizationOwner {
                     .map_or(organization::TeamRunQueryOutcome::Unavailable, |store| {
                         state.team_run.query(&store, &query)
                     });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::TeamRunPublicProjection {
                 team_id,
@@ -1877,7 +2014,7 @@ impl OwnerSpec for OrganizationOwner {
                         )
                     },
                 );
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::TeamRunPublicSnapshot {
                 team_id,
@@ -1895,7 +2032,7 @@ impl OwnerSpec for OrganizationOwner {
                         event_limit,
                     )
                 });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::TeamRunDiagnostics { run_id, reply } => {
                 let outcome = state.open_store().map_or(
@@ -1917,7 +2054,7 @@ impl OwnerSpec for OrganizationOwner {
                         )
                     },
                 );
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::GraphContext { query, reply } => {
                 let outcome = state
@@ -1925,7 +2062,7 @@ impl OwnerSpec for OrganizationOwner {
                     .map_or(organization::TeamGraphContextResult::Unavailable, |store| {
                         state.team_run.graph_context(&store, &query)
                     });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::GraphDefinition {
                 team_id,
@@ -1936,7 +2073,7 @@ impl OwnerSpec for OrganizationOwner {
                     .open_store()
                     .ok()
                     .and_then(|store| state.team_run.graph_definition(&store, &team_id, &run_id));
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::GraphYaml { run_id, reply } => {
                 let outcome = state.open_store().ok().and_then(|store| {
@@ -1945,18 +2082,21 @@ impl OwnerSpec for OrganizationOwner {
                         .run(&run_id)
                         .map(|run| organization::export_yaml(run.graph().definition()))
                 });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::TaskBoardRead {
                 team_id,
                 run_id,
                 reply,
             } => {
-                let outcome = state.open_store().map_or_else(
-                    |_| organization::run::task_board::TaskBoardFacts::default(),
-                    |store| store.task_board().scoped(&team_id, &run_id),
-                );
-                let _ = reply.send(outcome);
+                let outcome = match state.open_store() {
+                    Ok(store) => store.task_board().scoped(&team_id, &run_id),
+                    Err(_) => {
+                        reply.unavailable().await;
+                        organization::run::task_board::TaskBoardFacts::default()
+                    }
+                };
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::PendingApprovals {
                 team_id,
@@ -1971,7 +2111,7 @@ impl OwnerSpec for OrganizationOwner {
                             .query_pending_approvals(&store, &team_id, &run_id)
                     },
                 );
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::NodePromptRetryDue { run_id, reply } => {
                 let query = NodePromptRetryDueQuery::new(run_id, now_millis());
@@ -1988,7 +2128,7 @@ impl OwnerSpec for OrganizationOwner {
                         )
                     },
                 );
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::TeamSkillValidate { .. }
             | OrganizationQuery::TeamSkillDependencyPlan { .. }
@@ -2016,24 +2156,25 @@ impl OwnerSpec for OrganizationOwner {
         state: &mut Self::GlobalState,
         query: Self::Query,
     ) {
+        if !query.call_running().await { return; }
         match query {
             OrganizationQuery::TeamSkillValidate {
                 package_root,
                 reply,
             } => {
-                let _ = reply.send(state.team_skill_validate(package_root));
+                let _ = reply.send(state.team_skill_validate(package_root)).await;
             }
             OrganizationQuery::TeamSkillDependencyPlan {
                 package_root,
                 reply,
             } => {
-                let _ = reply.send(state.team_skill_dependency_plan(package_root));
+                let _ = reply.send(state.team_skill_dependency_plan(package_root)).await;
             }
             OrganizationQuery::TeamSkillSelectionValidate {
                 selection_id,
                 reply,
             } => {
-                let _ = reply.send(state.validate_team_skill_selection(selection_id));
+                let _ = reply.send(state.validate_team_skill_selection(selection_id)).await;
             }
             OrganizationQuery::TeamSkillSelectionDependencyPlan {
                 selection_id,
@@ -2042,21 +2183,21 @@ impl OwnerSpec for OrganizationOwner {
                 let outcome = state
                     .plan_team_skill_dependencies(&shared, selection_id)
                     .await;
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::RunList { team_id, reply } => {
                 let outcome = match state.refresh() {
                     Ok(()) => state.team_run.list(&state.store, &team_id),
                     Err(_) => vec![organization::TeamRunQueryOutcome::Unavailable],
                 };
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::RoleSessions { team_id, reply } => {
                 let outcome = match state.refresh() {
                     Ok(()) => state.team_run.query_role_sessions(&state.store, &team_id),
                     Err(_) => organization::TeamRoleSessionQueryOutcome::Unavailable,
                 };
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::RoleSessionReceipts { reply } => {
                 let outcome = state.store.refresh().map(|()| {
@@ -2069,7 +2210,7 @@ impl OwnerSpec for OrganizationOwner {
                         .cloned()
                         .collect()
                 });
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::StartGatePromptPlan {
                 lookup,
@@ -2098,16 +2239,22 @@ impl OwnerSpec for OrganizationOwner {
                     Ok(()) => state
                         .team_run
                         .armed_triggers(&state.store, team_id.as_ref()),
-                    Err(_) => Vec::new(),
+                    Err(_) => {
+                        reply.unavailable().await;
+                        Vec::new()
+                    }
                 };
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::Resume { team_id, reply } => {
                 let outcome = match state.refresh() {
                     Ok(()) => state.team_run.resume(&state.store, &team_id),
-                    Err(_) => Vec::new(),
+                    Err(_) => {
+                        reply.unavailable().await;
+                        Vec::new()
+                    },
                 };
-                let _ = reply.send(outcome);
+                let _ = reply.send(outcome).await;
             }
             OrganizationQuery::PendingRunActivityIds { run_id, now, reply } => {
                 let outcome = match state.refresh() {
@@ -3074,6 +3221,7 @@ mod tests {
                     selection_id,
                     team_id(),
                     idempotency_key("team-skill:materialize"),
+                    None,
                 )
                 .await,
             TeamMaterializationCommandOutcome::Rejected,
@@ -3637,8 +3785,9 @@ mod tests {
             terminal_settlement: crate::owner::terminal_settlement::TeamRunTerminalSettlement::new(
             ),
             team_delete_tasks: Vec::new(),
-            team_delete_run_tasks: BTreeSet::new(),
+            team_delete_run_tasks: BTreeMap::new(),
             team_delete_removal_tasks: BTreeSet::new(),
+            team_delete_replies: BTreeMap::new(),
         }
     }
 

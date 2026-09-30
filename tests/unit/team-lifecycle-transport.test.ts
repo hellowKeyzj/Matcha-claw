@@ -62,8 +62,8 @@ describe('Electron Main Team lifecycle transport', () => {
         json: async () => ({ success: true, action: 'cancel', runId: 'run-1', state: 'cancelling' }),
       })
       .mockResolvedValueOnce({
-        status: 200,
-        json: async () => ({ success: true, action: 'delete', runId: 'run-1', state: 'tombstoned' }),
+        status: 202,
+        json: async () => ({ callId: 'a'.repeat(32), accepted: true }),
       });
     const transport = createTeamLifecycleTransport({ verificationKey: 'public', signDecision }, 3233, fetcher);
 
@@ -72,7 +72,7 @@ describe('Electron Main Team lifecycle transport', () => {
     await expect(transport.delete({ teamId: 'team-1', idempotencyKey: 'delete-1' })).resolves.toMatchObject({ status: 200, body: { action: 'delete' } });
     await expect(transport.resume({ teamId: 'team-1', idempotencyKey: 'resume-1' })).resolves.toMatchObject({ status: 200, body: { action: 'resume' } });
     await expect(transport.cancel({ runId: 'run-1', idempotencyKey: 'cancel-1' })).resolves.toMatchObject({ status: 200, body: { action: 'cancel' } });
-    await expect(transport.delete({ runId: 'run-1', idempotencyKey: 'delete-1' })).resolves.toMatchObject({ status: 200, body: { action: 'delete' } });
+    await expect(transport.delete({ runId: 'run-1', idempotencyKey: 'delete-1' })).resolves.toMatchObject({ status: 202, body: { callId: 'a'.repeat(32), accepted: true } });
 
     for (const capability of [
       'team.lifecycle.list',

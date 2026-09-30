@@ -3,12 +3,13 @@ use platform::capability::CapabilityDecisionVerifier;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
+
+use crate::projection::{JobResponse, project_job_response};
 
 use crate::model::{
-    CronCreateCommand, CronDeleteCommand, CronDeleteOutcome, CronDeliveryCommand,
-    CronHistoryCommand, CronHistoryOutcome, CronJobMutationOutcome, CronListOutcome,
-    CronScheduleCommand, CronUpdateCommand,
+    CronCreateCommand, CronDeleteCommand, CronDeliveryCommand, CronHistoryCommand,
+    CronHistoryOutcome, CronListOutcome, CronScheduleCommand, CronUpdateCommand,
 };
 
 pub const LIST_PATH: &str = "/api/cron/jobs";
@@ -18,6 +19,7 @@ pub const DELETE_PATH: &str = "/api/cron/jobs/delete";
 pub const TOGGLE_PATH: &str = "/api/cron/jobs/toggle";
 pub const TRIGGER_PATH: &str = "/api/cron/jobs/trigger";
 pub const SESSION_HISTORY_PATH: &str = "/api/cron/session-history";
+pub const RESULT_PATH: &str = "/api/cron/results";
 pub const MAX_HISTORY_LIMIT: u64 = 200;
 pub const DEFAULT_HISTORY_LIMIT: u64 = MAX_HISTORY_LIMIT;
 const MAX_SESSION_KEY_BYTES: usize = 4 * 1024;
@@ -353,17 +355,17 @@ impl CronRequest {
         authorization: &str,
         verifier: &mut CapabilityDecisionVerifier,
         now: u64,
-    ) -> Result<Self, DecodeError> {
+    ) -> Result<(Self, String), DecodeError> {
         if !matches!(
             path,
             LIST_PATH | CREATE_PATH | UPDATE_PATH | DELETE_PATH | TOGGLE_PATH | TRIGGER_PATH
         ) {
             return Err(DecodeError::Invalid);
         }
-        verifier
+        let decision = verifier
             .verify(authorization, now, path, SCOPE, CAPABILITY_ID, SUBJECT)
             .map_err(|_| DecodeError::Unauthorized)?;
-        match path {
+        let request = match path {
             LIST_PATH => {
                 if value != serde_json::json!({}) {
                     return Err(DecodeError::Invalid);
@@ -376,7 +378,69 @@ impl CronRequest {
             TOGGLE_PATH => decode_toggle(value),
             TRIGGER_PATH => decode_trigger(value),
             _ => Err(DecodeError::Invalid),
+        }?;
+        Ok((request, decision.principal().to_owned()))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ResultRequest {
+    pub(crate) call_id: platform::call::CallId,
+    pub(crate) command: crate::application::results::MutationKind,
+    pub(crate) job_id: Option<String>,
+}
+
+impl ResultRequest {
+    pub(crate) fn decode(
+        value: Value,
+        authorization: &str,
+        verifier: &mut CapabilityDecisionVerifier,
+        now: u64,
+    ) -> Result<(Self, crate::application::results::ResultSubject), DecodeError> {
+        let decision = verifier
+            .verify(
+                authorization,
+                now,
+                RESULT_PATH,
+                SCOPE,
+                CAPABILITY_ID,
+                SUBJECT,
+            )
+            .map_err(|_| DecodeError::Unauthorized)?;
+        let has_job_id = value.get("jobId").is_some();
+        let request = serde_json::from_value::<Self>(value).map_err(|_| DecodeError::Invalid)?;
+        if (request.command == crate::application::results::MutationKind::Create && has_job_id)
+            || (request.command == crate::application::results::MutationKind::Create)
+                != request.job_id.is_none()
+            || request
+                .job_id
+                .as_ref()
+                .is_some_and(|id| CronDeleteCommand::try_new(id.clone()).is_err())
+        {
+            return Err(DecodeError::Invalid);
         }
+        let subject = crate::application::results::ResultSubject {
+            principal: decision.principal().to_owned(),
+            command: request.command,
+            job_id: request.job_id.clone(),
+        };
+        Ok((request, subject))
+    }
+}
+
+pub(crate) fn result_body(result: crate::application::results::ResultRead) -> (u16, Value) {
+    use crate::application::results::{MutationResult, ResultRead};
+    match result {
+        ResultRead::Missing => fixed(404, "Cron result is unavailable or expired"),
+        ResultRead::Pending => fixed(409, "Cron result is not ready"),
+        ResultRead::Completed(result) => match result {
+            MutationResult::Job { job, .. } => (200, project_job_response(*job)),
+            MutationResult::Removed(removed) => (200, serde_json::json!({ "removed": removed })),
+            MutationResult::Rejected => fixed(422, "Cron operation was rejected"),
+            MutationResult::Unknown => fixed(409, "Cron operation outcome is unknown"),
+            MutationResult::Unavailable => unavailable(),
+        },
     }
 }
 
@@ -504,267 +568,6 @@ fn decode_trigger(value: Value) -> Result<CronRequest, DecodeError> {
     Ok(CronRequest::Trigger(request.input.id))
 }
 
-pub struct JobResponse {
-    id: String,
-    name: String,
-    agent_id: String,
-    message: String,
-    model: Option<String>,
-    schedule: ScheduleResponse,
-    delivery: DeliveryResponse,
-    target: Option<TargetResponse>,
-    enabled: bool,
-    created_at: String,
-    updated_at: String,
-    last_run: Option<LastRunResponse>,
-    next_run: Option<String>,
-    running_at: Option<String>,
-}
-
-enum ScheduleResponse {
-    At {
-        at: String,
-    },
-    Every {
-        every_ms: u64,
-        anchor_ms: Option<u64>,
-    },
-    Cron {
-        expr: String,
-        tz: Option<String>,
-    },
-}
-
-enum DeliveryResponse {
-    None,
-    Announce {
-        channel: String,
-        to: Option<String>,
-        account_id: Option<String>,
-    },
-}
-
-struct TargetResponse {
-    channel_type: String,
-    channel_id: String,
-    channel_name: String,
-    recipient: Option<String>,
-}
-
-struct LastRunResponse {
-    time: String,
-    success: bool,
-    error: Option<String>,
-    duration: Option<u64>,
-}
-
-impl TryFrom<crate::model::CronJobView> for JobResponse {
-    type Error = &'static str;
-
-    fn try_from(job: crate::model::CronJobView) -> Result<Self, Self::Error> {
-        let agent_id = job
-            .agent_id
-            .filter(|value| is_non_empty_legacy_text(value))
-            .ok_or("agentId.missing")?;
-        let message = job
-            .message
-            .filter(|value| is_non_empty_legacy_text(value))
-            .ok_or("message.missing")?;
-        let state = job.state;
-        let last_run = state
-            .last_run_at_ms
-            .filter(|time| *time > 0)
-            .map(|time| -> Result<LastRunResponse, &'static str> {
-                Ok(LastRunResponse {
-                    time: iso_timestamp(time).map_err(|_| "lastRun.time.invalid")?,
-                    success: matches!(
-                        state.last_run_status,
-                        Some(crate::model::CronRunStatusView::Ok)
-                    ),
-                    error: state.last_error.clone(),
-                    duration: state.last_duration_ms,
-                })
-            })
-            .transpose()?;
-        let next_run = state
-            .next_run_at_ms
-            .filter(|time| *time > 0)
-            .map(|time| iso_timestamp(time).map_err(|_| "nextRun.invalid"))
-            .transpose()?;
-        let running_at = state
-            .running_at_ms
-            .filter(|time| *time > 0)
-            .map(|time| iso_timestamp(time).map_err(|_| "runningAt.invalid"))
-            .transpose()?;
-        let (delivery, target) = match job.delivery {
-            crate::model::CronDeliveryView::None => (DeliveryResponse::None, None),
-            crate::model::CronDeliveryView::Announce {
-                channel,
-                to,
-                account_id,
-            } => {
-                let target = TargetResponse {
-                    channel_type: channel.clone(),
-                    channel_id: account_id.clone(),
-                    channel_name: channel.clone(),
-                    recipient: Some(to.clone()),
-                };
-                (
-                    DeliveryResponse::Announce {
-                        channel,
-                        to: Some(to),
-                        account_id: Some(account_id),
-                    },
-                    Some(target),
-                )
-            }
-        };
-        Ok(Self {
-            id: job.id,
-            name: job.name,
-            agent_id,
-            message,
-            model: job.model,
-            schedule: match job.schedule {
-                crate::model::CronScheduleView::At { at } => ScheduleResponse::At { at },
-                crate::model::CronScheduleView::Every {
-                    every_ms,
-                    anchor_ms,
-                } => ScheduleResponse::Every {
-                    every_ms,
-                    anchor_ms,
-                },
-                crate::model::CronScheduleView::Cron { expr, tz } => {
-                    ScheduleResponse::Cron { expr, tz }
-                }
-            },
-            delivery,
-            target,
-            enabled: job.enabled,
-            created_at: iso_timestamp(job.created_at_ms).map_err(|_| "createdAt.invalid")?,
-            updated_at: iso_timestamp(job.updated_at_ms).map_err(|_| "updatedAt.invalid")?,
-            last_run,
-            next_run,
-            running_at,
-        })
-    }
-}
-
-fn project_job_response(job: JobResponse) -> Value {
-    let mut value = Map::new();
-    value.insert("id".to_owned(), Value::String(job.id));
-    value.insert("name".to_owned(), Value::String(job.name));
-    value.insert("agentId".to_owned(), Value::String(job.agent_id));
-    value.insert("message".to_owned(), Value::String(job.message));
-    if let Some(model) = job.model {
-        value.insert("model".to_owned(), Value::String(model));
-    }
-    value.insert(
-        "schedule".to_owned(),
-        project_schedule_response(job.schedule),
-    );
-    value.insert(
-        "delivery".to_owned(),
-        project_delivery_response(job.delivery),
-    );
-    if let Some(target) = job.target {
-        value.insert("target".to_owned(), project_target_response(target));
-    }
-    value.insert("enabled".to_owned(), Value::Bool(job.enabled));
-    value.insert("createdAt".to_owned(), Value::String(job.created_at));
-    value.insert("updatedAt".to_owned(), Value::String(job.updated_at));
-    if let Some(last_run) = job.last_run {
-        value.insert("lastRun".to_owned(), project_last_run_response(last_run));
-    }
-    if let Some(next_run) = job.next_run {
-        value.insert("nextRun".to_owned(), Value::String(next_run));
-    }
-    if let Some(running_at) = job.running_at {
-        value.insert("runningAt".to_owned(), Value::String(running_at));
-    }
-    Value::Object(value)
-}
-
-fn project_schedule_response(schedule: ScheduleResponse) -> Value {
-    match schedule {
-        ScheduleResponse::At { at } => serde_json::json!({ "kind": "at", "at": at }),
-        ScheduleResponse::Every {
-            every_ms,
-            anchor_ms,
-        } => {
-            let mut value = Map::new();
-            value.insert("kind".to_owned(), Value::String("every".to_owned()));
-            value.insert("everyMs".to_owned(), Value::from(every_ms));
-            if let Some(anchor_ms) = anchor_ms {
-                value.insert("anchorMs".to_owned(), Value::from(anchor_ms));
-            }
-            Value::Object(value)
-        }
-        ScheduleResponse::Cron { expr, tz } => {
-            let mut value = Map::new();
-            value.insert("kind".to_owned(), Value::String("cron".to_owned()));
-            value.insert("expr".to_owned(), Value::String(expr));
-            if let Some(tz) = tz {
-                value.insert("tz".to_owned(), Value::String(tz));
-            }
-            Value::Object(value)
-        }
-    }
-}
-
-fn project_delivery_response(delivery: DeliveryResponse) -> Value {
-    match delivery {
-        DeliveryResponse::None => serde_json::json!({ "mode": "none" }),
-        DeliveryResponse::Announce {
-            channel,
-            to,
-            account_id,
-        } => {
-            let mut value = Map::new();
-            value.insert("mode".to_owned(), Value::String("announce".to_owned()));
-            value.insert("channel".to_owned(), Value::String(channel));
-            if let Some(to) = to {
-                value.insert("to".to_owned(), Value::String(to));
-            }
-            if let Some(account_id) = account_id {
-                value.insert("accountId".to_owned(), Value::String(account_id));
-            }
-            Value::Object(value)
-        }
-    }
-}
-
-fn project_target_response(target: TargetResponse) -> Value {
-    let mut value = Map::new();
-    value.insert("channelType".to_owned(), Value::String(target.channel_type));
-    value.insert("channelId".to_owned(), Value::String(target.channel_id));
-    value.insert("channelName".to_owned(), Value::String(target.channel_name));
-    if let Some(recipient) = target.recipient {
-        value.insert("recipient".to_owned(), Value::String(recipient));
-    }
-    Value::Object(value)
-}
-
-fn project_last_run_response(last_run: LastRunResponse) -> Value {
-    let mut value = Map::new();
-    value.insert("time".to_owned(), Value::String(last_run.time));
-    value.insert("success".to_owned(), Value::Bool(last_run.success));
-    if let Some(error) = last_run.error {
-        value.insert("error".to_owned(), Value::String(error));
-    }
-    if let Some(duration) = last_run.duration {
-        value.insert("duration".to_owned(), Value::from(duration));
-    }
-    Value::Object(value)
-}
-
-fn iso_timestamp(milliseconds: u64) -> Result<String, ()> {
-    let milliseconds = i64::try_from(milliseconds).map_err(|_| ())?;
-    chrono::DateTime::from_timestamp_millis(milliseconds)
-        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-        .ok_or(())
-}
-
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -826,29 +629,6 @@ fn project_history_message(message: crate::model::CronHistoryMessageView) -> Val
     })
 }
 
-pub fn job_body(outcome: CronJobMutationOutcome) -> (u16, Value) {
-    match outcome {
-        CronJobMutationOutcome::Applied(job) => match JobResponse::try_from(*job) {
-            Ok(job) => (200, project_job_response(job)),
-            Err(_) => fixed(409, "Cron operation outcome is unknown"),
-        },
-        CronJobMutationOutcome::Rejected => fixed(422, "Cron operation was rejected"),
-        CronJobMutationOutcome::OutcomeUnknown => fixed(409, "Cron operation outcome is unknown"),
-        CronJobMutationOutcome::Unavailable => unavailable(),
-    }
-}
-
-pub fn delete_body(outcome: CronDeleteOutcome) -> (u16, Value) {
-    match outcome {
-        CronDeleteOutcome::Applied(receipt) => {
-            (200, serde_json::json!({ "removed": receipt.removed }))
-        }
-        CronDeleteOutcome::Rejected => fixed(422, "Cron operation was rejected"),
-        CronDeleteOutcome::OutcomeUnknown => fixed(409, "Cron operation outcome is unknown"),
-        CronDeleteOutcome::Unavailable => unavailable(),
-    }
-}
-
 pub fn trigger_body(
     outcome: Result<crate::model::CronTriggerResult, crate::ports::CronRequestAdmissionClosed>,
 ) -> (u16, Value) {
@@ -881,10 +661,6 @@ fn project_legacy_renderer_job(job: crate::model::CronJobView) -> Option<Value> 
     JobResponse::try_from(job).ok().map(project_job_response)
 }
 
-fn is_non_empty_legacy_text(value: &str) -> bool {
-    !value.trim().is_empty() && !value.contains('\0')
-}
-
 fn unavailable() -> (u16, Value) {
     fixed(503, "Cron service is unavailable")
 }
@@ -898,6 +674,10 @@ fn fixed(status: u16, error: &'static str) -> (u16, Value) {
 
 #[cfg(test)]
 mod tests {
+    use crate::{
+        application::results::{MutationResult, ResultRead},
+        model::{CronDeleteOutcome, CronJobMutationOutcome},
+    };
     use serde_json::json;
 
     use super::*;
@@ -1211,7 +991,9 @@ mod tests {
         invalid.message = None;
 
         assert_eq!(
-            job_body(CronJobMutationOutcome::Applied(Box::new(invalid))),
+            result_body(ResultRead::Completed(MutationResult::job(
+                CronJobMutationOutcome::Applied(Box::new(invalid))
+            ))),
             fixed(409, "Cron operation outcome is unknown")
         );
     }
@@ -1255,15 +1037,21 @@ mod tests {
     #[test]
     fn mutation_outcome_mapping_preserves_unknown_delivery() {
         assert_eq!(
-            job_body(CronJobMutationOutcome::OutcomeUnknown),
+            result_body(ResultRead::Completed(MutationResult::job(
+                CronJobMutationOutcome::OutcomeUnknown
+            ))),
             fixed(409, "Cron operation outcome is unknown")
         );
         assert_eq!(
-            job_body(CronJobMutationOutcome::Rejected),
+            result_body(ResultRead::Completed(MutationResult::job(
+                CronJobMutationOutcome::Rejected
+            ))),
             fixed(422, "Cron operation was rejected")
         );
         assert_eq!(
-            delete_body(CronDeleteOutcome::OutcomeUnknown),
+            result_body(ResultRead::Completed(MutationResult::deleted(
+                CronDeleteOutcome::OutcomeUnknown
+            ))),
             fixed(409, "Cron operation outcome is unknown")
         );
         assert_eq!(

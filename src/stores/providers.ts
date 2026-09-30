@@ -16,7 +16,7 @@ import {
 } from '@/lib/provider-projection';
 import { refreshProviderPostMutationProjections } from '@/stores/provider-post-mutation-refresh';
 import { startUiTiming, trackUiEvent } from '@/lib/telemetry';
-import type { ProviderMutationReceipt } from '@/lib/host-api-transport-contract';
+import type { ProviderCallDetail } from '@/types/call-log/provider';
 import { nativeProjectionError } from '@/lib/provider-projection-errors';
 
 const PROVIDER_SNAPSHOT_TIMEOUT_MS = 20000;
@@ -153,7 +153,7 @@ interface ProviderState {
   mutatingActionsByAccountId: ProviderMutatingMap;
   error: string | null;
   warning: string | null;
-  lastMutationReceipt: ProviderMutationReceipt | null;
+  lastMutationReceipt: ProviderCallDetail | null;
 
   // Actions
   init: () => Promise<void>;
@@ -164,7 +164,7 @@ interface ProviderState {
   removeAccount: (accountId: string) => Promise<void>;
 }
 
-function providerNativeWarning(receipt: ProviderMutationReceipt | undefined): string | null {
+function providerNativeWarning(receipt: ProviderCallDetail | undefined): string | null {
   return receipt ? nativeProjectionError(receipt) ?? null : null;
 }
 

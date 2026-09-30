@@ -1,3 +1,5 @@
+import type { CallReceipt } from '../../../../../src/types/call-log';
+import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
@@ -19,8 +21,8 @@ export type ManualTeamMaterializeAndCreateRequest = Readonly<{
 }>;
 
 export type ManualTeamTransportResponse = Readonly<{
-  status: 200 | 503;
-  body: Readonly<{ status: 'materialized' | 'rejected' | 'outcome_unknown' }> | typeof UNAVAILABLE;
+  status: 202 | 503;
+  body: CallReceipt | typeof UNAVAILABLE;
 }>;
 
 export interface ManualTeamTransport {
@@ -49,7 +51,9 @@ export function createManualTeamTransport(
         fetcher,
         body: request,
       });
-      if (response?.status === 200 && isOutcome(response.body)) return { status: 200, body: response.body };
+      if (response?.status === 202) {
+        try { return { status: 202, body: decodeCallReceipt(response.body) }; } catch { /* Closed receipt boundary. */ }
+      }
       return { status: 503, body: UNAVAILABLE };
     },
   };
@@ -75,12 +79,6 @@ function isRole(value: unknown): value is ManualTeamRole {
     && isText(value.agentId)
     && isText(value.displayName)
     && typeof value.leader === 'boolean';
-}
-
-function isOutcome(value: unknown): value is Readonly<{ status: 'materialized' | 'rejected' | 'outcome_unknown' }> {
-  return isRecord(value)
-    && hasExactKeys(value, ['status'])
-    && (value.status === 'materialized' || value.status === 'rejected' || value.status === 'outcome_unknown');
 }
 
 function isText(value: unknown): value is string {

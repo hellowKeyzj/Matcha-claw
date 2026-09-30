@@ -1,12 +1,16 @@
 import { hostSessionAbort } from '@/lib/host-api';
+import {
+  createSessionTraceId,
+  logSessionTrace,
+  summarizeError,
+  summarizeIdentifier,
+  summarizeSessionIdentity,
+} from '@/lib/session-trace';
 import type { StoreSessionRunCache } from './session-run-cache';
 import { resolveSessionOperationTarget } from './session-identity';
-import { getSessionRuntime } from './store-state-helpers';
+import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import { clearErrorRecoveryTimer, clearHistoryPoll } from './timers';
-import type {
-  ApprovalItem,
-  ChatStoreState,
-} from './types';
+import { isRunActive, type ChatStoreState } from './types';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -16,9 +20,11 @@ type ChatStoreSetFn = (
 type ChatStoreGetFn = () => ChatStoreState;
 
 export const ABORT_STOPPING_TIMEOUT_ERROR = 'chat.abort.stopping-timeout';
+export const ABORT_UNKNOWN_ERROR = 'chat.abort.unknown';
+export const ABORT_REJECTED_ERROR = 'chat.abort.rejected';
+export const ABORT_REQUEST_FAILED_ERROR = 'chat.abort.request-failed';
 
-const ABORT_RETRY_INTERVAL_MS = 3_000;
-const ABORT_RETRY_TIMEOUT_MS = 15_000;
+const ABORT_TERMINAL_WAIT_MS = 15_000;
 
 interface ExecuteStoreAbortRunParams {
   set: ChatStoreSetFn;
@@ -29,88 +35,97 @@ interface ExecuteStoreAbortRunParams {
   onAbortedTelemetry: (sessionKey: string) => void;
 }
 
-function getPendingApprovalsForCurrentSession(
-  state: ChatStoreState,
-): { sessionKey: string; pendingApprovals: ApprovalItem[] } {
-  const sessionKey = state.currentSessionKey;
-  const pendingApprovals = state.pendingApprovalsBySession[sessionKey] ?? [];
-  return { sessionKey, pendingApprovals };
-}
-
-function scheduleAbortRetry(params: {
-  set: ChatStoreSetFn;
-  get: ChatStoreGetFn;
-  sessionKey: string;
-  endpointSessionId?: string;
-  sessionIdentity: ChatStoreState['loadedSessions'][string]['meta']['sessionIdentity'];
-  runId?: string;
-  approvalIds: string[];
-  startedAtMs: number;
-}): void {
-  const { set, get, sessionKey, endpointSessionId, sessionIdentity, runId, approvalIds, startedAtMs } = params;
-  if (!sessionIdentity) {
-    return;
-  }
-  setTimeout(() => {
-    const runtime = getSessionRuntime(get(), sessionKey);
-    if (runtime.runPhase !== 'stopping') {
-      return;
-    }
-    if (Date.now() - startedAtMs >= ABORT_RETRY_TIMEOUT_MS) {
-      set({ error: ABORT_STOPPING_TIMEOUT_ERROR });
-      return;
-    }
-    void hostSessionAbort({
-      ...(endpointSessionId ? { endpointSessionId } : {}),
-      sessionIdentity,
-      ...(runId ? { runId } : {}),
-      approvalIds,
-    }).then(() => {
-      scheduleAbortRetry(params);
-    }).catch(() => {
-      scheduleAbortRetry(params);
-    });
-  }, ABORT_RETRY_INTERVAL_MS);
-}
-
 export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): Promise<void> {
   const { set, get, sessionRunCache, onBeginMutating, onFinishMutating, onAbortedTelemetry } = params;
+  const stateAtClick = get();
+  const sessionKey = stateAtClick.currentSessionKey;
+  const runtimeAtClick = getSessionRuntime(stateAtClick, sessionKey);
+  if (runtimeAtClick.runPhase === 'stopping' || !isRunActive(runtimeAtClick)) return;
+
+  const runId = runtimeAtClick.activeRunId ?? undefined;
+  const sendGeneration = sessionRunCache.getSendGeneration(sessionKey);
+  const approvalIds = (stateAtClick.pendingApprovalsBySession[sessionKey] ?? []).map((approval) => approval.id);
+  const traceId = createSessionTraceId('abort-boundary');
+  const startedAtMs = Date.now();
+  const stoppingUpdatedAt = Math.max(startedAtMs, (runtimeAtClick.updatedAt ?? 0) + 1);
+  const reportFailure = (message: string) => {
+    set((state) => {
+      const runtime = getSessionRuntime(state, sessionKey);
+      if (runtime.runPhase !== 'stopping'
+        || runtime.updatedAt !== stoppingUpdatedAt
+        || sessionRunCache.getSendGeneration(sessionKey) !== sendGeneration
+        || (runId && runtime.activeRunId !== runId)) return state;
+      const at = Date.now();
+      return {
+        loadedSessions: patchSessionRecord(state, sessionKey, {
+          runtime: {
+            ...runtime,
+            runPhase: runtimeAtClick.runPhase,
+            lastError: message,
+            lastIssue: { message, code: message, source: 'rpc', at, retryable: true },
+            updatedAt: at,
+          },
+        }),
+      };
+    });
+  };
+
+  logSessionTrace('abort.start', traceId, {
+    phase: runtimeAtClick.runPhase,
+    activeRunId: summarizeIdentifier(runId),
+    sessionKey: summarizeIdentifier(sessionKey),
+    pendingApprovalCount: approvalIds.length,
+  });
   clearHistoryPoll();
   clearErrorRecoveryTimer();
-
-  const { sessionKey, pendingApprovals } = getPendingApprovalsForCurrentSession(get());
-  sessionRunCache.nextSendGeneration(sessionKey);
-  onAbortedTelemetry(sessionKey);
+  set((state) => ({
+    loadedSessions: patchSessionRecord(state, sessionKey, {
+      runtime: { ...runtimeAtClick, runPhase: 'stopping', lastError: null, lastIssue: null, updatedAt: stoppingUpdatedAt },
+    }),
+  }));
 
   onBeginMutating();
   try {
-    set((state) => ({
-      pendingApprovalsBySession: {
-        ...state.pendingApprovalsBySession,
-        [sessionKey]: [],
-      },
-    }));
-    const target = resolveSessionOperationTarget(get(), sessionKey);
-    const runId = getSessionRuntime(get(), sessionKey).activeRunId ?? undefined;
-    const approvalIds = pendingApprovals.map((approval) => approval.id);
-    await hostSessionAbort({
+    const target = resolveSessionOperationTarget(stateAtClick, sessionKey);
+    logSessionTrace('abort.target', traceId, {
+      sessionKey: summarizeIdentifier(target.sessionKey),
+      endpointSessionId: summarizeIdentifier(target.endpointSessionId),
+      sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
+    });
+    logSessionTrace('abort.request', traceId, {
+      runId: summarizeIdentifier(runId),
+      approvalIdsCount: approvalIds.length,
+    });
+    const response = await hostSessionAbort({
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
       ...(runId ? { runId } : {}),
-      approvalIds,
+      ...(approvalIds.length > 0 ? { approvalIds } : {}),
+    }, { traceId });
+    logSessionTrace('abort.response', traceId, {
+      outcome: response.outcome,
+      elapsedMs: Date.now() - startedAtMs,
     });
-    scheduleAbortRetry({
-      set,
-      get,
-      sessionKey,
-      endpointSessionId: target.endpointSessionId,
-      sessionIdentity: target.sessionIdentity,
-      runId,
-      approvalIds,
-      startedAtMs: Date.now(),
-    });
+    if (response.outcome !== 'succeeded') {
+      reportFailure(response.outcome === 'target_rejected' ? ABORT_REJECTED_ERROR : ABORT_UNKNOWN_ERROR);
+      return;
+    }
+    onAbortedTelemetry(sessionKey);
+    // A receipt is not a terminal event; this deadline never resends cancellation.
+    setTimeout(() => {
+      logSessionTrace('abort.terminal.deadline', traceId, {
+        phase: getSessionRuntime(get(), sessionKey).runPhase,
+        activeRunId: summarizeIdentifier(getSessionRuntime(get(), sessionKey).activeRunId),
+        elapsedMs: Date.now() - startedAtMs,
+      });
+      reportFailure(ABORT_STOPPING_TIMEOUT_ERROR);
+    }, ABORT_TERMINAL_WAIT_MS);
   } catch (err) {
-    set({ error: String(err) });
+    logSessionTrace('abort.error', traceId, {
+      ...summarizeError(err),
+      elapsedMs: Date.now() - startedAtMs,
+    });
+    reportFailure(ABORT_REQUEST_FAILED_ERROR);
   } finally {
     onFinishMutating();
   }

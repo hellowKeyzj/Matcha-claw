@@ -13,7 +13,13 @@ pub(crate) enum Delivery {
     Wait(AgentWaitResponse),
     Created(AgentMutationResponse),
     Updated(AgentMutationResponse),
-    Deleted(AgentMutationResponse),
+    Deleted(agents::AgentDeleted),
+    WorkspaceInitializationFailed(AgentMutationResponse),
+    PackageInstallFailed {
+        agent_id: String,
+        failure: agents::PackageInstallFailure,
+        compensation: agents::InstallCompensation,
+    },
     Files(Vec<AgentFileResponse>),
     File(AgentFileResponse),
     Configuration(ConfigurationResponse),
@@ -36,7 +42,6 @@ impl Delivery {
             | Self::Wait(_)
             | Self::Created(_)
             | Self::Updated(_)
-            | Self::Deleted(_)
             | Self::Files(_)
             | Self::File(_)
             | Self::Configuration(_)
@@ -45,6 +50,13 @@ impl Delivery {
             | Self::ToolConfiguration(_)
             | Self::PackageExport(_)
             | Self::PackageInstall(_) => 200,
+            Self::Deleted(agent) => if agent.succeeded() { 200 } else { 503 },
+            Self::WorkspaceInitializationFailed(_) => 503,
+            Self::PackageInstallFailed { failure, .. } => match failure {
+                agents::PackageInstallFailure::Rejected => 422,
+                agents::PackageInstallFailure::OutcomeUnknown => 409,
+                agents::PackageInstallFailure::Unavailable => 503,
+            },
             Self::Rejected => 422,
             Self::OutcomeUnknown | Self::WaitUnknown | Self::Unsupported => 409,
             Self::Unavailable => 503,
@@ -71,7 +83,20 @@ impl Delivery {
             }),
             Self::Created(agent) => success_mutation("created", agent),
             Self::Updated(agent) => success_mutation("updated", agent),
-            Self::Deleted(agent) => success_mutation("deleted", agent),
+            Self::Deleted(agent) => serde_json::json!({
+                "success": agent.succeeded(), "kind": "deleted",
+                "agent": { "id": agent.agent_id, "name": null, "model": null },
+                "nativeOk": agent.native_ok, "removedBindings": agent.removed_bindings,
+                "failedCount": agent.failed_count, "purgeFailedCount": agent.purge_failed_count,
+                "sealedPurge": agent.sealed_purge,
+            }),
+            Self::WorkspaceInitializationFailed(agent) => serde_json::json!({
+                "success": false, "error": "Subagent workspace initialization failed", "agent": agent,
+            }),
+            Self::PackageInstallFailed { agent_id, compensation, .. } => serde_json::json!({
+                "success": false, "error": "Subagent package installation failed",
+                "agentId": agent_id, "compensation": compensation,
+            }),
             Self::Files(files) => serde_json::json!({ "success": true, "files": files }),
             Self::File(file) => serde_json::json!({ "success": true, "file": file }),
             Self::Configuration(configuration) => serde_json::json!({
@@ -208,7 +233,9 @@ pub(crate) fn map_outcome(outcome: agents::Outcome) -> Delivery {
         agents::Outcome::Waited(wait) => Delivery::Wait(agent_wait(wait)),
         agents::Outcome::Created(agent) => Delivery::Created(agent_mutation(agent)),
         agents::Outcome::Updated(agent) => Delivery::Updated(agent_mutation(agent)),
-        agents::Outcome::Deleted(agent) => Delivery::Deleted(agent_mutation(agent)),
+        agents::Outcome::Deleted(agent) => Delivery::Deleted(agent),
+        agents::Outcome::WorkspaceInitializationFailed(agent) => Delivery::WorkspaceInitializationFailed(agent_mutation(agent)),
+        agents::Outcome::PackageInstallFailed { agent_id, failure, compensation } => Delivery::PackageInstallFailed { agent_id, failure, compensation },
         agents::Outcome::Files(files) => {
             Delivery::Files(files.files.into_iter().map(agent_file).collect())
         }
@@ -455,16 +482,6 @@ impl IntoMutationResponse for agents::AgentCreated {
 }
 
 impl IntoMutationResponse for agents::AgentUpdated {
-    fn into_mutation_response(self) -> AgentMutationResponse {
-        AgentMutationResponse {
-            id: self.agent_id,
-            name: None,
-            model: None,
-        }
-    }
-}
-
-impl IntoMutationResponse for agents::AgentDeleted {
     fn into_mutation_response(self) -> AgentMutationResponse {
         AgentMutationResponse {
             id: self.agent_id,

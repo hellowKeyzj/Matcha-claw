@@ -22,6 +22,10 @@ import {
   type AgentAvatarStyle,
 } from '@/lib/agent-avatar';
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import { hostExportSkillBundles, hostSkillsMutation } from '@/lib/skills';
+import { isSubagentMutation, subagentMutationError, waitForSubagentMutation, waitForSubagentResult } from '@/lib/subagent-call';
+import { decodeCallReceipt } from '@/types/call-log/receipt';
+import { runCloudPackageOperation } from '@/lib/cloud-package-call';
 import i18n from '@/i18n';
 import { fetchSelectableProviderModels } from '@/lib/provider-models';
 import { useChatStore } from '@/stores/chat';
@@ -52,7 +56,6 @@ import type {
   ModelCatalogEntry,
   PreviewDiffByFile,
   SubagentCloudPackage,
-  SubagentCloudPackageDownloadResult,
   SubagentCloudPackageInstallResult,
   SubagentCloudPackageUploadResult,
   SubagentConfigPackage,
@@ -62,6 +65,8 @@ import type {
   SubagentTemplateDetail,
   SubagentTargetFile,
 } from '@/types/subagent';
+
+import type { CloudPackageListPage, CloudPackageVersion, InstalledCloudPackage, InstalledCloudPackageList } from '@/types/cloud-package';
 
 const MAIN_AGENT_ID = 'main';
 const DRAFT_HISTORY_POLL_INTERVAL_MS = 500;
@@ -100,7 +105,7 @@ async function subagentManagementCapabilityExecute<TResult>(
   target: CapabilityTarget,
   timeoutMs?: number,
 ): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/subagents/agents', {
+  const result = await hostApiFetch<unknown>('/api/subagents/agents', {
     method: 'POST',
     body: JSON.stringify({
       id: SUBAGENT_MANAGEMENT_CAPABILITY_ID,
@@ -111,6 +116,9 @@ async function subagentManagementCapabilityExecute<TResult>(
     }),
     timeoutMs,
   });
+  return isSubagentMutation(operationId)
+    ? await waitForSubagentMutation<TResult>(result, operationId, scope.endpoint, typeof input.agentId === 'string' ? input.agentId : undefined)
+    : result as TResult;
 }
 
 interface AgentFileGetResult {
@@ -120,12 +128,9 @@ interface AgentFileGetResult {
 }
 
 interface AgentsCreateResult {
-  agentId?: unknown;
-  agent?: {
-    id?: unknown;
-  };
-  name?: unknown;
-  workspace?: unknown;
+  success: boolean;
+  agent: { id: string };
+  error?: string;
 }
 
 interface CreateAgentOptions {
@@ -204,6 +209,16 @@ interface SubagentsState {
   agents: SubagentSummary[];
   agentsResource: ResourceStateMeta<SubagentSummary[]>;
   cloudPackages: SubagentCloudPackage[];
+  installedCloudPackages: InstalledCloudPackage[];
+  cloudLoading: boolean;
+  cloudError: string | null;
+  myCloudPackages: CloudPackageVersion[];
+  myCloudLoading: boolean;
+  myCloudError: string | null;
+  cloudPublishingByVersionId: Record<string, boolean>;
+  cloudInstallingByVersionId: Record<string, boolean>;
+  loadMyCloudPackages: () => Promise<void>;
+  publishCloudAgentPackage: (packageVersionId: string) => Promise<void>;
   availableModels: ModelCatalogEntry[];
   modelsLoading: boolean;
   mutating: boolean;
@@ -246,7 +261,6 @@ interface SubagentsState {
   exportAgentConfig: (agentId: string) => Promise<SubagentConfigPackage>;
   exportAgentPackage: (agentId: string) => Promise<SubagentPackageExportResult>;
   uploadAgentPackageToCloud: (agentId: string) => Promise<SubagentCloudPackageUploadResult>;
-  downloadAgentPackageFromCloud: (packageVersionId: string) => Promise<SubagentCloudPackageDownloadResult>;
   installAgentPackageFromCloud: (packageVersionId: string) => Promise<SubagentCloudPackageInstallResult>;
   importAgentConfig: (input: unknown) => Promise<SubagentImportResult>;
   updateAgent: (input: {
@@ -892,32 +906,15 @@ async function updateAgentSkillsConfig(scope: AgentScope, agentId: string, skill
 async function exportSkillBundles(
   skillKeys: string[],
 ): Promise<NonNullable<SubagentConfigPackage['agent']['skillBundles']>> {
-  const result = await hostApiFetch<{
-    outcome?: unknown;
-    skillBundles?: unknown;
-  }>('/api/subagents/skill-bundles/export', {
-    method: 'POST',
-    body: JSON.stringify({ skillKeys }),
-  });
-  return Array.isArray(result.skillBundles)
-    ? result.skillBundles as NonNullable<SubagentConfigPackage['agent']['skillBundles']>
-    : [];
+  return hostExportSkillBundles(skillKeys);
 }
 
 async function importSkillBundles(
   skillBundles: NonNullable<SubagentConfigPackage['agent']['skillBundles']>,
 ): Promise<SkillBundleImportResult> {
-  const result = await hostApiFetch<{
-    outcome?: unknown;
-    error?: unknown;
-  }>('/api/subagents/skill-bundles/import', {
-    method: 'POST',
-    body: JSON.stringify({ skillBundles }),
-  });
-  return {
-    ok: result.outcome === 'accepted',
-    ...(typeof result.error === 'string' ? { error: result.error } : {}),
-  };
+  const result = await hostSkillsMutation('/api/subagents/skill-bundles/import',
+    { skillBundles }, 'skills.bundles.import');
+  return { ok: result.outcome === 'accepted' };
 }
 
 async function updateAgentDescriptionConfig(scope: AgentScope, agentId: string, description: string | undefined): Promise<void> {
@@ -1077,6 +1074,7 @@ let latestLoadAgentsRequestId = 0;
 let agentMutationChain: Promise<void> = Promise.resolve();
 let activeMutatingOperationCount = 0;
 const pendingDeletedAgentIds = new Set<string>();
+const unconfirmedDeletedAgentIds = new Set<string>();
 let inflightLoadAgentsTask: Promise<void> | null = null;
 
 export function __resetSubagentsStoreInternalCachesForTest(): void {
@@ -1087,6 +1085,7 @@ export function __resetSubagentsStoreInternalCachesForTest(): void {
   configDisplayGeneration = 0;
   persistedFilesLoadTasks.clear();
   pendingDeletedAgentIds.clear();
+  unconfirmedDeletedAgentIds.clear();
   latestLoadAgentsRequestId = 0;
   agentMutationChain = Promise.resolve();
   activeMutatingOperationCount = 0;
@@ -1217,6 +1216,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   },
   agentsResource: createIdleResourceState<SubagentSummary[]>([]),
   cloudPackages: [],
+  installedCloudPackages: [],
+  cloudLoading: false,
+  cloudError: null,
+  myCloudPackages: [],
+  myCloudLoading: false,
+  myCloudError: null,
+  cloudPublishingByVersionId: {},
+  cloudInstallingByVersionId: {},
   availableModels: [],
   modelsLoading: false,
   mutating: false,
@@ -1236,8 +1243,46 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   selectedAgentId: null,
 
   loadCloudPackages: async () => {
-    const result = await hostApiFetch<{ items?: SubagentCloudPackage[] }>('/api/packages/market?packageType=agent');
-    set({ cloudPackages: Array.isArray(result.items) ? result.items : [] });
+    set({ cloudLoading: true, cloudError: null });
+    try {
+      const [result, installed] = await Promise.all([
+        hostApiFetch<CloudPackageListPage>('/api/packages/market?packageType=agent'),
+        hostApiFetch<InstalledCloudPackageList>('/api/packages/installed'),
+      ]);
+      set({ cloudPackages: result.items, installedCloudPackages: installed.packages });
+    } catch {
+      set({ cloudPackages: [], installedCloudPackages: [], cloudError: 'cloudUnavailable' });
+    } finally {
+      set({ cloudLoading: false });
+    }
+  },
+
+  loadMyCloudPackages: async () => {
+    set({ myCloudLoading: true, myCloudError: null });
+    try {
+      const result = await hostApiFetch<CloudPackageListPage>('/api/packages/mine?packageType=agent');
+      set({ myCloudPackages: result.items });
+    } catch {
+      set({ myCloudError: 'cloudUnavailable' });
+    } finally {
+      set({ myCloudLoading: false });
+    }
+  },
+
+  publishCloudAgentPackage: async (packageVersionId) => {
+    if (get().cloudPublishingByVersionId[packageVersionId]) return;
+    set((state) => ({ cloudPublishingByVersionId: { ...state.cloudPublishingByVersionId, [packageVersionId]: true } }));
+    try {
+      const published = await hostApiFetch<CloudPackageVersion>(`/api/packages/${encodeURIComponent(packageVersionId)}/publish`, { method: 'POST' });
+      set((state) => ({ myCloudPackages: state.myCloudPackages.map((item) => item.packageVersionId === packageVersionId ? published : item) }));
+      await get().loadCloudPackages();
+    } finally {
+      set((state) => {
+        const next = { ...state.cloudPublishingByVersionId };
+        delete next[packageVersionId];
+        return { cloudPublishingByVersionId: next };
+      });
+    }
   },
 
   loadAgents: async (options) => {
@@ -1313,13 +1358,12 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           return;
         }
         settlePendingDeletedAgentIds(collectRuntimeAgentIdSet(result));
+        const retainedAgentIds = [...result.agents.map((agent) => agent.id), ...unconfirmedDeletedAgentIds];
         useChatStore.getState().reconcileAgentSessionTombstones(
-          result.agents
-            .map((agent) => agent.id)
-            .filter((agentId) => !isAgentPendingDeletion(agentId)),
+          retainedAgentIds.filter((agentId) => !isAgentPendingDeletion(agentId)),
         );
         try {
-          pruneStoredAvatarPresentations(result.agents.map((agent) => agent.id));
+          pruneStoredAvatarPresentations(retainedAgentIds);
         } catch {
           // Ignore local presentation cleanup failures during refresh.
         }
@@ -1558,15 +1602,16 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         scope: managementScope,
         target: { kind: 'subagent' },
       });
-      const createdAgentId = getOptionalString(createResult?.agentId) ?? getOptionalString(createResult?.agent?.id);
+      const createdAgentId = getOptionalString(createResult.agent?.id);
       if (!createdAgentId) {
         throw new Error('Subagent creation returned an invalid receipt');
       }
+      unconfirmedDeletedAgentIds.delete(createdAgentId);
       const normalizedCreatedAgentId = normalizeAgentIdForComparison(createdAgentId);
       if (normalizedCreatedAgentId) {
         pendingDeletedAgentIds.delete(normalizedCreatedAgentId);
       }
-      const warnings: string[] = [];
+      const warnings: string[] = createResult.success ? [] : [buildCreateWarning(createdAgentId, createResult.error || 'Subagent workspace initialization failed')];
       const nextDescription = getOptionalString(description);
       if (nextDescription !== undefined) {
         try {
@@ -1732,57 +1777,55 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     if (!normalizedAgentId) {
       throw new Error('Agent id is required');
     }
-    const uploaded = await hostApiFetch<{ packageId?: string; packageVersionId?: string; name?: string; fileName?: string; bytes?: number }>('/api/packages/upload/sealed-agent', {
-      method: 'POST',
-      body: JSON.stringify({ agentId: normalizedAgentId }),
-      timeoutMs: 120000,
-    });
+    const uploaded = await runCloudPackageOperation('uploadSealedAgent', { agentId: normalizedAgentId });
+    await get().loadMyCloudPackages();
     return {
       agentId: normalizedAgentId,
       packageId: uploaded.packageId,
       packageVersionId: uploaded.packageVersionId,
-      fileName: uploaded.fileName ?? uploaded.name,
-      size: uploaded.bytes,
+      fileName: uploaded.name,
       uploadedAtMs: Date.now(),
     };
   },
 
-  downloadAgentPackageFromCloud: async (packageVersionId) => {
-    const result = await hostApiFetch<{ packageId?: string; packageVersionId?: string; filename?: string; bytes?: number }>('/api/packages/download', {
-      method: 'POST',
-      body: JSON.stringify({ packageVersionId, packageType: 'agent', source: 'subagents' }),
-      timeoutMs: 120000,
-    });
-    return {
-      agentId: result.packageVersionId ?? packageVersionId,
-      packageId: result.packageId,
-      packageVersionId: result.packageVersionId,
-      fileName: result.filename ?? packageVersionId,
-      size: result.bytes,
-      downloadedAtMs: Date.now(),
-    };
-  },
-
   installAgentPackageFromCloud: async (packageVersionId) => {
-    let result: { packageId?: string; packageVersionId?: string; install?: { outcome?: string; agentId?: string } };
+    set((state) => ({ cloudInstallingByVersionId: { ...state.cloudInstallingByVersionId, [packageVersionId]: true } }));
     try {
-      result = await hostApiFetch<{ packageId?: string; packageVersionId?: string; install?: { outcome?: string; agentId?: string } }>('/api/packages/install', {
-        method: 'POST',
-        body: JSON.stringify({ packageVersionId, packageType: 'agent', source: 'subagents' }),
-        timeoutMs: 120000,
+      let result: { packageId?: string; packageVersionId?: string; install?: { outcome?: string; agentId?: string } };
+      try {
+        const admitted = await runCloudPackageOperation('install', { packageVersionId, packageType: 'agent', source: 'subagents' });
+        if (admitted.packageVersionId !== packageVersionId) throw new Error('Invalid cloud package installation identity');
+        const receipt = decodeCallReceipt(admitted.install);
+        const terminal = await waitForSubagentResult(receipt, 'subagents.package.install', {
+          kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local',
+        });
+        const confirmed = await hostApiFetch<typeof result>('/api/packages/install/confirm', {
+          method: 'POST', body: JSON.stringify({ callId: receipt.callId }),
+        });
+        result = { ...admitted, ...confirmed, install: confirmed.install };
+        if (terminal.body.success !== true) throw new Error(subagentMutationError(terminal.body));
+        const installed = terminal.body.package as { agentId: string };
+        if (result.install?.agentId !== installed.agentId) throw new Error('Invalid Subagent package confirmation');
+      } catch (error) {
+        throw new Error(agentPackageInstallErrorMessage(error), { cause: error });
+      }
+      if (result.install?.outcome !== 'accepted' || !result.install.agentId) {
+        throw new Error(i18n.t('subagents:transfer.installPackageUnexpectedResult'));
+      }
+      await get().loadAgents({ silent: true });
+      await get().loadCloudPackages();
+      return {
+        agentId: result.install.agentId,
+        packageId: result.packageId,
+        packageVersionId: result.packageVersionId ?? packageVersionId,
+      };
+    } finally {
+      set((state) => {
+        const next = { ...state.cloudInstallingByVersionId };
+        delete next[packageVersionId];
+        return { cloudInstallingByVersionId: next };
       });
-    } catch (error) {
-      throw new Error(agentPackageInstallErrorMessage(error), { cause: error });
     }
-    if (result.install?.outcome !== 'accepted' || !result.install.agentId) {
-      throw new Error(i18n.t('subagents:transfer.installPackageUnexpectedResult'));
-    }
-    await get().loadAgents({ silent: true });
-    return {
-      agentId: result.install.agentId,
-      packageId: result.packageId,
-      packageVersionId: result.packageVersionId ?? packageVersionId,
-    };
   },
 
   importAgentConfig: async (input) => {
@@ -1944,18 +1987,20 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       set({
         error: error instanceof Error ? error.message : 'Failed to delete subagent',
       });
-      return;
+      throw error;
     }
 
     beginGlobalMutating(set);
     const agentsSnapshot = readAgentsFromState(get());
-    const selectedAgentIdSnapshot = get().selectedAgentId;
-    const managedAgentIdSnapshot = get().managedAgentId;
+    unconfirmedDeletedAgentIds.add(agentId);
     try {
+      await rpc('agents.delete', { agentId, deleteFiles: true }, {
+        scope: managementScope,
+        target: buildSubagentTarget(managementScope, agentId),
+      });
+      unconfirmedDeletedAgentIds.delete(agentId);
       const normalizedAgentId = normalizeAgentIdForComparison(agentId);
-      if (normalizedAgentId) {
-        pendingDeletedAgentIds.add(normalizedAgentId);
-      }
+      if (normalizedAgentId) pendingDeletedAgentIds.add(normalizedAgentId);
       set((state) => {
         const nextAgents = state.agentsResource.data.filter((entry) => entry.id !== agentId);
         const selectedAgentId = state.selectedAgentId === agentId
@@ -1973,30 +2018,17 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           managedAgentId,
         };
       });
-      await rpc('agents.delete', { agentId, deleteFiles: true }, {
-        scope: managementScope,
-        target: buildSubagentTarget(managementScope, agentId),
-      });
       useChatStore.getState().forgetAgentSessions(agentId);
+      if (agentsSnapshot.find((agent) => agent.id === agentId)?.sealed) await get().loadCloudPackages();
       try {
         persistAvatarPresentation(agentId, undefined);
       } catch {
         // Ignore local presentation cleanup failures during delete.
       }
     } catch (error) {
-      const normalizedAgentId = normalizeAgentIdForComparison(agentId);
-      if (normalizedAgentId) {
-        pendingDeletedAgentIds.delete(normalizedAgentId);
-      }
-      set({
-        agentsResource: {
-          ...get().agentsResource,
-          data: agentsSnapshot,
-        },
-        selectedAgentId: selectedAgentIdSnapshot,
-        managedAgentId: managedAgentIdSnapshot,
-        error: getErrorMessage(error) || 'Failed to delete subagent',
-      });
+      const message = getErrorMessage(error) || 'Failed to delete subagent';
+      set({ error: message });
+      throw error instanceof Error ? error : new Error(message, { cause: error });
     } finally {
       finishGlobalMutating(set);
     }

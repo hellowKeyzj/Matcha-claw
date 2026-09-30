@@ -1,3 +1,4 @@
+import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { isRecord, sendLoopbackJson } from '../client';
 
@@ -6,7 +7,7 @@ const INVALID = { success: false, error: 'Team runtime request is invalid' } as 
 const UNAVAILABLE = { success: false, error: 'Team runtime operation is unavailable' } as const;
 
 export type TeamRuntimeTransportResponse = Readonly<{
-  status: 200 | 400 | 500 | 503;
+  status: 200 | 202 | 400 | 500 | 503;
   body: unknown;
 }>;
 
@@ -35,7 +36,18 @@ export function createTeamRuntimeTransport(
         fetcher,
         body: withTrace(request, traceId),
       });
-      if (response?.status === 200) return { status: 200, body: response.body };
+      if (isRecord(request) && (request.operationId === 'team.provisionAgents' || request.operationId === 'team.delete' || request.operationId === 'team.runDelete')) {
+        if (response?.status === 202) {
+          try {
+            return { status: 202, body: decodeCallReceipt(response.body) };
+          } catch {
+            return { status: 503, body: UNAVAILABLE };
+          }
+        }
+        if (response?.status === 200) return { status: 503, body: UNAVAILABLE };
+      } else if (response?.status === 200) {
+        return { status: 200, body: response.body };
+      }
       if (response?.status === 400) return { status: 400, body: response.body ?? INVALID };
       if (response?.status === 500) return { status: 500, body: response.body ?? UNAVAILABLE };
       return { status: 503, body: response?.body ?? UNAVAILABLE };

@@ -46,6 +46,7 @@ pub(super) const CAPABILITY_EXECUTE_ENDPOINT: &str = "/api/skills/capability/exe
 pub(super) enum RequestError {
     Invalid,
     Unauthorized,
+    Admission(platform::call::CallLogError),
 }
 
 pub(super) async fn handle_status(
@@ -90,20 +91,93 @@ pub(super) async fn handle_management(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     handle: SkillsModule,
     now: u64,
-) -> Result<Outcome, RequestError> {
+    call: Option<crate::operation::RecordedCall>,
+) -> Result<(u16, Value), RequestError> {
     let (scope, capability, subject) = authorization(endpoint).ok_or(RequestError::Invalid)?;
     let authorization = bearer(headers).ok_or(RequestError::Unauthorized)?;
-    {
-        let mut verifier = verifier.lock().await;
-        verifier
-            .verify(authorization, now, endpoint, scope, capability, subject)
-            .map_err(|_| RequestError::Unauthorized)?;
-    }
+    let principal = verifier
+        .lock()
+        .await
+        .verify(authorization, now, endpoint, scope, capability, subject)
+        .map_err(|_| RequestError::Unauthorized)?
+        .principal()
+        .to_owned();
     let value = serde_json::from_slice::<Value>(body).map_err(|_| RequestError::Invalid)?;
     let command = decode(endpoint, value).map_err(|_| RequestError::Invalid)?;
+    if matches!(
+        command,
+        Command::Config { .. } | Command::UploadCommit { .. }
+    ) {
+        let call = call.ok_or(RequestError::Admission(
+            platform::call::CallLogError::Unavailable,
+        ))?;
+        let access = crate::result::ResultAccess {
+            principal,
+            scope: scope.into(),
+            capability: capability.into(),
+            subject: subject.into(),
+            private: false,
+        };
+        let worker = handle.clone();
+        let receipt = handle
+            .submit_result(
+                call,
+                access,
+                crate::result::SMALL_RESULT_BUDGET,
+                async move {
+                    if matches!(command, Command::Config { .. }) {
+                        return Ok(crate::result::configure(&worker, command).await);
+                    }
+                    let (outcome, receipt) = match worker.manage_skills(command).await {
+                        Ok(Outcome::Upload(UploadOutcome::Accepted(receipt))) => {
+                            (crate::management::ConfigOutcome::Accepted, Some(receipt))
+                        }
+                        Ok(Outcome::Upload(UploadOutcome::Rejected) | Outcome::Rejected) => {
+                            (crate::management::ConfigOutcome::Rejected, None)
+                        }
+                        _ => (crate::management::ConfigOutcome::Unknown, None),
+                    };
+                    Ok(crate::result::SkillResult::UploadCommit { outcome, receipt })
+                },
+            )
+            .await
+            .map_err(RequestError::Admission)?;
+        return Ok((202, json!(receipt)));
+    }
+    if matches!(
+        command,
+        Command::ClawHubInstall { .. }
+            | Command::ClawHubUpdate { .. }
+            | Command::ImportMarkdown { .. }
+            | Command::ImportBundle { .. }
+            | Command::Uninstall { .. }
+    ) {
+        let call = call.ok_or(RequestError::Admission(
+            platform::call::CallLogError::Unavailable,
+        ))?;
+        {
+            let worker = handle.clone();
+            let receipt = handle
+                .submit_operation(call, async move {
+                    match worker.manage_skills(command).await {
+                        Ok(outcome) => {
+                            let (status, body) = response(outcome);
+                            platform::loopback::Response::json(status, body)
+                        }
+                        Err(_) => {
+                            platform::loopback::Response::json(503, json!({ "outcome": "unknown" }))
+                        }
+                    }
+                })
+                .await
+                .map_err(RequestError::Admission)?;
+            return Ok((202, json!(receipt)));
+        }
+    }
     handle
         .manage_skills(command)
         .await
+        .map(response)
         .map_err(|_| RequestError::Invalid)
 }
 
@@ -113,23 +187,92 @@ pub(super) async fn handle_capability_execute(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     handle: SkillsModule,
     now: u64,
+    call: Option<crate::operation::RecordedCall>,
 ) -> Result<control::ManagementOutcome, RequestError> {
     let value = serde_json::from_slice::<Value>(body).map_err(|_| RequestError::Invalid)?;
     let operation_id = value
         .get("operationId")
         .and_then(Value::as_str)
         .ok_or(RequestError::Invalid)?;
-    verify(
-        headers,
-        verifier,
-        now,
-        CAPABILITY_EXECUTE_ENDPOINT,
-        "skill.management",
-        operation_id,
-        "skill-management",
-    )
-    .await?;
-    Ok(control::execute_management_request(&handle, value).await)
+    let principal = verifier
+        .lock()
+        .await
+        .verify(
+            bearer(headers).ok_or(RequestError::Unauthorized)?,
+            now,
+            CAPABILITY_EXECUTE_ENDPOINT,
+            "skill.management",
+            operation_id,
+            "skill-management",
+        )
+        .map_err(|_| RequestError::Unauthorized)?
+        .principal()
+        .to_owned();
+    let operation_id = operation_id.to_owned();
+    let request = control::decode_management_request(value).map_err(|_| RequestError::Invalid)?;
+    if matches!(
+        request,
+        control::ManagementRequest::UpdateConfig(_)
+            | control::ManagementRequest::UpdateState(_)
+            | control::ManagementRequest::UpdateBatchState { .. }
+            | control::ManagementRequest::ExportBundles(_)
+    ) {
+        let call = call.ok_or(RequestError::Admission(
+            platform::call::CallLogError::Unavailable,
+        ))?;
+        let budget = if matches!(request, control::ManagementRequest::ExportBundles(_)) {
+            crate::result::BUNDLE_RESULT_BUDGET
+        } else {
+            crate::result::SMALL_RESULT_BUDGET
+        };
+        let access = crate::result::ResultAccess {
+            principal,
+            scope: "skill.management".into(),
+            capability: operation_id,
+            subject: "skill-management".into(),
+            private: false,
+        };
+        let worker = handle.clone();
+        let receipt = handle
+            .submit_result(call, access, budget, async move {
+                Ok(match request {
+                    control::ManagementRequest::UpdateConfig(command)
+                    | control::ManagementRequest::UpdateState(command) => {
+                        crate::result::configure(&worker, command).await
+                    }
+                    control::ManagementRequest::UpdateBatchState {
+                        commands,
+                        skill_keys,
+                        enabled,
+                    } => crate::result::batch_state(&worker, commands, skill_keys, enabled).await,
+                    control::ManagementRequest::ExportBundles(command) => {
+                        crate::result::export_bundles(&worker, command).await
+                    }
+                    _ => unreachable!(),
+                })
+            })
+            .await
+            .map_err(RequestError::Admission)?;
+        return Ok(control::ManagementOutcome::Succeeded(json!(receipt)));
+    }
+    if matches!(request, control::ManagementRequest::ImportBundles(_)) {
+        let call = call.ok_or(RequestError::Admission(
+            platform::call::CallLogError::Unavailable,
+        ))?;
+        {
+            let worker = handle.clone();
+            let receipt = handle
+                .submit_operation(call, async move {
+                    super::capability_response(
+                        control::dispatch_management_request(&worker, request).await,
+                    )
+                })
+                .await
+                .map_err(RequestError::Admission)?;
+            return Ok(control::ManagementOutcome::Succeeded(json!(receipt)));
+        }
+    }
+    Ok(control::dispatch_management_request(&handle, request).await)
 }
 
 fn authorization(endpoint: &str) -> Option<(&'static str, &'static str, &'static str)> {
@@ -458,6 +601,20 @@ fn validate_bundle_skill_key(value: &str) -> Result<(), ()> {
 
 pub(super) fn response(outcome: Outcome) -> (u16, Value) {
     match outcome {
+        Outcome::Config {
+            outcome,
+            invalid_keys,
+        } => {
+            let status = match outcome {
+                crate::management::ConfigOutcome::Rejected => 400,
+                crate::management::ConfigOutcome::Unknown => 503,
+                _ => 200,
+            };
+            (
+                status,
+                json!({ "outcome": outcome, "invalidKeys": invalid_keys }),
+            )
+        }
         Outcome::Detail(Ok(detail)) => (200, detail_projection(&detail)),
         Outcome::Detail(Err(ReadError::Rejected)) | Outcome::Rejected => {
             (400, json!({ "outcome": "rejected" }))

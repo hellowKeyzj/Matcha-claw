@@ -48,7 +48,7 @@ type FleetMutationOutcome =
   | 'submitted' | 'alreadySubmitted' | 'completed' | 'rejected' | 'accepted' | 'outcomeUnknown'
   | 'alreadyRecorded' | 'replayed' | 'replayAuthorized'
   | 'targetUpdated' | 'targetRemoved'
-  | 'connectionUpdated' | 'connectionRemoved' | 'environmentRegistered' | 'resourceRegistered'
+  | 'connectionUpdated' | 'connectionRemoved' | 'environmentRegistered'
   | 'nodeUpdated' | 'nodeRetired' | 'agentUpdated' | 'agentRevoked'
   | 'runtimeUpdated' | 'runtimeLifecycleUpdated' | 'runtimeRetired'
   | 'endpointUpdated' | 'endpointDrained' | 'endpointRetired'
@@ -61,6 +61,8 @@ type FleetMutationOutcome =
 
 export type FleetMutationResult = Readonly<{
   outcome: FleetMutationOutcome;
+  callId?: string;
+  accepted?: true;
   commandId?: string;
   dispatchId?: string;
   attempt?: number;
@@ -506,7 +508,7 @@ export type FleetTransportResponse = Readonly<{
 }>;
 
 export type FleetMutationTransportResponse = Readonly<{
-  status: 200 | 503;
+  status: 200 | 202 | 503;
   body: FleetMutationResult | FleetTerminalCloseResult | FleetTerminalSessionResult | typeof UNAVAILABLE;
 }>;
 
@@ -531,19 +533,24 @@ export function createFleetTransport(
       if (!isFleetMutationRequest(request)) return { status: 503, body: UNAVAILABLE };
       return requestFleet(runtimeHostTransportPort, issuer, fetcher, request, 'fleet:write', (body) =>
         isFleetMutationResponse(body, request.operation) ? body : null,
+        request.operation === 'fleet.resources.register' ? 202 : 200,
       );
     },
   };
 }
 
-async function requestFleet<T extends FleetSuccessBody | FleetMutationResult | FleetTerminalCloseResult | FleetTerminalSessionResult>(
+async function requestFleet<
+  T extends FleetSuccessBody | FleetMutationResult | FleetTerminalCloseResult | FleetTerminalSessionResult,
+  S extends 200 | 202 = 200,
+>(
   port: number,
   issuer: RuntimeHostDeliveryIssuer,
   fetcher: typeof fetch,
   request: Readonly<{ operation: FleetOperation; input: Readonly<Record<string, unknown>> }>,
   scope: 'fleet:read' | 'fleet:write',
   decode: (body: unknown) => T | null,
-): Promise<Readonly<{ status: 200 | 503; body: T | typeof UNAVAILABLE }>> {
+  successStatus: S = 200 as S,
+): Promise<Readonly<{ status: S | 503; body: T | typeof UNAVAILABLE }>> {
   const response = await sendLoopbackJson({
     port,
     path: '/api/fleet',
@@ -558,8 +565,8 @@ async function requestFleet<T extends FleetSuccessBody | FleetMutationResult | F
     fetcher,
     body: request,
   });
-  const decoded = response?.status === 200 ? decode(response.body) : null;
-  if (decoded) return { status: 200, body: decoded };
+  const decoded = response?.status === successStatus ? decode(response.body) : null;
+  if (decoded) return { status: successStatus, body: decoded };
   return { status: 503, body: UNAVAILABLE };
 }
 
@@ -794,6 +801,12 @@ function isFleetMutationResponse(
   value: unknown,
   operation: FleetMutationOperation,
 ): value is FleetMutationResult | FleetTerminalCloseResult | FleetTerminalSessionResult {
+  if (operation === 'fleet.resources.register') {
+    return isMutationResponse(value)
+      && hasExactKeys(value, ['outcome', 'callId', 'accepted'])
+      && value.outcome === 'accepted'
+      && value.accepted === true;
+  }
   if (operation === 'fleet.terminals.open') return isTerminalSessionResponse(value, 'terminalOpened');
   if (operation === 'fleet.terminals.reconnect') return isTerminalSessionResponse(value, 'terminalReconnected');
   return operation === 'fleet.terminals.close'
@@ -856,8 +869,10 @@ function isBase64Url(value: unknown): value is string {
 }
 
 function isMutationResponse(value: unknown): value is FleetMutationResult {
-  if (!isRecord(value) || !['submitted', 'alreadySubmitted', 'completed', 'rejected', 'accepted', 'outcomeUnknown', 'alreadyRecorded', 'replayed', 'replayAuthorized', 'targetUpdated', 'targetRemoved', 'connectionUpdated', 'connectionRemoved', 'environmentRegistered', 'resourceRegistered', 'nodeUpdated', 'nodeRetired', 'agentUpdated', 'agentRevoked', 'runtimeUpdated', 'runtimeLifecycleUpdated', 'runtimeRetired', 'endpointUpdated', 'endpointDrained', 'endpointRetired', 'probeStarted', 'probeCompleted', 'probeUnknown', 'probeRejected', 'capabilitySyncStarted', 'capabilitySyncCompleted', 'deploymentCompleted', 'deploymentFailed', 'deploymentUnknown', 'deletionCompleted', 'deletionFailed', 'deletionUnknown', 'provisioningCompleted', 'provisioningFailed', 'provisioningUnknown', 'terminalOpened', 'terminalReconnected', 'terminalClosing', 'terminalClosed'].includes(String(value.outcome))) return false;
-  const allowed = ['outcome', 'commandId', 'dispatchId', 'attempt', 'target', 'state', 'message'] as const;
+  if (!isRecord(value) || !['submitted', 'alreadySubmitted', 'completed', 'rejected', 'accepted', 'outcomeUnknown', 'alreadyRecorded', 'replayed', 'replayAuthorized', 'targetUpdated', 'targetRemoved', 'connectionUpdated', 'connectionRemoved', 'environmentRegistered', 'nodeUpdated', 'nodeRetired', 'agentUpdated', 'agentRevoked', 'runtimeUpdated', 'runtimeLifecycleUpdated', 'runtimeRetired', 'endpointUpdated', 'endpointDrained', 'endpointRetired', 'probeStarted', 'probeCompleted', 'probeUnknown', 'probeRejected', 'capabilitySyncStarted', 'capabilitySyncCompleted', 'deploymentCompleted', 'deploymentFailed', 'deploymentUnknown', 'deletionCompleted', 'deletionFailed', 'deletionUnknown', 'provisioningCompleted', 'provisioningFailed', 'provisioningUnknown', 'terminalOpened', 'terminalReconnected', 'terminalClosing', 'terminalClosed'].includes(String(value.outcome))) return false;
+  const allowed = ['outcome', 'commandId', 'dispatchId', 'attempt', 'target', 'state', 'message', 'callId', 'accepted'] as const;
+  if (value.callId !== undefined && (typeof value.callId !== 'string' || !/^[a-f0-9]{32}$/.test(value.callId) || value.accepted !== true)) return false;
+  if (value.accepted !== undefined && (value.accepted !== true || value.callId === undefined)) return false;
   if (!Object.keys(value).every((key) => allowed.includes(key as typeof allowed[number]))) return false;
   if (typeof value.commandId !== 'undefined' && !isIdentifier(value.commandId)) return false;
   if (typeof value.dispatchId !== 'undefined' && !isIdentifier(value.dispatchId)) return false;

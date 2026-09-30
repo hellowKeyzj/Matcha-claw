@@ -4,6 +4,7 @@ use super::{HostHandles, owners::RuntimeOwners};
 
 pub(super) struct HostHandleInput {
     pub(super) admission: Arc<super::super::admission::HostAdmission>,
+    pub(super) calls: call_log::CallLogModule,
     pub(super) open_claw: Arc<openclaw::driver::OpenClawDriver>,
     pub(super) sealed_resource: sealed_resource::SealedResourceModule,
     pub(super) clawhub_registry: clawhub::ClawHubRegistryClient,
@@ -15,6 +16,7 @@ pub(super) struct HostHandleInput {
 pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> HostHandles {
     let HostHandleInput {
         admission,
+        calls,
         open_claw,
         sealed_resource,
         clawhub_registry,
@@ -30,7 +32,8 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> H
         open_claw.clone(),
         Arc::new(owners.peer_handle.clone()),
     ));
-    let plugins_handle = plugins_module::PluginsModule::new(plugins_adapter);
+    let plugins_handle = plugins_module::PluginsModule::new(plugins_adapter)
+        .with_call_recorder(calls.recorder());
     let skills_adapter = Arc::new(openclaw::skill::OpenClawSkillsPort::new(
         admission.clone(),
         open_claw.clone(),
@@ -40,7 +43,8 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> H
         skills_adapter.clone(),
         skills_adapter,
         sealed_resource.skills_port(),
-    );
+    )
+    .with_call_recorder(calls.recorder());
     let cron_handle = owners.cron.clone();
     let agents_handle = owners.subagents.clone();
     let task_manager_handle = owners.task_manager.clone();
@@ -51,6 +55,7 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> H
 
     HostHandles {
         admission,
+        calls,
         peer: owners.peer_handle.clone(),
         open_claw,
         session_module: owners.session_module.clone(),

@@ -1,6 +1,11 @@
 use std::{path::PathBuf, sync::Arc};
 
 use foundation::execution::{LaneRetention, OwnerSpec};
+use platform::call::CallStatus;
+
+use crate::call::{
+    CallResult, ConnectorCall, ConnectorCallDetail, ObservationSummary, observation_status,
+};
 
 use crate::{
     adapters::store::{self, ConnectorStore, ConnectorStoreError},
@@ -29,6 +34,8 @@ use crate::{
     projection,
 };
 
+use super::observations::{ObservationResult, ObservationResults};
+
 pub struct ConnectorOwnerInput {
     pub state_dir: PathBuf,
     pub runtime_directory: Arc<dyn ConnectorRuntimeDirectory>,
@@ -38,6 +45,7 @@ pub struct ConnectorOwnerInput {
 
 #[derive(Clone)]
 pub(crate) struct ConnectorShared {
+    observations: Arc<ObservationResults>,
     runtime_directory: Arc<dyn ConnectorRuntimeDirectory>,
     runtime_host_mcp_executable: PathBuf,
     team_run_mcp_state_dir: PathBuf,
@@ -61,6 +69,7 @@ impl ConnectorOwner {
 
         Ok(Self {
             shared: ConnectorShared {
+                observations: Arc::new(ObservationResults::default()),
                 runtime_directory: input.runtime_directory,
                 runtime_host_mcp_executable: input.runtime_host_mcp_executable,
                 team_run_mcp_state_dir: input.team_run_mcp_state_dir,
@@ -70,6 +79,10 @@ impl ConnectorOwner {
                 private_resolver: Arc::new(unavailable_connector_secret_authority()),
             },
         })
+    }
+
+    pub(crate) fn observations(&self) -> Arc<ObservationResults> {
+        self.shared.observations.clone()
     }
 
     pub const fn lane_retention() -> LaneRetention {
@@ -115,12 +128,34 @@ impl OwnerSpec for ConnectorOwner {
         command: Self::Command,
     ) {
         match command {
-            ConnectorCommand::Upsert { connector, reply } => {
-                let outcome = upsert(&shared, global, *connector).await;
+            ConnectorCommand::Upsert {
+                connector,
+                mut call,
+                reply,
+            } => {
+                if let Some(call) = &call {
+                    call.running().await;
+                }
+                let outcome = upsert(&shared, global, *connector, call.as_mut()).await;
+                if let Some(mut call) = call {
+                    let status = call.detail.mutation(&outcome);
+                    call.finish(status).await;
+                }
                 let _ = reply.send(outcome);
             }
-            ConnectorCommand::Remove { id, reply } => {
-                let outcome = remove(&shared, global, &id).await;
+            ConnectorCommand::Remove {
+                id,
+                mut call,
+                reply,
+            } => {
+                if let Some(call) = &call {
+                    call.running().await;
+                }
+                let outcome = remove(&shared, global, &id, call.as_mut()).await;
+                if let Some(mut call) = call {
+                    let status = call.detail.mutation(&outcome);
+                    call.finish(status).await;
+                }
                 let _ = reply.send(outcome);
             }
             ConnectorCommand::ConfigurePrivateResolver { resolver, reply } => {
@@ -128,8 +163,28 @@ impl OwnerSpec for ConnectorOwner {
                 let _ = reconcile_connector_projection(&shared, global).await;
                 let _ = reply.send(());
             }
-            ConnectorCommand::SetSessionMcpServerEnabled { target, reply } => {
+            ConnectorCommand::SetSessionMcpServerEnabled {
+                target,
+                call,
+                reply,
+            } => {
+                if let Some(call) = &call {
+                    call.running().await;
+                }
                 let outcome = set_session_mcp_server_enabled(&shared, global, target).await;
+                if let Some(mut call) = call {
+                    let status = match outcome {
+                        ConnectorSessionMcpServerEnabledReceipt::Applied => {
+                            call.detail.result = Some(CallResult::AppliedNextRun);
+                            CallStatus::Succeeded
+                        }
+                        ConnectorSessionMcpServerEnabledReceipt::Unavailable => {
+                            call.detail.result = Some(CallResult::Unavailable);
+                            CallStatus::Failed
+                        }
+                    };
+                    call.finish(status).await;
+                }
                 let _ = reply.send(outcome);
             }
         }
@@ -168,39 +223,179 @@ async fn handle_connector_query(
     query: ConnectorQuery,
 ) {
     match query {
-        ConnectorQuery::List { reply } => {
-            let connectors = domain::connector_list(&catalog(global))
+        ConnectorQuery::List { call, reply } => {
+            if let Some(call) = &call {
+                call.running().await;
+            }
+            let connectors: Vec<_> = domain::connector_list(&catalog(global))
                 .into_iter()
                 .map(ConnectorRecord::from_domain)
                 .collect();
+            if let Some(mut call) = call {
+                call.detail.count = Some(
+                    connectors
+                        .iter()
+                        .filter(|connector| {
+                            !connector
+                                .mcp_server_program
+                                .as_ref()
+                                .is_some_and(|program| {
+                                    matches!(program.source, McpProgramSource::SystemRuntime)
+                                })
+                        })
+                        .count(),
+                );
+                call.detail.result = Some(CallResult::Available);
+                call.finish(CallStatus::Succeeded).await;
+            }
             let _ = reply.send(ConnectorListReceipt::Available(connectors));
         }
-        ConnectorQuery::Catalog { reply } => {
+        ConnectorQuery::Catalog { call, reply } => {
+            if let Some(call) = &call {
+                call.running().await;
+            }
             let programs = catalog_programs(&catalog(global));
+            if let Some(mut call) = call {
+                call.detail.count = Some(programs.len());
+                call.detail.result = Some(CallResult::Available);
+                call.finish(CallStatus::Succeeded).await;
+            }
             let _ = reply.send(ConnectorCatalogReceipt::Available(programs));
         }
-        ConnectorQuery::Status { reply } => {
+        ConnectorQuery::Status { mut call } => {
+            if call.start().await.is_err() {
+                shared.observations.discard(call.context.id());
+                call.detail.result = Some(CallResult::Unavailable);
+                call.finish(CallStatus::Failed).await;
+                return;
+            }
             let outcome = status(&shared, domain::user_connectors(&catalog(global))).await;
-            let _ = reply.send(outcome);
+            let status = match outcome {
+                ConnectorStatusReceipt::Available(statuses) => {
+                    call.detail.observations(&statuses);
+                    call.detail.result = Some(CallResult::Available);
+                    shared
+                        .observations
+                        .complete(call.context.id(), ObservationResult::Status(statuses));
+                    CallStatus::Succeeded
+                }
+                ConnectorStatusReceipt::Unavailable => {
+                    shared.observations.discard(call.context.id());
+                    call.detail.result = Some(CallResult::Unavailable);
+                    CallStatus::Failed
+                }
+            };
+            call.finish(status).await;
         }
-        ConnectorQuery::Get { id, reply } => {
+        ConnectorQuery::Get { id, call, reply } => {
+            if let Some(call) = &call {
+                call.running().await;
+            }
             let outcome = domain::connector(&catalog(global), &id)
                 .map(ConnectorRecord::from_domain)
                 .map(|connector| ConnectorGetReceipt::Found(Box::new(connector)))
                 .unwrap_or(ConnectorGetReceipt::Missing);
+            if let Some(mut call) = call {
+                revision_detail(global, &id, &mut call.detail);
+                call.detail.result = Some(match &outcome {
+                    ConnectorGetReceipt::Found(connector)
+                        if connector
+                            .mcp_server_program
+                            .as_ref()
+                            .is_some_and(|program| {
+                                matches!(program.source, McpProgramSource::SystemRuntime)
+                            }) =>
+                    {
+                        CallResult::Missing
+                    }
+                    ConnectorGetReceipt::Found(_) => CallResult::Found,
+                    ConnectorGetReceipt::Missing => CallResult::Missing,
+                });
+                call.finish(CallStatus::Succeeded).await;
+            }
             let _ = reply.send(outcome);
         }
-        ConnectorQuery::Probe { id, reply } => {
+        ConnectorQuery::Probe { id, mut call } => {
+            if call.start().await.is_err() {
+                shared.observations.discard(call.context.id());
+                call.detail.result = Some(CallResult::Unavailable);
+                call.finish(CallStatus::Failed).await;
+                return;
+            }
             let connector = domain::connector(&catalog(global), &id);
             let outcome = probe(&shared, connector).await;
-            let _ = reply.send(outcome);
+            let status = match outcome {
+                ConnectorProbeReceipt::Observed(observation) => {
+                    call.detail.observations.push(ObservationSummary {
+                        connector_id: id.clone(),
+                        result_type: observation_status(&observation),
+                    });
+                    call.detail.result = Some(CallResult::Available);
+                    shared
+                        .observations
+                        .complete(call.context.id(), ObservationResult::Probe(id, observation));
+                    CallStatus::Succeeded
+                }
+                ConnectorProbeReceipt::Missing => {
+                    shared.observations.discard(call.context.id());
+                    call.detail.result = Some(CallResult::Missing);
+                    CallStatus::Succeeded
+                }
+                ConnectorProbeReceipt::Unavailable => {
+                    shared.observations.discard(call.context.id());
+                    call.detail.result = Some(CallResult::Unavailable);
+                    CallStatus::Failed
+                }
+            };
+            call.finish(status).await;
         }
-        ConnectorQuery::SessionStatus { target, reply } => {
-            let outcome = session_connector_status(&shared, global, target).await;
-            let _ = reply.send(outcome);
+        ConnectorQuery::SessionStatus {
+            target,
+            session_identity,
+            mut call,
+        } => {
+            if call.start().await.is_err() {
+                shared.observations.discard(call.context.id());
+                call.detail.result = Some(CallResult::Unavailable);
+                call.finish(CallStatus::Failed).await;
+                return;
+            }
+            let ConnectorSessionStatusReceipt::Available(mut statuses) =
+                session_connector_status(&shared, global, target).await;
+            statuses.retain(|status| status.server.connector_id.as_deref() != Some("matcha"));
+            call.detail.servers(&statuses);
+            call.detail.result = Some(CallResult::Available);
+            shared.observations.complete(
+                call.context.id(),
+                ObservationResult::SessionStatus {
+                    session_identity,
+                    statuses: statuses
+                        .into_iter()
+                        .map(crate::api::map_session_mcp_server_status)
+                        .collect(),
+                },
+            );
+            call.finish(CallStatus::Succeeded).await;
         }
-        ConnectorQuery::OpenClawMcpServers { reply } => {
+        ConnectorQuery::OpenClawMcpServers { call, reply } => {
+            if let Some(call) = &call {
+                call.running().await;
+            }
             let outcome = openclaw_mcp_servers(&shared, global).await;
+            if let Some(mut call) = call {
+                let status = match &outcome {
+                    OpenClawMcpServersReceipt::Available(servers) => {
+                        call.detail.count = Some(servers.len());
+                        call.detail.result = Some(CallResult::Available);
+                        CallStatus::Succeeded
+                    }
+                    OpenClawMcpServersReceipt::Unavailable => {
+                        call.detail.result = Some(CallResult::Unavailable);
+                        CallStatus::Failed
+                    }
+                };
+                call.finish(status).await;
+            }
             let _ = reply.send(outcome);
         }
     }
@@ -214,6 +409,7 @@ async fn upsert(
     shared: &ConnectorShared,
     global: &mut ConnectorGlobalState,
     connector: Connector,
+    mut call: Option<&mut ConnectorCall>,
 ) -> ConnectorMutationReceipt {
     if domain::is_system_runtime_connector(&connector) {
         return ConnectorMutationReceipt::Rejected;
@@ -224,7 +420,15 @@ async fn upsert(
         Err(error) => return mutation_error(error),
     };
 
+    if let Some(call) = call.as_deref_mut() {
+        call.detail.created = Some(mutation.created);
+    }
+    record_revision(global, connector.id(), call.as_deref_mut()).await;
     let configuration = reconcile_connector_projection(shared, global).await;
+    if let Some(call) = call.as_deref_mut() {
+        call.detail
+            .projection(&map_projection_effect(configuration));
+    }
 
     if matches!(configuration, ConnectorProjectionEffect::Written { .. }) {
         match global
@@ -242,6 +446,7 @@ async fn upsert(
         }
     }
 
+    record_revision(global, connector.id(), call).await;
     ConnectorMutationReceipt::Stored {
         connector: Box::new(ConnectorRecord::from_domain(connector)),
         created: mutation.created,
@@ -254,11 +459,17 @@ async fn remove(
     shared: &ConnectorShared,
     global: &mut ConnectorGlobalState,
     id: &str,
+    mut call: Option<&mut ConnectorCall>,
 ) -> ConnectorMutationReceipt {
     match global.store.remove(id) {
         Ok(None) => ConnectorMutationReceipt::Missing,
         Ok(Some(revision)) => {
+            record_revision(global, id, call.as_deref_mut()).await;
             let configuration = reconcile_connector_projection(shared, global).await;
+            if let Some(call) = call.as_deref_mut() {
+                call.detail
+                    .projection(&map_projection_effect(configuration));
+            }
 
             if matches!(configuration, ConnectorProjectionEffect::Written { .. }) {
                 match global.store.record_applied(id, revision) {
@@ -273,12 +484,32 @@ async fn remove(
                 }
             }
 
+            record_revision(global, id, call).await;
             ConnectorMutationReceipt::Removed {
                 revision,
                 configuration: map_projection_effect(configuration),
             }
         }
         Err(error) => mutation_error(error),
+    }
+}
+
+fn revision_detail(global: &ConnectorGlobalState, id: &str, detail: &mut ConnectorCallDetail) {
+    detail.revision = global.store.revision(id);
+    detail.applied_revision = global.store.applied_revision(id);
+    detail.tombstoned = global.store.tombstoned(id);
+}
+
+async fn record_revision(
+    global: &ConnectorGlobalState,
+    id: &str,
+    call: Option<&mut ConnectorCall>,
+) {
+    if let Some(call) = call {
+        revision_detail(global, id, &mut call.detail);
+        if let Err(error) = call.context.update(&call.detail).await {
+            eprintln!("connector revision could not be recorded: {error}");
+        }
     }
 }
 

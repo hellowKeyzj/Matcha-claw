@@ -39,7 +39,9 @@ export async function handleChannelControlRoutes(
 
   try {
     const response = await transport.control(body);
-    sendJson(res, response.status, response.status === 200 ? response.body : UNAVAILABLE);
+    sendJson(res, response.status,
+      (body.action === 'connect' && response.status === 200)
+        || (body.action === 'disconnect' && response.status === 202) ? response.body : UNAVAILABLE);
   } catch {
     sendJson(res, 503, UNAVAILABLE);
   }

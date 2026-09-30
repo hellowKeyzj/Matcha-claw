@@ -29,6 +29,7 @@ export type ChannelAuthorizationRequest = Readonly<{
 }>;
 
 type ChannelAuthorizationProgress = Readonly<{
+  callId?: string;
   outcome: 'progress' | 'connected' | 'target_rejected' | 'unknown' | 'cancelled';
   channel: ChannelAuthorizationChannel;
   accountId?: string;
@@ -128,6 +129,18 @@ export function createChannelAuthorizationTransport(
     if (activeSessions.get(session.activeKey) === session.key) activeSessions.delete(session.activeKey);
 
     const body = response.body;
+    if (response.status === 202 && 'callId' in body) {
+      return {
+        status: 200,
+        body: {
+          outcome: 'connected',
+          channel: session.channel,
+          accountId: session.accountId,
+          sessionKey: session.key,
+          callId: body.callId,
+        },
+      };
+    }
     if (response.status === 200 && isConfigureOutcome(body)) {
       if (body.outcome === 'confirmed') {
         return {

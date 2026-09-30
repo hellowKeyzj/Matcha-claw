@@ -1,4 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
+import { decodeCallReceipt } from '../../../../src/types/call-log/receipt';
+import { isCronDeleteResult, isCronJob, isCronResultRequest } from '../../../../src/types/cron-operation-result';
 import { hasExactKeys, isNonEmptyBoundedText as isNonEmptyString, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson, type LoopbackDecision, type LoopbackJsonResponse } from './client';
 const REQUEST_TIMEOUT_MS = 30_000;
 const UNAVAILABLE = {
@@ -48,7 +50,7 @@ type CronSessionHistoryResponse = Readonly<{
 }>;
 
 export type CronTransportResponse = Readonly<{
-  status: 200 | 400 | 401 | 404 | 409 | 422 | 502 | 503 | 504;
+  status: 200 | 202 | 400 | 401 | 404 | 409 | 422 | 502 | 503 | 504;
   body: unknown;
 }>;
 
@@ -59,6 +61,7 @@ export interface CronTransport {
   remove(request: unknown): Promise<CronTransportResponse>;
   toggle(request: unknown): Promise<CronTransportResponse>;
   trigger(request: unknown): Promise<CronTransportResponse>;
+  result(request: unknown): Promise<CronTransportResponse>;
   history(sessionKey: string, limit: number): Promise<CronTransportResponse>;
 }
 
@@ -90,6 +93,7 @@ export function createCronTransport(
     remove: (request) => send('cron.delete', '/api/cron/jobs/delete', request),
     toggle: (request) => send('cron.toggle', '/api/cron/jobs/toggle', request),
     trigger: (request) => send('cron.trigger', '/api/cron/jobs/trigger', request),
+    result: sendResult,
     history: (sessionKey, limit) => sendHistory({ sessionKey, limit }),
   };
 
@@ -120,6 +124,30 @@ export function createCronTransport(
     } finally {
       clearTimeout(requestTimeout);
     }
+  }
+
+  async function sendResult(request: unknown): Promise<CronTransportResponse> {
+    if (!isCronResultRequest(request)) return { status: 503, body: UNAVAILABLE };
+    const response = await sendCronLoopbackJson({
+      path: '/api/cron/results',
+      decision: {
+        endpoint: '/api/cron/results',
+        scope: 'cron:write',
+        capability: 'scheduler.cron',
+        subject: 'cron-crud',
+      },
+      method: 'POST',
+      body: request,
+    });
+    if (response?.status === 200
+      && (request.command === 'delete' ? isCronDeleteResult(response.body)
+        : isCronJob(response.body) && (request.command === 'create' || response.body.id === request.jobId))) {
+      return { status: 200, body: response.body };
+    }
+    if (response && [400, 401, 404, 409, 422, 503].includes(response.status) && isPublicFailure(response.body)) {
+      return { status: response.status as CronTransportResponse['status'], body: response.body };
+    }
+    return { status: 503, body: UNAVAILABLE };
   }
 
   async function sendHistory(request: CronSessionHistoryRequest): Promise<CronTransportResponse> {
@@ -178,12 +206,18 @@ export function createCronTransport(
     });
     if (response) {
       await options.reportE2ETrace?.(loopbackTraceStage(response.status));
-      if (response.status === 200 && isSuccessResponse(response.body, operation)) {
+      if (operation !== 'cron.list' && operation !== 'cron.trigger' && response.status === 202) {
+        try { return { status: 202, body: decodeCallReceipt(response.body) }; } catch { /* Closed receipt boundary. */ }
+      }
+      if ((operation === 'cron.list' || operation === 'cron.trigger')
+        && response.status === 200 && isSuccessResponse(response.body, operation)) {
         return { status: 200, body: response.body };
       }
-      if ((response.status === 409 || response.status === 422 || response.status === 502 || response.status === 503)
+      const failureStatuses = operation === 'cron.list' || operation === 'cron.trigger'
+        ? [409, 422, 502, 503] : [400, 401, 404, 409, 422, 502, 503, 504];
+      if (failureStatuses.includes(response.status)
         && isPublicFailure(response.body)) {
-        return { status: response.status, body: response.body };
+        return { status: response.status as CronTransportResponse['status'], body: response.body };
       }
     }
     return { status: 503, body: UNAVAILABLE };
@@ -193,6 +227,7 @@ export function createCronTransport(
 function loopbackTraceStage(status: number): CronE2ETraceStage {
   switch (status) {
     case 200:
+    case 202:
       return 'loopback_ok';
     case 400:
       return 'loopback_bad_request';
@@ -298,13 +333,7 @@ function isSuccessResponse(value: unknown, operation: CronCrudOperation): boolea
       && Array.isArray(value.jobs)
       && value.jobs.every(isCronJob);
   }
-  if (operation === 'cron.delete') {
-    return isRecord(value) && hasExactKeys(value, ['removed']) && typeof value.removed === 'boolean';
-  }
-  if (operation === 'cron.trigger') {
-    return isCronTriggerResponse(value);
-  }
-  return isCronJob(value);
+  return operation === 'cron.trigger' && isCronTriggerResponse(value);
 }
 
 function isCronTriggerResponse(value: unknown): boolean {
@@ -324,69 +353,6 @@ function isCronTriggerResponse(value: unknown): boolean {
     || value.result.reason === 'stopped';
 }
 
-function isCronJob(value: unknown): boolean {
-  return isRecord(value)
-    && hasAllowedKeys(value, [
-      'id', 'name', 'agentId', 'message', 'model', 'schedule', 'delivery', 'target', 'enabled',
-      'createdAt', 'updatedAt', 'lastRun', 'nextRun', 'runningAt',
-    ], [
-      'id', 'name', 'agentId', 'message', 'schedule', 'delivery', 'enabled', 'createdAt', 'updatedAt',
-    ])
-    && isNonEmptyString(value.id)
-    && isNonEmptyString(value.name)
-    && isNonEmptyString(value.agentId)
-    && typeof value.message === 'string'
-    && (value.model === undefined || isNonEmptyString(value.model))
-    && isSchedule(value.schedule)
-    && isDelivery(value.delivery)
-    && (value.target === undefined || isTargetProjection(value.target))
-    && typeof value.enabled === 'boolean'
-    && isIsoTimestamp(value.createdAt)
-    && isIsoTimestamp(value.updatedAt)
-    && (value.lastRun === undefined || isLastRun(value.lastRun))
-    && (value.nextRun === undefined || isIsoTimestamp(value.nextRun))
-    && (value.runningAt === undefined || isIsoTimestamp(value.runningAt));
-}
-
-function isSchedule(value: unknown): boolean {
-  if (!isRecord(value) || typeof value.kind !== 'string') return false;
-  if (value.kind === 'at') return hasExactKeys(value, ['kind', 'at']) && isNonEmptyString(value.at);
-  if (value.kind === 'every') return hasAllowedKeys(value, ['kind', 'everyMs', 'anchorMs'], ['kind', 'everyMs'])
-    && isTimestamp(value.everyMs) && (value.anchorMs === undefined || isTimestamp(value.anchorMs));
-  return value.kind === 'cron'
-    && hasAllowedKeys(value, ['kind', 'expr', 'tz'], ['kind', 'expr'])
-    && isNonEmptyString(value.expr)
-    && (value.tz === undefined || isNonEmptyString(value.tz));
-}
-
-function isDelivery(value: unknown): boolean {
-  if (!isRecord(value) || typeof value.mode !== 'string') return false;
-  if (value.mode === 'none') return hasExactKeys(value, ['mode']);
-  return value.mode === 'announce'
-    && hasAllowedKeys(value, ['mode', 'channel', 'to', 'accountId'], ['mode', 'channel'])
-    && isNonEmptyString(value.channel)
-    && (value.to === undefined || isNonEmptyString(value.to))
-    && (value.accountId === undefined || isNonEmptyString(value.accountId));
-}
-
-function isTargetProjection(value: unknown): boolean {
-  return isRecord(value)
-    && hasAllowedKeys(value, ['channelType', 'channelId', 'channelName', 'recipient'], ['channelType', 'channelId', 'channelName'])
-    && isNonEmptyString(value.channelType)
-    && isNonEmptyString(value.channelId)
-    && isNonEmptyString(value.channelName)
-    && (value.recipient === undefined || isNonEmptyString(value.recipient));
-}
-
-function isLastRun(value: unknown): boolean {
-  return isRecord(value)
-    && hasAllowedKeys(value, ['time', 'success', 'error', 'duration'], ['time', 'success'])
-    && isIsoTimestamp(value.time)
-    && typeof value.success === 'boolean'
-    && (value.error === undefined || typeof value.error === 'string')
-    && (value.duration === undefined || isTimestamp(value.duration));
-}
-
 function isPublicFailure(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['success', 'error'])
@@ -396,15 +362,6 @@ function isPublicFailure(value: unknown): boolean {
 
 function isOptionalTimestamp(value: unknown): boolean {
   return value === null || value === undefined || isTimestamp(value);
-}
-
-function isIsoTimestamp(value: unknown): value is string {
-  if (typeof value !== 'string'
-    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
-    return false;
-  }
-  const timestamp = Date.parse(value);
-  return !Number.isNaN(timestamp) && new Date(timestamp).toISOString() === value;
 }
 
 function hasAllowedKeys(

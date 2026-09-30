@@ -8,6 +8,10 @@ use super::actor::FleetLaneKey;
 
 /// Fleet owner command envelope for independent mailbox architecture.
 pub(crate) enum FleetCommand {
+    Recorded {
+        command: Box<FleetCommand>,
+        call: crate::call::FleetCall,
+    },
     TerminalOpenAllocated {
         selector: crate::owner::actor::FleetTerminalTargetSelector,
         dimensions: fleet::terminal::Dimensions,
@@ -460,6 +464,13 @@ pub(crate) enum FleetCommand {
 }
 
 pub(crate) enum FleetQuery {
+    Recorded {
+        query: Box<FleetQuery>,
+        call: crate::call::FleetCall,
+    },
+    Live {
+        query: Box<FleetQuery>,
+    },
     TerminalContext {
         summary: fleet::terminal::SessionSummary,
         reply: oneshot::Sender<
@@ -540,6 +551,7 @@ pub(crate) enum FleetQuery {
 impl FleetCommand {
     pub(crate) fn route_command(&self) -> CommandRoute<FleetLaneKey> {
         match self {
+            Self::Recorded { command, .. } => command.route_command(),
             Self::TerminalOpenAllocated { .. } => CommandRoute::Exclusive,
             Self::TerminalProviderOpen { target_id, .. } => {
                 CommandRoute::Keyed(FleetLaneKey::Target(target_id.clone()))
@@ -627,6 +639,8 @@ impl FleetCommand {
 impl FleetQuery {
     pub(crate) fn route_query(&self) -> QueryRoute<FleetLaneKey> {
         match self {
+            Self::Recorded { query, .. } => query.route_query(),
+            Self::Live { .. } => QueryRoute::Direct,
             Self::TerminalContext { .. }
             | Self::TerminalResolveContext { .. }
             | Self::QuerySnapshot { .. }

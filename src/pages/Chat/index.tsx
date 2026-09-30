@@ -9,7 +9,12 @@ import { AlertCircle } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore, type ApprovalItem, type ChatSessionRuntimeState, type ChatStoreState } from '@/stores/chat';
 import { selectCurrentChatSendGate } from '@/stores/chat/selectors';
-import { ABORT_STOPPING_TIMEOUT_ERROR } from '@/stores/chat/abort-handlers';
+import {
+  ABORT_STOPPING_TIMEOUT_ERROR,
+  ABORT_UNKNOWN_ERROR,
+  ABORT_REJECTED_ERROR,
+  ABORT_REQUEST_FAILED_ERROR,
+} from '@/stores/chat/abort-handlers';
 import { isRunActive } from '@/stores/chat/types';
 import { buildCurrentConversationFromSessionRecord, resolveCurrentConversationRuntimeState } from '@/stores/chat/session-runtime-graph';
 import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
@@ -1049,6 +1054,15 @@ export function Chat({ isActive = true }: ChatProps) {
     }
     if (effectiveRuntimeError === ABORT_STOPPING_TIMEOUT_ERROR) {
       return t('errors.abortStoppingTimeout');
+    }
+    if (effectiveRuntimeError === ABORT_UNKNOWN_ERROR) {
+      return t('errors.abortUnknown');
+    }
+    if (effectiveRuntimeError === ABORT_REJECTED_ERROR) {
+      return t('errors.abortRejected');
+    }
+    if (effectiveRuntimeError === ABORT_REQUEST_FAILED_ERROR) {
+      return t('errors.abortRequestFailed');
     }
     return effectiveRuntimeError;
   }, [currentSession.meta.sessionIdentity, currentSession.runtime, dismissedRuntimeError, localizedGatewayIssue, t]);

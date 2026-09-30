@@ -62,7 +62,7 @@ describe('IPC handler registration', () => {
     const { registerIpcHandlers } = await import('../../electron/main/ipc-handlers');
 
     const fleetCredentialsTransport = { write: vi.fn() };
-    registerIpcHandlers(runtimeHost, getMainWindow, { execute: vi.fn() }, fleetCredentialsTransport, {
+    registerIpcHandlers(runtimeHost, getMainWindow, { execute: vi.fn() }, vi.fn(), fleetCredentialsTransport, {
       transport: { download: vi.fn() },
       showSaveDialog: vi.fn(),
       writeFile: vi.fn(),

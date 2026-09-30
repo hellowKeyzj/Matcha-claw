@@ -8,6 +8,8 @@ import {
   resolveSingleCapabilityScope,
 } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
+import { hostSkillsMutation, waitForSkillsOperation } from '@/lib/skills';
+import type { SkillsBatchStateResult } from '@/types/skills-operation-result';
 import type { Skill, MarketplaceSkill, SkillMissingCategory, SkillMissingRequirements, SkillUnavailableReason } from '../types/skill';
 import type { CapabilityTarget } from '../types/desktop/capability-target';
 import type { LocalSkillImportPayload } from '@/services/local-path-picker';
@@ -54,14 +56,6 @@ type MarketplaceSearchResult = {
   success: boolean;
   results?: MarketplaceSkill[];
   error?: string;
-};
-
-type SkillsMutationResponse = {
-  outcome: 'accepted' | 'rejected' | 'unknown';
-};
-
-type SkillsUninstallResponse = {
-  outcome: 'removed' | 'notFound' | 'rejected' | 'unknown';
 };
 
 const SKILL_MANAGEMENT_CAPABILITY_ID = 'skill.management';
@@ -201,7 +195,7 @@ interface SkillsState {
   uninstallSkill: (skillKey: string, slug?: string) => Promise<void>;
   enableSkill: (skillId: string) => Promise<void>;
   disableSkill: (skillId: string) => Promise<void>;
-  batchSetSkillsEnabled: (skillIds: string[], enabled: boolean) => Promise<void>;
+  batchSetSkillsEnabled: (skillIds: string[], enabled: boolean) => Promise<SkillsBatchStateResult>;
   setSkills: (skills: Skill[]) => void;
   updateSkill: (skillId: string, updates: Partial<Skill>) => void;
 }
@@ -406,10 +400,8 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       };
     });
     try {
-      const result = await hostApiFetch<SkillsMutationResponse>('/api/skills/clawhub/install', {
-        method: 'POST',
-        body: JSON.stringify({ slug, ...(version ? { version } : {}) }),
-      });
+      const result = await hostSkillsMutation('/api/skills/clawhub/install',
+        { slug, ...(version ? { version } : {}) }, 'skills.clawhub.install');
       if (result.outcome !== 'accepted') {
         const appError = normalizeAppError(new Error('Install failed'), {
           module: 'skills',
@@ -460,10 +452,8 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       const body = payload.kind === 'markdown'
         ? { content: payload.content }
         : { skillKey, files: payload.files };
-      const result = await hostApiFetch<SkillsMutationResponse>(endpoint, {
-        method: 'POST',
-        body: JSON.stringify(body),
-      });
+      const result = await hostSkillsMutation(endpoint, body,
+        payload.kind === 'markdown' ? 'skills.import.markdown' : 'skills.import.bundle');
       if (result.outcome !== 'accepted') {
         throw new Error('Skill import failed');
       }
@@ -492,10 +482,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       };
     });
     try {
-      const result = await hostApiFetch<SkillsUninstallResponse>('/api/skills/uninstall', {
-        method: 'POST',
-        body: JSON.stringify({ skillKey, ...(slug ? { slug } : {}) }),
-      });
+      const result = await hostSkillsMutation('/api/skills/uninstall', { skillKey, ...(slug ? { slug } : {}) }, 'skills.uninstall');
       if (result.outcome !== 'removed') {
         throw new Error('Uninstall failed');
       }
@@ -533,10 +520,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await hostApiFetch<SkillsMutationResponse>('/api/skills/config', {
-        method: 'POST',
-        body: JSON.stringify({ skillKey: skillId, enabled: true }),
-      });
+      const result = await hostSkillsMutation('/api/skills/config', { skillKey: skillId, enabled: true }, 'skills.config');
       if (result.outcome !== 'accepted') {
         throw new Error('Failed to enable skill');
       }
@@ -579,10 +563,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await hostApiFetch<SkillsMutationResponse>('/api/skills/config', {
-        method: 'POST',
-        body: JSON.stringify({ skillKey: skillId, enabled: false }),
-      });
+      const result = await hostSkillsMutation('/api/skills/config', { skillKey: skillId, enabled: false }, 'skills.config');
       if (result.outcome !== 'accepted') {
         throw new Error('Failed to disable skill');
       }
@@ -608,7 +589,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   batchSetSkillsEnabled: async (skillIds, enabled) => {
     const uniqueSkillIds = [...new Set(skillIds.map((skillId) => skillId.trim()).filter(Boolean))];
     if (uniqueSkillIds.length === 0) {
-      return;
+      return { kind: 'batchState', success: true, outcome: 'accepted', enabled, requested: [], updated: [], invalidKeys: [], failed: [] };
     }
     const { skills } = get();
     if (!enabled) {
@@ -630,18 +611,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await skillManagementCapabilityExecute<{ success: boolean; updated?: string[]; error?: string }>(
-        'skills.updateBatchState',
-        { skillKeys: uniqueSkillIds, enabled },
-        { kind: 'skill' },
-      );
-      if (result.success !== true) {
-        throw new Error(result.error || 'Failed to update skills');
-      }
-      const updatedSkillIds = Array.isArray(result.updated) && result.updated.length > 0
-        ? result.updated
-        : uniqueSkillIds;
-      const updatedSkillIdSet = new Set(updatedSkillIds);
+      const input = { skillKeys: uniqueSkillIds, enabled };
+      const receipt = await skillManagementCapabilityExecute<unknown>('skills.updateBatchState', input, { kind: 'skill' });
+      const result = await waitForSkillsOperation(receipt, 'skills.updateBatchState', input);
+      if (result.kind !== 'batchState') throw new Error('Invalid Skills batch result');
+      const updatedSkillIdSet = new Set(result.updated);
       set((state) => ({
         skills: state.skills.map((skill) =>
           updatedSkillIdSet.has(skill.id)
@@ -649,6 +623,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
             : skill
         ),
       }));
+      return result;
     } catch (error) {
       console.error('Failed to batch update skills:', error);
       throw error;

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { RuntimeHostControlError } from './control';
 import type {
   RuntimeHostControlCommand,
   RuntimeHostControlCommandOptions,
@@ -13,6 +15,7 @@ const GRACEFUL_STOP_TIMEOUT_MS = 5_000;
 
 type SafeEventHandler = (event: RuntimeHostSafeEvent) => void;
 type ExitHandler = (exit: DirectRuntimeHostExit) => void;
+type DisconnectHandler = (error: RuntimeHostControlError) => void;
 
 export type RuntimeHostRestart = Readonly<{
   readonly previousPid?: number;
@@ -20,12 +23,22 @@ export type RuntimeHostRestart = Readonly<{
   readonly status: 'running';
   readonly recoveredAt: number;
 }>;
+export type RuntimeHostRestartAdmission =
+  | Readonly<{ accepted: true; restartId: string }>
+  | Readonly<{ accepted: false; error: 'Runtime Host is shutting down' }>;
+
+export type RuntimeHostRestartStatus =
+  | Readonly<{ restartId: string; status: 'running' }>
+  | Readonly<{ restartId: string; status: 'succeeded'; result: RuntimeHostRestart }>
+  | Readonly<{ restartId: string; status: 'failed' | 'unknown'; error: string }>;
+
 type RestartHandler = (restart: RuntimeHostRestart) => void;
 
 type ActiveRuntimeHost = {
   readonly host: DirectRuntimeHost;
   readonly epoch: number;
   stopSafeEventSubscription: () => void;
+  stopDisconnectSubscription: () => void;
   stopExitSubscription: () => void;
 };
 
@@ -42,6 +55,8 @@ export class RuntimeHostLifecycleUnavailableError extends Error {
 
 export type RuntimeHostLifecycle = DirectRuntimeHost & Readonly<{
   restart: () => Promise<void>;
+  admitRestart: () => RuntimeHostRestartAdmission;
+  readRestart: (restartId: string) => RuntimeHostRestartStatus | undefined;
   onRestart: (handler: RestartHandler) => () => void;
 }>;
 
@@ -51,11 +66,15 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
   private replacingEpoch: number | undefined;
   private replacementExit: DirectRuntimeHostExit | undefined;
   private lastExit: DirectRuntimeHostExit | undefined;
+  private disconnectError: RuntimeHostControlError | undefined;
   private restartInFlight: Promise<void> | undefined;
+  private latestRestart: RuntimeHostRestartStatus | undefined;
+  private closing = false;
   private forceKillInFlight: Promise<void> | undefined;
   private lifecycleTail: Promise<void> = Promise.resolve();
   private readonly safeEventHandlers = new Set<SafeEventHandler>();
   private readonly exitHandlers = new Set<ExitHandler>();
+  private readonly disconnectHandlers = new Set<DisconnectHandler>();
   private readonly restartHandlers = new Set<RestartHandler>();
 
   constructor(
@@ -81,6 +100,12 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
     return () => this.safeEventHandlers.delete(handler);
   }
 
+  onDisconnect(handler: DisconnectHandler): () => void {
+    this.disconnectHandlers.add(handler);
+    if (this.disconnectError) handler(this.disconnectError);
+    return () => this.disconnectHandlers.delete(handler);
+  }
+
   onExit(handler: ExitHandler): () => void {
     this.exitHandlers.add(handler);
     if (!this.activeRuntimeHost && this.lastExit) {
@@ -99,15 +124,26 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
   }
 
   stop(): Promise<void> {
+    this.closing = true;
     return this.enqueueLifecycleOperation(async () => {
       await this.requireActiveRuntimeHost().host.stop();
     });
   }
 
   forceKill(): Promise<void> {
+    this.closing = true;
     if (this.forceKillInFlight) return this.forceKillInFlight;
-    const activeRuntimeHost = this.requireActiveRuntimeHost();
-    const forceKill = activeRuntimeHost.host.forceKill();
+    const activeRuntimeHost = this.activeRuntimeHost;
+    const forceKill = (async () => {
+      await activeRuntimeHost?.host.forceKill();
+      if (this.restartInFlight) {
+        await this.restartInFlight.catch(() => undefined);
+      }
+      const replacement = this.activeRuntimeHost;
+      if (replacement && replacement !== activeRuntimeHost) {
+        await replacement.host.forceKill();
+      }
+    })();
     this.forceKillInFlight = forceKill;
     void forceKill.then(
       () => this.clearForceKillInFlight(forceKill),
@@ -122,10 +158,39 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
     }
   }
 
+  admitRestart(): RuntimeHostRestartAdmission {
+    if (this.closing) {
+      return { accepted: false, error: 'Runtime Host is shutting down' };
+    }
+    void this.restart();
+    return { accepted: true, restartId: this.latestRestart!.restartId };
+  }
+
+  readRestart(restartId: string): RuntimeHostRestartStatus | undefined {
+    return this.latestRestart?.restartId === restartId ? this.latestRestart : undefined;
+  }
+
   restart(): Promise<void> {
+    if (this.closing) return Promise.reject(new RuntimeHostLifecycleUnavailableError());
     if (this.restartInFlight) return this.restartInFlight;
 
-    const restart = this.enqueueLifecycleOperation(() => this.replaceRuntimeHost());
+    const restartId = randomUUID();
+    this.latestRestart = { restartId, status: 'running' };
+    const restart = this.enqueueLifecycleOperation(async () => {
+      try {
+        const result = await this.replaceRuntimeHost();
+        this.latestRestart = { restartId, status: 'succeeded', result };
+      } catch (error) {
+        const unknown = error instanceof RuntimeHostLifecycleUnavailableError
+          || error instanceof RuntimeHostControlError && error.delivery === 'unknown-delivery';
+        this.latestRestart = {
+          restartId,
+          status: unknown ? 'unknown' : 'failed',
+          error: unknown ? 'Runtime Host restart outcome is unknown' : 'Runtime Host restart failed',
+        };
+        throw error;
+      }
+    });
     this.restartInFlight = restart;
     void restart.then(
       () => this.clearRestartInFlight(restart),
@@ -149,7 +214,7 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
     return scheduled;
   }
 
-  private async replaceRuntimeHost(): Promise<void> {
+  private async replaceRuntimeHost(): Promise<RuntimeHostRestart> {
     const previousRuntimeHost = this.activeRuntimeHost;
     let previousExit: DirectRuntimeHostExit | undefined;
 
@@ -184,7 +249,7 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
       if (this.activeRuntimeHost !== activeReplacement) {
         throw new RuntimeHostLifecycleUnavailableError();
       }
-      this.publishRestart(previousRuntimeHost?.host.pid, replacementRuntimeHost.pid);
+      return this.publishRestart(previousRuntimeHost?.host.pid, replacementRuntimeHost.pid);
     } catch (error) {
       if (previousExit && !replacementLaunched) {
         this.publishExit(previousExit);
@@ -198,9 +263,11 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
       host,
       epoch: this.nextEpoch,
       stopSafeEventSubscription: () => {},
+      stopDisconnectSubscription: () => {},
       stopExitSubscription: () => {},
     };
     this.nextEpoch += 1;
+    this.disconnectError = undefined;
     this.activeRuntimeHost = activeRuntimeHost;
 
     const stopSafeEventSubscription = host.onSafeEvent((event) => {
@@ -210,6 +277,15 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
       activeRuntimeHost.stopSafeEventSubscription = stopSafeEventSubscription;
     } else {
       stopSafeEventSubscription();
+    }
+
+    const stopDisconnectSubscription = host.onDisconnect((error) => {
+      this.observeDisconnect(activeRuntimeHost, error);
+    });
+    if (this.activeRuntimeHost === activeRuntimeHost) {
+      activeRuntimeHost.stopDisconnectSubscription = stopDisconnectSubscription;
+    } else {
+      stopDisconnectSubscription();
     }
 
     const stopExitSubscription = host.onExit((exit) => {
@@ -229,6 +305,7 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
 
     this.activeRuntimeHost = undefined;
     activeRuntimeHost.stopSafeEventSubscription();
+    activeRuntimeHost.stopDisconnectSubscription();
     activeRuntimeHost.stopExitSubscription();
   }
 
@@ -239,6 +316,16 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
     }
     for (const handler of [...this.safeEventHandlers]) {
       handler(event);
+    }
+  }
+
+  private observeDisconnect(activeRuntimeHost: ActiveRuntimeHost, error: RuntimeHostControlError): void {
+    if (this.activeRuntimeHost !== activeRuntimeHost || this.disconnectError) return;
+
+    // Replacement suppresses old business events, not loss of observation.
+    this.disconnectError = error;
+    for (const handler of [...this.disconnectHandlers]) {
+      handler(error);
     }
   }
 
@@ -261,7 +348,7 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
     }
   }
 
-  private publishRestart(previousPid: number | undefined, pid: number | undefined): void {
+  private publishRestart(previousPid: number | undefined, pid: number | undefined): RuntimeHostRestart {
     const restart: RuntimeHostRestart = {
       ...(previousPid === undefined ? {} : { previousPid }),
       ...(pid === undefined ? {} : { pid }),
@@ -271,6 +358,7 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
     for (const handler of [...this.restartHandlers]) {
       handler(restart);
     }
+    return restart;
   }
 
   private requireActiveRuntimeHost(): ActiveRuntimeHost {

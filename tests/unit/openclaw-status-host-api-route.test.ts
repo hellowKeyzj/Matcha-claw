@@ -368,8 +368,8 @@ describe('OpenClaw Host API routes', () => {
         body: { result: { lifecycle: 'failed', observedAtMs: 1_725_000_000_000, failure: 'readiness', startupDiagnostic: 'appServerReportedError' } },
       }),
       lifecycleRestart: vi.fn().mockResolvedValue({
-        status: 200,
-        body: { result: { lifecycle: 'starting', observedAtMs: 1_725_000_000_000 } },
+        status: 202,
+        body: { callId: 'call-openclaw-restart', accepted: true },
       }),
     };
     const status = createResponse();
@@ -397,11 +397,8 @@ describe('OpenClaw Host API routes', () => {
       failure: 'readiness',
       startupDiagnostic: 'appServerReportedError',
     });
-    expect(restart.response.statusCode).toBe(200);
-    expect(restart.response.body).toEqual({
-      success: true,
-      status: { processState: 'starting' },
-    });
+    expect(restart.response.statusCode).toBe(202);
+    expect(restart.response.body).toEqual({ callId: 'call-openclaw-restart', accepted: true });
   });
 
   it('reports unknown restart delivery without exposing native errors', async () => {

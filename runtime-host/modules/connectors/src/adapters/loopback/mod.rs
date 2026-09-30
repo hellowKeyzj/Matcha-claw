@@ -116,43 +116,39 @@ async fn handle_external_connectors(request: Request, dependencies: Dependencies
             .unwrap_or(external::Delivery::Unavailable),
         external::Command::Status => dependencies
             .connector
-            .status()
+            .admit_status()
             .await
-            .map(|outcome| match outcome {
-                delivery::StatusOutcome::Available(statuses) => {
-                    external::Delivery::Status(statuses)
-                }
-                delivery::StatusOutcome::Unavailable => external::Delivery::Unavailable,
-            })
+            .map(external::Delivery::Accepted)
             .unwrap_or(external::Delivery::Unavailable),
-        external::Command::SessionStatus(identity) => dependencies
+        external::Command::ObservationResult(call_id, identity, principal) => match dependencies
             .connector
-            .session_status(identity)
+            .observation_result(&call_id, &principal, identity.as_ref())
+        {
+            Ok(result) => external::Delivery::ObservationResult(call_id, result),
+            Err(crate::owner::observations::ObservationReadError::Pending) => {
+                external::Delivery::Pending
+            }
+            Err(crate::owner::observations::ObservationReadError::Missing) => {
+                external::Delivery::Missing
+            }
+        },
+        external::Command::SessionStatus(identity, principal) => dependencies
+            .connector
+            .admit_session_status(identity, principal)
             .await
-            .map(|outcome| match outcome {
-                delivery::SessionStatusOutcome::Available(statuses) => {
-                    external::Delivery::SessionStatus(public_session_statuses(statuses))
-                }
-                delivery::SessionStatusOutcome::Unavailable => external::Delivery::Unavailable,
-            })
+            .map(external::Delivery::Accepted)
             .unwrap_or(external::Delivery::Unavailable),
         external::Command::SessionMcpServerEnabled(target) => dependencies
             .connector
-            .set_session_mcp_server_enabled(target)
+            .admit_session_mcp_server_enabled(target)
             .await
-            .map(external::Delivery::SessionMcpServerEnabled)
+            .map(external::Delivery::Accepted)
             .unwrap_or(external::Delivery::Unavailable),
         external::Command::Probe(id) => dependencies
             .connector
-            .probe(id.clone())
+            .admit_probe(id)
             .await
-            .map(|outcome| match outcome {
-                delivery::ProbeOutcome::Observed(observation) => {
-                    external::Delivery::Probe(id, observation)
-                }
-                delivery::ProbeOutcome::Missing => external::Delivery::Missing,
-                delivery::ProbeOutcome::Unavailable => external::Delivery::Unavailable,
-            })
+            .map(external::Delivery::Accepted)
             .unwrap_or(external::Delivery::Unavailable),
         external::Command::Get(id) => dependencies
             .connector
@@ -169,15 +165,15 @@ async fn handle_external_connectors(request: Request, dependencies: Dependencies
             .unwrap_or(external::Delivery::Unavailable),
         external::Command::Upsert(connector) => dependencies
             .connector
-            .upsert(*connector)
+            .admit_upsert(*connector)
             .await
-            .map(external::Delivery::Mutation)
+            .map(external::Delivery::Accepted)
             .unwrap_or(external::Delivery::Unavailable),
         external::Command::Remove(id) => dependencies
             .connector
-            .remove(id)
+            .admit_remove(id)
             .await
-            .map(external::Delivery::Mutation)
+            .map(external::Delivery::Accepted)
             .unwrap_or(external::Delivery::Unavailable),
     };
     Response::json(delivery.status_code(), delivery.body())
@@ -225,15 +221,6 @@ fn public_connectors(
     connectors
         .into_iter()
         .filter(|connector| !is_system_runtime_connector(connector))
-        .collect()
-}
-
-fn public_session_statuses(
-    statuses: Vec<delivery::SessionConnectorStatus>,
-) -> Vec<delivery::SessionConnectorStatus> {
-    statuses
-        .into_iter()
-        .filter(|status| status.connector_id != "matcha")
         .collect()
 }
 

@@ -231,7 +231,8 @@
     "dismissedReview": "Review dismissed",
     "clearedReviews": "Resolved reviews cleared",
     "createdReviewPage": "Review page created",
-    "failed": "{{label}} failed"
+    "failed": "{{label}} failed",
+    "resultUnconfirmed": "The operation result could not be confirmed. Check Calls or refresh the Wiki before trying again."
   },
   "time": {
     "unrecorded": "Not recorded"

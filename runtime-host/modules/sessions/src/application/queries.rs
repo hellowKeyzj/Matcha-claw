@@ -2,6 +2,7 @@ use foundation::execution::QueryRoute;
 use tokio::sync::oneshot;
 
 use super::{
+    abort::{SessionAbortCommand, SessionAbortOutcome},
     approval::{PendingApprovalsCommand, PendingApprovalsOutcome},
     commands::session_lane_key,
     session_catalog::{SessionCatalogCommand, SessionCatalogOutcome},
@@ -13,12 +14,30 @@ use super::{
     },
 };
 pub enum SessionQuery {
+    Audited {
+        query: Box<SessionQuery>,
+        call: crate::call::SessionCall,
+    },
+    BoundaryOutcome {
+        command: &'static str,
+        detail: crate::call::SessionsCallDetail,
+        outcome: crate::call::SessionsCallOutcome,
+        reply: oneshot::Sender<crate::call::SessionsCallOutcome>,
+    },
+    EventsSubscribed {
+        reply: oneshot::Sender<()>,
+    },
     ListSessions {
         reply: oneshot::Sender<Vec<SessionView>>,
     },
     GetSession {
         session_key: String,
         reply: oneshot::Sender<Option<SessionView>>,
+    },
+    /// Native cancellation control; never queued behind a session send.
+    Abort {
+        command: SessionAbortCommand,
+        reply: oneshot::Sender<SessionAbortOutcome>,
     },
     PendingApprovals {
         command: PendingApprovalsCommand,
@@ -45,11 +64,17 @@ pub enum SessionQuery {
 impl SessionQuery {
     pub fn send_unavailable(self) {
         match self {
+            Self::Audited { query, .. } => query.send_unavailable(),
+            Self::BoundaryOutcome { outcome, reply, .. } => { let _ = reply.send(outcome); },
+            Self::EventsSubscribed { reply } => { let _ = reply.send(()); },
             Self::ListSessions { reply } => {
                 let _ = reply.send(Vec::new());
             }
             Self::GetSession { reply, .. } => {
                 let _ = reply.send(None);
+            }
+            Self::Abort { reply, .. } => {
+                let _ = reply.send(SessionAbortOutcome::Unavailable);
             }
             Self::PendingApprovals { reply, .. } => {
                 let _ = reply.send(PendingApprovalsOutcome::Unavailable);
@@ -79,7 +104,8 @@ impl SessionQuery {
 impl SessionQuery {
     pub fn route(&self) -> QueryRoute<String> {
         match self {
-            Self::ListSessions { .. } | Self::GetSession { .. } => QueryRoute::Direct,
+            Self::Audited { query, .. } => query.route(),
+            Self::Abort { .. } | Self::BoundaryOutcome { .. } | Self::EventsSubscribed { .. } | Self::ListSessions { .. } | Self::GetSession { .. } => QueryRoute::Direct,
             Self::PendingApprovals { command, .. } => QueryRoute::Keyed(session_lane_key(
                 command.endpoint.provider(),
                 &command.session_id,

@@ -21,22 +21,21 @@ const createRequest = {
   },
 } as const;
 
-const created = {
-  success: true,
-  kind: 'created',
-  agent: { id: 'writer', name: 'Writer', model: null },
-};
+const created = { callId: 'a'.repeat(32), accepted: true };
+const resultRequest = (operationId: string, agentId?: string) => ({
+  callId: created.callId, operationId, endpoint, ...(agentId === undefined ? {} : { agentId }),
+});
 
 describe('Electron Main agents transport', () => {
   it('signs and sends only the fixed agents create DTO', async () => {
     const signDecision = vi.fn().mockReturnValue('signed-decision');
-    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => created });
+    const fetcher = vi.fn().mockResolvedValue({ status: 202, json: async () => created });
     const transport = createAgentsTransport({ verificationKey: 'public', signDecision }, 34_225, fetcher);
 
     await expect(transport.execute({
       ...createRequest,
       input: { ...createRequest.input, workspaceInitialization: 'emptyWorkspace' },
-    })).resolves.toEqual({ status: 200, body: created });
+    })).resolves.toEqual({ status: 202, body: created });
     expect(signDecision).toHaveBeenCalledWith(expect.objectContaining({
       endpoint: '/api/subagents/agents',
       scope: 'subagents:manage',
@@ -210,15 +209,19 @@ describe('Electron Main agents transport', () => {
       target: { kind: 'subagent', subagentId: 'writer' },
       input: { kind: 'packageExport', endpoint, agentId: 'writer' },
     } as const;
-    const body = { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1 } };
-    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => body });
+    const body = { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', size: 1024, exportedAtMs: 1 } };
+    const completed = { callId: created.callId, operationId: request.operationId, status: 200, body };
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce({ status: 202, json: async () => created })
+      .mockResolvedValueOnce({ status: 200, json: async () => completed });
     const transport = createAgentsTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
       34_225,
       fetcher,
     );
 
-    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body });
+    await expect(transport.execute(request)).resolves.toEqual({ status: 202, body: created });
+    await expect(transport.result(resultRequest(request.operationId, 'writer'))).resolves.toEqual({ status: 200, body: completed });
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34225/api/subagents/agents', expect.objectContaining({
       method: 'POST',
       body: JSON.stringify(request),
@@ -233,15 +236,19 @@ describe('Electron Main agents transport', () => {
       target: { kind: 'subagent', subagentId: 'writer' },
       input: { kind: 'packageExportCloud', endpoint, agentId: 'writer', cloudPublicKey: 'cloud-public-key', cloudKeyId: 'cloud-key' },
     } as const;
-    const body = { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1 } };
-    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => body });
+    const body = { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', size: 1024, exportedAtMs: 1 } };
+    const completed = { callId: created.callId, operationId: request.operationId, status: 200, body };
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce({ status: 202, json: async () => created })
+      .mockResolvedValueOnce({ status: 200, json: async () => completed });
     const transport = createAgentsTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
       34_225,
       fetcher,
     );
 
-    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body });
+    await expect(transport.execute(request)).resolves.toEqual({ status: 202, body: created });
+    await expect(transport.result(resultRequest(request.operationId, 'writer'))).resolves.toEqual({ status: 200, body: completed });
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34225/api/subagents/agents', expect.objectContaining({
       method: 'POST',
       body: JSON.stringify(request),
@@ -287,15 +294,15 @@ describe('Electron Main agents transport', () => {
       target: { kind: 'subagent' },
       input: { kind: 'packageInstall', endpoint, packagePath: 'C:/sealed/writer.matcha-agentpkg' },
     } as const;
-    const body = { success: true, package: { agentId: 'writer' } };
-    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => body });
+    const body = { callId: 'b'.repeat(32), accepted: true };
+    const fetcher = vi.fn().mockResolvedValue({ status: 202, json: async () => body });
     const transport = createAgentsTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
       34_225,
       fetcher,
     );
 
-    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body });
+    await expect(transport.execute(request)).resolves.toEqual({ status: 202, body });
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34225/api/subagents/agents', expect.objectContaining({
       method: 'POST',
       body: JSON.stringify(request),
@@ -662,11 +669,12 @@ describe('Electron Main agents transport', () => {
       explicitSkillKeys: [], inheritedDefaultSkillKeys: [], effectiveSkillKeys: [], options: [], revision: 'revision-2', updatedAt: null,
     };
     const body = { success: true, resultType: 'staleRevision', latestView: view };
-    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => body });
+    const completed = { callId: created.callId, operationId: request.operationId, status: 200, body };
+    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => completed });
     const transport = createAgentsTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' }, 34_225, fetcher,
     );
-    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body });
+    await expect(transport.result(resultRequest(request.operationId, 'writer'))).resolves.toEqual({ status: 200, body: completed });
     expect(fetcher).toHaveBeenCalledTimes(1);
 
     await expect(transport.execute({ ...request, input: { ...request.input, agentId: 'other' } })).resolves.toEqual({
@@ -711,11 +719,12 @@ describe('Electron Main agents transport', () => {
       },
     } as const;
     const invalid = { success: true, resultType: 'invalidSkillKeys', unknownSkillKeys: ['missing'], nonCanonicalSkillKeys: [' Research '] };
+    const completed = { callId: created.callId, operationId: request.operationId, status: 200, body: invalid };
     const transport = createAgentsTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' }, 34_225,
-      vi.fn().mockResolvedValue({ status: 200, json: async () => invalid }),
+      vi.fn().mockResolvedValue({ status: 200, json: async () => completed }),
     );
-    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body: invalid });
+    await expect(transport.result(resultRequest(request.operationId, 'writer'))).resolves.toEqual({ status: 200, body: completed });
   });
 
   it('redacts loopback failures as unavailable', async () => {

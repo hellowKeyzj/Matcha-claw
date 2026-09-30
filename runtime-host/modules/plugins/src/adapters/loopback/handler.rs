@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::{ConfigurationOutcome, Operation, OperationOutcome, PluginsModule, projection};
+use crate::{Operation, PluginsModule, projection};
 
 pub(super) const CATALOG_ENDPOINT: &str = "/api/plugins/catalog";
 pub(super) const RUNTIME_ENDPOINT: &str = "/api/plugins/runtime";
@@ -18,6 +18,7 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(crate) enum RequestError {
     Invalid,
     Unauthorized,
+    Unavailable,
 }
 
 pub(super) async fn catalog(
@@ -34,7 +35,7 @@ pub(super) async fn catalog(
     .await
     {
         Ok(body) => Response::json(200, body),
-        Err(RequestError::Invalid) => Response::json(
+        Err(RequestError::Invalid | RequestError::Unavailable) => Response::json(
             503,
             json!({ "success": false, "error": "Plugin catalog is unavailable" }),
         ),
@@ -59,7 +60,7 @@ pub(super) async fn runtime(
     .await
     {
         Ok(body) => Response::json(200, body),
-        Err(RequestError::Invalid) => Response::json(
+        Err(RequestError::Invalid | RequestError::Unavailable) => Response::json(
             503,
             json!({ "success": false, "error": "Plugin runtime is unavailable" }),
         ),
@@ -84,7 +85,11 @@ pub(super) async fn operation(
     )
     .await
     {
-        Ok(body) => Response::json(200, body),
+        Ok(body) => Response::json(202, body),
+        Err(RequestError::Unavailable) => Response::json(
+            503,
+            json!({ "success": false, "error": "Plugin mutation admission is unavailable" }),
+        ),
         Err(RequestError::Invalid) => Response::json(
             400,
             json!({ "success": false, "error": "Plugin operation request is invalid" }),
@@ -110,7 +115,11 @@ pub(super) async fn configuration(
     )
     .await
     {
-        Ok(body) => Response::json(200, body),
+        Ok(body) => Response::json(202, body),
+        Err(RequestError::Unavailable) => Response::json(
+            503,
+            json!({ "success": false, "error": "Plugin mutation admission is unavailable" }),
+        ),
         Err(RequestError::Invalid) => Response::json(
             400,
             json!({ "success": false, "error": "Plugin configuration request is invalid" }),
@@ -209,15 +218,11 @@ pub async fn operation_request(
         return Err(RequestError::Invalid);
     }
     let operation = Operation::from_wire(&request.operation).ok_or(RequestError::Invalid)?;
-    let outcome = plugins
-        .operation(operation, request.plugin_id)
+    let receipt = plugins
+        .admit_operation(operation, request.plugin_id)
         .await
-        .map_err(|_| RequestError::Invalid)?;
-    Ok(json!({ "outcome": match outcome {
-        OperationOutcome::Configured => "configured",
-        OperationOutcome::Rejected => "rejected",
-        OperationOutcome::Unknown => "unknown",
-    }}))
+        .map_err(|_| RequestError::Unavailable)?;
+    Ok(json!(receipt))
 }
 
 pub async fn configuration_request(
@@ -242,15 +247,11 @@ pub async fn configuration_request(
     if request.runtime != "openclaw" || request.plugin_id.trim().is_empty() {
         return Err(RequestError::Invalid);
     }
-    let outcome = plugins
-        .set_enabled(request.plugin_id, request.enabled)
+    let receipt = plugins
+        .admit_configuration(request.plugin_id, request.enabled)
         .await
-        .map_err(|_| RequestError::Invalid)?;
-    Ok(json!({ "outcome": match outcome {
-        ConfigurationOutcome::Configured => "configured",
-        ConfigurationOutcome::Rejected => "rejected",
-        ConfigurationOutcome::Unknown => "unknown",
-    }}))
+        .map_err(|_| RequestError::Unavailable)?;
+    Ok(json!(receipt))
 }
 
 async fn verify(

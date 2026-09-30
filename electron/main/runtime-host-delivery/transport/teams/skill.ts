@@ -1,3 +1,5 @@
+import type { CallReceipt } from '../../../../../src/types/call-log';
+import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isNonEmptyBoundedText, isRecord, sendLoopbackJson } from '../client';
 
@@ -45,10 +47,6 @@ export type TeamSkillDependencyPlanResult =
   | Readonly<{ status: 'available'; plan: TeamSkillDependencyPlan }>
   | Readonly<{ status: 'invalid' | 'unavailable' }>;
 
-export type TeamSkillMaterializeResult = Readonly<{
-  status: 'materialized' | 'rejected' | 'outcome_unknown';
-}>;
-
 export type TeamSkillTransportResponse<T> = Readonly<{
   status: 200 | 503;
   body: T | typeof UNAVAILABLE;
@@ -62,7 +60,7 @@ export interface TeamSkillTransport {
     selectionId: string,
     teamId: string,
     idempotencyKey: string,
-  ): Promise<TeamSkillTransportResponse<TeamSkillMaterializeResult>>;
+  ): Promise<Readonly<{ status: 202 | 503; body: CallReceipt | typeof UNAVAILABLE }>>;
 }
 
 export function createTeamSkillTransport(
@@ -89,15 +87,17 @@ export function createTeamSkillTransport(
     materialize: async (selectionId, teamId, idempotencyKey) => request(
       'team.skill.materialize',
       { operation: 'team.skill.materialize', selectionId, teamId, idempotencyKey },
-      isMaterialized,
+      (value): value is CallReceipt => { try { decodeCallReceipt(value); return true; } catch { return false; } },
+      202,
     ),
   };
 
-  async function request<T>(
+  async function request<T, S extends 200 | 202 = 200>(
     capability: string,
     body: unknown,
     isResponse: (value: unknown) => value is T,
-  ): Promise<TeamSkillTransportResponse<T>> {
+    successStatus: S = 200 as S,
+  ): Promise<Readonly<{ status: S | 503; body: T | typeof UNAVAILABLE }>> {
     if (!isRequest(body)) return { status: 503, body: UNAVAILABLE };
     const response = await sendLoopbackJson({
       port: runtimeHostTransportPort,
@@ -113,7 +113,7 @@ export function createTeamSkillTransport(
       fetcher,
       body,
     });
-    if (response?.status === 200 && isResponse(response.body)) return { status: 200, body: response.body };
+    if (response?.status === successStatus && isResponse(response.body)) return { status: successStatus, body: response.body };
     return { status: 503, body: UNAVAILABLE };
   }
 }
@@ -162,12 +162,6 @@ function isDependencyPlan(value: unknown): value is TeamSkillDependencyPlanResul
   return value.status === 'available'
     && hasExactKeys(value, ['status', 'plan'])
     && isPlan(value.plan);
-}
-
-function isMaterialized(value: unknown): value is TeamSkillMaterializeResult {
-  return isRecord(value)
-    && hasExactKeys(value, ['status'])
-    && (value.status === 'materialized' || value.status === 'rejected' || value.status === 'outcome_unknown');
 }
 
 function isPlan(value: unknown): boolean {

@@ -16,7 +16,7 @@ const INVALID_SESSION_KEY = (sessionKey: string) => ({
   error: `Invalid cron sessionKey: ${sessionKey}`,
 });
 
-type CronOperation = 'create' | 'update' | 'remove' | 'toggle';
+type CronOperation = 'create' | 'update' | 'remove' | 'toggle' | 'result';
 
 export async function handleCronRoutes(
   req: IncomingMessage,
@@ -93,6 +93,7 @@ function resolveMutation(pathname: string, method: string | undefined): CronOper
     case '/api/cron/jobs/update': return 'update';
     case '/api/cron/jobs/delete': return 'remove';
     case '/api/cron/jobs/toggle': return 'toggle';
+    case '/api/cron/results': return 'result';
     default: return undefined;
   }
 }

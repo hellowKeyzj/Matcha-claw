@@ -382,6 +382,15 @@ describe('subagents page', () => {
       selectedAgentId: null,
       loadAgents,
       loadCloudPackages: vi.fn().mockResolvedValue(undefined),
+      loadMyCloudPackages: vi.fn().mockResolvedValue(undefined),
+      myCloudPackages: [],
+      myCloudLoading: false,
+      myCloudError: null,
+      installedCloudPackages: [],
+      cloudLoading: false,
+      cloudError: null,
+      cloudInstallingByVersionId: {},
+      cloudPublishingByVersionId: {},
       loadAvailableModels,
       loadPersistedFilesForAgent,
       selectAgent: vi.fn(),
@@ -944,6 +953,40 @@ describe('subagents page', () => {
     });
     expect(loadPersistedFilesForAgent).toHaveBeenCalledWith('agent-alpha');
     expect(toast.success).toHaveBeenCalledWith('Agent package installed: agent-alpha');
+  });
+
+  it('publishes mine drafts separately from entitled market packages', async () => {
+    const publishCloudAgentPackage = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({
+      myCloudPackages: [{ packageId: 'mine', packageVersionId: 'draft-id', name: 'My Draft', packageType: 'agent', version: 'a'.repeat(64), status: 'draft', downloadable: false }],
+      publishCloudAgentPackage,
+      cloudPackages: [{ packageId: 'pkg-alpha', packageVersionId: 'version-alpha', name: 'Cloud Agent', packageType: 'agent', version: 'b'.repeat(64), status: 'published', entitlementStatus: 'active', downloadable: true }],
+    });
+    renderSubagentsPage();
+    await openAgentActionMenu('agent-alpha');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Cloud Packages' }));
+    expect(await screen.findByText('My Draft')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Install' })).toBeEnabled();
+    expect(screen.queryByText('Installed')).not.toBeInTheDocument();
+    expect(publishCloudAgentPackage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Publish' }));
+    await waitFor(() => expect(publishCloudAgentPackage).toHaveBeenCalledWith('draft-id'));
+    act(() => useSubagentsStore.setState({ installedCloudPackages: [{ packageVersionId: 'version-alpha', packageType: 'agent', packageSha256: 'b'.repeat(64), fileName: 'agent.matcha-agentpkg' }] }));
+    expect(screen.getByText('Installed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Install' })).not.toBeInTheDocument();
+  });
+
+  it('shows market loading and retry instead of hiding failures', async () => {
+    const loadCloudPackages = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({ cloudLoading: true, loadCloudPackages });
+    renderSubagentsPage();
+    await openAgentActionMenu('agent-alpha');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Cloud Packages' }));
+    expect(await screen.findByText('Loading packages...')).toBeInTheDocument();
+    act(() => useSubagentsStore.setState({ cloudLoading: false, cloudError: 'cloudUnavailable' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('Unable to load packages. Please retry.');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(loadCloudPackages).toHaveBeenCalledTimes(2);
   });
 
   it('does not open prompt editor for managed sealed agent', async () => {

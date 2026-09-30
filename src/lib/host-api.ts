@@ -1,4 +1,7 @@
 import { invokeIpc } from '@/lib/api-client';
+import type { CallReceipt } from '@/types/call-log';
+import { decodeCallReceipt } from '@/types/call-log/receipt';
+import { decodeWikiCallResult, type WikiCallResult } from '@/types/wiki-call-result';
 import { trackUiEvent } from './telemetry';
 import { mapBackendErrorCode, normalizeAppError } from './error-model';
 import {
@@ -414,20 +417,7 @@ export async function hostUvCheck(): Promise<boolean> {
   return result.installed;
 }
 
-export async function hostToolchainPrepare(): Promise<void> {
-  await hostApiFetch('/api/toolchain/uv/prepare', {
-    method: 'POST',
-    timeoutMs: 120000,
-  });
-}
-
 export type HostWikiRequest = Record<string, unknown>;
-
-export type HostWikiImportSourceReceipt = Readonly<{
-  sourceRelativePath: string;
-  pageRelativePath: string;
-  revision: unknown;
-}>;
 
 export type HostWikiGeneratedPageInput = Readonly<{
   path: string;
@@ -579,28 +569,32 @@ export async function hostWikiUpdateSourceWatchConfig(payload: HostWikiSourceWat
   return hostApiFetch('/api/wiki/source-watch-config', { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiRescanSources(payload: HostWikiRequest = {}): Promise<unknown> {
-  return hostApiFetch('/api/wiki/rescan-sources', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiRescanSources(payload: HostWikiRequest = {}): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/rescan-sources', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiImportSource(payload: { projectId?: string; sourcePath: string }): Promise<HostWikiImportSourceReceipt> {
-  return hostApiFetch('/api/wiki/import-source', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiImportSource(payload: { projectId?: string; sourcePath: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/import-source', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiImportFolder(payload: { projectId?: string; folderPath: string }): Promise<unknown> {
-  return hostApiFetch('/api/wiki/import-folder', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiImportFolder(payload: { projectId?: string; folderPath: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/import-folder', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiRefreshSources(payload: { projectId?: string } = {}): Promise<unknown> {
-  return hostApiFetch('/api/wiki/refresh-sources', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiRefreshSources(payload: { projectId?: string } = {}): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/refresh-sources', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiApplyGeneratedPages(payload: { projectId?: string; sourcePath: string; files: HostWikiGeneratedPageInput[] }): Promise<unknown> {
-  return hostApiFetch('/api/wiki/apply-generated-pages', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiApplyGeneratedPages(payload: { projectId?: string; sourcePath: string; files: HostWikiGeneratedPageInput[] }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/apply-generated-pages', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiDeleteSource(payload: { projectId?: string; sourcePath: string; fileAlreadyDeleted?: boolean }): Promise<unknown> {
-  return hostApiFetch('/api/wiki/delete-source', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiDeleteSource(payload: { projectId?: string; sourcePath: string; fileAlreadyDeleted?: boolean }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/delete-source', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiCallResult(payload: { callId: string }): Promise<WikiCallResult> {
+  return hostApiFetchDecoded('/api/wiki/call-result', decodeWikiCallResult, { method: 'POST', body: JSON.stringify(payload) });
 }
 
 export async function hostWikiReviews(payload: { projectId?: string } = {}): Promise<unknown> {
@@ -637,8 +631,8 @@ export async function hostWikiCancelSourceTask(payload: { projectId?: string; so
   return hostApiFetch('/api/wiki/source-task/cancel', { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiEmbedPage(payload: HostWikiRequest): Promise<unknown> {
-  return hostApiFetch('/api/wiki/embed-page', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiEmbedPage(payload: HostWikiRequest): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/embed-page', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
 export async function hostWikiRetrieveContext(payload: HostWikiRequest): Promise<unknown> {
@@ -1629,12 +1623,13 @@ export async function hostSessionAbort(
     runId?: string;
     approvalIds?: string[];
   },
+  options?: { traceId?: string | null },
 ): Promise<HostSessionAbortResult> {
   return sessionIdentityCapabilityExecute<HostSessionAbortResult>({
     capabilityId: SESSION_PROMPT_CAPABILITY_ID,
     operationId: 'sessions.abort',
     payload: bindSessionIdentityInput(payload),
-  }, { timeoutMs: SESSION_PEER_RPC_TIMEOUT_MS });
+  }, { timeoutMs: SESSION_PEER_RPC_TIMEOUT_MS, traceId: options?.traceId });
 }
 
 export async function hostSessionApprovals(

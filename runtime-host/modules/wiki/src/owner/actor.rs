@@ -250,21 +250,7 @@ impl OwnerSpec for WikiOwner {
         _global: &mut Self::GlobalState,
         command: Self::Command,
     ) {
-        match command {
-            WikiCommand::CreateProject { input, reply } => {
-                let _ = reply.send(create_project(&shared, input).await);
-            }
-            WikiCommand::OpenProject { input, reply } => {
-                let _ = reply.send(open_project(&shared, input).await);
-            }
-            WikiCommand::SetCurrentProject { input, reply } => {
-                let _ = reply.send(set_current_project(&shared, input).await);
-            }
-            WikiCommand::UpdateSourceWatchConfig { input, reply } => {
-                let _ = reply.send(update_source_watch_config(&shared, input).await);
-            }
-            command => handle_project_command(shared, command).await,
-        }
+        handle_project_command(shared, command).await;
     }
 
     async fn handle_direct_query(shared: Self::Shared, query: Self::Query) {
@@ -298,32 +284,40 @@ impl OwnerSpec for WikiOwner {
 }
 
 async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
+    if let Err(error) = crate::call::running(command.call(), command.acceptance()).await {
+        command.reject(error).await;
+        return;
+    }
     let state = shared.snapshot().await;
     match command {
         WikiCommand::WriteFile { input, reply } => {
-            let _ = reply.send(write_file(&state, input));
+            let _ = reply.send(write_file(&state, input)).await;
         }
         WikiCommand::StageImportSource { input, reply } => {
-            let _ = reply.send(stage_import_source(&state, input));
+            let _ = reply.send(stage_import_source(&state, input)).await;
         }
         WikiCommand::ParseImportSource { input, reply } => {
-            let _ = reply.send(parse_import_source(&shared, input).await);
+            let _ = reply.send(parse_import_source(&shared, input).await).await;
         }
         WikiCommand::CommitImportSource { input, reply } => {
-            let _ = reply.send(commit_import_source(&state, &shared, input).await);
+            let _ = reply
+                .send(commit_import_source(&state, &shared, input).await)
+                .await;
         }
         WikiCommand::StageImportFolder { input, reply } => {
-            let _ = reply.send(stage_import_folder(&state, input));
+            let _ = reply.send(stage_import_folder(&state, input)).await;
         }
         WikiCommand::StageRefreshSources { input, reply } => {
-            let _ = reply.send(stage_refresh_sources(&state, input));
+            let _ = reply.send(stage_refresh_sources(&state, input)).await;
         }
         WikiCommand::StageRefreshSourcePaths {
             project_id,
             paths,
             reply,
         } => {
-            let _ = reply.send(stage_refresh_source_paths(&state, &project_id, paths));
+            let _ = reply
+                .send(stage_refresh_source_paths(&state, &project_id, paths))
+                .await;
         }
         WikiCommand::CleanupDeletedWikiPages {
             project_id,
@@ -331,10 +325,11 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             reply,
         } => {
             let _ = reply
-                .send(cleanup_deleted_wiki_pages_for_project(&state, &project_id, &paths).await);
+                .send(cleanup_deleted_wiki_pages_for_project(&state, &project_id, &paths).await)
+                .await;
         }
         WikiCommand::DeleteSource { input, reply } => {
-            let _ = reply.send(delete_source(&state, input).await);
+            reply.send_deleted(delete_source(&state, input).await).await;
         }
         WikiCommand::MigrateSourcePath {
             project_id,
@@ -342,24 +337,28 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             new_source_relative_path,
             reply,
         } => {
-            let _ = reply.send(migrate_source_path(
-                &state,
-                &project_id,
-                &old_source_relative_path,
-                &new_source_relative_path,
-            ));
+            let _ = reply
+                .send(migrate_source_path(
+                    &state,
+                    &project_id,
+                    &old_source_relative_path,
+                    &new_source_relative_path,
+                ))
+                .await;
         }
         WikiCommand::ApplyGeneratedPages { input, reply } => {
-            let _ = reply.send(apply_generated_pages(&state, &shared, input).await);
+            reply
+                .send_generated(apply_generated_pages(&state, &shared, input).await)
+                .await;
         }
         WikiCommand::ResolveReview { input, reply } => {
-            let _ = reply.send(resolve_review(&state, input));
+            let _ = reply.send(resolve_review(&state, input)).await;
         }
         WikiCommand::DismissReview { input, reply } => {
-            let _ = reply.send(dismiss_review(&state, input));
+            let _ = reply.send(dismiss_review(&state, input)).await;
         }
         WikiCommand::ClearResolvedReviews { input, reply } => {
-            let _ = reply.send(clear_resolved_reviews(&state, input));
+            let _ = reply.send(clear_resolved_reviews(&state, input)).await;
         }
         WikiCommand::MarkSourceTaskFailed {
             project_id,
@@ -367,93 +366,107 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             error,
             reply,
         } => {
-            let _ = reply.send(mark_source_task_failed_for_project(
-                &state,
-                &project_id,
-                &source_relative_path,
-                error,
-            ));
+            let _ = reply
+                .send(mark_source_task_failed_for_project(
+                    &state,
+                    &project_id,
+                    &source_relative_path,
+                    error,
+                ))
+                .await;
         }
         WikiCommand::CancelSourceTask { input, reply } => {
-            let _ = reply.send(cancel_source_task(&shared, &state, input).await);
+            let _ = reply
+                .send(cancel_source_task(&shared, &state, input).await)
+                .await;
         }
         WikiCommand::RetrySourceTask { input, reply } => {
-            let _ = reply.send(retry_source_task(&state, input));
+            let _ = reply.send(retry_source_task(&state, input)).await;
         }
         WikiCommand::PauseSourceTask { input, reply } => {
-            let _ = reply.send(pause_source_task(&shared, &state, input).await);
+            let _ = reply
+                .send(pause_source_task(&shared, &state, input).await)
+                .await;
         }
         WikiCommand::ResumeSourceTask { input, reply } => {
-            let _ = reply.send(resume_source_task(&state, input));
+            let _ = reply.send(resume_source_task(&state, input)).await;
         }
         WikiCommand::ReorderSourceTask { input, reply } => {
-            let _ = reply.send(reorder_source_task(&state, input));
+            let _ = reply.send(reorder_source_task(&state, input)).await;
         }
         WikiCommand::Rescan { input, reply } => {
-            let _ = reply.send(rescan(&state, input));
+            let _ = reply.send(rescan(&state, input)).await;
         }
         WikiCommand::EmbedPage { input, reply } => {
-            let _ = reply.send(embed_page(&shared, &state, input).await);
+            let _ = reply.send(embed_page(&shared, &state, input).await).await;
         }
         WikiCommand::CreateProject { input, reply } => {
-            let _ = reply.send(create_project(&shared, input).await);
+            let _ = reply.send(create_project(&shared, input).await).await;
         }
         WikiCommand::OpenProject { input, reply } => {
-            let _ = reply.send(open_project(&shared, input).await);
+            let _ = reply.send(open_project(&shared, input).await).await;
         }
         WikiCommand::SetCurrentProject { input, reply } => {
-            let _ = reply.send(set_current_project(&shared, input).await);
+            let _ = reply.send(set_current_project(&shared, input).await).await;
         }
         WikiCommand::UpdateSourceWatchConfig { input, reply } => {
-            let _ = reply.send(update_source_watch_config(&shared, input).await);
+            let _ = reply
+                .send(update_source_watch_config(&shared, input).await)
+                .await;
         }
     }
 }
 
 async fn handle_query(shared: WikiShared, query: WikiQuery) {
+    if let Err(error) = crate::call::running(query.call(), None).await {
+        query.reject(error).await;
+        return;
+    }
     let state = shared.snapshot().await;
     match query {
         WikiQuery::Status { reply } => {
-            let _ = reply.send(status(&state));
+            let _ = reply.send(status(&state)).await;
         }
         WikiQuery::Projects { reply } => {
-            let _ = reply.send(projects(&state));
+            let _ = reply.send(projects(&state)).await;
         }
         WikiQuery::ProjectTemplates { reply } => {
-            let _ = reply.send(project_templates());
+            let _ = reply.send(project_templates()).await;
         }
         WikiQuery::Files { input, reply } => {
-            let _ = reply.send(files(&state, input));
+            let _ = reply.send(files(&state, input)).await;
         }
         WikiQuery::ReadFile { input, reply } => {
-            let _ = reply.send(read_file(&state, input));
+            let _ = reply.send(read_file(&state, input)).await;
         }
         WikiQuery::ReadBinaryFile { input, reply } => {
-            let _ = reply.send(read_binary_file(&state, input));
+            let _ = reply.send(read_binary_file(&state, input)).await;
         }
         WikiQuery::ReadSourcePreview { input, reply } => {
-            let _ = reply.send(read_source_preview(&state, input).await);
+            let _ = reply.send(read_source_preview(&state, input).await).await;
         }
         WikiQuery::Search { input, reply } => {
-            let _ = reply.send(search(&state, input));
+            let _ = reply.send(search(&state, input)).await;
         }
         WikiQuery::Graph { input, reply } => {
-            let _ = reply.send(graph(&state, input));
+            let _ = reply.send(graph(&state, input)).await;
         }
         WikiQuery::RetrieveContext { input, reply } => {
-            let _ = reply.send(retrieve_context(&shared, &state, input).await);
+            let _ = reply
+                .send(retrieve_context(&shared, &state, input).await)
+                .await;
         }
         WikiQuery::Reviews { input, reply } => {
-            let _ = reply.send(reviews(&state, input));
+            let _ = reply.send(reviews(&state, input)).await;
         }
         WikiQuery::SourceTasks { input, reply } => {
-            let _ = reply.send(source_tasks(&state, input));
+            let _ = reply.send(source_tasks(&state, input)).await;
         }
         WikiQuery::SourceFiles { input, reply } => {
-            let _ = reply.send(source_files(&state, input));
+            let _ = reply.send(source_files(&state, input)).await;
         }
         WikiQuery::SourceWatchConfig { input, reply } => {
-            let _ = reply.send(source_watch_config(&state, input));
+            let _ = reply.send(source_watch_config(&state, input)).await;
         }
     }
 }

@@ -917,6 +917,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "call-log"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "platform",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5876,6 +5888,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
+ "foundation",
  "platform",
  "runtime-directory",
  "serde",
@@ -6602,6 +6615,7 @@ name = "runtime-host"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "call-log",
  "channels",
  "clawhub",
  "connectors",
@@ -6949,6 +6963,7 @@ dependencies = [
  "aes-gcm 0.10.3",
  "base64 0.22.1",
  "chrono",
+ "ed25519-dalek 2.2.0",
  "getrandom 0.3.4",
  "platform",
  "rsa",
@@ -7320,6 +7335,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
+ "foundation",
  "platform",
  "runtime-directory",
  "serde",

@@ -1,10 +1,19 @@
-use tokio::sync::oneshot;
+use std::sync::Arc;
+use tokio::sync::{OnceCell, oneshot};
 
-use crate::domain::model::{Command as SubagentCommand, Outcome};
+use platform::call::{CallContext, CallLogError, CallReceipt};
+
+use crate::{
+    domain::model::{Command as SubagentCommand, Outcome},
+    projection::call::SubagentCallDetail,
+};
 
 pub(crate) enum SubagentCommandEnvelope {
     Execute {
         command: SubagentCommand,
+        call: Option<CallContext<SubagentCallDetail>>,
+        detail: SubagentCallDetail,
+        admission: Option<Arc<OnceCell<Result<CallReceipt, CallLogError>>>>,
         reply: oneshot::Sender<Outcome>,
     },
 }

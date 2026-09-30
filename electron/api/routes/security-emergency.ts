@@ -32,7 +32,7 @@ export async function handleSecurityEmergencyRoutes(
   }
   try {
     const response = await transport.run();
-    sendJson(res, response.status, response.status === 200 ? response.body : UNAVAILABLE);
+    sendJson(res, response.status, response.body);
   } catch {
     sendJson(res, 503, UNAVAILABLE);
   }

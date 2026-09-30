@@ -73,7 +73,7 @@ impl OpenClawDriver {
                             })
                             .is_err()
                         {
-                            Outcome::Unknown
+                            Outcome::WorkspaceInitializationFailed(agent_created(agent))
                         } else {
                             Outcome::Created(agent_created(agent))
                         }
@@ -170,13 +170,12 @@ impl OpenClawDriver {
             }
             Command::SetSkills {
                 agent_id, skills, ..
-            } => agents::configuration_mutation(configuration_mutation(
-                self.gateway
-                    .lock()
-                    .await
-                    .set_agent_skills(agent_id, skills)
-                    .await,
-            )),
+            } => match self.gateway.lock().await.set_agent_skills(agent_id, skills).await {
+                Ok(outcome) => agents::configuration_mutation(configuration_mutation(outcome)),
+                Err((unknown_skill_keys, non_canonical_skill_keys)) => Outcome::SkillConfiguration(
+                    agents::SkillConfigurationOutcome::InvalidSkillKeys { unknown_skill_keys, non_canonical_skill_keys },
+                ),
+            },
             Command::SkillConfiguration {
                 agent_id, trace_id, ..
             } => Outcome::SkillConfiguration(skill_configuration_outcome(

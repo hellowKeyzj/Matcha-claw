@@ -68,7 +68,22 @@ describe('provider account public round trip', () => {
       },
     });
     fetchProviderSnapshotMock.mockResolvedValue(snapshot);
-    hostProviderUpdateAccountMock.mockResolvedValue({ success: true });
+    hostProviderUpdateAccountMock.mockImplementation(async (account, revision) => ({
+      success: true,
+      receipt: {
+        kind: 'replaceAccount',
+        phase: 'terminal',
+        outcome: 'stored',
+        count: null,
+        acceptedCount: null,
+        persisted: 'confirmed',
+        commit: 'committed',
+        accountId: account.id,
+        accountRevision: revision,
+        diagnostic: null,
+        native: { changed: false, applied: 'unknown', observed: 'unavailable' },
+      },
+    }));
     useProviderStore.setState({
       providerSnapshot: snapshot,
       snapshotReady: true,
@@ -94,7 +109,7 @@ describe('provider account public round trip', () => {
       enabled: true,
       createdAt: '',
       updatedAt: expect.any(String),
-    }, 4, 'next-chat-key');
+    }, 4, 'next-chat-key', undefined);
     expect(hostProviderUpdateAccountMock).toHaveBeenNthCalledWith(2, {
       id: 'custom-media',
       vendorId: 'custom',
@@ -106,7 +121,7 @@ describe('provider account public round trip', () => {
       enabled: true,
       createdAt: '',
       updatedAt: expect.any(String),
-    }, 6, 'next-media-key');
+    }, 6, 'next-media-key', undefined);
   });
 
   it('拒绝携带私密、未知或无效字段的 public vendor metadata', () => {

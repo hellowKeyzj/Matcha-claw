@@ -38,12 +38,12 @@ describe('skills management fixed delivery transport', () => {
   });
 
   it('sends raw OpenClaw skill keys for config mutations', async () => {
-    const fetcher = vi.fn().mockResolvedValue(nativeResponse({ outcome: 'accepted' }));
+    const fetcher = vi.fn().mockResolvedValue(nativeResponse({ callId: 'a'.repeat(32), accepted: true }, 202));
     const transport = createSkillsManagementTransport(issuer(), 3227, fetcher);
 
     await expect(transport.mutateConfig({ skillKey: 'Excel XLSX', enabled: false })).resolves.toEqual({
-      status: 200,
-      body: { outcome: 'accepted' },
+      status: 202,
+      body: { callId: 'a'.repeat(32), accepted: true },
     });
 
     expect(fetcher).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
@@ -52,12 +52,12 @@ describe('skills management fixed delivery transport', () => {
   });
 
   it('posts ClawHub install to the skills management endpoint', async () => {
-    const fetcher = vi.fn().mockResolvedValue(nativeResponse({ outcome: 'accepted' }));
+    const fetcher = vi.fn().mockResolvedValue(nativeResponse({ callId: 'a'.repeat(32), accepted: true }, 202));
     const transport = createSkillsManagementTransport(issuer(), 3227, fetcher);
 
     await expect(transport.installClawHub({ slug: 'weather' })).resolves.toEqual({
-      status: 200,
-      body: { outcome: 'accepted' },
+      status: 202,
+      body: { callId: 'a'.repeat(32), accepted: true },
     });
 
     expect(fetcher).toHaveBeenCalledWith(`http://127.0.0.1:3227${SKILLS_ENDPOINTS.clawHubInstall}`, expect.objectContaining({
@@ -167,10 +167,10 @@ describe('skills management fixed delivery transport', () => {
 
   it('delivers local import and readme through fixed signed endpoints', async () => {
     const fetcher = vi.fn()
-      .mockResolvedValueOnce(nativeResponse({ outcome: 'accepted' }))
+      .mockResolvedValueOnce(nativeResponse({ callId: 'a'.repeat(32), accepted: true }, 202))
       .mockResolvedValueOnce(nativeResponse({ success: true, content: '# README', filePath: 'C:\\skills\\Excel XLSX\\SKILL.md' }));
     const transport = createSkillsManagementTransport(issuer(), 3227, fetcher);
-    await expect(transport.importBundle({ skillKey: 'Excel XLSX', files: [{ path: 'SKILL.md', content: '---\\nname: Excel XLSX\\n---' }] })).resolves.toEqual({ status: 200, body: { outcome: 'accepted' } });
+    await expect(transport.importBundle({ skillKey: 'Excel XLSX', files: [{ path: 'SKILL.md', content: '---\\nname: Excel XLSX\\n---' }] })).resolves.toEqual({ status: 202, body: { callId: 'a'.repeat(32), accepted: true } });
     await expect(transport.readme({
       skillKey: 'Excel XLSX',
       slug: 'excel-xlsx',

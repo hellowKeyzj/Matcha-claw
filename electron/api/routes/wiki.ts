@@ -25,6 +25,7 @@ const WIKI_ROUTES = {
   '/api/wiki/refresh-sources': { method: 'POST', action: 'refreshSources' },
   '/api/wiki/apply-generated-pages': { method: 'POST', action: 'applyGeneratedPages' },
   '/api/wiki/delete-source': { method: 'POST', action: 'deleteSource' },
+  '/api/wiki/call-result': { method: 'POST', action: 'callResult' },
   '/api/wiki/reviews': { method: 'GET', action: 'reviews' },
   '/api/wiki/review/resolve': { method: 'POST', action: 'resolveReview' },
   '/api/wiki/review/dismiss': { method: 'POST', action: 'dismissReview' },

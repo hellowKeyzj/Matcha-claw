@@ -27,6 +27,8 @@ type ChannelConfigureField = Readonly<{
   options?: readonly string[];
 }>;
 type ChannelConfigureForm = Readonly<{ fields: readonly ChannelConfigureField[] }>;
+type ChannelCallReceipt = Readonly<{ callId: string; accepted: true }>;
+
 type ChannelConfigureOutcome = Readonly<{
   outcome: 'confirmed' | 'target_rejected' | 'unknown';
 }>;
@@ -44,8 +46,8 @@ export type ChannelCatalogTransportResponse = Readonly<{
 }>;
 
 export type ChannelConfigureTransportResponse = Readonly<{
-  status: 200 | 400 | 503;
-  body: ChannelConfigureForm | ChannelConfigureOutcome | typeof REJECTED | typeof UNAVAILABLE;
+  status: 200 | 202 | 400 | 503;
+  body: ChannelConfigureForm | ChannelConfigureOutcome | ChannelCallReceipt | typeof REJECTED | typeof UNAVAILABLE;
 }>;
 
 export interface ChannelCatalogTransport {
@@ -143,6 +145,9 @@ async function requestConfigure<T extends ChannelConfigureForm | ChannelConfigur
     });
     status = response?.status ?? 503;
     outcome = response?.body ?? UNAVAILABLE;
+    if (phase === 'transport.configure.apply' && response?.status === 202 && isCallReceipt(response.body)) {
+      return { status: 202, body: response.body };
+    }
     if (response?.status === 400 && isRejected(response.body)) {
       return { status: 400, body: response.body };
     }
@@ -161,6 +166,11 @@ async function requestConfigure<T extends ChannelConfigureForm | ChannelConfigur
     finish(status, outcome, errorCode);
   }
   return { status: 503, body: UNAVAILABLE };
+}
+
+function isCallReceipt(value: unknown): value is ChannelCallReceipt {
+  return isRecord(value) && Object.keys(value).length === 2
+    && value.accepted === true && typeof value.callId === 'string' && /^[0-9a-f]{32}$/.test(value.callId);
 }
 
 function isIdentity(value: unknown): value is string {

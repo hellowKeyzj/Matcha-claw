@@ -99,6 +99,21 @@
         "missingPrefix": "Missing: {{items}}"
     },
     "sealed": {
+        "tabs": {
+            "installed": "Installed",
+            "mine": "My cloud packages",
+            "market": "Cloud market"
+        },
+        "searchInstalled": "Search installed packages",
+        "searchMine": "Search my cloud packages",
+        "searchMarket": "Search cloud skill packages",
+        "exportSkills": "Export skills",
+        "exportSearch": "Search skills to export",
+        "exportDescription": "Select skills and export them as encrypted skill packages.",
+        "packageActions": "Skill package actions",
+        "viewCloudPackages": "View cloud packages",
+        "installedDescription": "Manage locally installed skill packages.",
+        "marketDescription": "Discover and install skill packages from the cloud.",
         "search": "Search skill packages",
         "runtimeLabel": "Runtime: {{runtime}}",
         "runtimeAny": "Any",
@@ -106,7 +121,20 @@
         "emptyTitle": "No skill packages yet",
         "packageInstalled": "Installed",
         "packageAvailable": "Not installed",
-        "cloudTitle": "Cloud skill packages",
+        "mineTitle": "My cloud packages",
+        "mineDescription": "Uploads remain drafts until you publish them to the market.",
+        "mineEmpty": "No uploaded packages yet.",
+        "publish": "Publish",
+        "publishing": "Publishing...",
+        "published": "Package published",
+        "publishFailed": "Failed to publish package",
+        "retry": "Retry",
+        "status": { "draft": "Draft", "published": "Published", "disabled": "Disabled", "unknown": "Unknown status" },
+        "errors": {
+            "MATCHA_PACKAGE_CLOUD_ENVELOPE_REQUIRED": "Export the package again for the cloud, then upload it.",
+            "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "This version cannot be published. Refresh your uploaded packages."
+        },
+        "cloudTitle": "Cloud skill package market",
         "cloudEmpty": "No cloud skill packages yet.",
         "cloudUnavailableTitle": "Cloud skill packages unavailable",
         "cloudUnavailableDescription": "Cannot connect to the backend platform. Refresh later.",

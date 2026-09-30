@@ -1,5 +1,8 @@
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { logSessionTrace, summarizeIdentifier, traceHeader } from '../transport/sessions/trace';
+import { sendLoopbackJson } from '../transport/client';
+import { decodeCallReceipt } from '../../../../src/types/call-log/receipt';
+import { isCallId } from '../../../../src/types/call-log/decode';
 
 const DECISION_TTL_MS = 30_000;
 const UNAVAILABLE = { success: false, error: 'Subagent management is unavailable' } as const;
@@ -43,12 +46,21 @@ type AgentsRequest = Readonly<{
 }>;
 
 export type AgentsTransportResponse = Readonly<{
-  status: 200 | 409 | 422 | 503;
+  status: 200 | 202 | 404 | 409 | 422 | 503;
   body: unknown;
+}>;
+
+export type SubagentCloudArtifactRequest = Readonly<{
+  callId: string;
+  operationId: 'subagents.package.exportCloud';
+  endpoint: Endpoint;
+  agentId: string;
 }>;
 
 export interface AgentsTransport {
   execute(request: unknown, traceId?: string | null): Promise<AgentsTransportResponse>;
+  result(request: unknown): Promise<AgentsTransportResponse>;
+  exportCloudArtifact(request: SubagentCloudArtifactRequest): Promise<AgentsTransportResponse>;
 }
 
 export function createAgentsTransport(
@@ -56,7 +68,44 @@ export function createAgentsTransport(
   port: number,
   fetcher: typeof fetch = fetch,
 ): AgentsTransport {
-  return { execute };
+  return { execute, result, exportCloudArtifact };
+
+  async function exportCloudArtifact(request: SubagentCloudArtifactRequest): Promise<AgentsTransportResponse> {
+    if (!isResultRequest(request) || request.operationId !== 'subagents.package.exportCloud'
+      || request.endpoint.runtimeAdapterId !== 'openclaw') return { status: 503, body: UNAVAILABLE };
+    const response = await sendLoopbackJson({
+      port, path: '/api/subagents/package-artifacts', issuer,
+      decision: {
+        endpoint: '/api/subagents/package-artifacts', scope: 'subagents:manage',
+        capability: 'subagent.management', subject: 'subagents',
+      },
+      method: 'POST', fetcher, body: request, timeoutMs: 30_000,
+    });
+    if (response?.status === 200 && isPackageArtifact(response.body, request)) return { status: 200, body: response.body };
+    if (response && (response.status === 404 || response.status === 409 || response.status === 503)
+      && isFailure(response.body)) return { status: response.status, body: response.body };
+    return { status: 503, body: UNAVAILABLE };
+  }
+
+  async function result(request: unknown): Promise<AgentsTransportResponse> {
+    if (!isResultRequest(request)) return { status: 503, body: UNAVAILABLE };
+    const response = await sendLoopbackJson({
+      port,
+      path: '/api/subagents/results',
+      issuer,
+      decision: {
+        endpoint: '/api/subagents/results', scope: 'subagents:manage',
+        capability: capabilityForOperation(request.operationId), subject: 'subagents',
+      },
+      method: 'POST', fetcher, body: request, timeoutMs: 30_000,
+    });
+    if (response?.status === 200 && isResultResponse(response.body, request)) {
+      return { status: 200, body: response.body };
+    }
+    if (response && (response.status === 404 || response.status === 409 || response.status === 422 || response.status === 503)
+      && isFailure(response.body)) return { status: response.status, body: response.body };
+    return { status: 503, body: UNAVAILABLE };
+  }
 
   async function execute(request: unknown, traceId?: string | null): Promise<AgentsTransportResponse> {
     if (!isAgentsRequest(request)) {
@@ -82,9 +131,14 @@ export function createAgentsTransport(
           ...traceHeader(traceId),
         },
         body: JSON.stringify(request),
+        ...(isBackgroundOperation(request.operationId) ? { signal: AbortSignal.timeout(30_000) } : {}),
       });
       const body: unknown = await response.json();
-      const validSuccess = response.status === 200 && isSuccess(body, request.operationId);
+      if (isBackgroundOperation(request.operationId) && response.status === 202) {
+        return { status: 202, body: decodeCallReceipt(body) };
+      }
+      const validSuccess = !isBackgroundOperation(request.operationId)
+        && response.status === 200 && isSuccess(body, request.operationId);
       const validFailure = (response.status === 409 || response.status === 422 || response.status === 503) && isFailure(body);
       logSessionTrace('electron.agents.response', traceId, {
         operationId: request.operationId,
@@ -186,6 +240,98 @@ function isOperation(value: unknown): value is Operation {
     || value === 'subagentTools.set';
 }
 
+function isBackgroundOperation(operation: Operation): boolean {
+  return operation === 'subagents.create' || operation === 'subagents.update' || operation === 'subagents.delete'
+    || operation === 'subagents.description.set' || operation === 'subagents.model.set'
+    || operation === 'subagents.skills.set' || operation === 'subagentSkills.set'
+    || operation === 'subagentTools.set' || operation === 'subagents.package.install'
+    || operation === 'subagents.package.export' || operation === 'subagents.package.exportCloud';
+}
+
+function capabilityForOperation(operation: Operation): CapabilityId {
+  return operation === 'subagentSkills.set' ? 'subagent.skills'
+    : operation === 'subagentTools.set' ? 'subagent.tools' : 'subagent.management';
+}
+
+type ResultRequest = { callId: string; operationId: Operation; endpoint: Endpoint; agentId?: string };
+
+function isResultRequest(value: unknown): value is ResultRequest {
+  if (!isRecord(value) || !isCallId(value.callId) || !isOperation(value.operationId)
+    || !isBackgroundOperation(value.operationId) || !isEndpoint(value.endpoint)) return false;
+  if ((value.operationId === 'subagents.package.export' || value.operationId === 'subagents.package.exportCloud')
+    && value.endpoint.runtimeAdapterId !== 'openclaw') return false;
+  const root = value.operationId === 'subagents.create' || value.operationId === 'subagents.package.install';
+  return hasExactKeys(value, root ? ['callId', 'operationId', 'endpoint'] : ['callId', 'operationId', 'endpoint', 'agentId'])
+    && (root || isText(value.agentId, 4096));
+}
+
+function isResultResponse(value: unknown, request: ResultRequest): boolean {
+  if (!isRecord(value) || !hasExactKeys(value, ['callId', 'operationId', 'status', 'body'])
+    || value.callId !== request.callId || value.operationId !== request.operationId
+    || !isRecord(value.body)) return false;
+  const body = value.body;
+  if (request.operationId === 'subagents.delete' && isDeleteResult(body)) {
+    return body.agent.id === request.agentId && (value.status === 200 ? body.success === true : value.status === 503 && body.success === false);
+  }
+  if (value.status === 200) {
+    if (!isMutationResult(body, request.operationId)) return false;
+    if (request.agentId !== undefined) {
+      if (isRecord(body.agent) && body.agent.id !== request.agentId) return false;
+      if (isRecord(body.package) && body.package.agentId !== request.agentId) return false;
+      for (const key of ['view', 'latestView']) {
+        if (isRecord(body[key]) && body[key].agentId !== request.agentId) return false;
+      }
+    }
+    return true;
+  }
+  if (value.status !== 409 && value.status !== 422 && value.status !== 503) return false;
+  if (request.operationId === 'subagents.create' && value.status === 503
+    && hasExactKeys(body, ['success', 'error', 'agent']) && body.success === false
+    && body.error === 'Subagent workspace initialization failed' && isMutationAgent(body.agent)) return true;
+  if (request.operationId === 'subagents.package.install' && hasExactKeys(body, ['success', 'error', 'agentId', 'compensation'])) {
+    return body.success === false && body.error === 'Subagent package installation failed'
+      && isText(body.agentId, 4096) && isCompensation(body.compensation);
+  }
+  return isFailure(body) && (body.error === 'Subagent request was rejected'
+    || body.error === 'Subagent mutation outcome is unknown'
+    || body.error === 'Subagent management is unsupported for this runtime'
+    || body.error === 'Subagent management is unavailable');
+}
+
+function isMutationResult(value: Record<string, unknown>, operation: Operation): boolean {
+  if (value.success !== true) return false;
+  if (operation === 'subagents.create' || operation === 'subagents.update') {
+    return hasExactKeys(value, ['success', 'kind', 'agent'])
+      && value.kind === (operation === 'subagents.create' ? 'created' : 'updated') && isMutationAgent(value.agent);
+  }
+  if (operation === 'subagents.package.install') return hasExactKeys(value, ['success', 'package']) && isPackageInstall(value.package);
+  if (operation === 'subagents.package.export' || operation === 'subagents.package.exportCloud') {
+    return hasExactKeys(value, ['success', 'package']) && isPackageExport(value.package);
+  }
+  if (operation === 'subagentSkills.set' || operation === 'subagents.skills.set') {
+    return (operation === 'subagents.skills.set' && hasExactKeys(value, ['success'])) || isConfigurationMutationResult(value, true);
+  }
+  if (operation === 'subagentTools.set') return isConfigurationMutationResult(value, false);
+  return (operation === 'subagents.description.set' || operation === 'subagents.model.set') && hasExactKeys(value, ['success']);
+}
+
+function isDeleteResult(value: Record<string, unknown>): value is Record<string, unknown> & { agent: { id: string }; success: boolean } {
+  if (!hasExactKeys(value, ['success', 'kind', 'agent', 'nativeOk', 'removedBindings', 'failedCount', 'purgeFailedCount', 'sealedPurge'])
+    || typeof value.success !== 'boolean' || value.kind !== 'deleted' || !isMutationAgent(value.agent)
+    || !isRecord(value.agent) || value.agent.name !== null || value.agent.model !== null
+    || typeof value.nativeOk !== 'boolean' || !isTimestamp(value.removedBindings)
+    || !isTimestamp(value.failedCount) || !isTimestamp(value.purgeFailedCount)
+    || (value.sealedPurge !== 'completed' && value.sealedPurge !== 'failed' && value.sealedPurge !== 'notAttempted')) return false;
+  return value.success === (value.nativeOk && value.failedCount === 0 && value.purgeFailedCount === 0 && value.sealedPurge === 'completed');
+}
+
+function isCompensation(value: unknown): boolean {
+  return isRecord(value) && hasExactKeys(value, ['outcome', 'failedCount', 'purgeFailedCount'])
+    && typeof value.outcome === 'string' && ['deleted', 'rejected', 'outcomeUnknown', 'unsupported', 'unavailable'].includes(value.outcome)
+    && isTimestamp(value.failedCount) && isTimestamp(value.purgeFailedCount)
+    && (value.outcome !== 'deleted' || (value.failedCount === 0 && value.purgeFailedCount === 0));
+}
+
 function isScope(value: unknown): value is Readonly<{ kind: 'agent'; endpoint: Endpoint; agentId: string }> {
   return isRecord(value)
     && hasExactKeys(value, ['kind', 'endpoint', 'agentId'])
@@ -240,7 +386,7 @@ function isInput(
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'runId', 'waitSliceMs', 'rpcTimeoutBufferMs'])
       && value.kind === 'draftWait'
       && endpoint.runtimeAdapterId === 'openclaw'
-      && target.subagentId === value.agentId
+      && targetMatches(value.agentId)
       && isText(value.agentId, 4096)
       && isText(value.runId, 4096)
       && isWaitSlice(value.waitSliceMs)
@@ -260,7 +406,7 @@ function isInput(
   if (operation === 'subagents.update') {
     return hasAllowedKeys(value, ['kind', 'endpoint', 'agentId', 'name', 'workspace', 'model'], ['kind', 'endpoint', 'agentId'])
       && value.kind === 'update'
-      && target.subagentId === value.agentId
+      && targetMatches(value.agentId)
       && isText(value.agentId, 4096)
       && (Object.hasOwn(value, 'name') || Object.hasOwn(value, 'workspace') || Object.hasOwn(value, 'model'))
       && (!Object.hasOwn(value, 'name') || isText(value.name, 4096))
@@ -270,14 +416,14 @@ function isInput(
   if (operation === 'subagents.delete') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'deleteFiles'])
       && value.kind === 'delete'
-      && target.subagentId === value.agentId
+      && targetMatches(value.agentId)
       && isText(value.agentId, 4096)
       && typeof value.deleteFiles === 'boolean';
   }
   if (operation === 'subagents.files.list') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId'])
       && value.kind === 'filesList'
-      && target.subagentId === value.agentId
+      && targetMatches(value.agentId)
       && isText(value.agentId, 4096);
   }
   if (operation === 'subagents.displayConfig.get') {
@@ -289,7 +435,7 @@ function isInput(
   if (operation === 'subagents.description.set') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'description'])
       && value.kind === 'setDescription'
-      && target.subagentId === value.agentId
+      && targetMatches(value.agentId)
       && isText(value.agentId, 4096)
       && (value.description === null || isText(value.description, 4096))
       && endpoint.runtimeAdapterId === 'openclaw';
@@ -297,7 +443,7 @@ function isInput(
   if (operation === 'subagents.model.set') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'model'])
       && value.kind === 'setConfigurationModel'
-      && target.subagentId === value.agentId
+      && targetMatches(value.agentId)
       && isText(value.agentId, 4096)
       && (value.model === null || isModelInput(value.model))
       && endpoint.runtimeAdapterId === 'openclaw';
@@ -305,7 +451,7 @@ function isInput(
   if (operation === 'subagents.skills.set') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'skills'])
       && value.kind === 'setSkills'
-      && target.subagentId === value.agentId
+      && targetMatches(value.agentId)
       && isText(value.agentId, 4096)
       && Array.isArray(value.skills)
       && value.skills.every((skill) => isText(skill, 4096))
@@ -314,14 +460,14 @@ function isInput(
   if (operation === 'subagents.package.export') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId'])
       && value.kind === 'packageExport'
-      && target.subagentId === value.agentId
+      && targetMatches(value.agentId)
       && isText(value.agentId, 4096)
       && endpoint.runtimeAdapterId === 'openclaw';
   }
   if (operation === 'subagents.package.exportCloud') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'cloudPublicKey', 'cloudKeyId'])
       && value.kind === 'packageExportCloud'
-      && target.subagentId === value.agentId
+      && targetMatches(value.agentId)
       && isText(value.agentId, 4096)
       && isText(value.cloudPublicKey, 8192)
       && isText(value.cloudKeyId, 512)
@@ -330,7 +476,7 @@ function isInput(
   if (operation === 'subagents.package.install') {
     return hasAllowedKeys(value, ['kind', 'endpoint', 'packagePath', 'cloudMetadata'], ['kind', 'endpoint', 'packagePath'])
       && value.kind === 'packageInstall'
-      && target.subagentId === undefined
+      && target.kind === 'subagent' && target.subagentId === undefined
       && isText(value.packagePath, 4096)
       && (value.cloudMetadata === undefined || isCloudPackageInstallMetadata(value.cloudMetadata))
       && endpoint.runtimeAdapterId === 'openclaw';
@@ -338,13 +484,13 @@ function isInput(
   if (operation === 'subagents.files.get') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'name'])
       && value.kind === 'filesGet'
-      && target.subagentId === value.agentId
+      && targetMatches(value.agentId)
       && isText(value.agentId, 4096)
       && isRootedFileName(value.name);
   }
   return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'name', 'content'])
     && value.kind === 'filesSet'
-    && target.subagentId === value.agentId
+    && targetMatches(value.agentId)
     && isText(value.agentId, 4096)
     && isRootedFileName(value.name)
     && typeof value.content === 'string'
@@ -394,25 +540,14 @@ function isSuccess(value: unknown, operation: Operation): boolean {
     && value.agents.every(isAgent);
   if (operation === 'subagents.files.list') return hasExactKeys(value, ['success', 'files'])
     && Array.isArray(value.files) && value.files.every(isFile);
-  if (operation === 'subagents.package.export' || operation === 'subagents.package.exportCloud') return hasExactKeys(value, ['success', 'package'])
-    && isPackageExport(value.package);
-  if (operation === 'subagents.package.install') return hasExactKeys(value, ['success', 'package'])
-    && isPackageInstall(value.package);
   if (operation === 'subagents.displayConfig.get') return hasExactKeys(value, ['success', 'defaults', 'agents'])
     && isConfigurationDefaults(value.defaults)
     && Array.isArray(value.agents)
     && value.agents.every(isConfigurationAgent);
-  if (operation === 'subagents.description.set'
-    || operation === 'subagents.model.set'
-    || operation === 'subagents.skills.set') return hasExactKeys(value, ['success']);
-  if (operation === 'subagentSkills.set') return isConfigurationMutationResult(value, true);
-  if (operation === 'subagentTools.set') return isConfigurationMutationResult(value, false);
   if (operation === 'subagents.files.get' || operation === 'subagents.files.set') {
     return hasExactKeys(value, ['success', 'file']) && isFile(value.file);
   }
-  return hasExactKeys(value, ['success', 'kind', 'agent'])
-    && (value.kind === 'created' || value.kind === 'updated' || value.kind === 'deleted')
-    && isMutationAgent(value.agent);
+  return false;
 }
 
 function isAgent(value: unknown): boolean {
@@ -446,12 +581,23 @@ function isFile(value: unknown): boolean {
 
 function isPackageExport(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['agentId', 'fileName', 'packagePath', 'size', 'exportedAtMs'])
+    && hasExactKeys(value, ['agentId', 'fileName', 'size', 'exportedAtMs'])
     && isText(value.agentId, 4096)
     && isText(value.fileName, 4096)
-    && isText(value.packagePath, 4096)
     && isTimestamp(value.size)
     && isTimestamp(value.exportedAtMs);
+}
+
+function isPackageArtifact(value: unknown, request: SubagentCloudArtifactRequest): boolean {
+  if (!isRecord(value) || !hasExactKeys(value, ['callId', 'operationId', 'package'])
+    || value.callId !== request.callId || value.operationId !== request.operationId || !isRecord(value.package)) return false;
+  const { packageSha256, packageBase64, ...metadata } = value.package;
+  return isPackageExport(metadata) && metadata.agentId === request.agentId
+    && typeof metadata.size === 'number' && metadata.size > 0 && metadata.size <= 256 * 1024
+    && isPackageSha256(packageSha256) && typeof packageBase64 === 'string'
+    && packageBase64.length === Math.ceil(metadata.size / 3) * 4
+    && /^[A-Za-z0-9+/]+={0,2}$/.test(packageBase64)
+    && Buffer.from(packageBase64, 'base64').length === metadata.size;
 }
 
 function isPackageInstall(value: unknown): boolean {
@@ -634,7 +780,7 @@ function isWaitStatus(value: unknown): boolean {
   return value === 'completed' || value === 'failed' || value === 'timeout' || value === 'pending';
 }
 
-function isTimestamp(value: unknown): boolean {
+function isTimestamp(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 

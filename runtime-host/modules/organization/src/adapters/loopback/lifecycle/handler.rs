@@ -61,6 +61,14 @@ async fn handle_request(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     };
     drop(verifier);
+    if let super::Request::Delete { target: super::DeleteTarget::Run(run_id), idempotency_key } = request {
+        return match owner.admit_team_workflow(crate::call::TeamWorkflow::RunDelete {
+            run_id, idempotency_key, observed_at: now_millis(),
+        }).await {
+            Ok(receipt) => Response { status: 202, body: serde_json::json!(receipt) },
+            Err(_) => Response::from_delivery(Delivery::Unavailable),
+        };
+    }
     Response::from_delivery(handle(&owner, request, now_millis()).await)
 }
 

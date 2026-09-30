@@ -1,9 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn());
+const getCallMock = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: hostApiFetchMock,
+  hostApiFetchDecoded: async (path: string, decode: (value: unknown) => unknown, init: unknown) => decode(await hostApiFetchMock(path, init)),
 }));
+vi.mock('@/lib/call-log', () => ({ getCall: getCallMock }));
+vi.mock('@/lib/host-events', () => ({ subscribeHostEvent: () => () => {}, subscribeBrowserRecovery: () => () => {} }));
 
 describe('channel runtime client', () => {
   beforeEach(() => {
@@ -251,7 +255,13 @@ describe('channel runtime client', () => {
   });
 
   it('deletes configuration through the named endpoint and preserves the account', async () => {
-    hostApiFetchMock.mockResolvedValue({ outcome: 'confirmed' });
+    const receipt = { callId: '0123456789abcdef0123456789abcdef', accepted: true };
+    hostApiFetchMock.mockResolvedValue(receipt);
+    getCallMock.mockResolvedValue({
+      ...receipt, module: 'channels', command: 'deleteConfig', status: 'succeeded',
+      start: 1, end: 2, revision: 3,
+      detail: { operation: 'deleteConfig', channel: 'wecom', accountId: 'backup', phase: 'complete', outcome: 'confirmed', reply: null, configFinalization: null },
+    });
     const { hostChannelsDeleteConfig } = await import('@/lib/channel-runtime');
 
     await expect(hostChannelsDeleteConfig('wecom', 'backup')).resolves.toEqual({

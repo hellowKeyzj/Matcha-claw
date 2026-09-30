@@ -193,7 +193,15 @@ async fn handle_request(
                                 }
                             };
                             match channel.configure(key, agent_id, values).await {
-                                Ok(outcome) => Delivery::Configure(outcome),
+                                Ok(crate::api::ConfigureDelivery::Outcome(outcome)) => {
+                                    Delivery::Configure(outcome)
+                                }
+                                Ok(crate::api::ConfigureDelivery::Accepted(receipt)) => {
+                                    return Response {
+                                        status: 202,
+                                        body: serde_json::json!(receipt),
+                                    };
+                                }
                                 Err(_) => Delivery::Unavailable,
                             }
                         }
@@ -206,6 +214,7 @@ async fn handle_request(
         }
         .await;
         span.finish(match response.status {
+            202 => "accepted",
             200 => "delivered",
             400 => "invalid",
             401 => "unauthorized",

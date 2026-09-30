@@ -28,5 +28,5 @@
       "@electron/e2e-fixture-loader": ["electron/main/e2e-fixture-loader.noop.ts"]
     }
   },
-  "include": ["electron", "src/types/desktop", "vite.config.ts"]
+  "include": ["electron", "src/types/desktop", "src/types/call-log.ts", "src/types/call-log/**/*.ts", "src/types/connectors-observation.ts", "src/types/skills-operation-result.ts", "src/types/wiki-call-result.ts", "src/types/cron-operation-result.ts", "src/types/cloud-package-operation.ts", "src/types/cloud-package.ts", "src/types/cron.ts", "src/types/channel.ts", "vite.config.ts"]
 }

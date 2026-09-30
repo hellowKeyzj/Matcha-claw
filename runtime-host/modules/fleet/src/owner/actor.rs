@@ -93,6 +93,7 @@ pub(crate) struct FleetShared {
     private_root: PathBuf,
     docker_ownership: BTreeMap<String, String>,
     ssh_host_keys: BTreeMap<TargetId, russh::keys::PublicKey>,
+    pending_calls: crate::call::PendingCalls,
 }
 
 impl FleetShared {
@@ -1788,6 +1789,7 @@ impl OwnerSpec for FleetOwner {
             private_root: self.private_root.clone(),
             docker_ownership: self.docker_ownership.clone(),
             ssh_host_keys: self.ssh_host_keys.clone(),
+            pending_calls: Default::default(),
         };
         (shared, self)
     }
@@ -1810,10 +1812,22 @@ impl OwnerSpec for FleetOwner {
         _lane: &mut Self::LaneState,
         command: Self::Command,
     ) {
+        let (command, mut call) = match command {
+            FleetCommand::Recorded { command, call } => (*command, Some(call)),
+            command => (command, None),
+        };
+        if let Some(call) = &mut call {
+            if call.running().await.is_err() {
+                return;
+            }
+        }
         let now = SystemTime::now();
         let mut owner = match shared.open_operation_owner() {
             Ok(owner) => owner,
             Err(error) => {
+                if let Some(call) = &call {
+                    call.finish(&Err::<(), _>(&error)).await;
+                }
                 send_keyed_delivery_error(command, error);
                 return;
             }
@@ -1830,6 +1844,9 @@ impl OwnerSpec for FleetOwner {
                     }
                     _ => Err(()),
                 };
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::Begin {
@@ -1844,6 +1861,49 @@ impl OwnerSpec for FleetOwner {
                     Ok(_) => Err(FleetDeliveryError::InvalidTransition),
                     Err(error) => Err(error),
                 };
+                if let Some(call) = &mut call {
+                    call.detail.target_id = Some(target_id.as_str().to_owned());
+                    let command_id = owner
+                        .delivery
+                        .facts()
+                        .outbox()
+                        .record(&dispatch_id)
+                        .map(|record| record.intent().command_id().clone());
+                    call.detail.command_id = command_id.as_ref().map(|id| id.as_str().to_owned());
+                    call.dispatch(&result).await;
+                    if let Ok(result) = &result {
+                        if matches!(
+                            result.outcome,
+                            crate::application::executor::FleetExecutionOutcome::Accepted
+                        ) {
+                            let mut pending = shared.pending_calls.lock().await;
+                            let command = if owner.refresh_from_store().is_ok() {
+                                command_id.as_ref().and_then(|id| {
+                                    owner.delivery.facts().command_ledger().record(id)
+                                })
+                            } else {
+                                None
+                            };
+                            match (command_id, command) {
+                                (Some(command_id), Some(command)) => {
+                                    if !call.command_state(command.state()).await {
+                                        pending.insert(
+                                            (command_id, result.attempt.sequence()),
+                                            call.clone(),
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    call.outcome(
+                                        "outcomeUnknown",
+                                        platform::call::CallStatus::Unknown,
+                                    )
+                                    .await
+                                }
+                            }
+                        }
+                    }
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::Accept {
@@ -1851,35 +1911,55 @@ impl OwnerSpec for FleetOwner {
                 attempt,
                 reply,
             } => {
-                let _ = reply.send(owner.accept(&dispatch_id, &attempt, now));
+                let result = owner.accept(&dispatch_id, &attempt, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::Reject {
                 dispatch_id,
                 attempt,
                 reply,
             } => {
-                let _ = reply.send(owner.reject(&dispatch_id, &attempt, now));
+                let result = owner.reject(&dispatch_id, &attempt, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::Unknown {
                 dispatch_id,
                 attempt,
                 reply,
             } => {
-                let _ = reply.send(owner.mark_unknown(&dispatch_id, &attempt, now));
+                let result = owner.mark_unknown(&dispatch_id, &attempt, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::Replay {
                 command_id,
                 dispatch_id,
                 reply,
             } => {
-                let _ = reply.send(owner.authorize_replay(&command_id, &dispatch_id, now));
+                let result = owner.authorize_replay(&command_id, &dispatch_id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::BeginConnectionProbe {
                 id,
                 command_id,
                 reply,
             } => {
-                let _ = reply.send(owner.begin_connection_probe(&id, command_id, now));
+                let result = owner.begin_connection_probe(&id, command_id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RunConnectionProbe {
                 target_id,
@@ -1896,6 +1976,9 @@ impl OwnerSpec for FleetOwner {
                     Ok(_) => Err(FleetDeliveryError::InvalidTransition),
                     Err(error) => Err(error),
                 };
+                if let Some(call) = &call {
+                    call.probe(&result).await;
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::CompleteConnectionProbe {
@@ -1905,13 +1988,12 @@ impl OwnerSpec for FleetOwner {
                 message,
                 reply,
             } => {
-                let _ = reply.send(owner.complete_connection_probe(
-                    &id,
-                    &command_id,
-                    outcome,
-                    now,
-                    message,
-                ));
+                let result =
+                    owner.complete_connection_probe(&id, &command_id, outcome, now, message);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RunEnvironmentDeployment {
                 target_id,
@@ -1933,6 +2015,22 @@ impl OwnerSpec for FleetOwner {
                         .map(|(_, outcome)| outcome)
                 }
                 .await;
+                if let Some(call) = &mut call {
+                    call.detail.target_id = Some(target_id.as_str().to_owned());
+                    if let Some(command) = call
+                        .detail
+                        .command_id
+                        .as_deref()
+                        .and_then(|id| CommandId::try_new(id).ok())
+                        .and_then(|id| owner.delivery.facts().command_ledger().record(&id))
+                    {
+                        if !call.command_state(command.state()).await {
+                            call.lifecycle(&result).await;
+                        }
+                    } else {
+                        call.lifecycle(&result).await;
+                    }
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::RunEnvironmentDeletion {
@@ -1955,6 +2053,22 @@ impl OwnerSpec for FleetOwner {
                         .map(|(_, outcome)| outcome)
                 }
                 .await;
+                if let Some(call) = &mut call {
+                    call.detail.target_id = Some(target_id.as_str().to_owned());
+                    if let Some(command) = call
+                        .detail
+                        .command_id
+                        .as_deref()
+                        .and_then(|id| CommandId::try_new(id).ok())
+                        .and_then(|id| owner.delivery.facts().command_ledger().record(&id))
+                    {
+                        if !call.command_state(command.state()).await {
+                            call.lifecycle(&result).await;
+                        }
+                    } else {
+                        call.lifecycle(&result).await;
+                    }
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::RunResourceProvisioning {
@@ -1977,6 +2091,22 @@ impl OwnerSpec for FleetOwner {
                         .map(|(_, outcome)| outcome)
                 }
                 .await;
+                if let Some(call) = &mut call {
+                    call.detail.target_id = Some(target_id.as_str().to_owned());
+                    if let Some(command) = call
+                        .detail
+                        .command_id
+                        .as_deref()
+                        .and_then(|id| CommandId::try_new(id).ok())
+                        .and_then(|id| owner.delivery.facts().command_ledger().record(&id))
+                    {
+                        if !call.command_state(command.state()).await {
+                            call.lifecycle(&result).await;
+                        }
+                    } else {
+                        call.lifecycle(&result).await;
+                    }
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::RunResourceDeletion {
@@ -1999,6 +2129,22 @@ impl OwnerSpec for FleetOwner {
                         .map(|(_, outcome)| outcome)
                 }
                 .await;
+                if let Some(call) = &mut call {
+                    call.detail.target_id = Some(target_id.as_str().to_owned());
+                    if let Some(command) = call
+                        .detail
+                        .command_id
+                        .as_deref()
+                        .and_then(|id| CommandId::try_new(id).ok())
+                        .and_then(|id| owner.delivery.facts().command_ledger().record(&id))
+                    {
+                        if !call.command_state(command.state()).await {
+                            call.lifecycle(&result).await;
+                        }
+                    } else {
+                        call.lifecycle(&result).await;
+                    }
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::BeginEnvironmentDeployment {
@@ -2007,7 +2153,11 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ = reply.send(owner.start_environment_deployment(&id, command_id, phase, now));
+                let result = owner.start_environment_deployment(&id, command_id, phase, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::CompleteEnvironmentDeployment {
                 id,
@@ -2015,12 +2165,11 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ = reply.send(owner.complete_environment_deployment(
-                    &id,
-                    &command_id,
-                    &phase,
-                    now,
-                ));
+                let result = owner.complete_environment_deployment(&id, &command_id, &phase, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::FailEnvironmentDeployment {
                 id,
@@ -2029,13 +2178,12 @@ impl OwnerSpec for FleetOwner {
                 message,
                 reply,
             } => {
-                let _ = reply.send(owner.fail_environment_deployment(
-                    &id,
-                    &command_id,
-                    &phase,
-                    message,
-                    now,
-                ));
+                let result =
+                    owner.fail_environment_deployment(&id, &command_id, &phase, message, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::BeginEnvironmentDeletion {
                 id,
@@ -2043,7 +2191,11 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ = reply.send(owner.start_environment_deletion(&id, command_id, phase, now));
+                let result = owner.start_environment_deletion(&id, command_id, phase, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::CompleteEnvironmentDeletion {
                 id,
@@ -2051,8 +2203,13 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ =
-                    reply.send(owner.complete_environment_deletion(&id, &command_id, &phase, now));
+                let _ = {
+                    let result = owner.complete_environment_deletion(&id, &command_id, &phase, now);
+                    if let Some(call) = &call {
+                        call.finish(&result).await;
+                    }
+                    reply.send(result)
+                };
             }
             FleetCommand::FailEnvironmentDeletion {
                 id,
@@ -2061,13 +2218,12 @@ impl OwnerSpec for FleetOwner {
                 message,
                 reply,
             } => {
-                let _ = reply.send(owner.fail_environment_deletion(
-                    &id,
-                    &command_id,
-                    &phase,
-                    message,
-                    now,
-                ));
+                let result =
+                    owner.fail_environment_deletion(&id, &command_id, &phase, message, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::StartResourceProvisioning {
                 id,
@@ -2075,7 +2231,11 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ = reply.send(owner.start_resource_provisioning(&id, command_id, phase, now));
+                let result = owner.start_resource_provisioning(&id, command_id, phase, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::FailResourceProvisioning {
                 id,
@@ -2084,13 +2244,12 @@ impl OwnerSpec for FleetOwner {
                 message,
                 reply,
             } => {
-                let _ = reply.send(owner.fail_resource_provisioning(
-                    &id,
-                    &command_id,
-                    &phase,
-                    message,
-                    now,
-                ));
+                let result =
+                    owner.fail_resource_provisioning(&id, &command_id, &phase, message, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::CompleteResourceProvisioning {
                 id,
@@ -2098,8 +2257,14 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ =
-                    reply.send(owner.complete_resource_provisioning(&id, &command_id, &phase, now));
+                let _ = {
+                    let result =
+                        owner.complete_resource_provisioning(&id, &command_id, &phase, now);
+                    if let Some(call) = &call {
+                        call.finish(&result).await;
+                    }
+                    reply.send(result)
+                };
             }
             FleetCommand::StartResourceDeletion {
                 id,
@@ -2107,7 +2272,11 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ = reply.send(owner.start_resource_deletion(&id, command_id, phase, now));
+                let result = owner.start_resource_deletion(&id, command_id, phase, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::CompleteResourceDeletion {
                 id,
@@ -2115,7 +2284,11 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ = reply.send(owner.complete_resource_deletion(&id, &command_id, &phase, now));
+                let result = owner.complete_resource_deletion(&id, &command_id, &phase, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::FailResourceDeletion {
                 id,
@@ -2124,138 +2297,237 @@ impl OwnerSpec for FleetOwner {
                 message,
                 reply,
             } => {
-                let _ = reply.send(owner.fail_resource_deletion(
-                    &id,
-                    &command_id,
-                    &phase,
-                    message,
-                    now,
-                ));
+                let result = owner.fail_resource_deletion(&id, &command_id, &phase, message, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             _ => unreachable!("Fleet command was routed to an incompatible keyed lane"),
         }
     }
 
     async fn handle_global_command(
-        _shared: Self::Shared,
+        shared: Self::Shared,
         global: &mut Self::GlobalState,
         command: Self::Command,
     ) {
+        let (command, mut call) = match command {
+            FleetCommand::Recorded { command, call } => (*command, Some(call)),
+            command => (command, None),
+        };
+        if let Some(call) = &mut call {
+            if call.running().await.is_err() {
+                return;
+            }
+        }
         let now = SystemTime::now();
         match command {
+            FleetCommand::Recorded { .. } => {
+                unreachable!("recorded execution is target-lane owned")
+            }
             FleetCommand::TerminalOpenAllocated {
                 selector,
                 dimensions,
                 reply,
             } => {
-                let _ = reply.send(global.terminal_open_allocated(&selector, dimensions, now));
+                let result = global.terminal_open_allocated(&selector, dimensions, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::TerminalConsumeTicket { ticket, reply } => {
-                let _ = reply.send(global.terminal_consume_ticket(&ticket, now));
+                let result = global.terminal_consume_ticket(&ticket, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::TerminalProviderOpen { context, reply, .. } => {
-                let _ = reply.send(global.terminal_provider_open(context).await);
+                let result = global.terminal_provider_open(context).await;
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::TerminalClose {
                 session,
                 generation,
                 reply,
             } => {
-                let _ = reply.send(global.terminal_close(&session, generation, now));
+                let result = global.terminal_close(&session, generation, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::TerminalFail {
                 session,
                 generation,
                 reply,
             } => {
-                let _ = reply.send(global.terminal_fail(&session, generation, now));
+                let result = global.terminal_fail(&session, generation, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::TerminalCloseCurrent { session, reply } => {
                 let result = current_terminal_generation(global, &session)
                     .and_then(|generation| global.terminal_close(&session, generation, now));
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::TerminalBeginCloseCurrent { session, reply } => {
                 let result = current_terminal_generation(global, &session)
                     .and_then(|generation| global.terminal_begin_close(&session, generation, now));
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::TerminalFinishCloseCurrent { session, reply } => {
                 let result = current_terminal_generation(global, &session)
                     .and_then(|generation| global.terminal_finish_close(&session, generation, now));
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::TerminalReconnect { session, reply } => {
-                let _ = reply.send(global.terminal_reconnect(session, now));
+                let result = global.terminal_reconnect(session, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::TerminalBeginClose {
                 session,
                 generation,
                 reply,
             } => {
-                let _ = reply.send(global.terminal_begin_close(&session, generation, now));
+                let result = global.terminal_begin_close(&session, generation, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::TerminalFinishClose {
                 session,
                 generation,
                 reply,
             } => {
-                let _ = reply.send(global.terminal_finish_close(&session, generation, now));
+                let result = global.terminal_finish_close(&session, generation, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::PutTarget { id, config, reply } => {
-                let _ = reply.send(global.put_target(id, config));
+                let result = global.put_target(id, config);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RemoveTarget { id, reply } => {
-                let _ = reply.send(global.remove_target(&id));
+                let result = global.remove_target(&id);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::Submit { request, reply } => {
-                let _ = reply.send(global.submit(request, now));
+                let result = global.submit(request, now);
+                if let Some(call) = &call {
+                    if call.command != "fleet.commands.submit.node"
+                        || !matches!(result, Ok(crate::FleetSubmitOutcome::Submitted))
+                    {
+                        call.finish(&result).await;
+                    }
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::Begin {
                 dispatch_id, reply, ..
             } => {
-                let _ = reply.send(global.dispatch(&dispatch_id, now).await);
+                let result = global.dispatch(&dispatch_id, now).await;
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::Accept {
                 dispatch_id,
                 attempt,
                 reply,
             } => {
-                let _ = reply.send(global.accept(&dispatch_id, &attempt, now));
+                let result = global.accept(&dispatch_id, &attempt, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::Reject {
                 dispatch_id,
                 attempt,
                 reply,
             } => {
-                let _ = reply.send(global.reject(&dispatch_id, &attempt, now));
+                let result = global.reject(&dispatch_id, &attempt, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::Unknown {
                 dispatch_id,
                 attempt,
                 reply,
             } => {
-                let _ = reply.send(global.mark_unknown(&dispatch_id, &attempt, now));
+                let result = global.mark_unknown(&dispatch_id, &attempt, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::Replay {
                 command_id,
                 dispatch_id,
                 reply,
             } => {
-                let _ = reply.send(global.authorize_replay(&command_id, &dispatch_id, now));
+                let result = global.authorize_replay(&command_id, &dispatch_id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::UpsertConnection { record, reply } => {
-                let _ = reply.send(global.upsert_connection(record, now));
+                let result = global.upsert_connection(record, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::DeleteConnection { id, reply } => {
-                let _ = reply.send(global.delete_connection(&id, now));
+                let result = global.delete_connection(&id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::BeginConnectionProbe {
                 id,
                 command_id,
                 reply,
             } => {
-                let _ = reply.send(global.begin_connection_probe(&id, command_id, now));
+                let result = global.begin_connection_probe(&id, command_id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RunConnectionProbe {
                 id,
@@ -2266,6 +2538,9 @@ impl OwnerSpec for FleetOwner {
                 let result = crate::owner::lifecycle::FleetLifecycleOrchestrator::new(global)
                     .probe_connection(id, command_id, now)
                     .await;
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::RunEnvironmentDeployment {
@@ -2285,6 +2560,9 @@ impl OwnerSpec for FleetOwner {
                         .map(|(_, outcome)| outcome)
                 }
                 .await;
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::RunEnvironmentDeletion {
@@ -2304,6 +2582,9 @@ impl OwnerSpec for FleetOwner {
                         .map(|(_, outcome)| outcome)
                 }
                 .await;
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::RunResourceProvisioning {
@@ -2323,6 +2604,9 @@ impl OwnerSpec for FleetOwner {
                         .map(|(_, outcome)| outcome)
                 }
                 .await;
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::RunResourceDeletion {
@@ -2342,6 +2626,9 @@ impl OwnerSpec for FleetOwner {
                         .map(|(_, outcome)| outcome)
                 }
                 .await;
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
                 let _ = reply.send(result);
             }
             FleetCommand::CompleteConnectionProbe {
@@ -2351,84 +2638,151 @@ impl OwnerSpec for FleetOwner {
                 message,
                 reply,
             } => {
-                let _ = reply.send(global.complete_connection_probe(
-                    &id,
-                    &command_id,
-                    outcome,
-                    now,
-                    message,
-                ));
+                let result =
+                    global.complete_connection_probe(&id, &command_id, outcome, now, message);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RegisterEnvironment { record, reply } => {
-                let _ = reply.send(global.register_environment(record, now));
+                let result = global.register_environment(record, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RegisterResource { request, reply } => {
-                let _ = reply.send(global.register_source_backed_resource(request).await);
+                let result = global.register_source_backed_resource(request).await;
+                if let Some(call) = &call {
+                    call.resource_registration(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::UpsertNode { observation, reply } => {
-                let _ = reply.send(global.upsert_node(observation, now));
+                let result = global.upsert_node(observation, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::UpsertAgent { observation, reply } => {
-                let _ = reply.send(global.upsert_agent(observation, now));
+                let result = global.upsert_agent(observation, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::WriteCredential { request, reply } => {
-                let _ = reply.send(global.write_credential(request));
+                let result = global.write_credential(request);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RevokeAgent { id, reply } => {
-                let _ = reply.send(global.revoke_agent(&id, now));
+                let result = global.revoke_agent(&id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::UpsertRuntime { observation, reply } => {
-                let _ = reply.send(global.upsert_runtime(observation, now));
+                let result = global.upsert_runtime(observation, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::UpsertEndpoint { observation, reply } => {
-                let _ = reply.send(global.upsert_endpoint(observation, now));
+                let result = global.upsert_endpoint(observation, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RetireNode { id, reply } => {
-                let _ = reply.send(global.retire_node(&id, now));
+                let result = global.retire_node(&id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::BeginRuntimeStart {
                 id,
                 command_id,
                 reply,
             } => {
-                let _ = reply.send(global.begin_runtime_start(&id, command_id, now));
+                let result = global.begin_runtime_start(&id, command_id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::CompleteRuntimeStart {
                 id,
                 command_id,
                 reply,
             } => {
-                let _ = reply.send(global.complete_runtime_start(&id, &command_id, now));
+                let result = global.complete_runtime_start(&id, &command_id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::BeginRuntimeStop {
                 id,
                 command_id,
                 reply,
             } => {
-                let _ = reply.send(global.begin_runtime_stop(&id, command_id, now));
+                let result = global.begin_runtime_stop(&id, command_id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::CompleteRuntimeStop {
                 id,
                 command_id,
                 reply,
             } => {
-                let _ = reply.send(global.complete_runtime_stop(&id, &command_id, now));
+                let result = global.complete_runtime_stop(&id, &command_id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RetireRuntime { id, reply } => {
-                let _ = reply.send(global.retire_runtime(&id, now));
+                let result = global.retire_runtime(&id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::DrainEndpoint { id, reply } => {
-                let _ = reply.send(global.drain_endpoint(&id, now));
+                let result = global.drain_endpoint(&id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RetireEndpoint { id, reply } => {
-                let _ = reply.send(global.retire_endpoint(&id, now));
+                let result = global.retire_endpoint(&id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::BeginEndpointProbe {
                 id,
                 command_id,
                 reply,
             } => {
-                let _ = reply.send(global.begin_endpoint_probe(&id, command_id, now));
+                let result = global.begin_endpoint_probe(&id, command_id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::CompleteEndpointProbe {
                 id,
@@ -2436,14 +2790,22 @@ impl OwnerSpec for FleetOwner {
                 health,
                 reply,
             } => {
-                let _ = reply.send(global.complete_endpoint_probe(&id, &command_id, health, now));
+                let result = global.complete_endpoint_probe(&id, &command_id, health, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::BeginCapabilitySync {
                 id,
                 command_id,
                 reply,
             } => {
-                let _ = reply.send(global.begin_capability_sync(&id, command_id, now));
+                let result = global.begin_capability_sync(&id, command_id, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::CompleteCapabilitySync {
                 id,
@@ -2451,7 +2813,11 @@ impl OwnerSpec for FleetOwner {
                 sync,
                 reply,
             } => {
-                let _ = reply.send(global.complete_capability_sync(&id, &command_id, sync, now));
+                let result = global.complete_capability_sync(&id, &command_id, sync, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::BeginEnvironmentDeployment {
                 id,
@@ -2468,12 +2834,11 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ = reply.send(global.complete_environment_deployment(
-                    &id,
-                    &command_id,
-                    &phase,
-                    now,
-                ));
+                let result = global.complete_environment_deployment(&id, &command_id, &phase, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::FailEnvironmentDeployment {
                 id,
@@ -2482,13 +2847,12 @@ impl OwnerSpec for FleetOwner {
                 message,
                 reply,
             } => {
-                let _ = reply.send(global.fail_environment_deployment(
-                    &id,
-                    &command_id,
-                    &phase,
-                    message,
-                    now,
-                ));
+                let result =
+                    global.fail_environment_deployment(&id, &command_id, &phase, message, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::BeginEnvironmentDeletion {
                 id,
@@ -2496,7 +2860,11 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ = reply.send(global.start_environment_deletion(&id, command_id, phase, now));
+                let result = global.start_environment_deletion(&id, command_id, phase, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::CompleteEnvironmentDeletion {
                 id,
@@ -2514,13 +2882,12 @@ impl OwnerSpec for FleetOwner {
                 message,
                 reply,
             } => {
-                let _ = reply.send(global.fail_environment_deletion(
-                    &id,
-                    &command_id,
-                    &phase,
-                    message,
-                    now,
-                ));
+                let result =
+                    global.fail_environment_deletion(&id, &command_id, &phase, message, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::StartResourceProvisioning {
                 id,
@@ -2528,7 +2895,11 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ = reply.send(global.start_resource_provisioning(&id, command_id, phase, now));
+                let result = global.start_resource_provisioning(&id, command_id, phase, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::FailResourceProvisioning {
                 id,
@@ -2537,13 +2908,12 @@ impl OwnerSpec for FleetOwner {
                 message,
                 reply,
             } => {
-                let _ = reply.send(global.fail_resource_provisioning(
-                    &id,
-                    &command_id,
-                    &phase,
-                    message,
-                    now,
-                ));
+                let result =
+                    global.fail_resource_provisioning(&id, &command_id, &phase, message, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::CompleteResourceProvisioning {
                 id,
@@ -2551,12 +2921,11 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ = reply.send(global.complete_resource_provisioning(
-                    &id,
-                    &command_id,
-                    &phase,
-                    now,
-                ));
+                let result = global.complete_resource_provisioning(&id, &command_id, &phase, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::StartResourceDeletion {
                 id,
@@ -2564,7 +2933,11 @@ impl OwnerSpec for FleetOwner {
                 phase,
                 reply,
             } => {
-                let _ = reply.send(global.start_resource_deletion(&id, command_id, phase, now));
+                let result = global.start_resource_deletion(&id, command_id, phase, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::CompleteResourceDeletion {
                 id,
@@ -2582,19 +2955,25 @@ impl OwnerSpec for FleetOwner {
                 message,
                 reply,
             } => {
-                let _ = reply.send(global.fail_resource_deletion(
-                    &id,
-                    &command_id,
-                    &phase,
-                    message,
-                    now,
-                ));
+                let result = global.fail_resource_deletion(&id, &command_id, &phase, message, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::AuthenticateRuntimeAgentIngress { identity, reply } => {
-                let _ = reply.send(global.authenticate_runtime_agent_ingress(identity));
+                let result = global.authenticate_runtime_agent_ingress(identity);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RegisterRuntimeAgent { agent, reply } => {
-                let _ = reply.send(global.register_runtime_agent(agent));
+                let result = global.register_runtime_agent(agent);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RegisterRuntimeAgentCommand {
                 agent_id,
@@ -2604,20 +2983,28 @@ impl OwnerSpec for FleetOwner {
                 dispatch_attempt,
                 reply,
             } => {
-                let _ = reply.send(global.register_runtime_agent_command(
+                let result = global.register_runtime_agent_command(
                     &agent_id,
                     correlation,
                     queued_at,
                     command_attempt,
                     dispatch_attempt,
-                ));
+                );
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RecordRuntimeAgentHeartbeat {
                 agent_id,
                 heartbeat,
                 reply,
             } => {
-                let _ = reply.send(global.record_runtime_agent_heartbeat(&agent_id, heartbeat));
+                let result = global.record_runtime_agent_heartbeat(&agent_id, heartbeat);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RecordRuntimeAgentProgress {
                 agent_id,
@@ -2628,14 +3015,18 @@ impl OwnerSpec for FleetOwner {
                 dispatch_attempt,
                 reply,
             } => {
-                let _ = reply.send(global.record_runtime_agent_progress(
+                let result = global.record_runtime_agent_progress(
                     &agent_id,
                     &correlation,
                     progress,
                     reported_at,
                     &command_attempt,
                     &dispatch_attempt,
-                ));
+                );
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetCommand::RecordRuntimeAgentResult {
                 agent_id,
@@ -2645,18 +3036,64 @@ impl OwnerSpec for FleetOwner {
                 dispatch_attempt,
                 reply,
             } => {
-                let _ = reply.send(global.record_runtime_agent_result(
+                let mut pending = shared.pending_calls.lock().await;
+                let result = global.record_runtime_agent_result(
                     &agent_id,
                     &correlation,
                     result,
                     &command_attempt,
                     &dispatch_attempt,
-                ));
+                );
+                if result.is_ok() {
+                    if let Some(original) = pending.remove(&(
+                        correlation.command_id().clone(),
+                        dispatch_attempt.sequence(),
+                    )) {
+                        if let Some(command) = global
+                            .delivery
+                            .facts()
+                            .command_ledger()
+                            .record(correlation.command_id())
+                        {
+                            original.command_state(command.state()).await;
+                        }
+                    }
+                }
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
         }
     }
 
-    async fn handle_direct_query(_shared: Self::Shared, _query: Self::Query) {}
+    async fn handle_direct_query(shared: Self::Shared, query: Self::Query) {
+        let (query, call) = match query {
+            FleetQuery::Recorded { query, call } => (*query, Some(call)),
+            query => (query, None),
+        };
+        let FleetQuery::Live { query } = query else {
+            return;
+        };
+        let query = match call {
+            Some(call) => FleetQuery::Recorded { query, call },
+            None => *query,
+        };
+        match shared.open_operation_owner() {
+            Ok(mut owner) => Self::handle_global_query(shared, &mut owner, query).await,
+            Err(error) => {
+                let query = match query {
+                    FleetQuery::Recorded { query, call } => {
+                        call.outcome("unavailable", platform::call::CallStatus::Unknown)
+                            .await;
+                        *query
+                    }
+                    query => query,
+                };
+                send_query_delivery_error(query, error);
+            }
+        }
+    }
 
     async fn handle_keyed_query(
         _shared: Self::Shared,
@@ -2671,36 +3108,78 @@ impl OwnerSpec for FleetOwner {
         global: &mut Self::GlobalState,
         query: Self::Query,
     ) {
+        let (query, call) = match query {
+            FleetQuery::Recorded { query, call } => (*query, Some(call)),
+            query => (query, None),
+        };
+        if let Some(call) = &call {
+            call.admitted
+                .store(true, std::sync::atomic::Ordering::Release);
+            if call.running().await.is_err() {
+                return;
+            }
+        }
         let now = SystemTime::now();
         match query {
+            FleetQuery::Recorded { .. } => unreachable!("recorded query was unwrapped"),
+            FleetQuery::Live { .. } => unreachable!("live queries are direct"),
             FleetQuery::TerminalContext { summary, reply } => {
-                let _ = reply.send(Ok(global.terminal_context(&summary)));
+                let result = Ok(global.terminal_context(&summary));
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::TerminalResolveContext {
                 selector,
                 summary,
                 reply,
             } => {
-                let _ = reply.send(Ok(global.resolve_terminal_context(&selector, &summary)));
+                let result = Ok(global.resolve_terminal_context(&selector, &summary));
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::TerminalList { reply } => {
-                let _ = reply.send(global.terminal_list());
+                let result = global.terminal_list();
+                if let Some(call) = &call {
+                    call.outcome("completed", platform::call::CallStatus::Succeeded)
+                        .await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::QuerySnapshot { now, reply } => {
-                let _ = reply.send(Ok(global.query_snapshot(now)));
+                let result = Ok(global.query_snapshot(now));
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::Snapshot { now, reply } => {
-                let _ = reply.send(Ok(global.snapshot(now)));
+                let result = Ok(global.snapshot(now));
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::SelectorPreview {
                 constraints,
                 now,
                 reply,
             } => {
-                let _ = reply.send(Ok(global.selector_preview(constraints, now)));
+                let result = Ok(global.selector_preview(constraints, now));
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::TargetSummaries { reply } => {
-                let _ = reply.send(Ok(global.target_summaries()));
+                let result = Ok(global.target_summaries());
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::TargetSelector {
                 id,
@@ -2708,25 +3187,53 @@ impl OwnerSpec for FleetOwner {
                 kind,
                 reply,
             } => {
-                let _ = reply.send(Ok(global.target_selector(&id, revision, kind)));
+                let result = Ok(global.target_selector(&id, revision, kind));
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::TopologySummary { reply } => {
-                let _ = reply.send(Ok(global.topology_summary()));
+                let result = Ok(global.topology_summary());
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::NodeCommandRequest { request, reply } => {
-                let _ = reply.send(global.node_command_request(request, now));
+                let result = global.node_command_request(request, now);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::DispatchTarget { dispatch_id, reply } => {
-                let _ = reply.send(global.dispatch_target_id(&dispatch_id));
+                let result = global.dispatch_target_id(&dispatch_id);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::ConnectionTarget { id, reply } => {
-                let _ = reply.send(global.connection_target_id(&id));
+                let result = global.connection_target_id(&id);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::EnvironmentTarget { id, reply } => {
-                let _ = reply.send(global.environment_target_id(&id));
+                let result = global.environment_target_id(&id);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
             FleetQuery::ResourceTarget { id, reply } => {
-                let _ = reply.send(global.resource_target_id(&id));
+                let result = global.resource_target_id(&id);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
             }
         }
     }
@@ -2746,39 +3253,52 @@ impl OwnerSpec for FleetOwner {
 
 fn send_query_delivery_error(query: FleetQuery, error: FleetDeliveryError) {
     match query {
+        FleetQuery::Recorded { query, .. } | FleetQuery::Live { query } => {
+            send_query_delivery_error(*query, error)
+        }
         FleetQuery::TerminalContext { reply, .. }
         | FleetQuery::TerminalResolveContext { reply, .. } => {
-            let _ = reply.send(Err(error));
+            let result = Err(error);
+            let _ = reply.send(result);
         }
         FleetQuery::QuerySnapshot { reply, .. } => {
-            let _ = reply.send(Err(error));
+            let result = Err(error);
+            let _ = reply.send(result);
         }
         FleetQuery::Snapshot { reply, .. } => {
-            let _ = reply.send(Err(error));
+            let result = Err(error);
+            let _ = reply.send(result);
         }
         FleetQuery::SelectorPreview { reply, .. } => {
-            let _ = reply.send(Err(error));
+            let result = Err(error);
+            let _ = reply.send(result);
         }
         FleetQuery::TargetSummaries { reply } => {
-            let _ = reply.send(Err(error));
+            let result = Err(error);
+            let _ = reply.send(result);
         }
         FleetQuery::TargetSelector { reply, .. } => {
-            let _ = reply.send(Err(error));
+            let result = Err(error);
+            let _ = reply.send(result);
         }
         FleetQuery::TopologySummary { reply } => {
-            let _ = reply.send(Err(error));
+            let result = Err(error);
+            let _ = reply.send(result);
         }
         FleetQuery::NodeCommandRequest { reply, .. } => {
-            let _ = reply.send(Err(error));
+            let result = Err(error);
+            let _ = reply.send(result);
         }
         FleetQuery::DispatchTarget { reply, .. }
         | FleetQuery::ConnectionTarget { reply, .. }
         | FleetQuery::EnvironmentTarget { reply, .. }
         | FleetQuery::ResourceTarget { reply, .. } => {
-            let _ = reply.send(Err(error));
+            let result = Err(error);
+            let _ = reply.send(result);
         }
         FleetQuery::TerminalList { reply } => {
-            let _ = reply.send(Vec::new());
+            let result = Vec::new();
+            let _ = reply.send(result);
         }
     }
 }

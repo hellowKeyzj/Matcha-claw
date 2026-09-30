@@ -3,14 +3,14 @@ use crate::{
         RendererApprovalPhase, RendererEvent, RendererEventEnvelope, RendererMessageLifecycle,
         RendererRunPhase, RendererToolPhase, SessionSubscriptionItem,
     },
-    session::recovery::RecoveryReason as MatchaRecoveryReason,
+    session::{model::ClassifiedErrorKind, recovery::RecoveryReason as MatchaRecoveryReason},
 };
 use sessions_module::{
     command::{SessionEvent, SessionIngressEvent},
     state::{
-        ApprovalPhase, ApprovalView, ItemStatus, RecoveryReason, RunPhase, SessionChange,
-        SessionContent, SessionEventBinding, SessionIdentity, SessionItem, SessionProvider,
-        ToolPhase, ToolView,
+        ApprovalPhase, ApprovalView, ItemStatus, RecoveryReason, RunPhase, RuntimeErrorDetail,
+        RuntimeErrorKind, RuntimeView, SessionChange, SessionContent, SessionEventBinding,
+        SessionIdentity, SessionItem, SessionProvider, ToolPhase, ToolView,
     },
 };
 
@@ -99,10 +99,46 @@ pub fn matcha_event_changes(event: RendererEventEnvelope) -> Option<Vec<SessionC
                 RendererRunPhase::CancellationRequested => RunPhase::CancellationRequested,
                 RendererRunPhase::Completed => RunPhase::Completed,
                 RendererRunPhase::Cancelled => RunPhase::Cancelled,
-                RendererRunPhase::Failed => RunPhase::Failed,
                 RendererRunPhase::Interrupted => RunPhase::Interrupted,
             },
         }]),
+        RendererEvent::RunFailed { error, .. } => {
+            let mut changes = vec![SessionChange::RunPhaseChanged {
+                run_id,
+                phase: RunPhase::Failed,
+            }];
+            if let Some(error) = error {
+                changes.push(SessionChange::RuntimeChanged {
+                    runtime: RuntimeView {
+                        phase: RunPhase::Failed,
+                        active_run_id: None,
+                        issue: None,
+                        run_progress: None,
+                        runtime_activity: None,
+                        error_detail: Some(RuntimeErrorDetail {
+                            kind: RuntimeErrorKind::Error,
+                            failover_reason: None,
+                            provider_runtime_failure_kind: None,
+                            provider_error_type: Some(
+                                match error.kind {
+                                    ClassifiedErrorKind::InvalidRequest => "invalidRequest",
+                                    ClassifiedErrorKind::Auth => "auth",
+                                    ClassifiedErrorKind::Permission => "permission",
+                                    ClassifiedErrorKind::Network => "network",
+                                    ClassifiedErrorKind::Aborted => "aborted",
+                                    ClassifiedErrorKind::Worker => "worker",
+                                    ClassifiedErrorKind::Internal => "internal",
+                                }
+                                .to_owned(),
+                            ),
+                            provider_error_message_preview: error.message_preview,
+                            http_status: None,
+                        }),
+                    },
+                });
+            }
+            Some(changes)
+        }
         RendererEvent::Message {
             message_id,
             lifecycle,

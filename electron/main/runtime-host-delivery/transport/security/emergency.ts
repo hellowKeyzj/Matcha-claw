@@ -1,16 +1,19 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
-import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import type { CallReceipt } from '../../../../../src/types/call-log';
+import { sendLoopbackJson } from '../client';
+import { isSecurityCallReceipt } from './policy';
 
 const UNAVAILABLE = {
   success: false,
   error: 'Security emergency is unavailable',
 } as const;
 
-type SecurityEmergencyOutcome = 'applied' | 'target_rejected' | 'outcome_unknown';
-
 export type SecurityEmergencyTransportResponse = Readonly<{
-  status: 200 | 503;
-  body: Readonly<{ outcome: SecurityEmergencyOutcome }> | typeof UNAVAILABLE;
+  status: 202;
+  body: CallReceipt;
+}> | Readonly<{
+  status: 503;
+  body: typeof UNAVAILABLE;
 }>;
 
 export interface SecurityEmergencyTransport {
@@ -38,18 +41,10 @@ export function createSecurityEmergencyTransport(
         fetcher,
         body: {},
       });
-      if (response?.status === 200 && isOutcome(response.body)) {
-        return { status: 200, body: response.body };
+      if (response?.status === 202 && isSecurityCallReceipt(response.body)) {
+        return { status: 202, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
   };
-}
-
-function isOutcome(value: unknown): value is Readonly<{ outcome: SecurityEmergencyOutcome }> {
-  return isRecord(value)
-    && hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'applied'
-      || value.outcome === 'target_rejected'
-      || value.outcome === 'outcome_unknown');
 }

@@ -2881,6 +2881,7 @@ fn update_source_task_for_run(
     write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
     Ok(WikiSourceTaskRunPlan {
         project_id: project_id.to_owned(),
+        source_relative_path,
         staged,
     })
 }

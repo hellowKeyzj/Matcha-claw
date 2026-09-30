@@ -63,6 +63,12 @@ async fn handle(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     };
     drop(verifier);
+    if matches!(request, super::Request::Materialize { .. }) {
+        return match owner.admit_team_workflow(crate::call::TeamWorkflow::Skill(request)).await {
+            Ok(receipt) => Response { status: 202, body: serde_json::json!(receipt) },
+            Err(_) => Response::from_delivery(Delivery::Unavailable),
+        };
+    }
     Response::from_delivery(dispatch(&owner, request).await)
 }
 

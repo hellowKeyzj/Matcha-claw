@@ -340,6 +340,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
       set((state) => ({
         channels: state.channels.filter((item) => item.id !== channelId),
       }));
+      await get().fetchChannels();
       return true;
     } catch (error) {
       outcome = 'error';

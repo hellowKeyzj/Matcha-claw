@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use foundation::execution::{OwnedTask, OwnerRuntimeConfig, OwnerRuntimeSystem};
 use platform::{
+    call::CallRecorder,
     capability::CapabilityDecisionVerifier,
     module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
 };
@@ -33,11 +34,20 @@ pub use owner::SettingsOwnerInput;
 #[derive(Clone)]
 pub struct SettingsModule {
     handle: SettingsHandle,
+    call_recorder: Option<CallRecorder>,
 }
 
 impl SettingsModule {
     fn new(handle: SettingsHandle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            call_recorder: None,
+        }
+    }
+
+    pub fn with_call_recorder(mut self, recorder: CallRecorder) -> Self {
+        self.call_recorder = Some(recorder);
+        self
     }
 
     pub async fn recover_pending(&self) {
@@ -71,6 +81,7 @@ impl SettingsModule {
         adapters::loopback::descriptor(adapters::loopback::Dependencies::new(
             verifier,
             self.handle.clone(),
+            self.call_recorder.clone(),
         ))
     }
 }

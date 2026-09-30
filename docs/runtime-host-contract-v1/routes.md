@@ -119,14 +119,15 @@ Evidence: [openclaw-routes.ts](../../runtime-host/api/routes/openclaw-routes.ts#
 | `POST` | `/api/toolchain/uv/prepare` | Renderer allowlisted; Electron calls `toolchainTransport.prepare()` and returns public outcome |
 | `GET` | `/api/security`, `/api/security/destructive-rule-catalog`, `/api/security/audit` | Renderer allowlisted |
 | `GET` | `/api/cron/jobs`, `/api/cron/session-history` | Renderer allowlisted |
-| `POST` | `/api/cron/jobs/{create,update,delete,toggle}` | Renderer allowlisted; fixed Cron capability envelope |
+| `POST` | `/api/cron/jobs/{create,update,delete,toggle}` | Renderer allowlisted; fixed Cron capability envelope，成功接单仅 strict 202 CallReceipt |
+| `POST` | `/api/cron/results` | Renderer allowlisted；`{callId,command,jobId?}` 绑定本次 create/update/delete（toggle→update），短读 exact job / `{removed}` |
 | `POST` | `/api/files/{read-text,read-binary,stat,list-dir,thumbnails,write-text,stage-paths,stage-buffer,thumbnail}` | `LEGACY-REJECTED`; use capability execution |
 
 Evidence: [route-boundary.ts](../../electron/api/route-boundary.ts#L172-L173)、[toolchain.ts](../../electron/api/routes/toolchain.ts#L8-L88)、[security-routes.ts](../../runtime-host/api/routes/security-routes.ts#L16-L20)、[file-routes.ts](../../runtime-host/api/routes/file-routes.ts#L18-L38)。
 
 ### Cron model 字段
 
-`GET /api/cron/jobs` 的 `jobs[]` 与 create/update/toggle 返回的 `CronJob` 使用 `model?: string`：有覆盖时返回非空字符串，无覆盖时省略字段，不返回 `null`，也不填入解析后的默认模型。
+`GET /api/cron/jobs` 的 `jobs[]` 与 create/update/toggle 完成后从 `/api/cron/results` 领取的 `CronJob` 使用 `model?: string`：有覆盖时返回非空字符串，无覆盖时省略字段，不返回 `null`，也不填入解析后的默认模型。
 
 create/update 的 capability envelope `input.model` 使用 `model?: string | null`：
 

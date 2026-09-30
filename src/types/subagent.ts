@@ -1,3 +1,4 @@
+import type { CloudPackageVersion } from '@/types/cloud-package';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 import type { LineDiffEntry } from '@/lib/line-diff';
@@ -63,18 +64,7 @@ export interface SubagentPackageExportResult {
   exportedAtMs: number;
 }
 
-export interface SubagentCloudPackage {
-  packageId: string;
-  packageVersionId: string;
-  name: string;
-  displayName?: string;
-  packageType: string;
-  version: string;
-  description?: string;
-  status: string;
-  entitlementStatus?: string;
-  downloadable: boolean;
-}
+export type SubagentCloudPackage = CloudPackageVersion;
 
 export interface SubagentCloudPackageUploadResult {
   agentId: string;
@@ -83,15 +73,6 @@ export interface SubagentCloudPackageUploadResult {
   fileName?: string;
   size?: number;
   uploadedAtMs?: number;
-}
-
-export interface SubagentCloudPackageDownloadResult {
-  agentId?: string;
-  packageId?: string;
-  packageVersionId?: string;
-  fileName: string;
-  size?: number;
-  downloadedAtMs?: number;
 }
 
 export interface SubagentCloudPackageInstallResult {

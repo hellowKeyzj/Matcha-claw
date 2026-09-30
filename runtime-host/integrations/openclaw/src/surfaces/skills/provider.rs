@@ -123,7 +123,26 @@ impl OpenClawSkillProvider {
                         Ok(v) => v,
                         Err(_) => return SkillManagementOutcome::Rejected,
                     };
-                SkillManagementOutcome::Mutation(map_mutation(self.update_skill(request).await))
+                let (outcome, invalid_keys) =
+                    self.gateway.lock().await.configure_skill(request).await;
+                let outcome = match outcome {
+                    SkillMutationOutcome::Accepted if invalid_keys.is_empty() => {
+                        skills_module::management::ConfigOutcome::Accepted
+                    }
+                    SkillMutationOutcome::Accepted => {
+                        skills_module::management::ConfigOutcome::Partial
+                    }
+                    SkillMutationOutcome::Rejected => {
+                        skills_module::management::ConfigOutcome::Rejected
+                    }
+                    SkillMutationOutcome::Unknown => {
+                        skills_module::management::ConfigOutcome::Unknown
+                    }
+                };
+                SkillManagementOutcome::Config {
+                    outcome,
+                    invalid_keys,
+                }
             }
             skills_module::management::Command::ClawHubInstall {
                 slug,
@@ -193,7 +212,7 @@ impl OpenClawSkillProvider {
                     };
                     match self.uninstall_clawhub_skill(request).await {
                         clawhub::ClawHubUninstallOutcome::Removed => {
-                            self.remove_skill_configs_best_effort(config_keys);
+                            self.remove_skill_configs_best_effort(config_keys).await;
                             return SkillManagementOutcome::Uninstall(
                                 skills_module::management::RemoveOutcome::Removed,
                             );
@@ -209,7 +228,7 @@ impl OpenClawSkillProvider {
                 }
                 let outcome = map_remove(self.skill_bundles().remove(skill_key.clone()));
                 if outcome == skills_module::management::RemoveOutcome::Removed {
-                    self.remove_skill_configs_best_effort(config_keys);
+                    self.remove_skill_configs_best_effort(config_keys).await;
                     return SkillManagementOutcome::Uninstall(
                         skills_module::management::RemoveOutcome::Removed,
                     );
@@ -224,7 +243,7 @@ impl OpenClawSkillProvider {
                     let outcome =
                         remove_openclaw_managed_skill_dir(self.state_dir.as_path(), &base_dir);
                     if outcome == skills_module::management::RemoveOutcome::Removed {
-                        self.remove_skill_configs_best_effort(config_keys);
+                        self.remove_skill_configs_best_effort(config_keys).await;
                         return SkillManagementOutcome::Uninstall(
                             skills_module::management::RemoveOutcome::Removed,
                         );
@@ -567,13 +586,15 @@ impl OpenClawSkillProvider {
         (slugs, config_keys)
     }
 
-    fn remove_skill_configs_best_effort(&self, skill_keys: Vec<String>) {
-        let gateway = Arc::clone(&self.gateway);
-        tokio::spawn(async move {
-            for skill_key in skill_keys {
-                let _ = gateway.lock().await.remove_skill_config(skill_key).await;
-            }
-        });
+    async fn remove_skill_configs_best_effort(&self, skill_keys: Vec<String>) {
+        for skill_key in skill_keys {
+            let _ = self
+                .gateway
+                .lock()
+                .await
+                .remove_skill_config(skill_key)
+                .await;
+        }
     }
 }
 

@@ -14,7 +14,8 @@ const MAX_SKILL_KEY_BYTES: usize = 96;
 const SKILL_MANIFEST: &str = "SKILL.md";
 const MANAGED_MARKER: &str = ".matchaclaw-managed";
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Bundle {
     skill_key: String,
     files: Vec<BundleFile>,
@@ -46,7 +47,7 @@ impl fmt::Debug for Bundle {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, serde::Serialize)]
 pub struct BundleFile {
     path: String,
     content: String,

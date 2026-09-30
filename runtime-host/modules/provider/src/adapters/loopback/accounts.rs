@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     ProviderAccountDraft, ProviderAccountId, ProviderAccountRevision, ProviderAccountsDelivery,
-    ProviderHandle, projection,
+    ProviderHandle, api::ProviderAccountAdmissionError, projection,
 };
 
 pub(super) const ENDPOINT: &str = "/api/provider-accounts";
@@ -53,9 +53,18 @@ struct Target {
 )]
 enum Input {
     List {},
-    Get { account_id: String },
-    Replace { account: ProviderAccountWireDraft },
-    Delete { account_id: String, revision: u64 },
+    Get {
+        account_id: String,
+    },
+    Replace {
+        account: ProviderAccountWireDraft,
+        private_transaction_id: Option<String>,
+    },
+    Delete {
+        account_id: String,
+        revision: u64,
+        private_transaction_id: Option<String>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -98,8 +107,8 @@ fn default_provider_account_kind() -> String {
 enum ProviderAccountsCommand {
     List,
     Get(ProviderAccountId),
-    Replace(ProviderAccountDraft),
-    Delete(ProviderAccountId, ProviderAccountRevision),
+    Replace(ProviderAccountDraft, Option<String>),
+    Delete(ProviderAccountId, ProviderAccountRevision, Option<String>),
 }
 
 impl ProviderAccountsRequest {
@@ -158,25 +167,51 @@ impl ProviderAccountsRequest {
             Input::Get { account_id } => ProviderAccountId::try_new(account_id)
                 .map(ProviderAccountsCommand::Get)
                 .map_err(|_| RequestError::Invalid),
-            Input::Replace { account } => {
+            Input::Replace {
+                account,
+                private_transaction_id,
+            } => {
+                validate_transaction_id(private_transaction_id.as_deref())?;
                 let account = account.into_draft();
                 account
                     .validate()
-                    .map(|()| ProviderAccountsCommand::Replace(account))
+                    .map(|()| ProviderAccountsCommand::Replace(account, private_transaction_id))
                     .map_err(|_| RequestError::Invalid)
             }
             Input::Delete {
                 account_id,
                 revision,
+                private_transaction_id,
             } => {
+                validate_transaction_id(private_transaction_id.as_deref())?;
                 let id =
                     ProviderAccountId::try_new(account_id).map_err(|_| RequestError::Invalid)?;
                 let revision = ProviderAccountRevision::try_new(revision)
                     .map_err(|_| RequestError::Invalid)?;
-                Ok(ProviderAccountsCommand::Delete(id, revision))
+                Ok(ProviderAccountsCommand::Delete(
+                    id,
+                    revision,
+                    private_transaction_id,
+                ))
             }
         }
     }
+}
+
+fn validate_transaction_id(id: Option<&str>) -> Result<(), RequestError> {
+    if id.is_some_and(|id| {
+        id.len() != 36
+            || id.bytes().enumerate().any(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    byte != b'-'
+                } else {
+                    !byte.is_ascii_hexdigit()
+                }
+            })
+    }) {
+        return Err(RequestError::Invalid);
+    }
+    Ok(())
 }
 
 pub(super) async fn handle(
@@ -233,29 +268,35 @@ async fn handle_request(
         Err(RequestError::Unauthorized) => return TransportResponse::unauthorized(),
     };
     drop(verifier);
-    let is_query = matches!(
-        command,
-        ProviderAccountsCommand::List | ProviderAccountsCommand::Get(_)
-    );
+    let command = match command {
+        ProviderAccountsCommand::Replace(draft, transaction_id) => {
+            return TransportResponse::from_admission(
+                provider
+                    .admit_replace_provider_account(draft, transaction_id)
+                    .await,
+            );
+        }
+        ProviderAccountsCommand::Delete(id, revision, transaction_id) => {
+            return TransportResponse::from_admission(
+                provider
+                    .admit_delete_provider_account(id, revision, transaction_id)
+                    .await,
+            );
+        }
+        query => query,
+    };
     let dispatch = async {
         match command {
             ProviderAccountsCommand::List => provider.list_provider_accounts().await,
             ProviderAccountsCommand::Get(id) => provider.get_provider_account(id).await,
-            ProviderAccountsCommand::Replace(draft) => {
-                provider.replace_provider_account(draft).await
-            }
-            ProviderAccountsCommand::Delete(id, revision) => {
-                provider.delete_provider_account(id, revision).await
+            ProviderAccountsCommand::Replace(..) | ProviderAccountsCommand::Delete(..) => {
+                unreachable!("mutation dispatched before query")
             }
         }
     };
-    let delivery = if is_query {
-        match tokio::time::timeout(super::SHORT_DEADLINE, dispatch).await {
-            Ok(delivery) => delivery,
-            Err(_) => return TransportResponse::fixed(503, super::TIMEOUT_ERROR),
-        }
-    } else {
-        dispatch.await
+    let delivery = match tokio::time::timeout(super::SHORT_DEADLINE, dispatch).await {
+        Ok(delivery) => delivery,
+        Err(_) => return TransportResponse::fixed(503, super::TIMEOUT_ERROR),
     };
     TransportResponse::from_delivery(delivery.unwrap_or(ProviderAccountsDelivery::Unavailable))
 }
@@ -335,6 +376,24 @@ struct TransportResponse {
 }
 
 impl TransportResponse {
+    fn from_admission(
+        admission: Result<platform::call::CallReceipt, ProviderAccountAdmissionError>,
+    ) -> Self {
+        match admission {
+            Ok(receipt) => Self {
+                status: 202,
+                body: serde_json::to_value(receipt).expect("call receipt serializes"),
+            },
+            Err(ProviderAccountAdmissionError::NotAdmitted) => Self {
+                status: 503,
+                body: json!({"success": false, "error": "Provider account mutation was not admitted", "code": "not-admitted"}),
+            },
+            Err(ProviderAccountAdmissionError::Unavailable) => {
+                Self::from_delivery(ProviderAccountsDelivery::Unavailable)
+            }
+        }
+    }
+
     fn bad_request() -> Self {
         Self::fixed(400, "Provider account request is invalid")
     }

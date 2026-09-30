@@ -1,5 +1,7 @@
 import { invokeIpc } from '@/lib/api-client';
 import { hostApiFetch } from '@/lib/host-api';
+import { waitForCall } from '@/lib/call-log-await';
+import type { CallReceipt } from '@/types/call-log';
 
 const SETTINGS_UNAVAILABLE = 'Settings are unavailable';
 const SETTINGS_DESIRED_UNAVAILABLE = 'Settings desired is unavailable';
@@ -45,7 +47,7 @@ type SettingsPublicSnapshot = Readonly<{
 
 async function submitSettingsDesired(input: SettingsDesiredInput): Promise<SettingsDesiredReceipt> {
   const proxy = await invokeIpc<SanitizedProxyIntent>('settings:splitProxyIntent', input.proxy);
-  return await hostApiFetch<SettingsDesiredReceipt>('/api/settings/desired', {
+  const receipt = await hostApiFetch<CallReceipt>('/api/settings/desired', {
     method: 'POST',
     body: JSON.stringify({
       browserMode: input.browserMode,
@@ -55,6 +57,24 @@ async function submitSettingsDesired(input: SettingsDesiredInput): Promise<Setti
       proxyServer: proxy.server,
       proxyBypassRules: proxy.bypassRules,
     }),
+  });
+  const call = await waitForCall(receipt, 'settings');
+  if (call.command !== 'settings.replace' || call.detail.operation !== 'replaceDesired') {
+    throw new Error(SETTINGS_DESIRED_UNAVAILABLE);
+  }
+  if (call.status === 'rejected') throw new Error('Settings desired request was rejected');
+  const settlement = call.detail.settlement;
+  if (!settlement || !Number.isSafeInteger(settlement.revision) || settlement.revision <= 0
+    || (settlement.outcome !== 'confirmed' && settlement.outcome !== 'outcome_unknown')
+    || call.status !== (settlement.outcome === 'confirmed' ? 'succeeded' : 'unknown')) {
+    throw new Error(SETTINGS_DESIRED_UNAVAILABLE);
+  }
+  if (settlement.outcome === 'outcome_unknown') {
+    return { desired: { revision: settlement.revision, outcome: settlement.outcome } };
+  }
+  return await hostApiFetch<SettingsDesiredReceipt>('/api/settings/desired/projection', {
+    method: 'POST',
+    body: JSON.stringify({ callId: receipt.callId }),
   });
 }
 

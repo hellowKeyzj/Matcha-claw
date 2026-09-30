@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn());
+const terminalMock = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/call-log-await', () => ({ waitForCall: terminalMock }));
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
@@ -11,10 +13,12 @@ describe('skills store local import', () => {
   beforeEach(() => {
     vi.resetModules();
     hostApiFetchMock.mockReset();
+    hostApiFetchMock.mockResolvedValue({ callId: 'a'.repeat(32), accepted: true });
+    terminalMock.mockReset();
   });
 
   it('sends markdown content to the fixed import endpoint without a native path', async () => {
-    hostApiFetchMock.mockResolvedValue({ outcome: 'accepted' });
+    terminalMock.mockResolvedValue({ callId: 'a'.repeat(32), module: 'skills', command: 'skills.import.markdown', status: 'succeeded', detail: { access: 'write', outcome: 'accepted' } });
     const { useSkillsStore } = await import('@/stores/skills');
     const content = '---\nname: Web Search\ndescription: Search the web\n---\n';
 
@@ -37,7 +41,7 @@ describe('skills store local import', () => {
   });
 
   it('sends bundle content and its derived key to the fixed bundle endpoint', async () => {
-    hostApiFetchMock.mockResolvedValue({ outcome: 'accepted' });
+    terminalMock.mockResolvedValue({ callId: 'a'.repeat(32), module: 'skills', command: 'skills.import.bundle', status: 'succeeded', detail: { access: 'write', skillKey: 'web-search', outcome: 'accepted' } });
     const { useSkillsStore } = await import('@/stores/skills');
     const files = [{ path: 'SKILL.md', content: '---\nname: Web Search\ndescription: Search the web\n---\n' }];
 
@@ -55,7 +59,7 @@ describe('skills store local import', () => {
   });
 
   it.each(['rejected', 'unknown'] as const)('does not mutate an existing projection when import is %s', async (outcome) => {
-    hostApiFetchMock.mockResolvedValue({ outcome });
+    terminalMock.mockResolvedValue({ callId: 'a'.repeat(32), module: 'skills', command: 'skills.import.markdown', status: outcome, detail: { access: 'write', outcome } });
     const { useSkillsStore } = await import('@/stores/skills');
     const existingSkill = {
       id: 'calendar',

@@ -206,7 +206,8 @@
     "updatedSourceWatch": "ソース監視を更新しました",
     "embeddedPage": "ページの埋め込みを開始しました",
     "appliedGeneratedPages": "生成内容を適用しました",
-    "failed": "{{label}} に失敗しました"
+    "failed": "{{label}} に失敗しました",
+    "resultUnconfirmed": "操作結果を確認できません。再実行する前に、呼び出し記録を確認するか、Wikiを更新してください。"
   },
   "time": {
     "unrecorded": "記録なし"

@@ -23,6 +23,17 @@ pub(crate) fn project_observed(
     observation: &ObservationSink,
 ) -> Option<SafeEvent> {
     match event {
+        HostEvent::CallChanged(event) => project_accepted(
+            observation,
+            "call.changed",
+            SafeEvent::CallChanged {
+                call_id: event.call_id,
+                revision: event.revision,
+            },
+        ),
+        HostEvent::CallsResync => {
+            project_accepted(observation, "calls.resync", SafeEvent::CallsResync {})
+        }
         HostEvent::OpenClaw(event) => project_openclaw_observed(event, observation),
         HostEvent::CronExecution(event) => project_cron_execution_observed(event, observation),
         HostEvent::OpenClawRuntime => project_accepted(

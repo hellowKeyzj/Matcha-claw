@@ -1,14 +1,9 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
-import {
-  decodeProviderMutationCommittedResponse,
-  decodeProviderMutationCommitUnknownResponse,
-  type ProviderMutationCommittedResponse,
-  type ProviderMutationCommitUnknownResponse,
-} from './mutation-receipt';
+import type { CallReceipt } from '../../../../../src/types/call-log';
+import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 
 const PROVIDER_ROUTING_PATH = '/api/provider-routing';
-const MUTATION_UNKNOWN_ERROR = 'Provider mutation commit outcome is unknown; reopen before retrying';
 
 const UNAVAILABLE = {
   success: false,
@@ -61,7 +56,7 @@ type Request =
   }>;
 
 export type ProviderRoutingTransportResponse = Readonly<{
-  status: 200 | 400 | 409 | 422 | 503;
+  status: 200 | 202 | 400 | 422 | 503;
   body: ListResponse | ReplaceResponse | typeof INVALID_REQUEST | typeof REJECTED | typeof UNAVAILABLE;
 }>;
 
@@ -70,7 +65,7 @@ export interface ProviderRoutingTransport {
 }
 
 type ListResponse = Readonly<{ routing: Routing | null }>;
-type ReplaceResponse = ProviderMutationCommittedResponse | ProviderMutationCommitUnknownResponse;
+type ReplaceResponse = CallReceipt;
 
 const ROUTE_KEYS: readonly string[] = ['capability', 'primary', 'fallbacks', 'timeoutMs'];
 
@@ -108,24 +103,10 @@ async function executeRequest(
     body: request,
   });
   if (request.operationId === 'providerRouting.replace') {
-    if (response?.status === 200) {
-      const decoded = decodeProviderMutationCommittedResponse(response.body, {
-        desiredStatus: 'stored',
-        desiredRevision: 'required',
-        unknownError: MUTATION_UNKNOWN_ERROR,
-      });
-      return decoded
-        ? { status: 200, body: decoded }
-        : { status: 503, body: UNAVAILABLE };
-    }
-    if (response?.status === 409) {
-      const unknown = decodeProviderMutationCommitUnknownResponse(response.body, {
-        desiredRevision: 'required',
-        unknownError: MUTATION_UNKNOWN_ERROR,
-      });
-      return unknown
-        ? { status: 409, body: unknown }
-        : { status: 503, body: UNAVAILABLE };
+    if (response?.status === 202) {
+      try {
+        return { status: 202, body: decodeCallReceipt(response.body) };
+      } catch { /* closed public admission boundary */ }
     }
   } else if (response?.status === 200 && isListResponse(response.body)) {
     return { status: 200, body: response.body };

@@ -1,12 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { RuntimeHostApiContext } from '../context';
-import { RuntimeHostControlError } from '../../main/runtime-host-delivery/control';
-import { RuntimeHostLifecycleUnavailableError } from '../../main/runtime-host-delivery/lifecycle-owner';
 import { readRuntimeHostStatusProjection } from './app';
 import { sendJson } from '../route-utils';
-
-const RESTART_UNKNOWN = 'Runtime Host restart outcome is unknown';
-const RESTART_FAILED = 'Runtime Host restart failed';
 
 export async function handleRuntimeHostProcessRoutes(
   req: IncomingMessage,
@@ -31,18 +26,19 @@ export async function handleRuntimeHostProcessRoutes(
   }
 
   if (url.pathname === '/api/runtime-host/restart' && req.method === 'POST') {
-    try {
-      await ctx.runtimeHost.restart();
-      sendJson(res, 200, { success: true });
-    } catch (error) {
-      const unknown = error instanceof RuntimeHostControlError && error.delivery === 'unknown-delivery';
-      sendJson(res, unknown ? 503 : 500, {
-        success: false,
-        error: unknown || error instanceof RuntimeHostLifecycleUnavailableError
-          ? RESTART_UNKNOWN
-          : RESTART_FAILED,
-      });
+    const admission = ctx.runtimeHost.admitRestart();
+    sendJson(res, admission.accepted ? 202 : 503, admission);
+    return true;
+  }
+
+  if (url.pathname === '/api/runtime-host/restart' && req.method === 'GET') {
+    const restartId = url.searchParams.get('restartId');
+    if (!restartId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(restartId)) {
+      sendJson(res, 400, { error: 'Invalid Runtime Host restart identity' });
+      return true;
     }
+    const restart = ctx.runtimeHost.readRestart(restartId);
+    sendJson(res, restart ? 200 : 404, restart ?? { error: 'Runtime Host restart result is missing or expired' });
     return true;
   }
 

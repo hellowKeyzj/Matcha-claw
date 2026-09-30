@@ -64,7 +64,7 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
             path if path == accounts::ENDPOINT || path.starts_with(accounts::ACCOUNT_PREFIX) => {
                 accounts::handle(request, dependencies.verifier, dependencies.provider).await
             }
-            models::ENDPOINT | models::SELECTABLE_ENDPOINT => {
+            models::ENDPOINT | models::SELECTABLE_ENDPOINT | models::DISCOVERY_RESULT_ENDPOINT => {
                 models::handle(request, dependencies.verifier, dependencies.provider).await
             }
             routing::ENDPOINT => {
@@ -109,6 +109,7 @@ fn is_route(path: &str) -> bool {
         || path.starts_with(accounts::ACCOUNT_PREFIX)
         || path == models::ENDPOINT
         || path == models::SELECTABLE_ENDPOINT
+        || path == models::DISCOVERY_RESULT_ENDPOINT
         || path == routing::ENDPOINT
 }
 

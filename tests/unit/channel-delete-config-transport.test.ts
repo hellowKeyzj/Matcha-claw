@@ -2,9 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { createChannelDeleteConfigTransport } from '../../electron/main/runtime-host-delivery/transport/channels/delete-config';
 
 describe('Electron Main channel delete-config transport', () => {
-  it.each(['confirmed', 'target_rejected', 'unknown'] as const)('projects the sealed %s outcome', async (outcome) => {
+  it('projects the exact admission receipt', async () => {
+    const receipt = { callId: '0123456789abcdef0123456789abcdef', accepted: true };
     const signDecision = vi.fn().mockReturnValue('signed-decision');
-    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => ({ outcome }) });
+    const fetcher = vi.fn().mockResolvedValue({ status: 202, json: async () => receipt });
     const transport = createChannelDeleteConfigTransport(
       { verificationKey: 'public', signDecision },
       32_138,
@@ -12,8 +13,8 @@ describe('Electron Main channel delete-config transport', () => {
     );
 
     await expect(transport.deleteConfig({ channel: 'feishu', accountId: 'default' })).resolves.toEqual({
-      status: 200,
-      body: { outcome },
+      status: 202,
+      body: receipt,
     });
     expect(signDecision).toHaveBeenCalledWith(expect.objectContaining({
       endpoint: '/api/channels/delete-config',
@@ -42,15 +43,22 @@ describe('Electron Main channel delete-config transport', () => {
       body: { outcome: 'rejected' },
     });
 
-    const malformed = createChannelDeleteConfigTransport(
-      { verificationKey: 'public', signDecision: () => 'signed-decision' },
-      32_138,
-      vi.fn().mockResolvedValue({ status: 200, json: async () => ({ outcome: 'confirmed', secret: 'private' }) }),
-    );
-    await expect(malformed.deleteConfig({ channel: 'feishu', accountId: 'default' })).resolves.toEqual({
-      status: 503,
-      body: { outcome: 'unknown' },
-    });
+    for (const [status, body] of [
+      ...(['confirmed', 'target_rejected', 'unknown'] as const).map((outcome) => [200, { outcome }]),
+      [202, { callId: '0123456789abcdef0123456789abcdef', accepted: true, secret: 'private' }],
+      [202, { callId: 'invalid', accepted: true }],
+      [202, { callId: '0123456789abcdef0123456789abcdef', accepted: false }],
+    ]) {
+      const malformed = createChannelDeleteConfigTransport(
+        { verificationKey: 'public', signDecision: () => 'signed-decision' },
+        32_138,
+        vi.fn().mockResolvedValue({ status, json: async () => body }),
+      );
+      await expect(malformed.deleteConfig({ channel: 'feishu', accountId: 'default' })).resolves.toEqual({
+        status: 503,
+        body: { outcome: 'unknown' },
+      });
+    }
   });
 
   it('rejects invalid DTOs before signing or sending', async () => {

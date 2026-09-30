@@ -1,6 +1,7 @@
 mod adapters;
 mod api;
 mod application;
+mod call;
 pub mod capability;
 mod domain;
 mod owner;
@@ -10,6 +11,7 @@ use std::sync::Arc;
 
 use foundation::execution::{OwnedTask, OwnerRuntimeConfig, OwnerRuntimeSystem};
 use platform::{
+    call::CallRecorder,
     capability::CapabilityDecisionVerifier,
     module::{CapabilityDescriptorProvider, CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
 };
@@ -50,6 +52,11 @@ pub struct WorkspaceModule {
 impl WorkspaceModule {
     fn new(handle: WorkspaceHandle) -> Self {
         Self { handle }
+    }
+
+    pub fn with_call_recorder(mut self, recorder: CallRecorder) -> Self {
+        self.handle = self.handle.with_call_recorder(recorder);
+        self
     }
 
     pub fn descriptor(&self, verifier: Arc<Mutex<CapabilityDecisionVerifier>>) -> ModuleDescriptor {

@@ -74,16 +74,18 @@ impl ConnectorStore {
         &self.catalog
     }
 
-    #[cfg(test)]
-    fn revision(&self, id: &str) -> Option<u64> {
+    pub(crate) fn revision(&self, id: &str) -> Option<u64> {
         self.revisions.get(id).map(|record| record.revision)
     }
 
-    #[cfg(test)]
-    fn applied_revision(&self, id: &str) -> Option<u64> {
+    pub(crate) fn applied_revision(&self, id: &str) -> Option<u64> {
         self.revisions
             .get(id)
             .and_then(|record| record.applied_revision)
+    }
+
+    pub(crate) fn tombstoned(&self, id: &str) -> Option<bool> {
+        self.revisions.get(id).map(|record| record.tombstoned)
     }
 
     pub fn upsert(

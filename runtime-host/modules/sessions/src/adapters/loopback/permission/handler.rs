@@ -50,6 +50,11 @@ pub(crate) async fn handle(
         command.endpoint,
         crate::session_permission::NativeEndpoint::Unsupported
     ) {
+        let operation = match command.action() {
+            crate::session_permission::SessionPermissionAction::Get => "sessions.permission.get",
+            crate::session_permission::SessionPermissionAction::Set { .. } => "sessions.permission.set",
+        };
+        session.record_boundary_outcome(operation, crate::call::SessionsCallOutcome::Unsupported).await;
         return Response::from_delivery(SessionPermissionDelivery::Outcome(
             crate::session_permission::SessionPermissionOutcome::unsupported(),
         ));

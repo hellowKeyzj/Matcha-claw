@@ -1,7 +1,7 @@
 use ::cron::CronExecutionTerminalEvent;
 use foundation::process::supervision::SupervisorSnapshot;
 use openclaw::session::events::SessionEvent as OpenClawEvent;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 const EVENT_CAPACITY: usize = 256;
 
@@ -11,6 +11,8 @@ pub enum HostEvent {
     CronExecution(CronExecutionTerminalEvent),
     OpenClawRuntime,
     MatchaLifecycle(SupervisorSnapshot),
+    CallChanged(platform::call::CallChanged),
+    CallsResync,
 }
 
 pub struct HostEvents {
@@ -18,6 +20,7 @@ pub struct HostEvents {
     cron: mpsc::Receiver<CronExecutionTerminalEvent>,
     open_claw_runtime: mpsc::Receiver<()>,
     matcha_lifecycle: mpsc::Receiver<SupervisorSnapshot>,
+    calls: Option<broadcast::Receiver<platform::call::CallChanged>>,
     open_claw_open: bool,
     cron_open: bool,
     open_claw_runtime_open: bool,
@@ -25,16 +28,34 @@ pub struct HostEvents {
 }
 
 impl HostEvents {
+    pub(super) fn set_call_changes(
+        &mut self,
+        changes: broadcast::Receiver<platform::call::CallChanged>,
+    ) {
+        self.calls = Some(changes);
+    }
+
     pub async fn next(&mut self) -> Option<HostEvent> {
         loop {
             if !self.open_claw_open
                 && !self.cron_open
                 && !self.open_claw_runtime_open
                 && !self.matcha_lifecycle_open
+                && self.calls.is_none()
             {
                 return None;
             }
             tokio::select! {
+                change = async {
+                    match self.calls.as_mut() {
+                        Some(calls) => calls.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match change {
+                    Ok(change) => return Some(HostEvent::CallChanged(change)),
+                    Err(broadcast::error::RecvError::Closed) => self.calls = None,
+                    Err(broadcast::error::RecvError::Lagged(_)) => return Some(HostEvent::CallsResync),
+                },
                 event = self.open_claw.recv(), if self.open_claw_open => match event {
                     Some(event) => return Some(HostEvent::OpenClaw(event)),
                     None => self.open_claw_open = false,
@@ -111,6 +132,7 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
             cron: cron_events,
             open_claw_runtime: open_claw_runtime_events,
             matcha_lifecycle: matcha_lifecycle_events,
+            calls: None,
             open_claw_open: true,
             cron_open: true,
             open_claw_runtime_open: true,

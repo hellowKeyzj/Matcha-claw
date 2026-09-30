@@ -3,7 +3,10 @@ use std::sync::Arc;
 use foundation::execution::{LaneRetention, OwnerSpec};
 
 use crate::{
-    application::commands::{TaskCommand, TaskOwnerKey, TaskQuery},
+    application::{
+        call::{CallFailure, record_error},
+        commands::{TaskCommand, TaskOwnerKey, TaskQuery},
+    },
     domain::model::{TaskOutcome, TaskRuntimeFailure},
     ports::{TaskRequestAdmission, TaskRuntimeDirectory, failure_for_unavailable_ops},
 };
@@ -79,8 +82,22 @@ impl OwnerSpec for TaskOwner {
         command: Self::Command,
     ) {
         match command {
-            TaskCommand::Execute { command, reply } => {
-                let _ = reply.send(execute_task(&shared, command).await);
+            TaskCommand::Execute {
+                command,
+                mut call,
+                reply,
+            } => {
+                if let Some(call) = &call {
+                    record_error(call.context.accepted().await.map(|_| ()));
+                    record_error(call.context.running().await);
+                }
+                let (outcome, failure) = execute_task(&shared, command).await;
+                if let Some(call) = &mut call {
+                    call.detail.failure = failure;
+                    let status = call.detail.finish(&outcome);
+                    record_error(call.context.finish(status, &call.detail).await);
+                }
+                let _ = reply.send(outcome);
             }
         }
     }
@@ -114,15 +131,24 @@ impl OwnerSpec for TaskOwner {
 async fn execute_task(
     shared: &TaskShared,
     command: crate::domain::model::TaskCommand,
-) -> TaskOutcome {
+) -> (TaskOutcome, Option<CallFailure>) {
     if shared.admission.admit_task_request().is_err() {
-        return TaskOutcome::unavailable(command);
+        return (
+            TaskOutcome::unavailable(command),
+            Some(CallFailure::AdmissionClosed),
+        );
     }
     let Some(ops) = shared.runtime_directory.task_ops() else {
-        return failure_for_unavailable_ops(command);
+        return (
+            failure_for_unavailable_ops(command),
+            Some(CallFailure::Unsupported),
+        );
     };
     if !ops.task_runtime_ready() {
-        return TaskOutcome::from_failure(command, TaskRuntimeFailure::Unavailable);
+        return (
+            TaskOutcome::from_failure(command, TaskRuntimeFailure::Unavailable),
+            Some(CallFailure::Unavailable),
+        );
     }
-    ops.task_manager(command).await
+    (ops.task_manager(command).await, None)
 }

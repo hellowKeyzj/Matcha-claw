@@ -1,16 +1,14 @@
 import { logger } from '../../../../utils/logger';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
-import {
-  decodeProviderMutationCommittedResponse,
-  decodeProviderMutationCommitUnknownResponse,
-  type ProviderMutationCommittedResponse,
-  type ProviderMutationCommitUnknownResponse,
-} from './mutation-receipt';
+import type { CallReceipt } from '../../../../../src/types/call-log';
+import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 
 const PROVIDER_MODELS_PATH = '/api/provider-models';
 const SELECTABLE_PROVIDER_MODELS_PATH = '/api/provider-models/selectable';
-const MUTATION_UNKNOWN_ERROR = 'Provider mutation commit outcome is unknown; reopen before retrying';
+const DISCOVERY_RESULT_PATH = '/api/provider-models/discovery-result';
+const DISCOVERY_PENDING = { success: false, error: 'Provider model discovery is still running' } as const;
+const DISCOVERY_EXPIRED = { success: false, error: 'Provider model discovery result expired; discover again' } as const;
 
 const UNAVAILABLE = {
   success: false,
@@ -82,18 +80,19 @@ export type SelectableProviderModel = ProviderModel & Readonly<{
 }>;
 
 type ListResponse = Readonly<{ models: ProviderModel[] }>;
-type DiscoverResponse = Readonly<{ models: ModelDraft[] }>;
+type DiscoverResponse = Readonly<{ callId: string; accountId: string; models: ModelDraft[] }>;
 type SelectableResponse = Readonly<{ models: SelectableProviderModel[] }>;
-type ReplaceResponse = ProviderMutationCommittedResponse | ProviderMutationCommitUnknownResponse;
+type ReplaceResponse = CallReceipt;
 
 export type ProviderModelsTransportResponse = Readonly<{
-  status: 200 | 400 | 409 | 422 | 503;
-  body: ListResponse | DiscoverResponse | SelectableResponse | ReplaceResponse | typeof INVALID_REQUEST | typeof REJECTED | typeof UNAVAILABLE;
+  status: 200 | 202 | 400 | 409 | 410 | 422 | 503;
+  body: ListResponse | DiscoverResponse | SelectableResponse | ReplaceResponse | typeof INVALID_REQUEST | typeof REJECTED | typeof UNAVAILABLE | typeof DISCOVERY_PENDING | typeof DISCOVERY_EXPIRED;
 }>;
 
 export interface ProviderModelsTransport {
   read(): Promise<ProviderModelsTransportResponse>;
   discover(accountId: string): Promise<ProviderModelsTransportResponse>;
+  readDiscoveryResult(callId: string, accountId: string): Promise<ProviderModelsTransportResponse>;
   readSelectable(capability: ProviderModelCapability): Promise<ProviderModelsTransportResponse>;
   execute(request: unknown): Promise<ProviderModelsTransportResponse>;
 }
@@ -159,9 +158,12 @@ export function createProviderModelsTransport(
         body: request,
       });
       status.value = response?.status ?? null;
-      if (response?.status === 200 && isDiscoverResponse(response.body)) {
-        logger.info('[ProviderModels] discover result', { status: status.value, elapsedMs: Date.now() - startedAt });
-        return { status: 200, body: response.body };
+      if (response?.status === 202) {
+        try {
+          const receipt = decodeCallReceipt(response.body);
+          logger.info('[ProviderModels] discover admitted', { status: status.value, elapsedMs: Date.now() - startedAt });
+          return { status: 202, body: receipt };
+        } catch { /* closed public admission boundary */ }
       }
       logger.warn('[ProviderModels] discover result', {
         stage: response === null ? 'request' : 'response-validation',
@@ -170,6 +172,31 @@ export function createProviderModelsTransport(
         reason: response?.status === 200 ? 'invalid-response' : 'http-error',
       });
       if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
+      if (response?.status === 422) return { status: 422, body: REJECTED };
+      return { status: 503, body: UNAVAILABLE };
+    },
+
+    async readDiscoveryResult(callId: string, accountId: string): Promise<ProviderModelsTransportResponse> {
+      if (!/^[0-9a-f]{32}$/.test(callId) || !isIdentifier(accountId)) return { status: 400, body: INVALID_REQUEST };
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: DISCOVERY_RESULT_PATH,
+        issuer,
+        decision: {
+          endpoint: DISCOVERY_RESULT_PATH,
+          scope: 'providers:models',
+          capability: 'providerModels.discoveryResult',
+          subject: 'provider-models',
+        },
+        method: 'GET',
+        fetcher,
+        query: new URLSearchParams({ callId, accountId }),
+      });
+      if (response?.status === 200 && isDiscoverResponse(response.body)
+        && response.body.callId === callId && response.body.accountId === accountId) return { status: 200, body: response.body };
+      if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
+      if (response?.status === 409) return { status: 409, body: DISCOVERY_PENDING };
+      if (response?.status === 410) return { status: 410, body: DISCOVERY_EXPIRED };
       if (response?.status === 422) return { status: 422, body: REJECTED };
       return { status: 503, body: UNAVAILABLE };
     },
@@ -212,24 +239,10 @@ export function createProviderModelsTransport(
         fetcher,
         body: request,
       });
-      if (response?.status === 200) {
-        const decoded = decodeProviderMutationCommittedResponse(response.body, {
-          desiredStatus: 'stored',
-          desiredRevision: 'forbidden',
-          unknownError: MUTATION_UNKNOWN_ERROR,
-        });
-        return decoded
-          ? { status: 200, body: decoded }
-          : { status: 503, body: UNAVAILABLE };
-      }
-      if (response?.status === 409) {
-        const unknown = decodeProviderMutationCommitUnknownResponse(response.body, {
-          desiredRevision: 'forbidden',
-          unknownError: MUTATION_UNKNOWN_ERROR,
-        });
-        return unknown
-          ? { status: 409, body: unknown }
-          : { status: 503, body: UNAVAILABLE };
+      if (response?.status === 202) {
+        try {
+          return { status: 202, body: decodeCallReceipt(response.body) };
+        } catch { /* closed public admission boundary */ }
       }
       if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
       if (response?.status === 422) return { status: 422, body: REJECTED };
@@ -288,7 +301,9 @@ function isListResponse(value: unknown): value is ListResponse {
 
 function isDiscoverResponse(value: unknown): value is DiscoverResponse {
   return isRecord(value)
-    && hasExactKeys(value, ['models'])
+    && hasExactKeys(value, ['callId', 'accountId', 'models'])
+    && typeof value.callId === 'string' && /^[0-9a-f]{32}$/.test(value.callId)
+    && isIdentifier(value.accountId)
     && Array.isArray(value.models)
     && value.models.every(isModelDraft);
 }

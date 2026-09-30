@@ -5,6 +5,7 @@ use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
 use crate::{
     adapters::store::{DesiredState, PendingDesired},
     application::{
+        call::{SettingsCallDetail, SettingsOperation, settlement_status},
         commands::SettingsCommand,
         operations,
         queries::SettingsQuery,
@@ -159,9 +160,28 @@ impl OwnerSpec for SettingsOwner {
             SettingsCommand::ReplaceDesired {
                 correlation,
                 desired,
-                reply,
+                call,
             } => {
-                let _ = reply.send(state.replace(&shared, correlation, desired).await);
+                if let Err(error) = call.running().await {
+                    eprintln!(
+                        "settings call {} audit running failed: {error}",
+                        call.id().as_str()
+                    );
+                }
+                let launch_at_startup = desired.launch_at_startup();
+                let settlement = state.replace(&shared, correlation, desired).await;
+                if let Err(error) = call
+                    .finish(
+                        settlement_status(settlement),
+                        &SettingsCallDetail::settled(settlement, launch_at_startup),
+                    )
+                    .await
+                {
+                    eprintln!(
+                        "settings call {} audit finish failed: {error}",
+                        call.id().as_str()
+                    );
+                }
             }
             SettingsCommand::RecoverPendingProjection { reply } => {
                 let _ = state.recover_pending(&shared).await;
@@ -189,8 +209,25 @@ impl OwnerSpec for SettingsOwner {
         query: Self::Query,
     ) {
         match query {
-            SettingsQuery::DesiredReadModel { reply } => {
-                let _ = reply.send(state.desired_read_model());
+            SettingsQuery::DesiredReadModel { call, reply } => {
+                let result = async {
+                    call.running().await?;
+                    let snapshot = state.desired_read_model();
+                    call.finish(
+                        platform::call::CallStatus::Succeeded,
+                        &SettingsCallDetail::new(SettingsOperation::ReadCurrent),
+                    )
+                    .await?;
+                    Ok(snapshot)
+                }
+                .await;
+                if let Err(error) = &result {
+                    eprintln!(
+                        "settings call {} audit read failed: {error}",
+                        call.id().as_str()
+                    );
+                }
+                let _ = reply.send(result);
             }
             SettingsQuery::GatewayAutoStart { reply } => {
                 let _ = reply.send(state.gateway_auto_start());

@@ -1,6 +1,7 @@
 mod adapters;
 mod api;
 mod application;
+mod call;
 pub mod capability;
 pub mod domain;
 pub mod llm_client;
@@ -72,6 +73,11 @@ pub struct ProviderModule {
 impl ProviderModule {
     fn new(handle: ProviderHandle) -> Self {
         Self { handle }
+    }
+
+    pub fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
+        self.handle = self.handle.with_call_recorder(recorder);
+        self
     }
 
     pub fn handle(&self) -> &ProviderHandle {

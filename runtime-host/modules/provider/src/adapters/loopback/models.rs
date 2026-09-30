@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use platform::{capability::CapabilityDecisionVerifier, loopback::Response};
 use serde::Deserialize;
@@ -12,6 +12,7 @@ use crate::{
 
 pub(super) const ENDPOINT: &str = "/api/provider-models";
 pub(super) const SELECTABLE_ENDPOINT: &str = "/api/provider-models/selectable";
+pub(super) const DISCOVERY_RESULT_ENDPOINT: &str = "/api/provider-models/discovery-result";
 const CAPABILITY_ID: &str = "provider.models";
 const AUTHORIZATION_SCOPE: &str = "providers:models";
 const AUTHORIZATION_SUBJECT: &str = "provider-models";
@@ -207,6 +208,7 @@ async fn handle_request(
         return match target_path {
             ENDPOINT => handle_get_list(&request, query, verifier, provider).await,
             SELECTABLE_ENDPOINT => handle_get_selectable(&request, query, verifier, provider).await,
+            DISCOVERY_RESULT_ENDPOINT => handle_get_discovery_result(&request, query, verifier, provider).await,
             _ => TransportResponse::not_found(target_path),
         };
     }
@@ -266,6 +268,52 @@ async fn handle_get_selectable(
     TransportResponse::from_models_delivery(delivery)
 }
 
+async fn handle_get_discovery_result(
+    request: &platform::loopback::Request,
+    query: &str,
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    provider: ProviderHandle,
+) -> TransportResponse {
+    let Some((call_id, account_id)) = parse_discovery_result_query(query) else {
+        return TransportResponse::bad_request();
+    };
+    if !request.body.is_empty() {
+        return TransportResponse::bad_request();
+    }
+    if !verify_get_authorization(request, &verifier, DISCOVERY_RESULT_ENDPOINT, "providerModels.discoveryResult").await {
+        return TransportResponse::unauthorized();
+    }
+    use crate::owner::discovery::DiscoveryResult;
+    match provider.read_provider_model_discovery(&call_id, &account_id) {
+        Ok(DiscoveryResult::Available(models)) => TransportResponse {
+            status: 200,
+            body: json!({
+                "callId": call_id.as_str(), "accountId": account_id.as_str(),
+                "models": models.iter().map(projection::models::draft_json).collect::<Vec<_>>(),
+            }),
+        },
+        Ok(DiscoveryResult::Pending) => TransportResponse::fixed(409, "Provider model discovery is still running"),
+        Ok(DiscoveryResult::Expired) => TransportResponse::fixed(410, "Provider model discovery result expired; discover again"),
+        Err(()) => TransportResponse::from_models_delivery(ProviderModelsDelivery::Unavailable),
+    }
+}
+
+fn parse_discovery_result_query(query: &str) -> Option<(platform::call::CallId, crate::ProviderAccountId)> {
+    let mut call_id = None;
+    let mut account_id = None;
+    let url = reqwest::Url::parse(&format!("http://localhost/?{query}")).ok()?;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "callId" if call_id.is_none() && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) => {
+                call_id = Some(platform::call::CallId::parse(&value).ok()?);
+            }
+            "accountId" if account_id.is_none() => account_id = Some(crate::ProviderAccountId::try_new(value.into_owned()).ok()?),
+            _ => return None,
+        }
+    }
+    Some((call_id?, account_id?))
+}
+
 fn parse_capability_query(query: &str) -> Option<crate::ProviderModelCapability> {
     let (key, value) = query.split_once('=')?;
     if key != "capability" || value.is_empty() || value.contains('=') || value.contains('&') {
@@ -323,7 +371,27 @@ async fn handle_post(
         Err(RequestError::Unauthorized) => return TransportResponse::unauthorized(),
     };
     drop(verifier);
-    let is_query = !matches!(command, ProviderModelsCommand::Replace { .. });
+    if let ProviderModelsCommand::Replace { account_id, models } = command {
+        return match provider
+            .admit_replace_provider_models(account_id, models)
+            .await
+        {
+            Ok(receipt) => TransportResponse {
+                status: 202,
+                body: serde_json::to_value(receipt).expect("call receipt serializes"),
+            },
+            Err(()) => TransportResponse::from_models_delivery(ProviderModelsDelivery::Unavailable),
+        };
+    }
+    if let ProviderModelsCommand::Discover(account_id) = command {
+        return match provider.admit_discover_provider_models(account_id).await {
+            Ok(receipt) => TransportResponse {
+                status: 202,
+                body: serde_json::to_value(receipt).expect("call receipt serializes"),
+            },
+            Err(()) => TransportResponse::from_models_delivery(ProviderModelsDelivery::Unavailable),
+        };
+    }
     let dispatch = async {
         match command {
             ProviderModelsCommand::List => provider
@@ -334,35 +402,14 @@ async fn handle_post(
                 .selectable_provider_models(capability)
                 .await
                 .map(ProviderModelsDelivery::Selectable),
-            ProviderModelsCommand::Discover(account_id) => {
-                let started = Instant::now();
-                eprintln!("[provider-models-transport] phase=discover-owner outcome=dispatched");
-                let delivery = provider
-                    .discover_provider_models(account_id)
-                    .await
-                    .map(ProviderModelsDelivery::Discover);
-                eprintln!(
-                    "[provider-models-transport] phase=discover-owner outcome=completed status={} elapsed_ms={}",
-                    delivery
-                        .as_ref()
-                        .map_or(503, ProviderModelsDelivery::status_code),
-                    started.elapsed().as_millis()
-                );
-                delivery
+            ProviderModelsCommand::Discover(_) | ProviderModelsCommand::Replace { .. } => {
+                unreachable!("mutation dispatched before query")
             }
-            ProviderModelsCommand::Replace { account_id, models } => provider
-                .replace_provider_models(account_id, models)
-                .await
-                .map(ProviderModelsDelivery::Replace),
         }
     };
-    let delivery = if is_query {
-        match tokio::time::timeout(super::SHORT_DEADLINE, dispatch).await {
-            Ok(delivery) => delivery,
-            Err(_) => return TransportResponse::fixed(503, super::TIMEOUT_ERROR),
-        }
-    } else {
-        dispatch.await
+    let delivery = match tokio::time::timeout(super::SHORT_DEADLINE, dispatch).await {
+        Ok(delivery) => delivery,
+        Err(_) => return TransportResponse::fixed(503, super::TIMEOUT_ERROR),
     }
     .unwrap_or(ProviderModelsDelivery::Unavailable);
     TransportResponse::from_models_delivery(delivery)

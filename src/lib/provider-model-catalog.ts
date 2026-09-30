@@ -1,10 +1,9 @@
 import { hostApiFetch } from '@/lib/host-api';
 import { nativeProjectionError } from '@/lib/provider-projection-errors';
-import {
-  decodeProviderMutationReceipt,
-  ProviderMutationCommitOutcomeUnknownError,
-  type ProviderMutationReceipt,
-} from '@/lib/host-api-transport-contract';
+import { isProviderMutationCommitted, waitForProviderMutation } from '@/lib/provider-call';
+import { decodeProviderCallDetail, type ProviderCallDetail } from '@/types/call-log/provider';
+import { decodeCallReceipt } from '@/types/call-log/receipt';
+import { waitForCall } from '@/lib/call-log-await';
 import { summarizeIdentifier } from '@/lib/session-trace';
 import type { ModelCapability } from '@/lib/providers';
 import { MODEL_CAPABILITIES } from '@/lib/provider-model-capabilities';
@@ -27,8 +26,7 @@ export interface ProviderModel {
 export type ProviderModelDraft = Omit<ProviderModel, 'accountId' | 'label'>;
 
 export interface ProviderModelsReplaceResult {
-  desired: { status: 'stored' };
-  receipt: ProviderMutationReceipt;
+  receipt: ProviderCallDetail;
   warning?: string;
 }
 
@@ -151,8 +149,8 @@ function decodeModelList(value: unknown): ProviderModel[] {
   return models;
 }
 
-function decodeDiscoverResult(value: unknown): ProviderModelsDiscoverResult {
-  if (!isRecord(value) || Object.keys(value).length !== 1 || !Array.isArray(value.models)) {
+function decodeDiscoverResult(value: unknown, callId: string, accountId: string, count: number | null): ProviderModelsDiscoverResult {
+  if (!isRecord(value) || Object.keys(value).length !== 3 || value.callId !== callId || value.accountId !== accountId || !Array.isArray(value.models) || value.models.length !== count) {
     throw new Error('Provider model discovery is unavailable');
   }
   const models: ProviderModelDraft[] = [];
@@ -169,27 +167,6 @@ function decodeDiscoverResult(value: unknown): ProviderModelsDiscoverResult {
   return { models };
 }
 
-function decodeReplaceResult(value: unknown): ProviderModelsReplaceResult {
-  if (isRecord(value)
-    && value.success === false
-    && value.error === 'Provider model request was rejected') {
-    throw new Error('Provider model request was rejected');
-  }
-  if (!isRecord(value) || value.success !== true) {
-    throw new Error('Provider models are unavailable');
-  }
-  const receipt = decodeProviderMutationReceipt(value, 'committed');
-  if (!receipt || receipt.desired.status !== 'stored' || receipt.persisted.status !== 'confirmed') {
-    throw new Error('Provider models are unavailable');
-  }
-  const warning = nativeProjectionError(receipt);
-  return {
-    desired: { status: 'stored' },
-    receipt,
-    ...(warning ? { warning } : {}),
-  };
-}
-
 function logProviderConfigTrace(phase: string, payload: Record<string, unknown> = {}): void {
   console.info(JSON.stringify({
     prefix: '[startup-trace]',
@@ -199,23 +176,12 @@ function logProviderConfigTrace(phase: string, payload: Record<string, unknown> 
   }));
 }
 
-function providerProjectionTrace(receipt: ProviderMutationReceipt): Record<string, unknown> {
+function providerProjectionTrace(receipt: ProviderCallDetail): Record<string, unknown> {
   return {
-    changed: receipt.native.changed,
-    applied: receipt.native.applied.status,
-    observed: receipt.native.observed.status,
-    diagnostic: receipt.native.diagnostic
-      ? {
-          phase: receipt.native.diagnostic.phase,
-          reason: receipt.native.diagnostic.reason,
-          configPath: receipt.native.diagnostic.configPath,
-          method: receipt.native.diagnostic.method,
-          expectedPath: receipt.native.diagnostic.expectedPath,
-          detail: receipt.native.diagnostic.detail
-            ? summarizeIdentifier(receipt.native.diagnostic.detail)
-            : undefined,
-        }
-      : undefined,
+    changed: receipt.native?.changed,
+    applied: receipt.native?.applied,
+    observed: receipt.native?.observed,
+    diagnostic: receipt.diagnostic,
   };
 }
 
@@ -223,15 +189,31 @@ export async function fetchProviderModels(): Promise<ProviderModel[]> {
   return decodeModelList(await hostApiFetch<unknown>('/api/provider-models'));
 }
 
-export async function discoverProviderModels(accountId: string): Promise<ProviderModelsDiscoverResult> {
+export async function discoverProviderModels(accountId: string, signal?: AbortSignal): Promise<ProviderModelsDiscoverResult> {
   const trimmedAccountId = accountId.trim();
   if (!trimmedAccountId) {
     throw new Error('Provider account is required');
   }
-  return decodeDiscoverResult(await hostApiFetch<unknown>(
+  const receipt = decodeCallReceipt(await hostApiFetch<unknown>(
     `/api/provider-models/discover?accountId=${encodeURIComponent(trimmedAccountId)}`,
-    { timeoutMs: 60_000 },
+    { signal },
   ));
+  const call = await waitForCall(receipt, 'provider', { signal });
+  const detail = decodeProviderCallDetail(call.detail);
+  if (call.command !== 'providerModels.discover' || !detail || detail.kind !== 'discoverModels'
+    || detail.accountId !== trimmedAccountId) throw new Error('Provider discovery call identity is invalid');
+  if (call.status === 'unknown' || detail.outcome === 'unknown') {
+    throw new Error('Provider model discovery outcome is unknown; reopen before retrying');
+  }
+  if (detail.outcome === 'rejected') throw new Error('Provider model request was rejected');
+  if (call.status !== 'succeeded' || detail.phase !== 'terminal' || detail.outcome !== 'discovered') {
+    throw new Error('Provider models are unavailable');
+  }
+  const result = decodeDiscoverResult(await hostApiFetch<unknown>(
+    `/api/provider-models/discovery-result?${new URLSearchParams({ callId: receipt.callId, accountId: trimmedAccountId })}`,
+    { signal },
+  ), receipt.callId, trimmedAccountId, detail.count);
+  return result;
 }
 
 export async function persistProviderModels(
@@ -250,19 +232,24 @@ export async function persistProviderModels(
         input: { kind: 'replace', accountId, models },
       }),
     });
-    const decoded = decodeReplaceResult(result);
-    logProviderConfigTrace('request-finished', providerProjectionTrace(decoded.receipt));
-    return decoded;
+    const receipt = await waitForProviderMutation(result, 'providerModels.replace', { accountId });
+    logProviderConfigTrace('request-finished', providerProjectionTrace(receipt));
+    if (!isProviderMutationCommitted(receipt, 'stored')) {
+      if (receipt.outcome === 'rejected' || receipt.outcome === 'missing') {
+        throw new Error('Provider model request was rejected');
+      }
+      if (receipt.phase !== 'terminal' || receipt.outcome === 'unknown'
+        || receipt.commit === 'unknown' || receipt.persisted === 'unknown') {
+        throw new Error('Provider model commit outcome is unknown; reopen before retrying');
+      }
+      throw new Error('Provider models are unavailable');
+    }
+    const warning = nativeProjectionError(receipt);
+    return { receipt, ...(warning ? { warning } : {}) };
   } catch (error) {
     logProviderConfigTrace('request-failed', {
       errorName: error instanceof Error ? error.name : typeof error,
-      message: summarizeIdentifier(error instanceof Error ? error.message : String(error)),
     });
-    if (error instanceof ProviderMutationCommitOutcomeUnknownError) {
-      const unknown = new Error('Provider model commit outcome is unknown; reopen before retrying');
-      unknown.cause = error;
-      throw unknown;
-    }
     throw error;
   }
 }

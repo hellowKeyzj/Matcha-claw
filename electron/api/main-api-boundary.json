@@ -5,6 +5,7 @@
     "app.ts",
     "billing.ts",
     "capabilities.ts",
+    "calls.ts",
     "channel-authorization.ts",
     "channel-catalog.ts",
     "channel-configure.ts",
@@ -80,9 +81,13 @@
     "/api/billing/orders",
     "/api/billing/orders/verify",
     "/api/subagents/agents",
+    "/api/subagents/results",
     "/api/capabilities/list",
     "/api/capabilities/describe",
     "/api/capabilities/execute",
+    "/api/calls/list",
+    "/api/calls/get",
+    "/api/calls/history",
     "/api/channels/authorization",
     "/api/channels/catalog",
     "/api/channels/configure",
@@ -102,6 +107,7 @@
     "/api/cron/jobs/update",
     "/api/cron/jobs/delete",
     "/api/cron/jobs/toggle",
+    "/api/cron/results",
     "/api/cron/session-history",
     "/api/sessions/history",
     "/api/usage/recent",
@@ -111,6 +117,7 @@
     "/api/diagnostics/archive/download",
     "/api/settings",
     "/api/settings/desired",
+    "/api/settings/desired/projection",
     "/api/security",
     "/api/security/audit",
     "/api/security/destructive-rule-catalog",
@@ -118,6 +125,7 @@
     "/api/security/policy",
     "/api/security/policy/current",
     "/api/security/operation",
+    "/api/security/operation/receipt",
     "/api/files/save-image",
     "/api/files/binary",
     "/api/files/read-text",
@@ -152,22 +160,26 @@
     "/api/packages/market",
     "/api/packages/upload",
     "/api/packages/upload/sealed-skill",
+    "/api/packages/upload/sealed-skill/confirm",
     "/api/packages/upload/sealed-agent",
-    "/api/packages/download-record",
     "/api/packages/download",
     "/api/packages/install",
+    "/api/packages/install/confirm",
+    "/api/packages/operation-result",
     "/api/runtime-host/status",
     "/api/runtime-host/restart",
     "/api/provider-accounts",
     "/api/provider-models",
     "/api/provider-models/selectable",
     "/api/provider-models/discover",
+    "/api/provider-models/discovery-result",
     "/api/provider-routing",
     "/api/external-connectors",
     "/api/external-connectors/mcp-server-programs",
     "/api/external-connectors/status",
     "/api/external-connectors/get",
     "/api/external-connectors/probe",
+    "/api/external-connectors/observation-result",
     "/api/external-connectors/session-status",
     "/api/external-connectors/upsert",
     "/api/external-connectors/remove",
@@ -178,6 +190,7 @@
     "/api/skills/status",
     "/api/skills/detail",
     "/api/skills/config",
+    "/api/skills/operations/result",
     "/api/skills/clawhub/install",
     "/api/skills/clawhub/update",
     "/api/skills/upload/begin",
@@ -221,6 +234,7 @@
     "/api/wiki/refresh-sources",
     "/api/wiki/apply-generated-pages",
     "/api/wiki/delete-source",
+    "/api/wiki/call-result",
     "/api/wiki/reviews",
     "/api/wiki/review/resolve",
     "/api/wiki/review/dismiss",
@@ -338,6 +352,10 @@
       "/api/subagents/agents"
     ],
     [
+      "POST",
+      "/api/subagents/results"
+    ],
+    [
       "GET",
       "/api/capabilities/list"
     ],
@@ -348,6 +366,18 @@
     [
       "POST",
       "/api/capabilities/execute"
+    ],
+    [
+      "POST",
+      "/api/calls/list"
+    ],
+    [
+      "POST",
+      "/api/calls/get"
+    ],
+    [
+      "POST",
+      "/api/calls/history"
     ],
     [
       "POST",
@@ -426,6 +456,10 @@
       "/api/cron/jobs/toggle"
     ],
     [
+      "POST",
+      "/api/cron/results"
+    ],
+    [
       "GET",
       "/api/cron/session-history"
     ],
@@ -462,6 +496,10 @@
       "/api/settings/desired"
     ],
     [
+      "POST",
+      "/api/settings/desired/projection"
+    ],
+    [
       "GET",
       "/api/security"
     ],
@@ -488,6 +526,10 @@
     [
       "POST",
       "/api/security/operation"
+    ],
+    [
+      "POST",
+      "/api/security/operation/receipt"
     ],
     [
       "POST",
@@ -631,11 +673,11 @@
     ],
     [
       "POST",
-      "/api/packages/upload/sealed-agent"
+      "/api/packages/upload/sealed-skill/confirm"
     ],
     [
       "POST",
-      "/api/packages/download-record"
+      "/api/packages/upload/sealed-agent"
     ],
     [
       "POST",
@@ -644,6 +686,14 @@
     [
       "POST",
       "/api/packages/install"
+    ],
+    [
+      "POST",
+      "/api/packages/install/confirm"
+    ],
+    [
+      "POST",
+      "/api/packages/operation-result"
     ],
     [
       "GET",
@@ -664,6 +714,10 @@
     [
       "GET",
       "/api/provider-models/discover"
+    ],
+    [
+      "GET",
+      "/api/provider-models/discovery-result"
     ],
     [
       "GET",
@@ -696,6 +750,10 @@
     [
       "POST",
       "/api/external-connectors/probe"
+    ],
+    [
+      "POST",
+      "/api/external-connectors/observation-result"
     ],
     [
       "POST",
@@ -736,6 +794,10 @@
     [
       "POST",
       "/api/skills/config"
+    ],
+    [
+      "POST",
+      "/api/skills/operations/result"
     ],
     [
       "POST",
@@ -914,6 +976,10 @@
       "/api/wiki/delete-source"
     ],
     [
+      "POST",
+      "/api/wiki/call-result"
+    ],
+    [
       "GET",
       "/api/wiki/reviews"
     ],
@@ -983,6 +1049,10 @@
     ],
     [
       "POST",
+      "/api/runtime-host/restart"
+    ],
+    [
+      "GET",
       "/api/runtime-host/restart"
     ],
     [

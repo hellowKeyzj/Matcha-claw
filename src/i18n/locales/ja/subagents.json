@@ -205,6 +205,26 @@
   },
   "cloudPackages": {
     "title": "クラウドAgentパッケージ",
+    "mineTitle": "自分のクラウドパッケージ",
+    "mineDescription": "アップロードは下書きとして保存され、公開操作でマーケットに掲載されます。",
+    "mineEmpty": "アップロード済みのパッケージはありません。",
+    "marketTitle": "パッケージマーケット",
+    "loading": "パッケージを読み込み中…",
+    "loadFailed": "パッケージの読み込みに失敗しました。再試行してください。",
+    "retry": "再試行",
+    "publish": "公開",
+    "publishing": "公開中…",
+    "published": "パッケージを公開しました",
+    "publishFailed": "パッケージの公開に失敗しました",
+    "uploadFailed": "パッケージのアップロードに失敗しました",
+    "installFailed": "パッケージのインストールに失敗しました",
+    "installed": "インストール済み",
+    "installing": "インストール中…",
+    "status": { "draft": "下書き", "published": "公開済み", "disabled": "無効", "unknown": "不明な状態" },
+    "errors": {
+      "MATCHA_PACKAGE_CLOUD_ENVELOPE_REQUIRED": "クラウド用にパッケージを再エクスポートしてアップロードしてください。",
+      "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "このバージョンは公開できません。一覧を更新してください。"
+    },
     "empty": "クラウドAgentパッケージはありません。",
     "install": "インストール"
   },

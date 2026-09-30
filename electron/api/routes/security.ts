@@ -3,7 +3,7 @@ import type {
   SecurityOperationRequest,
   SecurityPolicyTransport,
 } from '../../main/runtime-host-delivery/transport/security/policy';
-import { isSecurityOperationRequest } from '../../main/runtime-host-delivery/transport/security/policy';
+import { isSecurityOperationId, isSecurityOperationRequest } from '../../main/runtime-host-delivery/transport/security/policy';
 import type { SecurityRuleCatalogTransport } from '../../main/runtime-host-delivery/transport/security/rule-catalog';
 import {
   logSessionTrace,
@@ -49,6 +49,28 @@ export async function handleSecurityRoutes(
   transport: SecurityPolicyTransport,
   catalogTransport: SecurityRuleCatalogTransport,
 ): Promise<boolean> {
+  if (url.pathname === '/api/security/operation/receipt' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await parseJsonBody(req); } catch {
+      sendJson(res, 400, OPERATION_INVALID);
+      return true;
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      sendJson(res, 400, OPERATION_INVALID);
+      return true;
+    }
+    const request = body as Record<string, unknown>;
+    if (Object.keys(request).length !== 2 || typeof request.correlation !== 'string'
+      || !isSecurityOperationId(request.operationId)) {
+      sendJson(res, 400, OPERATION_INVALID);
+      return true;
+    }
+    try {
+      const response = await transport.operationReceipt(request.correlation, request.operationId);
+      sendJson(res, response.status, response.body);
+    } catch { sendJson(res, 503, OPERATION_UNAVAILABLE); }
+    return true;
+  }
   if (url.pathname === '/api/security/operation' && req.method === 'POST') {
     let body: unknown;
     try {

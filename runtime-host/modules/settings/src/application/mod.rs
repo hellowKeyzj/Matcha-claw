@@ -1,3 +1,4 @@
+pub(crate) mod call;
 pub(crate) mod commands;
 pub(crate) mod operations;
 pub(crate) mod queries;

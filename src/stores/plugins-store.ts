@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
+import { configurePlugin, operatePlugin } from '@/lib/plugins';
 
 export type PluginCatalogItem = {
   id: string;
@@ -49,9 +50,6 @@ type CatalogPayload = {
 
 export type PluginConfigurationOutcome = 'configured' | 'rejected' | 'unknown';
 export type PluginOperation = 'install' | 'update' | 'uninstall';
-type PluginMutationResponse = {
-  outcome: PluginConfigurationOutcome;
-};
 
 export type PluginRefreshReason = 'initial' | 'manual' | 'mutation' | 'background';
 
@@ -66,6 +64,7 @@ type PluginRefreshOptions = PluginFetchOptions & {
 
 const PLUGIN_LOAD_FAILED_KEY = 'plugins:errors.loadFailed';
 const PLUGIN_CACHE_FRESH_MS = 30_000;
+const RUNTIME_HOST_RESTART_TIMEOUT_MS = 130_000;
 const RUNTIME_HOST_READY_TIMEOUT_MS = 15_000;
 const RUNTIME_HOST_READY_RETRY_MS = 300;
 const EMPTY_CATALOG: PluginCatalogItem[] = [];
@@ -143,6 +142,39 @@ async function fetchRuntimeShared(): Promise<RuntimePayload> {
       runtimeInflightTask = null;
     }
   }
+}
+
+async function restartRuntimeHost(): Promise<void> {
+  const admission = await hostApiFetch<{ accepted: true; restartId: string }>(
+    '/api/runtime-host/restart', { method: 'POST' },
+  );
+  if (admission.accepted !== true || typeof admission.restartId !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(admission.restartId)) {
+    throw new Error('Invalid Runtime Host restart admission');
+  }
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= RUNTIME_HOST_RESTART_TIMEOUT_MS) {
+    const restart = await hostApiFetch<
+      | { restartId: string; status: 'running' }
+      | { restartId: string; status: 'succeeded'; result: { status: 'running'; recoveredAt: number } }
+      | { restartId: string; status: 'failed' | 'unknown'; error: string }
+    >(`/api/runtime-host/restart?restartId=${encodeURIComponent(admission.restartId)}`);
+    if (restart.restartId !== admission.restartId) {
+      throw new Error('Runtime Host restart identity mismatch');
+    }
+    if (restart.status === 'succeeded') {
+      if (restart.result?.status !== 'running' || !Number.isSafeInteger(restart.result.recoveredAt)) {
+        throw new Error('Invalid Runtime Host restart result');
+      }
+      return;
+    }
+    if (restart.status === 'failed' || restart.status === 'unknown') {
+      throw new Error(restart.error);
+    }
+    if (restart.status !== 'running') throw new Error('Invalid Runtime Host restart status');
+    await delay(RUNTIME_HOST_READY_RETRY_MS);
+  }
+  throw new Error('Runtime Host restart outcome is unknown; observation timed out');
 }
 
 async function waitForRuntimeHostReady(): Promise<RuntimePayload> {
@@ -351,7 +383,7 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
   restartHost: async () => {
     set({ mutatingAction: 'restart', mutating: true, error: null });
     try {
-      await hostApiFetch<{ success: boolean }>('/api/runtime-host/restart', { method: 'POST' });
+      await restartRuntimeHost();
       const payload = await waitForRuntimeHostReady();
       set({
         runtime: payload,
@@ -372,16 +404,13 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
   togglePluginEnabled: async (pluginId, nextEnabled) => {
     set({ mutatingPluginId: pluginId, mutating: true, error: null });
     try {
-      const response = await hostApiFetch<PluginMutationResponse>('/api/plugins/configuration', {
-        method: 'POST',
-        body: JSON.stringify({ runtime: 'openclaw', pluginId, enabled: nextEnabled }),
-      });
-      if (response.outcome !== 'configured') {
+      const outcome = await configurePlugin(pluginId, nextEnabled);
+      if (outcome !== 'configured') {
         set({ error: 'plugins:errors.togglePluginFailed' });
       } else {
         await get().refreshCatalog({ reason: 'mutation', force: true });
       }
-      return response.outcome;
+      return outcome;
     } catch (error) {
       set({ error: 'plugins:errors.togglePluginFailed' });
       throw error;
@@ -399,16 +428,13 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
   operatePlugin: async (pluginId, operation) => {
     set({ mutatingPluginId: pluginId, mutatingAction: operation, mutating: true, error: null });
     try {
-      const response = await hostApiFetch<PluginMutationResponse>('/api/plugins/operation', {
-        method: 'POST',
-        body: JSON.stringify({ runtime: 'openclaw', operation, pluginId }),
-      });
-      if (response.outcome !== 'configured') {
+      const outcome = await operatePlugin(pluginId, operation);
+      if (outcome !== 'configured') {
         set({ error: 'plugins:errors.operationFailed' });
       } else {
         await get().refreshCatalog({ reason: 'mutation', force: true });
       }
-      return response.outcome;
+      return outcome;
     } catch (error) {
       set({ error: 'plugins:errors.operationFailed' });
       throw error;

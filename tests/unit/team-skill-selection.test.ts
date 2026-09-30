@@ -6,7 +6,8 @@ vi.mock('@/lib/host-api', () => ({
   hostApiFetchDecoded: (...args: unknown[]) => hostApiFetchDecodedMock(...args),
 }));
 
-import { decodeDependencyPlan, decodeMaterialization, decodeValidation, materializeTeamSkillSelection } from '@/services/team-skill-selection';
+import { decodeDependencyPlan, decodeValidation, materializeTeamSkillSelection } from '@/services/team-skill-selection';
+import { decodeCallReceipt } from '@/types/call-log/receipt';
 
 const selectionId = `teamskill:v1:${'a'.repeat(64)}`;
 
@@ -48,9 +49,9 @@ describe('TeamSkill renderer selection DTO', () => {
   it('uses the fixed TeamSkill materialization request', async () => {
     const teamId = 'team-1';
     const idempotencyKey = 'team-1:team-skill-materialize';
-    hostApiFetchDecodedMock.mockResolvedValueOnce({ status: 'materialized' });
+    hostApiFetchDecodedMock.mockResolvedValueOnce({ callId: 'a'.repeat(32), accepted: true });
 
-    await expect(materializeTeamSkillSelection(selectionId, teamId, idempotencyKey)).resolves.toEqual({ status: 'materialized' });
+    await expect(materializeTeamSkillSelection(selectionId, teamId, idempotencyKey)).resolves.toEqual({ callId: 'a'.repeat(32), accepted: true });
 
     expect(hostApiFetchDecodedMock).toHaveBeenCalledWith('/api/team/skill', expect.any(Function), expect.objectContaining({
       method: 'POST',
@@ -58,10 +59,10 @@ describe('TeamSkill renderer selection DTO', () => {
     }));
   });
 
-  it('accepts only sealed materialization outcomes', () => {
-    expect(decodeMaterialization({ status: 'materialized' })).toEqual({ status: 'materialized' });
-    expect(decodeMaterialization({ status: 'rejected' })).toEqual({ status: 'rejected' });
-    expect(decodeMaterialization({ status: 'outcome_unknown' })).toEqual({ status: 'outcome_unknown' });
-    expect(() => decodeMaterialization({ status: 'materialized', receipt: 'private' })).toThrow('TeamSkill materialization is unavailable');
+  it('accepts only sealed materialization call receipts', () => {
+    expect(decodeCallReceipt({ callId: 'a'.repeat(32), accepted: true })).toEqual({ callId: 'a'.repeat(32), accepted: true });
+    expect(() => decodeCallReceipt({ status: 'rejected' })).toThrow('Invalid call receipt');
+    expect(() => decodeCallReceipt({ status: 'outcome_unknown' })).toThrow('Invalid call receipt');
+    expect(() => decodeCallReceipt({ callId: 'a'.repeat(32), accepted: true, receipt: 'private' })).toThrow('Invalid call receipt');
   });
 });

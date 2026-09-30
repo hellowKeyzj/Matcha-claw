@@ -94,7 +94,7 @@ impl RuntimeAgentIngressPort for crate::owner::handle::FleetHandle {
         &self,
         identity: crate::store::AgentIngressIdentity,
     ) -> IngressAuthenticationFuture {
-        let owner = self.clone();
+        let owner = self.recording(None);
         Box::pin(async move {
             owner
                 .authenticate_runtime_agent_ingress(identity)

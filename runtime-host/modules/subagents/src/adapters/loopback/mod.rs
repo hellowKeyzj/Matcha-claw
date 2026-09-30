@@ -20,6 +20,7 @@ use crate::{
 };
 
 pub(crate) mod handler;
+mod results;
 
 const SUBAGENT_MANAGEMENT_CAPABILITY_ID: &str = "subagent.management";
 const SUBAGENT_SKILLS_CAPABILITY_ID: &str = "subagent.skills";
@@ -76,26 +77,30 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
 
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
-    (path == AUTHORIZATION_ENDPOINT || path.starts_with(SEALED_AGENT_READ_ENDPOINT_PREFIX)).then(
-        || {
-            let plan = if head.method == "POST" && path == AUTHORIZATION_ENDPOINT {
-                RouteHeadPlan::body_deadline
-            } else {
-                RouteHeadPlan::new
-            };
-            plan(
-                body_policy_for_method(head.method.as_str(), SUBAGENTS_REQUEST_BYTES),
-                SHORT_DEADLINE,
-                timeout_response,
-            )
-        },
-    )
+    (path == AUTHORIZATION_ENDPOINT
+        || path == results::ENDPOINT
+        || path == results::PRIVATE_ENDPOINT
+        || path.starts_with(SEALED_AGENT_READ_ENDPOINT_PREFIX))
+    .then(|| {
+        let plan = if head.method == "POST" && path == AUTHORIZATION_ENDPOINT {
+            RouteHeadPlan::body_deadline
+        } else {
+            RouteHeadPlan::new
+        };
+        plan(
+            body_policy_for_method(head.method.as_str(), SUBAGENTS_REQUEST_BYTES),
+            SHORT_DEADLINE,
+            timeout_response,
+        )
+    })
 }
 
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
         let path = pathname(request.path());
-        if path.starts_with(SEALED_AGENT_READ_ENDPOINT_PREFIX) {
+        if path == results::ENDPOINT || path == results::PRIVATE_ENDPOINT {
+            results::handle(request, dependencies).await.into()
+        } else if path.starts_with(SEALED_AGENT_READ_ENDPOINT_PREFIX) {
             sealed_agent_read(request, dependencies.sealed_agents)
                 .await
                 .into()
@@ -335,6 +340,8 @@ pub(crate) struct AgentsRequest {
     scope: Scope,
     target: Target,
     input: Value,
+    #[serde(skip)]
+    principal: String,
 }
 
 impl AgentsRequest {
@@ -344,8 +351,8 @@ impl AgentsRequest {
         verifier: &mut CapabilityDecisionVerifier,
         now: u64,
     ) -> Result<Self, RequestError> {
-        let request = Self::decode_semantics(value)?;
-        verifier
+        let mut request = Self::decode_semantics(value)?;
+        let decision = verifier
             .verify(
                 authorization,
                 now,
@@ -355,6 +362,7 @@ impl AgentsRequest {
                 AUTHORIZATION_SUBJECT,
             )
             .map_err(|_| RequestError::Invalid)?;
+        request.principal = decision.principal().to_owned();
         Ok(request)
     }
 

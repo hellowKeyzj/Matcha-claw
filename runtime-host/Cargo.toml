@@ -13,6 +13,7 @@ members = [
   "modules/cron",
   "modules/usage",
   "modules/diagnostics",
+  "modules/call-log",
   "modules/task-manager",
   "modules/subagents",
   "modules/workspace",

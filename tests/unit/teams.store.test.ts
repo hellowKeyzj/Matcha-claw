@@ -16,6 +16,9 @@ vi.mock('@/services/openclaw/team-runtime-client', () => ({
   submitTeamRunGraphPatch: vi.fn(),
 }));
 
+vi.mock('@/lib/call-log-await', () => ({ waitForCall: vi.fn() }));
+
+import { waitForCall } from '@/lib/call-log-await';
 import { useChatStore } from '@/stores/chat';
 import { buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
@@ -264,8 +267,8 @@ describe('teams store', () => {
 
     vi.mocked(createTeamRunLifecycle).mockResolvedValue({ runId: 'teamrun-generated', status: 'created', revision: 1 });
     vi.mocked(listTeamRunLifecycle).mockResolvedValue({ teamId: 'team-1', runs: [] });
-    vi.mocked(deleteTeamLifecycle).mockResolvedValue({ teamId: 'team-1', state: 'tombstoned', deleted: true, deletedRunIds: [], deletedAgentIds: [] });
-    vi.mocked(tombstoneTeamRun).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', deleted: true });
+    vi.mocked(deleteTeamLifecycle).mockResolvedValue({ callId: 'a'.repeat(32), accepted: true });
+    vi.mocked(tombstoneTeamRun).mockResolvedValue({ callId: 'a'.repeat(32), accepted: true });
     vi.mocked(beginTeamRunCancellation).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', status: 'cancelled', revision: 1 });
     vi.mocked(exportTeamGraphYaml).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', fileName: 'team-1-run-1.0.0-1000.team-graph.yaml', yaml: 'nodes: []\n' });
     vi.mocked(importTeamGraphYaml).mockResolvedValue({ runId: 'team-1-run-1.0.0-1000', imported: true });
@@ -419,8 +422,11 @@ describe('teams store', () => {
       errorByTeamId: { 'team-1': 'previous error' },
     });
     let releaseDelete!: () => void;
-    vi.mocked(deleteTeamLifecycle).mockReturnValueOnce(new Promise((resolve) => {
-      releaseDelete = () => resolve({ teamId: 'team-1', state: 'tombstoned' });
+    vi.mocked(waitForCall).mockReturnValueOnce(new Promise((resolve) => {
+      releaseDelete = () => resolve({
+        callId: 'a'.repeat(32), module: 'organization', command: 'team.delete', status: 'succeeded',
+        detail: { teamId: 'team-1', runId: null, teamIdHash: null, runIdHash: null, commandId: null, graph: null, provision: null, creation: null, outcome: 'tombstoned' },
+      } as never);
     }));
 
     const deletion = useTeamsStore.getState().deleteTeam('team-1');
@@ -454,7 +460,10 @@ describe('teams store', () => {
       runIdsByTeamId: { 'team-1': ['local-run', 'backend-run'] },
       runsById: { 'local-run': localRun ?? undefined, 'backend-run': backendRun ?? undefined },
     });
-    vi.mocked(deleteTeamLifecycle).mockResolvedValueOnce({ teamId: 'team-1', state: 'tombstoned' });
+    vi.mocked(waitForCall).mockResolvedValueOnce({
+      callId: 'a'.repeat(32), module: 'organization', command: 'team.delete', status: 'succeeded',
+      detail: { teamId: 'team-1', runId: null, teamIdHash: null, runIdHash: null, commandId: null, graph: null, provision: null, creation: null, outcome: 'tombstoned' },
+    } as never);
 
     await useTeamsStore.getState().deleteTeam('team-1');
 
@@ -496,7 +505,10 @@ describe('teams store', () => {
         'team-1': [leaderBinding, analystBinding, otherTeamRoleBinding],
       },
     } as never);
-    vi.mocked(deleteTeamLifecycle).mockResolvedValueOnce({ teamId: 'team-1', state: 'tombstoned' });
+    vi.mocked(waitForCall).mockResolvedValueOnce({
+      callId: 'a'.repeat(32), module: 'organization', command: 'team.delete', status: 'succeeded',
+      detail: { teamId: 'team-1', runId: null, teamIdHash: null, runIdHash: null, commandId: null, graph: null, provision: null, creation: null, outcome: 'tombstoned' },
+    } as never);
 
     await useTeamsStore.getState().deleteTeam('team-1');
 
@@ -512,16 +524,19 @@ describe('teams store', () => {
     expect(chatState.foregroundHistorySessionKey).toBeNull();
   });
 
-  it('removes a team when backend delete returns durable outcome unknown', async () => {
+  it('keeps a team when backend delete returns durable outcome unknown', async () => {
     seedTeam();
-    vi.mocked(deleteTeamLifecycle).mockResolvedValueOnce({ teamId: 'team-1', state: 'outcome_unknown' });
+    vi.mocked(waitForCall).mockResolvedValueOnce({
+      callId: 'a'.repeat(32), module: 'organization', command: 'team.delete', status: 'unknown',
+      detail: { teamId: 'team-1', runId: null, teamIdHash: null, runIdHash: null, commandId: null, graph: null, provision: null, creation: null, outcome: 'outcome_unknown' },
+    } as never);
 
-    await useTeamsStore.getState().deleteTeam('team-1');
+    await useTeamsStore.getState().deleteTeam('team-1').catch(() => {});
 
     const state = useTeamsStore.getState();
-    expect(state.teams).toHaveLength(0);
-    expect(state.loadingByTeamId['team-1']).toBeUndefined();
-    expect(state.errorByTeamId['team-1']).toBeUndefined();
+    expect(state.teams).toHaveLength(1);
+    expect(state.loadingByTeamId['team-1']).toBe(false);
+    expect(state.errorByTeamId['team-1']).toBe('Team deletion outcome is unknown');
   });
 
   it('keeps the team and records an error when backend Team instance deletion fails', async () => {
@@ -660,6 +675,10 @@ describe('teams store', () => {
       runByTeamId: { 'team-1': newerRun },
     });
 
+    vi.mocked(waitForCall).mockResolvedValueOnce({
+      callId: 'a'.repeat(32), module: 'organization', command: 'team.runDelete', status: 'succeeded',
+      detail: { teamId: 'team-1', runId: 'teamrun-new', teamIdHash: null, runIdHash: null, commandId: null, graph: null, provision: null, creation: null, outcome: 'purged' },
+    } as never);
     await useTeamsStore.getState().deleteRun('team-1', 'teamrun-new');
 
     expect(tombstoneTeamRun).toHaveBeenCalledWith({ runId: 'teamrun-new' });

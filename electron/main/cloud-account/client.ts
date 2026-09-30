@@ -20,8 +20,6 @@ import type {
   CloudPackageAuthorization,
   CloudPackageAuthorizationRequest,
   CloudPackageEnvelope,
-  CloudPackageDownloadRecord,
-  CloudPackageDownloadRecordRequest,
   CloudPackageDownloadRequest,
   CloudPackageListPage,
   CloudPackageListQuery,
@@ -45,7 +43,7 @@ const REQUEST_TIMEOUT_MS = 30_000;
 type HttpMethod = 'GET' | 'POST';
 
 type CloudEnvelope<T> = Readonly<{
-  code: number;
+  code: number | string;
   message: string;
   reason?: string;
   metadata?: Record<string, string>;
@@ -70,6 +68,8 @@ export class CloudAccountClientError extends Error {
   }
 }
 
+export type CloudPackageUpload = string | Readonly<{ fileName: string; packageBytes: Uint8Array<ArrayBuffer> }>;
+
 export type CloudAccountClient = Readonly<{
   fetchPublicSettings(): Promise<PublicCloudSettings>;
   login(request: AuthLoginRequest): Promise<AuthLoginResult>;
@@ -92,9 +92,9 @@ export type CloudAccountClient = Readonly<{
   listOwnedPackages(token: string, query: CloudPackageListQuery): Promise<CloudPackageListPage>;
   listMarketPackages(token: string, query: CloudPackageListQuery): Promise<CloudPackageListPage>;
   fetchSealedCloudKey(token: string): Promise<CloudSealedCloudKey>;
-  uploadPackage(token: string, packagePath: string): Promise<CloudPackageVersion>;
+  uploadPackage(token: string, upload: CloudPackageUpload): Promise<CloudPackageVersion>;
+  publishPackage(token: string, packageVersionId: string): Promise<CloudPackageVersion>;
   authorizePackage(token: string, request: CloudPackageAuthorizationRequest): Promise<CloudPackageAuthorization>;
-  recordPackageDownload(token: string, request: CloudPackageDownloadRecordRequest): Promise<CloudPackageDownloadRecord>;
   downloadPackage(token: string, request: CloudPackageDownloadRequest): Promise<CloudPackageLocalDownload>;
 }>;
 
@@ -149,25 +149,24 @@ export function createCloudAccountClient(): CloudAccountClient {
     listOwnedPackages: (token, query) => requestCloud<unknown>(`/packages/mine${packageListSearch(query)}`, { token }).then(toCloudPackageListPage),
     listMarketPackages: (token, query) => requestCloud<unknown>(`/packages/market${packageListSearch(query)}`, { token }).then(toCloudPackageListPage),
     fetchSealedCloudKey: (token) => requestCloud<unknown>('/packages/sealed-cloud-key', { token }).then(toCloudSealedCloudKey),
-    uploadPackage: (token, packagePath) => uploadCloudPackage(token, packagePath).then(toCloudPackageVersion),
+    uploadPackage: (token, upload) => uploadCloudPackage(token, upload).then(toCloudPackageVersion),
+    publishPackage: (token, packageVersionId) => requestCloud<unknown>(`/packages/${encodeURIComponent(packageVersionId)}/publish`, {
+      method: 'POST', token,
+    }).then(toCloudPackageVersion),
     authorizePackage: (token, request) => requestCloud<unknown>(`/packages/${encodeURIComponent(request.packageVersionId)}/authorization`, {
       method: 'POST',
       token,
       body: toPackageAuthorizationPayload(request),
     }).then(toCloudPackageAuthorization),
-    recordPackageDownload: (token, request) => requestCloud<unknown>(`/packages/${encodeURIComponent(request.packageVersionId)}/download-record`, {
-      method: 'POST',
-      token,
-      body: toPackageDownloadRecordPayload(request),
-    }).then(toCloudPackageDownloadRecord),
     downloadPackage: (token, request) => downloadCloudPackage(token, request),
   };
 }
 
-async function uploadCloudPackage(token: string, packagePath: string): Promise<unknown> {
-  const filename = basename(packagePath);
+async function uploadCloudPackage(token: string, upload: CloudPackageUpload): Promise<unknown> {
+  const filename = typeof upload === 'string' ? basename(upload) : upload.fileName;
+  const bytes = typeof upload === 'string' ? await readFile(upload) : upload.packageBytes;
   const form = new FormData();
-  form.set('package', new Blob([await readFile(packagePath)]), filename);
+  form.set('package', new Blob([bytes]), filename);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -294,7 +293,7 @@ function requestHeaders(options: CloudRequestOptions): Record<string, string> {
 async function readEnvelope<T>(response: Response): Promise<CloudEnvelope<T>> {
   try {
     const value: unknown = await response.json();
-    if (isRecord(value) && typeof value.code === 'number') return value as CloudEnvelope<T>;
+    if (isRecord(value) && (typeof value.code === 'number' || typeof value.code === 'string')) return value as CloudEnvelope<T>;
     return { code: response.ok ? 0 : response.status, message: response.statusText, data: value as T };
   } catch {
     return { code: response.ok ? 0 : response.status, message: response.statusText };
@@ -763,15 +762,6 @@ function packageListSearch(query: CloudPackageListQuery): string {
   return search ? `?${search}` : '';
 }
 
-function toPackageDownloadRecordPayload(request: CloudPackageDownloadRecordRequest): Record<string, unknown> {
-  return compactObject({
-    packageVersionId: request.packageVersionId,
-    clientVersion: request.clientVersion,
-    installId: request.installId,
-    source: request.source,
-  });
-}
-
 function toPackageAuthorizationPayload(request: CloudPackageAuthorizationRequest): Record<string, unknown> {
   return compactObject({
     packageVersionId: request.packageVersionId,
@@ -836,17 +826,6 @@ function toCloudPackageAuthorization(value: unknown): CloudPackageAuthorization 
     ...(typeof (record.entitlementStatus ?? record.entitlement_status) === 'string' ? { entitlementStatus: (record.entitlementStatus ?? record.entitlement_status) as string } : {}),
     ...(deviceEnvelope ? { deviceEnvelope } : {}),
     leaseExpiresAt: requireString(record.leaseExpiresAt ?? record.lease_expires_at, 'Cloud package authorization lease expiry is invalid'),
-  };
-}
-
-function toCloudPackageDownloadRecord(value: unknown): CloudPackageDownloadRecord {
-  const record = requireRecord(value, 'Cloud package download record is invalid');
-  return {
-    packageVersionId: requireString(record.packageVersionId, 'Cloud package version id is invalid'),
-    ...(isRecord(record.meteringBinding) ? { meteringBinding: toCloudPackageMeteringBinding(record.meteringBinding) } : {}),
-    ...(typeof record.entitlementStatus === 'string' ? { entitlementStatus: record.entitlementStatus } : {}),
-    recorded: record.recorded === true,
-    ...(typeof record.recordedAt === 'string' ? { recordedAt: record.recordedAt } : {}),
   };
 }
 

@@ -120,12 +120,14 @@ async fn handle_request(
         }),
     );
     if matches!(command.endpoint, NativeEndpoint::Unsupported) {
+        session.record_boundary_outcome("sessions.send", crate::call::SessionsCallOutcome::Unsupported).await;
         return Response::from_delivery(SessionSendDelivery::Unsupported);
     }
     drop(verifier);
     let prepared = match send_hooks.prepare(command, now_millis).await {
         Ok(prepared) => prepared,
         Err(_) => {
+            session.record_boundary_outcome("sessions.send", crate::call::SessionsCallOutcome::Unavailable).await;
             session_trace::log(
                 "runtime.send.owner-unavailable",
                 trace_id.as_deref(),

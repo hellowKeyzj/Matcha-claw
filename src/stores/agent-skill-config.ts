@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import { waitForSubagentMutation } from '@/lib/subagent-call';
 import {
   createSessionTraceId,
   logSessionTrace,
@@ -288,7 +289,7 @@ async function agentSkillConfigCapabilityExecute<TResult>(
     targetAgentId: summarizeIdentifier(targetAgentId),
   });
   try {
-    const result = await hostApiFetch<TResult>('/api/capabilities/execute', {
+    const response = await hostApiFetch<unknown>('/api/capabilities/execute', {
       method: 'POST',
       traceId,
       body: JSON.stringify({
@@ -299,6 +300,9 @@ async function agentSkillConfigCapabilityExecute<TResult>(
         input,
       }),
     });
+    const result = operationId === 'subagentSkills.set'
+      ? await waitForSubagentMutation<TResult>(response, operationId, scope.endpoint, targetAgentId)
+      : response as TResult;
     logSessionTrace('renderer.subagent.skills.response', traceId, {
       operationId,
       ...summarizeSkillConfigPayload(result),

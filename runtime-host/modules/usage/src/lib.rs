@@ -40,6 +40,11 @@ impl UsageModule {
         Self { handle }
     }
 
+    pub fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
+        self.handle = self.handle.with_call_recorder(recorder);
+        self
+    }
+
     pub fn descriptor(&self, verifier: Arc<Mutex<CapabilityDecisionVerifier>>) -> ModuleDescriptor {
         ModuleDescriptor::new(
             MODULE_ID,

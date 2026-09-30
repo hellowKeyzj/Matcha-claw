@@ -81,32 +81,35 @@ describe('provider models delivery transport', () => {
     vi.useRealTimers();
   });
 
-  it('keeps durable desired storage separate from the private configuration effect', async () => {
-    const transport = createProviderModelsTransport(
-      createRuntimeHostDeliveryIssuer(),
-      3227,
-      vi.fn().mockResolvedValue({
-        status: 200,
-        json: async () => ({
-          success: true,
-          desired: { status: 'stored' },
-          persisted: { status: 'confirmed' },
-          native: { changed: false, applied: { status: 'unknown' }, observed: { status: 'unavailable' } },
-          commit: 'committed',
-        }),
-      }),
-    );
+  it('keeps owner admission separate from durable storage and the private configuration effect', async () => {
+    const receipt = { callId: '0123456789abcdef0123456789abcdef', accepted: true };
+    const fetcher = vi.fn().mockResolvedValue({ status: 202, json: async () => receipt });
+    const transport = createProviderModelsTransport(createRuntimeHostDeliveryIssuer(), 3227, fetcher);
 
-    await expect(transport.execute(replaceRequest)).resolves.toEqual({
-      status: 200,
-      body: {
-        success: true,
-        desired: { status: 'stored' },
-        persisted: { status: 'confirmed' },
-        native: { changed: false, applied: { status: 'unknown' }, observed: { status: 'unavailable' } },
-        commit: 'committed',
-      },
-    });
+    await expect(transport.execute(replaceRequest)).resolves.toEqual({ status: 202, body: receipt });
+    expect(decisionFrom(fetcher)).toMatchObject({ capability: 'providerModels.replace' });
+
+    const finalResponse = {
+      success: true,
+      desired: { status: 'stored' },
+      persisted: { status: 'confirmed' },
+      native: { changed: false, applied: { status: 'unknown' }, observed: { status: 'unavailable' } },
+      commit: 'committed',
+    };
+    for (const [status, body] of [
+      [200, finalResponse],
+      [409, finalResponse],
+      [202, finalResponse],
+      [202, { ...receipt, native: finalResponse.native }],
+      [202, { ...receipt, callId: 'A'.repeat(32) }],
+      [202, { ...receipt, accepted: false }],
+    ]) {
+      fetcher.mockResolvedValueOnce({ status, json: async () => body });
+      await expect(transport.execute(replaceRequest)).resolves.toEqual({
+        status: 503,
+        body: { success: false, error: 'Provider models are unavailable' },
+      });
+    }
   });
 
   it('fails closed on malformed direct selectable responses without exposing details', async () => {

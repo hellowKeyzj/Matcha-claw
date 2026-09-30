@@ -4,6 +4,7 @@ import { createAgentsTransport } from '../products/agents';
 import { createSettingsDesiredTransport } from '../products/settings/desired';
 import { createCapabilityDirectoryTransport } from './capabilities';
 import { createCronTransport } from './cron';
+import { createCallLogTransport } from './call-log';
 import { createDiagnosticsArchiveTransport } from './diagnostics';
 import { createFleetCredentialsTransport } from './fleet-credentials';
 import { createFleetTransport } from './fleet';
@@ -135,6 +136,7 @@ export function createRuntimeHostTransportBundle(
     securityPolicyTransport: createSecurityPolicyTransport(issuer, runtimeHostTransportPort),
     securityRuleCatalogTransport: createSecurityRuleCatalogTransport(issuer, runtimeHostTransportPort),
     cronTransport,
+    callLogTransport: createCallLogTransport(issuer, runtimeHostTransportPort),
     taskManagerTransport: createTaskManagerTransport(issuer, runtimeHostTransportPort),
     agentsTransport: createAgentsTransport(issuer, runtimeHostTransportPort),
     teamPublicTransport: createTeamPublicTransport(issuer, runtimeHostTransportPort),

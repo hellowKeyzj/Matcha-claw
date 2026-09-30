@@ -10,7 +10,10 @@ const MAX_PROJECTED_TOOL_PAYLOAD_BYTES: usize = 128 * 1024;
 const MAX_PROJECTED_MESSAGE_COUNT: usize = 64;
 
 use super::{
-    model::{ApprovalId, MessageId, OptionId, RunId, Sequence, SessionId, ToolCallId, WorkerId},
+    model::{
+        ApprovalId, ClassifiedErrorKind, MessageId, OptionId, RunId, Sequence, SessionId,
+        ToolCallId, WorkerId,
+    },
     protocol_event::{Event, EventEnvelope},
 };
 
@@ -41,7 +44,6 @@ pub enum RunLifecycle {
     CancellationRequested,
     Cancelled,
     Completed,
-    Failed,
     Interrupted,
 }
 
@@ -269,8 +271,25 @@ impl fmt::Debug for ProjectedApprovalEvent {
 }
 
 #[derive(Clone, Eq, PartialEq)]
+pub struct ProjectedRunError {
+    pub kind: ClassifiedErrorKind,
+    pub message_preview: Option<String>,
+}
+
+impl fmt::Debug for ProjectedRunError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProjectedRunError")
+            .field("kind", &self.kind)
+            .field("has_preview", &self.message_preview.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub enum EventActivity {
     Run(RunLifecycle),
+    RunFailed { error: Option<ProjectedRunError> },
     Message(ProjectedMessageEvent),
     Tool(ProjectedToolActivity),
     Approval(ProjectedApprovalEvent),
@@ -281,6 +300,10 @@ impl fmt::Debug for EventActivity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Run(lifecycle) => formatter.debug_tuple("Run").field(lifecycle).finish(),
+            Self::RunFailed { error } => formatter
+                .debug_struct("RunFailed")
+                .field("error", error)
+                .finish(),
             Self::Message(message) => formatter.debug_tuple("Message").field(message).finish(),
             Self::Tool(tool) => formatter.debug_tuple("Tool").field(tool).finish(),
             Self::Approval(approval) => formatter.debug_tuple("Approval").field(approval).finish(),
@@ -315,6 +338,7 @@ impl ProjectedSessionEvent {
         match &self.activity {
             EventActivity::Message(message) => Some(message.message_id()),
             EventActivity::Run(_)
+            | EventActivity::RunFailed { .. }
             | EventActivity::Tool(_)
             | EventActivity::Approval(_)
             | EventActivity::Ignored => None,
@@ -828,9 +852,8 @@ impl SessionEventProjector {
                     EventActivity::Run(
                         RunLifecycle::Cancelled
                             | RunLifecycle::Completed
-                            | RunLifecycle::Failed
                             | RunLifecycle::Interrupted
-                    )
+                    ) | EventActivity::RunFailed { .. }
                 );
                 self.terminal |= terminal;
                 EventProjectionResult::Projected(ProjectedSessionEvent {
@@ -924,7 +947,22 @@ fn project_activity(
         ),
         "run.cancelled" => project_run(event.as_value(), expected_run_id, RunLifecycle::Cancelled),
         "run.completed" => project_run(event.as_value(), expected_run_id, RunLifecycle::Completed),
-        "run.failed" => project_run(event.as_value(), expected_run_id, RunLifecycle::Failed),
+        "run.failed" => {
+            let value = event.as_value();
+            validate_run_id(value, expected_run_id)?;
+            let error = value.get("error").and_then(|error| {
+                let kind =
+                    serde_json::from_value::<ClassifiedErrorKind>(error.get("type")?.clone())
+                        .ok()?;
+                let message = error.get("message")?.as_str()?;
+                error.get("retryable")?.as_bool()?;
+                Some(ProjectedRunError {
+                    kind,
+                    message_preview: run_error_preview(message),
+                })
+            });
+            Ok(EventActivity::RunFailed { error })
+        }
         "run.interrupted" => {
             project_run(event.as_value(), expected_run_id, RunLifecycle::Interrupted)
         }
@@ -997,6 +1035,11 @@ fn project_run(
     expected_run_id: &RunId,
     lifecycle: RunLifecycle,
 ) -> Result<EventActivity, EventRejection> {
+    validate_run_id(value, expected_run_id)?;
+    Ok(EventActivity::Run(lifecycle))
+}
+
+fn validate_run_id(value: &Value, expected_run_id: &RunId) -> Result<(), EventRejection> {
     if value
         .get("runId")
         .and_then(Value::as_str)
@@ -1005,7 +1048,68 @@ fn project_run(
     {
         return Err(EventRejection::Malformed);
     }
-    Ok(EventActivity::Run(lifecycle))
+    Ok(())
+}
+
+fn run_error_preview(message: &str) -> Option<String> {
+    // Inspect the whole message before truncation so a late secret cannot escape detection.
+    let mut normalized = String::with_capacity(message.len());
+    let mut separator = false;
+    for ch in message.chars() {
+        if ch.is_control() || ch.is_whitespace() {
+            separator = !normalized.is_empty();
+        } else {
+            if separator {
+                normalized.push(' ');
+                separator = false;
+            }
+            normalized.push(ch);
+        }
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if [
+        "password",
+        "api key",
+        "api_key",
+        "api-key",
+        "apikey",
+        "authorization",
+        "bearer",
+        "credential",
+        "sk-",
+        "token=",
+        "token =",
+        "token:",
+        "token :",
+        "secret=",
+        "secret =",
+        "secret:",
+        "secret :",
+        "body=",
+        "body =",
+        "body:",
+        "body :",
+        "payload=",
+        "payload =",
+        "payload:",
+        "payload :",
+        "json",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || normalized.contains(['/', '\\', '{', '}', '[', ']', '@'])
+    {
+        return None;
+    }
+    let mut end = 300.min(normalized.len());
+    while !normalized.is_char_boundary(end) {
+        end -= 1;
+    }
+    normalized.truncate(end);
+    if normalized.ends_with(' ') {
+        normalized.pop();
+    }
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn project_run_trace(

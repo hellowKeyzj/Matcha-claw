@@ -1,3 +1,4 @@
+import type { CallReceipt } from '../../../../../src/types/call-log';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import {
@@ -124,6 +125,9 @@ export type SecurityOperationResponse = Readonly<{
   status: 200;
   body: Record<string, unknown>;
 }> | Readonly<{
+  status: 202;
+  body: CallReceipt;
+}> | Readonly<{
   status: 400;
   body: typeof OPERATION_INVALID;
 }> | Readonly<{
@@ -145,8 +149,8 @@ export type SecurityPolicyReceipt = Readonly<{
 }>;
 
 export type SecurityPolicyTransportResponse = Readonly<{
-  status: 200;
-  body: SecurityPolicyReceipt;
+  status: 202;
+  body: CallReceipt;
 }> | Readonly<{
   status: 422 | 503;
   body: typeof REJECTED | typeof UNAVAILABLE;
@@ -154,6 +158,7 @@ export type SecurityPolicyTransportResponse = Readonly<{
 
 export interface SecurityPolicyTransport {
   operate(request: SecurityOperationRequest): Promise<SecurityOperationResponse>;
+  operationReceipt(correlation: string, operationId: SecurityOperationId): Promise<SecurityOperationResponse>;
   read(traceId?: string | null): Promise<Record<string, unknown> | null>;
   readAudit(page: number, pageSize: number): Promise<SecurityAuditResponse | null>;
   submit(request: SecurityPolicyRequest): Promise<SecurityPolicyTransportResponse>;
@@ -184,13 +189,7 @@ export function createSecurityPolicyTransport(
         body: request,
       });
       const body = response?.body;
-      if (
-        response?.status === 200
-        && isBoundedOperationResponse(body, request.operationId)
-        && Buffer.byteLength(JSON.stringify(body), 'utf8') <= MAX_OPERATION_RESPONSE_BYTES
-      ) {
-        return { status: 200, body };
-      }
+      if (response?.status === 202 && isSecurityCallReceipt(body)) return { status: 202, body };
       if (response?.status === 400 && isExact(body, OPERATION_INVALID)) {
         return { status: 400, body: OPERATION_INVALID };
       }
@@ -200,6 +199,23 @@ export function createSecurityPolicyTransport(
       if (response?.status === 422 && isExact(body, OPERATION_REJECTED)) {
         return { status: 422, body: OPERATION_REJECTED };
       }
+      return { status: 503, body: OPERATION_UNAVAILABLE };
+    },
+    async operationReceipt(correlation, operationId): Promise<SecurityOperationResponse> {
+      if (!isBoundedText(correlation) || Buffer.byteLength(correlation, 'utf8') > 256 || !SECURITY_OPERATION_IDS.includes(operationId)) {
+        return { status: 400, body: OPERATION_INVALID };
+      }
+      const endpoint = '/api/security/operation/receipt';
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort, path: endpoint, issuer,
+        decision: { endpoint, scope: 'security:read', capability: 'security.read', subject: 'operation-receipt' },
+        method: 'POST', fetcher, body: { correlation },
+      });
+      if (response?.status === 200 && isBoundedOperationResponse(response.body, operationId)
+        && Buffer.byteLength(JSON.stringify(response.body), 'utf8') <= MAX_OPERATION_RESPONSE_BYTES) {
+        return { status: 200, body: response.body };
+      }
+      if (response?.status === 422 && isExact(response.body, OPERATION_REJECTED)) return { status: 422, body: OPERATION_REJECTED };
       return { status: 503, body: OPERATION_UNAVAILABLE };
     },
     async read(traceId?: string | null): Promise<Record<string, unknown> | null> {
@@ -270,11 +286,15 @@ export function createSecurityPolicyTransport(
         fetcher,
         body: request,
       });
-      if (response?.status === 200 && isReceipt(response.body)) return { status: 200, body: response.body };
+      if (response?.status === 202 && isSecurityCallReceipt(response.body)) return { status: 202, body: response.body };
       if (response?.status === 422 && isExact(response.body, REJECTED)) return { status: 422, body: REJECTED };
       return { status: 503, body: UNAVAILABLE };
     },
   };
+}
+
+export function isSecurityOperationId(value: unknown): value is SecurityOperationId {
+  return typeof value === 'string' && SECURITY_OPERATION_IDS.includes(value as SecurityOperationId);
 }
 
 export function isSecurityOperationRequest(value: unknown): value is SecurityOperationRequest {
@@ -600,13 +620,10 @@ function isSafeText(value: unknown): value is string {
     && /^[A-Za-z0-9._-]+$/.test(value);
 }
 
-function isReceipt(value: unknown): value is SecurityPolicyReceipt {
-  if (!isRecord(value) || !hasExactKeys(value, ['desired']) || !isRecord(value.desired)) return false;
-  return hasExactKeys(value.desired, ['revision', 'outcome'])
-    && typeof value.desired.revision === 'number'
-    && Number.isSafeInteger(value.desired.revision)
-    && value.desired.revision > 0
-    && (value.desired.outcome === 'confirmed' || value.desired.outcome === 'outcome_unknown');
+export function isSecurityCallReceipt(value: unknown): value is CallReceipt {
+  return isRecord(value) && hasExactKeys(value, ['callId', 'accepted'])
+    && typeof value.callId === 'string' && /^[a-f0-9]{32}$/.test(value.callId)
+    && value.accepted === true;
 }
 
 function isExact(value: unknown, expected: Record<string, unknown>): boolean {

@@ -79,7 +79,7 @@ pub(super) async fn handle(owner: &FleetHandle, operation: Operation, input: Inp
         },
         Operation::ResourceRegister => match input {
             Input::ResourceRegister { payload } => match parse_resource(payload) {
-                Ok(request) => owner.register_resource(request).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"resourceRegistered"})))),
+                Ok(request) => owner.admit_resource_registration(request).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"accepted"})))),
                 Err(()) => Delivery::Invalid,
             },
             _ => Delivery::Invalid,
@@ -122,16 +122,9 @@ pub(super) async fn handle(owner: &FleetHandle, operation: Operation, input: Inp
         Operation::ConnectionProbeBegin => match input {
             Input::ConnectionProbeBegin { payload } => match (ConnectionId::try_new(payload.id), CommandId::try_new(payload.command_id)) {
                 (Ok(id), Ok(command_id)) => owner
-                    .run_connection_probe(id, command_id)
+                    .admit_connection_probe(id, command_id)
                     .await
-                    .map_or(Delivery::Unavailable, |result| {
-                        mutation_result(result.map(|outcome| match outcome {
-                            crate::owner::lifecycle::FleetConnectionLifecycleOutcome::Ready(_) => json!({"outcome":"probeCompleted","state":"ready"}),
-                            crate::owner::lifecycle::FleetConnectionLifecycleOutcome::Unhealthy(_) => json!({"outcome":"probeCompleted","state":"unhealthy"}),
-                            crate::owner::lifecycle::FleetConnectionLifecycleOutcome::Unknown(_) => json!({"outcome":"probeUnknown","reason":"providerOutcomeUnknown"}),
-                            crate::owner::lifecycle::FleetConnectionLifecycleOutcome::Rejected(_) => json!({"outcome":"probeRejected","reason":"providerRejected"}),
-                        }))
-                    }),
+                    .map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"accepted"})))),
                 _ => Delivery::Invalid,
             },
             _ => Delivery::Invalid,
@@ -266,7 +259,7 @@ pub(super) async fn handle(owner: &FleetHandle, operation: Operation, input: Inp
                         let dispatch_id = resolution.dispatch_id.clone();
                         let target = selector_target_json(&resolution.selector);
                         match owner.submit(resolution.request).await {
-                            Ok(Ok(fleet::FleetSubmitOutcome::Submitted)) => owner.begin_dispatch(dispatch_id).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|dispatch| json!({"outcome": match dispatch.outcome { crate::application::executor::FleetExecutionOutcome::Completed => "completed", crate::application::executor::FleetExecutionOutcome::Rejected => "rejected", crate::application::executor::FleetExecutionOutcome::Unknown => "outcomeUnknown", crate::application::executor::FleetExecutionOutcome::Accepted => "accepted" }, "dispatchId": dispatch.dispatch_id.as_str(), "attempt": dispatch.attempt.sequence(), "target": target})))),
+                            Ok(Ok(fleet::FleetSubmitOutcome::Submitted)) => owner.admit_dispatch(dispatch_id.clone()).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"accepted", "dispatchId":dispatch_id.as_str(), "target":target})))),
                             Ok(Ok(fleet::FleetSubmitOutcome::AlreadySubmitted)) => Delivery::Mutation(json!({"outcome":"alreadySubmitted","dispatchId":dispatch_id.as_str(),"target":target})),
                             Ok(Err(_)) => Delivery::Invalid,
                             Err(_) => Delivery::Unavailable,
@@ -281,7 +274,7 @@ pub(super) async fn handle(owner: &FleetHandle, operation: Operation, input: Inp
         },
         Operation::CommandBegin => match input {
             Input::CommandBegin { payload } => match DispatchId::try_new(payload.dispatch_id) {
-                Ok(dispatch) => owner.begin_dispatch(dispatch).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|dispatch| json!({"outcome": match dispatch.outcome { crate::application::executor::FleetExecutionOutcome::Completed => "completed", crate::application::executor::FleetExecutionOutcome::Rejected => "rejected", crate::application::executor::FleetExecutionOutcome::Unknown => "outcomeUnknown", crate::application::executor::FleetExecutionOutcome::Accepted => "accepted" },"dispatchId":dispatch.dispatch_id.as_str(),"attempt":dispatch.attempt.sequence()})))),
+                Ok(dispatch) => owner.admit_dispatch(dispatch.clone()).await.map_or(Delivery::Unavailable, |result| mutation_result(result.map(|_| json!({"outcome":"accepted","dispatchId":dispatch.as_str()})))),
                 Err(_) => Delivery::Invalid,
             },
             _ => Delivery::Invalid,
@@ -334,8 +327,14 @@ async fn lifecycle_environment_deploy(
         _ => return Delivery::Invalid,
     };
     let result = match step {
-        0 => owner.run_environment_deployment(id, command_id, phase).await.map(|result| result.map(|outcome| json!({"outcome": match outcome { crate::owner::lifecycle::FleetLifecycleOutcome::Completed | crate::owner::lifecycle::FleetLifecycleOutcome::AlreadyAbsent => "deploymentCompleted", crate::owner::lifecycle::FleetLifecycleOutcome::Rejected(_) => "deploymentFailed", crate::owner::lifecycle::FleetLifecycleOutcome::Unknown(_) => "deploymentUnknown" }}))),
-        _ => owner.complete_environment_deployment(id, command_id, phase).await.map(|result| result.map(|_| json!({"outcome":"deploymentCompleted"}))),
+        0 => owner
+            .admit_environment_deployment(id, command_id, phase)
+            .await
+            .map(|result| result.map(|_| json!({"outcome":"accepted"}))),
+        _ => owner
+            .complete_environment_deployment(id, command_id, phase)
+            .await
+            .map(|result| result.map(|_| json!({"outcome":"deploymentCompleted"}))),
     };
     result.map_or(Delivery::Unavailable, |result| {
         result.map_or(Delivery::Invalid, |value| Delivery::Mutation(value))
@@ -377,18 +376,9 @@ async fn lifecycle_environment_delete(
     };
     let result = match step {
         0 => owner
-            .run_environment_deletion(id, command_id, phase)
+            .admit_environment_deletion(id, command_id, phase)
             .await
-            .map(|result| {
-                result.map(|outcome| {
-                    json!({"outcome": match outcome {
-                        crate::owner::lifecycle::FleetLifecycleOutcome::Completed
-                        | crate::owner::lifecycle::FleetLifecycleOutcome::AlreadyAbsent => "deletionCompleted",
-                        crate::owner::lifecycle::FleetLifecycleOutcome::Rejected(_) => "deletionFailed",
-                        crate::owner::lifecycle::FleetLifecycleOutcome::Unknown(_) => "deletionUnknown",
-                    }})
-                })
-            }),
+            .map(|result| result.map(|_| json!({"outcome":"accepted"}))),
         _ => owner
             .complete_environment_deletion(id, command_id, phase)
             .await
@@ -431,8 +421,14 @@ async fn lifecycle_resource_provision(
         _ => return Delivery::Invalid,
     };
     let result = match step {
-        0 => owner.run_resource_provisioning(id, command_id, phase).await.map(|result| result.map(|outcome| json!({"outcome": match outcome { crate::owner::lifecycle::FleetLifecycleOutcome::Completed | crate::owner::lifecycle::FleetLifecycleOutcome::AlreadyAbsent => "provisioningCompleted", crate::owner::lifecycle::FleetLifecycleOutcome::Rejected(_) => "provisioningFailed", crate::owner::lifecycle::FleetLifecycleOutcome::Unknown(_) => "provisioningUnknown" }}))),
-        _ => owner.complete_resource_provisioning(id, command_id, phase).await.map(|result| result.map(|_| json!({"outcome":"provisioningCompleted"}))),
+        0 => owner
+            .admit_resource_provisioning(id, command_id, phase)
+            .await
+            .map(|result| result.map(|_| json!({"outcome":"accepted"}))),
+        _ => owner
+            .complete_resource_provisioning(id, command_id, phase)
+            .await
+            .map(|result| result.map(|_| json!({"outcome":"provisioningCompleted"}))),
     };
     result.map_or(Delivery::Unavailable, mutation_result)
 }
@@ -451,8 +447,14 @@ async fn lifecycle_resource_delete(
         _ => return Delivery::Invalid,
     };
     let result = match step {
-        0 => owner.run_resource_deletion(id, command_id, phase).await.map(|result| result.map(|outcome| json!({"outcome": match outcome { crate::owner::lifecycle::FleetLifecycleOutcome::Completed | crate::owner::lifecycle::FleetLifecycleOutcome::AlreadyAbsent => "deletionCompleted", crate::owner::lifecycle::FleetLifecycleOutcome::Rejected(_) => "deletionFailed", crate::owner::lifecycle::FleetLifecycleOutcome::Unknown(_) => "deletionUnknown" }}))),
-        _ => owner.complete_resource_deletion(id, command_id, phase).await.map(|result| result.map(|_| json!({"outcome":"deletionCompleted"}))),
+        0 => owner
+            .admit_resource_deletion(id, command_id, phase)
+            .await
+            .map(|result| result.map(|_| json!({"outcome":"accepted"}))),
+        _ => owner
+            .complete_resource_deletion(id, command_id, phase)
+            .await
+            .map(|result| result.map(|_| json!({"outcome":"deletionCompleted"}))),
     };
     result.map_or(Delivery::Unavailable, mutation_result)
 }

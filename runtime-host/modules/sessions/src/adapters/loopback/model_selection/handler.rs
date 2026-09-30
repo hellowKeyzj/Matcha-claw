@@ -137,6 +137,7 @@ async fn handle_request(
             trace_id,
             serde_json::json!({}),
         );
+        session.record_boundary_outcome("sessions.model", crate::call::SessionsCallOutcome::Unsupported).await;
         return Response::from_delivery(SessionModelSelectionDelivery::Unsupported);
     }
     drop(verifier);

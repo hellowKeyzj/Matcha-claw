@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { pickLocalDirectory, pickLocalFile } from '@/services/local-path-picker';
+import { waitForCall } from '@/lib/call-log-await';
 import { LibraryHome } from './components/LibraryHome';
 import { LibraryWorkspace } from './components/LibraryWorkspace';
 import { ActivityBar } from './components/ActivityBar';
@@ -14,6 +15,7 @@ import { classifyWikiPath, isUnsupportedWikiSourcePreview, supportsWikiBinaryPre
 import { resolveWikiMarkdownImage } from './wiki-media';
 import {
   hostWikiCancelSourceTask,
+  hostWikiCallResult,
   hostWikiCreateProject,
   hostWikiCurrentProject,
   hostWikiDeleteSource,
@@ -55,7 +57,8 @@ import {
   normalizeSourceTasks,
   normalizeSourceWatchConfig,
   normalizeStatus,
-  summarizeReceipt,
+  summarizeDeleteSourceResult,
+  summarizeSourceCallCounts,
   type WikiFileItem,
   type WikiGraphResult,
   type WikiProject,
@@ -419,15 +422,32 @@ export default function WikiPage() {
 
   const rescan = useCallback(async () => {
     await run('rescan', async () => {
-      await hostWikiRescanSources();
+      const call = await hostWikiRescanSources()
+        .then((receipt) => waitForCall(receipt, 'wiki'))
+        .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
+      if (call.command !== 'rescan-sources' || call.detail.operation !== 'rescan-sources' || call.status === 'unknown') {
+        throw new Error(t('actions.resultUnconfirmed'));
+      }
+      if (call.status !== 'succeeded' || call.detail.outcome !== 'completed') {
+        throw new Error(t('actions.failed', { label: 'rescan-sources' }));
+      }
       await loadWikiSnapshot();
     }, t('actions.rescanned'));
   }, [loadWikiSnapshot, run, t]);
 
   const importSourcePath = useCallback(async (path: string) => {
     await run('import-source', async () => {
-      const receipt = await hostWikiImportSource({ sourcePath: path });
-      setLastReceipt(summarizeReceipt({ imported: [receipt] }, t('actions.importFileReceipt')));
+      const call = await hostWikiImportSource({ sourcePath: path })
+        .then((receipt) => waitForCall(receipt, 'wiki'))
+        .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
+      if (call.command !== 'import-source' || call.detail.operation !== 'import-source' || call.status === 'unknown') {
+        throw new Error(t('actions.resultUnconfirmed'));
+      }
+      if (call.status !== 'succeeded' || call.detail.outcome !== 'completed') {
+        throw new Error(t('actions.failed', { label: 'import-source' }));
+      }
+      if (call.detail.counts === null) throw new Error(t('actions.resultUnconfirmed'));
+      setLastReceipt(summarizeSourceCallCounts(call.detail.counts, t('actions.importFileReceipt')));
       await loadWikiSnapshot();
     }, t('actions.importedSource'));
   }, [loadWikiSnapshot, run, t]);
@@ -443,7 +463,17 @@ export default function WikiPage() {
 
   const importFolderPath = useCallback(async (path: string) => {
     await run('import-folder', async () => {
-      setLastReceipt(summarizeReceipt(await hostWikiImportFolder({ folderPath: path }), t('actions.importFolderReceipt')));
+      const call = await hostWikiImportFolder({ folderPath: path })
+        .then((receipt) => waitForCall(receipt, 'wiki'))
+        .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
+      if (call.command !== 'import-folder' || call.detail.operation !== 'import-folder' || call.status === 'unknown') {
+        throw new Error(t('actions.resultUnconfirmed'));
+      }
+      if (call.status !== 'succeeded' || call.detail.outcome !== 'completed') {
+        throw new Error(t('actions.failed', { label: 'import-folder' }));
+      }
+      if (call.detail.counts === null) throw new Error(t('actions.resultUnconfirmed'));
+      setLastReceipt(summarizeSourceCallCounts(call.detail.counts, t('actions.importFolderReceipt')));
       await loadWikiSnapshot();
     }, t('actions.importedFolder'));
   }, [loadWikiSnapshot, run, t]);
@@ -460,14 +490,41 @@ export default function WikiPage() {
   const deleteSourceAtPath = useCallback(async (path: string) => {
     if (!path.trim()) return;
     await run('delete-source', async () => {
-      setLastReceipt(summarizeReceipt(await hostWikiDeleteSource({ sourcePath: path }), t('actions.deleteSourceReceipt')));
+      const call = await hostWikiDeleteSource({ sourcePath: path })
+        .then((receipt) => waitForCall(receipt, 'wiki'))
+        .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
+      if (call.command !== 'delete-source' || call.detail.operation !== 'delete-source' || call.status === 'unknown') {
+        throw new Error(t('actions.resultUnconfirmed'));
+      }
+      if (call.status !== 'succeeded' || call.detail.outcome !== 'completed') {
+        throw new Error(t('actions.failed', { label: 'delete-source' }));
+      }
+      const result = await hostWikiCallResult({ callId: call.callId })
+        .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
+      if (result.callId !== call.callId || result.operation !== 'delete-source' || call.detail.counts === null
+        || result.result.deletedPages.length !== call.detail.counts.deletedPages
+        || result.result.updatedPages.length !== call.detail.counts.updatedPages
+        || result.result.deletedMedia.length !== call.detail.counts.deletedMedia) {
+        throw new Error(t('actions.resultUnconfirmed'));
+      }
+      setLastReceipt(summarizeDeleteSourceResult(result.result, t('actions.deleteSourceReceipt')));
       await loadWikiSnapshot();
     }, t('actions.deletedSource'));
   }, [loadWikiSnapshot, run, t]);
 
   const refreshSources = useCallback(async () => {
     await run('refresh-sources', async () => {
-      setLastReceipt(summarizeReceipt(await hostWikiRefreshSources(), t('actions.refreshSourcesReceipt')));
+      const call = await hostWikiRefreshSources()
+        .then((receipt) => waitForCall(receipt, 'wiki'))
+        .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
+      if (call.command !== 'refresh-sources' || call.detail.operation !== 'refresh-sources' || call.status === 'unknown') {
+        throw new Error(t('actions.resultUnconfirmed'));
+      }
+      if (call.status !== 'succeeded' || call.detail.outcome !== 'completed') {
+        throw new Error(t('actions.failed', { label: 'refresh-sources' }));
+      }
+      if (call.detail.counts === null) throw new Error(t('actions.resultUnconfirmed'));
+      setLastReceipt(summarizeSourceCallCounts(call.detail.counts, t('actions.refreshSourcesReceipt')));
       await loadWikiSnapshot();
     }, t('actions.refreshedSources'));
   }, [loadWikiSnapshot, run, t]);
@@ -590,7 +647,12 @@ export default function WikiPage() {
   const embedPage = useCallback(async () => {
     if (!selectedPath || preview.kind !== 'text' || preview.contentType !== 'markdown') return;
     await run('embed', async () => {
-      await hostWikiEmbedPage({ path: selectedPath });
+      const receipt = await hostWikiEmbedPage({ path: selectedPath });
+      const call = await waitForCall(receipt, 'wiki');
+      if (call.command !== 'embed-page' || call.detail.operation !== 'embed-page'
+        || call.status !== 'succeeded' || call.detail.outcome !== 'completed') {
+        throw new Error(t('actions.failed', { label: 'embed' }));
+      }
     }, t('actions.embeddedPage'));
   }, [preview, run, selectedPath, t]);
 

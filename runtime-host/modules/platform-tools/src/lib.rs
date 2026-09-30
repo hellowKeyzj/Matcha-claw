@@ -26,7 +26,9 @@ const EVENTS: &[&str] = &[];
 const EFFECTS: &[EffectKind] = &[EffectKind::OwnerTask, EffectKind::Route];
 
 pub use api::PlatformToolsModule;
-pub use domain::model::{PlatformTool, PlatformToolsOutcome};
+pub use domain::model::{
+    PlatformTool, PlatformToolsCallDetail, PlatformToolsCallResult, PlatformToolsOutcome,
+};
 pub use owner::{PlatformToolsOwnerInput, spawn_owner};
 pub use ports::{
     PlatformToolsFuture, PlatformToolsOps, PlatformToolsRequestAdmission,

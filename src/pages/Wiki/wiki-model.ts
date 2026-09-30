@@ -1,3 +1,6 @@
+import type { WikiSourceCallCounts } from '@/types/call-log/wiki';
+import type { WikiDeleteSourceResult } from '@/types/wiki-call-result';
+
 export type WikiSourceWatchConfig = Readonly<{
   enabled: boolean;
   autoIngest: boolean;
@@ -401,16 +404,12 @@ export function normalizeGraph(value: unknown): WikiGraphResult {
   return { nodes, edges };
 }
 
-export function summarizeReceipt(value: unknown, label: string): WikiReceiptSummary | null {
-  if (!isRecord(value)) return null;
-  return {
-    label,
-    imported: firstArray(value, ['imported']).length,
-    deleted: firstArray(value, ['deleted', 'deletedPages']).length,
-    moved: firstArray(value, ['moved']).length,
-    skipped: firstArray(value, ['skipped']).length,
-    written: firstArray(value, ['writtenPages']).length,
-  };
+export function summarizeSourceCallCounts(counts: WikiSourceCallCounts, label: string): WikiReceiptSummary {
+  return { ...counts, written: 0, label };
+}
+
+export function summarizeDeleteSourceResult(result: WikiDeleteSourceResult, label: string): WikiReceiptSummary {
+  return { label, imported: 0, deleted: result.deletedPages.length, moved: 0, skipped: 0, written: 0 };
 }
 
 export function formatDateTime(ms: number, fallback = ''): string {

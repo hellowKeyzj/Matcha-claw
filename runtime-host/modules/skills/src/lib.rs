@@ -1,16 +1,20 @@
 mod adapters;
 pub mod bundle;
+pub mod call;
 pub mod capability;
 pub mod control;
 pub mod install;
 pub mod management;
+mod operation;
 pub mod ports;
 pub mod projection;
+mod result;
 pub mod status;
 
 use std::{path::PathBuf, sync::Arc};
 
 use platform::{
+    call::{CallLogError, CallReceipt, CallRecorder},
     capability::CapabilityDecisionVerifier,
     module::{CapabilityDescriptorProvider, CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
 };
@@ -32,6 +36,7 @@ const REQUIRES: &[CapabilityKey] = &[
 const ROUTES: &[&str] = &["skills.loopback"];
 const EVENTS: &[&str] = &[];
 const EFFECTS: &[EffectKind] = &[
+    EffectKind::OwnerTask,
     EffectKind::Route,
     EffectKind::FilesystemRead,
     EffectKind::FilesystemWrite,
@@ -43,6 +48,8 @@ pub struct SkillsModule {
     skills: Arc<dyn ports::SkillsPort>,
     clawhub: Arc<dyn ports::ClawHubSearchPort>,
     sealed: Arc<dyn ports::SealedSkillStorePort>,
+    recorder: Option<CallRecorder>,
+    operations: Arc<Mutex<operation::Operations>>,
 }
 
 impl SkillsModule {
@@ -55,7 +62,70 @@ impl SkillsModule {
             skills,
             clawhub,
             sealed,
+            recorder: None,
+            operations: Arc::new(Mutex::new(operation::Operations::default())),
         }
+    }
+
+    pub fn with_call_recorder(mut self, recorder: CallRecorder) -> Self {
+        self.recorder = Some(recorder);
+        self
+    }
+
+    pub async fn stop_operations(&self) {
+        self.operations.lock().await.stop().await;
+    }
+
+    pub(crate) async fn submit_operation<F>(
+        &self,
+        call: operation::RecordedCall,
+        operation: F,
+    ) -> Result<CallReceipt, CallLogError>
+    where
+        F: std::future::Future<Output = platform::loopback::Response> + Send + 'static,
+    {
+        let admission = call.clone();
+        self.operations
+            .lock()
+            .await
+            .submit(call, None, operation)
+            .await?;
+        admission.accepted().await
+    }
+
+    pub(crate) async fn submit_result<F>(
+        &self,
+        call: operation::RecordedCall,
+        access: result::ResultAccess,
+        budget: usize,
+        operation: F,
+    ) -> Result<CallReceipt, CallLogError>
+    where
+        F: std::future::Future<Output = Result<result::SkillResult, platform::loopback::Response>>
+            + Send
+            + 'static,
+    {
+        let admission = call.clone();
+        let mut operations = self.operations.lock().await;
+        let results = operations.results.clone();
+        let call_id = admission.context.id().clone();
+        operations
+            .submit(call, Some((access, budget)), async move {
+                match operation.await {
+                    Ok(result) => {
+                        let response = result.response();
+                        results.complete(&call_id, result).await;
+                        response
+                    }
+                    Err(response) => {
+                        results.remove(&call_id).await;
+                        response
+                    }
+                }
+            })
+            .await?;
+        drop(operations);
+        admission.accepted().await
     }
 
     pub async fn install_clawhub_skill(
@@ -123,8 +193,10 @@ impl SkillsModule {
         token: &str,
         skill_key: String,
         path: String,
+        expected_package_sha256: Option<&str>,
     ) -> Result<ports::SealedResourceRead, ports::SealedSkillError> {
-        self.sealed.read_sealed_skill_file(token, skill_key, path)
+        self.sealed
+            .read_sealed_skill_file(token, skill_key, path, expected_package_sha256)
     }
 
     pub fn remove_sealed_skill(&self, skill_key: String) -> Result<bool, ports::SealedSkillError> {

@@ -208,6 +208,26 @@
   },
   "cloudPackages": {
     "title": "云端 Agent Package",
+    "mineTitle": "我的云端包",
+    "mineDescription": "上传后保留为草稿，点击发布才会进入市场。",
+    "mineEmpty": "暂无已上传的包。",
+    "marketTitle": "资源包市场",
+    "loading": "正在加载资源包…",
+    "loadFailed": "加载资源包失败，请重试。",
+    "retry": "重试",
+    "publish": "发布",
+    "publishing": "发布中…",
+    "published": "资源包已发布",
+    "publishFailed": "发布资源包失败",
+    "uploadFailed": "上传资源包失败",
+    "installFailed": "安装资源包失败",
+    "installed": "已安装",
+    "installing": "安装中…",
+    "status": { "draft": "草稿", "published": "已发布", "disabled": "已停用", "unknown": "未知状态" },
+    "errors": {
+      "MATCHA_PACKAGE_CLOUD_ENVELOPE_REQUIRED": "请重新为云端导出资源包后上传。",
+      "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "该版本不能发布，请刷新我的云端包。"
+    },
     "empty": "暂无云端 Agent Package。",
     "install": "安装"
   },

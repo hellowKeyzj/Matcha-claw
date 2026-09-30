@@ -56,6 +56,10 @@ impl TeamRuntimeCapabilityRequest {
         self.run_id.as_deref()
     }
 
+    pub(crate) fn single_stage(&self) -> bool {
+        crate::call::runtime_single_stage(&self.command)
+    }
+
     pub fn into_execution(self) -> (TeamRuntimeCommand, Option<TeamRuntimeProjectionContext>) {
         (self.command, self.projection_context)
     }
@@ -136,12 +140,20 @@ pub async fn execute_team_runtime_capability_request(
     resolver: &dyn organization::RoleSessionIdentityResolver,
     request: TeamRuntimeCapabilityRequest,
 ) -> Result<(String, TeamRuntimeControlOutcome), TeamRuntimeDecodeError> {
+    execute_inline(owner, resolver, request).await
+}
+
+pub(crate) async fn execute_inline(
+    owner: &organization::OrganizationHandle,
+    resolver: &dyn organization::RoleSessionIdentityResolver,
+    request: TeamRuntimeCapabilityRequest,
+) -> Result<(String, TeamRuntimeControlOutcome), TeamRuntimeDecodeError> {
     let operation_id = request.operation_id().to_owned();
     let team_id = request.team_id().map(str::to_owned);
     let run_id = request.run_id().map(str::to_owned);
     let (command, projection_context) = request.into_execution();
     let outcome = owner
-        .execute_team_runtime(command)
+        .execute_team_runtime_inline(command)
         .await
         .map_err(|_| TeamRuntimeDecodeError::Unavailable)?;
     let outcome = project_team_runtime_outcome(

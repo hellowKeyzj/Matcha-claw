@@ -21,6 +21,7 @@ pub(super) const READ_ENDPOINT_PREFIX: &str = "/api/sealed-skills/read/";
 const AUTHORIZATION_HEADER: &str = "authorization";
 const SEALED_RUNTIME_AUTHORIZATION_HEADER: &str = "x-matcha-sealed-token";
 const SEALED_RUNTIME_HEADER: &str = "x-matcha-sealed-runtime";
+const SEALED_PACKAGE_SHA256_HEADER: &str = "x-matcha-sealed-package-sha256";
 const BEARER_PREFIX: &str = "Bearer ";
 const OPENCLAW_RUNTIME: &str = "openclaw";
 const MATCHA_SEALED_SOURCE: &str = "matcha-sealed";
@@ -33,6 +34,7 @@ pub(super) enum RequestError {
     Invalid,
     Unauthorized,
     Unavailable,
+    Admission(platform::call::CallLogError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,25 +137,55 @@ pub(super) async fn handle(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     skills: SkillsModule,
     now: u64,
+    call: Option<crate::operation::RecordedCall>,
 ) -> Result<(u16, Value), RequestError> {
     let route = Route::from_request(method, endpoint)?;
+    let mut principal = None;
     if let Some((auth_endpoint, scope, capability, subject)) = route.authorization() {
-        authorize(
-            headers,
-            verifier,
-            now,
-            auth_endpoint,
-            scope,
-            capability,
-            subject,
-        )
-        .await?;
+        principal = Some(
+            authorize(
+                headers,
+                verifier,
+                now,
+                auth_endpoint,
+                scope,
+                capability,
+                subject,
+            )
+            .await?,
+        );
+    }
+    if route == Route::ExportCloud && principal.as_deref() != Some("electron-main-local") {
+        return Err(RequestError::Unauthorized);
+    }
+    if matches!(route, Route::Export | Route::Uninstall) {
+        decode_skill_key(body)?;
+        let call = call.ok_or(RequestError::Admission(
+            platform::call::CallLogError::Unavailable,
+        ))?;
+        let body = body.to_vec();
+        let worker = skills.clone();
+        let receipt = skills
+            .submit_operation(call, async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    if route == Route::Export {
+                        export(&body, worker)
+                    } else {
+                        uninstall(&body, worker)
+                    }
+                })
+                .await;
+                blocking_response(result)
+            })
+            .await
+            .map_err(RequestError::Admission)?;
+        return Ok((202, json!(receipt)));
     }
     match route {
         Route::Status => status(body, skills).await,
         Route::Export => export(body, skills),
-        Route::ExportCloud => export_cloud(body, skills),
-        Route::Install => install(body, skills),
+        Route::ExportCloud => export_cloud(body, skills, call, principal.unwrap()).await,
+        Route::Install => install(body, skills, call).await,
         Route::Uninstall => uninstall(body, skills),
         Route::SkillRead => read_skill(endpoint, headers, body, skills).await,
     }
@@ -218,7 +250,12 @@ fn export(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestErro
     }
 }
 
-fn export_cloud(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestError> {
+async fn export_cloud(
+    body: &[u8],
+    handle: SkillsModule,
+    call: Option<crate::operation::RecordedCall>,
+    principal: String,
+) -> Result<(u16, Value), RequestError> {
     let request =
         serde_json::from_slice::<CloudExportRequest>(body).map_err(|_| RequestError::Invalid)?;
     if !valid_openclaw_skill_key(&request.skill_key)
@@ -231,21 +268,70 @@ fn export_cloud(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), Reque
         return Err(RequestError::Invalid);
     }
     let cloud_key_id = request.cloud_key_id.ok_or(RequestError::Invalid)?;
-    match handle.export_cloud_sealed_skill_package(
-        request.skill_key.clone(),
-        request.cloud_public_key,
-        cloud_key_id,
-    ) {
-        Ok(export) => Ok((
-            200,
-            json!({ "outcome": "accepted", "skillKey": export.skill_key(), "packagePath": export.package_path() }),
-        )),
-        Err(SealedSkillError::NotFound) => Ok((404, json!({ "outcome": "notFound" }))),
-        Err(SealedSkillError::RejectedWith(detail)) => {
-            rejected_export_response(&request.skill_key, detail)
-        }
-        Err(error) => Err(map_error(error)),
-    }
+    let call = call.ok_or(RequestError::Admission(
+        platform::call::CallLogError::Unavailable,
+    ))?;
+    let access = crate::result::ResultAccess {
+        principal,
+        scope: "sealed-skills:package".into(),
+        capability: "sealedSkills.exportCloud".into(),
+        subject: "sealed-skills-export-cloud".into(),
+        private: true,
+    };
+    let worker = handle.clone();
+    let receipt = handle
+        .submit_result(
+            call,
+            access,
+            crate::result::SEALED_RESULT_BUDGET,
+            async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    worker.export_cloud_sealed_skill_package(
+                        request.skill_key,
+                        request.cloud_public_key,
+                        cloud_key_id,
+                    )
+                })
+                .await;
+                match result {
+                    Ok(Ok(export)) => {
+                        let skill_key = export.skill_key().to_owned();
+                        let file_name = export.file_name().to_owned();
+                        let package_sha256 = export.package_sha256().to_owned();
+                        let bytes = export.into_package_bytes();
+                        if bytes.len() > 10 * 1024 * 1024 {
+                            return Err(platform::loopback::Response::json(
+                                400,
+                                json!({ "outcome": "rejected" }),
+                            ));
+                        }
+                        Ok(crate::result::SkillResult::SealedCloudExport {
+                            skill_key,
+                            file_name,
+                            package_sha256,
+                            package_base64: base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                bytes,
+                            ),
+                        })
+                    }
+                    Ok(Err(SealedSkillError::NotFound)) => Err(platform::loopback::Response::json(
+                        404,
+                        json!({ "outcome": "notFound" }),
+                    )),
+                    Ok(Err(SealedSkillError::Unknown)) | Err(_) => Err(
+                        platform::loopback::Response::json(503, json!({ "outcome": "unknown" })),
+                    ),
+                    Ok(Err(_)) => Err(platform::loopback::Response::json(
+                        400,
+                        json!({ "outcome": "rejected" }),
+                    )),
+                }
+            },
+        )
+        .await
+        .map_err(RequestError::Admission)?;
+    Ok((202, json!(receipt)))
 }
 
 fn rejected_export_response(
@@ -263,14 +349,61 @@ fn rejected_export_response(
     ))
 }
 
-fn install(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestError> {
+async fn install(
+    body: &[u8],
+    handle: SkillsModule,
+    call: Option<crate::operation::RecordedCall>,
+) -> Result<(u16, Value), RequestError> {
     let request =
         serde_json::from_slice::<InstallRequest>(body).map_err(|_| RequestError::Invalid)?;
     if !valid_package_path(&request.package_path) {
         return Err(RequestError::Invalid);
     }
     let cloud_metadata = decode_cloud_metadata(request.cloud_metadata)?;
-    match handle.install_sealed_skill(PathBuf::from(request.package_path), cloud_metadata) {
+    let package_path = PathBuf::from(request.package_path);
+    let call = call.ok_or(RequestError::Admission(
+        platform::call::CallLogError::Unavailable,
+    ))?;
+    {
+        let worker = handle.clone();
+        let receipt = handle
+            .submit_operation(call, async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    install_package(worker, package_path, cloud_metadata)
+                })
+                .await;
+                let (status, body) = match result {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(RequestError::Unavailable)) | Err(_) => {
+                        (503, json!({ "outcome": "unknown" }))
+                    }
+                    Ok(Err(_)) => (400, json!({ "outcome": "rejected" })),
+                };
+                platform::loopback::Response::json(status, body)
+            })
+            .await
+            .map_err(RequestError::Admission)?;
+        return Ok((202, json!(receipt)));
+    }
+}
+
+fn blocking_response(
+    result: Result<Result<(u16, Value), RequestError>, tokio::task::JoinError>,
+) -> platform::loopback::Response {
+    let (status, body) = match result {
+        Ok(Ok(response)) => response,
+        Ok(Err(RequestError::Unavailable)) | Err(_) => (503, json!({ "outcome": "unknown" })),
+        Ok(Err(_)) => (400, json!({ "outcome": "rejected" })),
+    };
+    platform::loopback::Response::json(status, body)
+}
+
+fn install_package(
+    handle: SkillsModule,
+    package_path: PathBuf,
+    cloud_metadata: Option<CloudPackageMetadata>,
+) -> Result<(u16, Value), RequestError> {
+    match handle.install_sealed_skill(package_path, cloud_metadata) {
         Ok(entry) => Ok((
             200,
             json!({ "outcome": "accepted", "skillKey": entry.skill_key() }),
@@ -306,12 +439,29 @@ async fn read_skill(
     }
     let token = header_value(headers, SEALED_RUNTIME_AUTHORIZATION_HEADER)
         .ok_or(RequestError::Unauthorized)?;
+    let mut package_sha256_headers = headers
+        .iter()
+        .filter(|(name, _)| name == SEALED_PACKAGE_SHA256_HEADER);
+    let expected_package_sha256 = package_sha256_headers
+        .next()
+        .map(|(_, value)| value.as_str());
+    if package_sha256_headers.next().is_some()
+        || expected_package_sha256.is_some_and(|value| {
+            value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+    {
+        return Err(RequestError::Invalid);
+    }
     let (skill_key, path) = decode_skill_read_path(endpoint)?;
     if !is_openclaw_matcha_sealed_skill_enabled(&handle, &skill_key).await {
         return Ok((404, json!({ "outcome": "notFound" })));
     }
-    match handle.read_sealed_skill_file(token, skill_key, path) {
+    match handle.read_sealed_skill_file(token, skill_key, path, expected_package_sha256) {
         Ok(read) => Ok((200, project_read(read))),
+        Err(SealedSkillError::PackageChanged) => Ok((409, json!({ "outcome": "rejected" }))),
         Err(SealedSkillError::NotFound) => Ok((404, json!({ "outcome": "notFound" }))),
         Err(error) => Err(map_error(error)),
     }
@@ -325,7 +475,7 @@ async fn authorize(
     scope: &str,
     capability: &str,
     subject: &str,
-) -> Result<(), RequestError> {
+) -> Result<String, RequestError> {
     let authorization = header_value(headers, AUTHORIZATION_HEADER)
         .and_then(|value| value.strip_prefix(BEARER_PREFIX))
         .ok_or(RequestError::Unauthorized)?;
@@ -333,7 +483,7 @@ async fn authorize(
         .lock()
         .await
         .verify(authorization, now, endpoint, scope, capability, subject)
-        .map(|_| ())
+        .map(|decision| decision.principal().to_owned())
         .map_err(|_| RequestError::Unauthorized)
 }
 
@@ -394,6 +544,7 @@ fn project_entry(entry: &crate::ports::SealedSkillCatalogEntry) -> Value {
 fn project_read(read: crate::ports::SealedResourceRead) -> Value {
     let mut value = json!({
         "contentBase64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, read.content()),
+        "packageSha256": read.package_sha256(),
     });
     if let Some(binding) = read.metering_binding() {
         value["meteringBinding"] = json!(binding);
@@ -406,6 +557,7 @@ fn map_error(error: SealedSkillError) -> RequestError {
         SealedSkillError::Unknown => RequestError::Unavailable,
         SealedSkillError::AlreadyExists
         | SealedSkillError::NotFound
+        | SealedSkillError::PackageChanged
         | SealedSkillError::Rejected
         | SealedSkillError::RejectedWith(_) => RequestError::Invalid,
     }
@@ -415,6 +567,7 @@ fn sealed_skill_error_detail(error: &SealedSkillError) -> &'static str {
     match error {
         SealedSkillError::AlreadyExists => "already-exists",
         SealedSkillError::NotFound => "not-found",
+        SealedSkillError::PackageChanged => "package-changed",
         SealedSkillError::Rejected | SealedSkillError::RejectedWith(_) => "rejected",
         SealedSkillError::Unknown => "unknown",
     }

@@ -60,6 +60,8 @@ export type RuntimeHostControlOutcome =
   | { readonly kind: 'timed-out' };
 
 export type RuntimeHostSafeEvent =
+  | { readonly type: 'call.changed'; readonly callId: string; readonly revision: number }
+  | { readonly type: 'calls.resync' }
   | {
       readonly type: 'openclaw.lifecycle';
       readonly sequence: number | null;
@@ -526,12 +528,19 @@ function isMutatingCommand(_command: RuntimeHostControlCommand): boolean {
 function isRuntimeHostSafeEvent(value: unknown): value is RuntimeHostSafeEvent {
   if (!isRecord(value) || typeof value.type !== 'string') return false;
   switch (value.type) {
+    case 'call.changed':
+      return hasExactKeys(value, ['type', 'callId', 'revision'])
+        && typeof value.callId === 'string'
+        && /^[a-f0-9]{32}$/.test(value.callId)
+        && isNonNegativeSafeInteger(value.revision)
+        && value.revision > 0;
     case 'openclaw.lifecycle':
       return hasExactKeys(value, ['type', 'sequence', 'hasRun', 'hasMessage', 'hasSessionActivity'])
         && (value.sequence === null || isNonNegativeSafeInteger(value.sequence))
         && typeof value.hasRun === 'boolean'
         && typeof value.hasMessage === 'boolean'
         && typeof value.hasSessionActivity === 'boolean';
+    case 'calls.resync':
     case 'openclaw.runtime':
       return hasExactKeys(value, ['type']);
     case 'matcha.lifecycle':

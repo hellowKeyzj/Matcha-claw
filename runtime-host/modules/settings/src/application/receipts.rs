@@ -1,7 +1,10 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 pub enum Outcome {
+    #[serde(rename = "confirmed")]
     Confirmed,
+    #[serde(rename = "rejected")]
     Rejected,
+    #[serde(rename = "outcome_unknown")]
     Unknown,
 }
 
@@ -15,7 +18,7 @@ impl Outcome {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct Settlement {
     pub revision: u64,
     pub outcome: Outcome,

@@ -1,4 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import type { CallReceipt } from '../../../../../src/types/call-log';
+import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 import { beginChannelTrace, channelTraceHeaders } from './trace';
 
@@ -25,6 +27,7 @@ export type ChannelLoginRequest = Readonly<{
 }>;
 
 type LoginProgress = Readonly<{
+  callId?: string;
   outcome: 'progress' | 'connected' | 'target_rejected' | 'unknown';
   channel: string;
   accountId?: string;
@@ -32,16 +35,14 @@ type LoginProgress = Readonly<{
   sessionKey?: string;
 }>;
 
-type LogoutOutcome = Readonly<{
-  outcome: 'confirmed' | 'target_rejected' | 'unknown';
-}>;
-
 type CancelledOutcome = Readonly<{ outcome: 'cancelled' }>;
 
-export type ChannelLoginTransportResponse = Readonly<{
-  status: 200 | 400 | 503;
-  body: LoginProgress | LogoutOutcome | CancelledOutcome | RejectedResponse | typeof UNKNOWN;
-}>;
+export type ChannelLoginTransportResponse =
+  | Readonly<{ status: 202; body: CallReceipt }>
+  | Readonly<{
+    status: 200 | 400 | 503;
+    body: LoginProgress | CancelledOutcome | RejectedResponse | typeof UNKNOWN;
+  }>;
 
 export interface ChannelLoginTransport {
   login(input: ChannelLoginRequest, traceId?: string): Promise<ChannelLoginTransportResponse>;
@@ -98,7 +99,11 @@ export function createChannelLoginTransport(
         const body = response.body;
         outcome = body;
         if (response.status === 400 && isRejected(body)) return { status: 400, body };
+        if (response.status === 400 && isProgress(body) && body.outcome === 'target_rejected') return { status: 400, body };
         if (response.status === 503 && isUnknown(body)) return { status: 503, body };
+        if (input.action === 'logout' && response.status === 202) {
+          try { return { status: 202, body: decodeCallReceipt(body) }; } catch { /* closed public boundary */ }
+        }
         if (response.status === 200 && isExpectedResponse(body, input)) {
           return { status: 200, body };
         }
@@ -137,15 +142,15 @@ function isRequest(value: unknown): value is ChannelLoginRequest {
   return value.timeoutMs === undefined || isTimeout(value.timeoutMs);
 }
 
-function isExpectedResponse(value: unknown, input: ChannelLoginRequest): value is LoginProgress | LogoutOutcome {
-  if (input.action === 'logout') return isLogoutOutcome(value);
+function isExpectedResponse(value: unknown, input: ChannelLoginRequest): value is LoginProgress | CancelledOutcome {
+  if (input.action === 'logout') return false;
   if (input.action === 'cancel') return isCancelled(value);
   return isProgress(value);
 }
 
 function isProgress(value: unknown): value is LoginProgress {
   if (!isRecord(value)
-    || Object.keys(value).some((key) => !['outcome', 'channel', 'accountId', 'qrDataUrl', 'sessionKey'].includes(key))
+    || Object.keys(value).some((key) => !['outcome', 'channel', 'accountId', 'qrDataUrl', 'sessionKey', 'callId'].includes(key))
     || !Object.hasOwn(value, 'outcome')
     || !Object.hasOwn(value, 'channel')
     || (value.outcome !== 'progress'
@@ -153,7 +158,8 @@ function isProgress(value: unknown): value is LoginProgress {
       && value.outcome !== 'target_rejected'
       && value.outcome !== 'unknown')) return false;
   if (!isIdentity(value.channel)) return false;
-  return optionalIdentity(value.accountId)
+  return (value.callId === undefined || (typeof value.callId === 'string' && /^[0-9a-f]{32}$/.test(value.callId)))
+    && optionalIdentity(value.accountId)
     && optionalIdentity(value.sessionKey)
     && (value.qrDataUrl === undefined || isQrDataUrl(value.qrDataUrl));
 }
@@ -164,12 +170,6 @@ function isCancelled(value: unknown): value is CancelledOutcome {
 
 function isUnknown(value: unknown): value is typeof UNKNOWN {
   return isRecord(value) && hasExactKeys(value, ['outcome']) && value.outcome === 'unknown';
-}
-
-function isLogoutOutcome(value: unknown): value is LogoutOutcome {
-  return isRecord(value)
-    && hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'confirmed' || value.outcome === 'target_rejected' || value.outcome === 'unknown');
 }
 
 function isRejected(value: unknown): value is RejectedResponse {
