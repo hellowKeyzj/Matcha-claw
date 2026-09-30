@@ -2,7 +2,10 @@ use tokio::sync::oneshot;
 
 use foundation::execution::QueryRoute;
 
-use openclaw::gateway::request::{OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest};
+use openclaw::gateway::request::{
+    OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest,
+    OpenClawQuestionResolveGatewayRequest,
+};
 
 use crate::{
     HostState, RuntimeState,
@@ -98,6 +101,12 @@ pub(crate) enum PeerQuery {
             Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
         >,
     },
+    OpenClawQuestionResolve {
+        request: OpenClawQuestionResolveGatewayRequest,
+        reply: oneshot::Sender<
+            Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
+        >,
+    },
 }
 
 impl PeerQuery {
@@ -116,7 +125,8 @@ impl PeerQuery {
             | Self::OpenClawGatewaySnapshot { .. }
             | Self::OpenClawControlSnapshot { .. }
             | Self::OpenClawBrowserRequest { .. }
-            | Self::OpenClawMcpAppRequest { .. } => {
+            | Self::OpenClawMcpAppRequest { .. }
+            | Self::OpenClawQuestionResolve { .. } => {
                 QueryRoute::Keyed(RuntimeDriverIdentity::open_claw().endpoint())
             }
         }

@@ -156,11 +156,12 @@ const CONTROL_STARTING_RETRY_DELAYS: [Duration; 6] = [
     Duration::from_secs(8),
 ];
 
-const CONTROL_SCOPES: [&str; 4] = [
+const CONTROL_SCOPES: [&str; 5] = [
     "operator.read",
     "operator.write",
     "operator.admin",
     "operator.approvals",
+    "operator.questions",
 ];
 const CONTROL_CAPS: [&str; 2] = ["agent-kind", "tool-events"];
 const CONTROL_EVENTS: [&str; 1] = ["tick"];
@@ -1170,7 +1171,7 @@ impl GatewayClient {
     }
 }
 
-const CONTROL_METHODS: [&str; 10] = [
+const CONTROL_METHODS: [&str; 11] = [
     "status",
     "config.get",
     "config.patch",
@@ -1180,6 +1181,7 @@ const CONTROL_METHODS: [&str; 10] = [
     "skills.status",
     "channels.pairing.list",
     "sessions.describe",
+    wire::QUESTION_RESOLVE_METHOD,
     wire::SYSTEM_PRESENCE_METHOD,
 ];
 

@@ -1269,6 +1269,87 @@ function factValue<T>(fact: SessionFact<T>): T | null {
   return fact.incomplete.facts;
 }
 
+function countKinds(items: ReadonlyArray<{ kind: string }>): Record<string, number> {
+  return items.reduce<Record<string, number>>((counts, item) => {
+    counts[item.kind] = (counts[item.kind] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function summarizeWireAssistantTurn(item: SessionWireItem) {
+  const base = {
+    kind: item.kind,
+    itemId: summarizeIdentifier(item.itemId),
+    status: item.status,
+  };
+  if (item.kind !== 'assistantTurn') {
+    return base;
+  }
+  const toolCallIds = item.segments
+    .map((segment) => (segment.kind === 'toolUse' || segment.kind === 'toolResult'
+      ? summarizeIdentifier(segment.toolCallId)
+      : null))
+    .filter((value): value is NonNullable<typeof value> => value !== null);
+  return {
+    ...base,
+    runId: summarizeIdentifier(item.runId),
+    messageId: summarizeIdentifier(item.messageId),
+    segmentCount: item.segments.length,
+    segmentKinds: countKinds(item.segments),
+    toolSegmentCount: toolCallIds.length,
+    toolCallIds,
+    textLength: item.text.length,
+  };
+}
+
+function summarizeWireAssistantTurns(items: SessionWireItem[] | null | undefined) {
+  if (!items) return null;
+  return items
+    .filter((item) => item.kind === 'assistantTurn')
+    .map(summarizeWireAssistantTurn);
+}
+
+function summarizeRenderAssistantTurns(items: SessionRenderItem[] | null | undefined) {
+  if (!items) return null;
+  return items
+    .filter((item): item is SessionAssistantTurnItem => item.kind === 'assistant-turn')
+    .map((item) => {
+      const messageId = 'messageId' in item && typeof item.messageId === 'string' ? item.messageId : null;
+      return {
+        key: summarizeIdentifier(item.key),
+        runId: summarizeIdentifier(item.runId),
+        messageId: summarizeIdentifier(messageId),
+        status: item.status,
+        segmentCount: item.segments.length,
+        segmentKinds: countKinds(item.segments),
+        toolSegmentCount: item.segments.filter((segment) => segment.kind === 'tool').length,
+        toolCount: item.tools.length,
+        toolCallIds: item.tools.map((tool) => summarizeIdentifier(tool.toolCallId ?? tool.id)),
+        textLength: item.text.length,
+      };
+    });
+}
+
+function summarizeDeltaTurnChanges(changes: SessionDelta['changes']) {
+  return {
+    messageUpdates: changes
+      .filter((change): change is Extract<SessionDelta['changes'][number], { kind: 'messageUpdated' }> => change.kind === 'messageUpdated')
+      .map((change) => summarizeWireAssistantTurn(change.item)),
+    toolUpdates: changes
+      .filter((change): change is Extract<SessionDelta['changes'][number], { kind: 'toolUpdated' }> => change.kind === 'toolUpdated')
+      .map((change) => ({
+        toolCallId: summarizeIdentifier(change.tool.toolCallId),
+        runId: summarizeIdentifier(change.tool.runId),
+        name: change.tool.name,
+        phase: change.tool.phase,
+      })),
+  };
+}
+
+function shouldTraceDeltaTurnState(delta: SessionDelta): boolean {
+  return delta.changes.some((change) => change.kind === 'messageUpdated' || change.kind === 'toolUpdated');
+}
+
 function sessionIdentityForProjection(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   view: SessionView,
@@ -1337,6 +1418,7 @@ function projectionToolCard(
   return {
     id: tool.toolCallId,
     toolCallId: tool.toolCallId,
+    ...(tool.runId ? { runId: tool.runId } : {}),
     name: tool.name ?? 'tool',
     displayTitle: tool.name ?? 'tool',
     input,
@@ -1789,6 +1871,7 @@ export function applySessionDelta(
   const state = input.get();
   const projectionKey = resolveCronEquivalentProjectionKey(store, state, delta.sessionKey);
   const previous = store.get(projectionKey);
+  const traceTurnState = shouldTraceDeltaTurnState(delta);
   logSessionTrace('session.delta.apply.start', traceId, {
     sessionKey: summarizeIdentifier(delta.sessionKey),
     incomingEpoch: delta.epoch,
@@ -1801,6 +1884,16 @@ export function applySessionDelta(
     runtimePhase: previous ? projectionRuntimePhase(factValue(previous.runtime)?.phase ?? 'started') : null,
     activeRunId: summarizeIdentifier(factValue(previous?.runtime ?? 'unknown')?.activeRunId),
   });
+  if (traceTurnState) {
+    logSessionTrace('session.delta.apply.turns.before', traceId, {
+      sessionKey: summarizeIdentifier(delta.sessionKey),
+      seq: delta.seq,
+      cursor: delta.cursor,
+      delta: summarizeDeltaTurnChanges(delta.changes),
+      projectionTurns: summarizeWireAssistantTurns(previous ? factValue(previous.items) : null),
+      renderTurns: summarizeRenderAssistantTurns(getSessionRecord(state, projectionKey).items),
+    });
+  }
   if (!previous) {
     const historyReason = 'session_delta_without_view';
     void input.get().loadHistory({ sessionKey: projectionKey, mode: 'quiet', scope: 'background', reason: historyReason });
@@ -1862,6 +1955,15 @@ export function applySessionDelta(
     return { status: 'unavailable', sessionKey: delta.sessionKey, reason: 'session identity unavailable' };
   }
   store.set(projectionKey, projected);
+  if (traceTurnState) {
+    logSessionTrace('session.delta.apply.turns.after', traceId, {
+      sessionKey: summarizeIdentifier(delta.sessionKey),
+      seq: delta.seq,
+      cursor: delta.cursor,
+      projectionTurns: summarizeWireAssistantTurns(factValue(projected.items)),
+      renderTurns: summarizeRenderAssistantTurns(getSessionRecord(input.get(), projectionKey).items),
+    });
+  }
   if (tasksChanged) refreshSessionTasks(input, projected, true);
   return { status: 'applied', sessionKey: projectionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
 }

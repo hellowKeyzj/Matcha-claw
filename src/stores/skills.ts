@@ -290,6 +290,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
           combinedSkills = gatewayData.skills.map((s: GatewaySkillStatus) => {
             return {
               id: s.skillKey,
+              runtimeId: 'openclaw',
               slug: s.slug,
               name: s.name || s.skillKey,
               description: s.description || '',
@@ -539,11 +540,15 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       if (result.outcome !== 'accepted') {
         throw new Error('Failed to enable skill');
       }
-      const staleDisabledReason = get().skills.find((skill) => skill.id === skillId)?.unavailableReason;
-      updateSkill(skillId, {
-        enabled: true,
-        ...(staleDisabledReason === 'disabled' ? { unavailableReason: null } : {}),
-      });
+      const currentSkill = get().skills.find((skill) => skill.id === skillId);
+      if (currentSkill) {
+        updateSkill(skillId, {
+          enabled: true,
+          ...(currentSkill.unavailableReason === 'disabled' ? { unavailableReason: null } : {}),
+        });
+      } else {
+        await get().fetchSkills({ force: true, silent: true, fresh: true });
+      }
     } catch (error) {
       console.error('Failed to enable skill:', error);
       throw error;
@@ -581,7 +586,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       if (result.outcome !== 'accepted') {
         throw new Error('Failed to disable skill');
       }
-      updateSkill(skillId, { enabled: false });
+      if (skill) {
+        updateSkill(skillId, { enabled: false });
+      } else {
+        await get().fetchSkills({ force: true, silent: true, fresh: true });
+      }
     } catch (error) {
       console.error('Failed to disable skill:', error);
       throw error;

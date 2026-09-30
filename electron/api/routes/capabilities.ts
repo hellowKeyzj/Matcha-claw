@@ -79,6 +79,14 @@ const OPENCLAW_MCP_APP_UNAVAILABLE = {
   success: false,
   error: 'OpenClaw MCP app request is unavailable',
 } as const;
+const OPENCLAW_QUESTION_REQUEST_INVALID = {
+  success: false,
+  error: 'OpenClaw question request is invalid',
+} as const;
+const OPENCLAW_QUESTION_UNAVAILABLE = {
+  success: false,
+  error: 'OpenClaw question request is unavailable',
+} as const;
 type CapabilityRouteContext = SessionCapabilityRouteDeps
   & RuntimeHostTransportContext<
     | 'capabilityDirectoryTransport'
@@ -233,6 +241,12 @@ export async function handleCapabilityRoutes(
 
   if (body.id === 'openclaw.mcpApp') {
     const response = await executeOpenClawMcpAppCapability(body, deps);
+    sendJson(res, response.status, response.body);
+    return true;
+  }
+
+  if (body.id === 'openclaw.question') {
+    const response = await executeOpenClawQuestionCapability(body, deps);
     sendJson(res, response.status, response.body);
     return true;
   }
@@ -436,6 +450,21 @@ async function executeOpenClawMcpAppCapability(
   }
 }
 
+async function executeOpenClawQuestionCapability(
+  body: Record<string, unknown>,
+  deps: CapabilityRouteContext,
+): Promise<{ status: number; body: unknown }> {
+  if (!isOpenClawQuestionRequest(body)) {
+    return { status: 400, body: OPENCLAW_QUESTION_REQUEST_INVALID };
+  }
+  try {
+    const response = await deps.runtimeHostTransports.openClawGatewayTransport.execute(body);
+    return projectOpenClawGatewayResponse(response, OPENCLAW_QUESTION_REQUEST_INVALID, OPENCLAW_QUESTION_UNAVAILABLE);
+  } catch {
+    return { status: 503, body: OPENCLAW_QUESTION_UNAVAILABLE };
+  }
+}
+
 function projectOpenClawGatewayResponse(
   response: { status: number; body: unknown },
   invalidBody: unknown,
@@ -529,6 +558,43 @@ function isOpenClawMcpAppInput(value: unknown): boolean {
     && isNonEmptyText(value.sessionKey)
     && isNonEmptyText(value.viewId)
     && (value.standalone === undefined || typeof value.standalone === 'boolean');
+}
+
+function isOpenClawQuestionRequest(value: Record<string, unknown>): boolean {
+  return hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
+    && value.id === 'openclaw.question'
+    && value.operationId === 'question.resolve'
+    && isNativeRuntimeScope(value.scope)
+    && value.target === null
+    && isOpenClawQuestionInput(value.input);
+}
+
+function isOpenClawQuestionInput(value: unknown): boolean {
+  return isRecord(value)
+    && hasOnlyKeys(value, ['id', 'answers', 'resolvedBy', 'resolutionId'])
+    && Object.hasOwn(value, 'id')
+    && Object.hasOwn(value, 'answers')
+    && isNonEmptyText(value.id)
+    && isQuestionAnswers(value.answers)
+    && (value.resolvedBy === undefined || isNonEmptyText(value.resolvedBy))
+    && (value.resolutionId === undefined || isNonEmptyText(value.resolutionId));
+}
+
+function isQuestionAnswers(value: unknown): boolean {
+  if (!isRecord(value) || !hasExactKeys(value, ['answers']) || !isRecord(value.answers)) {
+    return false;
+  }
+  return Object.entries(value.answers).every(([key, answer]) => isQuestionKey(key)
+    && Array.isArray(answer)
+    && answer.every(isAnswerText));
+}
+
+function isQuestionKey(value: string): boolean {
+  return /^[a-z][a-z0-9_]*$/.test(value);
+}
+
+function isAnswerText(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 4096 && !value.includes('\0');
 }
 
 function isMcpAppOperationId(value: unknown): value is string {

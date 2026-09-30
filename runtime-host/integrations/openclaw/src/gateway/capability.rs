@@ -5,7 +5,7 @@ pub const DESCRIPTOR_PROVIDER: CapabilityDescriptorProvider =
     CapabilityDescriptorProvider::new(listed_descriptors, describe_descriptor);
 
 pub fn listed_descriptors() -> Vec<Value> {
-    vec![browser_descriptor(), mcp_app_descriptor()]
+    vec![browser_descriptor(), mcp_app_descriptor(), question_descriptor()]
 }
 
 pub fn describe_descriptor(id: &str, scope: &Value) -> Option<Value> {
@@ -15,6 +15,7 @@ pub fn describe_descriptor(id: &str, scope: &Value) -> Option<Value> {
     match id {
         "openclaw.browser" => Some(browser_descriptor()),
         "openclaw.mcpApp" => Some(mcp_app_descriptor()),
+        "openclaw.question" => Some(question_descriptor()),
         _ => None,
     }
 }
@@ -54,6 +55,26 @@ pub fn mcp_app_descriptor() -> Value {
             operation("mcp.app.*", "Request MCP app view", "none"),
         ],
         "policyScope": "openclaw.mcpApp",
+        "ownerModuleId": "openclaw-gateway",
+        "routeOwnerId": "openclaw",
+    })
+}
+
+pub fn question_descriptor() -> Value {
+    json!({
+        "id": "openclaw.question",
+        "kind": "openclaw-question",
+        "scopeKind": "runtime-instance",
+        "scope": native_runtime_instance_scope(),
+        "targetKinds": ["none"],
+        "runtimeAdapterId": "openclaw",
+        "runtimeInstanceId": "local",
+        "supportLevel": "native",
+        "availability": "available",
+        "operations": [
+            operation("question.resolve", "Resolve OpenClaw question", "none"),
+        ],
+        "policyScope": "openclaw.question",
         "ownerModuleId": "openclaw-gateway",
         "routeOwnerId": "openclaw",
     })

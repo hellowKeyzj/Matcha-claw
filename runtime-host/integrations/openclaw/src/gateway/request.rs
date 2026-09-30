@@ -23,6 +23,14 @@ pub struct OpenClawMcpAppGatewayRequest {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct OpenClawQuestionResolveGatewayRequest {
+    pub id: String,
+    pub answers: Value,
+    pub resolved_by: Option<String>,
+    pub resolution_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum OpenClawGatewayControlOutcome {
     Succeeded(Value),
     Unknown(Value),
@@ -139,10 +147,66 @@ pub fn decode_mcp_app_request(
     })
 }
 
+pub fn decode_question_resolve_request(
+    input: Value,
+) -> Result<OpenClawQuestionResolveGatewayRequest, InvalidGatewayRequest> {
+    let object = input.as_object().ok_or(InvalidGatewayRequest)?;
+    if !object.keys().all(|key| {
+        matches!(key.as_str(), "id" | "answers" | "resolvedBy" | "resolutionId")
+    }) || !object.contains_key("id")
+        || !object.contains_key("answers")
+    {
+        return Err(InvalidGatewayRequest);
+    }
+    let id = bounded_gateway_text(object.get("id"))?;
+    if !is_question_id(&id) {
+        return Err(InvalidGatewayRequest);
+    }
+    let answers = object.get("answers").cloned().ok_or(InvalidGatewayRequest)?;
+    if !is_question_answers(&answers) {
+        return Err(InvalidGatewayRequest);
+    }
+    Ok(OpenClawQuestionResolveGatewayRequest {
+        id,
+        answers,
+        resolved_by: optional_bounded_gateway_text(object.get("resolvedBy"))?,
+        resolution_id: optional_bounded_gateway_text(object.get("resolutionId"))?,
+    })
+}
+
 fn bounded_gateway_text(value: Option<&Value>) -> Result<String, InvalidGatewayRequest> {
     let value = value.and_then(Value::as_str).ok_or(InvalidGatewayRequest)?;
     if value.trim().is_empty() || value.len() > 4_096 || value.chars().any(char::is_control) {
         return Err(InvalidGatewayRequest);
     }
     Ok(value.to_owned())
+}
+
+fn optional_bounded_gateway_text(value: Option<&Value>) -> Result<Option<String>, InvalidGatewayRequest> {
+    value.map(|value| bounded_gateway_text(Some(value))).transpose()
+}
+
+fn is_question_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(|ch| ch.is_ascii_lowercase())
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn is_question_answers(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let Some(answers) = object.get("answers").and_then(Value::as_object) else {
+        return false;
+    };
+    answers.iter().all(|(key, value)| {
+        is_question_id(key)
+            && value.as_array().is_some_and(|answers| answers.iter().all(is_question_answer_text))
+    })
+}
+
+fn is_question_answer_text(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|value| value.len() <= 4_096 && !value.contains('\0'))
 }

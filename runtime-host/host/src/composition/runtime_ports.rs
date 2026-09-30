@@ -400,6 +400,20 @@ impl openclaw::gateway::loopback::OpenClawGatewayCapabilityPort for PeerHandle {
                 .map_err(|_| ())
         })
     }
+
+    fn question_resolve(
+        &self,
+        request: openclaw::gateway::request::OpenClawQuestionResolveGatewayRequest,
+    ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
+        Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
+    > {
+        let peer = self.clone();
+        Box::pin(async move {
+            peer.open_claw_question_resolve(request)
+                .await
+                .map_err(|_| ())
+        })
+    }
 }
 
 impl RuntimeControlLifecyclePort for PeerHandle {

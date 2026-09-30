@@ -1,5 +1,8 @@
 use foundation::execution::OwnerRuntimeHandle;
-use openclaw::gateway::request::{OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest};
+use openclaw::gateway::request::{
+    OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest,
+    OpenClawQuestionResolveGatewayRequest,
+};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
@@ -265,6 +268,15 @@ impl PeerHandle {
         request: OpenClawMcpAppGatewayRequest,
     ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
         self.request_query(|reply| PeerQuery::OpenClawMcpAppRequest { request, reply })
+            .await
+            .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
+    }
+
+    pub(crate) async fn open_claw_question_resolve(
+        &self,
+        request: OpenClawQuestionResolveGatewayRequest,
+    ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
+        self.request_query(|reply| PeerQuery::OpenClawQuestionResolve { request, reply })
             .await
             .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
     }

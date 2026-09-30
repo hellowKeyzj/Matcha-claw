@@ -391,6 +391,7 @@ pub enum SkillStatusSource {
     OpenClawExtra,
     AgentsSkillsPersonal,
     AgentsSkillsProject,
+    MatchaSealed,
 }
 
 impl SkillStatusSource {
@@ -404,6 +405,7 @@ impl SkillStatusSource {
             Self::OpenClawExtra => "openclaw-extra",
             Self::AgentsSkillsPersonal => "agents-skills-personal",
             Self::AgentsSkillsProject => "agents-skills-project",
+            Self::MatchaSealed => "matcha-sealed",
         }
     }
 }
@@ -740,6 +742,7 @@ fn optional_status_source(
             "openclaw-extra" => Some(SkillStatusSource::OpenClawExtra),
             "agents-skills-personal" => Some(SkillStatusSource::AgentsSkillsPersonal),
             "agents-skills-project" => Some(SkillStatusSource::AgentsSkillsProject),
+            "matcha-sealed" => Some(SkillStatusSource::MatchaSealed),
             _ => None,
         }),
         Some(_) => Err(StatusEntryRejectReason::FieldType),

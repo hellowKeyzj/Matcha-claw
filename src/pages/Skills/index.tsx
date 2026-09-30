@@ -921,9 +921,21 @@ interface SkillGridCardProps extends SkillGridCardViewModel {
   onUninstallSkill: (skillId: string, slug?: string) => void;
 }
 
-interface SealedSkillCardProps {
+type SealedSkillRuntimeState = 'enabled' | 'disabled' | 'syncing';
+
+interface SealedSkillRuntimeProjection {
+  runtimeId?: string;
+  state: SealedSkillRuntimeState;
+  canToggle: boolean;
+}
+
+interface SealedSkillCardViewModel {
   skill: SealedSkillMetadata;
-  enabled: boolean;
+  runtimeProjection: SealedSkillRuntimeProjection;
+}
+
+interface SealedSkillCardProps {
+  model: SealedSkillCardViewModel;
   mutationLocked: boolean;
   uninstalling: boolean;
   cloudUploading: boolean;
@@ -954,8 +966,44 @@ interface ExportSkillPackageCardProps {
 type InstalledSkillSourceFilter = 'all' | 'built-in' | 'managed';
 type SealedSkillDeleteTarget = Pick<SealedSkillMetadata, 'skillKey' | 'name'>;
 
-function SealedSkillCard({ skill, enabled, mutationLocked, uninstalling, cloudUploading, onToggleSkill, onUninstallSkill, onUploadToCloud }: SealedSkillCardProps) {
+function normalizeRuntimeId(value?: string): string | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return normalized || undefined;
+}
+
+function buildSealedSkillCardModels(sealedSkills: SealedSkillMetadata[], runtimeSkills: Skill[]): SealedSkillCardViewModel[] {
+  const runtimeSkillsByKey = new Map<string, Skill[]>();
+  for (const skill of runtimeSkills) {
+    const existing = runtimeSkillsByKey.get(skill.id);
+    if (existing) existing.push(skill);
+    else runtimeSkillsByKey.set(skill.id, [skill]);
+  }
+
+  return sealedSkills.map((skill) => {
+    const supportedRuntimeIds = new Set((skill.runtimes ?? []).map(normalizeRuntimeId).filter((id): id is string => Boolean(id)));
+    const runtimeSkill = (runtimeSkillsByKey.get(skill.skillKey) ?? []).find((candidate) => {
+      const runtimeId = normalizeRuntimeId(candidate.runtimeId);
+      return supportedRuntimeIds.size === 0 || (runtimeId !== undefined && supportedRuntimeIds.has(runtimeId));
+    });
+    const runtimeId = normalizeRuntimeId(runtimeSkill?.runtimeId) ?? supportedRuntimeIds.values().next().value;
+    return {
+      skill,
+      runtimeProjection: {
+        runtimeId,
+        state: runtimeSkill ? (runtimeSkill.enabled ? 'enabled' : 'disabled') : 'syncing',
+        canToggle: skill.installed !== false,
+      },
+    };
+  });
+}
+
+function SealedSkillCard({ model, mutationLocked, uninstalling, cloudUploading, onToggleSkill, onUninstallSkill, onUploadToCloud }: SealedSkillCardProps) {
   const { t } = useTranslation('skills');
+  const { skill, runtimeProjection } = model;
+  const enabled = runtimeProjection.state === 'enabled';
+  const runtimeStateLabel = runtimeProjection.state === 'syncing'
+    ? t('availability.unknown')
+    : enabled ? t('detail.enabled') : t('detail.disabled');
   const runtimeLabel = skill.runtimes?.length ? skill.runtimes.join(', ') : t('sealed.runtimeAny');
 
   return (
@@ -987,7 +1035,7 @@ function SealedSkillCard({ skill, enabled, mutationLocked, uninstalling, cloudUp
       <AgentResourceFooter className="flex-wrap">
         <span className={cn('inline-flex items-center gap-2', enabled && 'text-emerald-700 dark:text-emerald-400')}>
           <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />
-          {enabled ? t('detail.enabled') : t('detail.disabled')}
+          {runtimeStateLabel}
         </span>
         <div className="flex items-center gap-2">
           <Button
@@ -1003,8 +1051,8 @@ function SealedSkillCard({ skill, enabled, mutationLocked, uninstalling, cloudUp
           <Switch
             checked={enabled}
             onCheckedChange={(checked) => onToggleSkill(skill.skillKey, checked)}
-            disabled={mutationLocked || uninstalling}
-            aria-label={`${enabled ? t('detail.enabled') : t('detail.disabled')}: ${skill.name || skill.skillKey}`}
+            disabled={mutationLocked || uninstalling || !runtimeProjection.canToggle}
+            aria-label={`${runtimeStateLabel}: ${skill.name || skill.skillKey}`}
           />
         </div>
       </AgentResourceFooter>
@@ -1343,8 +1391,9 @@ export function Skills() {
     if (isSealedTabActive) {
       void fetchSealedSkills();
       void fetchCloudSkillPackages();
+      void fetchSkills({ force: true, silent: true, fresh: true });
     }
-  }, [fetchCloudSkillPackages, fetchSealedSkills, isSealedTabActive]);
+  }, [fetchCloudSkillPackages, fetchSealedSkills, fetchSkills, isSealedTabActive]);
 
   useEffect(() => {
     if (skillsHeavyContentReady) {
@@ -1457,6 +1506,7 @@ export function Skills() {
     if (isSealedTabActive) {
       void fetchSealedSkills();
       void fetchCloudSkillPackages();
+      void fetchSkills({ force: true, silent: true, fresh: true });
       return;
     }
     void fetchSkills({ force: true, fresh: true });
@@ -1792,7 +1842,11 @@ export function Skills() {
     ? Boolean(installing[selectedMarketplaceSkill.slug] || installing[selectedInstalledMarketplaceSkill?.id ?? ''])
     : false;
   const packageSearch = sealedQuery.trim().toLowerCase();
-  const filteredSealedSkills = sealedSkills.filter((skill) => [skill.name, skill.skillKey, skill.description].some((value) => value?.toLowerCase().includes(packageSearch)));
+  const sealedSkillCardModels = useMemo(() => buildSealedSkillCardModels(sealedSkills, safeSkills), [sealedSkills, safeSkills]);
+  const filteredSealedSkillCardModels = useMemo(
+    () => sealedSkillCardModels.filter(({ skill }) => [skill.name, skill.skillKey, skill.description].some((value) => value?.toLowerCase().includes(packageSearch))),
+    [packageSearch, sealedSkillCardModels],
+  );
   const filteredCloudPackages = cloudPackages.filter((item) => [item.name, item.skillKey, item.packageId, item.fileName, item.description].some((value) => value?.toLowerCase().includes(packageSearch)));
   const filteredExportableSkills = exportableSkills.filter((skill) => [skill.name, skill.id, skill.description].some((value) => value?.toLowerCase().includes(packageSearch)));
   const resourceGridClassName = view === 'list' ? 'md:grid-cols-1 xl:grid-cols-1' : undefined;
@@ -1983,7 +2037,7 @@ export function Skills() {
                   <LoadingSpinner size="lg" />
                 </CardContent>
               </Card>
-            ) : filteredSealedSkills.length === 0 ? (
+            ) : filteredSealedSkillCardModels.length === 0 ? (
               <Card>
                 <CardContent className="flex flex-col items-center justify-center py-12">
                   <Lock className="h-12 w-12 text-muted-foreground mb-4" />
@@ -1992,14 +2046,13 @@ export function Skills() {
               </Card>
             ) : (
               <AgentResourceGrid className={resourceGridClassName}>
-                {filteredSealedSkills.map((skill) => (
+                {filteredSealedSkillCardModels.map((model) => (
                   <SealedSkillCard
-                    key={skill.skillKey}
-                    skill={skill}
-                    enabled={skillById.get(skill.skillKey)?.enabled ?? false}
-                    mutationLocked={Boolean(mutatingBySkillId[skill.skillKey])}
-                    uninstalling={Boolean(uninstallingBySkillKey[skill.skillKey])}
-                    cloudUploading={Boolean(cloudUploadingBySkillKey[skill.skillKey])}
+                    key={model.skill.skillKey}
+                    model={model}
+                    mutationLocked={Boolean(mutatingBySkillId[model.skill.skillKey])}
+                    uninstalling={Boolean(uninstallingBySkillKey[model.skill.skillKey])}
+                    cloudUploading={Boolean(cloudUploadingBySkillKey[model.skill.skillKey])}
                     onToggleSkill={handleToggleSkillQuick}
                     onUninstallSkill={handleUninstallSealedSkillQuick}
                     onUploadToCloud={handleUploadInstalledSkillPackageToCloud}

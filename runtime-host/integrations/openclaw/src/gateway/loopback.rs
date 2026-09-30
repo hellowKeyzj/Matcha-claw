@@ -14,8 +14,9 @@ use tokio::sync::Mutex;
 
 use crate::{
     gateway::request::{
-        OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest, decode_browser_request,
-        decode_mcp_app_request,
+        OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest,
+        OpenClawQuestionResolveGatewayRequest, decode_browser_request, decode_mcp_app_request,
+        decode_question_resolve_request,
     },
     port::OpenClawGatewayRequestOutcome,
 };
@@ -33,9 +34,12 @@ const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_EXECUTE_BYTES: usize = 1_000_000;
 const BROWSER_SCOPE: &str = "openclaw.browser";
 const MCP_APP_SCOPE: &str = "openclaw.mcpApp";
+const QUESTION_SCOPE: &str = "openclaw.question";
 const BROWSER_OPERATION: &str = "browser.request";
+const QUESTION_RESOLVE_OPERATION: &str = "question.resolve";
 const BROWSER_SUBJECT: &str = "openclaw-browser";
 const MCP_APP_SUBJECT: &str = "openclaw-mcp-app";
+const QUESTION_SUBJECT: &str = "openclaw-question";
 
 pub type OpenClawGatewayCapabilityFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -48,6 +52,11 @@ pub trait OpenClawGatewayCapabilityPort: Send + Sync {
     fn mcp_app_request(
         &self,
         request: OpenClawMcpAppGatewayRequest,
+    ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
+
+    fn question_resolve(
+        &self,
+        request: OpenClawQuestionResolveGatewayRequest,
     ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
 }
 
@@ -150,6 +159,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
     let outcome = match decoded.invocation {
         Invocation::Browser(request) => dependencies.gateway.browser_request(request).await,
         Invocation::McpApp(request) => dependencies.gateway.mcp_app_request(request).await,
+        Invocation::QuestionResolve(request) => dependencies.gateway.question_resolve(request).await,
     };
     match outcome {
         Ok(outcome) => response_for_outcome(outcome),
@@ -181,6 +191,7 @@ struct RouteAuthorization {
 enum Invocation {
     Browser(OpenClawBrowserGatewayRequest),
     McpApp(OpenClawMcpAppGatewayRequest),
+    QuestionResolve(OpenClawQuestionResolveGatewayRequest),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,6 +234,16 @@ impl DecodeRequest {
                     ),
                 })
             }
+            ("openclaw.question", QUESTION_RESOLVE_OPERATION) => Ok(Self {
+                authorization: RouteAuthorization {
+                    scope: QUESTION_SCOPE,
+                    capability: QUESTION_RESOLVE_OPERATION.to_owned(),
+                    subject: QUESTION_SUBJECT,
+                },
+                invocation: Invocation::QuestionResolve(
+                    decode_question_resolve_request(wire.input).map_err(|_| DecodeError)?,
+                ),
+            }),
             _ => Err(DecodeError),
         }
     }

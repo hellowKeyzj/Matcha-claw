@@ -155,6 +155,23 @@ impl OpenClawGateway {
         gateway_request_outcome(self.client.rpc_mutation(request).await)
     }
 
+    pub async fn question_resolve(
+        &self,
+        request: crate::gateway::request::OpenClawQuestionResolveGatewayRequest,
+    ) -> OpenClawGatewayRequestOutcome {
+        let request = match wire::question_resolve_request(
+            next_request_id("question-resolve"),
+            request.id,
+            request.answers,
+            request.resolved_by,
+            request.resolution_id,
+        ) {
+            Ok(request) => request,
+            Err(_) => return OpenClawGatewayRequestOutcome::Rejected,
+        };
+        gateway_request_outcome(self.client.rpc_mutation(request).await)
+    }
+
     pub fn control_ui_url(&self) -> String {
         self.client.control_ui_url()
     }

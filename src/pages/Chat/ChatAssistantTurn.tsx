@@ -463,7 +463,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
       .map(buildRuntimeSurfaceDescriptor)
       .filter((descriptor): descriptor is ChatRuntimeSurfaceDescriptor => descriptor != null);
     if (descriptors.length === 0) {
-      return <ToolCardList tools={tools} collapseVersion={collapseVersion} />;
+      return <ToolCardList tools={tools} collapseVersion={collapseVersion} sessionIdentity={sessionIdentity} />;
     }
     return (
       <div
@@ -471,10 +471,10 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
         className="w-full cursor-pointer"
         onClick={() => openChatRuntimeSurface(descriptors[descriptors.length - 1]!)}
       >
-        <ToolCardList tools={tools} collapseVersion={collapseVersion} />
+        <ToolCardList tools={tools} collapseVersion={collapseVersion} sessionIdentity={sessionIdentity} />
       </div>
     );
-  }, [collapseVersion]);
+  }, [collapseVersion, sessionIdentity]);
   if (!hasContentSegments && visibleDerivedAttachedFiles.length === 0 && !pendingMode) {
     return null;
   }

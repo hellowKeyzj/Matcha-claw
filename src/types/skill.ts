@@ -20,6 +20,7 @@ export type SkillUnavailableReason = 'disabled' | 'missingRequirements' | 'ineli
 
 export interface Skill {
   id: string;
+  runtimeId?: string;
   slug?: string;
   name: string;
   description: string;

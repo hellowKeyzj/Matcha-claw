@@ -418,6 +418,13 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
             };
             let _ = reply.send(result);
         }
+        PeerQuery::OpenClawQuestionResolve { request, reply } => {
+            let result = match shared.admission().admit_request() {
+                Ok(()) => Ok(shared.open_claw().question_resolve(request).await),
+                Err(error) => Err(error),
+            };
+            let _ = reply.send(result);
+        }
     }
 }
 

@@ -82,6 +82,7 @@ export interface SessionRenderAssistantBubbleToolResult {
 export interface SessionRenderToolCard {
   id: string;
   toolCallId?: string;
+  runId?: string;
   parentMessageId?: string;
   name: string;
   displayTitle: string;

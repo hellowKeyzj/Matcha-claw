@@ -359,15 +359,15 @@ async function readMatchaSealedSkillFile(filePath, signal) {
       'const instructionTool = typeof instructionContent.get(instructionPath) === "string" || instructionPath.startsWith(MATCHA_SEALED_SKILL_PREFIX) ? virtualRead ??= createOpenClawReadTool(eraseSessionFileTool(createReadTool("/", {',
       patchId,
     );
-    const virtualReadPatch = replaceOptionalOnce(
-      source,
-      `access: async (filePath) => void readContent(filePath),
-						readFile: async (filePath) => Buffer.from(readContent(filePath), "utf8")`,
-      `access: async (filePath) => { await readContent(filePath, signal); },
-						readFile: async (filePath) => Buffer.from(await readContent(filePath, signal), "utf8")`,
-      patchId,
+    const virtualReadPattern = /access: async \(filePath\) => void readContent\(filePath\),\n(\s*)readFile: async \(filePath\) => Buffer\.from\(readContent\(filePath\), "utf8"\)/g;
+    const virtualReadMatches = [...source.matchAll(virtualReadPattern)];
+    if (virtualReadMatches.length !== 1) {
+      throw new Error(`${patchId}: expected one virtual read operation match, found ${virtualReadMatches.length}`);
+    }
+    source = source.replace(
+      virtualReadPattern,
+      `access: async (filePath) => { await readContent(filePath, signal); },\n${virtualReadMatches[0][1]}readFile: async (filePath) => Buffer.from(await readContent(filePath, signal), "utf8")`,
     );
-    source = virtualReadPatch.source;
     changed = true;
   } else if (!source.includes('function rememberMatchaSealedSkillMeteringBinding(')) {
     source = replaceOnce(
@@ -595,7 +595,11 @@ function loadMatchaSealedSkillRecords(dir) {`,
     source = replaceOnce(source, buggyManagedAndSealed, managedOnly, patchId);
     changed = true;
   }
-  const workspaceSkillsOnly = `	const workspaceSkills = loadSkills({ dir: workspaceSkillsDir, source: "openclaw-workspace" });`;
+  const workspaceSkillsCompact = `	const workspaceSkills = loadSkills({ dir: workspaceSkillsDir, source: "openclaw-workspace" });`;
+  const workspaceSkillsBlock = `	const workspaceSkills = loadSkills({
+		dir: workspaceSkillsDir,
+		source: "openclaw-workspace"
+	});`;
   const allOrdinaryFilteredSealed = `	const ordinarySkillKeys = new Set([
 		...bundledSkills,
 		...custodianSkills,
@@ -608,7 +612,11 @@ function loadMatchaSealedSkillRecords(dir) {`,
 	].map(resolveLoadedSkillRecordKey));
 	const sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir).filter((record) => !ordinarySkillKeys.has(resolveLoadedSkillRecordKey(record)));`;
   if (!source.includes(allOrdinaryFilteredSealed)) {
-    source = replaceOnce(source, workspaceSkillsOnly, `${workspaceSkillsOnly}\n${allOrdinaryFilteredSealed}`, patchId);
+    if (source.includes(workspaceSkillsBlock)) {
+      source = replaceOnce(source, workspaceSkillsBlock, `${workspaceSkillsBlock}\n${allOrdinaryFilteredSealed}`, patchId);
+    } else {
+      source = replaceOnce(source, workspaceSkillsCompact, `${workspaceSkillsCompact}\n${allOrdinaryFilteredSealed}`, patchId);
+    }
     changed = true;
   }
   const buggyOrder = `for (const record of managedSkills) mergeRecord(record);

@@ -60,6 +60,14 @@ function decisionFor(value: unknown) {
       subject: 'openclaw-mcp-app',
     } as const;
   }
+  if (value.id === 'openclaw.question' && value.operationId === 'question.resolve') {
+    return {
+      endpoint: EXECUTE_PATH,
+      scope: 'openclaw.question',
+      capability: 'question.resolve',
+      subject: 'openclaw-question',
+    } as const;
+  }
   return null;
 }
 

@@ -46,6 +46,7 @@ const SESSION_APPROVAL_CAPABILITY_ID = 'session.approval';
 const SESSION_MODEL_SELECTION_CAPABILITY_ID = 'session.modelSelection';
 const OPENCLAW_BROWSER_CAPABILITY_ID = 'openclaw.browser';
 const OPENCLAW_MCP_APP_CAPABILITY_ID = 'openclaw.mcpApp';
+const OPENCLAW_QUESTION_CAPABILITY_ID = 'openclaw.question';
 const OPENCLAW_LOCAL_ENDPOINT = { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' } as const;
 const CAPABILITY_SCOPE_CACHE_TTL_MS = 5_000;
 const capabilityScopeCache = new Map<string, { scope: RuntimeScope; expiresAt: number }>();
@@ -1310,6 +1311,19 @@ export async function hostOpenClawMcpAppRequest<TResult = unknown>(
     scope: runtimeInstanceScope(OPENCLAW_LOCAL_ENDPOINT),
     target: null,
     input: requestInput,
+  }, options);
+}
+
+export async function hostOpenClawQuestionResolve<TResult = unknown>(
+  input: { id: string; answers: { answers: Record<string, string[]> }; resolvedBy?: string; resolutionId?: string },
+  options?: SessionCapabilityOptions,
+): Promise<TResult> {
+  return hostCapabilityExecute<TResult>({
+    id: OPENCLAW_QUESTION_CAPABILITY_ID,
+    operationId: 'question.resolve',
+    scope: runtimeInstanceScope(OPENCLAW_LOCAL_ENDPOINT),
+    target: null,
+    input,
   }, options);
 }
 

@@ -109,6 +109,13 @@ impl OpenClawDriver {
         self.gateway.lock().await.mcp_app_request(request).await
     }
 
+    pub async fn question_resolve(
+        &self,
+        request: crate::gateway::request::OpenClawQuestionResolveGatewayRequest,
+    ) -> crate::port::OpenClawGatewayRequestOutcome {
+        self.gateway.lock().await.question_resolve(request).await
+    }
+
     pub fn control_lease(&self) -> ControlLease {
         match self.owner().lease() {
             Some(lease) => ControlLease::probe(Arc::clone(&self.gateway), lease),

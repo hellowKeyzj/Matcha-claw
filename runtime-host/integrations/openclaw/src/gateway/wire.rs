@@ -35,6 +35,7 @@ pub const GATEWAY_STATUS_METHOD: &str = "status";
 pub const GATEWAY_LOGS_TAIL_METHOD: &str = "logs.tail";
 pub const MCP_SERVER_STATUS_LIST_METHOD: &str = "mcpServerStatus/list";
 pub const MCP_SESSION_SERVERS_UPDATE_METHOD: &str = "mcpSessionServers/update";
+pub(crate) const QUESTION_RESOLVE_METHOD: &str = "question.resolve";
 pub const SYSTEM_PRESENCE_SCOPE: &str = "operator.read";
 pub const GATEWAY_SESSION_SCOPES: &[&str] = &["operator.read", "operator.write", "operator.admin"];
 #[cfg(test)]
@@ -573,6 +574,28 @@ pub(crate) fn mcp_app_request(
         params.insert("standalone".into(), Value::Bool(standalone));
     }
     rpc_request(request_id, operation_id, Some(Value::Object(params)))
+}
+
+pub(crate) fn question_resolve_request(
+    request_id: String,
+    id: String,
+    answers: Value,
+    resolved_by: Option<String>,
+    resolution_id: Option<String>,
+) -> Result<RpcRequest, WireError> {
+    if !valid_native_string(&id, 4_096) || !answers.is_object() {
+        return Err(WireError::InvalidRequest);
+    }
+    let mut params = serde_json::Map::new();
+    params.insert("id".into(), Value::String(id));
+    params.insert("answers".into(), answers);
+    if let Some(resolved_by) = resolved_by {
+        params.insert("resolvedBy".into(), Value::String(resolved_by));
+    }
+    if let Some(resolution_id) = resolution_id {
+        params.insert("resolutionId".into(), Value::String(resolution_id));
+    }
+    rpc_request(request_id, QUESTION_RESOLVE_METHOD, Some(Value::Object(params)))
 }
 
 fn rpc_request(
