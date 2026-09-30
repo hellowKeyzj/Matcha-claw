@@ -78,31 +78,94 @@ impl OpenClawDriver {
     }
 
     pub(crate) async fn abort_session(&self, command: SessionAbortCommand) -> SessionAbortOutcome {
-        let session_key = match crate::session::protocol::SessionKey::try_new(command.session_key) {
+        use crate::session::{protocol, trace};
+        use sessions_module::trace as session_trace;
+
+        let started = std::time::Instant::now();
+        let trace_id = command.trace_id().map(str::to_owned);
+        let method = if command.run_id.is_some() {
+            protocol::CHAT_ABORT_METHOD
+        } else {
+            protocol::SESSIONS_ABORT_METHOD
+        };
+        trace::log_unscoped("openclaw.sessions.abort.request", serde_json::json!({
+            "traceId": trace_id,
+            "method": method,
+            "sessionKey": session_trace::id_shape(Some(&command.session_key)),
+            "runId": session_trace::id_shape(command.run_id.as_deref()),
+        }));
+        let session_key = match protocol::SessionKey::try_new(command.session_key) {
             Ok(session_key) => session_key,
-            Err(_) => return SessionAbortOutcome::Rejected,
+            Err(_) => {
+                trace::log_unscoped("openclaw.sessions.abort.invalid", serde_json::json!({ "traceId": trace_id, "method": method, "reason": "session-key", "elapsedMs": started.elapsed().as_millis() }));
+                return SessionAbortOutcome::Rejected;
+            }
         };
-        let params = match command.run_id {
-            Some(run_id) => match crate::session::protocol::RunId::try_new(run_id) {
-                Ok(run_id) => {
-                    crate::session::protocol::SessionAbortParams::new(session_key).for_run(run_id)
+        let (outcome, invocation_outcome, native_receipt) = match command.run_id {
+            Some(run_id) => {
+                let run_id = match protocol::RunId::try_new(run_id) {
+                    Ok(run_id) => run_id,
+                    Err(_) => {
+                        trace::log_unscoped("openclaw.sessions.abort.invalid", serde_json::json!({ "traceId": trace_id, "method": method, "reason": "run-id", "elapsedMs": started.elapsed().as_millis() }));
+                        return SessionAbortOutcome::Rejected;
+                    }
+                };
+                let params = protocol::ChatAbortParams::new(session_key).for_run(run_id);
+                match self.session_gateway.abort_chat(params).await {
+                    Ok(InvocationOutcome::Succeeded(result)) => (
+                        if result.aborted || !result.run_ids.is_empty() {
+                            SessionAbortOutcome::Succeeded
+                        } else {
+                            SessionAbortOutcome::Unknown
+                        },
+                        "succeeded",
+                        serde_json::json!({
+                            "ok": result.ok,
+                            "aborted": result.aborted,
+                            "runCount": result.run_ids.len(),
+                        }),
+                    ),
+                    Ok(InvocationOutcome::TargetRejected(_)) => (SessionAbortOutcome::Rejected, "target-rejected", Value::Null),
+                    Ok(InvocationOutcome::Cancelled) => (SessionAbortOutcome::Unknown, "cancelled", Value::Null),
+                    Ok(InvocationOutcome::Unknown) => (SessionAbortOutcome::Unknown, "unknown", Value::Null),
+                    Err(_) => (SessionAbortOutcome::Unknown, "error", Value::Null),
                 }
-                Err(_) => return SessionAbortOutcome::Rejected,
-            },
-            None => crate::session::protocol::SessionAbortParams::new(session_key),
+            }
+            None => {
+                let params = protocol::SessionAbortParams::new(session_key);
+                match self.session_gateway.abort_session(params).await {
+                    Ok(InvocationOutcome::Succeeded(result)) => (
+                        if result.status == protocol::SessionAbortStatus::Aborted {
+                            SessionAbortOutcome::Succeeded
+                        } else {
+                            SessionAbortOutcome::Unknown
+                        },
+                        "succeeded",
+                        serde_json::json!({
+                            "ok": result.ok,
+                            "status": match result.status {
+                                protocol::SessionAbortStatus::Aborted => "aborted",
+                                protocol::SessionAbortStatus::NoActiveRun => "no-active-run",
+                            },
+                            "hasAbortedRunId": result.aborted_run_id.is_some(),
+                        }),
+                    ),
+                    Ok(InvocationOutcome::TargetRejected(_)) => (SessionAbortOutcome::Rejected, "target-rejected", Value::Null),
+                    Ok(InvocationOutcome::Cancelled) => (SessionAbortOutcome::Unknown, "cancelled", Value::Null),
+                    Ok(InvocationOutcome::Unknown) => (SessionAbortOutcome::Unknown, "unknown", Value::Null),
+                    Err(_) => (SessionAbortOutcome::Unknown, "error", Value::Null),
+                }
+            }
         };
-        match self.session_gateway.abort_session(params).await {
-            Ok(InvocationOutcome::Succeeded(result))
-                if result.status == crate::session::protocol::SessionAbortStatus::Aborted =>
-            {
-                SessionAbortOutcome::Succeeded
-            }
-            Ok(InvocationOutcome::Succeeded(_)) => SessionAbortOutcome::Unknown,
-            Ok(InvocationOutcome::TargetRejected(_)) => SessionAbortOutcome::Rejected,
-            Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) | Err(_) => {
-                SessionAbortOutcome::Unknown
-            }
-        }
+        trace::log_unscoped("openclaw.sessions.abort.receipt", serde_json::json!({
+            "traceId": trace_id,
+            "method": method,
+            "invocationOutcome": invocation_outcome,
+            "nativeReceipt": native_receipt,
+            "outcome": outcome,
+            "elapsedMs": started.elapsed().as_millis(),
+        }));
+        outcome
     }
 
     pub(crate) async fn session_permission(
@@ -388,7 +451,6 @@ fn project_openclaw_create(
 ) -> SessionCreateOutcome {
     match outcome {
         InvocationOutcome::Succeeded(result) => {
-            let _ = result;
             sessions_module::create::project_created_session_view(
                 command.session_key().to_owned(),
                 Some(command.endpoint_session_id().to_owned()),
@@ -396,7 +458,12 @@ fn project_openclaw_create(
                 Some(command.agent_id().to_owned()),
                 epoch,
             )
-            .map(SessionCreateOutcome::Succeeded)
+            .map(|view| {
+                SessionCreateOutcome::Succeeded(SessionView {
+                    model_state: result.model_state(),
+                    ..view
+                })
+            })
             .unwrap_or(SessionCreateOutcome::Unknown)
         }
         InvocationOutcome::TargetRejected(_) => SessionCreateOutcome::TargetRejected,

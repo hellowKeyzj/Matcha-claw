@@ -181,13 +181,13 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
     set({ status: 'downloading', error: null });
     
     try {
-      const result = await invokeIpc<{
-        success: boolean;
-        error?: string;
-      }>('update:download');
-      
-      if (!result.success) {
-        set({ status: 'error', error: result.error || 'Failed to download update' });
+      const result = await invokeIpc<
+        | { accepted: true }
+        | { accepted: false; error: string }
+      >('update:download');
+
+      if (!result.accepted) {
+        set({ status: 'error', error: result.error });
       }
     } catch (error) {
       set({ status: 'error', error: String(error) });

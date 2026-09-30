@@ -1,6 +1,6 @@
 import type { JSX, ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { BookOpen, FileText, GitGraph, Home, RefreshCw, Search, Settings2, ShieldQuestion } from 'lucide-react';
+import { BookOpen, FileText, GitGraph, Home, ListChecks, MessageSquare, RefreshCw, Search, Settings2, ShieldQuestion, Wrench } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import type { WikiFileItem, WikiProject, WikiSourceView, WikiWorkspaceTab } from '../wiki-model';
@@ -15,6 +15,7 @@ export type LibraryWorkspaceProps = Readonly<{
   sourceView: WikiSourceView;
   busy: string | null;
   children: ReactNode;
+  questionPanel?: ReactNode;
   activity: ReactNode;
   onTabChange(tab: WikiWorkspaceTab): void;
   onSourceViewChange(view: WikiSourceView): void;
@@ -24,12 +25,17 @@ export type LibraryWorkspaceProps = Readonly<{
   onToggleDirectory(path: string): void;
 }>;
 
-const tabs: readonly { value: WikiWorkspaceTab; labelKey: string; icon: typeof BookOpen }[] = [
+const tabs: readonly { value: WikiWorkspaceTab; labelKey: string; defaultValue?: string; icon: typeof BookOpen }[] = [
   { value: 'wiki', labelKey: 'workspace.tabs.wiki', icon: BookOpen },
   { value: 'sources', labelKey: 'workspace.tabs.sources', icon: FileText },
   { value: 'review', labelKey: 'workspace.tabs.review', icon: ShieldQuestion },
+  { value: 'qa', labelKey: 'workspace.tabs.qa', defaultValue: '问答', icon: MessageSquare },
+  { value: 'lint', labelKey: 'workspace.tabs.lint', defaultValue: '检查', icon: ListChecks },
+  { value: 'research', labelKey: 'workspace.tabs.research', defaultValue: '研究', icon: Search },
   { value: 'search', labelKey: 'workspace.tabs.search', icon: Search },
   { value: 'graph', labelKey: 'workspace.tabs.graph', icon: GitGraph },
+  { value: 'search-settings', labelKey: 'workspace.tabs.searchSettings', defaultValue: '搜索与向量配置', icon: Settings2 },
+  { value: 'maintenance', labelKey: 'workspace.tabs.maintenance', defaultValue: '维护', icon: Wrench },
 ];
 
 export function LibraryWorkspace({
@@ -41,6 +47,7 @@ export function LibraryWorkspace({
   sourceView,
   busy,
   children,
+  questionPanel,
   activity,
   onTabChange,
   onSourceViewChange,
@@ -85,7 +92,7 @@ export function LibraryWorkspace({
                 return (
                   <TabsTrigger key={tab.value} value={tab.value} onClick={() => { if (tab.value === 'sources') onSourceViewChange('sources'); }} className="h-8 rounded-full px-3 text-sm data-[state=active]:bg-[hsl(var(--shell-surface-muted))]">
                     <Icon className="mr-2 h-4 w-4" />
-                    {t(tab.labelKey)}
+                    {t(tab.labelKey, { defaultValue: tab.defaultValue })}
                   </TabsTrigger>
                 );
               })}
@@ -116,9 +123,8 @@ export function LibraryWorkspace({
             </div>
           </div>
 
-          <TabsContent value={activeTab} className="m-0 min-h-0 flex-1 p-0">
-            {children}
-          </TabsContent>
+          {activeTab !== 'qa' ? <TabsContent value={activeTab} className="m-0 min-h-0 flex-1 p-0">{children}</TabsContent> : null}
+          {questionPanel ? <TabsContent value="qa" forceMount hidden={activeTab !== 'qa'} className="m-0 min-h-0 flex-1 p-0">{questionPanel}</TabsContent> : null}
         </section>
       </div>
 

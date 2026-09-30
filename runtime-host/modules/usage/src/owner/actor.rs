@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
 use foundation::execution::{LaneRetention, OwnerSpec};
+use platform::call::{CallContext, CallStatus};
 
 use crate::{
-    application::commands::{UsageCommand, UsageOwnerKey, UsageQuery},
+    application::{
+        call::{self, CallFailure, UsageCallDetail},
+        commands::{UsageCommand, UsageOwnerKey, UsageQuery},
+    },
     domain::model::{UsageEntry, UsageReadError},
     ports::{UsageRequestAdmission, UsageRuntimeDirectory},
 };
@@ -97,15 +101,17 @@ impl OwnerSpec for UsageOwner {
         query: Self::Query,
     ) {
         match query {
-            UsageQuery::Recent { limit, reply } => {
-                let _ = reply.send(recent(&shared, limit).await);
+            UsageQuery::Recent { limit, call, reply } => {
+                let _ = reply.send(recent(&shared, limit, call.as_ref()).await);
             }
             UsageQuery::SessionTimeseries {
                 agent_id,
                 session_id,
+                call,
                 reply,
             } => {
-                let _ = reply.send(session_timeseries(&shared, &agent_id, &session_id).await);
+                let _ = reply
+                    .send(session_timeseries(&shared, &agent_id, &session_id, call.as_ref()).await);
             }
             UsageQuery::DefaultLimit { reply } => {
                 let _ = reply.send(default_limit(&shared));
@@ -125,28 +131,84 @@ impl OwnerSpec for UsageOwner {
     }
 }
 
-async fn recent(shared: &UsageShared, limit: usize) -> Result<Vec<UsageEntry>, UsageReadError> {
-    if shared.admission.admit_usage_request().is_err() {
-        return Err(UsageReadError::Unavailable);
-    }
-    match shared.runtime_directory.usage_ops() {
+async fn recent(
+    shared: &UsageShared,
+    limit: usize,
+    context: Option<&CallContext<UsageCallDetail>>,
+) -> Result<Vec<UsageEntry>, UsageReadError> {
+    let detail = UsageCallDetail::recent(limit);
+    admit(shared, context, UsageCallDetail::recent(limit)).await?;
+    let result = match shared.runtime_directory.usage_ops() {
         Some(ops) => ops.usage_recent(limit).await,
         None => Err(UsageReadError::Unavailable),
-    }
+    };
+    settle(context, detail, &result).await;
+    result
 }
 
 async fn session_timeseries(
     shared: &UsageShared,
     agent_id: &str,
     session_id: &str,
+    context: Option<&CallContext<UsageCallDetail>>,
 ) -> Result<Vec<UsageEntry>, UsageReadError> {
-    if shared.admission.admit_usage_request().is_err() {
-        return Err(UsageReadError::Unavailable);
-    }
-    match shared.runtime_directory.usage_ops() {
+    admit(shared, context, UsageCallDetail::session_timeseries()).await?;
+    let result = match shared.runtime_directory.usage_ops() {
         Some(ops) => ops.session_usage_timeseries(agent_id, session_id).await,
         None => Err(UsageReadError::Unavailable),
+    };
+    settle(context, UsageCallDetail::session_timeseries(), &result).await;
+    result
+}
+
+async fn admit(
+    shared: &UsageShared,
+    context: Option<&CallContext<UsageCallDetail>>,
+    detail: UsageCallDetail,
+) -> Result<(), UsageReadError> {
+    if shared.admission.admit_usage_request().is_err() {
+        call::finish(
+            context,
+            CallStatus::Rejected,
+            &detail.failed(CallFailure::AdmissionClosed),
+        )
+        .await;
+        return Err(UsageReadError::Unavailable);
     }
+    if let Some(context) = context {
+        let recorded = async {
+            context.accepted().await?;
+            context.running().await
+        }
+        .await;
+        if let Err(error) = recorded {
+            eprintln!(
+                "[usage:call] admission record failed call_id={} error={error}",
+                context.id().as_str()
+            );
+            call::finish(
+                Some(context),
+                CallStatus::Rejected,
+                &detail.failed(CallFailure::RecordingUnavailable),
+            )
+            .await;
+            return Err(UsageReadError::Unavailable);
+        }
+    }
+    Ok(())
+}
+
+async fn settle(
+    context: Option<&CallContext<UsageCallDetail>>,
+    detail: UsageCallDetail,
+    result: &Result<Vec<UsageEntry>, UsageReadError>,
+) {
+    let status = if result.is_ok() {
+        CallStatus::Succeeded
+    } else {
+        CallStatus::Failed
+    };
+    call::finish(context, status, &detail.observed(result)).await;
 }
 
 fn default_limit(shared: &UsageShared) -> usize {

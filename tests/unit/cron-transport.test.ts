@@ -43,6 +43,8 @@ const job = {
   updatedAt: '1970-01-01T00:00:00.001Z',
 };
 
+const receipt = { callId: 'a'.repeat(32), accepted: true };
+
 const snapshot = {
   success: true,
   ready: true,
@@ -55,10 +57,10 @@ const snapshot = {
 describe('Electron Main cron transport', () => {
   it('signs and sends only the fixed Cron create DTO', async () => {
     const signDecision = vi.fn().mockReturnValue('signed-decision');
-    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => job });
+    const fetcher = vi.fn().mockResolvedValue({ status: 202, json: async () => receipt });
     const transport = createCronTransport({ verificationKey: 'public', signDecision }, 34_116, fetcher);
 
-    await expect(transport.create(createRequest)).resolves.toEqual({ status: 200, body: job });
+    await expect(transport.create(createRequest)).resolves.toEqual({ status: 202, body: receipt });
     expect(signDecision).toHaveBeenCalledWith(expect.objectContaining({
       endpoint: '/api/cron/jobs/create',
       scope: 'cron:write',
@@ -70,18 +72,58 @@ describe('Electron Main cron transport', () => {
       headers: expect.objectContaining({ Authorization: 'Bearer signed-decision' }),
       body: JSON.stringify(createRequest),
     }));
+    fetcher.mockResolvedValueOnce({ status: 200, json: async () => job });
+    const resultRequest = { callId: receipt.callId, command: 'create' };
+    await expect(transport.result(resultRequest)).resolves.toEqual({ status: 200, body: job });
+    expect(signDecision).toHaveBeenLastCalledWith(expect.objectContaining({
+      endpoint: '/api/cron/results', scope: 'cron:write', capability: 'scheduler.cron', subject: 'cron-crud',
+    }));
+    expect(fetcher).toHaveBeenLastCalledWith('http://127.0.0.1:34116/api/cron/results', expect.objectContaining({
+      method: 'POST', body: JSON.stringify(resultRequest),
+    }));
+    for (const invalid of [
+      { status: 200, json: async () => job },
+      { status: 202, json: async () => ({ ...receipt, extra: true }) },
+      { status: 202, json: async () => ({ ...receipt, accepted: false }) },
+    ]) {
+      fetcher.mockResolvedValueOnce(invalid);
+      await expect(transport.create(createRequest)).resolves.toEqual({ status: 503, body: { success: false, error: 'Cron service is unavailable' } });
+    }
   });
 
   it('sends only a target-bound Cron update DTO', async () => {
     const signDecision = vi.fn().mockReturnValue('signed-decision');
-    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => job });
+    const fetcher = vi.fn().mockResolvedValue({ status: 202, json: async () => receipt });
     const transport = createCronTransport({ verificationKey: 'public', signDecision }, 34_116, fetcher);
 
-    await expect(transport.update(updateRequest)).resolves.toEqual({ status: 200, body: job });
+    await expect(transport.update(updateRequest)).resolves.toEqual({ status: 202, body: receipt });
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:34116/api/cron/jobs/update', expect.objectContaining({
       method: 'POST',
       body: JSON.stringify(updateRequest),
     }));
+    const resultRequest = { callId: receipt.callId, command: 'update', jobId: 'job-1' };
+    fetcher.mockResolvedValueOnce({ status: 200, json: async () => job });
+    await expect(transport.result(resultRequest)).resolves.toEqual({ status: 200, body: job });
+    fetcher.mockResolvedValueOnce({ status: 200, json: async () => ({ ...job, id: 'job-2' }) });
+    await expect(transport.result(resultRequest)).resolves.toMatchObject({ status: 503 });
+    fetcher.mockResolvedValueOnce({ status: 200, json: async () => ({ ...job, private: 'secret' }) });
+    await expect(transport.result(resultRequest)).resolves.toMatchObject({ status: 503 });
+    for (const invalid of [
+      { ...resultRequest, command: 'toggle' },
+      { ...resultRequest, command: 'create' },
+      { callId: receipt.callId, command: 'update' },
+      { ...resultRequest, extra: true },
+    ]) {
+      const count = fetcher.mock.calls.length;
+      await expect(transport.result(invalid)).resolves.toMatchObject({ status: 503 });
+      expect(fetcher).toHaveBeenCalledTimes(count);
+    }
+    for (const [status, error] of [[409, 'Cron result is not ready'], [404, 'Cron result is unavailable or expired']] as const) {
+      fetcher.mockResolvedValueOnce({ status, json: async () => ({ success: false, error }) });
+      await expect(transport.result(resultRequest)).resolves.toEqual({ status, body: { success: false, error } });
+    }
+    fetcher.mockResolvedValueOnce({ status: 200, json: async () => ({ removed: false }) });
+    await expect(transport.result({ ...resultRequest, command: 'delete' })).resolves.toEqual({ status: 200, body: { removed: false } });
   });
 
   it('fails closed before signing an update whose input job id differs from its target', async () => {
@@ -286,7 +328,7 @@ describe('Electron Main cron transport', () => {
       { method: 'GET' } as never,
       response as never,
       new URL('http://127.0.0.1/api/cron/session-history?sessionKey=agent%3Amain%3Acron%3Ajob-1&limit=999'),
-      { list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), toggle: vi.fn(), history },
+      { list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), toggle: vi.fn(), trigger: vi.fn(), result: vi.fn(), history },
     );
 
     expect(handled).toBe(true);
@@ -302,7 +344,7 @@ describe('Electron Main cron transport', () => {
       { method: 'GET' } as never,
       response as never,
       new URL('http://127.0.0.1/api/cron/session-history?sessionKey=agent%3Amain%3Achat%3Ajob-1'),
-      { list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), toggle: vi.fn(), history },
+      { list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), toggle: vi.fn(), trigger: vi.fn(), result: vi.fn(), history },
     );
 
     expect(handled).toBe(true);
@@ -321,7 +363,7 @@ describe('Electron Main cron transport', () => {
       vi.fn(),
     );
 
-    expect(Object.keys(transport)).toEqual(['list', 'create', 'update', 'remove', 'toggle', 'trigger', 'history']);
+    expect(Object.keys(transport)).toEqual(['list', 'create', 'update', 'remove', 'toggle', 'trigger', 'result', 'history']);
     expect('fire' in transport).toBe(false);
     expect('repairDelivery' in transport).toBe(false);
   });

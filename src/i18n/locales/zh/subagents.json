@@ -99,20 +99,8 @@
   "editDialogTitle": "编辑子Agent",
   "manageTitle": "配置人设：{{agentId}}",
   "manage": {
-    "promptLabel": "提示词",
-    "promptPlaceholder": "描述这个子Agent要为 AGENTS.md / SOUL.md / USER.md / MEMORY.md 生成什么内容",
-    "includeCurrentFilesLabel": "带当前文件",
-    "generateDraft": "生成草稿",
-    "generatingDraft": "生成中...",
-    "applyingDraft": "应用中...",
-    "generateDiffPreview": "生成 Diff 预览",
-    "diffPreviewTitle": "Diff 预览",
     "currentFilesTitle": "当前文件",
     "emptyFileContent": "(空)",
-    "confirmApplyDraft": "确认应用草稿",
-    "cancelDraft": "取消草稿",
-    "applyDraftSuccess": "草稿已成功应用。",
-    "rawOutputTitle": "模型原始输出",
     "noAgentSelected": "请选择一个 Agent 后再配置人设。"
   },
   "deleteDialog": {
@@ -129,7 +117,6 @@
   },
   "form": {
     "basicInfo": "基本信息",
-    "aiConfig": "AI 配置",
     "skillConfig": "技能配置",
     "useAllSkills": "使用全部技能",
     "skillsLoading": "技能加载中...",
@@ -146,8 +133,6 @@
     "selectModel": "请选择已配置模型",
     "useDefaultModel": "继承全局默认模型",
     "modelUnavailable": "未找到可用的已配置模型。",
-    "initialPrompt": "系统提示词",
-    "initialPromptPlaceholder": "可选：先写一段该 Agent 的系统提示词",
     "avatar": "头像",
     "avatarStyles": {
       "pixelArt": "像素风",
@@ -208,6 +193,26 @@
   },
   "cloudPackages": {
     "title": "云端 Agent Package",
+    "mineTitle": "我的云端包",
+    "mineDescription": "上传后保留为草稿，点击发布才会进入市场。",
+    "mineEmpty": "暂无已上传的包。",
+    "marketTitle": "资源包市场",
+    "loading": "正在加载资源包…",
+    "loadFailed": "加载资源包失败，请重试。",
+    "retry": "重试",
+    "publish": "发布",
+    "publishing": "发布中…",
+    "published": "资源包已发布",
+    "publishFailed": "发布资源包失败",
+    "uploadFailed": "上传资源包失败",
+    "installFailed": "安装资源包失败",
+    "installed": "已安装",
+    "installing": "安装中…",
+    "status": { "draft": "草稿", "published": "已发布", "disabled": "已停用", "unknown": "未知状态" },
+    "errors": {
+      "MATCHA_PACKAGE_CLOUD_ENVELOPE_REQUIRED": "请重新为云端导出资源包后上传。",
+      "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "该版本不能发布，请刷新我的云端包。"
+    },
     "empty": "暂无云端 Agent Package。",
     "install": "安装"
   },

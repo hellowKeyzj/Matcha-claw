@@ -190,7 +190,6 @@ fn missing_canonical_config_is_initialized_with_state_dir_and_without_overlay_en
             "profile": "full",
             "sessions": { "visibility": "all" },
             "deny": [
-                "skill_workshop",
                 "gateway",
                 "nodes",
                 "progress_card",
@@ -249,7 +248,6 @@ fn canonical_initialization_preserves_existing_configuration() {
             "profile": "full",
             "sessions": { "visibility": "all" },
             "deny": [
-                "skill_workshop",
                 "gateway",
                 "nodes",
                 "progress_card",

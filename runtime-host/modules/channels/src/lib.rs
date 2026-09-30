@@ -29,7 +29,7 @@ const EFFECTS: &[EffectKind] = &[EffectKind::OwnerTask, EffectKind::Route];
 
 pub use owner::actor::ChannelOwnerInput;
 
-pub use application::trace;
+pub use application::{call, trace};
 pub use domain::{catalog, control, credentials, delete, login, status};
 pub use projection::config_read;
 
@@ -42,6 +42,11 @@ pub struct ChannelModule {
 impl ChannelModule {
     fn new(handle: ChannelHandle, endpoint: RuntimeEndpoint) -> Self {
         Self { handle, endpoint }
+    }
+
+    pub fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
+        self.handle = self.handle.with_call_recorder(recorder);
+        self
     }
 
     pub fn descriptor(&self, verifier: Arc<Mutex<CapabilityDecisionVerifier>>) -> ModuleDescriptor {

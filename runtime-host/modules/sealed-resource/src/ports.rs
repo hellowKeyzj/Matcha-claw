@@ -1,6 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use platform::{
+    call::{CallContext, CallRecorder, CallStatus},
     capability::CapabilityDecisionVerifier,
     module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
     state_dir::CanonicalStateDir,
@@ -10,9 +11,11 @@ use tokio::sync::Mutex;
 
 use crate::{
     api::{
-        SealedCloudPackageMetadata, SealedCloudPackageType, SealedPackageAuthorizationKey,
-        SealedPackageAuthorizationKeyring, SealedResourceError, SealedResourceRead, now_millis,
+        SealedCloudPackageEntry, SealedCloudPackageMetadata, SealedCloudPackageType,
+        SealedPackageAuthorizationKey, SealedPackageAuthorizationKeyring, SealedResourceError,
+        SealedResourceRead, now_millis,
     },
+    call::{AuthorizationValidity, SealedResourceCallDetail, safe_digest},
     domain::{AgentKey, PackageRelativePath, SkillKey},
     store::{
         SealedAgentCatalogEntry, SealedAgentInstallPlan, SealedAgentPackageExport,
@@ -42,6 +45,7 @@ pub struct SealedResourceModule {
     skills: Arc<dyn skills_module::SealedSkillStorePort>,
     agents: Arc<dyn subagents::SealedAgentStorePort>,
     authorization_keyring: Arc<SealedPackageAuthorizationKeyring>,
+    call_recorder: Option<CallRecorder>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,7 +70,13 @@ impl SealedResourceModule {
             )),
             agents: Arc::new(SealedAgentStoreAdapter::new(agent_store, runtime_token)),
             authorization_keyring,
+            call_recorder: None,
         }
+    }
+
+    pub fn with_call_recorder(mut self, recorder: CallRecorder) -> Self {
+        self.call_recorder = Some(recorder);
+        self
     }
 
     pub fn openclaw(
@@ -120,6 +130,127 @@ impl SealedResourceModule {
             authorization_key,
             lease_expires_at_ms,
         )
+    }
+
+    pub(crate) async fn authorize_package(
+        &self,
+        package_sha256: String,
+        authorization_key: Result<SealedPackageAuthorizationKey, SealedResourceError>,
+        lease_expires_at_ms: Result<u64, SealedResourceError>,
+    ) -> Result<(), SealedResourceError> {
+        let mut detail = SealedResourceCallDetail::default();
+        detail.package_sha256 = safe_digest(&package_sha256);
+        let call = self.begin_call("authorizePackage", &detail).await?;
+        let result = authorization_key.and_then(|key| {
+            self.register_authorization_key(package_sha256, key, lease_expires_at_ms?)
+        });
+        detail.authorization = match result {
+            Ok(()) => Some(AuthorizationValidity::Valid),
+            Err(SealedResourceError::Rejected | SealedResourceError::RejectedWith(_)) => {
+                Some(AuthorizationValidity::Invalid)
+            }
+            Err(_) => None,
+        };
+        self.finish_call(call, &mut detail, &result).await;
+        result
+    }
+
+    pub async fn list_cloud_packages(
+        &self,
+    ) -> Result<Vec<SealedCloudPackageEntry>, SealedResourceError> {
+        let mut detail = SealedResourceCallDetail::default();
+        let call = self.begin_call("listCloudPackages", &detail).await?;
+        let result = (|| {
+            let mut packages = self.skill_store.cloud_packages()?;
+            packages.extend(self.agent_store.cloud_packages()?);
+            packages.sort_by(|left, right| left.package_sha256.cmp(&right.package_sha256));
+            packages.dedup_by(|left, right| left.package_sha256 == right.package_sha256);
+            Ok(packages)
+        })();
+        if let Ok(packages) = &result {
+            detail.catalog(packages);
+        }
+        self.finish_call(call, &mut detail, &result).await;
+        result
+    }
+
+    pub async fn clear_authorizations(&self) -> Result<(), SealedResourceError> {
+        let mut detail = SealedResourceCallDetail::default();
+        // Audit failure must not prevent logout from revoking private authorization keys.
+        let call = self
+            .begin_call("clearAuthorizations", &detail)
+            .await
+            .ok()
+            .flatten();
+        let result = self.authorization_keyring.clear();
+        if result.is_ok() {
+            detail.authorization = Some(AuthorizationValidity::Cleared);
+        }
+        self.finish_call(call, &mut detail, &result).await;
+        result
+    }
+
+    pub(crate) async fn reject_call(&self, command: &'static str) {
+        let Some(recorder) = &self.call_recorder else {
+            return;
+        };
+        let mut detail = SealedResourceCallDetail::default();
+        detail.error = Some(crate::call::CallError::Rejected);
+        match recorder.begin(command, &detail).await {
+            Ok(call) => {
+                if call.finish(CallStatus::Rejected, &detail).await.is_err() {
+                    eprintln!(
+                        "[sealed-resource:call] phase=finish outcome=audit-unavailable callId={}",
+                        call.id().as_str()
+                    );
+                }
+            }
+            Err(_) => eprintln!("[sealed-resource:call] phase=begin outcome=audit-unavailable"),
+        }
+    }
+
+    async fn begin_call(
+        &self,
+        command: &'static str,
+        detail: &SealedResourceCallDetail,
+    ) -> Result<Option<CallContext<SealedResourceCallDetail>>, SealedResourceError> {
+        let Some(recorder) = &self.call_recorder else {
+            return Ok(None);
+        };
+        let call = recorder.begin(command, detail).await.map_err(|_| {
+            eprintln!("[sealed-resource:call] phase=begin outcome=audit-unavailable");
+            SealedResourceError::Unknown
+        })?;
+        if call.running().await.is_err() {
+            eprintln!(
+                "[sealed-resource:call] phase=running outcome=audit-unavailable callId={}",
+                call.id().as_str()
+            );
+            let mut detail = detail.clone();
+            detail.error = Some(crate::call::CallError::AuditUnavailable);
+            if call.finish(CallStatus::Unknown, &detail).await.is_err() {
+                eprintln!("[sealed-resource:call] phase=finish outcome=audit-unavailable");
+            }
+            return Err(SealedResourceError::Unknown);
+        }
+        Ok(Some(call))
+    }
+
+    async fn finish_call<T>(
+        &self,
+        call: Option<CallContext<SealedResourceCallDetail>>,
+        detail: &mut SealedResourceCallDetail,
+        result: &Result<T, SealedResourceError>,
+    ) {
+        let status = detail.result(result);
+        if let Some(call) = call {
+            if call.finish(status, detail).await.is_err() {
+                eprintln!(
+                    "[sealed-resource:call] phase=finish outcome=audit-unavailable callId={}",
+                    call.id().as_str()
+                );
+            }
+        }
     }
 
     pub fn install_skill_package_path_with_cloud_metadata(
@@ -238,6 +369,7 @@ impl skills_module::SealedSkillStorePort for SealedSkillStoreAdapter {
         token: &str,
         skill_key: String,
         path: String,
+        expected_package_sha256: Option<&str>,
     ) -> Result<skills_module::SealedResourceRead, skills_module::SealedSkillError> {
         if !self
             .runtime_token
@@ -250,11 +382,16 @@ impl skills_module::SealedSkillStorePort for SealedSkillStoreAdapter {
             SkillKey::parse(skill_key).map_err(|_| skill_projection::rejected_error())?;
         let path =
             PackageRelativePath::parse(path).map_err(|_| skill_projection::rejected_error())?;
-        self.store
+        let read = self
+            .store
             .read_file(skill_key, path)
-            .map(SealedResourceReadProjectionInput)
-            .map(skill_projection::project_read)
-            .map_err(project_skill_error)
+            .map_err(project_skill_error)?;
+        if expected_package_sha256.is_some_and(|expected| expected != read.package_sha256()) {
+            return Err(skills_module::SealedSkillError::PackageChanged);
+        }
+        Ok(skill_projection::project_read(
+            SealedResourceReadProjectionInput(read),
+        ))
     }
 
     fn remove_sealed_skill(
@@ -454,6 +591,10 @@ impl skill_projection::SealedReadProjection for SealedResourceReadProjectionInpu
     fn metering_binding(&self) -> Option<&str> {
         self.0.metering_binding().map(|binding| binding.as_str())
     }
+
+    fn package_sha256(&self) -> &str {
+        self.0.package_sha256()
+    }
 }
 
 struct SealedResourceErrorProjectionInput(SealedResourceError);
@@ -485,7 +626,9 @@ fn project_skill_export(
 ) -> skills_module::SealedSkillPackageExport {
     skills_module::SealedSkillPackageExport::new(
         export.entry().skill_key().as_str().to_owned(),
-        export.package_path().to_string_lossy().into_owned(),
+        export.file_name().to_owned(),
+        export.package_sha256().to_owned(),
+        export.into_package_bytes(),
     )
 }
 
@@ -545,12 +688,13 @@ fn cloud_package_type(
 }
 
 fn project_agent_export(receipt: SealedAgentPackageExport) -> subagents::PackageExportReceipt {
+    let exported_at_ms = receipt.exported_at_ms();
     subagents::PackageExportReceipt::new(
         receipt.agent_key().as_str().to_owned(),
         receipt.file_name().to_owned(),
-        receipt.package_path().to_string_lossy().into_owned(),
-        receipt.size(),
-        receipt.exported_at_ms(),
+        receipt.package_sha256().to_owned(),
+        receipt.into_package_bytes(),
+        exported_at_ms,
     )
 }
 

@@ -205,6 +205,7 @@ function renderSkillConfigPanelHarness() {
       selectedSkillIds,
       availableSkillOptions,
       skillsLoading,
+      savingSkillId,
       toggleSkill,
     } = useAgentSkillConfig({ currentAgentId: 'test' });
 
@@ -213,6 +214,7 @@ function renderSkillConfigPanelHarness() {
         title="Skill Configuration · Test Agent"
         skillOptions={availableSkillOptions}
         skillsLoading={skillsLoading}
+        savingSkillId={savingSkillId}
         selectedSkillIds={selectedSkillIds}
         onToggleSkill={toggleSkill}
       />
@@ -436,6 +438,7 @@ describe('chat agent skill configuration', () => {
               { id: 'clawflow', name: 'Clawflow', description: 'flow', selectable: true },
             ],
             loading: false,
+            savingSkillId: null,
             selectedSkillIds: ['web-search'],
             skillPreview: null,
             onToggleSkill,
@@ -469,6 +472,7 @@ describe('chat agent skill configuration', () => {
             title: 'Skill Configuration · Test Agent',
             options: [],
             loading: false,
+            savingSkillId: null,
             selectedSkillIds: [],
             skillPreview: {
               skillId: 'clawflow',
@@ -547,6 +551,7 @@ describe('chat agent skill configuration', () => {
           },
         ]}
         skillsLoading={false}
+        savingSkillId={null}
         selectedSkillIds={['feishu-doc']}
         onToggleSkill={onToggleSkill}
       />,

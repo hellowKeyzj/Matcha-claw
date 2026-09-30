@@ -74,6 +74,7 @@ async fn handle_request(
                 Err(_) => return Response::bad_request(),
             };
             if !endpoint_supports_approval(command.endpoint) {
+                session.record_boundary_outcome("sessions.approvals.list", crate::call::SessionsCallOutcome::Unsupported).await;
                 return Response::from_pending(PendingApprovalsDelivery::Unsupported);
             }
             drop(verifier);
@@ -99,6 +100,7 @@ async fn handle_request(
                 Err(_) => return Response::bad_request(),
             };
             if !endpoint_supports_approval(command.endpoint) {
+                session.record_boundary_outcome("sessions.approvals.respond", crate::call::SessionsCallOutcome::Unsupported).await;
                 return Response::from_response(SessionApprovalDelivery::Unsupported);
             }
             drop(verifier);

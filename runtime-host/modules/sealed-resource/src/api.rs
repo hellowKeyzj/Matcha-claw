@@ -104,6 +104,22 @@ impl SealedPackageAuthorizationKeyring {
         Ok(())
     }
 
+    pub(crate) fn remove(&self, package_sha256: &str) -> Result<(), SealedResourceError> {
+        self.entries
+            .lock()
+            .map_err(|_| SealedResourceError::Unknown)?
+            .remove(package_sha256);
+        Ok(())
+    }
+
+    pub fn clear(&self) -> Result<(), SealedResourceError> {
+        self.entries
+            .lock()
+            .map_err(|_| SealedResourceError::Unknown)?
+            .clear();
+        Ok(())
+    }
+
     pub(crate) fn authorization_key(
         &self,
         package_sha256: &str,
@@ -149,6 +165,26 @@ struct SealedPackageAuthorizationKeyLease {
 pub enum SealedCloudPackageType {
     Agent,
     Skill,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedCloudPackageEntry {
+    pub package_version_id: String,
+    pub package_type: SealedCloudPackageType,
+    pub package_sha256: String,
+    pub file_name: String,
+}
+
+impl From<SealedCloudPackageMetadata> for SealedCloudPackageEntry {
+    fn from(metadata: SealedCloudPackageMetadata) -> Self {
+        Self {
+            package_version_id: metadata.package_version_id,
+            package_type: metadata.package_type,
+            package_sha256: metadata.package_sha256,
+            file_name: metadata.file_name,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -217,6 +253,12 @@ impl SealedCloudPackageMetadata {
         package_sha256: &str,
     ) -> Result<(), SealedResourceError> {
         if self.source != "cloud"
+            || self.package_version_id.trim().is_empty()
+            || self.package_version_id.len() > 4096
+            || self.package_version_id.contains('\0')
+            || self.file_name.trim().is_empty()
+            || self.file_name.len() > 4096
+            || self.file_name.contains('\0')
             || self.package_type != package_type
             || self.package_sha256 != package_sha256
         {
@@ -243,16 +285,19 @@ fn is_package_sha256(value: &str) -> bool {
 pub struct SealedResourceRead {
     content: Vec<u8>,
     metering_binding: Option<SealedResourceMeteringBinding>,
+    package_sha256: String,
 }
 
 impl SealedResourceRead {
     pub(crate) fn new(
         content: Vec<u8>,
         metering_binding: Option<SealedResourceMeteringBinding>,
+        package_sha256: String,
     ) -> Self {
         Self {
             content,
             metering_binding,
+            package_sha256,
         }
     }
 
@@ -262,6 +307,10 @@ impl SealedResourceRead {
 
     pub fn metering_binding(&self) -> Option<&SealedResourceMeteringBinding> {
         self.metering_binding.as_ref()
+    }
+
+    pub fn package_sha256(&self) -> &str {
+        &self.package_sha256
     }
 }
 
@@ -274,6 +323,7 @@ impl fmt::Debug for SealedResourceRead {
                 &format_args!("[REDACTED:{} bytes]", self.content.len()),
             )
             .field("metering_binding", &self.metering_binding)
+            .field("package_sha256", &self.package_sha256)
             .finish()
     }
 }

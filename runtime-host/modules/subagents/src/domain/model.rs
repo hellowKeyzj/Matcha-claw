@@ -57,10 +57,6 @@ pub enum Command {
     List {
         endpoint: NativeEndpoint,
     },
-    Wait {
-        endpoint: NativeEndpoint,
-        input: AgentWait,
-    },
     Create {
         endpoint: NativeEndpoint,
         input: AgentCreate,
@@ -152,7 +148,6 @@ impl Command {
     pub const fn endpoint(&self) -> NativeEndpoint {
         match self {
             Self::List { endpoint }
-            | Self::Wait { endpoint, .. }
             | Self::Create { endpoint, .. }
             | Self::Update { endpoint, .. }
             | Self::Delete { endpoint, .. }
@@ -171,33 +166,6 @@ impl Command {
             | Self::ExportCloudPackage { endpoint, .. }
             | Self::InstallPackage { endpoint, .. } => *endpoint,
         }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AgentWait {
-    pub run_id: String,
-    pub wait_slice_ms: u64,
-    pub rpc_timeout_buffer_ms: u64,
-}
-
-impl AgentWait {
-    pub fn try_new(
-        run_id: String,
-        wait_slice_ms: u64,
-        rpc_timeout_buffer_ms: u64,
-    ) -> Result<Self, ()> {
-        if !valid_text(&run_id)
-            || !(1_000..=60_000).contains(&wait_slice_ms)
-            || rpc_timeout_buffer_ms > 10_000
-        {
-            return Err(());
-        }
-        Ok(Self {
-            run_id,
-            wait_slice_ms,
-            rpc_timeout_buffer_ms,
-        })
     }
 }
 
@@ -322,9 +290,8 @@ pub enum Outcome {
         selection_required: bool,
         agents: Vec<AgentSummary>,
     },
-    Waited(AgentWaitResult),
-    WaitUnknown,
     Created(AgentCreated),
+    WorkspaceInitializationFailed(AgentCreated),
     Updated(AgentUpdated),
     Deleted(AgentDeleted),
     Files(AgentFiles),
@@ -335,18 +302,23 @@ pub enum Outcome {
     ToolConfiguration(ToolConfigurationOutcome),
     PackageExported(PackageExportReceipt),
     PackageInstalled(PackageInstallReceipt),
+    PackageInstallFailed {
+        agent_id: String,
+        failure: PackageInstallFailure,
+        compensation: InstallCompensation,
+    },
     Rejected,
     Unknown,
     Unsupported,
     Unavailable,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct PackageExportReceipt {
     agent_id: String,
     file_name: String,
-    package_path: String,
-    size: u64,
+    package_sha256: String,
+    package_bytes: std::sync::Arc<[u8]>,
     exported_at_ms: u64,
 }
 
@@ -354,15 +326,15 @@ impl PackageExportReceipt {
     pub fn new(
         agent_id: String,
         file_name: String,
-        package_path: String,
-        size: u64,
+        package_sha256: String,
+        package_bytes: std::sync::Arc<[u8]>,
         exported_at_ms: u64,
     ) -> Self {
         Self {
             agent_id,
             file_name,
-            package_path,
-            size,
+            package_sha256,
+            package_bytes,
             exported_at_ms,
         }
     }
@@ -375,16 +347,36 @@ impl PackageExportReceipt {
         &self.file_name
     }
 
-    pub fn package_path(&self) -> &str {
-        &self.package_path
+    pub fn package_sha256(&self) -> &str {
+        &self.package_sha256
+    }
+
+    pub fn package_bytes(&self) -> &[u8] {
+        &self.package_bytes
     }
 
     pub fn size(&self) -> u64 {
-        self.size
+        self.package_bytes.len() as u64
     }
 
     pub fn exported_at_ms(&self) -> u64 {
         self.exported_at_ms
+    }
+}
+
+impl std::fmt::Debug for PackageExportReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PackageExportReceipt")
+            .field("agent_id", &self.agent_id)
+            .field("file_name", &self.file_name)
+            .field("package_sha256", &self.package_sha256)
+            .field(
+                "package_bytes",
+                &format_args!("[REDACTED:{} bytes]", self.package_bytes.len()),
+            )
+            .field("exported_at_ms", &self.exported_at_ms)
+            .finish()
     }
 }
 
@@ -463,6 +455,54 @@ pub struct AgentUpdated {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentDeleted {
     pub agent_id: String,
+    pub native_ok: bool,
+    pub removed_bindings: u64,
+    pub failed_count: usize,
+    pub purge_failed_count: usize,
+    pub sealed_purge: SealedPurge,
+}
+
+impl AgentDeleted {
+    pub fn native_succeeded(&self) -> bool {
+        self.native_ok && self.failed_count == 0 && self.purge_failed_count == 0
+    }
+
+    pub fn succeeded(&self) -> bool {
+        self.native_succeeded() && self.sealed_purge == SealedPurge::Completed
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SealedPurge {
+    Completed,
+    Failed,
+    NotAttempted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageInstallFailure {
+    Rejected,
+    OutcomeUnknown,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallCompensation {
+    pub outcome: CompensationOutcome,
+    pub failed_count: usize,
+    pub purge_failed_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CompensationOutcome {
+    Deleted,
+    Rejected,
+    OutcomeUnknown,
+    Unsupported,
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -477,21 +517,6 @@ pub struct AgentFile {
     pub size: Option<u64>,
     pub updated_at_ms: Option<u64>,
     pub content: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AgentWaitResult {
-    pub status: AgentWaitStatus,
-    pub started_at: Option<u64>,
-    pub ended_at: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AgentWaitStatus {
-    Completed,
-    Failed,
-    Timeout,
-    Pending,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

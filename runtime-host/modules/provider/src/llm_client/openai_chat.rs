@@ -39,7 +39,7 @@ pub async fn stream_generate(
     request: LlmRequest,
     sink: &mut dyn LlmStreamSink,
 ) -> Result<(), LlmClientError> {
-    let mut response = request_builder(http, &openai_request(request, true))
+    let response = request_builder(http, &openai_request(request, true))
         .send()
         .await?;
     let status = response.status();
@@ -52,27 +52,7 @@ pub async fn stream_generate(
         return Err(LlmClientError::Protocol(error));
     }
 
-    let mut buffer = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        buffer.extend_from_slice(&chunk);
-        while let Some((frame_end, separator_len)) = sse_frame_end(&buffer) {
-            let frame = String::from_utf8(buffer[..frame_end].to_vec()).map_err(|error| {
-                LlmClientError::Protocol(format!("invalid OpenAI chat stream UTF-8: {error}"))
-            })?;
-            buffer.drain(..frame_end + separator_len);
-            if send_sse_frame(&frame, sink).await? {
-                return Ok(());
-            }
-        }
-    }
-
-    if !buffer.is_empty() {
-        let frame = String::from_utf8(buffer).map_err(|error| {
-            LlmClientError::Protocol(format!("invalid OpenAI chat stream UTF-8: {error}"))
-        })?;
-        send_sse_frame(&frame, sink).await?;
-    }
-    Ok(())
+    super::consume_sse(response, sink, parse_openai_chat_sse_chunk).await
 }
 
 pub fn build_openai_chat_http_request(request: &OpenAiChatRequest) -> OpenAiChatHttpRequest {
@@ -124,7 +104,6 @@ pub fn parse_openai_chat_text_response(payload: &Value) -> LlmResponse {
     }
 }
 
-#[cfg(test)]
 pub fn parse_openai_chat_sse_chunk(chunk: &str) -> Vec<LlmStreamEvent> {
     let mut events = Vec::new();
 
@@ -197,48 +176,6 @@ fn request_builder(http: &reqwest::Client, request: &OpenAiChatRequest) -> reqwe
         builder = builder.header(name, value);
     }
     builder.body(request.body.to_string())
-}
-
-fn sse_frame_end(buffer: &[u8]) -> Option<(usize, usize)> {
-    buffer
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|index| (index, 2))
-        .or_else(|| {
-            buffer
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .map(|index| (index, 4))
-        })
-}
-
-async fn send_sse_frame(frame: &str, sink: &mut dyn LlmStreamSink) -> Result<bool, LlmClientError> {
-    let Some(data) = sse_frame_data(frame) else {
-        return Ok(false);
-    };
-    if data == "[DONE]" {
-        return Ok(true);
-    }
-
-    match serde_json::from_str::<Value>(&data) {
-        Ok(payload) => {
-            if let Some(error) = parse_openai_chat_error(&payload) {
-                return Err(LlmClientError::Protocol(error));
-            }
-            let mut events = Vec::new();
-            push_stream_events(&payload, &mut events);
-            for event in events {
-                sink.send(event).await?;
-            }
-        }
-        Err(error) => {
-            sink.send(LlmStreamEvent::Diagnostic(format!(
-                "invalid OpenAI chat stream JSON: {error}"
-            )))
-            .await?;
-        }
-    }
-    Ok(false)
 }
 
 fn sse_frame_data(frame: &str) -> Option<String> {

@@ -10,13 +10,6 @@ function isAssistantTurnItem(item: SessionRenderItem): item is SessionAssistantT
   return item.kind === 'assistant-turn';
 }
 
-function readTurnToolNames(item: SessionAssistantTurnItem): string[] {
-  return item.segments
-    .filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'tool' }> => segment.kind === 'tool')
-    .map((segment) => segment.tool.name)
-    .filter((name) => typeof name === 'string' && name.trim());
-}
-
 function readTurnMessageText(item: SessionAssistantTurnItem): string {
   return item.segments
     .filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'message' }> => segment.kind === 'message')
@@ -69,29 +62,4 @@ export function findLatestAssistantTurnTextFromItems(
     return latestAssistant;
   }
   return '';
-}
-
-export function findLatestAssistantSnapshotFromItems(
-  items: SessionRenderItem[],
-): { text: string; toolNames: string[] } {
-  if (!Array.isArray(items) || items.length === 0) {
-    return { text: '', toolNames: [] };
-  }
-
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (!isAssistantTurnItem(item)) {
-      continue;
-    }
-    const text = readTurnMessageText(item);
-    const toolNames = readTurnToolNames(item);
-    if (text || toolNames.length > 0) {
-      return { text, toolNames };
-    }
-  }
-
-  return {
-    text: findLatestAssistantTextFromItems(items),
-    toolNames: [],
-  };
 }

@@ -6,7 +6,6 @@ use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 use super::{
-    abort::{SessionAbortCommand, SessionAbortOutcome},
     approval::{SessionApprovalCommand, SessionApprovalOutcome},
     create::{SessionCreateCommand, SessionCreateOutcome},
     delete::{SessionDeleteCommand, SessionDeleteOutcome},
@@ -76,14 +75,11 @@ pub enum SessionSendRequest {
     },
 }
 
-pub enum SessionAbortRequest {
-    Session {
-        command: SessionAbortCommand,
-        reply: oneshot::Sender<SessionAbortOutcome>,
-    },
-}
-
 pub enum SessionCommand {
+    Audited {
+        command: Box<SessionCommand>,
+        call: crate::call::SessionCall,
+    },
     Ensure {
         identity: SessionIdentity,
         source_binding: SessionSourceBinding,
@@ -104,9 +100,6 @@ pub enum SessionCommand {
     },
     Send {
         request: SessionSendRequest,
-    },
-    Abort {
-        request: SessionAbortRequest,
     },
     Delete {
         command: SessionDeleteCommand,
@@ -137,6 +130,7 @@ pub enum SessionCommand {
 impl SessionCommand {
     pub fn send_unavailable(self) {
         match self {
+            Self::Audited { command, .. } => command.send_unavailable(),
             Self::Ensure { reply, .. } => {
                 let _ = reply.send(SessionEnsureOutcome::Failed);
             }
@@ -152,11 +146,6 @@ impl SessionCommand {
             Self::Send { request } => match request {
                 SessionSendRequest::Session { reply, .. } => {
                     let _ = reply.send(SessionSendOutcome::Unavailable);
-                }
-            },
-            Self::Abort { request } => match request {
-                SessionAbortRequest::Session { reply, .. } => {
-                    let _ = reply.send(SessionAbortOutcome::Unavailable);
                 }
             },
             Self::Delete { reply, .. } => {
@@ -182,6 +171,7 @@ impl SessionCommand {
 
     pub fn route(&self) -> CommandRoute<String> {
         match self {
+            Self::Audited { command, .. } => command.route(),
             Self::Ensure { identity, .. } => CommandRoute::Keyed(session_lane_key(
                 identity.provider(),
                 identity.session_key(),
@@ -231,11 +221,6 @@ impl SessionCommand {
             }
             Self::Send { request } => match request {
                 SessionSendRequest::Session { command, .. } => CommandRoute::Keyed(
-                    session_lane_key(command.endpoint.provider(), &command.session_key),
-                ),
-            },
-            Self::Abort { request } => match request {
-                SessionAbortRequest::Session { command, .. } => CommandRoute::Keyed(
                     session_lane_key(command.endpoint.provider(), &command.session_key),
                 ),
             },

@@ -37,6 +37,7 @@ pub(crate) fn runtime_module_install_plan(
 
     (
         vec![
+            handles.calls.descriptor(Arc::clone(&verifier)),
             handles.organization_module.descriptor(
                 Arc::clone(&verifier),
                 webhook_token,
@@ -48,6 +49,7 @@ pub(crate) fn runtime_module_install_plan(
             handles.connector.descriptor(Arc::clone(&verifier)),
             handles.provider.descriptor(Arc::clone(&verifier)),
             runtime_directory::RuntimeDirectoryModule::new(runtime_directory_source)
+                .with_call_recorder(handles.calls.recorder())
                 .descriptor(Arc::clone(&verifier)),
             runtime_directory::control_loopback::RuntimeControlModule::new(vec![
                 Arc::new(
@@ -64,12 +66,18 @@ pub(crate) fn runtime_module_install_plan(
                 )
                     as Arc<dyn runtime_directory::control_loopback::RuntimeControlRouteFragment>,
             ])
+            .with_call_recorder(handles.calls.recorder())
             .descriptor(Arc::clone(&verifier)),
-            openclaw::gateway::loopback::descriptor(Arc::clone(&verifier), openclaw_gateway_port),
-            openclaw::platform_runtime::loopback::descriptor(
+            openclaw::gateway::loopback::descriptor_with_calls(
+                Arc::clone(&verifier),
+                openclaw_gateway_port,
+                handles.calls.recorder(),
+            ),
+            openclaw::platform_runtime::loopback::descriptor_with_calls(
                 Arc::clone(&verifier),
                 Arc::clone(&handles.open_claw),
                 openclaw_platform_admission,
+                handles.calls.recorder(),
             ),
         ],
         vec![

@@ -4,17 +4,20 @@ use std::{
     path::{Component, Path},
 };
 
+pub const MAX_CONTENT_BYTES: usize = 5 * 1024 * 1024;
+
 const MAX_BUNDLES: usize = 32;
 const MAX_FILES_PER_BUNDLE: usize = 64;
-const MAX_FILE_BYTES: usize = 48 * 1024;
-const MAX_BUNDLE_BYTES: usize = 48 * 1024;
-const MAX_TOTAL_BYTES: usize = 48 * 1024;
-const MAX_PATH_BYTES: usize = 240;
+// Content and paths may expand sixfold in JSON; reserve space for envelopes.
+pub(crate) const MAX_JSON_BYTES: usize =
+    6 * (MAX_CONTENT_BYTES + MAX_BUNDLES * MAX_FILES_PER_BUNDLE * MAX_PATH_BYTES) + 1024 * 1024;
+pub(crate) const MAX_PATH_BYTES: usize = 240;
 const MAX_SKILL_KEY_BYTES: usize = 96;
 const SKILL_MANIFEST: &str = "SKILL.md";
 const MANAGED_MARKER: &str = ".matchaclaw-managed";
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Bundle {
     skill_key: String,
     files: Vec<BundleFile>,
@@ -46,7 +49,7 @@ impl fmt::Debug for Bundle {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, serde::Serialize)]
 pub struct BundleFile {
     path: String,
     content: String,
@@ -65,7 +68,7 @@ impl fmt::Debug for BundleFile {
 impl BundleFile {
     pub fn try_new(path: String, content: String) -> Result<Self, ()> {
         validate_file_path(&path)?;
-        if content.len() > MAX_FILE_BYTES || content.contains('\0') {
+        if content.len() > MAX_CONTENT_BYTES || content.contains('\0') {
             return Err(());
         }
         Ok(Self { path, content })
@@ -97,7 +100,7 @@ pub fn validate_batch(bundles: &[Bundle]) -> Result<(), ()> {
             .try_fold(0usize, |total, file| total.checked_add(file.content.len()))
             .ok_or(())?;
         total_bytes = total_bytes.checked_add(bundle_bytes).ok_or(())?;
-        if total_bytes > MAX_TOTAL_BYTES {
+        if total_bytes > MAX_CONTENT_BYTES {
             return Err(());
         }
     }
@@ -128,7 +131,7 @@ fn validate_files(files: &[BundleFile]) -> Result<(), ()> {
             return Err(());
         }
         total_bytes = total_bytes.checked_add(file.content.len()).ok_or(())?;
-        if total_bytes > MAX_BUNDLE_BYTES {
+        if total_bytes > MAX_CONTENT_BYTES {
             return Err(());
         }
     }

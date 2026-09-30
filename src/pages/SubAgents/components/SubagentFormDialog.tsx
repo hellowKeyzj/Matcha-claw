@@ -18,13 +18,13 @@ import {
   buildSubagentWorkspacePath,
   hasSubagentNameConflict,
 } from '@/features/subagents/domain/workspace';
-import type { ModelCatalogEntry, DraftByFile, PreviewDiffByFile, SubagentSummary, SubagentTargetFile } from '@/types/subagent';
+import type { ModelCatalogEntry, SubagentSummary, SubagentTargetFile } from '@/types/subagent';
 import type { AgentSkillConfigView, SetAgentSkillConfigCommand } from '@/stores/agent-skill-config';
 import type { AgentToolConfigOption, AgentToolConfigView, SetAgentToolConfigCommand } from '@/stores/agent-tool-config';
 import { ChevronDown, RefreshCw, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { SubagentDiffPreview } from './SubagentDiffPreview';
+import { SubagentFilesPreview } from './SubagentFilesPreview';
 
 type SubagentFormMode = 'create' | 'edit';
 type SubagentFormTab = 'basic' | 'persona' | 'skills' | 'tools';
@@ -38,7 +38,6 @@ interface SubagentFormValues {
   model: string;
   avatarSeed: string;
   avatarStyle: AgentAvatarStyle;
-  prompt: string;
   skillConfig?: {
     revision: string;
     selection: SetAgentSkillConfigCommand['selection'];
@@ -66,23 +65,7 @@ interface SubagentFormDialogProps {
   toolConfigView?: AgentToolConfigView | null;
   toolConfigLoading?: boolean;
   toolConfigError?: string | null;
-  draftPrompt?: string;
-  generatingDraft?: boolean;
-  applyingDraft?: boolean;
-  includeCurrentFiles?: boolean;
-  hasAnyDraft?: boolean;
-  hasApprovedDraft?: boolean;
-  applySucceeded?: boolean;
-  draftByFile?: DraftByFile;
-  draftError?: string | null;
-  draftRawOutput?: string;
-  previewDiffByFile?: PreviewDiffByFile;
   persistedContentByFile?: Partial<Record<SubagentTargetFile, string>>;
-  onDraftPromptChange?: (prompt: string) => void;
-  onIncludeCurrentFilesChange?: (includeCurrentFiles: boolean) => void;
-  onGenerateDraft?: () => Promise<void>;
-  onGenerateDiffPreview?: (originalByFile: Partial<Record<SubagentTargetFile, string>>) => void;
-  onApplyDraft?: () => Promise<void>;
   onSubmit: (values: SubagentFormValues) => Promise<void>;
   onClose: () => void;
 }
@@ -94,7 +77,6 @@ const EMPTY_VALUES: SubagentFormValues = {
   model: '',
   avatarSeed: '',
   avatarStyle: DEFAULT_AGENT_AVATAR_STYLE,
-  prompt: '',
 };
 
 const TOOL_PROFILE_OPTIONS = ['full', 'coding', 'minimal', 'messaging'] as const;
@@ -126,16 +108,6 @@ function toggleStringKey(keys: readonly string[], key: string, checked: boolean)
   return keys.filter((item) => item !== key);
 }
 
-function readOriginalByDraftFile(
-  draftByFile: DraftByFile,
-  persistedContentByFile: Partial<Record<SubagentTargetFile, string>>,
-): Partial<Record<SubagentTargetFile, string>> {
-  return Object.keys(draftByFile).reduce<Partial<Record<SubagentTargetFile, string>>>((acc, fileName) => {
-    acc[fileName as SubagentTargetFile] = persistedContentByFile[fileName as SubagentTargetFile] ?? '';
-    return acc;
-  }, {});
-}
-
 export function SubagentFormDialog({
   open,
   title,
@@ -153,23 +125,7 @@ export function SubagentFormDialog({
   toolConfigView,
   toolConfigLoading = false,
   toolConfigError = null,
-  draftPrompt = '',
-  generatingDraft = false,
-  applyingDraft = false,
-  includeCurrentFiles = false,
-  hasAnyDraft = false,
-  hasApprovedDraft = false,
-  applySucceeded = false,
-  draftByFile = {},
-  draftError = null,
-  draftRawOutput = '',
-  previewDiffByFile = {},
   persistedContentByFile = {},
-  onDraftPromptChange,
-  onIncludeCurrentFilesChange,
-  onGenerateDraft,
-  onGenerateDiffPreview,
-  onApplyDraft,
   onSubmit,
   onClose,
 }: SubagentFormDialogProps) {
@@ -224,7 +180,6 @@ export function SubagentFormDialog({
       model: resolvedInitialModel ?? (initialModel || (mode === 'create' ? (modelOptions[0]?.id ?? '') : '')),
       avatarSeed: initialAvatarSeed,
       avatarStyle: initialAvatarStyle,
-      prompt: initialValues?.prompt ?? '',
     });
     setActiveTab(mode === 'edit' ? initialTab : 'basic');
     setAvatarPickerPage(0);
@@ -425,50 +380,47 @@ export function SubagentFormDialog({
   };
 
   const renderModelAndWorkspaceFields = () => (
-    <section className="space-y-3">
-      <h3 className="text-sm font-semibold text-foreground">{t('form.aiConfig')}</h3>
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="space-y-1">
-          <Label htmlFor="subagent-workspace">{t('form.workspace')}</Label>
-          <Input
-            id="subagent-workspace"
-            value={values.workspace}
-            readOnly
-            className="text-muted-foreground"
-          />
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="subagent-model">{t('form.model')}</Label>
-          <Select
-            id="subagent-model"
-            value={values.model}
-            disabled={modelsLoading || (mode === 'create' && !hasModelOptions)}
-            onChange={(event) => setValues((prev) => ({ ...prev, model: event.target.value }))}
-          >
-            {mode === 'edit' ? (
-              <option value="">{t('form.useDefaultModel')}</option>
-            ) : (
-              <option value="">
-                {modelsLoading
-                  ? t('form.modelsLoading')
-                  : t('form.selectModel')}
-              </option>
-            )}
-            {showCurrentModelOption ? (
-              <option value={currentModel}>{currentModel}</option>
-            ) : null}
-            {resolvedModelOptions.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.displayLabel}
-              </option>
-            ))}
-          </Select>
-          {!modelsLoading && !hasModelOptions && (
-            <p className="text-xs text-destructive">{t('form.modelUnavailable')}</p>
-          )}
-        </div>
+    <>
+      <div className="space-y-1">
+        <Label htmlFor="subagent-workspace">{t('form.workspace')}</Label>
+        <Input
+          id="subagent-workspace"
+          value={values.workspace}
+          readOnly
+          className="text-muted-foreground"
+        />
       </div>
-    </section>
+      <div className="space-y-1">
+        <Label htmlFor="subagent-model">{t('form.model')}</Label>
+        <Select
+          id="subagent-model"
+          value={values.model}
+          disabled={modelsLoading || (mode === 'create' && !hasModelOptions)}
+          onChange={(event) => setValues((prev) => ({ ...prev, model: event.target.value }))}
+        >
+          {mode === 'edit' ? (
+            <option value="">{t('form.useDefaultModel')}</option>
+          ) : (
+            <option value="">
+              {modelsLoading
+                ? t('form.modelsLoading')
+                : t('form.selectModel')}
+            </option>
+          )}
+          {showCurrentModelOption ? (
+            <option value={currentModel}>{currentModel}</option>
+          ) : null}
+          {resolvedModelOptions.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.displayLabel}
+            </option>
+          ))}
+        </Select>
+        {!modelsLoading && !hasModelOptions && (
+          <p className="text-xs text-destructive">{t('form.modelUnavailable')}</p>
+        )}
+      </div>
+    </>
   );
 
   const renderBasicInfo = () => (
@@ -575,17 +527,7 @@ export function SubagentFormDialog({
                     onChange={(event) => setValues((prev) => ({ ...prev, description: event.target.value }))}
                   />
                 </div>
-                <div className="space-y-1">
-                  <Label htmlFor="subagent-initial-prompt">{t('form.initialPrompt')}</Label>
-                  <Textarea
-                    id="subagent-initial-prompt"
-                    rows={6}
-                    className="min-h-[180px] resize-none"
-                    value={values.prompt}
-                    placeholder={t('form.initialPromptPlaceholder')}
-                    onChange={(event) => setValues((prev) => ({ ...prev, prompt: event.target.value }))}
-                  />
-                </div>
+                {renderModelAndWorkspaceFields()}
               </div>
             </div>
           ) : (
@@ -704,7 +646,6 @@ export function SubagentFormDialog({
           )}
         </div>
       </section>
-      {mode === 'create' ? renderModelAndWorkspaceFields() : null}
     </div>
   );
 
@@ -713,84 +654,9 @@ export function SubagentFormDialog({
       {!agentId ? (
         <p className="text-sm text-muted-foreground">{t('manage.noAgentSelected')}</p>
       ) : (
-        <>
-          <div className="space-y-1">
-            <Label htmlFor="subagent-draft-prompt">{t('manage.promptLabel')}</Label>
-            <Textarea
-              id="subagent-draft-prompt"
-              value={draftPrompt}
-              rows={5}
-              placeholder={t('manage.promptPlaceholder')}
-              onChange={(event) => onDraftPromptChange?.(event.target.value)}
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={!onGenerateDraft || !draftPrompt.trim() || generatingDraft || applyingDraft}
-              onClick={() => {
-                void onGenerateDraft?.();
-              }}
-            >
-              {generatingDraft ? t('manage.generatingDraft') : t('manage.generateDraft')}
-            </Button>
-            <label className="inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs text-muted-foreground">
-              <Switch
-                checked={includeCurrentFiles}
-                disabled={generatingDraft || applyingDraft}
-                onCheckedChange={(nextIncludeCurrentFiles) => onIncludeCurrentFilesChange?.(nextIncludeCurrentFiles)}
-              />
-              <span>{t('manage.includeCurrentFilesLabel')}</span>
-            </label>
-            {hasAnyDraft && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => onGenerateDiffPreview?.(readOriginalByDraftFile(draftByFile, persistedContentByFile))}
-              >
-                {t('manage.generateDiffPreview')}
-              </Button>
-            )}
-            {hasApprovedDraft && (
-              <Button
-                type="button"
-                size="sm"
-                disabled={applyingDraft}
-                onClick={() => {
-                  void onApplyDraft?.();
-                }}
-              >
-                {applyingDraft ? t('manage.applyingDraft') : t('manage.confirmApplyDraft')}
-              </Button>
-            )}
-          </div>
-
-          {applySucceeded && !draftError && (
-            <p className="text-xs text-green-600">{t('manage.applyDraftSuccess')}</p>
-          )}
-          {draftError && (
-            <p className="text-xs text-destructive">{draftError}</p>
-          )}
-          {draftError && draftRawOutput.trim() && (
-            <div className="space-y-1 rounded-md border border-destructive/30 bg-destructive/5 p-2">
-              <p className="text-[11px] font-medium text-destructive">{t('manage.rawOutputTitle')}</p>
-              <pre className="max-h-40 overflow-auto whitespace-pre-wrap text-[11px] text-muted-foreground">
-                {draftRawOutput}
-              </pre>
-            </div>
-          )}
-
-          <div className="min-h-0 flex-1 overflow-auto rounded-lg border bg-muted/15 p-3">
-            <SubagentDiffPreview
-              previewDiffByFile={previewDiffByFile}
-              persistedContentByFile={persistedContentByFile}
-            />
-          </div>
-        </>
+        <div className="min-h-0 flex-1 overflow-auto rounded-lg border bg-muted/15 p-3">
+          <SubagentFilesPreview persistedContentByFile={persistedContentByFile} />
+        </div>
       )}
     </div>
   );
@@ -1147,7 +1013,6 @@ export function SubagentFormDialog({
         model: values.model.trim(),
         avatarSeed: values.avatarSeed.trim(),
         avatarStyle: values.avatarStyle,
-        prompt: values.prompt.trim(),
         ...(skillConfig ? { skillConfig } : {}),
         ...(toolConfig ? { toolConfig } : {}),
       });

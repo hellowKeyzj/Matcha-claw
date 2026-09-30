@@ -7,6 +7,8 @@ import {
 } from './helpers/mock-gateway-client';
 
 import i18n from '@/i18n';
+import { getCall } from '@/lib/call-log';
+import * as hostApiModule from '@/lib/host-api';
 import {
   __resetSubagentsStoreInternalCachesForTest,
   useSubagentsStore,
@@ -926,25 +928,31 @@ describe('subagents store', () => {
         },
       ],
     });
+    const callId = 'b'.repeat(32);
+    vi.spyOn(hostApiModule, 'hostApiFetchDecoded').mockImplementationOnce(async (_path, decode) => decode({
+      callId,
+      command: 'skills.bundles.export',
+      result: {
+        kind: 'bundleExport',
+        outcome: 'accepted',
+        skillBundles: [
+          { skillKey: 'web-search', files: [{ path: 'SKILL.md', content: 'web skill' }] },
+          { skillKey: 'feishu-doc', files: [{ path: 'SKILL.md', content: 'feishu skill' }] },
+        ],
+      },
+    }));
     hostApiFetchMock.mockImplementation(async (path, options) => {
       expect(path).toBe('/api/subagents/skill-bundles/export');
       expect(options).toEqual({
         method: 'POST',
         body: JSON.stringify({ skillKeys: ['web-search', 'feishu-doc'] }),
       });
-      return {
-        outcome: 'accepted',
-        skillBundles: [
-          {
-            skillKey: 'web-search',
-            files: [{ path: 'SKILL.md', content: 'web skill' }],
-          },
-          {
-            skillKey: 'feishu-doc',
-            files: [{ path: 'SKILL.md', content: 'feishu skill' }],
-          },
-        ],
-      };
+      vi.mocked(getCall).mockResolvedValueOnce({
+        callId, module: 'skills', command: 'skills.bundles.export', status: 'succeeded',
+        start: 0, end: 1, revision: 1,
+        detail: { access: 'read', resultReady: true, result: 'accepted', outcome: 'succeeded', bundleCount: 2, fileCount: 2 },
+      });
+      return { callId, accepted: true };
     });
     rpc.mockImplementation(async (method, params) => {
       if (method === 'agents.files.get') {
@@ -998,7 +1006,20 @@ describe('subagents store', () => {
         { id: 'writer', name: 'Writer', sealed: true, isDefault: false },
       ],
     });
+    const callId = 'e'.repeat(32);
+    vi.mocked(getCall).mockResolvedValueOnce({
+      callId, module: 'subagents', command: 'subagents.package.export', status: 'succeeded',
+      start: 0, end: 1, revision: 1,
+      detail: { endpoint: 'openclaw:local', agentId: 'writer', runId: null, outcome: 'packageExported', readFailure: null },
+    });
     hostApiFetchMock.mockImplementation(async (path, options) => {
+      if (path === '/api/subagents/results') {
+        expect(JSON.parse(String(options?.body))).toEqual({ callId, operationId: 'subagents.package.export', endpoint: runtimeEndpoint, agentId: 'writer' });
+        return {
+          callId, operationId: 'subagents.package.export', status: 200,
+          body: { success: true, package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', size: 1024, exportedAtMs: 1 } },
+        };
+      }
       expect(path).toBe('/api/subagents/agents');
       expect(JSON.parse(String(options?.body))).toEqual({
         id: 'subagent.management',
@@ -1007,10 +1028,7 @@ describe('subagents store', () => {
         target: { kind: 'subagent', subagentId: 'writer' },
         input: { kind: 'packageExport', endpoint: runtimeEndpoint, agentId: 'writer' },
       });
-      return {
-        success: true,
-        package: { agentId: 'writer', fileName: 'writer.matcha-agentpkg', packagePath: 'C:/sealed/writer.matcha-agentpkg', size: 1024, exportedAtMs: 1 },
-      };
+      return { callId, accepted: true };
     });
 
     await expect(useSubagentsStore.getState().exportAgentPackage('writer')).resolves.toEqual({
@@ -1029,20 +1047,44 @@ describe('subagents store', () => {
       ],
       loadAgents,
     });
+    const uploadOperationId = 'cloud-package:00000000-0000-4000-8000-000000000001';
+    const installOperationId = 'cloud-package:00000000-0000-4000-8000-000000000002';
     hostApiFetchMock.mockImplementation(async (path, options) => {
       if (path === '/api/packages/upload/sealed-agent') {
         expect(JSON.parse(String(options?.body))).toEqual({ agentId: 'writer' });
         expect(String(options?.body)).not.toMatch(/packagePath|deviceEnvelope|authorizationKey|contentKey|rawPayload|token/);
-        return { packageId: 'pkg-writer', packageVersionId: 'version-writer', fileName: 'writer.matcha-agentpkg', bytes: 1024 };
+        return { operationId: uploadOperationId, accepted: true };
       }
-      if (path === '/api/packages/download') {
-        expect(JSON.parse(String(options?.body))).toEqual({ packageVersionId: 'version-writer', packageType: 'agent', source: 'subagents' });
-        return { packageId: 'pkg-writer', packageVersionId: 'version-writer', filename: 'writer.matcha-agentpkg', bytes: 1024 };
+      if (path === '/api/packages/operation-result') {
+        const { operationId } = JSON.parse(String(options?.body));
+        if (operationId === uploadOperationId) return {
+          operationId, kind: 'uploadSealedAgent', state: 'succeeded',
+          result: { packageId: 'pkg-writer', packageVersionId: 'version-writer', name: 'writer.matcha-agentpkg', packageType: 'agent', version: 'v1', status: 'draft', downloadable: false },
+        };
+        expect(operationId).toBe(installOperationId);
+        return {
+          operationId, kind: 'install', state: 'succeeded',
+          result: { packageVersionId: 'version-writer', filename: 'writer.matcha-agentpkg', bytes: 1024, packageSha256: 'a'.repeat(64), install: { callId: 'c'.repeat(32), accepted: true } },
+        };
       }
+      if (path === '/api/packages/mine?packageType=agent' || path === '/api/packages/market?packageType=agent') return { items: [] };
+      if (path === '/api/packages/installed') return { packages: [] };
       if (path === '/api/packages/install') {
         expect(JSON.parse(String(options?.body))).toEqual({ packageVersionId: 'version-writer', packageType: 'agent', source: 'subagents' });
         expect(String(options?.body)).not.toMatch(/packagePath|deviceEnvelope|authorizationKey|contentKey|rawPayload|token/);
-        return { packageId: 'pkg-writer', packageVersionId: 'version-writer', install: { outcome: 'accepted', agentId: 'writer', workspace: 'C:/private' } };
+        const callId = 'c'.repeat(32);
+        vi.mocked(getCall).mockResolvedValueOnce({
+          callId, module: 'subagents', command: 'subagents.package.install', status: 'succeeded',
+          start: 0, end: 1, revision: 1,
+          detail: { endpoint: 'openclaw:local', agentId: 'writer', runId: null, outcome: 'packageInstalled', readFailure: null },
+        });
+        return { operationId: installOperationId, accepted: true };
+      }
+      if (path === '/api/subagents/results') {
+        return { callId: 'c'.repeat(32), operationId: 'subagents.package.install', status: 200, body: { success: true, package: { agentId: 'writer' } } };
+      }
+      if (path === '/api/packages/install/confirm') {
+        return { packageId: 'pkg-writer', packageVersionId: 'version-writer', install: { outcome: 'accepted', agentId: 'writer' } };
       }
       throw new Error(`Unexpected path in test: ${String(path)}`);
     });
@@ -1052,17 +1094,11 @@ describe('subagents store', () => {
       packageId: 'pkg-writer',
       packageVersionId: 'version-writer',
       fileName: 'writer.matcha-agentpkg',
-      size: 1024,
+      size: undefined,
       uploadedAtMs: expect.any(Number),
     });
-    await expect(useSubagentsStore.getState().downloadAgentPackageFromCloud('version-writer')).resolves.toEqual({
-      agentId: 'version-writer',
-      packageId: 'pkg-writer',
-      packageVersionId: 'version-writer',
-      fileName: 'writer.matcha-agentpkg',
-      size: 1024,
-      downloadedAtMs: expect.any(Number),
-    });
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/packages/mine?packageType=agent', undefined);
+    expect(hostApiFetchMock.mock.calls.some(([path]) => String(path).endsWith('/publish'))).toBe(false);
     await expect(useSubagentsStore.getState().installAgentPackageFromCloud('version-writer')).resolves.toEqual({
       agentId: 'writer',
       packageId: 'pkg-writer',
@@ -1070,6 +1106,23 @@ describe('subagents store', () => {
     });
     expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/subagents/agents', expect.anything());
     expect(loadAgents).toHaveBeenCalledTimes(1);
+  });
+
+  it('lists mine drafts and publishes the direct package version receipt', async () => {
+    const draft = { packageId: 'mine', packageVersionId: 'draft-id', name: 'Writer', packageType: 'agent', version: 'a'.repeat(64), status: 'draft', downloadable: false };
+    hostApiFetchMock.mockImplementation(async (path) => {
+      if (path === '/api/packages/mine?packageType=agent') return { items: [draft] };
+      if (path === '/api/packages/draft-id/publish') return { ...draft, status: 'published' };
+      if (path === '/api/packages/installed') return { packages: [] };
+      return { items: [] };
+    });
+    await useSubagentsStore.getState().loadMyCloudPackages();
+    expect(useSubagentsStore.getState().myCloudPackages).toEqual([draft]);
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+    await useSubagentsStore.getState().publishCloudAgentPackage('draft-id');
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/packages/draft-id/publish', { method: 'POST' });
+    expect(useSubagentsStore.getState().myCloudPackages[0].status).toBe('published');
+    expect(useSubagentsStore.getState().cloudPublishingByVersionId).toEqual({});
   });
 
   it('maps package install unknown outcome to an actionable user message', async () => {
@@ -1116,7 +1169,13 @@ describe('subagents store', () => {
           ],
         }),
       });
-      return { outcome: 'accepted' };
+      const callId = 'd'.repeat(32);
+      vi.mocked(getCall).mockResolvedValueOnce({
+        callId, module: 'skills', command: 'skills.bundles.import', status: 'succeeded',
+        start: 0, end: 1, revision: 1,
+        detail: { access: 'write', outcome: 'succeeded', bundleCount: 1 },
+      });
+      return { callId, accepted: true };
     });
     rpc.mockImplementation(async (method, params) => {
       if (method === 'agents.create') {

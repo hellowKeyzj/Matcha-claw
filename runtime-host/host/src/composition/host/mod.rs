@@ -46,6 +46,7 @@ pub struct Host {
     fleet_handle: FleetHandle,
     fleet_module: FleetModule,
     owner_runtime_tasks: owners::OwnerRuntimeTasks,
+    call_scope: foundation::lifecycle::ModuleScope,
     peer_startup: super::peer::PeerStartupState,
     matcha_runtime_driver: Arc<MatchaRuntimeDriver>,
     open_claw: Arc<OpenClawDriver>,
@@ -70,6 +71,7 @@ struct PeerRuntimeArtifacts {
 }
 
 struct HostAssemblyArtifacts {
+    calls: call_log::CallLogModule,
     sealed_resource: sealed_resource::SealedResourceModule,
     clawhub_registry: clawhub::ClawHubRegistryClient,
     runtime_observation: ::diagnostics::RuntimeFlightRecorder,
@@ -216,7 +218,11 @@ fn spawn_owner_runtime_stage(
         fleet_private_root,
         diagnostics,
     } = provisioned;
+    let calls = call_log::CallLogModule::open(&runtime_state_dir.join("call-log"))
+        .map_err(ConstructionError::CallLog)?;
+    let sealed_resource = sealed_resource.with_call_recorder(calls.recorder());
     let owners = owners::spawn_runtime_owners(owners::RuntimeOwnerInput {
+        calls: calls.recorder(),
         organization,
         runtime_state_dir,
         diagnostics_state_root,
@@ -240,6 +246,7 @@ fn spawn_owner_runtime_stage(
     Ok((
         owners,
         HostAssemblyArtifacts {
+            calls,
             sealed_resource,
             clawhub_registry,
             runtime_observation,
@@ -310,11 +317,12 @@ fn wire_diagnostics_forwarders(owners: &mut owners::RuntimeOwners, runtime: &Pee
 fn assemble_host(
     parent_callback: ParentCallbackClient,
     admission: Arc<HostAdmission>,
-    owners: owners::RuntimeOwners,
+    mut owners: owners::RuntimeOwners,
     runtime: PeerRuntimeArtifacts,
     artifacts: HostAssemblyArtifacts,
 ) -> (Host, HostEvents, HostHandles) {
     let HostAssemblyArtifacts {
+        calls,
         sealed_resource,
         clawhub_registry,
         runtime_observation,
@@ -326,13 +334,15 @@ fn assemble_host(
         open_claw,
         matcha_runtime_driver,
         event_sinks,
-        events,
+        mut events,
         session_delta_source,
         ..
     } = runtime;
+    events.set_call_changes(calls.subscribe());
     let handles = handle_wiring::build_handles(
         handle_wiring::HostHandleInput {
             admission: Arc::clone(&admission),
+            calls: calls.clone(),
             open_claw: Arc::clone(&open_claw),
             sealed_resource,
             clawhub_registry,
@@ -342,8 +352,33 @@ fn assemble_host(
         },
         &owners,
     );
+    let plugins = handles.plugins.clone();
+    owners
+        .tasks
+        .module_scope_mut("plugins")
+        .expect("plugins module scope must exist")
+        .register_effect_disposer(
+            foundation::lifecycle::ScopedEffectKind::OwnerTask,
+            "owner-task",
+            move || async move {
+                plugins.stop_operations().await;
+            },
+        );
+    let skills = handles.skills.clone();
+    owners
+        .tasks
+        .module_scope_mut("skills")
+        .expect("skills module scope must exist")
+        .register_effect_disposer(
+            foundation::lifecycle::ScopedEffectKind::OwnerTask,
+            "owner-task",
+            move || async move {
+                skills.stop_operations().await;
+            },
+        );
     let cron_handle = handles.cron.clone();
-    let shutdown_failures = shutdown::ShutdownState::new();
+    let shutdown_failures = shutdown::ShutdownState::new(owners.tasks.join_failures());
+    let call_scope = shutdown_failures.call_log_scope(calls);
     let runtime_processes = shutdown::RuntimeProcessScopes::new(
         Arc::clone(&open_claw),
         matcha,
@@ -359,6 +394,7 @@ fn assemble_host(
         fleet_handle: owners.fleet_handle,
         fleet_module,
         owner_runtime_tasks: owners.tasks,
+        call_scope,
         peer_startup: owners.peer_startup,
         matcha_runtime_driver,
         open_claw,
@@ -410,6 +446,7 @@ impl Host {
     ) -> Vec<foundation::lifecycle::EffectRegistration> {
         let mut registrations = self.owner_runtime_tasks.module_effect_registrations();
         registrations.extend(self.runtime_processes.effect_registrations());
+        registrations.extend(self.call_scope.effect_registrations().iter().copied());
         registrations
     }
 
@@ -419,10 +456,13 @@ impl Host {
         router: Router,
     ) -> Result<(), platform::module::ModuleInstallError> {
         for module in routes {
-            let Some(scope) = self
-                .owner_runtime_tasks
-                .route_scope_mut(module.id().as_str())
-            else {
+            let scope = if module.id().as_str() == "call-log" {
+                Some(&mut self.call_scope)
+            } else {
+                self.owner_runtime_tasks
+                    .route_scope_mut(module.id().as_str())
+            };
+            let Some(scope) = scope else {
                 return Err(platform::module::ModuleEffectError::UnknownModule {
                     module: platform::module::ModuleId::new(module.id().as_str()),
                     effect: platform::module::EffectKind::Route,

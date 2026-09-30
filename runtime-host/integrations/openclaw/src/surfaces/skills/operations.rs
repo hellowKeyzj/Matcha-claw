@@ -571,6 +571,70 @@ impl OpenClawSkillOperations {
         };
         self.mutate(UPDATE, params).await
     }
+    pub async fn configure(
+        &self,
+        request: SkillUpdateRequest,
+    ) -> (SkillMutationOutcome, Vec<String>) {
+        let env_keys = match &request {
+            SkillUpdateRequest::Config { env, .. } => env
+                .as_ref()
+                .map(|env| env.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let invalid_keys = match &request {
+            SkillUpdateRequest::Config { env, .. } => env
+                .as_ref()
+                .map(|env| {
+                    env.keys()
+                        .filter(|key| key.trim().is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            _ => return (SkillMutationOutcome::Rejected, Vec::new()),
+        };
+        let Ok(request) = wire::operations_request(next_id(UPDATE), UPDATE, request.params())
+        else {
+            return (SkillMutationOutcome::Rejected, invalid_keys);
+        };
+        match self.gateway.rpc_mutation(request).await {
+            MutationDelivery::Response(GatewayResponse::Success {
+                payload: Some(Value::Object(payload)),
+                ..
+            }) if payload.get("ok") == Some(&Value::Bool(true)) => {
+                let mut invalid_keys = invalid_keys;
+                if let Some(keys) = payload.get("invalidKeys") {
+                    let Some(keys) = keys
+                        .as_array()
+                        .filter(|keys| keys.len() <= env_keys.len())
+                        .and_then(|keys| {
+                            keys.iter()
+                                .map(|key| {
+                                    key.as_str()
+                                        .filter(|key| env_keys.iter().any(|known| known == key))
+                                        .map(str::to_owned)
+                                })
+                                .collect::<Option<Vec<_>>>()
+                        })
+                    else {
+                        return (SkillMutationOutcome::Unknown, invalid_keys);
+                    };
+                    for key in keys {
+                        if !invalid_keys.contains(&key) {
+                            invalid_keys.push(key);
+                        }
+                    }
+                }
+                (SkillMutationOutcome::Accepted, invalid_keys)
+            }
+            MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
+                (SkillMutationOutcome::Rejected, invalid_keys)
+            }
+            _ => (SkillMutationOutcome::Unknown, invalid_keys),
+        }
+    }
+
     pub async fn remove_config(&self, skill_key: String) -> SkillConfigRemoveOutcome {
         let Some(skill_key) = clean_openclaw_skill_key(skill_key) else {
             return SkillConfigRemoveOutcome::Rejected;

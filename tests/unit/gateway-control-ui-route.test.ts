@@ -60,10 +60,11 @@ describe('gateway control UI route', () => {
     ['/api/gateway/restart', 'lifecycleRestart'],
   ] as const)('routes %s lifecycle mutation through runtime control transport', async (pathname, method) => {
     const command = vi.fn();
+    const receipt = { callId: 'call-gateway-lifecycle', accepted: true };
     const transport = {
-      lifecycleStart: vi.fn().mockResolvedValue(runtimeControlResponse({ result: { lifecycle: 'running', observedAtMs: 1_725_000_000_000 } })),
-      lifecycleStop: vi.fn().mockResolvedValue(runtimeControlResponse({ result: { lifecycle: 'idle', observedAtMs: 1_725_000_000_000 } })),
-      lifecycleRestart: vi.fn().mockResolvedValue(runtimeControlResponse({ result: { lifecycle: 'starting', observedAtMs: 1_725_000_000_000 } })),
+      lifecycleStart: vi.fn().mockResolvedValue({ status: 202, body: receipt }),
+      lifecycleStop: vi.fn().mockResolvedValue({ status: 202, body: receipt }),
+      lifecycleRestart: vi.fn().mockResolvedValue({ status: 202, body: receipt }),
     };
     const res = response();
 
@@ -79,7 +80,7 @@ describe('gateway control UI route', () => {
 
     expect(transport[method]).toHaveBeenCalledWith();
     expect(command).not.toHaveBeenCalled();
-    expect(res.status()).toBe(200);
-    expect(res.json()).toEqual({ success: true });
+    expect(res.status()).toBe(202);
+    expect(res.json()).toEqual(receipt);
   });
 });

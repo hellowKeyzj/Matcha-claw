@@ -1,4 +1,42 @@
+use platform::call::CallDetail;
 use serde::Serialize;
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformToolsCallDetail {
+    pub tool_count: Option<usize>,
+    pub available: Option<bool>,
+    pub result: Option<PlatformToolsCallResult>,
+}
+
+impl CallDetail for PlatformToolsCallDetail {
+    const MODULE: &'static str = "platform-tools";
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlatformToolsCallResult {
+    Tools,
+    Unavailable,
+    Rejected,
+}
+
+impl PlatformToolsOutcome {
+    pub(crate) fn call_detail(&self) -> PlatformToolsCallDetail {
+        match self {
+            Self::Tools(tools) => PlatformToolsCallDetail {
+                tool_count: Some(tools.len()),
+                available: Some(true),
+                result: Some(PlatformToolsCallResult::Tools),
+            },
+            Self::Unavailable => PlatformToolsCallDetail {
+                tool_count: None,
+                available: Some(false),
+                result: Some(PlatformToolsCallResult::Unavailable),
+            },
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlatformToolsOutcome {

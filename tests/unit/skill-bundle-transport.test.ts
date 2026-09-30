@@ -18,19 +18,19 @@ describe('Subagent skill bundle delivery transport', () => {
   it('binds export and import to their fixed sealed localhost endpoints', async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce({
-        status: 200,
-        json: async () => ({ outcome: 'accepted', skillBundles: importRequest.skillBundles }),
+        status: 202,
+        json: async () => ({ callId: 'a'.repeat(32), accepted: true }),
       })
-      .mockResolvedValueOnce({ status: 200, json: async () => ({ outcome: 'accepted' }) });
+      .mockResolvedValueOnce({ status: 202, json: async () => ({ callId: 'b'.repeat(32), accepted: true }) });
     const transport = createSkillBundleTransport(createRuntimeHostDeliveryIssuer(), 3227, fetcher);
 
     await expect(transport.exportBundles(exportRequest)).resolves.toEqual({
-      status: 200,
-      body: { outcome: 'accepted', skillBundles: importRequest.skillBundles },
+      status: 202,
+      body: { callId: 'a'.repeat(32), accepted: true },
     });
     await expect(transport.importBundles(importRequest)).resolves.toEqual({
-      status: 200,
-      body: { outcome: 'accepted' },
+      status: 202,
+      body: { callId: 'b'.repeat(32), accepted: true },
     });
     expect(fetcher).toHaveBeenNthCalledWith(1, 'http://127.0.0.1:3227/api/subagents/skill-bundles/export', expect.objectContaining({
       method: 'POST',

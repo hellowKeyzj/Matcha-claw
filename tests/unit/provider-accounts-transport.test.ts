@@ -73,26 +73,10 @@ describe('provider accounts delivery transport', () => {
   });
 
   it('preserves custom media endpoint and protocol without accepting auth fields', async () => {
+    const receipt = { callId: 'a'.repeat(32), accepted: true } as const;
     const fetcher = vi.fn().mockResolvedValue({
-      status: 200,
-      json: async () => ({
-        success: true,
-        account: {
-          id: 'custom-media',
-          provider: 'custom',
-          label: 'OpenAI',
-          enabled: true,
-          kind: 'media',
-          endpoint: 'https://media.example.test/v1',
-          mediaProtocol: 'openRouter',
-          authMode: 'apiKey',
-          revision: 1,
-        },
-        desired: { status: 'stored' },
-        persisted: { status: 'confirmed' },
-        native: { changed: false, applied: { status: 'unknown' }, observed: { status: 'unavailable' } },
-        commit: 'committed',
-      }),
+      status: 202,
+      json: async () => receipt,
     });
     const transport = createProviderAccountsTransport(createRuntimeHostDeliveryIssuer(), 3240, fetcher);
     const account = {
@@ -107,7 +91,7 @@ describe('provider accounts delivery transport', () => {
     await expect(transport.execute({
       ...replaceRequest,
       input: { kind: 'replace', account },
-    })).resolves.toMatchObject({ status: 200, body: { success: true } });
+    })).resolves.toEqual({ status: 202, body: receipt });
     expect(fetcher.mock.calls[0]?.[1]?.body).toContain('https://media.example.test/v1');
   });
 
@@ -116,8 +100,8 @@ describe('provider accounts delivery transport', () => {
       createRuntimeHostDeliveryIssuer(),
       3240,
       vi.fn().mockResolvedValue({
-        status: 200,
-        json: async () => ({ account: { ...replaceRequest.input.account, accessToken: 'secret-canary' } }),
+        status: 202,
+        json: async () => ({ callId: 'a'.repeat(32), accepted: true, account: { ...replaceRequest.input.account, accessToken: 'secret-canary' } }),
       }),
     );
 

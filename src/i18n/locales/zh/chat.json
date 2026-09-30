@@ -108,7 +108,10 @@
     },
     "errors": {
         "activeRunDisconnected": "当前这轮回复在收到结束事件前就断开了连接。",
-        "abortStoppingTimeout": "停止耗时较久。如果需要继续，可以新建会话。",
+        "abortStoppingTimeout": "停止请求后仍未收到本轮结束事件，可再次点击停止。",
+        "abortUnknown": "无法确认停止请求的结果，本轮回复可能仍在运行，可再次点击停止。",
+        "abortRejected": "运行时拒绝了停止请求，本轮回复可能仍在运行，可再次点击停止。",
+        "abortRequestFailed": "停止请求失败，请检查连接后再次点击停止。",
         "modelUnavailable": "当前模型不可用，请稍后重试或切换模型。",
         "gatewayAuthRequired": "OpenClaw 网关需要认证，请检查认证配置。",
         "gatewayAuthFailed": "OpenClaw 网关认证失败，请检查凭据或认证配置。",

@@ -2,6 +2,8 @@ import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { hasExactKeys, isBoundedText, isRecord, sendLoopbackJson } from './client';
 
 const AUTHORIZE_PACKAGE_ENDPOINT = '/api/sealed-resource/authorize-package';
+const CLOUD_PACKAGES_ENDPOINT = '/api/sealed-resource/cloud-packages';
+const CLEAR_AUTHORIZATIONS_ENDPOINT = '/api/sealed-resource/clear-authorizations';
 
 type SealedResourceAuthorizationStatus = 200 | 400 | 503;
 
@@ -22,8 +24,27 @@ export type SealedResourceAuthorizationResponse = Readonly<{
   body: SealedResourceAuthorizationResult;
 }>;
 
+export type SealedResourceCloudPackage = Readonly<{
+  packageVersionId: string;
+  packageType: 'skill' | 'agent';
+  packageSha256: string;
+  fileName: string;
+}>;
+
+export type SealedResourceCloudPackagesResponse = Readonly<{
+  status: 200 | 503;
+  body: { packages: SealedResourceCloudPackage[] };
+}>;
+
+export type SealedResourceClearAuthorizationsResponse = Readonly<{
+  status: 200 | 503;
+  body: { outcome: 'accepted' | 'unknown' };
+}>;
+
 export interface SealedResourceAuthorizationTransport {
   authorizePackage(request: unknown): Promise<SealedResourceAuthorizationResponse>;
+  listCloudPackages(): Promise<SealedResourceCloudPackagesResponse>;
+  clearAuthorizations(): Promise<SealedResourceClearAuthorizationsResponse>;
 }
 
 export function createSealedResourceAuthorizationTransport(
@@ -33,6 +54,43 @@ export function createSealedResourceAuthorizationTransport(
 ): SealedResourceAuthorizationTransport {
   return {
     authorizePackage: (request) => authorizePackage(issuer, runtimeHostTransportPort, fetcher, request),
+    listCloudPackages: async () => {
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: CLOUD_PACKAGES_ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: CLOUD_PACKAGES_ENDPOINT,
+          scope: 'sealed-resource:package',
+          capability: 'sealedResource.listCloudPackages',
+          subject: 'sealed-resource-keyring',
+        },
+        method: 'GET',
+        fetcher,
+      });
+      return response?.status === 200 && isCloudPackagesResult(response.body)
+        ? { status: 200, body: response.body }
+        : { status: 503, body: { packages: [] } };
+    },
+    clearAuthorizations: async () => {
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort,
+        path: CLEAR_AUTHORIZATIONS_ENDPOINT,
+        issuer,
+        decision: {
+          endpoint: CLEAR_AUTHORIZATIONS_ENDPOINT,
+          scope: 'sealed-resource:package',
+          capability: 'sealedResource.clearAuthorizations',
+          subject: 'sealed-resource-keyring',
+        },
+        method: 'POST',
+        fetcher,
+        emptyContentLength: true,
+      });
+      return response?.status === 200 && isAcceptedResult(response.body)
+        ? { status: 200, body: { outcome: 'accepted' } }
+        : { status: 503, body: { outcome: 'unknown' } };
+    },
   };
 }
 
@@ -71,6 +129,16 @@ function isAuthorizePackageRequest(value: unknown): value is SealedResourceAutho
     && isPackageSha256(value.packageSha256)
     && isAuthorizationKey(value.authorizationKey)
     && (value.leaseExpiresAt === undefined || isText(value.leaseExpiresAt, 128));
+}
+
+function isCloudPackagesResult(value: unknown): value is { packages: SealedResourceCloudPackage[] } {
+  return isRecord(value) && hasExactKeys(value, ['packages']) && Array.isArray(value.packages)
+    && value.packages.every((entry: unknown) => isRecord(entry)
+      && hasExactKeys(entry, ['packageVersionId', 'packageType', 'packageSha256', 'fileName'])
+      && isText(entry.packageVersionId, 4096)
+      && (entry.packageType === 'skill' || entry.packageType === 'agent')
+      && isPackageSha256(entry.packageSha256)
+      && isText(entry.fileName, 4096));
 }
 
 function isAcceptedResult(value: unknown): value is SealedResourceAuthorizationResult {

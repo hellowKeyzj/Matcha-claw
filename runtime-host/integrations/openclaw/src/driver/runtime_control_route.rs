@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use platform::loopback::Response;
+use platform::{call::CallStatus, loopback::Response};
 use runtime_directory::{
-    RuntimeControlOps, RuntimeControlReadiness, RuntimeDriverIdentity, RuntimeGatewayHealth,
-    RuntimeGatewayStatus, RuntimeLogSnapshot,
+    RuntimeControlFailure, RuntimeControlOps, RuntimeControlReadiness, RuntimeDriverIdentity,
+    RuntimeGatewayHealth, RuntimeGatewayStatus, RuntimeLogSnapshot,
+    call::{RuntimeControlCallDetail, RuntimeControlCallResult, finish_runtime_control_call},
     control_loopback::{
         RuntimeControlLifecyclePort, RuntimeControlOperation, RuntimeControlRequest,
         RuntimeControlRouteFragment, RuntimeControlRouteFuture, lifecycle_error_response,
@@ -51,17 +52,19 @@ impl RuntimeControlRouteFragment for OpenClawRuntimeControlRoute {
             RuntimeControlOperation::LifecycleRestart => {
                 Some(lifecycle_restart(Arc::clone(&self.lifecycle), request))
             }
-            RuntimeControlOperation::Logs => Some(logs(Arc::clone(&self.driver), request.cursor)),
-            RuntimeControlOperation::ControlReady => Some(control_ready(Arc::clone(&self.driver))),
-            RuntimeControlOperation::GatewayHealth => Some(gateway_health(
-                Arc::clone(&self.driver),
-                request.probe.unwrap_or(false),
-            )),
-            RuntimeControlOperation::GatewayStatus => Some(gateway_status(
-                Arc::clone(&self.driver),
-                request.include_channel_summary.unwrap_or(true),
-            )),
-            RuntimeControlOperation::ControlUiUrl => Some(control_ui_url(Arc::clone(&self.driver))),
+            RuntimeControlOperation::Logs => Some(logs(Arc::clone(&self.driver), request)),
+            RuntimeControlOperation::ControlReady => {
+                Some(control_ready(Arc::clone(&self.driver), request))
+            }
+            RuntimeControlOperation::GatewayHealth => {
+                Some(gateway_health(Arc::clone(&self.driver), request))
+            }
+            RuntimeControlOperation::GatewayStatus => {
+                Some(gateway_status(Arc::clone(&self.driver), request))
+            }
+            RuntimeControlOperation::ControlUiUrl => {
+                Some(control_ui_url(Arc::clone(&self.driver), request))
+            }
         }
     }
 }
@@ -71,7 +74,14 @@ fn lifecycle_status(
     request: RuntimeControlRequest,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match lifecycle.lifecycle_status(request.endpoint).await {
+        let result = lifecycle.lifecycle_status(request.endpoint.clone()).await;
+        let (status, detail) = RuntimeControlCallDetail::lifecycle_result(
+            &request.endpoint,
+            RuntimeControlOperation::LifecycleStatus,
+            &result,
+        );
+        finish_runtime_control_call(request.call, status, &detail).await;
+        match result {
             Ok(status) => Response::json(200, json!({ "result": status })),
             Err(error) => lifecycle_error_response(error),
         }
@@ -83,8 +93,14 @@ fn lifecycle_start(
     request: RuntimeControlRequest,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match lifecycle.lifecycle_start(request.endpoint).await {
-            Ok(status) => Response::json(200, json!({ "result": status })),
+        let Some(call) = request.call else {
+            return runtime_directory::control_loopback::unavailable_response();
+        };
+        match lifecycle
+            .admit_lifecycle_start(request.endpoint, call)
+            .await
+        {
+            Ok(receipt) => Response::json(202, json!(receipt)),
             Err(error) => lifecycle_error_response(error),
         }
     })
@@ -95,8 +111,11 @@ fn lifecycle_stop(
     request: RuntimeControlRequest,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match lifecycle.lifecycle_stop(request.endpoint).await {
-            Ok(status) => Response::json(200, json!({ "result": status })),
+        let Some(call) = request.call else {
+            return runtime_directory::control_loopback::unavailable_response();
+        };
+        match lifecycle.admit_lifecycle_stop(request.endpoint, call).await {
+            Ok(receipt) => Response::json(202, json!(receipt)),
             Err(error) => lifecycle_error_response(error),
         }
     })
@@ -107,34 +126,84 @@ fn lifecycle_restart(
     request: RuntimeControlRequest,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match lifecycle.lifecycle_restart(request.endpoint).await {
-            Ok(status) => Response::json(200, json!({ "result": status })),
+        let Some(call) = request.call else {
+            return runtime_directory::control_loopback::unavailable_response();
+        };
+        match lifecycle
+            .admit_lifecycle_restart(request.endpoint, call)
+            .await
+        {
+            Ok(receipt) => Response::json(202, json!(receipt)),
             Err(error) => lifecycle_error_response(error),
         }
     })
 }
 
-fn logs(driver: Arc<OpenClawDriver>, cursor: Option<u64>) -> RuntimeControlRouteFuture {
+async fn finish_read<T>(
+    request: RuntimeControlRequest,
+    result: &Result<T, RuntimeControlFailure>,
+    mut detail: RuntimeControlCallDetail,
+) {
+    let (status, outcome) = match result {
+        Ok(_) => (CallStatus::Succeeded, RuntimeControlCallResult::Succeeded),
+        Err(RuntimeControlFailure::Unsupported) => {
+            (CallStatus::Rejected, RuntimeControlCallResult::Unsupported)
+        }
+        Err(RuntimeControlFailure::Unavailable) => {
+            (CallStatus::Failed, RuntimeControlCallResult::Unavailable)
+        }
+        Err(RuntimeControlFailure::Unknown) => {
+            (CallStatus::Unknown, RuntimeControlCallResult::Unknown)
+        }
+    };
+    detail.result = Some(outcome);
+    finish_runtime_control_call(request.call, status, &detail).await;
+}
+
+fn logs(driver: Arc<OpenClawDriver>, request: RuntimeControlRequest) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match RuntimeControlOps::logs(driver.as_ref(), cursor).await {
+        let result = RuntimeControlOps::logs(driver.as_ref(), request.cursor).await;
+        let mut detail = RuntimeControlCallDetail::new(&request.endpoint);
+        detail.count = result.as_ref().ok().map(|logs| logs.entries.len());
+        finish_read(request, &result, detail).await;
+        match result {
             Ok(logs) => Response::json(200, project_logs(logs)),
             Err(error) => runtime_control_error_response(error),
         }
     })
 }
 
-fn control_ready(driver: Arc<OpenClawDriver>) -> RuntimeControlRouteFuture {
+fn control_ready(
+    driver: Arc<OpenClawDriver>,
+    request: RuntimeControlRequest,
+) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match RuntimeControlOps::control_readiness(driver.as_ref()).await {
+        let result = RuntimeControlOps::control_readiness(driver.as_ref()).await;
+        let mut detail = RuntimeControlCallDetail::new(&request.endpoint);
+        detail.ready = result
+            .as_ref()
+            .ok()
+            .map(|ready| *ready == RuntimeControlReadiness::Ready);
+        finish_read(request, &result, detail).await;
+        match result {
             Ok(readiness) => Response::json(200, project_control_readiness(readiness)),
             Err(error) => runtime_control_error_response(error),
         }
     })
 }
 
-fn gateway_health(driver: Arc<OpenClawDriver>, probe: bool) -> RuntimeControlRouteFuture {
+fn gateway_health(
+    driver: Arc<OpenClawDriver>,
+    request: RuntimeControlRequest,
+) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match RuntimeControlOps::gateway_health(driver.as_ref(), probe).await {
+        let result =
+            RuntimeControlOps::gateway_health(driver.as_ref(), request.probe.unwrap_or(false))
+                .await;
+        let mut detail = RuntimeControlCallDetail::new(&request.endpoint);
+        detail.healthy = result.as_ref().ok().map(|health| health.ok);
+        finish_read(request, &result, detail).await;
+        match result {
             Ok(health) => Response::json(200, project_gateway_health(health)),
             Err(error) => runtime_control_error_response(error),
         }
@@ -143,19 +212,33 @@ fn gateway_health(driver: Arc<OpenClawDriver>, probe: bool) -> RuntimeControlRou
 
 fn gateway_status(
     driver: Arc<OpenClawDriver>,
-    include_channel_summary: bool,
+    request: RuntimeControlRequest,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match RuntimeControlOps::gateway_status(driver.as_ref(), include_channel_summary).await {
+        let result = RuntimeControlOps::gateway_status(
+            driver.as_ref(),
+            request.include_channel_summary.unwrap_or(true),
+        )
+        .await;
+        let mut detail = RuntimeControlCallDetail::new(&request.endpoint);
+        detail.count = result.as_ref().ok().map(|status| status.session_count);
+        finish_read(request, &result, detail).await;
+        match result {
             Ok(status) => Response::json(200, project_gateway_status(status)),
             Err(error) => runtime_control_error_response(error),
         }
     })
 }
 
-fn control_ui_url(driver: Arc<OpenClawDriver>) -> RuntimeControlRouteFuture {
+fn control_ui_url(
+    driver: Arc<OpenClawDriver>,
+    request: RuntimeControlRequest,
+) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match RuntimeControlOps::control_ui_url(driver.as_ref()).await {
+        let result = RuntimeControlOps::control_ui_url(driver.as_ref()).await;
+        let detail = RuntimeControlCallDetail::new(&request.endpoint);
+        finish_read(request, &result, detail).await;
+        match result {
             Ok(url) => Response::json(200, json!({ "result": { "url": url } })),
             Err(error) => runtime_control_error_response(error),
         }

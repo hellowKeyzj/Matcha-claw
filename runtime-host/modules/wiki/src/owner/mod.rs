@@ -1,4 +1,9 @@
 pub(crate) mod actor;
+pub(crate) mod insights;
+pub(crate) mod lint;
+pub(crate) mod maintenance;
+pub(crate) mod qa;
+pub(crate) mod reindex;
 pub(crate) mod review_lifecycle;
 pub(crate) mod source_lifecycle;
 pub(crate) mod source_watcher;

@@ -1,4 +1,7 @@
 import { hostApiFetch } from '@/lib/host-api';
+import { waitForCall } from '@/lib/call-log-await';
+import type { CallReceipt } from '@/types/call-log';
+import { decodeSecurityCallDetail } from '@/types/call-log/security';
 
 type SecurityOperationScopeKind = 'security-policy' | 'security-remediation';
 type SecurityOperationTarget = Readonly<{
@@ -21,7 +24,7 @@ async function hostSecurityOperation<TResult>(
   input: Record<string, unknown>,
   target: SecurityOperationTarget = { kind: scopeKind },
 ): Promise<TResult> {
-  return await hostApiFetch<TResult>('/api/security/operation', {
+  const receipt = await hostApiFetch<CallReceipt>('/api/security/operation', {
     method: 'POST',
     body: JSON.stringify({
       id: 'security.operation',
@@ -30,6 +33,12 @@ async function hostSecurityOperation<TResult>(
       target,
       input,
     }),
+  });
+  const call = await waitForCall(receipt, 'security');
+  const detail = decodeSecurityCallDetail(call.detail);
+  if (!detail || detail.kind !== 'operation' || `security.${detail.operation}` !== operationId) throw new Error('Invalid security operation receipt');
+  return await hostApiFetch<TResult>('/api/security/operation/receipt', {
+    method: 'POST', body: JSON.stringify({ correlation: detail.correlation, operationId }),
   });
 }
 
@@ -45,7 +54,7 @@ export async function hostSecurityReadPolicy<TPolicy = unknown>(options?: { trac
 }
 
 export async function hostSecurityWritePolicy(policy: unknown): Promise<SecurityPolicyReceipt> {
-  return await hostApiFetch<SecurityPolicyReceipt>('/api/security/policy', {
+  const receipt = await hostApiFetch<CallReceipt>('/api/security/policy', {
     method: 'POST',
     body: JSON.stringify({
       id: 'security.policy',
@@ -55,6 +64,12 @@ export async function hostSecurityWritePolicy(policy: unknown): Promise<Security
       input: { policy: isRecord(policy) ? policy : {} },
     }),
   });
+  const call = await waitForCall(receipt, 'security');
+  const detail = decodeSecurityCallDetail(call.detail);
+  if (!detail || detail.kind !== 'policyReplace') throw new Error('Invalid security policy receipt');
+  if (detail.effect === 'rejected') throw new Error('Security policy effect was rejected');
+  if (detail.revision === null) throw new Error('Security policy outcome is unknown');
+  return { desired: { revision: detail.revision, outcome: detail.effect === 'confirmed' ? 'confirmed' : 'outcome_unknown' } };
 }
 
 export async function hostSecurityReadAudit<TResult = unknown>(params?: Record<string, string | number | undefined>) {
@@ -91,10 +106,15 @@ export function resolveSecurityEmergencyOutcome(response: SecurityEmergencyRespo
 }
 
 export async function hostSecurityRunEmergencyResponse(): Promise<SecurityEmergencyResponse> {
-  return await hostApiFetch<SecurityEmergencyResponse>('/api/security/emergency', {
+  const receipt = await hostApiFetch<CallReceipt>('/api/security/emergency', {
     method: 'POST',
     body: '{}',
   });
+  const call = await waitForCall(receipt, 'security');
+  const detail = decodeSecurityCallDetail(call.detail);
+  if (!detail || detail.kind !== 'emergency') throw new Error('Invalid security emergency receipt');
+  if (detail.outcome === 'unavailable') throw new Error('Security emergency is unavailable');
+  return { outcome: detail.outcome ?? 'outcome_unknown' };
 }
 
 export async function hostSecurityRunQuickAudit<TResult = unknown>(): Promise<TResult> {

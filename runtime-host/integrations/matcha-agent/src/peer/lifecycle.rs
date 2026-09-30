@@ -34,8 +34,8 @@ use crate::{
         close::SessionCloseParams,
         events::{
             ApprovalPhase, EventActivity, EventProjectionResult, EventRejection, MessageLifecycle,
-            RunLifecycle, SessionEventObservation, SessionEventProjector, SessionEventUpdate,
-            ToolActivityPhase,
+            ProjectedRunError, RunLifecycle, SessionEventObservation, SessionEventProjector,
+            SessionEventUpdate, ToolActivityPhase,
         },
         history::{HistoryContentResult, HistoryListResult, HistoryLoadResult},
         hydration::HydrationWindowRequest,
@@ -96,6 +96,10 @@ pub enum RendererEvent {
         sequence: u64,
         phase: RendererRunPhase,
     },
+    RunFailed {
+        sequence: u64,
+        error: Option<ProjectedRunError>,
+    },
     Message {
         sequence: u64,
         message_id: String,
@@ -131,6 +135,11 @@ impl fmt::Debug for RendererEvent {
                 .debug_struct("Run")
                 .field("sequence", sequence)
                 .field("phase", phase)
+                .finish(),
+            Self::RunFailed { sequence, error } => formatter
+                .debug_struct("RunFailed")
+                .field("sequence", sequence)
+                .field("error", error)
                 .finish(),
             Self::Message {
                 sequence,
@@ -288,7 +297,6 @@ pub enum RendererRunPhase {
     CancellationRequested,
     Completed,
     Cancelled,
-    Failed,
     Interrupted,
 }
 
@@ -320,10 +328,9 @@ impl RendererEvent {
             Self::Run {
                 phase: RendererRunPhase::Completed
                     | RendererRunPhase::Cancelled
-                    | RendererRunPhase::Failed
                     | RendererRunPhase::Interrupted,
                 ..
-            }
+            } | Self::RunFailed { .. }
         )
     }
 }
@@ -644,7 +651,7 @@ fn renderer_subscription_projection_step(
             "eventType": event_type,
             "result": "Projected",
             "eventKind": match &p.event {
-                RendererEvent::Run { .. } => "run",
+                RendererEvent::Run { .. } | RendererEvent::RunFailed { .. } => "run",
                 RendererEvent::Message { .. } => "message",
                 RendererEvent::Tool { .. } => "tool",
                 RendererEvent::Approval { .. } => "approval",
@@ -792,9 +799,9 @@ fn renderer_event(sequence: u64, activity: &EventActivity) -> Option<RendererEve
             sequence,
             phase: RendererRunPhase::Cancelled,
         }),
-        EventActivity::Run(RunLifecycle::Failed) => Some(RendererEvent::Run {
+        EventActivity::RunFailed { error } => Some(RendererEvent::RunFailed {
             sequence,
-            phase: RendererRunPhase::Failed,
+            error: error.clone(),
         }),
         EventActivity::Run(RunLifecycle::Interrupted) => Some(RendererEvent::Run {
             sequence,
@@ -1599,17 +1606,6 @@ impl MatchaPeerSessionHandle {
             return crate::session::history::HistoryResult::Unavailable;
         }
         crate::session::history::list(self.endpoint, &self.secret).await
-    }
-
-    pub async fn list_local_history(
-        &self,
-    ) -> crate::session::history::HistoryResult<crate::session::history::local::LocalHistoryCatalog>
-    {
-        crate::session::history::local::LocalHistoryReader::for_workspace(
-            self.working_directory.clone(),
-        )
-        .list()
-        .await
     }
 
     pub async fn load_local_history(

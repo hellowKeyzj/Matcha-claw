@@ -1,12 +1,14 @@
+use platform::call::CallContext;
 use tokio::sync::oneshot;
 
-use crate::PlatformToolsOutcome;
+use crate::{PlatformToolsCallDetail, PlatformToolsOutcome};
 
 pub(crate) enum PlatformToolsCommand {}
 
 pub(crate) enum PlatformToolsQuery {
     List {
         reply: oneshot::Sender<PlatformToolsOutcome>,
+        call: Option<CallContext<PlatformToolsCallDetail>>,
     },
 }
 

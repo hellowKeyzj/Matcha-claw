@@ -43,13 +43,20 @@ pub async fn stream_generate(
 ) -> Result<(), LlmClientError> {
     let http_request =
         build_openai_responses_http_request(&openai_responses_request(request, true));
-    let body = send_text(http, &http_request).await?;
-
-    for event in parse_openai_responses_sse_chunk(&body) {
-        sink.send(event).await?;
+    let mut builder = http
+        .post(&http_request.endpoint)
+        .body(http_request.body.to_string());
+    for (name, value) in &http_request.headers {
+        builder = builder.header(*name, value);
     }
-
-    Ok(())
+    let response = builder.send().await?;
+    if !response.status().is_success() {
+        return Err(LlmClientError::Protocol(format!(
+            "OpenAI Responses stream failed with HTTP {}",
+            response.status()
+        )));
+    }
+    super::consume_sse(response, sink, parse_openai_responses_sse_chunk).await
 }
 
 pub fn build_openai_responses_http_request(
@@ -333,7 +340,10 @@ fn push_stream_events(payload: &Value, events: &mut Vec<LlmStreamEvent>) {
                 events.push(LlmStreamEvent::FinalText(text.to_string()));
             }
         }
-        "response.completed" | "response.incomplete" | "response.failed" => {
+        "response.failed" => events.push(LlmStreamEvent::Diagnostic(
+            "OpenAI Responses stream failed".into(),
+        )),
+        "response.completed" | "response.incomplete" => {
             let response = payload.get("response").unwrap_or(payload);
             if let Some(usage) = extract_usage(response) {
                 events.push(LlmStreamEvent::Usage(usage));

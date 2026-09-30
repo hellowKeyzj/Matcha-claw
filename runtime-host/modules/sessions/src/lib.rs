@@ -1,6 +1,7 @@
 mod adapters;
 mod api;
 mod application;
+pub mod call;
 pub mod capability;
 pub mod domain;
 pub mod events;
@@ -119,6 +120,11 @@ pub struct SessionModule {
 impl SessionModule {
     fn new(handle: SessionHandle) -> Self {
         Self { handle }
+    }
+
+    pub fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
+        self.handle = self.handle.with_call_recorder(recorder);
+        self
     }
 
     pub fn handle(&self) -> &SessionHandle {

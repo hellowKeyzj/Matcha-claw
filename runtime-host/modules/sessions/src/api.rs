@@ -11,7 +11,7 @@ use super::{
         SessionApprovalOutcome,
     },
     command::{
-        SessionAbortRequest, SessionCommand, SessionEnsureOutcome, SessionEvent,
+        SessionCommand, SessionEnsureOutcome, SessionEvent,
         SessionEvictOutcome, SessionIngestOutcome, SessionIngressEvent, SessionSendRequest,
     },
     create::{
@@ -38,6 +38,7 @@ use crate::ports::SessionRuntimeDirectory;
 pub struct SessionHandle {
     owner: OwnerRuntimeHandle<SessionCommand, SessionQuery>,
     runtime_directory: Arc<dyn SessionRuntimeDirectory>,
+    call_recorder: Option<platform::call::CallRecorder>,
 }
 
 impl SessionHandle {
@@ -48,7 +49,32 @@ impl SessionHandle {
         Self {
             owner,
             runtime_directory,
+            call_recorder: None,
         }
+    }
+
+    pub fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
+        self.call_recorder = Some(recorder);
+        self
+    }
+
+    pub(crate) async fn record_boundary_outcome(
+        &self,
+        command: &'static str,
+        outcome: crate::call::SessionsCallOutcome,
+    ) {
+        if self.request_query(|reply| SessionQuery::BoundaryOutcome {
+            command,
+            detail: crate::call::SessionsCallDetail::default(),
+            outcome,
+            reply,
+        }).await.is_err() {
+            eprintln!("Sessions boundary call audit unavailable");
+        }
+    }
+
+    pub(crate) async fn record_events_subscription(&self) -> Result<(), ()> {
+        self.request_query(|reply| SessionQuery::EventsSubscribed { reply }).await
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionView>, ()> {
@@ -146,9 +172,8 @@ impl SessionHandle {
         &self,
         command: SessionAbortCommand,
     ) -> Result<SessionAbortOutcome, ()> {
-        self.request_command(|reply| SessionCommand::Abort {
-            request: SessionAbortRequest::Session { command, reply },
-        })
+        crate::trace::log("runtime.abort.api.submit", command.trace_id(), serde_json::json!({}));
+        self.request_query(|reply| SessionQuery::Abort { command, reply })
         .await
     }
 
@@ -245,10 +270,16 @@ impl SessionHandle {
         command: impl FnOnce(oneshot::Sender<T>) -> SessionCommand,
     ) -> Result<T, ()> {
         let (reply, response) = oneshot::channel();
-        self.owner
-            .send_command(command(reply))
-            .await
-            .map_err(|_| ())?;
+        let command = command(reply);
+        let call = self.begin_call(command.call_detail()).await?;
+        let command = match &call {
+            Some(call) => SessionCommand::Audited { command: Box::new(command), call: call.clone() },
+            None => command,
+        };
+        if self.owner.send_command(command).await.is_err() {
+            if let Some(call) = call { call.rejected().await; }
+            return Err(());
+        }
         response.await.map_err(|_| ())
     }
 
@@ -257,7 +288,40 @@ impl SessionHandle {
         query: impl FnOnce(oneshot::Sender<T>) -> SessionQuery,
     ) -> Result<T, ()> {
         let (reply, response) = oneshot::channel();
-        self.owner.send_query(query(reply)).await.map_err(|_| ())?;
-        response.await.map_err(|_| ())
+        let query = query(reply);
+        let abort_trace_id = match &query {
+            SessionQuery::Abort { command, .. } => command.trace_id().map(str::to_owned),
+            _ => None,
+        };
+        let started = std::time::Instant::now();
+        let call = self.begin_call(query.call_detail()).await.map_err(|()| {
+            crate::trace::log("runtime.abort.api.audit-failed", abort_trace_id.as_deref(), serde_json::json!({ "elapsedMs": started.elapsed().as_millis() }));
+        })?;
+        let query = match &call {
+            Some(call) => SessionQuery::Audited { query: Box::new(query), call: call.clone() },
+            None => query,
+        };
+        crate::trace::log("runtime.abort.api.dispatch", abort_trace_id.as_deref(), serde_json::json!({ "elapsedMs": started.elapsed().as_millis() }));
+        if self.owner.send_query(query).await.is_err() {
+            if let Some(call) = call { call.rejected().await; }
+            crate::trace::log("runtime.abort.api.dispatch-failed", abort_trace_id.as_deref(), serde_json::json!({ "elapsedMs": started.elapsed().as_millis() }));
+            return Err(());
+        }
+        let outcome = response.await.map_err(|_| ());
+        crate::trace::log("runtime.abort.api.response", abort_trace_id.as_deref(), serde_json::json!({ "received": outcome.is_ok(), "elapsedMs": started.elapsed().as_millis() }));
+        outcome
+    }
+
+    async fn begin_call(
+        &self,
+        detail: Option<(&'static str, crate::call::SessionsCallDetail)>,
+    ) -> Result<Option<crate::call::SessionCall>, ()> {
+        let (Some(recorder), Some((command, detail))) = (&self.call_recorder, detail) else {
+            return Ok(None);
+        };
+        let context = recorder.begin(command, &detail).await.map_err(|error| {
+            eprintln!("Sessions call audit: {error}");
+        })?;
+        Ok(Some(crate::call::SessionCall::new(context, detail)))
     }
 }

@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Loader2, Plus, Sparkles, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { StableScrollArea } from '@/components/scroll';
@@ -164,24 +164,31 @@ export function ProviderCredentialModelsEditor(props: {
   const [discovering, setDiscovering] = useState(false);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [discoveryCollapsed, setDiscoveryCollapsed] = useState(false);
+  const discoveryObservation = useRef<AbortController | null>(null);
+  useEffect(() => () => discoveryObservation.current?.abort(), []);
 
   const handleDiscover = async () => {
-    if (discovering) return;
+    if (discoveryObservation.current) return;
+    const observation = new AbortController();
+    discoveryObservation.current = observation;
     setDiscoveryCollapsed(false);
     setDiscovering(true);
     setDiscoveryError(null);
     try {
-      const result = await discoverProviderModels(credential.id);
+      const result = await discoverProviderModels(credential.id, observation.signal);
+      if (observation.signal.aborted) return;
       setDiscoveredModels(result.models);
       setSelectedDiscoveredModelIds(result.models.map((model) => model.modelId));
       setDiscoveryAttempted(true);
     } catch (discoverError) {
+      if (observation.signal.aborted) return;
       setDiscoveredModels([]);
       setSelectedDiscoveredModelIds([]);
       setDiscoveryError(discoverError instanceof Error ? discoverError.message : String(discoverError));
       setDiscoveryAttempted(true);
     } finally {
-      setDiscovering(false);
+      discoveryObservation.current = null;
+      if (!observation.signal.aborted) setDiscovering(false);
     }
   };
 

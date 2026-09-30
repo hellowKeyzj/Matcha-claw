@@ -1,9 +1,6 @@
 import { hostApiFetch } from '@/lib/host-api';
-import {
-  decodeProviderMutationReceipt,
-  ProviderMutationCommitOutcomeUnknownError,
-  type ProviderMutationReceipt,
-} from '@/lib/host-api-transport-contract';
+import { isProviderMutationCommitted, waitForProviderMutation } from '@/lib/provider-call';
+import type { ProviderCallDetail } from '@/types/call-log/provider';
 import { nativeProjectionError } from '@/lib/provider-projection-errors';
 
 export type CapabilityKey =
@@ -34,9 +31,9 @@ export interface CapabilityRoutingSnapshot {
 
 export interface PersistCapabilityRoutingResult {
   success: boolean;
-  revision: number;
+  revision: number | null;
   routing: CapabilityRouting;
-  receipt?: ProviderMutationReceipt;
+  receipt?: ProviderCallDetail;
   error?: string;
   warning?: string;
 }
@@ -156,30 +153,6 @@ function routingToDocument(routing: CapabilityRouting, revision: number) {
   };
 }
 
-function isStoredReplacement(value: unknown): value is {
-  success: true;
-  desired: { status: 'stored'; revision: number };
-  persisted: { status: 'confirmed' };
-  native: ProviderMutationReceipt['native'];
-  commit: 'committed';
-} {
-  if (!isRecord(value)
-    || !hasExactKeys(value, ['success', 'desired', 'persisted', 'native', 'commit'])
-    || value.success !== true) return false;
-  const receipt = decodeProviderMutationReceipt(value, 'committed');
-  return receipt?.desired.status === 'stored'
-    && receipt.desired.revision !== undefined
-    && isPositiveInteger(receipt.desired.revision)
-    && receipt.persisted.status === 'confirmed';
-}
-
-function isRejectedReplacement(value: unknown): value is { success: false; error: 'Provider routing request was rejected' } {
-  return isRecord(value)
-    && hasExactKeys(value, ['success', 'error'])
-    && value.success === false
-    && value.error === 'Provider routing request was rejected';
-}
-
 export function normalizeCapabilityRouting(value: unknown): CapabilityRouting {
   return decodeRoutingDocument(value)?.routing ?? {};
 }
@@ -206,48 +179,31 @@ export async function persistCapabilityRouting(
   routing: CapabilityRouting,
   revision: number,
 ): Promise<PersistCapabilityRoutingResult> {
-  let result: unknown;
-  try {
-    result = await hostApiFetch<unknown>(PROVIDER_ROUTING_PATH, {
-      method: 'POST',
-      body: JSON.stringify({
-        id: 'provider.routing',
-        operationId: 'providerRouting.replace',
-        scope: { kind: 'provider-routing' },
-        target: { kind: 'provider-routing' },
-        input: { kind: 'replace', routing: routingToDocument(routing, revision) },
-      }),
-    });
-  } catch (error) {
-    if (error instanceof ProviderMutationCommitOutcomeUnknownError) {
-      return {
-        success: false,
-        revision,
-        routing: {},
-        receipt: error.receipt,
-        error: 'Provider routing commit outcome is unknown; reopen before retrying',
-      };
-    }
-    throw error;
-  }
-  if (isStoredReplacement(result)) {
-    const receipt = decodeProviderMutationReceipt(result, 'committed');
-    const warning = receipt ? nativeProjectionError(receipt) : undefined;
-    return {
-      success: true,
-      revision: result.desired.revision,
-      routing,
-      ...(receipt ? { receipt } : {}),
-      ...(warning ? { warning } : {}),
-    };
-  }
-  if (isRejectedReplacement(result)) {
+  const result = await hostApiFetch<unknown>(PROVIDER_ROUTING_PATH, {
+    method: 'POST',
+    body: JSON.stringify({
+      id: 'provider.routing',
+      operationId: 'providerRouting.replace',
+      scope: { kind: 'provider-routing' },
+      target: { kind: 'provider-routing' },
+      input: { kind: 'replace', routing: routingToDocument(routing, revision) },
+    }),
+  });
+  const receipt = await waitForProviderMutation(result, 'providerRouting.replace');
+  if (!isProviderMutationCommitted(receipt, 'stored')) {
+    const unknown = receipt.phase !== 'terminal' || receipt.outcome === 'unknown'
+      || receipt.commit === 'unknown' || receipt.persisted === 'unknown';
     return {
       success: false,
-      revision,
+      revision: null,
       routing: {},
-      error: result.error,
+      receipt,
+      error: unknown ? 'Provider routing commit outcome is unknown; reopen before retrying'
+        : receipt.outcome === 'rejected' || receipt.outcome === 'missing'
+          ? 'Provider routing request was rejected' : 'Provider routing is unavailable',
     };
   }
-  throw new Error('Provider routing response is invalid');
+  const snapshot = await fetchCapabilityRouting();
+  const warning = nativeProjectionError(receipt);
+  return { success: true, ...snapshot, receipt, ...(warning ? { warning } : {}) };
 }

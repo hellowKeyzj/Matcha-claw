@@ -25,6 +25,8 @@ import { RuntimeHostLifecycleOwner, stopOrForceKillRuntimeHost } from './runtime
 import { createCloudAccountClient } from './cloud-account/client';
 import { createCloudAccountService } from './cloud-account/service';
 import { createCloudProviderSync } from './cloud-account/provider-sync';
+import { createProviderCallObserver } from './ipc/provider-call-observation';
+import { createCallSubscriber } from './call-observation';
 import { createDiagnosticsExportDependencies } from './ipc/diagnostics-export-ipc';
 import {
   createRuntimeHostTransportBundle,
@@ -191,6 +193,7 @@ export async function bootstrapMainApplication(deps: {
   let closeRuntimeHostDelivery: (() => Promise<void>) | undefined;
   let transportBundle: RuntimeHostTransportBundle;
   let providerCredentialStatusTransport: ProviderCredentialStatusTransport;
+  let awaitProviderCall: ReturnType<typeof createProviderCallObserver>;
   let cloudAccountService: ReturnType<typeof createCloudAccountService>;
   let delivery: RuntimeHostDelivery;
   try {
@@ -213,17 +216,38 @@ export async function bootstrapMainApplication(deps: {
         : undefined,
     });
     closeRuntimeHostDelivery = async () => {
+      await cloudAccountService?.close();
       transportBundle.close();
       await delivery.close();
     };
     providerCredentialStatusTransport = createProviderCredentialStatusTransport();
+    const subscribeCalls = createCallSubscriber(deps.hostEventBus, directRuntimeHost);
+    awaitProviderCall = createProviderCallObserver(transportBundle.hostApiTransports.callLogTransport, subscribeCalls);
     const cloudProviderSync = createCloudProviderSync({
       fetchClientBootstrap: (token) => cloudAccountClient.fetchClientBootstrap(token),
       providerAccountsTransport: transportBundle.hostApiTransports.providerAccountsTransport,
       providerModelsTransport: transportBundle.hostApiTransports.providerModelsTransport,
+      awaitProviderCall,
     });
-    cloudAccountService = createCloudAccountService(cloudAccountClient, cloudProviderSync);
-    cloudAccountService.prewarm();
+    cloudAccountService = createCloudAccountService(cloudAccountClient, cloudProviderSync, transportBundle.hostApiTransports.sealedResourceAuthorizationTransport, {
+      agentsTransport: transportBundle.hostApiTransports.agentsTransport,
+      sealedSkillsTransport: transportBundle.hostApiTransports.sealedSkillsTransport,
+      callLogTransport: transportBundle.hostApiTransports.callLogTransport,
+      subscribeCalls,
+      packageChanged: (operationId) => deps.hostEventBus.emit('package:changed', { operationId }),
+    });
+    const stopPackageExit = directRuntimeHost.onExit(() => cloudAccountService.runtimeExited());
+    const stopPackageRestart = directRuntimeHost.onRestart(() => {
+      void cloudAccountService.runtimeRestarted().catch(() => logger.warn('Cloud package authorization restore failed'));
+    });
+    closeRuntimeHostDelivery = async () => {
+      stopPackageExit();
+      stopPackageRestart();
+      try { await cloudAccountService.close(); } finally {
+        transportBundle.close();
+        await delivery.close();
+      }
+    };
   } catch (error) {
     if (startedRuntimeHost) {
       await stopOrForceKillRuntimeHost(startedRuntimeHost).catch(() => undefined);
@@ -256,6 +280,7 @@ export async function bootstrapMainApplication(deps: {
       directRuntimeHost,
       deps.getMainWindow,
       transportBundle.hostApiTransports.providerAccountsTransport,
+      awaitProviderCall,
       transportBundle.hostApiTransports.fleetCredentialsTransport,
       createDiagnosticsExportDependencies(transportBundle.hostApiTransports.diagnosticsArchiveTransport),
     );
@@ -266,6 +291,7 @@ export async function bootstrapMainApplication(deps: {
       rendererEventRoutes,
       sessionEvents: transportBundle.sessionEventsTransport,
     });
+    cloudAccountService.prewarm();
 
     if (!isE2EMode) {
       const settings = await transportBundle.hostApiTransports.settingsDesiredTransport.read().catch(() => null);

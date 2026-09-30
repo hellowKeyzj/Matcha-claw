@@ -1,4 +1,7 @@
+use platform::call::CallContext;
 use tokio::sync::oneshot;
+
+use super::call::DiagnosticsCallDetail;
 
 use crate::{
     DiagnosticsArchiveError, DiagnosticsArchiveReceipt, ports::DiagnosticsArchiveCancellation,
@@ -6,6 +9,8 @@ use crate::{
 
 pub(crate) enum DiagnosticsCommand {
     CollectArchive {
+        observation: foundation::execution::ObservationSink,
+        call: Option<CallContext<DiagnosticsCallDetail>>,
         cancellation: DiagnosticsArchiveCancellation,
         reply: oneshot::Sender<Result<DiagnosticsArchiveReceipt, DiagnosticsArchiveError>>,
     },
@@ -13,6 +18,7 @@ pub(crate) enum DiagnosticsCommand {
 
 pub(crate) enum DiagnosticsQuery {
     DownloadArchive {
+        call: Option<CallContext<DiagnosticsCallDetail>>,
         archive_id: String,
         reply: oneshot::Sender<Result<Vec<u8>, DiagnosticsArchiveError>>,
     },

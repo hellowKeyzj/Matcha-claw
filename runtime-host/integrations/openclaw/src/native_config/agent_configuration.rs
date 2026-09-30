@@ -114,19 +114,16 @@ impl AgentConfiguration {
         self.mutate(agent_id, Patch::Model(model)).await
     }
 
-    pub async fn set_skills(&self, agent_id: String, skills: Vec<String>) -> MutationOutcome {
+    pub async fn set_skills(&self, agent_id: String, skills: Vec<String>) -> Result<MutationOutcome, (Vec<String>, Vec<String>)> {
         let catalog = match self.skill_catalog(&agent_id).await {
             Ok(catalog) => catalog,
-            Err(ReadFailure::Rejected) => return MutationOutcome::Rejected,
+            Err(ReadFailure::Rejected) => return Ok(MutationOutcome::Rejected),
             Err(ReadFailure::Unavailable | ReadFailure::Protocol) => {
-                return MutationOutcome::OutcomeUnknown;
+                return Ok(MutationOutcome::OutcomeUnknown);
             }
         };
-        let skills = match catalog.canonicalize(skills) {
-            Ok(skills) => skills,
-            Err(_) => return MutationOutcome::Rejected,
-        };
-        self.mutate(agent_id, Patch::Skills(skills)).await
+        let skills = catalog.canonicalize(skills)?;
+        Ok(self.mutate(agent_id, Patch::Skills(skills)).await)
     }
 
     pub async fn skill_configuration(&self, agent_id: String) -> SkillConfigurationOutcome {

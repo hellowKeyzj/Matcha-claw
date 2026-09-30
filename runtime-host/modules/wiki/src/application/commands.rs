@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use tokio::sync::oneshot;
+use crate::call::{CallReply, WikiCallAcceptance, WikiCallDetail};
+use platform::call::CallContext;
 
 use crate::domain::{
     WikiApplyGeneratedPagesInput, WikiApplyGeneratedPagesReceipt, WikiCancelSourceTaskInput,
@@ -17,115 +18,207 @@ use crate::domain::{
 };
 
 pub(crate) enum WikiCommand {
+    RestoreHistory {
+        input: crate::history::WikiRestoreFileHistoryInput,
+        reply: CallReply<WikiReadReceipt>,
+    },
+    UpdateHistoryConfig {
+        input: crate::history::WikiFileHistorySettingsInput,
+        reply: CallReply<crate::history::WikiFileHistorySettings>,
+    },
+    ClearHistory {
+        input: WikiProjectSelector,
+        reply: CallReply<()>,
+    },
+    ExportArchive {
+        input: crate::WikiArchiveExportInput,
+        reply: CallReply<()>,
+    },
+    ImportArchive {
+        input: crate::WikiArchiveImportInput,
+        reply: CallReply<WikiProjectsReceipt>,
+    },
+    RebuildIndex {
+        input: WikiProjectSelector,
+        reply: CallReply<crate::WikiRebuildIndexReceipt>,
+    },
+    StageQuestion {
+        input: crate::WikiQuestionInput,
+        cancellation: tokio_util::sync::CancellationToken,
+        reply: CallReply<crate::qa::QuestionPlan>,
+    },
+    CancelQuestion {
+        input: crate::WikiQuestionTaskSelector,
+        reply: CallReply<crate::WikiQuestionTaskReceipt>,
+    },
+    SaveQuestion {
+        input: crate::WikiQuestionTaskSelector,
+        reply: CallReply<crate::WikiQuestionSaveReceipt>,
+    },
+    StageReindex {
+        input: crate::reindex::WikiReindexInput,
+        task_id: Option<String>,
+        reply: CallReply<crate::reindex::ReindexPlan>,
+    },
+    StageLint {
+        input: crate::lint::WikiLintRunInput,
+        task_id: String,
+        reply: CallReply<crate::lint::LintRunPlan>,
+    },
+    BeginLint {
+        plan: crate::lint::LintRunPlan,
+        reply: CallReply<()>,
+    },
+    CompleteLint {
+        plan: crate::lint::LintRunPlan,
+        result: Result<Vec<crate::lint::WikiLintFinding>, WikiFailure>,
+        reply: CallReply<crate::lint::WikiLintState>,
+    },
+    UpdateLintConfig {
+        input: crate::lint::WikiLintConfigInput,
+        reply: CallReply<crate::lint::WikiLintConfig>,
+    },
+    LintAction {
+        input: crate::lint::WikiLintActionInput,
+        action: crate::lint::LintAction,
+        reply: CallReply<crate::lint::WikiLintFixReceipt>,
+    },
+    DismissLint {
+        input: crate::lint::WikiLintActionInput,
+        reply: CallReply<crate::lint::WikiLintState>,
+    },
+    DismissGraphInsight {
+        input: crate::insights::WikiGraphInsightInput,
+        reply: CallReply<crate::insights::WikiGraphInsightsReceipt>,
+    },
     CreateProject {
         input: WikiCreateProjectInput,
-        reply: oneshot::Sender<Result<WikiProjectsReceipt, WikiFailure>>,
+        reply: CallReply<WikiProjectsReceipt>,
     },
     OpenProject {
         input: WikiOpenProjectInput,
-        reply: oneshot::Sender<Result<WikiProjectsReceipt, WikiFailure>>,
+        reply: CallReply<WikiProjectsReceipt>,
     },
     SetCurrentProject {
         input: WikiProjectSelector,
-        reply: oneshot::Sender<Result<WikiProjectsReceipt, WikiFailure>>,
+        reply: CallReply<WikiProjectsReceipt>,
     },
     UpdateSourceWatchConfig {
         input: WikiSourceWatchConfigInput,
-        reply: oneshot::Sender<Result<WikiSourceWatchConfigReceipt, WikiFailure>>,
+        reply: CallReply<WikiSourceWatchConfigReceipt>,
     },
     WriteFile {
         input: WikiWriteInput,
-        reply: oneshot::Sender<Result<WikiWriteReceipt, WikiFailure>>,
+        reply: CallReply<WikiWriteReceipt>,
     },
     StageImportSource {
         input: WikiImportSourceInput,
-        reply: oneshot::Sender<Result<WikiStagedImportSource, WikiFailure>>,
+        reply: CallReply<WikiStagedImportSource>,
     },
     ParseImportSource {
         input: WikiStagedImportSource,
-        reply: oneshot::Sender<Result<WikiParsedImportSource, WikiFailure>>,
+        reply: CallReply<WikiParsedImportSource>,
     },
     CommitImportSource {
         input: WikiParsedImportSource,
-        reply: oneshot::Sender<Result<WikiImportSourceReceipt, WikiFailure>>,
+        reply: CallReply<WikiImportSourceReceipt>,
     },
     StageImportFolder {
         input: WikiImportFolderInput,
-        reply: oneshot::Sender<Result<WikiImportFolderPlan, WikiFailure>>,
+        reply: CallReply<WikiImportFolderPlan>,
     },
     StageRefreshSources {
         input: WikiProjectSelector,
-        reply: oneshot::Sender<Result<WikiRefreshSourcesPlan, WikiFailure>>,
+        reply: CallReply<WikiRefreshSourcesPlan>,
     },
     StageRefreshSourcePaths {
         project_id: String,
         paths: Vec<PathBuf>,
-        reply: oneshot::Sender<Result<WikiRefreshSourcesPlan, WikiFailure>>,
+        reply: CallReply<WikiRefreshSourcesPlan>,
     },
     CleanupDeletedWikiPages {
         project_id: String,
         paths: Vec<String>,
-        reply: oneshot::Sender<Result<(), WikiFailure>>,
+        reply: CallReply<()>,
     },
     DeleteSource {
         input: WikiDeleteSourceInput,
-        reply: oneshot::Sender<Result<WikiDeleteSourceReceipt, WikiFailure>>,
+        reply: CallReply<WikiDeleteSourceReceipt>,
     },
     MigrateSourcePath {
         project_id: String,
         old_source_relative_path: String,
         new_source_relative_path: String,
-        reply: oneshot::Sender<Result<WikiSourceMoveReceipt, WikiFailure>>,
+        reply: CallReply<WikiSourceMoveReceipt>,
     },
     ApplyGeneratedPages {
         input: WikiApplyGeneratedPagesInput,
-        reply: oneshot::Sender<Result<WikiApplyGeneratedPagesReceipt, WikiFailure>>,
+        reply: CallReply<WikiApplyGeneratedPagesReceipt>,
     },
     ResolveReview {
         input: WikiReviewResolveInput,
-        reply: oneshot::Sender<Result<WikiReviewsReceipt, WikiFailure>>,
+        reply: CallReply<WikiReviewsReceipt>,
     },
     DismissReview {
         input: WikiReviewDismissInput,
-        reply: oneshot::Sender<Result<WikiReviewsReceipt, WikiFailure>>,
+        reply: CallReply<WikiReviewsReceipt>,
     },
     ClearResolvedReviews {
         input: WikiReviewClearResolvedInput,
-        reply: oneshot::Sender<Result<WikiReviewsReceipt, WikiFailure>>,
+        reply: CallReply<WikiReviewsReceipt>,
     },
     MarkSourceTaskFailed {
         project_id: String,
         source_relative_path: String,
         error: String,
-        reply: oneshot::Sender<Result<(), WikiFailure>>,
+        reply: CallReply<()>,
     },
     CancelSourceTask {
         input: WikiCancelSourceTaskInput,
-        reply: oneshot::Sender<Result<WikiSourceTasksReceipt, WikiFailure>>,
+        reply: CallReply<WikiSourceTasksReceipt>,
     },
     RetrySourceTask {
         input: WikiSourceTaskActionInput,
-        reply: oneshot::Sender<Result<WikiSourceTaskRunPlan, WikiFailure>>,
+        reply: CallReply<WikiSourceTaskRunPlan>,
     },
     PauseSourceTask {
         input: WikiSourceTaskActionInput,
-        reply: oneshot::Sender<Result<WikiSourceTasksReceipt, WikiFailure>>,
+        reply: CallReply<WikiSourceTasksReceipt>,
     },
     ResumeSourceTask {
         input: WikiSourceTaskActionInput,
-        reply: oneshot::Sender<Result<WikiSourceTaskRunPlan, WikiFailure>>,
+        reply: CallReply<WikiSourceTaskRunPlan>,
     },
     ReorderSourceTask {
         input: WikiReorderSourceTaskInput,
-        reply: oneshot::Sender<Result<WikiSourceTasksReceipt, WikiFailure>>,
+        reply: CallReply<WikiSourceTasksReceipt>,
     },
     Rescan {
         input: WikiProjectSelector,
-        reply: oneshot::Sender<Result<WikiStatusReceipt, WikiFailure>>,
+        reply: CallReply<WikiStatusReceipt>,
+    },
+    StageResearch {
+        input: crate::research::WikiResearchInput,
+        reply: CallReply<crate::research::ResearchPlan>,
+    },
+    CommitResearch {
+        project_id: String,
+        task: crate::research::WikiResearchTask,
+        cited: Vec<usize>,
+        reply: CallReply<crate::research::WikiResearchTask>,
+    },
+    RemoveResearchTask {
+        input: crate::research::WikiResearchRemoveInput,
+        reply: CallReply<crate::research::WikiResearchTasksReceipt>,
+    },
+    UpdateSearchConfig {
+        project_id: Option<String>,
+        input: crate::search_config::SearchConfigUpdate,
+        reply: CallReply<crate::search_config::SearchConfig>,
     },
     EmbedPage {
         input: WikiPathSelector,
-        reply: oneshot::Sender<Result<(), WikiFailure>>,
+        reply: CallReply<()>,
     },
 }
 
@@ -176,62 +269,117 @@ pub(crate) struct WikiRefreshSourcesPlan {
 
 pub(crate) struct WikiSourceTaskRunPlan {
     pub project_id: String,
+    pub source_relative_path: String,
     pub staged: Option<WikiStagedImportSource>,
 }
 
 pub(crate) enum WikiQuery {
+    HistoryList {
+        input: crate::history::WikiFileHistoryInput,
+        reply: CallReply<crate::history::WikiFileHistoryReceipt>,
+    },
+    HistoryConfig {
+        input: WikiProjectSelector,
+        reply: CallReply<crate::history::WikiFileHistorySettings>,
+    },
+    HistoryStats {
+        input: WikiProjectSelector,
+        reply: CallReply<crate::history::WikiFileHistoryStats>,
+    },
+    QuestionTask {
+        input: crate::WikiQuestionTaskSelector,
+        reply: CallReply<crate::WikiQuestionTaskReceipt>,
+    },
+    ReindexState {
+        input: WikiProjectSelector,
+        reply: CallReply<crate::reindex::WikiReindexState>,
+    },
+    LintConfig {
+        input: WikiProjectSelector,
+        reply: CallReply<crate::lint::WikiLintConfig>,
+    },
+    LintState {
+        input: WikiProjectSelector,
+        reply: CallReply<crate::lint::WikiLintState>,
+    },
+    CancelLint {
+        input: crate::lint::WikiLintCancelInput,
+        reply: CallReply<crate::lint::WikiLintState>,
+    },
+    GraphInsights {
+        input: WikiProjectSelector,
+        reply: CallReply<crate::insights::WikiGraphInsightsReceipt>,
+    },
+    StageGraphInsightResearch {
+        input: crate::insights::WikiGraphInsightResearchInput,
+        reply: CallReply<crate::owner::insights::InsightResearchPlan>,
+    },
     Status {
-        reply: oneshot::Sender<Result<WikiStatusReceipt, WikiFailure>>,
+        reply: CallReply<WikiStatusReceipt>,
     },
     Projects {
-        reply: oneshot::Sender<Result<WikiProjectsReceipt, WikiFailure>>,
+        reply: CallReply<WikiProjectsReceipt>,
     },
     ProjectTemplates {
-        reply: oneshot::Sender<Result<WikiProjectTemplatesReceipt, WikiFailure>>,
+        reply: CallReply<WikiProjectTemplatesReceipt>,
     },
     Files {
         input: WikiFilesInput,
-        reply: oneshot::Sender<Result<WikiFilesReceipt, WikiFailure>>,
+        reply: CallReply<WikiFilesReceipt>,
     },
     ReadFile {
         input: WikiReadInput,
-        reply: oneshot::Sender<Result<WikiReadReceipt, WikiFailure>>,
+        reply: CallReply<WikiReadReceipt>,
     },
     ReadBinaryFile {
         input: WikiReadBinaryInput,
-        reply: oneshot::Sender<Result<WikiReadBinaryReceipt, WikiFailure>>,
+        reply: CallReply<WikiReadBinaryReceipt>,
     },
     ReadSourcePreview {
         input: WikiReadInput,
-        reply: oneshot::Sender<Result<WikiReadReceipt, WikiFailure>>,
+        reply: CallReply<WikiReadReceipt>,
     },
     Search {
         input: WikiSearchInput,
-        reply: oneshot::Sender<Result<WikiSearchReceipt, WikiFailure>>,
+        reply: CallReply<WikiSearchReceipt>,
     },
     Graph {
         input: WikiProjectSelector,
-        reply: oneshot::Sender<Result<WikiGraphReceipt, WikiFailure>>,
+        reply: CallReply<WikiGraphReceipt>,
     },
     RetrieveContext {
         input: WikiRetrieveContextInput,
-        reply: oneshot::Sender<Result<WikiSearchReceipt, WikiFailure>>,
+        reply: CallReply<WikiSearchReceipt>,
     },
     Reviews {
         input: WikiProjectSelector,
-        reply: oneshot::Sender<Result<WikiReviewsReceipt, WikiFailure>>,
+        reply: CallReply<WikiReviewsReceipt>,
     },
     SourceTasks {
         input: WikiProjectSelector,
-        reply: oneshot::Sender<Result<WikiSourceTasksReceipt, WikiFailure>>,
+        reply: CallReply<WikiSourceTasksReceipt>,
     },
     SourceFiles {
         input: WikiProjectSelector,
-        reply: oneshot::Sender<Result<WikiSourceFilesReceipt, WikiFailure>>,
+        reply: CallReply<WikiSourceFilesReceipt>,
+    },
+    ResearchTasks {
+        input: WikiProjectSelector,
+        reply: CallReply<crate::research::WikiResearchTasksReceipt>,
+    },
+    SearchConfig {
+        input: WikiProjectSelector,
+        reply: CallReply<crate::search_config::SearchConfig>,
+    },
+    TestSearchProvider {
+        project_id: Option<String>,
+        input: crate::external_search::SearchProviderTest,
+        cancellation: tokio_util::sync::CancellationToken,
+        reply: CallReply<Vec<crate::research::ResearchSource>>,
     },
     SourceWatchConfig {
         input: WikiProjectSelector,
-        reply: oneshot::Sender<Result<WikiSourceWatchConfigReceipt, WikiFailure>>,
+        reply: CallReply<WikiSourceWatchConfigReceipt>,
     },
 }
 
@@ -244,9 +392,372 @@ pub(crate) enum WikiOwnerKey {
 }
 
 impl WikiCommand {
+    pub(crate) async fn reject(self, error: WikiFailure) {
+        match self {
+            Self::RestoreHistory { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::UpdateHistoryConfig { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ClearHistory { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ExportArchive { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ImportArchive { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::RebuildIndex { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::StageQuestion { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CancelQuestion { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::SaveQuestion { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::StageReindex { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::StageLint { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::BeginLint { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CompleteLint { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::UpdateLintConfig { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::LintAction { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::DismissLint { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::DismissGraphInsight { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CreateProject { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::OpenProject { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::SetCurrentProject { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::UpdateSourceWatchConfig { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::WriteFile { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::StageImportSource { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ParseImportSource { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CommitImportSource { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::StageImportFolder { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::StageRefreshSources { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::StageRefreshSourcePaths { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CleanupDeletedWikiPages { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::DeleteSource { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::MigrateSourcePath { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ApplyGeneratedPages { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ResolveReview { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::DismissReview { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ClearResolvedReviews { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::MarkSourceTaskFailed { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CancelSourceTask { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::RetrySourceTask { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::PauseSourceTask { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ResumeSourceTask { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ReorderSourceTask { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::Rescan { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::StageResearch { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CommitResearch { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::RemoveResearchTask { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::UpdateSearchConfig { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::EmbedPage { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+        }
+    }
+
+    pub(crate) fn acceptance(&self) -> Option<&WikiCallAcceptance> {
+        match self {
+            Self::RestoreHistory { reply, .. } => reply.acceptance.as_ref(),
+            Self::ClearHistory { reply, .. } => reply.acceptance.as_ref(),
+            Self::ExportArchive { reply, .. } => reply.acceptance.as_ref(),
+            Self::ImportArchive { reply, .. } => reply.acceptance.as_ref(),
+            Self::RebuildIndex { reply, .. } => reply.acceptance.as_ref(),
+            Self::SaveQuestion { reply, .. } => reply.acceptance.as_ref(),
+            Self::LintAction { reply, .. } => reply.acceptance.as_ref(),
+            Self::Rescan { reply, .. } => reply.acceptance.as_ref(),
+            Self::EmbedPage { reply, .. } => reply.acceptance.as_ref(),
+            Self::ApplyGeneratedPages { reply, .. } => reply.acceptance.as_ref(),
+            Self::DeleteSource { reply, .. } => reply.acceptance.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn call(&self) -> Option<&CallContext<WikiCallDetail>> {
+        match self {
+            Self::RestoreHistory { reply, .. } => reply.call.as_ref(),
+            Self::UpdateHistoryConfig { reply, .. } => reply.call.as_ref(),
+            Self::ClearHistory { reply, .. } => reply.call.as_ref(),
+            Self::ExportArchive { reply, .. } => reply.call.as_ref(),
+            Self::ImportArchive { reply, .. } => reply.call.as_ref(),
+            Self::RebuildIndex { reply, .. } => reply.call.as_ref(),
+            Self::StageQuestion { reply, .. } => reply.call.as_ref(),
+            Self::CancelQuestion { reply, .. } => reply.call.as_ref(),
+            Self::SaveQuestion { reply, .. } => reply.call.as_ref(),
+            Self::StageReindex { reply, .. } => reply.call.as_ref(),
+            Self::StageLint { reply, .. } => reply.call.as_ref(),
+            Self::BeginLint { reply, .. } => reply.call.as_ref(),
+            Self::CompleteLint { reply, .. } => reply.call.as_ref(),
+            Self::UpdateLintConfig { reply, .. } => reply.call.as_ref(),
+            Self::LintAction { reply, .. } => reply.call.as_ref(),
+            Self::DismissLint { reply, .. } => reply.call.as_ref(),
+            Self::DismissGraphInsight { reply, .. } => reply.call.as_ref(),
+            Self::CreateProject { reply, .. } => reply.call.as_ref(),
+            Self::OpenProject { reply, .. } => reply.call.as_ref(),
+            Self::SetCurrentProject { reply, .. } => reply.call.as_ref(),
+            Self::UpdateSourceWatchConfig { reply, .. } => reply.call.as_ref(),
+            Self::WriteFile { reply, .. } => reply.call.as_ref(),
+            Self::StageImportSource { reply, .. } => reply.call.as_ref(),
+            Self::ParseImportSource { reply, .. } => reply.call.as_ref(),
+            Self::CommitImportSource { reply, .. } => reply.call.as_ref(),
+            Self::StageImportFolder { reply, .. } => reply.call.as_ref(),
+            Self::StageRefreshSources { reply, .. } => reply.call.as_ref(),
+            Self::StageRefreshSourcePaths { reply, .. } => reply.call.as_ref(),
+            Self::CleanupDeletedWikiPages { reply, .. } => reply.call.as_ref(),
+            Self::DeleteSource { reply, .. } => reply.call.as_ref(),
+            Self::MigrateSourcePath { reply, .. } => reply.call.as_ref(),
+            Self::ApplyGeneratedPages { reply, .. } => reply.call.as_ref(),
+            Self::ResolveReview { reply, .. } => reply.call.as_ref(),
+            Self::DismissReview { reply, .. } => reply.call.as_ref(),
+            Self::ClearResolvedReviews { reply, .. } => reply.call.as_ref(),
+            Self::MarkSourceTaskFailed { reply, .. } => reply.call.as_ref(),
+            Self::CancelSourceTask { reply, .. } => reply.call.as_ref(),
+            Self::RetrySourceTask { reply, .. } => reply.call.as_ref(),
+            Self::PauseSourceTask { reply, .. } => reply.call.as_ref(),
+            Self::ResumeSourceTask { reply, .. } => reply.call.as_ref(),
+            Self::ReorderSourceTask { reply, .. } => reply.call.as_ref(),
+            Self::Rescan { reply, .. } => reply.call.as_ref(),
+            Self::StageResearch { reply, .. } => reply.call.as_ref(),
+            Self::CommitResearch { reply, .. } => reply.call.as_ref(),
+            Self::RemoveResearchTask { reply, .. } => reply.call.as_ref(),
+            Self::UpdateSearchConfig { reply, .. } => reply.call.as_ref(),
+            Self::EmbedPage { reply, .. } => reply.call.as_ref(),
+        }
+    }
+
+    pub(crate) fn set_call(&mut self, call: Option<CallContext<WikiCallDetail>>) {
+        match self {
+            Self::RestoreHistory { reply, .. } => reply.call = call,
+            Self::UpdateHistoryConfig { reply, .. } => reply.call = call,
+            Self::ClearHistory { reply, .. } => reply.call = call,
+            Self::ExportArchive { reply, .. } => reply.call = call,
+            Self::ImportArchive { reply, .. } => reply.call = call,
+            Self::RebuildIndex { reply, .. } => reply.call = call,
+            Self::StageQuestion { reply, .. } => reply.call = call,
+            Self::CancelQuestion { reply, .. } => reply.call = call,
+            Self::SaveQuestion { reply, .. } => reply.call = call,
+            Self::StageReindex { reply, .. } => reply.call = call,
+            Self::StageLint { reply, .. } => reply.call = call,
+            Self::BeginLint { reply, .. } => reply.call = call,
+            Self::CompleteLint { reply, .. } => reply.call = call,
+            Self::UpdateLintConfig { reply, .. } => reply.call = call,
+            Self::LintAction { reply, .. } => reply.call = call,
+            Self::DismissLint { reply, .. } => reply.call = call,
+            Self::DismissGraphInsight { reply, .. } => reply.call = call,
+            Self::CreateProject { reply, .. } => reply.call = call,
+            Self::OpenProject { reply, .. } => reply.call = call,
+            Self::SetCurrentProject { reply, .. } => reply.call = call,
+            Self::UpdateSourceWatchConfig { reply, .. } => reply.call = call,
+            Self::WriteFile { reply, .. } => reply.call = call,
+            Self::StageImportSource { reply, .. } => reply.call = call,
+            Self::ParseImportSource { reply, .. } => reply.call = call,
+            Self::CommitImportSource { reply, .. } => reply.call = call,
+            Self::StageImportFolder { reply, .. } => reply.call = call,
+            Self::StageRefreshSources { reply, .. } => reply.call = call,
+            Self::StageRefreshSourcePaths { reply, .. } => reply.call = call,
+            Self::CleanupDeletedWikiPages { reply, .. } => reply.call = call,
+            Self::DeleteSource { reply, .. } => reply.call = call,
+            Self::MigrateSourcePath { reply, .. } => reply.call = call,
+            Self::ApplyGeneratedPages { reply, .. } => reply.call = call,
+            Self::ResolveReview { reply, .. } => reply.call = call,
+            Self::DismissReview { reply, .. } => reply.call = call,
+            Self::ClearResolvedReviews { reply, .. } => reply.call = call,
+            Self::MarkSourceTaskFailed { reply, .. } => reply.call = call,
+            Self::CancelSourceTask { reply, .. } => reply.call = call,
+            Self::RetrySourceTask { reply, .. } => reply.call = call,
+            Self::PauseSourceTask { reply, .. } => reply.call = call,
+            Self::ResumeSourceTask { reply, .. } => reply.call = call,
+            Self::ReorderSourceTask { reply, .. } => reply.call = call,
+            Self::Rescan { reply, .. } => reply.call = call,
+            Self::StageResearch { reply, .. } => reply.call = call,
+            Self::CommitResearch { reply, .. } => reply.call = call,
+            Self::RemoveResearchTask { reply, .. } => reply.call = call,
+            Self::UpdateSearchConfig { reply, .. } => reply.call = call,
+            Self::EmbedPage { reply, .. } => reply.call = call,
+        }
+    }
+
+    pub(crate) fn project_id_mut(&mut self) -> Option<&mut Option<String>> {
+        match self {
+            Self::RestoreHistory { input, .. } => Some(&mut input.project_id),
+            Self::UpdateHistoryConfig { input, .. } => Some(&mut input.project_id),
+            Self::ClearHistory { input, .. } => Some(&mut input.project_id),
+            Self::ExportArchive { input, .. } => Some(&mut input.project_id),
+            Self::RebuildIndex { input, .. } => Some(&mut input.project_id),
+            Self::StageQuestion { input, .. } => Some(&mut input.project_id),
+            Self::CancelQuestion { input, .. } => Some(&mut input.project_id),
+            Self::SaveQuestion { input, .. } => Some(&mut input.project_id),
+            Self::StageReindex { input, .. } => Some(&mut input.project_id),
+            Self::StageLint { input, .. } => Some(&mut input.project_id),
+            Self::UpdateLintConfig { input, .. } => Some(&mut input.project_id),
+            Self::LintAction { input, .. } => Some(&mut input.project_id),
+            Self::DismissLint { input, .. } => Some(&mut input.project_id),
+            Self::DismissGraphInsight { input, .. } => Some(&mut input.project_id),
+            Self::UpdateSourceWatchConfig { input, .. } => Some(&mut input.project_id),
+            Self::WriteFile { input, .. } => Some(&mut input.project_id),
+            Self::StageImportSource { input, .. } => Some(&mut input.project_id),
+            Self::StageImportFolder { input, .. } => Some(&mut input.project_id),
+            Self::StageRefreshSources { input, .. } => Some(&mut input.project_id),
+            Self::DeleteSource { input, .. } => Some(&mut input.project_id),
+            Self::ApplyGeneratedPages { input, .. } => Some(&mut input.project_id),
+            Self::ResolveReview { input, .. } => Some(&mut input.project_id),
+            Self::DismissReview { input, .. } => Some(&mut input.project_id),
+            Self::ClearResolvedReviews { input, .. } => Some(&mut input.project_id),
+            Self::CancelSourceTask { input, .. } => Some(&mut input.project_id),
+            Self::RetrySourceTask { input, .. } => Some(&mut input.project_id),
+            Self::PauseSourceTask { input, .. } => Some(&mut input.project_id),
+            Self::ResumeSourceTask { input, .. } => Some(&mut input.project_id),
+            Self::ReorderSourceTask { input, .. } => Some(&mut input.project_id),
+            Self::Rescan { input, .. } => Some(&mut input.project_id),
+            Self::StageResearch { input, .. } => Some(&mut input.project_id),
+            Self::RemoveResearchTask { input, .. } => Some(&mut input.project_id),
+            Self::UpdateSearchConfig { project_id, .. } => Some(project_id),
+            Self::EmbedPage { input, .. } => Some(&mut input.project_id),
+            _ => None,
+        }
+    }
+
     pub(crate) fn route(&self) -> foundation::execution::CommandRoute<WikiOwnerKey> {
         use foundation::execution::CommandRoute;
         match self {
+            Self::ImportArchive { .. } | Self::StageReindex { .. } => CommandRoute::Global,
+            Self::BeginLint { plan, .. } | Self::CompleteLint { plan, .. } => {
+                CommandRoute::Keyed(WikiOwnerKey::Commit(plan.project_id.clone()))
+            }
+            Self::RestoreHistory { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::UpdateHistoryConfig { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::ClearHistory { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::ExportArchive { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::RebuildIndex { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::StageQuestion { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::CancelQuestion { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::SaveQuestion { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::StageLint { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::UpdateLintConfig { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::LintAction { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::DismissLint { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::DismissGraphInsight { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
             Self::CreateProject { .. }
             | Self::OpenProject { .. }
             | Self::SetCurrentProject { .. } => CommandRoute::Global,
@@ -352,6 +863,21 @@ impl WikiCommand {
                 }
                 None => CommandRoute::Global,
             },
+            Self::StageResearch { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::CommitResearch { project_id, .. } => {
+                CommandRoute::Keyed(WikiOwnerKey::Commit(project_id.clone()))
+            }
+            Self::RemoveResearchTask { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::UpdateSearchConfig { project_id, .. } => match project_id {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.clone())),
+                None => CommandRoute::Global,
+            },
             Self::EmbedPage { input, .. } => match input.project_id.as_deref() {
                 Some(project_id) => CommandRoute::Keyed(WikiOwnerKey::Embed(page_lane(
                     Some(project_id),
@@ -364,6 +890,156 @@ impl WikiCommand {
 }
 
 impl WikiQuery {
+    pub(crate) async fn reject(self, error: WikiFailure) {
+        match self {
+            Self::HistoryList { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::HistoryConfig { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::HistoryStats { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::QuestionTask { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ReindexState { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::LintConfig { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::LintState { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CancelLint { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::GraphInsights { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::StageGraphInsightResearch { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::Status { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::Projects { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ProjectTemplates { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::Files { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ReadFile { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ReadBinaryFile { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ReadSourcePreview { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::Search { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::Graph { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::RetrieveContext { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::Reviews { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::SourceTasks { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::SourceFiles { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ResearchTasks { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::SearchConfig { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::TestSearchProvider { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::SourceWatchConfig { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+        }
+    }
+
+    pub(crate) fn call(&self) -> Option<&CallContext<WikiCallDetail>> {
+        match self {
+            Self::HistoryList { reply, .. } => reply.call.as_ref(),
+            Self::HistoryConfig { reply, .. } => reply.call.as_ref(),
+            Self::HistoryStats { reply, .. } => reply.call.as_ref(),
+            Self::QuestionTask { reply, .. } => reply.call.as_ref(),
+            Self::ReindexState { reply, .. } => reply.call.as_ref(),
+            Self::LintConfig { reply, .. } => reply.call.as_ref(),
+            Self::LintState { reply, .. } => reply.call.as_ref(),
+            Self::CancelLint { reply, .. } => reply.call.as_ref(),
+            Self::GraphInsights { reply, .. } => reply.call.as_ref(),
+            Self::StageGraphInsightResearch { reply, .. } => reply.call.as_ref(),
+            Self::Status { reply, .. } => reply.call.as_ref(),
+            Self::Projects { reply, .. } => reply.call.as_ref(),
+            Self::ProjectTemplates { reply, .. } => reply.call.as_ref(),
+            Self::Files { reply, .. } => reply.call.as_ref(),
+            Self::ReadFile { reply, .. } => reply.call.as_ref(),
+            Self::ReadBinaryFile { reply, .. } => reply.call.as_ref(),
+            Self::ReadSourcePreview { reply, .. } => reply.call.as_ref(),
+            Self::Search { reply, .. } => reply.call.as_ref(),
+            Self::Graph { reply, .. } => reply.call.as_ref(),
+            Self::RetrieveContext { reply, .. } => reply.call.as_ref(),
+            Self::Reviews { reply, .. } => reply.call.as_ref(),
+            Self::SourceTasks { reply, .. } => reply.call.as_ref(),
+            Self::SourceFiles { reply, .. } => reply.call.as_ref(),
+            Self::ResearchTasks { reply, .. } => reply.call.as_ref(),
+            Self::SearchConfig { reply, .. } => reply.call.as_ref(),
+            Self::TestSearchProvider { reply, .. } => reply.call.as_ref(),
+            Self::SourceWatchConfig { reply, .. } => reply.call.as_ref(),
+        }
+    }
+
+    pub(crate) fn set_call(&mut self, call: Option<CallContext<WikiCallDetail>>) {
+        match self {
+            Self::HistoryList { reply, .. } => reply.call = call,
+            Self::HistoryConfig { reply, .. } => reply.call = call,
+            Self::HistoryStats { reply, .. } => reply.call = call,
+            Self::QuestionTask { reply, .. } => reply.call = call,
+            Self::ReindexState { reply, .. } => reply.call = call,
+            Self::LintConfig { reply, .. } => reply.call = call,
+            Self::LintState { reply, .. } => reply.call = call,
+            Self::CancelLint { reply, .. } => reply.call = call,
+            Self::GraphInsights { reply, .. } => reply.call = call,
+            Self::StageGraphInsightResearch { reply, .. } => reply.call = call,
+            Self::Status { reply, .. } => reply.call = call,
+            Self::Projects { reply, .. } => reply.call = call,
+            Self::ProjectTemplates { reply, .. } => reply.call = call,
+            Self::Files { reply, .. } => reply.call = call,
+            Self::ReadFile { reply, .. } => reply.call = call,
+            Self::ReadBinaryFile { reply, .. } => reply.call = call,
+            Self::ReadSourcePreview { reply, .. } => reply.call = call,
+            Self::Search { reply, .. } => reply.call = call,
+            Self::Graph { reply, .. } => reply.call = call,
+            Self::RetrieveContext { reply, .. } => reply.call = call,
+            Self::Reviews { reply, .. } => reply.call = call,
+            Self::SourceTasks { reply, .. } => reply.call = call,
+            Self::SourceFiles { reply, .. } => reply.call = call,
+            Self::ResearchTasks { reply, .. } => reply.call = call,
+            Self::SearchConfig { reply, .. } => reply.call = call,
+            Self::TestSearchProvider { reply, .. } => reply.call = call,
+            Self::SourceWatchConfig { reply, .. } => reply.call = call,
+        }
+    }
+
     pub(crate) fn route(&self) -> foundation::execution::QueryRoute<WikiOwnerKey> {
         foundation::execution::QueryRoute::Direct
     }
@@ -383,9 +1059,9 @@ mod tests {
 
     use super::*;
 
-    fn reply<T>() -> oneshot::Sender<T> {
-        let (reply, _response) = oneshot::channel();
-        reply
+    fn reply<T>() -> CallReply<T> {
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        CallReply::new(reply)
     }
 
     #[test]

@@ -14,13 +14,14 @@ pub fn spawn_owner(
     input: SubagentOwnerInput,
 ) -> (SubagentsModule, OwnedTask<()>) {
     let sealed_agents = Arc::clone(&input.sealed_agents);
-    let owner = SubagentOwner::new(input);
+    let results = crate::application::results::MutationResults::default();
+    let owner = SubagentOwner::new(input, results.clone());
     let (handle, task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(16, SubagentOwner::lane_retention()),
     );
     (
-        SubagentsModule::new(SubagentHandle::new(handle), sealed_agents),
+        SubagentsModule::new(SubagentHandle::new(handle, results), sealed_agents),
         task,
     )
 }

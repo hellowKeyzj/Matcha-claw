@@ -128,6 +128,7 @@ describe('external connector sealed delivery', () => {
 
   it('preserves unknown observed state instead of collapsing it to unavailable', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      callId: 'a'.repeat(32), kind: 'probe',
       status: {
         connectorId: 'remote',
         resultType: 'unknown',
@@ -138,11 +139,12 @@ describe('external connector sealed delivery', () => {
 
     await expect(transport.execute({
       ...request,
-      operationId: 'externalConnectors.probe',
-      input: { kind: 'probe', connectorId: 'remote' },
+      operationId: 'externalConnectors.observationResult',
+      input: { kind: 'observationResult', callId: 'a'.repeat(32) },
     })).resolves.toEqual({
       status: 200,
       body: {
+        callId: 'a'.repeat(32), kind: 'probe',
         status: {
           connectorId: 'remote',
           resultType: 'unknown',
@@ -212,8 +214,8 @@ describe('external connector sealed delivery', () => {
 
   it('forwards a valid probe request to the Rust endpoint', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
-      status: { connectorId: 'remote', resultType: 'disabled', safeProbe: false },
-    }), { status: 200 }));
+      callId: 'a'.repeat(32), accepted: true,
+    }), { status: 202 }));
     const transport = createExternalConnectorsTransport({ signDecision: () => 'decision' } as never, 43123, fetcher as never);
 
     await expect(transport.execute({
@@ -221,8 +223,8 @@ describe('external connector sealed delivery', () => {
       operationId: 'externalConnectors.probe',
       input: { kind: 'probe', connectorId: 'remote' },
     })).resolves.toEqual({
-      status: 200,
-      body: { status: { connectorId: 'remote', resultType: 'disabled', safeProbe: false } },
+      status: 202,
+      body: { callId: 'a'.repeat(32), accepted: true },
     });
     expect(fetcher).toHaveBeenCalledOnce();
   });
@@ -275,7 +277,13 @@ describe('external connector sealed delivery', () => {
   });
 
   it('accepts and safely projects a valid session status response', async () => {
+    const sessionIdentity = {
+      endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+      agentId: 'agent-1',
+      sessionKey: 'session-1',
+    } as const;
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      callId: 'a'.repeat(32), kind: 'sessionStatus', sessionIdentity,
       statuses: [{
         connectorId: 'remote',
         displayName: 'Remote',
@@ -283,23 +291,19 @@ describe('external connector sealed delivery', () => {
         targetKind: 'session',
         resultType: 'pending',
         reason: 'starting',
-        details: { serverId: 'server-1', sessionKey: 'session-1', toolCount: 2, launchSummary: 'attached' },
+        details: { serverId: 'server-1', toolCount: 2, launchSummary: 'attached' },
       }],
     }), { status: 200 }));
     const transport = createExternalConnectorsTransport({ signDecision: () => 'decision' } as never, 43123, fetcher as never);
-    const sessionIdentity = {
-      endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
-      agentId: 'agent-1',
-      sessionKey: 'session-1',
-    } as const;
 
     await expect(transport.execute({
       ...request,
-      operationId: 'externalConnectors.sessionStatus',
-      input: { kind: 'sessionStatus', sessionIdentity },
+      operationId: 'externalConnectors.observationResult',
+      input: { kind: 'observationResult', callId: 'a'.repeat(32), sessionIdentity },
     })).resolves.toEqual({
       status: 200,
       body: {
+        callId: 'a'.repeat(32), kind: 'sessionStatus', sessionIdentity,
         statuses: [{
           connectorId: 'remote',
           displayName: 'Remote',
@@ -307,7 +311,7 @@ describe('external connector sealed delivery', () => {
           targetKind: 'session',
           resultType: 'pending',
           reason: 'starting',
-          details: { serverId: 'server-1', sessionKey: 'session-1', toolCount: 2, launchSummary: 'attached' },
+          details: { serverId: 'server-1', toolCount: 2, launchSummary: 'attached' },
         }],
       },
     });

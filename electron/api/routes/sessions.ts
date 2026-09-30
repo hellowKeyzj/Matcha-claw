@@ -112,7 +112,11 @@ export async function dispatchSessionCapability(
   }
   if ((body.id === 'session.prompt' || body.id === 'session.abort')
     && body.operationId === 'sessions.abort') {
-    return await deps.runtimeHostTransports.sessionAbortTransport.abort(adaptSessionAbortRequest(body));
+    logSessionTrace('capability.abort.dispatch', traceId, {});
+    const request = adaptSessionAbortRequest(body, traceId);
+    return traceId
+      ? await deps.runtimeHostTransports.sessionAbortTransport.abort(request, traceId)
+      : await deps.runtimeHostTransports.sessionAbortTransport.abort(request);
   }
   if (body.id === 'session.approval' && body.operationId === 'approvals.list') {
     const request = adaptSessionApprovalListRequest(body);
@@ -1190,7 +1194,7 @@ function adaptSessionListRequest(body: Record<string, unknown>): Record<string, 
   };
 }
 
-function adaptSessionAbortRequest(body: Record<string, unknown>): SessionAbortRequest {
+function adaptSessionAbortRequest(body: Record<string, unknown>, traceId?: string | null): SessionAbortRequest {
   if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
     || (body.id !== 'session.prompt' && body.id !== 'session.abort')
     || body.operationId !== 'sessions.abort'
@@ -1214,9 +1218,26 @@ function adaptSessionAbortRequest(body: Record<string, unknown>): SessionAbortRe
       && (!Array.isArray(body.input.approvalIds)
         || body.input.approvalIds.some((approvalId) => !isIdentifier(approvalId))))
 ) {
+    const input = isRecord(body.input) ? body.input : null;
+    logSessionTrace('electron.abort.route.invalid', traceId, {
+      reason: 'request-validation',
+      sessionKey: summarizeString(input?.sessionKey),
+      endpointSessionId: summarizeString(input?.endpointSessionId),
+      runId: summarizeString(input?.runId),
+      approvalIdsCount: Array.isArray(input?.approvalIds) ? input.approvalIds.length : null,
+      emptyApprovalIds: Array.isArray(input?.approvalIds) && input.approvalIds.length === 0,
+    });
     throw new Error('Session abort request is invalid');
   }
   const endpoint = body.scope.identity.endpoint;
+  logSessionTrace('electron.abort.route.adapted', traceId, {
+    adapter: endpoint.runtimeAdapterId,
+    sessionKey: summarizeString(body.input.sessionKey),
+    endpointSessionId: summarizeString(body.input.endpointSessionId),
+    runId: summarizeString(body.input.runId),
+    approvalIdsCount: Array.isArray(body.input.approvalIds) ? body.input.approvalIds.length : null,
+    emptyApprovalIds: Array.isArray(body.input.approvalIds) && body.input.approvalIds.length === 0,
+  });
   return {
     id: 'session.abort',
     operationId: 'sessions.abort',

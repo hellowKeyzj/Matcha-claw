@@ -11,6 +11,7 @@ use crate::ports::ChannelRuntimeDirectory;
 
 use crate::{
     application::{
+        call::{ChannelCall, ChannelCallOutcome, record_error},
         commands::{ChannelCommand, ChannelOwnerUnavailable},
         queries::ChannelQuery,
     },
@@ -249,11 +250,27 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
     with_channel_trace(trace_id, async {
         query.trace().received();
         let mut span = ChannelTraceSpan::begin("channel.owner.query");
+        let mut call = query.trace().call.clone();
+        if let Some(call) = &mut call {
+            if let Err(error) = call.running().await {
+                record_error(Err(error));
+                span.finish("unavailable");
+                return;
+            }
+        }
         match query {
             ChannelQuery::Catalog { reply, .. } => {
-                let _ = reply.send(
-                    catalog(shared.runtime_directory.as_ref(), &shared.default_endpoint).await,
-                );
+                let outcome =
+                    catalog(shared.runtime_directory.as_ref(), &shared.default_endpoint).await;
+                if let Some(call) = &mut call {
+                    let summary = match &outcome {
+                        crate::catalog::ChannelCatalogOutcome::Catalog(_) => ChannelCallOutcome::Confirmed,
+                        crate::catalog::ChannelCatalogOutcome::Rejected => ChannelCallOutcome::Rejected,
+                        _ => ChannelCallOutcome::Unknown,
+                    };
+                    record_error(call.finish(summary).await);
+                }
+                let _ = reply.send(outcome);
             }
             ChannelQuery::ConfigRead {
                 channel_id,
@@ -261,27 +278,43 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
                 reply,
                 ..
             } => {
-                let _ = reply.send(
+                let outcome =
                     config_read(
                         shared.runtime_directory.as_ref(),
                         &shared.default_endpoint,
                         channel_id,
                         account_id,
                     )
-                    .await,
-                );
+                    .await;
+                if let Some(call) = &mut call {
+                    let summary = match &outcome {
+                        crate::config_read::Outcome::Values(_) => ChannelCallOutcome::Confirmed,
+                        crate::config_read::Outcome::TargetRejected => ChannelCallOutcome::Rejected,
+                        _ => ChannelCallOutcome::Unknown,
+                    };
+                    record_error(call.finish(summary).await);
+                }
+                let _ = reply.send(outcome);
             }
             ChannelQuery::ConfigureForm {
                 channel_id, reply, ..
             } => {
-                let _ = reply.send(
+                let outcome =
                     configure_form(
                         shared.runtime_directory.as_ref(),
                         &shared.default_endpoint,
                         channel_id,
                     )
-                    .await,
-                );
+                    .await;
+                if let Some(call) = &mut call {
+                    let summary = match &outcome {
+                        crate::catalog::ChannelConfigureFormOutcome::Form(_) => ChannelCallOutcome::Confirmed,
+                        crate::catalog::ChannelConfigureFormOutcome::TargetRejected => ChannelCallOutcome::Rejected,
+                        _ => ChannelCallOutcome::Unknown,
+                    };
+                    record_error(call.finish(summary).await);
+                }
+                let _ = reply.send(outcome);
             }
             ChannelQuery::Pairing {
                 channel_id,
@@ -289,25 +322,49 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
                 reply,
                 ..
             } => {
-                let _ = reply.send(
+                let outcome =
                     pairing(
                         shared.runtime_directory.as_ref(),
                         &shared.default_endpoint,
                         channel_id,
                         account_id,
                     )
-                    .await,
-                );
+                    .await;
+                if let Some(call) = &mut call {
+                    let summary = match &outcome {
+                        crate::status::ChannelPairingOutcome::Listed(_) => ChannelCallOutcome::Confirmed,
+                        crate::status::ChannelPairingOutcome::Rejected => ChannelCallOutcome::Rejected,
+                        _ => ChannelCallOutcome::Unknown,
+                    };
+                    record_error(call.finish(summary).await);
+                }
+                let _ = reply.send(outcome);
             }
             ChannelQuery::Status { reply, .. } => {
-                let _ = reply.send(
-                    status(shared.runtime_directory.as_ref(), &shared.default_endpoint).await,
-                );
+                let outcome =
+                    status(shared.runtime_directory.as_ref(), &shared.default_endpoint).await;
+                if let Some(call) = &mut call {
+                    let summary = match &outcome {
+                        Ok(_) => ChannelCallOutcome::Confirmed,
+                        Err(crate::status::ChannelStatusFailure::Rejected) => ChannelCallOutcome::Rejected,
+                        _ => ChannelCallOutcome::Unknown,
+                    };
+                    record_error(call.finish(summary).await);
+                }
+                let _ = reply.send(outcome);
             }
             ChannelQuery::Snapshot { reply, .. } => {
-                let _ = reply.send(
-                    snapshot(shared.runtime_directory.as_ref(), &shared.default_endpoint).await,
-                );
+                let outcome =
+                    snapshot(shared.runtime_directory.as_ref(), &shared.default_endpoint).await;
+                if let Some(call) = &mut call {
+                    let summary = match &outcome {
+                        Ok(_) => ChannelCallOutcome::Confirmed,
+                        Err(crate::status::ChannelStatusFailure::Rejected) => ChannelCallOutcome::Rejected,
+                        _ => ChannelCallOutcome::Unknown,
+                    };
+                    record_error(call.finish(summary).await);
+                }
+                let _ = reply.send(outcome);
             }
         }
         span.finish("replied");
@@ -320,6 +377,24 @@ async fn handle_keyed_command(
     lane: &mut ChannelLaneState,
     command: ChannelCommand,
 ) {
+    let mut call = command.trace().and_then(|trace| trace.call.clone());
+    if let Some(call) = &mut call {
+        if let Err(error) = call.running().await {
+            record_error(Err(error));
+            if matches!(
+                &command,
+                ChannelCommand::Delete { .. }
+                    | ChannelCommand::Logout { .. }
+                    | ChannelCommand::Control {
+                        action: crate::control::ChannelControlAction::Disconnect,
+                        ..
+                    }
+            ) {
+                record_error(call.finish(ChannelCallOutcome::Unknown).await);
+            }
+            return;
+        }
+    }
     match command {
         ChannelCommand::Configure {
             key,
@@ -336,6 +411,9 @@ async fn handle_keyed_command(
                 CancellationToken::new(),
             )
             .await;
+            if let Some(call) = &mut call {
+                record_error(call.effect(&effect).await);
+            }
             let outcome = match effect {
                 ChannelMutationEffect::Configure(outcome) => Ok(outcome),
                 _ => Err(ChannelOwnerUnavailable),
@@ -351,6 +429,9 @@ async fn handle_keyed_command(
                 CancellationToken::new(),
             )
             .await;
+            if let Some(call) = &mut call {
+                record_error(call.effect(&effect).await);
+            }
             let outcome = match effect {
                 ChannelMutationEffect::DeleteConfig(outcome) => Ok(outcome),
                 _ => Err(ChannelOwnerUnavailable),
@@ -374,12 +455,15 @@ async fn handle_keyed_command(
                 CancellationToken::new(),
             )
             .await;
+            if let Some(call) = &mut call {
+                record_error(call.login_reply(&effect).await);
+            }
             let outcome = match &effect {
                 ChannelMutationEffect::Login(outcome) => Ok(outcome.clone()),
                 _ => Err(ChannelOwnerUnavailable),
             };
             let _ = reply.send(outcome);
-            finalize_login_effect_after_delivery(shared, lane, key, effect).await;
+            finalize_login_effect_after_delivery(shared, lane, key, effect, call).await;
         }
         ChannelCommand::LoginWait {
             key,
@@ -390,6 +474,9 @@ async fn handle_keyed_command(
             reply,
             ..
         } => {
+            if let Some(call) = &call {
+                record_error(call.context.waiting().await);
+            }
             let mutation = ChannelMutation::LoginWait {
                 timeout_ms,
                 session_key,
@@ -403,16 +490,22 @@ async fn handle_keyed_command(
             );
             tokio::select! {
                 effect = effect => {
+                    if let Some(call) = &mut call {
+                        record_error(call.login_reply(&effect).await);
+                    }
                     let outcome = match &effect {
                         ChannelMutationEffect::Login(outcome) => Ok(outcome.clone()),
                         _ => Err(ChannelOwnerUnavailable),
                     };
                     let _ = reply.send(outcome);
-                    finalize_login_effect_after_delivery(shared, lane, key, effect).await;
+                    finalize_login_effect_after_delivery(shared, lane, key, effect, call).await;
                 }
                 _ = cancellation.cancelled() => {
                     channel_trace("channel.login.wait", "outcome=cancelled");
                     lane.clear_login_configs();
+                    if let Some(call) = &mut call {
+                        record_error(call.finish(ChannelCallOutcome::Cancelled).await);
+                    }
                     let _ = reply.send(Ok(ChannelLoginOutcome::Cancelled));
                 }
             }
@@ -426,6 +519,9 @@ async fn handle_keyed_command(
                 CancellationToken::new(),
             )
             .await;
+            if let Some(call) = &mut call {
+                record_error(call.effect(&effect).await);
+            }
             let outcome = match effect {
                 ChannelMutationEffect::Login(outcome) => Ok(outcome),
                 _ => Err(ChannelOwnerUnavailable),
@@ -442,6 +538,9 @@ async fn handle_keyed_command(
             )
             .await;
             lane.remove_login_config(&key);
+            if let Some(call) = &mut call {
+                record_error(call.effect(&effect).await);
+            }
             let outcome = match effect {
                 ChannelMutationEffect::Login(outcome) => Ok(outcome),
                 _ => Err(ChannelOwnerUnavailable),
@@ -459,6 +558,9 @@ async fn handle_keyed_command(
                 CancellationToken::new(),
             )
             .await;
+            if let Some(call) = &mut call {
+                record_error(call.effect(&effect).await);
+            }
             let outcome = match effect {
                 ChannelMutationEffect::Control(outcome) => Ok(outcome),
                 _ => Err(ChannelOwnerUnavailable),
@@ -476,6 +578,9 @@ async fn handle_keyed_command(
                 CancellationToken::new(),
             )
             .await;
+            if let Some(call) = &mut call {
+                record_error(call.effect(&effect).await);
+            }
             let outcome = match effect {
                 ChannelMutationEffect::PairingApprove(outcome) => Ok(outcome),
                 _ => Err(ChannelOwnerUnavailable),
@@ -493,6 +598,9 @@ async fn handle_keyed_command(
                 CancellationToken::new(),
             )
             .await;
+            if let Some(call) = &mut call {
+                record_error(call.effect(&effect).await);
+            }
             let outcome = match effect {
                 ChannelMutationEffect::Credentials(outcome) => Ok(outcome),
                 _ => Err(ChannelOwnerUnavailable),
@@ -541,14 +649,24 @@ async fn finalize_login_effect_after_delivery(
     lane: &mut ChannelLaneState,
     key: ChannelKey,
     effect: ChannelMutationEffect,
+    mut call: Option<ChannelCall>,
 ) {
     let Some((config_key, agent_id, config, _)) = check_login_finalization(lane, &key, &effect)
     else {
         channel_trace("channel.login.finalize", "outcome=skipped");
         lane.settle_login_effect(&key, &effect);
+        if let Some(call) = &mut call {
+            record_error(call.effect(&effect).await);
+        }
         return;
     };
-    let _ = execute_login_finalization(shared, config_key, agent_id, config).await;
+    if let Some(call) = &mut call {
+        record_error(call.finalizing(&config_key).await);
+    }
+    let effect = execute_login_finalization(shared, config_key, agent_id, config).await;
+    if let Some(call) = &mut call {
+        record_error(call.finalized(&effect).await);
+    }
 }
 
 async fn execute_login_finalization(

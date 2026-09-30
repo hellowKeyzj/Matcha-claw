@@ -95,18 +95,43 @@ pub fn export_project_archive(
     project_path: impl AsRef<Path>,
     destination: impl AsRef<Path>,
 ) -> Result<(), ArchiveError> {
+    require_absolute(project_path.as_ref(), "project path must be absolute")?;
+    require_absolute(destination.as_ref(), "export destination must be absolute")?;
     let root = canonicalize(project_path.as_ref(), "resolve project root")?;
-    validate_project_root(&root)?;
     let output = resolve_export_destination(&root, destination.as_ref())?;
-    let file = create_file(&output)?;
-    let mut archive = zip::ZipWriter::new(file);
-    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let mut writer = ArchiveWriter::new(&root, &mut archive, options);
-    writer.write_directory_children(&root)?;
-    drop(writer);
-    archive
-        .finish()
-        .map_err(|error| ArchiveError::Zip(error.to_string()))?;
+    let parent = output.parent().ok_or(ArchiveError::InvalidPath(
+        "export destination must have a parent directory",
+    ))?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|source| ArchiveError::Io {
+            action: "create temporary archive",
+            path: output.clone(),
+            source,
+        })?;
+    {
+        let mut archive = zip::ZipWriter::new(temporary.as_file_mut());
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let mut writer = ArchiveWriter::new(&root, &mut archive, options);
+        writer.write_directory_children(&root)?;
+        drop(writer);
+        archive
+            .finish()
+            .map_err(|error| ArchiveError::Zip(error.to_string()))?
+            .sync_all()
+            .map_err(|source| ArchiveError::Io {
+                action: "sync project archive",
+                path: output.clone(),
+                source,
+            })?;
+    }
+    temporary
+        .persist(&output)
+        .map_err(|error| ArchiveError::Io {
+            action: "publish project archive",
+            path: output,
+            source: error.error,
+        })?;
     Ok(())
 }
 
@@ -115,6 +140,11 @@ pub fn import_project_archive(
     destination_root: impl AsRef<Path>,
 ) -> Result<PathBuf, ArchiveError> {
     let archive_path = archive_path.as_ref();
+    require_absolute(archive_path, "archive path must be absolute")?;
+    require_absolute(
+        destination_root.as_ref(),
+        "import destination must be absolute",
+    )?;
     let file = File::open(archive_path).map_err(|source| ArchiveError::Io {
         action: "open archive",
         path: archive_path.to_path_buf(),
@@ -124,15 +154,34 @@ pub fn import_project_archive(
         zip::ZipArchive::new(file).map_err(|error| ArchiveError::Zip(error.to_string()))?;
     validate_archive(&mut archive)?;
 
-    let root = destination_root.as_ref().to_path_buf();
-    ensure_empty_destination(&root)?;
-    fs::create_dir_all(&root).map_err(|source| ArchiveError::Io {
-        action: "create import destination",
+    let destination = destination_root.as_ref();
+    ensure_empty_destination(destination)?;
+    let root = if destination.exists() {
+        canonicalize(destination, "resolve import destination")?
+    } else {
+        let parent = destination.parent().ok_or(ArchiveError::InvalidPath(
+            "import destination must have a parent directory",
+        ))?;
+        let filename = destination.file_name().ok_or(ArchiveError::InvalidPath(
+            "import destination must be a directory path",
+        ))?;
+        fs::create_dir_all(parent).map_err(|source| ArchiveError::Io {
+            action: "create import destination parent",
+            path: parent.to_path_buf(),
+            source,
+        })?;
+        canonicalize(parent, "resolve import destination parent")?.join(filename)
+    };
+    let parent = root.parent().ok_or(ArchiveError::InvalidPath(
+        "import destination must have a parent directory",
+    ))?;
+    let staging = tempfile::tempdir_in(parent).map_err(|source| ArchiveError::Io {
+        action: "create import staging directory",
         path: root.clone(),
         source,
     })?;
-    extract_archive(&mut archive, &root)?;
-    validate_project_root(&root)?;
+    extract_archive(&mut archive, staging.path())?;
+    publish_import(staging.path(), &root)?;
     Ok(root)
 }
 
@@ -196,18 +245,18 @@ pub fn update_recent_wiki_index(
 pub fn rebuild_wiki_index(
     project_path: impl AsRef<Path>,
 ) -> Result<WikiIndexRebuild, ArchiveError> {
+    require_absolute(project_path.as_ref(), "project path must be absolute")?;
     let root = canonicalize(project_path.as_ref(), "resolve project root")?;
-    validate_project_root(&root)?;
-    let wiki = root.join(PROJECT_WIKI_DIR);
+    let wiki = canonicalize(&root.join(PROJECT_WIKI_DIR), "resolve wiki directory")?;
+    if !wiki.starts_with(&root) {
+        return Err(ArchiveError::InvalidPath(
+            "wiki directory escaped project root",
+        ));
+    }
     let mut groups: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     collect_wiki_pages(&wiki, &wiki, &mut groups)?;
     for pages in groups.values_mut() {
-        pages.sort_by(|left, right| {
-            left.1
-                .to_lowercase()
-                .cmp(&right.1.to_lowercase())
-                .then_with(|| left.0.cmp(&right.0))
-        });
+        pages.sort_by(|left, right| left.1.to_lowercase().cmp(&right.1.to_lowercase()));
     }
 
     let pages = groups.values().map(Vec::len).sum();
@@ -353,9 +402,7 @@ fn validate_archive<R: Read + std::io::Seek>(
     }
 
     let mut expanded = 0_u64;
-    let mut has_schema = false;
-    let mut has_wiki = false;
-    let mut seen = BTreeSet::new();
+    let mut has_project_index = false;
 
     for index in 0..archive.len() {
         let entry = archive
@@ -370,17 +417,7 @@ fn validate_archive<R: Read + std::io::Seek>(
             ));
         }
         let relative = archive_relative_path(entry.name())?;
-        if !seen.insert(relative.clone()) {
-            return Err(ArchiveError::UnsupportedArchiveEntry(
-                entry.name().to_owned(),
-            ));
-        }
-        if relative == Path::new(PROJECT_SCHEMA) && !entry.is_dir() {
-            has_schema = true;
-        }
-        if first_path_segment_is(&relative, PROJECT_WIKI_DIR) {
-            has_wiki = true;
-        }
+        has_project_index |= relative == Path::new("wiki/index.md") && !entry.is_dir();
         expanded = expanded
             .checked_add(entry.size())
             .ok_or(ArchiveError::ArchiveTooLarge)?;
@@ -389,10 +426,10 @@ fn validate_archive<R: Read + std::io::Seek>(
         }
     }
 
-    if !has_schema || !has_wiki {
+    if !has_project_index {
         return Err(ArchiveError::InvalidProjectRoot {
             path: PathBuf::from("archive"),
-            reason: "schema.md and wiki/ are required",
+            reason: "wiki/index.md is missing",
         });
     }
     Ok(())
@@ -429,6 +466,41 @@ fn extract_archive<R: Read + std::io::Seek>(
             path: target,
             source,
         })?;
+    }
+    Ok(())
+}
+
+fn publish_import(staging: &Path, root: &Path) -> Result<(), ArchiveError> {
+    ensure_empty_destination(root)?;
+    if !root.exists() {
+        return fs::rename(staging, root).map_err(|source| ArchiveError::Io {
+            action: "publish imported project",
+            path: root.to_path_buf(),
+            source,
+        });
+    }
+    let mut published = Vec::<PathBuf>::new();
+    for entry in read_sorted_directory(staging)? {
+        let source_path = entry.path();
+        let destination = root.join(entry.file_name());
+        if let Err(source) = fs::rename(&source_path, &destination) {
+            let mut rollback_failed = false;
+            for path in published.iter().rev() {
+                if fs::rename(path, staging.join(path.file_name().unwrap())).is_err() {
+                    rollback_failed = true;
+                }
+            }
+            return Err(ArchiveError::Io {
+                action: if rollback_failed {
+                    "publish imported project; some imported entries remain in destination"
+                } else {
+                    "publish imported project"
+                },
+                path: root.to_path_buf(),
+                source,
+            });
+        }
+        published.push(destination);
     }
     Ok(())
 }
@@ -615,6 +687,8 @@ fn write_rebuilt_index(
     index_path: &Path,
     content: &[u8],
 ) -> Result<(), ArchiveError> {
+    reject_symlink(temporary_path)?;
+    reject_symlink(index_path)?;
     let mut file = create_file(temporary_path)?;
     file.write_all(content).map_err(|source| ArchiveError::Io {
         action: "write rebuilt wiki index",
@@ -644,7 +718,7 @@ fn write_rebuilt_index(
 }
 
 fn archive_relative_path(name: &str) -> Result<PathBuf, ArchiveError> {
-    if name.contains(['\\', '\0']) {
+    if name.contains(['\\', '\0', ':']) {
         return Err(ArchiveError::UnsafeArchivePath(name.to_owned()));
     }
     let name = name.strip_suffix('/').unwrap_or(name);
@@ -672,8 +746,11 @@ fn archive_name(path: &Path) -> Result<String, ArchiveError> {
     Ok(path.to_string_lossy().replace('\\', "/"))
 }
 
-fn first_path_segment_is(path: &Path, expected: &str) -> bool {
-    matches!(path.components().next(), Some(Component::Normal(segment)) if segment == expected)
+fn require_absolute(path: &Path, message: &'static str) -> Result<(), ArchiveError> {
+    if !path.is_absolute() {
+        return Err(ArchiveError::InvalidPath(message));
+    }
+    Ok(())
 }
 
 fn canonicalize(path: &Path, action: &'static str) -> Result<PathBuf, ArchiveError> {
@@ -682,6 +759,21 @@ fn canonicalize(path: &Path, action: &'static str) -> Result<PathBuf, ArchiveErr
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn reject_symlink(path: &Path) -> Result<(), ArchiveError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(ArchiveError::UnsafeArchivePath(path.display().to_string()))
+        }
+        Ok(_) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ArchiveError::Io {
+            action: "inspect index destination",
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 fn create_file(path: &Path) -> Result<File, ArchiveError> {

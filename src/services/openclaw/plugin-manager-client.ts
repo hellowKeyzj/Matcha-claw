@@ -1,4 +1,5 @@
 import { hostApiFetch } from '@/lib/host-api';
+import { configurePlugin } from '@/lib/plugins';
 
 export type RuntimePluginCatalogItem = {
   id: string;
@@ -42,11 +43,8 @@ export async function setEnabledPluginIds(pluginIds: string[]): Promise<PluginRu
   if (pluginIds.length !== 1) {
     throw new Error('setEnabledPluginIds requires exactly one pluginId');
   }
-  const response = await hostApiFetch<{ outcome: 'configured' | 'rejected' | 'unknown' }>('/api/plugins/configuration', {
-    method: 'POST',
-    body: JSON.stringify({ runtime: 'openclaw', pluginId: pluginIds[0], enabled: true }),
-  });
-  if (response.outcome !== 'configured') {
+  const outcome = await configurePlugin(pluginIds[0], true);
+  if (outcome !== 'configured') {
     throw new Error('Plugin configuration was not accepted');
   }
   return await getPluginRuntime();

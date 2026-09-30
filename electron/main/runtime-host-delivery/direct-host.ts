@@ -2,6 +2,7 @@ import {
   spawn,
   type ChildProcessWithoutNullStreams,
 } from 'node:child_process';
+import { logger } from '../../utils/logger';
 import {
   RuntimeHostControlClient,
   RuntimeHostControlError,
@@ -96,6 +97,7 @@ export interface DirectRuntimeHost {
     options?: RuntimeHostControlCommandOptions,
   ) => Promise<RuntimeHostControlOutcome>;
   readonly onSafeEvent: (handler: (event: RuntimeHostSafeEvent) => void) => () => void;
+  readonly onDisconnect: (handler: (error: RuntimeHostControlError) => void) => () => void;
   readonly onExit: (handler: (exit: DirectRuntimeHostExit) => void) => () => void;
   readonly readE2ECronProviderTrace: () => readonly string[];
   readonly stop: () => Promise<void>;
@@ -158,6 +160,9 @@ export async function launchDirectRuntimeHost(
     throw new DirectRuntimeHostDeliveryError('CHILD_FAILED');
   }
 
+  // Publish disconnect before lifecycle observers detach this child's subscriptions.
+  exit.onExit(() => controlClient.close());
+
   let gracefulStop: Promise<void> | undefined;
   let forceTermination: Promise<void> | undefined;
 
@@ -165,6 +170,7 @@ export async function launchDirectRuntimeHost(
     ...(child.pid === undefined ? {} : { pid: child.pid }),
     command: (command, options) => controlClient.command(command, options),
     onSafeEvent: (handler) => controlClient.onSafeEvent(handler),
+    onDisconnect: (handler) => controlClient.onDisconnect(handler),
     onExit: (handler) => exit.onExit(handler),
     readE2ECronProviderTrace: cronProviderTrace,
     stop: () => {
@@ -424,9 +430,9 @@ function streamRuntimeHostStartupTrace(output: RuntimeHostControlOutput): void {
     for (const line of lines) {
       if (line.includes('[startup-trace]') || line.includes('"prefix":"session-trace"')) {
         const trace = /^\[startup-trace\] source=openclaw-channel traceId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?= )/i.exec(line);
-        console.info(trace
+        logger.info(trace
           ? `${trace[0]}${redactLaunchStderr(line.slice(trace[0].length))}`
-          : redactLaunchStderr(line));
+          : redactLaunchStderr(line, line.includes('"prefix":"session-trace"')));
       }
     }
   });
@@ -449,10 +455,15 @@ function captureE2ECronProviderTrace(output: RuntimeHostControlOutput): () => re
   return () => [...entries];
 }
 
-function redactLaunchStderr(value: string): string {
-  return value
-    .replace(/(token|authorization|secret|password)=\S+/gi, '$1=[REDACTED]')
-    .replace(/[A-Za-z0-9_-]{32,}/g, '[REDACTED]');
+function redactLaunchStderr(value: string, preserveSessionTrace = false): string {
+  const sanitized = value.replace(/(token|authorization|secret|password)=\S+/gi, '$1=[REDACTED]');
+  const trace = preserveSessionTrace
+    ? /"traceId":"session-trace:[A-Za-z0-9_.:-]{1,128}:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i.exec(sanitized)
+    : null;
+  const traceOffset = trace ? trace.index + trace[0].length - trace[1].length - 1 : -1;
+  return sanitized.replace(/[A-Za-z0-9_-]{32,}/g, (match, offset: number) => (
+    offset === traceOffset && match === trace?.[1] ? match : '[REDACTED]'
+  ));
 }
 
 function resolveReadyTimeoutMs(value: number | undefined): number {

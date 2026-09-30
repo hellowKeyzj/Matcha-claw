@@ -193,7 +193,7 @@ pub(super) async fn handle(
         return Response::json(response.status, response.body);
     }
     let response = match handle_request(request, verifier, provider).await {
-        Ok(delivery) => TransportResponse::from_routing_delivery(delivery),
+        Ok(response) => response,
         Err(RequestError::Invalid) => TransportResponse::bad_request(),
         Err(RequestError::Unauthorized) => TransportResponse::unauthorized(),
         Err(RequestError::TimedOut) => TransportResponse::fixed(503, super::TIMEOUT_ERROR),
@@ -205,7 +205,7 @@ async fn handle_request(
     request: platform::loopback::Request,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     provider: ProviderHandle,
-) -> Result<ProviderRoutingDelivery, RequestError> {
+) -> Result<TransportResponse, RequestError> {
     let authorization = request
         .bearer_authorization()
         .ok_or(RequestError::Unauthorized)?;
@@ -224,15 +224,21 @@ async fn handle_request(
                 .map(ProviderRoutingDelivery::from)
         }
         ProviderRoutingCommand::Replace(routing) => {
-            let revision = routing.revision();
-            provider
-                .replace_provider_routing(routing)
-                .await
-                .map(|outcome| ProviderRoutingDelivery::Replace { revision, outcome })
+            return Ok(
+                match provider.admit_replace_provider_routing(routing).await {
+                    Ok(receipt) => TransportResponse {
+                        status: 202,
+                        body: serde_json::to_value(receipt).expect("call receipt serializes"),
+                    },
+                    Err(()) => TransportResponse::from_routing_delivery(
+                        ProviderRoutingDelivery::Unavailable,
+                    ),
+                },
+            );
         }
     }
     .unwrap_or(ProviderRoutingDelivery::Unavailable);
-    Ok(delivery)
+    Ok(TransportResponse::from_routing_delivery(delivery))
 }
 
 fn capability_for(value: &str) -> Option<ProviderRoutingCapability> {

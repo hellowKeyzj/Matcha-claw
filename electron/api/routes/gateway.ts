@@ -6,16 +6,6 @@ import { sendJson } from '../route-utils';
 
 const GATEWAY_CONTROL_UI_UNAVAILABLE = 'Gateway control UI URL is unavailable';
 
-type GatewayLifecycle =
-  | 'unavailable'
-  | 'idle'
-  | 'starting'
-  | 'running'
-  | 'stopping'
-  | 'waitingToRestart'
-  | 'failed'
-  | 'shutDown';
-
 type GatewayApiContext = RuntimeHostApiContext & RuntimeHostTransportContext<'runtimeControlTransport'>;
 
 export async function handleGatewayRoutes(
@@ -95,19 +85,15 @@ async function handleLifecycleMutation(
   operation: 'start' | 'stop' | 'restart',
 ): Promise<void> {
   try {
-    const response = await ctx.runtimeHostTransports.runtimeControlTransport[operation === 'start'
-      ? 'lifecycleStart'
-      : operation === 'stop'
-        ? 'lifecycleStop'
-        : 'lifecycleRestart']();
-    const lifecycle = response.status === 200 ? readGatewayLifecycle(response.body) : null;
-    if (!lifecycle) {
+    const transport = ctx.runtimeHostTransports.runtimeControlTransport;
+    const response = await transport[
+      operation === 'start' ? 'lifecycleStart' : operation === 'stop' ? 'lifecycleStop' : 'lifecycleRestart'
+    ]();
+    if (response.status === 202) {
+      sendJson(res, 202, response.body);
+    } else {
       sendLifecycleFailure(res, operation, undefined, response.status);
-      return;
     }
-    sendJson(res, 200, operation === 'restart' && lifecycle === 'waitingToRestart'
-      ? { success: true, deferred: true }
-      : { success: true });
   } catch (error) {
     sendLifecycleFailure(res, operation, error, undefined);
   }
@@ -126,21 +112,6 @@ function sendLifecycleFailure(
     success: false,
     error: `Gateway ${operation} ${unknown ? 'outcome is unknown' : unavailable ? 'is unavailable' : 'failed'}`,
   });
-}
-
-function readGatewayLifecycle(body: unknown): GatewayLifecycle | null {
-  if (!isRecord(body)) return null;
-  const result = body.result;
-  if (!isRecord(result)
-    || !hasRequiredKeys(result, ['lifecycle'])
-    || !Object.keys(result).every((key) => ['lifecycle', 'observedAtMs', 'failure', 'startupDiagnostic'].includes(key))
-    || !isGatewayLifecycle(result.lifecycle)
-    || (result.observedAtMs !== undefined && (!Number.isSafeInteger(result.observedAtMs) || result.observedAtMs < 0))
-    || (result.failure !== undefined && typeof result.failure !== 'string')
-    || (result.startupDiagnostic !== undefined && typeof result.startupDiagnostic !== 'string')) {
-    return null;
-  }
-  return result.lifecycle;
 }
 
 function readControlUiResult(
@@ -170,17 +141,6 @@ function readControlUiResult(
   return { url: parsed.toString(), port };
 }
 
-function isGatewayLifecycle(value: unknown): value is GatewayLifecycle {
-  return value === 'unavailable'
-    || value === 'idle'
-    || value === 'starting'
-    || value === 'running'
-    || value === 'stopping'
-    || value === 'waitingToRestart'
-    || value === 'failed'
-    || value === 'shutDown';
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -188,8 +148,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const keys = Object.keys(value);
   return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
-}
-
-function hasRequiredKeys(value: Record<string, unknown>, required: readonly string[]): boolean {
-  return required.every((key) => Object.hasOwn(value, key));
 }

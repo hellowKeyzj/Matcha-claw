@@ -1,3 +1,5 @@
+import type { CallReceipt } from '../../../../src/types/call-log';
+import { decodeCallReceipt } from '../../../../src/types/call-log/receipt';
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from './client';
 
@@ -5,15 +7,10 @@ const TOOLCHAIN_UNAVAILABLE = { success: false, error: 'Toolchain is unavailable
 
 export type ToolchainAvailability = 'available' | 'unavailable';
 export type PythonReadiness = 'ready' | 'notReady' | 'unknown' | 'unavailable' | 'unsupported';
-export type ToolchainPrepareOutcome = 'ready' | 'installed' | 'rejected' | 'unknown';
 
 export type ToolchainStatus = Readonly<{
   uv: ToolchainAvailability;
   python: PythonReadiness;
-}>;
-
-export type ToolchainPrepare = Readonly<{
-  outcome: ToolchainPrepareOutcome;
 }>;
 
 export type ToolchainStatusTransportResponse =
@@ -21,12 +18,12 @@ export type ToolchainStatusTransportResponse =
   | Readonly<{ status: 503; body: typeof TOOLCHAIN_UNAVAILABLE }>;
 
 export type ToolchainPrepareTransportResponse =
-  | Readonly<{ status: 200; body: ToolchainPrepare }>
+  | Readonly<{ status: 202; body: CallReceipt }>
   | Readonly<{ status: 503; body: typeof TOOLCHAIN_UNAVAILABLE }>;
 
 export interface ToolchainTransport {
   status(): Promise<ToolchainStatusTransportResponse>;
-  prepare(timeoutMs: number): Promise<ToolchainPrepareTransportResponse>;
+  prepare(): Promise<ToolchainPrepareTransportResponse>;
 }
 
 export function createToolchainTransport(
@@ -53,7 +50,7 @@ export function createToolchainTransport(
       return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
     },
 
-    async prepare(timeoutMs: number): Promise<ToolchainPrepareTransportResponse> {
+    async prepare(): Promise<ToolchainPrepareTransportResponse> {
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: '/api/toolchain/prepare',
@@ -66,10 +63,11 @@ export function createToolchainTransport(
         },
         method: 'POST',
         fetcher,
-        timeoutMs,
         emptyContentLength: true,
       });
-      if (response?.status === 200 && isToolchainPrepare(response.body)) return { status: 200, body: response.body };
+      if (response?.status === 202) {
+        try { return { status: 202, body: decodeCallReceipt(response.body) }; } catch { /* closed public boundary */ }
+      }
       return { status: 503, body: TOOLCHAIN_UNAVAILABLE };
     },
   };
@@ -80,15 +78,6 @@ function isToolchainStatus(value: unknown): value is ToolchainStatus {
     && hasExactKeys(value, ['uv', 'python'])
     && isToolchainAvailability(value.uv)
     && isPythonReadiness(value.python);
-}
-
-function isToolchainPrepare(value: unknown): value is ToolchainPrepare {
-  return isRecord(value)
-    && hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'ready'
-      || value.outcome === 'installed'
-      || value.outcome === 'rejected'
-      || value.outcome === 'unknown');
 }
 
 function isToolchainAvailability(value: unknown): value is ToolchainAvailability {

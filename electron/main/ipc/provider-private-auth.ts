@@ -8,14 +8,15 @@ import { DatabaseSync } from 'node:sqlite';
 import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron';
 
 import type { ProviderAccountsTransport } from '../runtime-host-delivery/transport/providers/accounts';
-import {
-  ProviderMutationReceiptUnavailableError,
-  type ProviderMutationCommittedAccountResponse,
-  type ProviderMutationCommittedResponse,
-  type ProviderMutationCommitUnknownResponse,
-  type ProviderMutationReceipt,
-} from '../runtime-host-delivery/transport/providers/mutation-receipt';
+import type { CallReceipt, CallRecord } from '../../../src/types/call-log';
+import type { ProviderCallDetail } from '../../../src/types/call-log/provider';
+import { decodeCallReceipt } from '../../../src/types/call-log/receipt';
 import { probeAnthropicCliAuth } from './provider-private-auth/anthropic-cli-probe';
+import {
+  beginPrivateAccountTransaction, claimPrivateAccountTransaction, clearPrivateAccountTransactions,
+  privateAccountTransactionForRequest, settlePrivateAccountTransaction,
+  type PrivateAccountTransaction,
+} from './provider-private-auth/account-transactions';
 import { loginOpenAICodexOAuth } from '../../services/providers/oauth/openai-codex-oauth';
 import { loginOpenAIDeviceOAuth } from '../../services/providers/oauth/openai-device-oauth';
 import { loginGitHubCopilotDeviceOAuth } from '../../services/providers/oauth/github-copilot-device-oauth';
@@ -40,7 +41,6 @@ const AUTH_PROFILES_STORE_STATE_KEY = 'authProfiles.store';
 const AUTH_PROFILES_STATE_STATE_KEY = 'authProfiles.state';
 const AUTH_SHARED_STORE_STATE_VALUE = { location: 'state-db' } as const;
 const OAUTH_ERROR_MESSAGE = 'Provider OAuth authentication failed';
-const MUTATION_UNKNOWN_ERROR = 'Provider mutation commit outcome is unknown; reopen before retrying';
 
 type PrivateResolverFailureCode =
   | 'invalid-request'
@@ -101,6 +101,9 @@ export type ProviderAccountIntent = Readonly<{
 type AccountIntent = ProviderAccountIntent;
 type Flow = Readonly<{ flowId: string; account: AccountIntent; provider: Provider; controller: AbortController }>;
 
+export type AwaitProviderCall = (receipt: CallReceipt, command: 'providerAccounts.replace' | 'providerAccounts.delete') => Promise<CallRecord<'provider'>>;
+export type ProviderPrivateAccountDependencies = Readonly<{ transport: ProviderAccountsTransport; awaitProviderCall: AwaitProviderCall }>;
+
 const activeFlows = new Map<string, Flow>();
 const manualCodes = new Map<string, { resolve: (value: string) => void; reject: () => void }>();
 let privateStoreWrite = Promise.resolve();
@@ -153,6 +156,7 @@ export function createProviderCredentialStatusTransport(): ProviderCredentialSta
 export function registerProviderPrivateAuthHandlers(
   getMainWindow: () => BrowserWindow | null,
   transport: ProviderAccountsTransport,
+  awaitProviderCall: AwaitProviderCall,
 ): void {
   ipcMain.handle('providers:storeAccount', async (_, input: unknown) => {
     const value = input as { account?: unknown; apiKey?: unknown; token?: unknown };
@@ -167,7 +171,7 @@ export function registerProviderPrivateAuthHandlers(
       throw new Error('Provider account request is invalid');
     }
     providerPrivateAuthTrace('ipc.store.decoded', accountTrace(account));
-    return await storeProviderPrivateAccount(transport, account, value.apiKey, value.token);
+    return await admitPrivateAccount(transport, await preparePrivateAccount(account, value.apiKey, value.token), account);
   });
 
   ipcMain.handle('providers:deleteAccount', async (_, input: unknown) => {
@@ -180,7 +184,7 @@ export function registerProviderPrivateAuthHandlers(
       providerPrivateAuthTrace('ipc.delete.rejected', { detail: 'invalid-request' });
       throw new Error('Provider account request is invalid');
     }
-    return await deleteProviderPrivateAccount(transport, value.accountId, value.revision);
+    return await admitPrivateDelete(transport, value.accountId, value.revision);
   });
 
   ipcMain.handle('providers:startOAuth', async (_, input: unknown) => {
@@ -191,7 +195,7 @@ export function registerProviderPrivateAuthHandlers(
     if (activeFlows.has(flow.flowId)) throw new Error('Provider OAuth flow is already active');
     activeFlows.set(flow.flowId, flow);
     publish(getMainWindow, { flowId: flow.flowId, status: 'started' });
-    void runOAuth(flow, getMainWindow, transport);
+    void runOAuth(flow, getMainWindow, { transport, awaitProviderCall });
     return { flowId: flow.flowId, status: 'started' as const };
   });
 
@@ -239,7 +243,16 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
       return;
     }
     try {
-      if (request.method === 'DELETE') {
+      if (body?.operation === 'claim' || body?.operation === 'settle') {
+        const transaction = privateAccountTransactionForRequest(body.transactionId as string, reference, revision!);
+        if (!transaction) throw new ProviderPrivateResolverError('invalid-request');
+        if (body.operation === 'claim') {
+          if (!claimPrivateAccountTransaction(transaction)) throw new ProviderPrivateResolverError('invalid-request');
+        } else {
+          await settlePrivateAccountTransaction(transaction, body.settlement as 'retained' | 'rejected' | 'unknown', restoreCredential);
+        }
+        response.writeHead(204).end();
+      } else if (request.method === 'DELETE') {
         if (!revision || !profileProvider) {
           sendPrivateResolverFailure(response, 'invalid-request', 400);
           return;
@@ -298,14 +311,19 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
   return {
     endpoint: `http://127.0.0.1:${address.port}/resolve`,
     authorization,
-    close: () => closeServer(server),
+    close: async () => {
+      await closeServer(server);
+      await privateStoreWrite;
+      await authProfileWrite;
+      clearPrivateAccountTransactions();
+    },
   };
 }
 
 async function runOAuth(
   flow: Flow,
   getMainWindow: () => BrowserWindow | null,
-  transport: ProviderAccountsTransport,
+  deps: ProviderPrivateAccountDependencies,
 ): Promise<void> {
   let flowClaimed = false;
   try {
@@ -318,7 +336,7 @@ async function runOAuth(
       authMode: secret.kind === 'apiKey' ? 'apiKey' as const
         : secret.kind === 'token' ? 'token' as const : flow.account.authMode,
     };
-    const replacement = await commitPrivateAccount(transport, account, secret);
+    const replacement = await commitPrivateAccount(deps, account, secret);
     publish(getMainWindow, { flowId: flow.flowId, status: oauthOutcome(replacement.outcome) });
     if (replacement.outcome === 'stored') {
       publishLegacy(getMainWindow, 'oauth:success', {
@@ -422,16 +440,12 @@ type PublicOAuthOutcome = 'completed' | 'rejected' | 'unknown' | 'unavailable';
 type PublicReplaceResult = Readonly<{
   outcome: PublicMutationOutcome;
   accountId?: string;
-  receipt?: ProviderMutationReceipt;
-}>;
-type PublicDeleteResult = Readonly<{
-  outcome: PublicDeleteOutcome;
-  receipt?: ProviderMutationReceipt;
+  detail?: ProviderCallDetail;
 }>;
 
 export type ProviderPrivateAccountMutationResult = Readonly<{
   status: PublicMutationOutcome | PublicDeleteOutcome;
-  receipt?: ProviderMutationReceipt;
+  detail?: ProviderCallDetail;
 }>;
 
 type ProviderMutationTransportResponse = Awaited<ReturnType<ProviderAccountsTransport['execute']>>;
@@ -464,43 +478,32 @@ function accountTrace(account: AccountIntent): Record<string, unknown> {
   };
 }
 
-function receiptTrace(receipt: ProviderMutationReceipt | undefined): Record<string, unknown> {
-  if (!receipt) return { receipt: false };
-  return {
-    receipt: true,
-    desired: receipt.desired.status,
-    persisted: receipt.persisted.status,
-    nativeChanged: receipt.native.changed,
-    nativeApplied: receipt.native.applied.status,
-    nativeObserved: receipt.native.observed.status,
-    nativeDiagnostic: receipt.native.diagnostic
-      ? {
-          phase: receipt.native.diagnostic.phase,
-          reason: receipt.native.diagnostic.reason,
-          method: receipt.native.diagnostic.method,
-          expectedPath: receipt.native.diagnostic.expectedPath,
-          detail: idShape(receipt.native.diagnostic.detail),
-        }
-      : undefined,
-    commit: receipt.commit,
-  };
+function detailTrace(detail: ProviderCallDetail | undefined): Record<string, unknown> {
+  return detail ? { persisted: detail.persisted, commit: detail.commit, native: detail.native, diagnostic: detail.diagnostic } : {};
 }
 
 export async function storeProviderPrivateAccount(
-  transport: ProviderAccountsTransport,
+  deps: ProviderPrivateAccountDependencies,
   account: ProviderAccountIntent,
   apiKey?: unknown,
   token?: unknown,
 ): Promise<ProviderPrivateAccountMutationResult> {
-  providerPrivateAuthTrace('store.request', {
-    ...accountTrace(account),
-    privateAuthInputPresent: (typeof apiKey === 'string' && apiKey.trim().length > 0)
-      || (typeof token === 'string' && token.trim().length > 0),
-  });
+  const transaction = await preparePrivateAccount(account, apiKey, token);
+  try {
+    const receipt = await admitPrivateAccount(deps.transport, transaction, account);
+    return await accountCallResult(deps, receipt, 'providerAccounts.replace', account.id, account.revision);
+  } catch (error) {
+    if (error instanceof ProviderAccountAdmissionFailure) return { status: error.outcome };
+    throw error;
+  }
+}
+
+async function preparePrivateAccount(
+  account: AccountIntent, apiKey?: unknown, token?: unknown,
+): Promise<PrivateAccountTransaction> {
   if (!parseAccount(account)
     || apiKey !== undefined && (account.authMode !== 'apiKey' || !isSecret(apiKey))
     || token !== undefined && (account.authMode !== 'token' || !isSecret(token))) {
-    providerPrivateAuthTrace('store.rejected', { detail: 'invalid-request', accountId: idShape(account.id) });
     throw new Error('Provider account request is invalid');
   }
   if (account.authMode === 'cliReuse' && account.enabled) {
@@ -516,53 +519,40 @@ export async function storeProviderPrivateAccount(
     : token !== undefined
       ? { kind: 'token', provider: account.provider, token: normalizeProviderToken(account.provider, token as string) }
       : undefined;
-  const replacement = await commitPrivateAccount(transport, account, secret);
-  providerPrivateAuthTrace('store.response', {
-    ...accountTrace(account),
-    outcome: replacement.outcome,
-    ...receiptTrace(replacement.receipt),
-  });
-  return {
-    status: replacement.outcome,
-    ...(replacement.receipt ? { receipt: replacement.receipt } : {}),
-  };
+  return preparePrivateAccountSecret(account, secret);
+}
+
+async function preparePrivateAccountSecret(
+  account: AccountIntent, secret?: PrivateCredential,
+): Promise<PrivateAccountTransaction> {
+  const reference = credentialReference(account.id);
+  const transaction = await beginPrivateAccountTransaction(reference, account.revision, () => credentialSnapshot(reference));
+  try {
+    if (account.authMode !== 'local' && account.authMode !== 'cliReuse') {
+      if (secret) await storeSecret(account.id, secret);
+      else if (!transaction.previous) throw new Error('A provider credential is required');
+    }
+    return transaction;
+  } catch (error) {
+    await settlePrivateAccountTransaction(transaction, 'rejected', restoreCredential);
+    throw error;
+  }
 }
 
 async function commitPrivateAccount(
-  transport: ProviderAccountsTransport,
+  deps: ProviderPrivateAccountDependencies,
   account: AccountIntent,
   secret?: PrivateCredential,
 ): Promise<PublicReplaceResult> {
-  const hasCredential = account.authMode !== 'local' && account.authMode !== 'cliReuse';
-  const reference = credentialReference(account.id);
-  const previous = hasCredential ? await credentialSnapshot(reference) : undefined;
-  providerPrivateAuthTrace('store.private-before', {
-    ...accountTrace(account),
-    privateAuthRequired: hasCredential,
-    previousPrivateAuthPresent: Boolean(previous),
-    incomingPrivateAuthPresent: Boolean(secret),
-  });
-  if (hasCredential) {
-    if (secret) await storeSecret(account.id, secret);
-    else if (!previous) throw new Error('A provider credential is required');
-  }
-  providerPrivateAuthTrace('store.private-after', {
-    ...accountTrace(account),
-    privateAuthStored: hasCredential,
-  });
-  let replacement: PublicReplaceResult;
+  const transaction = await preparePrivateAccountSecret(account, secret);
   try {
-    replacement = await replace(transport, account);
+    const receipt = await admitPrivateAccount(deps.transport, transaction, account);
+    const result = await accountCallResult(deps, receipt, 'providerAccounts.replace', account.id, account.revision);
+    return { outcome: result.status as PublicMutationOutcome, accountId: account.id, detail: result.detail };
   } catch (error) {
-    if (!(error instanceof ProviderMutationReceiptUnavailableError)) throw error;
-    providerPrivateAuthTrace('store.transport-unavailable', accountTrace(account));
-    replacement = { outcome: 'unavailable' };
+    if (error instanceof ProviderAccountAdmissionFailure) return { outcome: error.outcome };
+    throw error;
   }
-  if (hasCredential && replacement.outcome === 'rejected') {
-    await restoreCredential(reference, previous);
-    providerPrivateAuthTrace('store.private-rollback', accountTrace(account));
-  }
-  return replacement;
 }
 
 function normalizeProviderToken(provider: string, token: string): string {
@@ -575,133 +565,91 @@ function normalizeProviderToken(provider: string, token: string): string {
 }
 
 export async function deleteProviderPrivateAccount(
-  transport: ProviderAccountsTransport,
+  deps: ProviderPrivateAccountDependencies,
   accountId: string,
   revision: number,
 ): Promise<ProviderPrivateAccountMutationResult> {
-  providerPrivateAuthTrace('delete.request', { accountId: idShape(accountId), revision });
   try {
-    const deletion = await removeAccount(transport, accountId, revision);
-    providerPrivateAuthTrace('delete.response', {
-      accountId: idShape(accountId),
-      revision,
-      outcome: deletion.outcome,
-      ...receiptTrace(deletion.receipt),
-    });
-    return {
-      status: deletion.outcome,
-      ...(deletion.receipt ? { receipt: deletion.receipt } : {}),
-    };
+    const receipt = await admitPrivateDelete(deps.transport, accountId, revision);
+    return await accountCallResult(deps, receipt, 'providerAccounts.delete', accountId, revision);
   } catch (error) {
-    if (error instanceof ProviderMutationReceiptUnavailableError) {
-      providerPrivateAuthTrace('delete.transport-unavailable', { accountId: idShape(accountId), revision });
-      return { status: 'unavailable' };
-    }
-    providerPrivateAuthTrace('delete.failed', {
-      accountId: idShape(accountId),
-      revision,
-      errorName: error instanceof Error ? error.name : typeof error,
-      message: idShape(error instanceof Error ? error.message : String(error)),
-    });
+    if (error instanceof ProviderAccountAdmissionFailure) return { status: error.outcome };
     throw error;
   }
 }
 
-async function replace(
-  transport: ProviderAccountsTransport,
-  account: AccountIntent,
-): Promise<PublicReplaceResult> {
-  const response = await transport.execute(accountRequest('providerAccounts.replace', {
-    kind: 'replace',
-    account,
-  }));
-  const outcome = replaceOutcomeForResponse(response);
-  const receipt = mutationReceiptForResponse(response);
-  const accountId = accountIdFromResponse(response.body);
-  return {
-    outcome,
-    ...(outcome === 'stored' && accountId ? { accountId } : {}),
-    ...(receipt ? { receipt } : {}),
-  };
+class ProviderAccountAdmissionFailure extends Error {
+  constructor(readonly outcome: 'rejected' | 'unavailable') {
+    super(outcome === 'rejected' ? 'Provider account request was rejected' : 'Provider accounts are unavailable; reopen before retrying');
+  }
 }
 
-async function removeAccount(
+async function admitPrivateAccount(
+  transport: ProviderAccountsTransport, transaction: PrivateAccountTransaction, account: AccountIntent,
+): Promise<CallReceipt> {
+  return admitPrivateMutation(transport, transaction, 'providerAccounts.replace', {
+    kind: 'replace', account, privateTransactionId: transaction.id,
+  });
+}
+
+async function admitPrivateDelete(
+  transport: ProviderAccountsTransport, accountId: string, revision: number,
+): Promise<CallReceipt> {
+  if (!isId(accountId) || !isRevision(revision)) throw new Error('Provider account request is invalid');
+  const reference = credentialReference(accountId);
+  const transaction = await beginPrivateAccountTransaction(reference, revision, () => credentialSnapshot(reference));
+  return admitPrivateMutation(transport, transaction, 'providerAccounts.delete', {
+    kind: 'delete', accountId, revision, privateTransactionId: transaction.id,
+  });
+}
+
+async function admitPrivateMutation(
   transport: ProviderAccountsTransport,
+  transaction: PrivateAccountTransaction,
+  command: 'providerAccounts.replace' | 'providerAccounts.delete',
+  input: unknown,
+): Promise<CallReceipt> {
+  let response: ProviderMutationTransportResponse;
+  try { response = await transport.execute(accountRequest(command, input)); }
+  catch { throw new ProviderAccountAdmissionFailure('unavailable'); }
+  if (response.status === 202) {
+    try { return decodeCallReceipt(response.body); }
+    catch { throw new ProviderAccountAdmissionFailure('unavailable'); }
+  }
+  const notAdmitted = response.status === 400 || response.status === 422
+    || response.status === 503 && 'code' in response.body && response.body.code === 'not-admitted';
+  if (notAdmitted && !transaction.claimed) {
+    await settlePrivateAccountTransaction(transaction, 'rejected', restoreCredential);
+  }
+  throw new ProviderAccountAdmissionFailure(response.status === 400 || response.status === 422 ? 'rejected' : 'unavailable');
+}
+
+async function accountCallResult(
+  deps: ProviderPrivateAccountDependencies,
+  receipt: CallReceipt,
+  command: 'providerAccounts.replace' | 'providerAccounts.delete',
   accountId: string,
   revision: number,
-): Promise<PublicDeleteResult> {
-  const response = await transport.execute(accountRequest('providerAccounts.delete', {
-    kind: 'delete', accountId, revision,
-  }));
-  const outcome = deleteOutcomeForResponse(response);
-  const receipt = mutationReceiptForResponse(response);
+): Promise<ProviderPrivateAccountMutationResult> {
+  let record: CallRecord<'provider'>;
+  try { record = await deps.awaitProviderCall(receipt, command); }
+  catch { return { status: 'unknown' }; }
+  const detail = record.detail;
+  if (record.callId !== receipt.callId || record.module !== 'provider' || record.command !== command
+    || detail.kind !== (command === 'providerAccounts.replace' ? 'replaceAccount' : 'deleteAccount')
+    || detail.phase !== 'terminal' || detail.accountId !== accountId || detail.accountRevision !== revision) {
+    return { status: 'unknown' };
+  }
+  providerPrivateAuthTrace('mutation.terminal', { command, ...detailTrace(detail) });
+  if (detail.diagnostic?.reason === 'private-transaction-settle-failed') return { status: 'unknown', detail };
+  const outcome = command === 'providerAccounts.replace' ? 'stored' : 'deleted';
+  if (detail.outcome === outcome && detail.persisted === 'confirmed' && detail.commit === 'committed') {
+    return { status: outcome, detail };
+  }
   return {
-    outcome,
-    ...(receipt ? { receipt } : {}),
-  };
-}
-
-function replaceOutcomeForResponse(response: ProviderMutationTransportResponse): PublicMutationOutcome {
-  if (response.status === 200 && isCommittedMutation(response.body, 'stored')) return 'stored';
-  if (response.status === 422) return 'rejected';
-  if (response.status === 409 && isUnknownMutation(response.body)) return 'unknown';
-  return 'unavailable';
-}
-
-function deleteOutcomeForResponse(response: ProviderMutationTransportResponse): PublicDeleteOutcome {
-  if (response.status === 200 && isCommittedMutation(response.body, 'deleted')) return 'deleted';
-  if (response.status === 422) return 'rejected';
-  if (response.status === 409 && isUnknownMutation(response.body)) return 'unknown';
-  return 'unavailable';
-}
-
-function mutationReceiptForResponse(response: ProviderMutationTransportResponse): ProviderMutationReceipt | undefined {
-  if (response.status === 200 || response.status === 409) return receiptFromMutation(response.body);
-  return undefined;
-}
-
-function isCommittedMutation(
-  value: ProviderMutationTransportResponse['body'],
-  desiredStatus: 'stored' | 'deleted',
-): boolean {
-  const receipt = receiptFromMutation(value);
-  return isMutationReceipt(value)
-    && value.success === true
-    && receipt !== undefined
-    && receipt.desired.status === desiredStatus
-    && receipt.persisted.status === 'confirmed'
-    && receipt.commit === 'committed';
-}
-
-function isUnknownMutation(value: ProviderMutationTransportResponse['body']): boolean {
-  return isMutationReceipt(value)
-    && value.success === false
-    && value.code === 'commit-outcome-unknown'
-    && value.error === MUTATION_UNKNOWN_ERROR
-    && value.receipt.persisted.status === 'unknown'
-    && value.receipt.commit === 'commit-outcome-unknown';
-}
-
-function isMutationReceipt(
-  value: ProviderMutationTransportResponse['body'],
-): value is ProviderMutationCommittedAccountResponse | ProviderMutationCommittedResponse | ProviderMutationCommitUnknownResponse {
-  return value !== null
-    && typeof value === 'object'
-    && ('success' in value)
-    && (value.success === true || value.success === false)
-    && ('receipt' in value || ('desired' in value && 'persisted' in value && 'native' in value && 'commit' in value));
-}
-
-function receiptFromMutation(
-  value: ProviderMutationTransportResponse['body'],
-): ProviderMutationReceipt | undefined {
-  if (!isMutationReceipt(value)) return undefined;
-  if (value.success === false) return value.receipt;
-  return {
-    desired: value.desired,
-    persisted: value.persisted,
-    native: value.native,
-    commit: value.commit,
+    status: detail.outcome === 'rejected' || record.status === 'rejected' ? 'rejected'
+      : detail.outcome === 'unavailable' ? 'unavailable' : 'unknown',
+    detail,
   };
 }
 
@@ -718,15 +666,6 @@ function oauthErrorMessage(outcome: Exclude<PublicMutationOutcome, 'stored'>): s
     case 'unavailable':
       return 'Provider accounts are unavailable';
   }
-}
-
-function accountIdFromResponse(
-  value: Awaited<ReturnType<ProviderAccountsTransport['execute']>>['body'],
-): string | undefined {
-  if (value === null || typeof value !== 'object' || !('account' in value)) return undefined;
-  const account = value.account;
-  if (account === null || typeof account !== 'object' || !('id' in account) || !isId(account.id)) return undefined;
-  return account.id;
 }
 
 function accountRequest(operationId: 'providerAccounts.replace' | 'providerAccounts.delete', input: unknown): unknown {
@@ -1512,6 +1451,14 @@ function isPrivateResolverRequest(
   if (!body) return false;
   const keys = Object.keys(body).sort();
   if (method === 'POST') {
+    if (body.operation === 'claim' || body.operation === 'settle') {
+      return keys.join(',') === (body.operation === 'claim'
+        ? 'operation,reference,revision,transactionId' : 'operation,reference,revision,settlement,transactionId')
+        && typeof body.transactionId === 'string'
+        && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.transactionId)
+        && isRevision(body.revision)
+        && (body.operation === 'claim' || body.settlement === 'retained' || body.settlement === 'rejected' || body.settlement === 'unknown');
+    }
     return keys.join(',') === 'reference'
       || keys.join(',') === 'authMode,credentialProvider,provider,reference,revision';
   }

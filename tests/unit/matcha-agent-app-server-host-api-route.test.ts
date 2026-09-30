@@ -20,8 +20,8 @@ function createResponse() {
   };
 }
 
-function lifecycleResponse(lifecycle: string) {
-  return { status: 200 as const, body: { result: { lifecycle } } };
+function lifecycleResponse() {
+  return { status: 202 as const, body: { callId: 'call-matcha-restart', accepted: true } };
 }
 
 function statusResponse(lifecycle: string) {
@@ -89,7 +89,7 @@ describe('Matcha Agent app server Host API routes', () => {
   });
 
   it('accepts a sealed restart result and does not invoke legacy lifecycle commands', async () => {
-    const lifecycleRestart = vi.fn().mockResolvedValue(lifecycleResponse('starting'));
+    const lifecycleRestart = vi.fn().mockResolvedValue(lifecycleResponse());
     const command = vi.fn();
     const fixture = createResponse();
 
@@ -103,8 +103,8 @@ describe('Matcha Agent app server Host API routes', () => {
     expect(lifecycleRestart).toHaveBeenCalledWith(MATCHA_AGENT_RUNTIME_ENDPOINT);
     expect(command).not.toHaveBeenCalledWith({ name: 'matcha.lifecycle.restart' });
     expect(command).not.toHaveBeenCalledWith({ name: 'matcha.lifecycle.start' });
-    expect(fixture.response.statusCode).toBe(200);
-    expect(fixture.response.body).toEqual({ success: true });
+    expect(fixture.response.statusCode).toBe(202);
+    expect(fixture.response.body).toEqual(lifecycleResponse().body);
   });
 
   it('maps an unavailable restart response to unknown delivery', async () => {

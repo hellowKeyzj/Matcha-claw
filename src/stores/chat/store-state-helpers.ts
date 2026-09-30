@@ -4,6 +4,7 @@ import {
   buildSessionIdentityKey,
   type SessionIdentity,
 } from '../../types/desktop/runtime-address';
+import { isRunActive } from './types';
 import type {
   ApprovalStatus,
   ApprovalItem,
@@ -1122,6 +1123,28 @@ export function patchSessionTurnItem(
   return patchSessionRecord(state, sessionKey, { items });
 }
 
+function reconcileRuntimeProjection(
+  current: ChatSessionRuntimeState,
+  next: ChatSessionRuntimeState,
+): ChatSessionRuntimeState {
+  const sameRun = current.activeRunId === next.activeRunId
+    || (current.activeRunId === null && current.pendingTurnKey !== null);
+  if (!sameRun || !isRunActive(next)) return next;
+  const stopping = current.runPhase === 'stopping';
+  const abortIssue = current.lastIssue?.code?.startsWith('chat.abort.') === true;
+  if (!stopping && !abortIssue) return next;
+  return {
+    ...next,
+    ...(stopping ? { runPhase: 'stopping' as const, updatedAt: current.updatedAt }
+      : abortIssue && next.runPhase === 'stopping' ? { runPhase: current.runPhase } : {}),
+    ...(next.activeRunId === null && current.pendingTurnKey !== null ? {
+      pendingTurnKey: current.pendingTurnKey,
+      pendingTurnLaneKey: current.pendingTurnLaneKey,
+    } : {}),
+    ...(abortIssue ? { lastError: current.lastError, lastIssue: current.lastIssue, updatedAt: current.updatedAt } : {}),
+  };
+}
+
 export function patchSessionSnapshot(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
@@ -1155,7 +1178,7 @@ export function patchSessionSnapshot(
     nextItems,
     current.runtime.imageGeneration,
   );
-  const nextRuntime = {
+  const nextRuntime = reconcileRuntimeProjection(current.runtime, {
     ...current.runtime,
     activeRunId: snapshot.runtime.activeRunId,
     runPhase: snapshot.runtime.runPhase,
@@ -1171,7 +1194,7 @@ export function patchSessionSnapshot(
     lastError: snapshot.runtime.lastError,
     lastIssue: snapshot.runtime.lastIssue,
     updatedAt: snapshot.runtime.updatedAt,
-  };
+  });
   const nextWindow = syncViewportState(current.window, {
     totalItemCount: snapshot.window.totalItemCount,
     windowStartOffset: snapshot.window.windowStartOffset,
@@ -1221,7 +1244,7 @@ export function patchPendingApprovalsFromSnapshot(
   };
 }
 
-type SessionProjectionState = SessionView & {
+type SessionProjectionState = Omit<SessionView, 'modelState'> & {
   runtimeNotice?: ChatSessionRuntimeState['runtimeNotice'] | null;
 };
 type SessionProjectionStore = Map<string, SessionProjectionState>;
@@ -1352,7 +1375,7 @@ function shouldTraceDeltaTurnState(delta: SessionDelta): boolean {
 
 function sessionIdentityForProjection(
   state: Pick<ChatStoreState, 'loadedSessions'>,
-  view: SessionView,
+  view: SessionProjectionState,
 ): SessionIdentity | null {
   if (!view.identity.agentId || view.identity.endpoint.kind !== 'native-runtime') return null;
   const identity = {
@@ -1455,7 +1478,7 @@ function projectionLargeText(content: SessionWireContent) {
     : undefined;
 }
 
-export function projectSessionViewItems(view: SessionView): SessionRenderItem[] {
+export function projectSessionViewItems(view: SessionProjectionState): SessionRenderItem[] {
   const items = factValue(view.items);
   if (!items) {
     return [];
@@ -1554,7 +1577,7 @@ function projectionRuntime(
   if (!runtime) return createEmptySessionRuntime();
   const issueMessage = runtime.issue === null ? null : `Session runtime ${runtime.issue}`;
   const imageGeneration = deriveSessionImageGenerationPendingStateFromItems(items, current.imageGeneration);
-  return {
+  return reconcileRuntimeProjection(current, {
     ...current,
     activeRunId: runtime.activeRunId,
     runPhase: projectionRuntimePhase(runtime.phase),
@@ -1570,7 +1593,7 @@ function projectionRuntime(
     lastError: runtime.issue === 'rejected' ? issueMessage : null,
     lastIssue: issueMessage ? { message: issueMessage, source: 'runtime', at: Date.now(), retryable: runtime.issue !== 'rejected' } : null,
     updatedAt: Date.now(),
-  };
+  });
 }
 
 function projectionWindow(current: ChatSessionViewportState, fact: SessionFact<SessionWireWindow>): ChatSessionViewportState {
@@ -1612,7 +1635,7 @@ function approvalOptionIdsToDecisions(optionIds: string[]): ApprovalItem['allowe
 function projectionApprovals(
   state: ChatStoreState,
   recordKey: string,
-  view: SessionView,
+  view: SessionProjectionState,
 ): Record<string, ApprovalItem[]> {
   const fact = factValue(view.approvals);
   if (!fact) {
@@ -1639,7 +1662,7 @@ function projectionApprovals(
   return { ...state.pendingApprovalsBySession, [recordKey]: approvals };
 }
 
-function refreshSessionTasks(input: SessionProjectionApplyInput, view: SessionView, invalidate: boolean): void {
+function refreshSessionTasks(input: SessionProjectionApplyInput, view: SessionProjectionState, invalidate: boolean): void {
   const identity = sessionIdentityForProjection(input.get(), view);
   const recordKey = projectionRecordKey(input.get(), identity);
   if (!identity || !recordKey) return;
@@ -1664,6 +1687,7 @@ function isTaskToolTerminalTransition(tool: SessionWireTool, previous?: SessionW
 function applyDecodedSessionView(
   input: SessionProjectionApplyInput,
   view: SessionProjectionState,
+  modelState?: SessionView['modelState'],
 ): boolean {
   const state = input.get();
   const identity = sessionIdentityForProjection(state, view);
@@ -1679,7 +1703,7 @@ function applyDecodedSessionView(
       protocolId: null,
       runtimeEndpointId: view.identity.endpoint.runtimeInstanceId,
       endpointSessionId: view.endpointSessionId,
-      modelState: view.modelState ?? current.meta.modelState,
+      modelState: modelState ?? current.meta.modelState,
       sessionIdentity: nextIdentity,
     } : current.meta;
     const nextItems = reconcileSessionItems(current.items, projectSessionViewItems(view));
@@ -1737,10 +1761,11 @@ export function applySessionView(
       }
     }
   }
-  if (!applyDecodedSessionView(input, view)) {
+  const { modelState, ...projection } = view;
+  if (!applyDecodedSessionView(input, projection, modelState)) {
     return { status: 'unavailable', sessionKey: view.sessionKey, reason: 'session identity unavailable' };
   }
-  store.set(view.sessionKey, view);
+  store.set(view.sessionKey, projection);
   refreshSessionTasks(input, view, true);
   return { status: 'applied', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
 }
@@ -1847,14 +1872,18 @@ function applyProjectionChange(view: SessionProjectionState, change: SessionDelt
     case 'runPhaseChanged':
       return {
         ...view,
-        runtime: updateProjectionFact(view.runtime, (): SessionWireRuntime => ({ phase: 'started', activeRunId: null, issue: null, runProgress: null, runtimeActivity: null, errorDetail: null }), (runtime) => ({
-          ...runtime,
-          phase: change.phase,
-          activeRunId: isTerminalRunPhase(change.phase) ? null : change.runId,
-          runProgress: null,
-          runtimeActivity: null,
-          errorDetail: null,
-        })),
+        runtime: updateProjectionFact(view.runtime, (): SessionWireRuntime => ({ phase: 'started', activeRunId: null, issue: null, runProgress: null, runtimeActivity: null, errorDetail: null }), (runtime) => (
+          isTerminalRunPhase(change.phase) && runtime.activeRunId !== null && runtime.activeRunId !== change.runId
+            ? runtime
+            : {
+                ...runtime,
+                phase: change.phase,
+                activeRunId: isTerminalRunPhase(change.phase) ? null : change.runId,
+                runProgress: null,
+                runtimeActivity: null,
+                errorDetail: null,
+              }
+        )),
         runtimeNotice: runtimeNoticeAfterRunPhaseChange(view.runtimeNotice ?? null, change.runId, change.phase),
       };
     case 'recoveryRequired':
@@ -1872,6 +1901,10 @@ export function applySessionDelta(
   const projectionKey = resolveCronEquivalentProjectionKey(store, state, delta.sessionKey);
   const previous = store.get(projectionKey);
   const traceTurnState = shouldTraceDeltaTurnState(delta);
+  const traceRuntimeState = traceId && delta.changes.some((change) => (
+    change.kind === 'runtimeChanged'
+    || (change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase))
+  ));
   logSessionTrace('session.delta.apply.start', traceId, {
     sessionKey: summarizeIdentifier(delta.sessionKey),
     incomingEpoch: delta.epoch,
@@ -1881,8 +1914,17 @@ export function applySessionDelta(
     previousSeq: previous?.seq ?? null,
     previousCursor: previous?.cursor ?? null,
     changeKinds: delta.changes.map((change) => change.kind),
-    runtimePhase: previous ? projectionRuntimePhase(factValue(previous.runtime)?.phase ?? 'started') : null,
-    activeRunId: summarizeIdentifier(factValue(previous?.runtime ?? 'unknown')?.activeRunId),
+    previousRuntimePhase: previous ? projectionRuntimePhase(factValue(previous.runtime)?.phase ?? 'started') : null,
+    previousActiveRunId: summarizeIdentifier(factValue(previous?.runtime ?? 'unknown')?.activeRunId),
+    ...(traceRuntimeState ? {
+      incomingRuntimePhases: delta.changes
+        .filter((change) => change.kind === 'runtimeChanged' || change.kind === 'runPhaseChanged')
+        .map((change) => ({
+          kind: change.kind,
+          phase: change.kind === 'runtimeChanged' ? change.runtime.phase : change.phase,
+          runId: summarizeIdentifier(change.kind === 'runtimeChanged' ? change.runtime.activeRunId : change.runId),
+        })),
+    } : {}),
   });
   if (traceTurnState) {
     logSessionTrace('session.delta.apply.turns.before', traceId, {
@@ -1945,7 +1987,7 @@ export function applySessionDelta(
     if (change.kind === 'recoveryRequired') tasksChanged = true;
     return applyProjectionChange(view, change);
   }, { ...previous, epoch: delta.epoch });
-  const projected: SessionView = {
+  const projected: SessionProjectionState = {
     ...nextView,
     epoch: delta.epoch,
     seq: delta.seq,
@@ -1955,6 +1997,20 @@ export function applySessionDelta(
     return { status: 'unavailable', sessionKey: delta.sessionKey, reason: 'session identity unavailable' };
   }
   store.set(projectionKey, projected);
+  if (traceRuntimeState) {
+    const appliedState = input.get();
+    const recordKey = projectionRecordKey(appliedState, sessionIdentityForProjection(appliedState, projected));
+    const appliedRuntime = recordKey ? appliedState.loadedSessions[recordKey]?.runtime : null;
+    logSessionTrace('session.delta.apply.runtime.after', traceId, {
+      sessionKey: summarizeIdentifier(delta.sessionKey),
+      seq: delta.seq,
+      cursor: delta.cursor,
+      projectionPhase: factValue(projected.runtime)?.phase ?? null,
+      projectionActiveRunId: summarizeIdentifier(factValue(projected.runtime)?.activeRunId),
+      runtimePhase: appliedRuntime?.runPhase ?? null,
+      activeRunId: summarizeIdentifier(appliedRuntime?.activeRunId),
+    });
+  }
   if (traceTurnState) {
     logSessionTrace('session.delta.apply.turns.after', traceId, {
       sessionKey: summarizeIdentifier(delta.sessionKey),

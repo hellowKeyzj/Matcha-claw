@@ -45,6 +45,12 @@ const READ_FILE_PATH: &str = "/api/wiki/read-file";
 const READ_BINARY_FILE_PATH: &str = "/api/wiki/read-binary-file";
 const READ_SOURCE_PREVIEW_PATH: &str = "/api/wiki/read-source-preview";
 const WRITE_FILE_PATH: &str = "/api/wiki/write-file";
+const SEARCH_CONFIG_PATH: &str = "/api/wiki/search-config";
+const SEARCH_PROVIDER_TEST_PATH: &str = "/api/wiki/search-provider/test";
+const RESEARCH_TASKS_PATH: &str = "/api/wiki/research-tasks";
+const RESEARCH_START_PATH: &str = "/api/wiki/research/start";
+const RESEARCH_RERUN_PATH: &str = "/api/wiki/research-task/rerun";
+const RESEARCH_REMOVE_PATH: &str = "/api/wiki/research-task/remove";
 const SEARCH_PATH: &str = "/api/wiki/search";
 const GRAPH_PATH: &str = "/api/wiki/graph";
 const RESCAN_SOURCES_PATH: &str = "/api/wiki/rescan-sources";
@@ -53,6 +59,7 @@ const IMPORT_SOURCE_PATH: &str = "/api/wiki/import-source";
 const IMPORT_FOLDER_PATH: &str = "/api/wiki/import-folder";
 const APPLY_GENERATED_PAGES_PATH: &str = "/api/wiki/apply-generated-pages";
 const DELETE_SOURCE_PATH: &str = "/api/wiki/delete-source";
+const CALL_RESULT_PATH: &str = "/api/wiki/call-result";
 const SOURCE_FILES_PATH: &str = "/api/wiki/source-files";
 const SOURCE_TASKS_PATH: &str = "/api/wiki/source-tasks";
 const CANCEL_SOURCE_TASK_PATH: &str = "/api/wiki/source-task/cancel";
@@ -67,6 +74,30 @@ const REVIEW_DISMISS_PATH: &str = "/api/wiki/review/dismiss";
 const REVIEWS_CLEAR_RESOLVED_PATH: &str = "/api/wiki/reviews/clear-resolved";
 const EMBED_PAGE_PATH: &str = "/api/wiki/embed-page";
 const RETRIEVE_CONTEXT_PATH: &str = "/api/wiki/retrieve-context";
+const HISTORY_LIST_PATH: &str = "/api/wiki/history/list";
+const HISTORY_RESTORE_PATH: &str = "/api/wiki/history/restore";
+const HISTORY_STATS_PATH: &str = "/api/wiki/history/stats";
+const HISTORY_CONFIG_PATH: &str = "/api/wiki/history/config";
+const HISTORY_CLEAR_PATH: &str = "/api/wiki/history/clear";
+const EXPORT_ARCHIVE_PATH: &str = "/api/wiki/project/export-archive";
+const IMPORT_ARCHIVE_PATH: &str = "/api/wiki/project/import-archive";
+const REBUILD_INDEX_PATH: &str = "/api/wiki/rebuild-index";
+const ASK_QUESTION_PATH: &str = "/api/wiki/qa/ask";
+const QUESTION_TASK_PATH: &str = "/api/wiki/qa/task";
+const CANCEL_QUESTION_PATH: &str = "/api/wiki/qa/cancel";
+const SAVE_QUESTION_PATH: &str = "/api/wiki/qa/save";
+const LINT_CONFIG_PATH: &str = "/api/wiki/lint/config";
+const LINT_STATE_PATH: &str = "/api/wiki/lint/state";
+const RUN_LINT_PATH: &str = "/api/wiki/lint/run";
+const CANCEL_LINT_PATH: &str = "/api/wiki/lint/cancel";
+const FIX_LINT_PATH: &str = "/api/wiki/lint/fix";
+const REVIEW_LINT_PATH: &str = "/api/wiki/lint/review";
+const DELETE_LINT_PATH: &str = "/api/wiki/lint/delete";
+const DISMISS_LINT_PATH: &str = "/api/wiki/lint/dismiss";
+const REINDEX_PATH: &str = "/api/wiki/embedding/reindex";
+const GRAPH_INSIGHTS_PATH: &str = "/api/wiki/graph/insights";
+const DISMISS_GRAPH_INSIGHT_PATH: &str = "/api/wiki/graph/insights/dismiss";
+const GRAPH_INSIGHT_RESEARCH_PATH: &str = "/api/wiki/graph/insights/research-input";
 
 #[derive(Clone)]
 pub struct Dependencies {
@@ -101,7 +132,14 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     } else {
         DEFAULT_REQUEST_BYTES
     };
-    Some(RouteHeadPlan::new(
+    let plan = if Route::match_request(&head.method, path).is_some_and(|route| {
+        route.scope() == AUTHORIZATION_SCOPE_WRITE && !matches!(route, Route::CallResult)
+    }) {
+        RouteHeadPlan::body_deadline
+    } else {
+        RouteHeadPlan::new
+    };
+    Some(plan(
         match head.method.as_str() {
             "GET" => BodyPolicy::Empty,
             "POST" => BodyPolicy::Required { max_bytes },
@@ -127,6 +165,302 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
 
     let query = query(request.path());
     match route {
+        Route::ResearchTasks => deliver(
+            dependencies
+                .wiki
+                .research_tasks(WikiProjectSelector {
+                    project_id: query_value(query, "projectId"),
+                })
+                .await,
+        ),
+        Route::StartResearch => {
+            let Some(input) = decode_body::<crate::research::WikiResearchInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.start_research(input).await)
+        }
+        Route::RerunResearch => {
+            let Some(input) = decode_body::<crate::research::WikiResearchTaskActionInput>(&request)
+            else {
+                return invalid();
+            };
+            admit(dependencies.wiki.rerun_research(input).await)
+        }
+        Route::RemoveResearchTask => {
+            let Some(input) = decode_body::<crate::research::WikiResearchRemoveInput>(&request)
+            else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.remove_research_task(input).await)
+        }
+        Route::SearchConfig => {
+            let project_id = match selected_project_id(
+                &dependencies.wiki,
+                query_value(query, "projectId"),
+            )
+            .await
+            {
+                Ok(id) => id,
+                Err(error) => return failure(error),
+            };
+            match dependencies
+                .wiki
+                .search_config(WikiProjectSelector {
+                    project_id: Some(project_id.clone()),
+                })
+                .await
+            {
+                Ok(config) => {
+                    Response::json(200, json!({ "projectId": project_id, "config": config }))
+                }
+                Err(error) => failure(error),
+            }
+        }
+        Route::UpdateSearchConfig => {
+            let Some((project_id, input)) =
+                decode_project_body::<crate::search_config::SearchConfigUpdate>(&request)
+            else {
+                return invalid();
+            };
+            let project_id = match selected_project_id(&dependencies.wiki, project_id).await {
+                Ok(id) => id,
+                Err(error) => return failure(error),
+            };
+            match dependencies
+                .wiki
+                .update_search_config(Some(project_id.clone()), input)
+                .await
+            {
+                Ok(config) => {
+                    Response::json(200, json!({ "projectId": project_id, "config": config }))
+                }
+                Err(error) => failure(error),
+            }
+        }
+        Route::TestSearchProvider => {
+            let Some((project_id, input)) =
+                decode_project_body::<crate::external_search::SearchProviderTest>(&request)
+            else {
+                return invalid();
+            };
+            let project_id = match selected_project_id(&dependencies.wiki, project_id).await {
+                Ok(id) => id,
+                Err(error) => return failure(error),
+            };
+            match dependencies
+                .wiki
+                .test_search_provider(Some(project_id.clone()), input)
+                .await
+            {
+                Ok(results) => {
+                    Response::json(200, json!({ "projectId": project_id, "results": results }))
+                }
+                Err(error) => failure(error),
+            }
+        }
+        Route::HistoryList => {
+            let Some(input) = decode_body::<crate::history::WikiFileHistoryInput>(&request) else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.history_list(input).await)
+        }
+        Route::RestoreHistory => {
+            let Some(input) = decode_body::<crate::history::WikiRestoreFileHistoryInput>(&request)
+            else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_restore_history(input).await)
+        }
+        Route::HistoryStats => deliver(
+            dependencies
+                .wiki
+                .history_stats(WikiProjectSelector {
+                    project_id: query_value(query, "projectId"),
+                })
+                .await,
+        ),
+        Route::HistoryConfig => deliver(
+            dependencies
+                .wiki
+                .history_config(WikiProjectSelector {
+                    project_id: query_value(query, "projectId"),
+                })
+                .await,
+        ),
+        Route::UpdateHistoryConfig => {
+            let Some(body) = decode_body::<serde_json::Map<String, serde_json::Value>>(&request)
+            else {
+                return invalid();
+            };
+            if body
+                .keys()
+                .any(|key| !matches!(key.as_str(), "projectId" | "enabled" | "maxVersionsPerFile"))
+                || !body.contains_key("enabled")
+                || !body.contains_key("maxVersionsPerFile")
+            {
+                return invalid();
+            }
+            let Ok(input) =
+                serde_json::from_value::<crate::history::WikiFileHistorySettingsInput>(body.into())
+            else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.update_history_config(input).await)
+        }
+        Route::ClearHistory | Route::RebuildIndex => {
+            let Some(body) = decode_body::<serde_json::Map<String, serde_json::Value>>(&request)
+            else {
+                return invalid();
+            };
+            if body.keys().any(|key| key != "projectId") {
+                return invalid();
+            }
+            let Ok(input) = serde_json::from_value::<WikiProjectSelector>(body.into()) else {
+                return invalid();
+            };
+            admit(match route {
+                Route::ClearHistory => dependencies.wiki.admit_clear_history(input).await,
+                _ => dependencies.wiki.admit_rebuild_index(input).await,
+            })
+        }
+        Route::ExportArchive => {
+            let Some(input) = decode_body::<crate::domain::WikiArchiveExportInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_export_archive(input).await)
+        }
+        Route::ImportArchive => {
+            let Some(input) = decode_body::<crate::domain::WikiArchiveImportInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_import_archive(input).await)
+        }
+        Route::AskQuestion => {
+            let Some(input) = decode_body::<crate::domain::WikiQuestionInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.ask_question(input).await)
+        }
+        Route::QuestionTask => {
+            let Some(task_id) = query_value(query, "taskId") else {
+                return invalid();
+            };
+            deliver(
+                dependencies
+                    .wiki
+                    .question_task(crate::domain::WikiQuestionTaskSelector {
+                        project_id: query_value(query, "projectId"),
+                        task_id,
+                    })
+                    .await,
+            )
+        }
+        Route::CancelQuestion => {
+            let Some(input) = decode_body::<crate::domain::WikiQuestionTaskSelector>(&request)
+            else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.cancel_question(input).await)
+        }
+        Route::SaveQuestion => {
+            let Some(input) = decode_body::<crate::domain::WikiQuestionTaskSelector>(&request)
+            else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_save_question(input).await)
+        }
+        Route::LintConfig => deliver(
+            dependencies
+                .wiki
+                .lint_config(WikiProjectSelector {
+                    project_id: query_value(query, "projectId"),
+                })
+                .await,
+        ),
+        Route::LintState => deliver(
+            dependencies
+                .wiki
+                .lint_state(WikiProjectSelector {
+                    project_id: query_value(query, "projectId"),
+                })
+                .await,
+        ),
+        Route::UpdateLintConfig => {
+            let Some(input) = decode_body::<crate::lint::WikiLintConfigInput>(&request) else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.update_lint_config(input).await)
+        }
+        Route::RunLint => {
+            let Some(input) = decode_body::<crate::lint::WikiLintRunInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_lint_run(input).await)
+        }
+        Route::CancelLint => {
+            let Some(input) = decode_body::<crate::lint::WikiLintCancelInput>(&request) else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.cancel_lint(input).await)
+        }
+        Route::FixLint | Route::ReviewLint | Route::DeleteLint => {
+            let Some(input) = decode_body::<crate::lint::WikiLintActionInput>(&request) else {
+                return invalid();
+            };
+            admit(match route {
+                Route::FixLint => dependencies.wiki.admit_lint_fix(input).await,
+                Route::ReviewLint => dependencies.wiki.admit_lint_review(input).await,
+                _ => dependencies.wiki.admit_lint_delete(input).await,
+            })
+        }
+        Route::DismissLint => {
+            let Some(input) = decode_body::<crate::lint::WikiLintActionInput>(&request) else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.dismiss_lint(input).await)
+        }
+        Route::ReindexState => deliver(
+            dependencies
+                .wiki
+                .reindex_state(WikiProjectSelector {
+                    project_id: query_value(query, "projectId"),
+                })
+                .await,
+        ),
+        Route::StartReindex => {
+            let Some(input) = decode_body::<crate::reindex::WikiReindexInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_reindex(input).await)
+        }
+        Route::GraphInsights => deliver(
+            dependencies
+                .wiki
+                .graph_insights(WikiProjectSelector {
+                    project_id: query_value(query, "projectId"),
+                })
+                .await,
+        ),
+        Route::DismissGraphInsight => {
+            let Some(input) = decode_body::<crate::insights::WikiGraphInsightInput>(&request)
+            else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.dismiss_graph_insight(input).await)
+        }
+        Route::GraphInsightResearchInput => {
+            let Some(input) =
+                decode_body::<crate::insights::WikiGraphInsightResearchInput>(&request)
+            else {
+                return invalid();
+            };
+            admit(
+                dependencies
+                    .wiki
+                    .admit_graph_insight_research_input(input)
+                    .await,
+            )
+        }
         Route::Status => deliver(dependencies.wiki.status().await),
         Route::Projects => deliver(dependencies.wiki.projects().await),
         Route::ProjectTemplates => deliver(dependencies.wiki.project_templates().await),
@@ -200,13 +534,13 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             let input = decode_body::<ProjectInput>(&request)
                 .map(ProjectInput::selector)
                 .unwrap_or(WikiProjectSelector { project_id: None });
-            deliver(dependencies.wiki.rescan(input).await)
+            admit(dependencies.wiki.admit_rescan(input).await)
         }
         Route::RefreshSources => {
             let input = decode_body::<ProjectInput>(&request)
                 .map(ProjectInput::selector)
                 .unwrap_or(WikiProjectSelector { project_id: None });
-            deliver(dependencies.wiki.refresh_sources(input).await)
+            admit(dependencies.wiki.admit_refresh_sources(input).await)
         }
         Route::SourceTasks => {
             let input = decode_body::<ProjectInput>(&request)
@@ -224,7 +558,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             let Some(input) = decode_body::<WikiSourceTaskActionInput>(&request) else {
                 return invalid();
             };
-            deliver(dependencies.wiki.retry_source_task(input).await)
+            admit(dependencies.wiki.admit_retry_source_task(input).await)
         }
         Route::PauseSourceTask => {
             let Some(input) = decode_body::<WikiSourceTaskActionInput>(&request) else {
@@ -236,7 +570,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             let Some(input) = decode_body::<WikiSourceTaskActionInput>(&request) else {
                 return invalid();
             };
-            deliver(dependencies.wiki.resume_source_task(input).await)
+            admit(dependencies.wiki.admit_resume_source_task(input).await)
         }
         Route::ReorderSourceTask => {
             let Some(input) = decode_body::<WikiReorderSourceTaskInput>(&request) else {
@@ -298,7 +632,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             else {
                 return invalid();
             };
-            deliver(dependencies.wiki.import_source(input).await)
+            admit(dependencies.wiki.admit_import_source(input).await)
         }
         Route::ImportFolder => {
             let Some(input) =
@@ -306,7 +640,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             else {
                 return invalid();
             };
-            deliver(dependencies.wiki.import_folder(input).await)
+            admit(dependencies.wiki.admit_import_folder(input).await)
         }
         Route::ApplyGeneratedPages => {
             let Some(input) = decode_body::<ApplyGeneratedPagesInput>(&request)
@@ -314,7 +648,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             else {
                 return invalid();
             };
-            deliver(dependencies.wiki.apply_generated_pages(input).await)
+            admit(dependencies.wiki.admit_apply_generated_pages(input).await)
         }
         Route::DeleteSource => {
             let Some(input) =
@@ -322,14 +656,20 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             else {
                 return invalid();
             };
-            deliver(dependencies.wiki.delete_source(input).await)
+            admit(dependencies.wiki.admit_delete_source(input).await)
+        }
+        Route::CallResult => {
+            let Some(input) = decode_body::<CallResultInput>(&request) else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.call_result(&input.call_id))
         }
         Route::EmbedPage => {
             let Some(input) = decode_body::<PathInput>(&request).and_then(PathInput::selector)
             else {
                 return invalid();
             };
-            deliver_unit(dependencies.wiki.embed_page(input).await)
+            admit(dependencies.wiki.admit_embed_page(input).await)
         }
         Route::RetrieveContext => {
             let Some(input) = decode_body::<SearchInput>(&request).and_then(SearchInput::retrieve)
@@ -343,6 +683,13 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
 
 #[derive(Clone, Copy)]
 enum Route {
+    ResearchTasks,
+    StartResearch,
+    RerunResearch,
+    RemoveResearchTask,
+    SearchConfig,
+    UpdateSearchConfig,
+    TestSearchProvider,
     Status,
     Projects,
     ProjectTemplates,
@@ -362,6 +709,7 @@ enum Route {
     ImportFolder,
     ApplyGeneratedPages,
     DeleteSource,
+    CallResult,
     SourceFiles,
     SourceTasks,
     CancelSourceTask,
@@ -377,11 +725,45 @@ enum Route {
     ClearResolvedReviews,
     EmbedPage,
     RetrieveContext,
+    HistoryList,
+    RestoreHistory,
+    HistoryStats,
+    HistoryConfig,
+    UpdateHistoryConfig,
+    ClearHistory,
+    ExportArchive,
+    ImportArchive,
+    RebuildIndex,
+    AskQuestion,
+    QuestionTask,
+    CancelQuestion,
+    SaveQuestion,
+    LintConfig,
+    LintState,
+    UpdateLintConfig,
+    RunLint,
+    CancelLint,
+    FixLint,
+    ReviewLint,
+    DeleteLint,
+    DismissLint,
+    ReindexState,
+    StartReindex,
+    GraphInsights,
+    DismissGraphInsight,
+    GraphInsightResearchInput,
 }
 
 impl Route {
     fn match_request(method: &str, path: &str) -> Option<Self> {
         Some(match (method, path) {
+            ("GET", SEARCH_CONFIG_PATH) => Self::SearchConfig,
+            ("POST", SEARCH_CONFIG_PATH) => Self::UpdateSearchConfig,
+            ("POST", SEARCH_PROVIDER_TEST_PATH) => Self::TestSearchProvider,
+            ("GET", RESEARCH_TASKS_PATH) => Self::ResearchTasks,
+            ("POST", RESEARCH_START_PATH) => Self::StartResearch,
+            ("POST", RESEARCH_RERUN_PATH) => Self::RerunResearch,
+            ("POST", RESEARCH_REMOVE_PATH) => Self::RemoveResearchTask,
             ("GET", STATUS_PATH) => Self::Status,
             ("GET", PROJECTS_PATH) => Self::Projects,
             ("GET", PROJECT_TEMPLATES_PATH) => Self::ProjectTemplates,
@@ -401,6 +783,7 @@ impl Route {
             ("POST", IMPORT_FOLDER_PATH) => Self::ImportFolder,
             ("POST", APPLY_GENERATED_PAGES_PATH) => Self::ApplyGeneratedPages,
             ("POST", DELETE_SOURCE_PATH) => Self::DeleteSource,
+            ("POST", CALL_RESULT_PATH) => Self::CallResult,
             ("GET", SOURCE_FILES_PATH) => Self::SourceFiles,
             ("POST", SOURCE_TASKS_PATH) => Self::SourceTasks,
             ("POST", CANCEL_SOURCE_TASK_PATH) => Self::CancelSourceTask,
@@ -416,13 +799,45 @@ impl Route {
             ("POST", REVIEWS_CLEAR_RESOLVED_PATH) => Self::ClearResolvedReviews,
             ("POST", EMBED_PAGE_PATH) => Self::EmbedPage,
             ("POST", RETRIEVE_CONTEXT_PATH) => Self::RetrieveContext,
+            ("POST", HISTORY_LIST_PATH) => Self::HistoryList,
+            ("POST", HISTORY_RESTORE_PATH) => Self::RestoreHistory,
+            ("GET", HISTORY_STATS_PATH) => Self::HistoryStats,
+            ("GET", HISTORY_CONFIG_PATH) => Self::HistoryConfig,
+            ("POST", HISTORY_CONFIG_PATH) => Self::UpdateHistoryConfig,
+            ("POST", HISTORY_CLEAR_PATH) => Self::ClearHistory,
+            ("POST", EXPORT_ARCHIVE_PATH) => Self::ExportArchive,
+            ("POST", IMPORT_ARCHIVE_PATH) => Self::ImportArchive,
+            ("POST", REBUILD_INDEX_PATH) => Self::RebuildIndex,
+            ("POST", ASK_QUESTION_PATH) => Self::AskQuestion,
+            ("GET", QUESTION_TASK_PATH) => Self::QuestionTask,
+            ("POST", CANCEL_QUESTION_PATH) => Self::CancelQuestion,
+            ("POST", SAVE_QUESTION_PATH) => Self::SaveQuestion,
+            ("GET", LINT_CONFIG_PATH) => Self::LintConfig,
+            ("POST", LINT_CONFIG_PATH) => Self::UpdateLintConfig,
+            ("GET", LINT_STATE_PATH) => Self::LintState,
+            ("POST", RUN_LINT_PATH) => Self::RunLint,
+            ("POST", CANCEL_LINT_PATH) => Self::CancelLint,
+            ("POST", FIX_LINT_PATH) => Self::FixLint,
+            ("POST", REVIEW_LINT_PATH) => Self::ReviewLint,
+            ("POST", DELETE_LINT_PATH) => Self::DeleteLint,
+            ("POST", DISMISS_LINT_PATH) => Self::DismissLint,
+            ("GET", REINDEX_PATH) => Self::ReindexState,
+            ("POST", REINDEX_PATH) => Self::StartReindex,
+            ("GET", GRAPH_INSIGHTS_PATH) => Self::GraphInsights,
+            ("POST", DISMISS_GRAPH_INSIGHT_PATH) => Self::DismissGraphInsight,
+            ("POST", GRAPH_INSIGHT_RESEARCH_PATH) => Self::GraphInsightResearchInput,
             _ => return None,
         })
     }
 
     const fn scope(self) -> &'static str {
         match self {
-            Self::CreateProject
+            Self::StartResearch
+            | Self::RerunResearch
+            | Self::RemoveResearchTask
+            | Self::UpdateSearchConfig
+            | Self::TestSearchProvider
+            | Self::CreateProject
             | Self::OpenProject
             | Self::WriteFile
             | Self::RescanSources
@@ -431,6 +846,7 @@ impl Route {
             | Self::ImportFolder
             | Self::ApplyGeneratedPages
             | Self::DeleteSource
+            | Self::CallResult
             | Self::UpdateSourceWatchConfig
             | Self::CancelSourceTask
             | Self::RetrySourceTask
@@ -440,8 +856,29 @@ impl Route {
             | Self::ResolveReview
             | Self::DismissReview
             | Self::ClearResolvedReviews
-            | Self::EmbedPage => AUTHORIZATION_SCOPE_WRITE,
-            Self::Status
+            | Self::EmbedPage
+            | Self::RestoreHistory
+            | Self::UpdateHistoryConfig
+            | Self::ClearHistory
+            | Self::ExportArchive
+            | Self::ImportArchive
+            | Self::RebuildIndex
+            | Self::AskQuestion
+            | Self::CancelQuestion
+            | Self::SaveQuestion
+            | Self::UpdateLintConfig
+            | Self::RunLint
+            | Self::CancelLint
+            | Self::FixLint
+            | Self::ReviewLint
+            | Self::DeleteLint
+            | Self::DismissLint
+            | Self::StartReindex
+            | Self::DismissGraphInsight
+            | Self::GraphInsightResearchInput => AUTHORIZATION_SCOPE_WRITE,
+            Self::ResearchTasks
+            | Self::SearchConfig
+            | Self::Status
             | Self::Projects
             | Self::ProjectTemplates
             | Self::CurrentProject
@@ -455,9 +892,23 @@ impl Route {
             | Self::SourceTasks
             | Self::SourceWatchConfig
             | Self::Reviews
-            | Self::RetrieveContext => AUTHORIZATION_SCOPE_READ,
+            | Self::RetrieveContext
+            | Self::HistoryList
+            | Self::HistoryStats
+            | Self::HistoryConfig
+            | Self::QuestionTask
+            | Self::LintConfig
+            | Self::LintState
+            | Self::ReindexState
+            | Self::GraphInsights => AUTHORIZATION_SCOPE_READ,
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CallResultInput {
+    call_id: platform::call::CallId,
 }
 
 #[derive(Deserialize)]
@@ -664,7 +1115,47 @@ async fn authorize(
             AUTHORIZATION_CAPABILITY,
             AUTHORIZATION_SUBJECT,
         )
-        .is_ok()
+        .is_ok_and(|decision| {
+            !matches!(
+                endpoint,
+                APPLY_GENERATED_PAGES_PATH
+                    | DELETE_SOURCE_PATH
+                    | CALL_RESULT_PATH
+                    | EXPORT_ARCHIVE_PATH
+                    | IMPORT_ARCHIVE_PATH
+            ) || decision.principal() == "electron-main-local"
+        })
+}
+
+async fn selected_project_id(
+    wiki: &WikiHandle,
+    project_id: Option<String>,
+) -> Result<String, WikiFailure> {
+    match project_id {
+        Some(id) => Ok(id),
+        None => wiki
+            .projects()
+            .await?
+            .current_project_id()
+            .map(str::to_owned)
+            .ok_or(WikiFailure::CurrentProjectUnset),
+    }
+}
+
+fn decode_project_body<T: for<'de> Deserialize<'de>>(
+    request: &Request,
+) -> Option<(Option<String>, T)> {
+    let mut body: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&request.body).ok()?;
+    let project_id = match body.remove("projectId") {
+        Some(serde_json::Value::String(id)) => Some(id),
+        None | Some(serde_json::Value::Null) => None,
+        _ => return None,
+    };
+    Some((
+        project_id,
+        serde_json::from_value(serde_json::Value::Object(body)).ok()?,
+    ))
 }
 
 fn decode_body<T: for<'de> Deserialize<'de>>(request: &Request) -> Option<T> {
@@ -678,9 +1169,9 @@ fn deliver<T: serde::Serialize>(result: Result<T, WikiFailure>) -> Response {
     }
 }
 
-fn deliver_unit(result: Result<(), WikiFailure>) -> Response {
+fn admit(result: Result<platform::call::CallReceipt, WikiFailure>) -> Response {
     match result {
-        Ok(()) => Response::json(200, json!({ "success": true })),
+        Ok(receipt) => Response::json(202, json!(receipt)),
         Err(error) => failure(error),
     }
 }
@@ -742,7 +1233,13 @@ fn error_message(error: &WikiFailure) -> String {
 fn is_wiki_path(path: &str) -> bool {
     matches!(
         path,
-        STATUS_PATH
+        SEARCH_CONFIG_PATH
+            | SEARCH_PROVIDER_TEST_PATH
+            | RESEARCH_TASKS_PATH
+            | RESEARCH_START_PATH
+            | RESEARCH_RERUN_PATH
+            | RESEARCH_REMOVE_PATH
+            | STATUS_PATH
             | PROJECTS_PATH
             | PROJECT_TEMPLATES_PATH
             | CREATE_PROJECT_PATH
@@ -761,6 +1258,7 @@ fn is_wiki_path(path: &str) -> bool {
             | IMPORT_FOLDER_PATH
             | APPLY_GENERATED_PAGES_PATH
             | DELETE_SOURCE_PATH
+            | CALL_RESULT_PATH
             | SOURCE_FILES_PATH
             | SOURCE_TASKS_PATH
             | CANCEL_SOURCE_TASK_PATH
@@ -775,6 +1273,30 @@ fn is_wiki_path(path: &str) -> bool {
             | REVIEWS_CLEAR_RESOLVED_PATH
             | EMBED_PAGE_PATH
             | RETRIEVE_CONTEXT_PATH
+            | HISTORY_LIST_PATH
+            | HISTORY_RESTORE_PATH
+            | HISTORY_STATS_PATH
+            | HISTORY_CONFIG_PATH
+            | HISTORY_CLEAR_PATH
+            | EXPORT_ARCHIVE_PATH
+            | IMPORT_ARCHIVE_PATH
+            | REBUILD_INDEX_PATH
+            | ASK_QUESTION_PATH
+            | QUESTION_TASK_PATH
+            | CANCEL_QUESTION_PATH
+            | SAVE_QUESTION_PATH
+            | LINT_CONFIG_PATH
+            | LINT_STATE_PATH
+            | RUN_LINT_PATH
+            | CANCEL_LINT_PATH
+            | FIX_LINT_PATH
+            | REVIEW_LINT_PATH
+            | DELETE_LINT_PATH
+            | DISMISS_LINT_PATH
+            | REINDEX_PATH
+            | GRAPH_INSIGHTS_PATH
+            | DISMISS_GRAPH_INSIGHT_PATH
+            | GRAPH_INSIGHT_RESEARCH_PATH
     )
 }
 

@@ -21,12 +21,7 @@ pub(crate) use runtime_directory::{
 
 use ::diagnostics::RuntimeStartupDiagnostic;
 
-use crate::{
-    RuntimeFailure, RuntimeLifecycle,
-    composition::{
-        PeerHandle, RuntimeRestartCommandError, RuntimeStartCommandError, RuntimeStopCommandError,
-    },
-};
+use crate::{RuntimeFailure, RuntimeLifecycle, composition::PeerHandle};
 
 pub(crate) trait RuntimeDriver:
     sessions_module::RuntimeDriver + organization::OrganizationNativeRuntime + Send + Sync
@@ -376,12 +371,13 @@ impl openclaw::gateway::loopback::OpenClawGatewayCapabilityPort for PeerHandle {
     fn browser_request(
         &self,
         request: openclaw::gateway::request::OpenClawBrowserGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
     ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
         Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
     > {
         let peer = self.clone();
         Box::pin(async move {
-            peer.open_claw_browser_request(request)
+            peer.open_claw_browser_request(request, call)
                 .await
                 .map_err(|_| ())
         })
@@ -390,12 +386,13 @@ impl openclaw::gateway::loopback::OpenClawGatewayCapabilityPort for PeerHandle {
     fn mcp_app_request(
         &self,
         request: openclaw::gateway::request::OpenClawMcpAppGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
     ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
         Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
     > {
         let peer = self.clone();
         Box::pin(async move {
-            peer.open_claw_mcp_app_request(request)
+            peer.open_claw_mcp_app_request(request, call)
                 .await
                 .map_err(|_| ())
         })
@@ -404,12 +401,13 @@ impl openclaw::gateway::loopback::OpenClawGatewayCapabilityPort for PeerHandle {
     fn question_resolve(
         &self,
         request: openclaw::gateway::request::OpenClawQuestionResolveGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
     ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
         Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
     > {
         let peer = self.clone();
         Box::pin(async move {
-            peer.open_claw_question_resolve(request)
+            peer.open_claw_question_resolve(request, call)
                 .await
                 .map_err(|_| ())
         })
@@ -439,80 +437,41 @@ impl RuntimeControlLifecyclePort for PeerHandle {
         })
     }
 
-    fn lifecycle_start<'a>(
+    fn admit_lifecycle_start<'a>(
         &'a self,
         endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        call: runtime_directory::call::RuntimeControlCallContext,
     ) -> RuntimeControlLifecycleFuture<
         'a,
-        Result<RuntimeControlLifecycleStatus, RuntimeControlLifecycleError>,
+        Result<platform::call::CallReceipt, RuntimeControlLifecycleError>,
     > {
-        Box::pin(async move {
-            let state = self
-                .start_runtime(endpoint)
-                .await
-                .map_err(|_| RuntimeControlLifecycleError::CommandFailed)?
-                .map_err(lifecycle_start_error)?;
-            Ok(runtime_control_status(&state))
-        })
+        Box::pin(self.admit_runtime_start(endpoint, call))
     }
 
-    fn lifecycle_stop<'a>(
+    fn admit_lifecycle_stop<'a>(
         &'a self,
         endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        call: runtime_directory::call::RuntimeControlCallContext,
     ) -> RuntimeControlLifecycleFuture<
         'a,
-        Result<RuntimeControlLifecycleStatus, RuntimeControlLifecycleError>,
+        Result<platform::call::CallReceipt, RuntimeControlLifecycleError>,
     > {
-        Box::pin(async move {
-            let state = self
-                .stop_runtime(endpoint)
-                .await
-                .map_err(|_| RuntimeControlLifecycleError::CommandFailed)?
-                .map_err(lifecycle_stop_error)?;
-            Ok(runtime_control_status(&state))
-        })
+        Box::pin(self.admit_runtime_stop(endpoint, call))
     }
 
-    fn lifecycle_restart<'a>(
+    fn admit_lifecycle_restart<'a>(
         &'a self,
         endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        call: runtime_directory::call::RuntimeControlCallContext,
     ) -> RuntimeControlLifecycleFuture<
         'a,
-        Result<RuntimeControlLifecycleStatus, RuntimeControlLifecycleError>,
+        Result<platform::call::CallReceipt, RuntimeControlLifecycleError>,
     > {
-        Box::pin(async move {
-            let state = self
-                .restart_runtime(endpoint)
-                .await
-                .map_err(|_| RuntimeControlLifecycleError::CommandFailed)?
-                .map_err(lifecycle_restart_error)?;
-            Ok(runtime_control_status(&state))
-        })
+        Box::pin(self.admit_runtime_restart(endpoint, call))
     }
 }
 
-fn lifecycle_start_error(error: RuntimeStartCommandError) -> RuntimeControlLifecycleError {
-    match error {
-        RuntimeStartCommandError::AdmissionClosed => RuntimeControlLifecycleError::Unavailable,
-        RuntimeStartCommandError::RuntimeStart => RuntimeControlLifecycleError::CommandFailed,
-    }
-}
-
-fn lifecycle_stop_error(error: RuntimeStopCommandError) -> RuntimeControlLifecycleError {
-    match error {
-        RuntimeStopCommandError::AdmissionClosed => RuntimeControlLifecycleError::Unavailable,
-        RuntimeStopCommandError::RuntimeStop => RuntimeControlLifecycleError::CommandFailed,
-    }
-}
-
-fn lifecycle_restart_error(error: RuntimeRestartCommandError) -> RuntimeControlLifecycleError {
-    match error {
-        RuntimeRestartCommandError::AdmissionClosed => RuntimeControlLifecycleError::Unavailable,
-        RuntimeRestartCommandError::RuntimeRestart => RuntimeControlLifecycleError::CommandFailed,
-    }
-}
-
-fn runtime_control_status(state: &crate::RuntimeState) -> RuntimeControlLifecycleStatus {
+pub(super) fn runtime_control_status(state: &crate::RuntimeState) -> RuntimeControlLifecycleStatus {
     RuntimeControlLifecycleStatus {
         lifecycle: runtime_control_lifecycle(state.lifecycle()),
         failure: state.failure().map(runtime_control_failure),

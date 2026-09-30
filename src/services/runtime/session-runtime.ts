@@ -19,16 +19,7 @@ import type { SessionRenderItem } from '../../types/session/render-item';
 import { decodeHistorySessionView, resolveSessionViewError } from '@/stores/chat/history-fetch-helpers';
 import { projectSessionViewItems } from '@/stores/chat/store-state-helpers';
 import type { ChatSession } from '@/stores/chat/types';
-import {
-  findLatestAssistantSnapshotFromItems,
-  findLatestAssistantTextFromItems,
-  findLatestAssistantTurnTextFromItems,
-} from '@/stores/chat/timeline-message';
-
-export interface AssistantSnapshot {
-  text: string;
-  toolNames: string[];
-}
+import { findLatestAssistantTextFromItems } from '@/stores/chat/timeline-message';
 
 export interface FetchChatHistoryInput extends SessionOperationTarget {
   limit?: number;
@@ -103,30 +94,6 @@ export async function fetchLatestAssistantText(
     limit: input.limit,
   });
   return findLatestAssistantTextFromItems(items);
-}
-
-export async function fetchLatestAssistantTurnText(
-  input: FetchChatHistoryInput,
-): Promise<string> {
-  const items = await fetchChatTimeline({
-    sessionKey: input.sessionKey,
-    sessionIdentity: input.sessionIdentity,
-    ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
-    limit: input.limit,
-  });
-  return findLatestAssistantTurnTextFromItems(items);
-}
-
-export async function fetchLatestAssistantSnapshot(
-  input: FetchChatHistoryInput,
-): Promise<AssistantSnapshot> {
-  const items = await fetchChatTimeline({
-    sessionKey: input.sessionKey,
-    sessionIdentity: input.sessionIdentity,
-    ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
-    limit: input.limit,
-  });
-  return findLatestAssistantSnapshotFromItems(items);
 }
 
 export async function sendChatMessage(

@@ -34,12 +34,14 @@ impl WikiMcpFacade {
         let (wiki, _owner_task, _owner_runtime_system) = {
             let _guard = runtime.enter();
             let owner_runtime_system = OwnerRuntimeSystem::spawn(OwnerRuntimeConfig::default());
-            let vector_index = index::LocalWikiVectorIndex::load_default()
-                .map(|index| Arc::new(index) as Arc<dyn index::WikiVectorIndex>)
-                .ok();
+            let vector_index = Arc::new(
+                index::RemoteWikiVectorIndex::new()
+                    .map_err(|_| WikiFailure::state("wiki embedding client unavailable"))?,
+            ) as Arc<dyn index::WikiVectorIndex>;
             let (module, owner_task) = spawn_owner(
                 &owner_runtime_system,
-                crate::WikiOwnerInput::new(state_dir.to_path_buf()).with_vector_index(vector_index),
+                crate::WikiOwnerInput::new(state_dir.to_path_buf())
+                    .with_vector_index(Some(vector_index)),
             )?;
             (module.handle().clone(), owner_task, owner_runtime_system)
         };

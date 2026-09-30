@@ -8,7 +8,7 @@ use std::{
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use super::{DecodeError, Delivery, decode, dispatch};
+use super::{DecodeError, Delivery, decode};
 
 pub(crate) const ROUTE: &str = "/api/team/manual-materialize-and-create";
 
@@ -56,7 +56,10 @@ async fn handle_request(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     };
     drop(verifier);
-    Response::from_delivery(dispatch(&owner, request).await)
+    match owner.admit_team_workflow(crate::call::TeamWorkflow::Manual(request)).await {
+        Ok(receipt) => Response { status: 202, body: serde_json::json!(receipt) },
+        Err(_) => Response::from_delivery(Delivery::Unavailable),
+    }
 }
 
 fn bearer_token(value: &str) -> Option<&str> {

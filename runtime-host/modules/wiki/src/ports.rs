@@ -68,6 +68,10 @@ pub struct WikiIngestLlmResponse {
     pub model_limits: Option<WikiIngestLlmModelLimits>,
 }
 
+pub trait WikiIngestLlmDeltaSink: Send {
+    fn send<'a>(&'a mut self, delta: String) -> WikiFuture<'a, Result<(), WikiFailure>>;
+}
+
 pub trait WikiIngestLlm: Send + Sync {
     fn model_limits<'a>(
         &'a self,
@@ -92,6 +96,21 @@ pub trait WikiIngestLlm: Send + Sync {
                 _ = cancellation.cancelled() => Err(WikiFailure::cancelled()),
                 response = self.generate(request) => response,
             }
+        })
+    }
+
+    fn stream_generate_cancellable<'a>(
+        &'a self,
+        request: WikiIngestLlmRequest,
+        cancellation: CancellationToken,
+        sink: &'a mut dyn WikiIngestLlmDeltaSink,
+    ) -> WikiFuture<'a, Result<WikiIngestLlmResponse, WikiFailure>> {
+        Box::pin(async move {
+            let _ = (request, sink);
+            if cancellation.is_cancelled() {
+                return Err(WikiFailure::cancelled());
+            }
+            Err(WikiFailure::state("provider text streaming is unavailable"))
         })
     }
 

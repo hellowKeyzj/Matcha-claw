@@ -1,5 +1,7 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isBoundedText, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from '../client';
+import { isSkillsCallReceipt, type SkillsCallReceipt } from './management';
+import { isCallId } from '../../../../../src/types/call-log/decode';
 
 export const SEALED_SKILLS_ENDPOINTS = Object.freeze({
   status: '/api/sealed-skills/status',
@@ -10,7 +12,7 @@ export const SEALED_SKILLS_ENDPOINTS = Object.freeze({
 });
 
 type SealedSkillsEndpoint = typeof SEALED_SKILLS_ENDPOINTS[keyof typeof SEALED_SKILLS_ENDPOINTS];
-type SealedSkillsStatus = 200 | 400 | 404 | 409 | 503;
+type SealedSkillsStatus = 200 | 202 | 400 | 404 | 409 | 503;
 
 export type SealedSkillsTransportFailure = Readonly<{
   outcome: 'rejected' | 'unknown';
@@ -63,8 +65,16 @@ export type SealedSkillPackageMutationResult = Readonly<{
   error?: string;
 }>;
 
-type SealedSkillPackageExportResult = SealedSkillPackageMutationResult & Readonly<{
-  packagePath?: string;
+export type SealedSkillCloudExportResult = Readonly<{
+  callId: string;
+  command: 'sealedSkills.exportCloud';
+  result: Readonly<{
+    kind: 'sealedCloudExport';
+    skillKey: string;
+    fileName: string;
+    packageSha256: string;
+    packageBase64: string;
+  }>;
 }>;
 
 export type SealedSkillUninstallResult = Readonly<{
@@ -73,14 +83,16 @@ export type SealedSkillUninstallResult = Readonly<{
 }>;
 
 export type SealedSkillsTransportResponse<T> = Readonly<{
-  status: SealedSkillsStatus;
+  status: Exclude<SealedSkillsStatus, 202 | 404>;
   body: T | SealedSkillsTransportFailure;
-}>;
+}> | Readonly<{ status: 202; body: SkillsCallReceipt }>
+  | Readonly<{ status: 404; body: Readonly<{ outcome: 'notFound' }> }>;
 
 export interface SealedSkillsTransport {
   readStatus(): Promise<SealedSkillsTransportResponse<SealedSkillsStatusResult>>;
   export(request: unknown): Promise<SealedSkillsTransportResponse<SealedSkillPackageMutationResult>>;
-  exportCloud(request: unknown): Promise<SealedSkillsTransportResponse<SealedSkillPackageExportResult>>;
+  exportCloud(request: unknown): Promise<SealedSkillsTransportResponse<SealedSkillPackageMutationResult>>;
+  exportCloudResult(callId: string): Promise<SealedSkillsTransportResponse<SealedSkillCloudExportResult>>;
   install(request: unknown): Promise<SealedSkillsTransportResponse<SealedSkillPackageMutationResult>>;
   uninstall(request: unknown): Promise<SealedSkillsTransportResponse<SealedSkillUninstallResult>>;
 }
@@ -93,7 +105,18 @@ export function createSealedSkillsTransport(
   return {
     readStatus: () => get(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.status, 'sealed-skills:read', 'sealedSkills.status', 'sealed-skills-status', isSealedSkillsStatusResult),
     export: (request) => post(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.export, request, 'sealed-skills:package', 'sealedSkills.export', 'sealed-skills-export', isSealedSkillExportRequest, isSealedSkillPackageMutationResult),
-    exportCloud: (request) => post(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.exportCloud, request, 'sealed-skills:package', 'sealedSkills.exportCloud', 'sealed-skills-export-cloud', isSealedSkillCloudExportRequest, isSealedSkillPackageExportResult),
+    exportCloud: (request) => post(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.exportCloud, request, 'sealed-skills:package', 'sealedSkills.exportCloud', 'sealed-skills-export-cloud', isSealedSkillCloudExportRequest, isSealedSkillPackageMutationResult),
+    async exportCloudResult(callId) {
+      if (!isCallId(callId)) return rejectedResponse();
+      const endpoint = '/api/sealed-skills/export-cloud/result';
+      const response = await sendLoopbackJson({
+        port: runtimeHostTransportPort, path: endpoint, issuer, method: 'POST', fetcher, body: { callId }, timeoutMs: 30_000,
+        decision: { endpoint, scope: 'sealed-skills:package', capability: 'sealedSkills.exportCloud', subject: 'sealed-skills-export-cloud' },
+      });
+      if (response?.status === 200 && isSealedSkillCloudExportResult(response.body) && response.body.callId === callId) return { status: 200, body: response.body };
+      if (response?.status === 404 && isNotFoundResult(response.body)) return { status: 404, body: response.body };
+      return unknownResponse();
+    },
     install: (request) => post(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.install, request, 'sealed-skills:package', 'sealedSkills.install', 'sealed-skills-install', isSealedSkillInstallRequest, isSealedSkillPackageMutationResult),
     uninstall: (request) => post(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.uninstall, request, 'sealed-skills:package', 'sealedSkills.uninstall', 'sealed-skills-uninstall', isSealedSkillUninstallRequest, isSealedSkillUninstallResult),
   };
@@ -152,9 +175,12 @@ async function send<T>(
     method,
     fetcher,
     ...(method === 'POST' ? { body: request } : {}),
+    ...(endpoint === SEALED_SKILLS_ENDPOINTS.install ? { timeoutMs: 30_000 } : {}),
   });
-  if (response?.status === 200 && isSuccess(response.body)) {
-    if (endpoint === SEALED_SKILLS_ENDPOINTS.export) traceExportTransportResponse('accepted', response.status, response.body);
+  if (endpoint !== SEALED_SKILLS_ENDPOINTS.status && response?.status === 202 && isSkillsCallReceipt(response.body)) {
+    return { status: 202, body: response.body };
+  }
+  if (endpoint === SEALED_SKILLS_ENDPOINTS.status && response?.status === 200 && isSuccess(response.body)) {
     return { status: 200, body: response.body };
   }
   if (response?.status === 404 && isSealedSkillsNotFoundEndpoint(endpoint) && isNotFoundResult(response.body)) {
@@ -267,14 +293,17 @@ function isSealedSkillPackageMutationResult(value: unknown): value is SealedSkil
     && (value.error === undefined || isBoundedText(value.error, 512));
 }
 
-function isSealedSkillPackageExportResult(value: unknown): value is SealedSkillPackageExportResult {
-  return hasOnlyKeys(value, ['outcome', 'skillKey', 'packagePath', 'reason', 'error'])
-    && hasRequiredKeys(value, ['outcome'])
-    && isPackageOutcome(value.outcome)
-    && (value.skillKey === undefined || isOpenClawSkillKey(value.skillKey))
-    && (value.packagePath === undefined || isPackagePath(value.packagePath))
-    && (value.reason === undefined || isText(value.reason, 128))
-    && (value.error === undefined || isBoundedText(value.error, 512));
+function isSealedSkillCloudExportResult(value: unknown): value is SealedSkillCloudExportResult {
+  if (!isRecord(value) || !hasExactKeys(value, ['callId', 'command', 'result'])
+    || !isCallId(value.callId) || value.command !== 'sealedSkills.exportCloud' || !isRecord(value.result)) return false;
+  const result = value.result;
+  return hasExactKeys(result, ['kind', 'skillKey', 'fileName', 'packageSha256', 'packageBase64'])
+    && result.kind === 'sealedCloudExport' && isOpenClawSkillKey(result.skillKey)
+    && isText(result.fileName, 512) && !/[\\/\\\\\0]/.test(result.fileName) && result.fileName.endsWith('.matcha-skillpkg')
+    && isPackageSha256(result.packageSha256)
+    && typeof result.packageBase64 === 'string' && result.packageBase64.length > 0
+    && result.packageBase64.length <= 13_981_016 && result.packageBase64.length % 4 === 0
+    && /^[A-Za-z0-9+/]+={0,2}$/.test(result.packageBase64);
 }
 
 function isSealedSkillUninstallResult(value: unknown): value is SealedSkillUninstallResult {

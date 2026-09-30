@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::{
-    ProviderModelCapability, ProviderModelDiscoverOutcome, ProviderModelDiscoveryView,
+    ProviderModelCapability, ProviderModelDiscoveryView,
     ProviderModelListOutcome, ProviderModelReplaceOutcome, ProviderModelSelectableOutcome,
     ProviderModelView, SelectableProviderModelView,
 };
@@ -9,7 +9,6 @@ use crate::{
 pub(crate) enum ProviderModelsDelivery {
     List(ProviderModelListOutcome),
     Selectable(ProviderModelSelectableOutcome),
-    Discover(ProviderModelDiscoverOutcome),
     Replace(ProviderModelReplaceOutcome),
     Unavailable,
 }
@@ -18,17 +17,14 @@ impl ProviderModelsDelivery {
     pub(crate) fn status_code(&self) -> u16 {
         match self {
             Self::List(ProviderModelListOutcome::Available(_))
-            | Self::Selectable(ProviderModelSelectableOutcome::Available(_))
-            | Self::Discover(ProviderModelDiscoverOutcome::Discovered(_)) => 200,
+            | Self::Selectable(ProviderModelSelectableOutcome::Available(_)) => 200,
             Self::Replace(ProviderModelReplaceOutcome::DesiredStored {
                 persisted, commit, ..
             }) if !super::mutation_unknown(*persisted, *commit) => 200,
             Self::Replace(ProviderModelReplaceOutcome::DesiredStored { .. }) => 409,
-            Self::Discover(ProviderModelDiscoverOutcome::Rejected)
-            | Self::Replace(ProviderModelReplaceOutcome::Rejected) => 422,
+            Self::Replace(ProviderModelReplaceOutcome::Rejected) => 422,
             Self::List(ProviderModelListOutcome::Unavailable)
             | Self::Selectable(ProviderModelSelectableOutcome::Unavailable)
-            | Self::Discover(ProviderModelDiscoverOutcome::Unavailable)
             | Self::Replace(ProviderModelReplaceOutcome::Unavailable)
             | Self::Unavailable => 503,
         }
@@ -41,9 +37,6 @@ impl ProviderModelsDelivery {
             }),
             Self::Selectable(ProviderModelSelectableOutcome::Available(models)) => json!({
                 "models": models.iter().map(selectable_model_json).collect::<Vec<_>>(),
-            }),
-            Self::Discover(ProviderModelDiscoverOutcome::Discovered(models)) => json!({
-                "models": models.iter().map(draft_json).collect::<Vec<_>>(),
             }),
             Self::Replace(ProviderModelReplaceOutcome::DesiredStored {
                 persisted,
@@ -73,8 +66,7 @@ impl ProviderModelsDelivery {
                     })
                 }
             }
-            Self::Discover(ProviderModelDiscoverOutcome::Rejected)
-            | Self::Replace(ProviderModelReplaceOutcome::Rejected) => {
+            Self::Replace(ProviderModelReplaceOutcome::Rejected) => {
                 super::fixed_error("Provider model request was rejected")
             }
             Self::Replace(ProviderModelReplaceOutcome::Unavailable) => {
@@ -82,7 +74,6 @@ impl ProviderModelsDelivery {
             }
             Self::List(ProviderModelListOutcome::Unavailable)
             | Self::Selectable(ProviderModelSelectableOutcome::Unavailable)
-            | Self::Discover(ProviderModelDiscoverOutcome::Unavailable)
             | Self::Unavailable => super::fixed_error("Provider models are unavailable"),
         }
     }
@@ -118,7 +109,7 @@ fn model_json(model: &ProviderModelView) -> Value {
     value
 }
 
-fn draft_json(model: &ProviderModelDiscoveryView) -> Value {
+pub(crate) fn draft_json(model: &ProviderModelDiscoveryView) -> Value {
     let mut value = json!({
         "modelId": model.model_id,
         "capabilities": model.capabilities,

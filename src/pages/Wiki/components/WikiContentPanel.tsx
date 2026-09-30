@@ -1,6 +1,7 @@
-import { type JSX } from 'react';
+import { useEffect, useRef, useState, type JSX } from 'react';
+import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
-import { FileText, Save, Sparkles } from 'lucide-react';
+import { Clock3, FileText, Save, Sparkles } from 'lucide-react';
 import { MarkdownPreview } from '@/components/file-preview/MarkdownPreview';
 import { HtmlPreview } from '@/components/file-preview/HtmlPreview';
 import { Badge } from '@/components/ui/badge';
@@ -10,6 +11,7 @@ import type { FileContentType } from '@/lib/generated-files';
 import { fileName, typeLabel } from '../preview';
 import { formatFileSize } from '../wiki-model';
 import { WikiPanel, WikiPanelHeader, WikiPrimaryButton } from './WikiChrome';
+import { FileHistoryPanel } from './FileHistoryPanel';
 
 export type WikiContentPreview = Readonly<
   | { kind: 'empty' }
@@ -21,14 +23,17 @@ export type WikiContentPreview = Readonly<
 >;
 
 export type WikiContentPanelProps = Readonly<{
+  projectId: string;
   selectedPath: string;
   preview: WikiContentPreview;
   editorText: string;
   busy: string | null;
+  sourceImageIndex?: number;
   resolveImageSrc?(src: string, filePath: string): Promise<string | null> | string | null;
   onEditorTextChange(value: string): void;
   onSave(): void;
   onEmbedPage(): void;
+  onRestored(projectId: string, path: string): Promise<void>;
 }>;
 
 function binarySource(preview: Extract<WikiContentPreview, { kind: 'binary' }>): string {
@@ -161,6 +166,27 @@ export function WikiContentPanel(props: WikiContentPanelProps): JSX.Element {
   const editable = preview.kind === 'text';
   const embeddable = preview.kind === 'text' && preview.contentType === 'markdown';
   const size = preview.kind === 'binary' ? formatFileSize(preview.size) : '';
+  const previewRef = useRef<HTMLDivElement>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  useEffect(() => {
+    if (preview.kind !== 'source' || props.sourceImageIndex === undefined || !previewRef.current) return;
+    const container = previewRef.current;
+    let target: HTMLImageElement | undefined;
+    const scroll = () => target?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const locate = () => {
+      const image = container.querySelectorAll<HTMLImageElement>('img')[props.sourceImageIndex!];
+      if (!image || !image.src.startsWith('data:')) return;
+      target = image;
+      target.addEventListener('load', scroll, { once: true });
+      scroll();
+      observer.disconnect();
+    };
+    const observer = new MutationObserver(locate);
+    observer.observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+    locate();
+    return () => { observer.disconnect(); target?.removeEventListener('load', scroll); };
+  }, [preview, props.sourceImageIndex]);
 
   return (
     <WikiPanel>
@@ -177,6 +203,7 @@ export function WikiContentPanel(props: WikiContentPanelProps): JSX.Element {
         )}
         actions={(
           <>
+            {editable ? <Button size="sm" variant="ghost" disabled={busy !== null} className="h-8 rounded-full" onClick={() => setHistoryOpen(true)}><Clock3 className="h-4 w-4" />{t('history.title', { defaultValue: '文件历史' })}</Button> : null}
             {editable ? (
               <Button size="sm" variant="ghost" onClick={onSave} disabled={busy !== null} className="h-8 rounded-full">
                 <Save className="h-4 w-4" />
@@ -192,9 +219,18 @@ export function WikiContentPanel(props: WikiContentPanelProps): JSX.Element {
           </>
         )}
       />
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <div ref={previewRef} className="min-h-0 flex-1 overflow-hidden">
         {hasSelectedPage ? <PreviewBody preview={preview} editorText={editorText} resolveImageSrc={resolveImageSrc} onEditorTextChange={onEditorTextChange} /> : <EmptyState />}
       </div>
+      <Dialog.Root open={historyOpen} onOpenChange={setHistoryOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 z-40 flex h-[min(80dvh,760px)] w-[calc(100vw-2rem)] max-w-6xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-elevated focus:outline-none" aria-describedby={undefined}>
+            <Dialog.Title className="sr-only">{t('history.title', { defaultValue: '文件历史' })}</Dialog.Title>
+            <FileHistoryPanel projectId={props.projectId} path={selectedPath} currentContent={editorText} busy={busy} onRestored={props.onRestored} onClose={() => setHistoryOpen(false)} />
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </WikiPanel>
   );
 }

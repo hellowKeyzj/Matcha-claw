@@ -20,6 +20,7 @@ export interface AgentSkillManagerDialogProps {
   title: string;
   skillOptions: AgentSkillOption[];
   skillsLoading: boolean;
+  savingSkillId: string | null;
   selectedSkillIds: string[];
   skillPreview: AgentSkillPreviewState | null;
   onToggleSkill: (skillId: string, checked: boolean) => void;
@@ -35,6 +36,7 @@ export function AgentSkillManagerDialog({
   title,
   skillOptions,
   skillsLoading,
+  savingSkillId,
   selectedSkillIds,
   skillPreview,
   onToggleSkill,
@@ -137,6 +139,7 @@ export function AgentSkillManagerDialog({
             )}
             skillOptions={skillOptions}
             skillsLoading={skillsLoading}
+            savingSkillId={savingSkillId}
             selectedSkillIds={selectedSkillIds}
             onToggleSkill={onToggleSkill}
           />

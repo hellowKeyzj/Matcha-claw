@@ -16,8 +16,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::{
-    DiagnosticsArchiveError, DiagnosticsArchiveReceipt, DiagnosticsArchiveTerminal,
-    api::DiagnosticsHandle, ports::DiagnosticsArchiveCancellation,
+    DiagnosticsArchiveError, api::DiagnosticsHandle, ports::DiagnosticsArchiveCancellation,
 };
 
 pub const ARCHIVE_PATH: &str = "/api/diagnostics/archive";
@@ -153,13 +152,16 @@ async fn handle(request: Request, dependencies: Dependencies) -> io::Result<Resp
         DiagnosticsTransportObservation::Accepted { endpoint },
     );
 
-    let delivery = collect(
-        &dependencies.diagnostics,
-        DiagnosticsArchiveCancellation::new(),
-    )
-    .await;
-    observe_archive_delivery(&dependencies.observation, &delivery);
-    Ok(ResponseBody::from_delivery(delivery).into_response())
+    match dependencies
+        .diagnostics
+        .admit_archive(DiagnosticsArchiveCancellation::new())
+        .await
+    {
+        Ok(receipt) => Ok(Response::json(202, serde_json::to_value(receipt)?)),
+        Err(_) => {
+            Ok(ResponseBody::fixed(503, "Diagnostics archive is unavailable").into_response())
+        }
+    }
 }
 
 fn authorize(
@@ -240,9 +242,9 @@ fn opaque_archive_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DiagnosticsArchiveDelivery {
-    Ok(DiagnosticsArchiveReceipt),
     Unavailable,
 }
 
@@ -280,49 +282,17 @@ impl DiagnosticsArchiveDownload {
     }
 }
 
+#[cfg(test)]
 impl DiagnosticsArchiveDelivery {
     const fn status_code(&self) -> u16 {
-        match self {
-            Self::Ok(_) => 200,
-            Self::Unavailable => 503,
-        }
+        503
     }
 
     fn body(&self) -> Value {
-        match self {
-            Self::Ok(receipt) => public_receipt(receipt),
-            Self::Unavailable => serde_json::json!({
-                "success": false,
-                "error": "Diagnostics archive is unavailable",
-            }),
-        }
-    }
-}
-
-fn public_receipt(receipt: &DiagnosticsArchiveReceipt) -> Value {
-    serde_json::json!({
-        "archiveId": receipt.archive_id(),
-        "terminal": public_terminal(receipt.terminal()),
-        "entries": receipt.entries(),
-        "bytes": receipt.bytes(),
-    })
-}
-
-fn public_terminal(terminal: DiagnosticsArchiveTerminal) -> &'static str {
-    match terminal {
-        DiagnosticsArchiveTerminal::Completed => "completed",
-        DiagnosticsArchiveTerminal::Cancelled => "cancelled",
-        DiagnosticsArchiveTerminal::Failed => "failed",
-    }
-}
-
-async fn collect(
-    diagnostics: &DiagnosticsHandle,
-    cancellation: DiagnosticsArchiveCancellation,
-) -> DiagnosticsArchiveDelivery {
-    match diagnostics.collect_archive(cancellation).await {
-        Ok(receipt) => DiagnosticsArchiveDelivery::Ok(receipt),
-        Err(_) => DiagnosticsArchiveDelivery::Unavailable,
+        serde_json::json!({
+            "success": false,
+            "error": "Diagnostics archive is unavailable",
+        })
     }
 }
 
@@ -372,9 +342,6 @@ enum DiagnosticsTransportObservation {
     BadJson { endpoint: EndpointKind },
     CapabilityRejected { endpoint: EndpointKind },
     Accepted { endpoint: EndpointKind },
-    ArchiveCompleted,
-    ArchiveCancelled,
-    ArchiveFailed,
     DownloadCompleted,
     DownloadArchiveNotFound,
     DownloadOutputUnavailable,
@@ -388,9 +355,6 @@ impl DiagnosticsTransportObservation {
             | Self::BadJson { endpoint }
             | Self::CapabilityRejected { endpoint }
             | Self::Accepted { endpoint } => endpoint,
-            Self::ArchiveCompleted | Self::ArchiveCancelled | Self::ArchiveFailed => {
-                EndpointKind::Archive
-            }
             Self::DownloadCompleted
             | Self::DownloadArchiveNotFound
             | Self::DownloadOutputUnavailable => EndpointKind::Download,
@@ -412,9 +376,6 @@ impl DiagnosticsTransportObservation {
             Self::Accepted {
                 endpoint: EndpointKind::Unknown,
             } => "diagnostics.ingress.accepted",
-            Self::ArchiveCompleted => "diagnostics.archive.completed",
-            Self::ArchiveCancelled => "diagnostics.archive.cancelled",
-            Self::ArchiveFailed => "diagnostics.archive.failed",
             Self::DownloadCompleted => "diagnostics.download.completed",
             Self::DownloadArchiveNotFound => "diagnostics.download.archiveNotFound",
             Self::DownloadOutputUnavailable => "diagnostics.download.outputUnavailable",
@@ -428,10 +389,7 @@ impl DiagnosticsTransportObservation {
             Self::MissingAuthorization { .. }
             | Self::CapabilityRejected { .. }
             | Self::Accepted { .. } => ControlStage::Admit,
-            Self::ArchiveCompleted
-            | Self::ArchiveCancelled
-            | Self::ArchiveFailed
-            | Self::DownloadCompleted
+            Self::DownloadCompleted
             | Self::DownloadArchiveNotFound
             | Self::DownloadOutputUnavailable => ControlStage::Settle,
         }
@@ -440,14 +398,10 @@ impl DiagnosticsTransportObservation {
     const fn control_reason(self) -> ControlReason {
         match self {
             Self::BadJson { .. } => ControlReason::DecodeRejected,
-            Self::Accepted { .. } | Self::ArchiveCompleted | Self::DownloadCompleted => {
-                ControlReason::Accepted
-            }
-            Self::ArchiveCancelled => ControlReason::OutputClosed,
+            Self::Accepted { .. } | Self::DownloadCompleted => ControlReason::Accepted,
             Self::MethodOrPathRejected { .. }
             | Self::MissingAuthorization { .. }
             | Self::CapabilityRejected { .. }
-            | Self::ArchiveFailed
             | Self::DownloadArchiveNotFound
             | Self::DownloadOutputUnavailable => ControlReason::Rejected,
         }
@@ -460,45 +414,22 @@ impl DiagnosticsTransportObservation {
             | Self::BadJson { .. }
             | Self::CapabilityRejected { .. }
             | Self::Accepted { .. } => EventStage::Validate,
-            Self::ArchiveCompleted | Self::DownloadCompleted => EventStage::Emit,
-            Self::ArchiveCancelled
-            | Self::ArchiveFailed
-            | Self::DownloadArchiveNotFound
-            | Self::DownloadOutputUnavailable => EventStage::Drop,
+            Self::DownloadCompleted => EventStage::Emit,
+            Self::DownloadArchiveNotFound | Self::DownloadOutputUnavailable => EventStage::Drop,
         }
     }
 
     const fn event_reason(self) -> EventReason {
         match self {
-            Self::Accepted { .. } | Self::ArchiveCompleted | Self::DownloadCompleted => {
-                EventReason::Accepted
-            }
+            Self::Accepted { .. } | Self::DownloadCompleted => EventReason::Accepted,
             Self::MethodOrPathRejected { .. } => EventReason::RouteMismatch,
-            Self::ArchiveCancelled => EventReason::SinkClosed,
             Self::MissingAuthorization { .. }
             | Self::BadJson { .. }
             | Self::CapabilityRejected { .. }
-            | Self::ArchiveFailed
             | Self::DownloadArchiveNotFound
             | Self::DownloadOutputUnavailable => EventReason::ValidationRejected,
         }
     }
-}
-
-fn observe_archive_delivery(observation: &ObservationSink, delivery: &DiagnosticsArchiveDelivery) {
-    let record = match delivery {
-        DiagnosticsArchiveDelivery::Ok(receipt) => match receipt.terminal() {
-            DiagnosticsArchiveTerminal::Completed => {
-                DiagnosticsTransportObservation::ArchiveCompleted
-            }
-            DiagnosticsArchiveTerminal::Cancelled => {
-                DiagnosticsTransportObservation::ArchiveCancelled
-            }
-            DiagnosticsArchiveTerminal::Failed => DiagnosticsTransportObservation::ArchiveFailed,
-        },
-        DiagnosticsArchiveDelivery::Unavailable => DiagnosticsTransportObservation::ArchiveFailed,
-    };
-    observe_diagnostics_transport(observation, record);
 }
 
 fn observe_download_delivery(observation: &ObservationSink, download: &DiagnosticsArchiveDownload) {
@@ -554,13 +485,6 @@ impl ResponseBody {
         Self {
             status,
             body: serde_json::json!({ "success": false, "error": error }),
-        }
-    }
-
-    fn from_delivery(delivery: DiagnosticsArchiveDelivery) -> Self {
-        Self {
-            status: delivery.status_code(),
-            body: delivery.body(),
         }
     }
 

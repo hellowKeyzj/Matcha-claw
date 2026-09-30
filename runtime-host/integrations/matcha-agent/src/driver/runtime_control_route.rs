@@ -3,6 +3,7 @@ use std::sync::Arc;
 use platform::loopback::Response;
 use runtime_directory::{
     RuntimeDriverIdentity,
+    call::{RuntimeControlCallDetail, finish_runtime_control_call},
     control_loopback::{
         RuntimeControlLifecyclePort, RuntimeControlOperation, RuntimeControlRequest,
         RuntimeControlRouteFragment, RuntimeControlRouteFuture, lifecycle_error_response,
@@ -57,7 +58,14 @@ fn lifecycle_status(
     request: RuntimeControlRequest,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match lifecycle.lifecycle_status(request.endpoint).await {
+        let result = lifecycle.lifecycle_status(request.endpoint.clone()).await;
+        let (status, detail) = RuntimeControlCallDetail::lifecycle_result(
+            &request.endpoint,
+            RuntimeControlOperation::LifecycleStatus,
+            &result,
+        );
+        finish_runtime_control_call(request.call, status, &detail).await;
+        match result {
             Ok(status) => Response::json(200, json!({ "result": status })),
             Err(error) => lifecycle_error_response(error),
         }
@@ -69,8 +77,14 @@ fn lifecycle_start(
     request: RuntimeControlRequest,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match lifecycle.lifecycle_start(request.endpoint).await {
-            Ok(status) => Response::json(200, json!({ "result": status })),
+        let Some(call) = request.call else {
+            return runtime_directory::control_loopback::unavailable_response();
+        };
+        match lifecycle
+            .admit_lifecycle_start(request.endpoint, call)
+            .await
+        {
+            Ok(receipt) => Response::json(202, json!(receipt)),
             Err(error) => lifecycle_error_response(error),
         }
     })
@@ -81,8 +95,11 @@ fn lifecycle_stop(
     request: RuntimeControlRequest,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match lifecycle.lifecycle_stop(request.endpoint).await {
-            Ok(status) => Response::json(200, json!({ "result": status })),
+        let Some(call) = request.call else {
+            return runtime_directory::control_loopback::unavailable_response();
+        };
+        match lifecycle.admit_lifecycle_stop(request.endpoint, call).await {
+            Ok(receipt) => Response::json(202, json!(receipt)),
             Err(error) => lifecycle_error_response(error),
         }
     })
@@ -93,8 +110,14 @@ fn lifecycle_restart(
     request: RuntimeControlRequest,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        match lifecycle.lifecycle_restart(request.endpoint).await {
-            Ok(status) => Response::json(200, json!({ "result": status })),
+        let Some(call) = request.call else {
+            return runtime_directory::control_loopback::unavailable_response();
+        };
+        match lifecycle
+            .admit_lifecycle_restart(request.endpoint, call)
+            .await
+        {
+            Ok(receipt) => Response::json(202, json!(receipt)),
             Err(error) => lifecycle_error_response(error),
         }
     })

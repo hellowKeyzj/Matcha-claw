@@ -7,6 +7,8 @@ import {
 } from '@/lib/session-trace';
 import type { RuntimeEndpointRef, SessionIdentity } from '../../types/desktop/runtime-address';
 import type { CapabilityTarget } from '../../types/desktop/capability-target';
+import type { CallReceipt } from '../../types/call-log';
+import { decodeCallReceipt } from '../../types/call-log/receipt';
 
 export type TeamRunStatus = 'created' | 'provisioning' | 'waiting_for_user' | 'running' | 'paused' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
 
@@ -757,11 +759,6 @@ export interface TeamRunCancelResult {
   state: 'cancelling' | 'cancelled' | 'tombstoned';
 }
 
-export interface TeamRunDeleteResult {
-  runId: string;
-  state: 'purged';
-}
-
 export interface TeamWebhookAuthProjection {
   success: true;
   enabled: true;
@@ -880,7 +877,7 @@ export async function provisionTeamAgents(payload: {
   idempotencyKey: string;
   sourceType?: TeamSourceType;
   manualTeam?: ManualTeamProvisionRecord;
-}): Promise<{ teamId: string; managedAgentCount: number }> {
+}): Promise<CallReceipt> {
   return await teamRuntimeApi({
     operationId: 'team.provisionAgents',
     target: { kind: 'team', teamId: payload.teamId, packagePath: payload.packagePath },
@@ -891,7 +888,7 @@ export async function provisionTeamAgents(payload: {
       ...(payload.sourceType ? { sourceType: payload.sourceType } : {}),
       ...(payload.manualTeam ? { manualTeam: toManualTeamProvisionInput(payload.manualTeam) } : {}),
     },
-  }, decodeTeamProvisionAgents);
+  }, decodeCallReceipt);
 }
 
 export type TeamDeleteResult = {
@@ -904,12 +901,12 @@ export type TeamDeleteResult = {
 
 export async function deleteTeamInstance(payload: {
   teamId: string;
-}): Promise<TeamDeleteResult> {
+}): Promise<CallReceipt> {
   return await teamRuntimeApi({
     operationId: 'team.delete',
     target: { kind: 'team', teamId: payload.teamId },
     input: { kind: 'team', teamId: payload.teamId },
-  }, decodeTeamDelete);
+  }, decodeCallReceipt);
 }
 
 export async function createTeamRun(payload: {
@@ -1263,12 +1260,12 @@ export async function cancelTeamRun(payload: {
 
 export async function deleteTeamRun(payload: {
   runId: string;
-}): Promise<TeamRunDeleteResult> {
+}): Promise<CallReceipt> {
   return await teamRuntimeApi({
     operationId: 'team.runDelete',
     target: { kind: 'team-run', runId: payload.runId },
     input: { runId: payload.runId },
-  }, decodeTeamRunDelete);
+  }, decodeCallReceipt);
 }
 
 function toManualTeamProvisionInput(manualTeam: ManualTeamProvisionRecord): ManualTeamProvisionRecord {
@@ -1296,29 +1293,6 @@ function decodeTeamSkillPackageValidation(payload: unknown): TeamSkillPackageVal
   }
   if (payload.status === 'valid' && hasExactKeys(payload, ['status', 'package']) && isTeamSkillPackage(payload.package)) {
     return payload as TeamSkillPackageValidationResult;
-  }
-  return teamRuntimeDecodeFailure();
-}
-
-function decodeTeamProvisionAgents(payload: unknown): { teamId: string; managedAgentCount: number } {
-  if (isRecord(payload)
-    && hasExactKeys(payload, ['teamId', 'managedAgentCount'])
-    && isText(payload.teamId)
-    && isSafeNonNegativeInteger(payload.managedAgentCount)) {
-    return payload as { teamId: string; managedAgentCount: number };
-  }
-  return teamRuntimeDecodeFailure();
-}
-
-function decodeTeamDelete(payload: unknown): TeamDeleteResult {
-  if (isRecord(payload)
-    && hasOnlyKeys(payload, ['teamId', 'state', 'deleted', 'deletedRunIds', 'deletedAgentIds'])
-    && (payload.teamId === null || isText(payload.teamId))
-    && (payload.state === 'tombstoned' || payload.state === 'outcome_unknown')
-    && (payload.deleted === undefined || typeof payload.deleted === 'boolean')
-    && (payload.deletedRunIds === undefined || isStringArray(payload.deletedRunIds))
-    && (payload.deletedAgentIds === undefined || isStringArray(payload.deletedAgentIds))) {
-    return payload as TeamDeleteResult;
   }
   return teamRuntimeDecodeFailure();
 }
@@ -1452,16 +1426,6 @@ function decodeTeamRunCancel(payload: unknown): TeamRunCancelResult {
     && isText(payload.runId)
     && (payload.state === 'cancelling' || payload.state === 'cancelled' || payload.state === 'tombstoned')) {
     return payload as unknown as TeamRunCancelResult;
-  }
-  return teamRuntimeDecodeFailure();
-}
-
-function decodeTeamRunDelete(payload: unknown): TeamRunDeleteResult {
-  if (isRecord(payload)
-    && hasExactKeys(payload, ['runId', 'state'])
-    && isText(payload.runId)
-    && payload.state === 'purged') {
-    return payload as unknown as TeamRunDeleteResult;
   }
   return teamRuntimeDecodeFailure();
 }

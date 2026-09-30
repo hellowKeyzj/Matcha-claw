@@ -4,7 +4,7 @@ import { hostWikiReadBinaryFile } from '@/lib/host-api';
 const WIKI_MEDIA_PREFIX = 'wiki/media/';
 const WIKI_MEDIA_MAX_BYTES = 20 * 1024 * 1024;
 
-function wikiMediaPath(filePath: string, imagePath: string): string | null {
+export function wikiMediaPath(filePath: string, imagePath: string): string | null {
   if (/^(?:[a-z][a-z0-9+.-]*:|data:|#|\/)/i.test(imagePath)) return null;
   const normalized = imagePath.replace(/\\/g, '/');
   if (normalized.startsWith(WIKI_MEDIA_PREFIX)) return normalized;

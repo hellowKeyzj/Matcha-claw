@@ -10,10 +10,15 @@ pub(crate) enum Delivery {
         selection_required: bool,
         agents: Vec<AgentSummaryResponse>,
     },
-    Wait(AgentWaitResponse),
     Created(AgentMutationResponse),
     Updated(AgentMutationResponse),
-    Deleted(AgentMutationResponse),
+    Deleted(agents::AgentDeleted),
+    WorkspaceInitializationFailed(AgentMutationResponse),
+    PackageInstallFailed {
+        agent_id: String,
+        failure: agents::PackageInstallFailure,
+        compensation: agents::InstallCompensation,
+    },
     Files(Vec<AgentFileResponse>),
     File(AgentFileResponse),
     Configuration(ConfigurationResponse),
@@ -24,7 +29,6 @@ pub(crate) enum Delivery {
     PackageInstall(PackageInstallResponse),
     Rejected,
     OutcomeUnknown,
-    WaitUnknown,
     Unsupported,
     Unavailable,
 }
@@ -33,10 +37,8 @@ impl Delivery {
     pub(crate) fn status_code(&self) -> u16 {
         match self {
             Self::Agents { .. }
-            | Self::Wait(_)
             | Self::Created(_)
             | Self::Updated(_)
-            | Self::Deleted(_)
             | Self::Files(_)
             | Self::File(_)
             | Self::Configuration(_)
@@ -45,8 +47,15 @@ impl Delivery {
             | Self::ToolConfiguration(_)
             | Self::PackageExport(_)
             | Self::PackageInstall(_) => 200,
+            Self::Deleted(agent) => if agent.succeeded() { 200 } else { 503 },
+            Self::WorkspaceInitializationFailed(_) => 503,
+            Self::PackageInstallFailed { failure, .. } => match failure {
+                agents::PackageInstallFailure::Rejected => 422,
+                agents::PackageInstallFailure::OutcomeUnknown => 409,
+                agents::PackageInstallFailure::Unavailable => 503,
+            },
             Self::Rejected => 422,
-            Self::OutcomeUnknown | Self::WaitUnknown | Self::Unsupported => 409,
+            Self::OutcomeUnknown | Self::Unsupported => 409,
             Self::Unavailable => 503,
         }
     }
@@ -63,15 +72,22 @@ impl Delivery {
                 "selectionRequired": selection_required,
                 "agents": agents,
             }),
-            Self::Wait(wait) => serde_json::json!({
-                "success": true,
-                "status": wait.status,
-                "startedAt": wait.started_at,
-                "endedAt": wait.ended_at,
-            }),
             Self::Created(agent) => success_mutation("created", agent),
             Self::Updated(agent) => success_mutation("updated", agent),
-            Self::Deleted(agent) => success_mutation("deleted", agent),
+            Self::Deleted(agent) => serde_json::json!({
+                "success": agent.succeeded(), "kind": "deleted",
+                "agent": { "id": agent.agent_id, "name": null, "model": null },
+                "nativeOk": agent.native_ok, "removedBindings": agent.removed_bindings,
+                "failedCount": agent.failed_count, "purgeFailedCount": agent.purge_failed_count,
+                "sealedPurge": agent.sealed_purge,
+            }),
+            Self::WorkspaceInitializationFailed(agent) => serde_json::json!({
+                "success": false, "error": "Subagent workspace initialization failed", "agent": agent,
+            }),
+            Self::PackageInstallFailed { agent_id, compensation, .. } => serde_json::json!({
+                "success": false, "error": "Subagent package installation failed",
+                "agentId": agent_id, "compensation": compensation,
+            }),
             Self::Files(files) => serde_json::json!({ "success": true, "files": files }),
             Self::File(file) => serde_json::json!({ "success": true, "file": file }),
             Self::Configuration(configuration) => serde_json::json!({
@@ -89,7 +105,6 @@ impl Delivery {
             }
             Self::Rejected => error("Subagent request was rejected"),
             Self::OutcomeUnknown => error("Subagent mutation outcome is unknown"),
-            Self::WaitUnknown => error("Subagent wait outcome is unknown"),
             Self::Unsupported => error("Subagent management is unsupported for this runtime"),
             Self::Unavailable => error("Subagent management is unavailable"),
         }
@@ -102,14 +117,6 @@ fn success_mutation(kind: &'static str, agent: &AgentMutationResponse) -> Value 
 
 fn error(message: &'static str) -> Value {
     serde_json::json!({ "success": false, "error": message })
-}
-
-#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AgentWaitResponse {
-    status: &'static str,
-    started_at: Option<u64>,
-    ended_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
@@ -205,10 +212,11 @@ pub(crate) fn map_outcome(outcome: agents::Outcome) -> Delivery {
             selection_required,
             agents: agents.into_iter().map(agent_summary).collect(),
         },
-        agents::Outcome::Waited(wait) => Delivery::Wait(agent_wait(wait)),
         agents::Outcome::Created(agent) => Delivery::Created(agent_mutation(agent)),
         agents::Outcome::Updated(agent) => Delivery::Updated(agent_mutation(agent)),
-        agents::Outcome::Deleted(agent) => Delivery::Deleted(agent_mutation(agent)),
+        agents::Outcome::Deleted(agent) => Delivery::Deleted(agent),
+        agents::Outcome::WorkspaceInitializationFailed(agent) => Delivery::WorkspaceInitializationFailed(agent_mutation(agent)),
+        agents::Outcome::PackageInstallFailed { agent_id, failure, compensation } => Delivery::PackageInstallFailed { agent_id, failure, compensation },
         agents::Outcome::Files(files) => {
             Delivery::Files(files.files.into_iter().map(agent_file).collect())
         }
@@ -227,7 +235,6 @@ pub(crate) fn map_outcome(outcome: agents::Outcome) -> Delivery {
         }
         agents::Outcome::Rejected => Delivery::Rejected,
         agents::Outcome::Unknown => Delivery::OutcomeUnknown,
-        agents::Outcome::WaitUnknown => Delivery::WaitUnknown,
         agents::Outcome::Unsupported => Delivery::Unsupported,
         agents::Outcome::Unavailable => Delivery::Unavailable,
     }
@@ -393,19 +400,6 @@ fn tool_option_value(option: &agents::ToolOption) -> Value {
     })
 }
 
-fn agent_wait(wait: agents::AgentWaitResult) -> AgentWaitResponse {
-    AgentWaitResponse {
-        status: match wait.status {
-            agents::AgentWaitStatus::Completed => "completed",
-            agents::AgentWaitStatus::Failed => "failed",
-            agents::AgentWaitStatus::Timeout => "timeout",
-            agents::AgentWaitStatus::Pending => "pending",
-        },
-        started_at: wait.started_at,
-        ended_at: wait.ended_at,
-    }
-}
-
 fn agent_summary(agent: agents::AgentSummary) -> AgentSummaryResponse {
     let kind = match agent.kind {
         agents::AgentKind::Agent => AgentKindResponse::Agent,
@@ -455,16 +449,6 @@ impl IntoMutationResponse for agents::AgentCreated {
 }
 
 impl IntoMutationResponse for agents::AgentUpdated {
-    fn into_mutation_response(self) -> AgentMutationResponse {
-        AgentMutationResponse {
-            id: self.agent_id,
-            name: None,
-            model: None,
-        }
-    }
-}
-
-impl IntoMutationResponse for agents::AgentDeleted {
     fn into_mutation_response(self) -> AgentMutationResponse {
         AgentMutationResponse {
             id: self.agent_id,

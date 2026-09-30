@@ -1,6 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use platform::{
+    call::{CallContext, CallDetail, CallLogError, CallRecorder, CallStatus},
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor as LoopbackModuleDescriptor, ModuleId as LoopbackModuleId,
@@ -8,7 +9,7 @@ use platform::{
     },
     module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId as CatalogModuleId},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -41,28 +42,104 @@ const BROWSER_SUBJECT: &str = "openclaw-browser";
 const MCP_APP_SUBJECT: &str = "openclaw-mcp-app";
 const QUESTION_SUBJECT: &str = "openclaw-question";
 
+#[derive(Clone, Copy, Serialize)]
+pub enum GatewayOperation {
+    #[serde(rename = "browser.request")]
+    BrowserRequest,
+    #[serde(rename = "mcp.app.request")]
+    McpAppRequest,
+    #[serde(rename = "question.resolve")]
+    QuestionResolve,
+}
+
+#[derive(Clone, Serialize)]
+pub struct GatewayCallDetail {
+    runtime: &'static str,
+    operation: GatewayOperation,
+}
+
+impl CallDetail for GatewayCallDetail {
+    const MODULE: &'static str = "openclaw-gateway";
+}
+
+pub type GatewayCallContext = CallContext<GatewayCallDetail>;
+
+pub async fn begin_gateway_call(
+    calls: &CallRecorder,
+    operation: GatewayOperation,
+) -> Result<GatewayCallContext, CallLogError> {
+    let command = match operation {
+        GatewayOperation::BrowserRequest => "browser.request",
+        GatewayOperation::McpAppRequest => "mcp.app.request",
+        GatewayOperation::QuestionResolve => "question.resolve",
+    };
+    calls.begin(command, &GatewayCallDetail { runtime: "openclaw", operation }).await
+}
+
+pub async fn finish_gateway_call(
+    call: &GatewayCallContext,
+    operation: GatewayOperation,
+    outcome: &OpenClawGatewayRequestOutcome,
+) -> Result<(), CallLogError> {
+    let status = match outcome {
+        OpenClawGatewayRequestOutcome::Succeeded(_) => CallStatus::Succeeded,
+        OpenClawGatewayRequestOutcome::Rejected
+        | OpenClawGatewayRequestOutcome::CapacityExhausted
+        | OpenClawGatewayRequestOutcome::Unavailable => CallStatus::Rejected,
+        OpenClawGatewayRequestOutcome::OutcomeUnknown => CallStatus::Unknown,
+    };
+    finish_gateway_call_status(call, operation, status).await
+}
+
+pub async fn finish_gateway_call_status(
+    call: &GatewayCallContext,
+    operation: GatewayOperation,
+    status: CallStatus,
+) -> Result<(), CallLogError> {
+    call.finish(status, &GatewayCallDetail { runtime: "openclaw", operation }).await
+}
+
 pub type OpenClawGatewayCapabilityFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 pub trait OpenClawGatewayCapabilityPort: Send + Sync {
     fn browser_request(
         &self,
         request: OpenClawBrowserGatewayRequest,
+        call: Option<GatewayCallContext>,
     ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
 
     fn mcp_app_request(
         &self,
         request: OpenClawMcpAppGatewayRequest,
+        call: Option<GatewayCallContext>,
     ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
 
     fn question_resolve(
         &self,
         request: OpenClawQuestionResolveGatewayRequest,
+        call: Option<GatewayCallContext>,
     ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
 }
 
 pub fn descriptor(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     gateway: Arc<dyn OpenClawGatewayCapabilityPort>,
+) -> ModuleDescriptor {
+    build_descriptor(verifier, gateway, None)
+}
+
+pub fn descriptor_with_calls(
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    gateway: Arc<dyn OpenClawGatewayCapabilityPort>,
+    calls: CallRecorder,
+) -> ModuleDescriptor {
+    build_descriptor(verifier, gateway, Some(calls))
+}
+
+fn build_descriptor(
+    verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+    gateway: Arc<dyn OpenClawGatewayCapabilityPort>,
+    calls: Option<CallRecorder>,
 ) -> ModuleDescriptor {
     ModuleDescriptor::with_capabilities(
         MODULE_ID,
@@ -71,7 +148,7 @@ pub fn descriptor(
         EFFECTS,
         ROUTES,
         EVENTS,
-        Some(loopback_descriptor(Dependencies::new(verifier, gateway))),
+        Some(loopback_descriptor(Dependencies { verifier, gateway, calls })),
         Some(super::capability::DESCRIPTOR_PROVIDER),
     )
 }
@@ -80,15 +157,7 @@ pub fn descriptor(
 struct Dependencies {
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     gateway: Arc<dyn OpenClawGatewayCapabilityPort>,
-}
-
-impl Dependencies {
-    fn new(
-        verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-        gateway: Arc<dyn OpenClawGatewayCapabilityPort>,
-    ) -> Self {
-        Self { verifier, gateway }
-    }
+    calls: Option<CallRecorder>,
 }
 
 fn loopback_descriptor(dependencies: Dependencies) -> LoopbackModuleDescriptor {
@@ -156,10 +225,22 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
         return unauthorized();
     }
 
+    let operation = match &decoded.invocation {
+        Invocation::Browser(_) => GatewayOperation::BrowserRequest,
+        Invocation::McpApp(_) => GatewayOperation::McpAppRequest,
+        Invocation::QuestionResolve(_) => GatewayOperation::QuestionResolve,
+    };
+    let call = match &dependencies.calls {
+        Some(calls) => match begin_gateway_call(calls, operation).await {
+            Ok(call) => Some(call),
+            Err(_) => return unavailable(),
+        },
+        None => None,
+    };
     let outcome = match decoded.invocation {
-        Invocation::Browser(request) => dependencies.gateway.browser_request(request).await,
-        Invocation::McpApp(request) => dependencies.gateway.mcp_app_request(request).await,
-        Invocation::QuestionResolve(request) => dependencies.gateway.question_resolve(request).await,
+        Invocation::Browser(request) => dependencies.gateway.browser_request(request, call).await,
+        Invocation::McpApp(request) => dependencies.gateway.mcp_app_request(request, call).await,
+        Invocation::QuestionResolve(request) => dependencies.gateway.question_resolve(request, call).await,
     };
     match outcome {
         Ok(outcome) => response_for_outcome(outcome),

@@ -378,9 +378,10 @@ where
 
 pub struct OwnerRuntimeSystem {
     next_owner_id: Arc<AtomicU64>,
-    ready_tx: mpsc::Sender<Runnable>,
+    ready_tx: Option<mpsc::Sender<Runnable>>,
+    drain: CancellationToken,
     observation: ObservationSink,
-    workers: OwnedTask<()>,
+    workers: OwnedTask<Result<(), tokio::task::JoinError>>,
 }
 
 impl OwnerRuntimeSystem {
@@ -400,17 +401,30 @@ impl OwnerRuntimeSystem {
                     cancellation.clone(),
                 )));
             }
-            cancellation.cancelled().await;
-            for worker in &worker_tasks {
-                worker.abort();
+            let mut failure = None;
+            for index in 0..worker_tasks.len() {
+                let result = tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        for worker in &worker_tasks {
+                            worker.abort();
+                        }
+                        for worker in &mut worker_tasks[index..] {
+                            let _ = worker.await;
+                        }
+                        return Ok(());
+                    }
+                    result = &mut worker_tasks[index] => result,
+                };
+                if let Err(error) = result {
+                    failure.get_or_insert(error);
+                }
             }
-            for worker in worker_tasks {
-                let _ = worker.await;
-            }
+            failure.map_or(Ok(()), Err)
         });
         Self {
             next_owner_id: Arc::new(AtomicU64::new(1)),
-            ready_tx,
+            ready_tx: Some(ready_tx),
+            drain: CancellationToken::new(),
             observation,
             workers,
         }
@@ -434,7 +448,10 @@ impl OwnerRuntimeSystem {
             shared,
             global_state,
             config,
-            self.ready_tx.clone(),
+            self.ready_tx
+                .as_ref()
+                .expect("owner runtime system is draining")
+                .clone(),
             self.observation.clone(),
             completion_tx,
             completion_rx,
@@ -449,12 +466,16 @@ impl OwnerRuntimeSystem {
             None,
             None,
         );
-        let (task, _handle) = OwnedTask::spawn(|cancellation| async move {
-            slot.run(mailbox_rx, cancellation).await;
+        let drain = self.drain.child_token();
+        let slot_drain = drain.clone();
+        let (mut task, _handle) = OwnedTask::spawn(|cancellation| async move {
+            slot.run(mailbox_rx, cancellation, slot_drain).await;
         });
+        task.set_drain(drain.clone());
         (
             OwnerRuntimeHandle {
                 id,
+                drain,
                 mailbox: mailbox_tx,
             },
             task,
@@ -469,13 +490,22 @@ impl OwnerRuntimeSystem {
         self.workers.is_finished()
     }
 
+    /// Drain upstream owners first when their handlers call other owner mailboxes.
+    pub async fn drain_and_join(&mut self) -> Result<(), tokio::task::JoinError> {
+        self.drain.cancel();
+        self.ready_tx.take();
+        // Each slot retains a ready sender until its handlers and shutdown hook finish.
+        self.workers.join().await?
+    }
+
     pub async fn cancel_and_join(&mut self) -> Result<(), tokio::task::JoinError> {
-        self.workers.cancel_and_join().await
+        self.workers.cancel_and_join().await?
     }
 }
 
 pub struct OwnerRuntimeHandle<Command, Query = std::convert::Infallible> {
     id: OwnerRuntimeId,
+    drain: CancellationToken,
     mailbox: mpsc::Sender<Mailbox<Command, Query>>,
 }
 
@@ -483,6 +513,7 @@ impl<Command, Query> Clone for OwnerRuntimeHandle<Command, Query> {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
+            drain: self.drain.clone(),
             mailbox: self.mailbox.clone(),
         }
     }
@@ -502,10 +533,7 @@ impl<Command, Query> OwnerRuntimeHandle<Command, Query> {
     }
 
     pub async fn send_command(&self, command: Command) -> Result<(), SendError> {
-        self.mailbox
-            .send(Mailbox::Command(command))
-            .await
-            .map_err(|_| SendError::Closed)
+        self.send_message(Mailbox::Command(command)).await
     }
 
     pub fn try_command(&self, command: Command) -> Result<(), SendError> {
@@ -517,9 +545,7 @@ impl<Command, Query> OwnerRuntimeHandle<Command, Query> {
     }
 
     pub fn try_send_command(&self, command: Command) -> Result<(), SendError> {
-        self.mailbox
-            .try_send(Mailbox::Command(command))
-            .map_err(map_try_send_error)
+        self.try_send_message(Mailbox::Command(command))
     }
 
     pub async fn query(&self, query: Query) -> Result<(), SendError> {
@@ -527,10 +553,7 @@ impl<Command, Query> OwnerRuntimeHandle<Command, Query> {
     }
 
     pub async fn send_query(&self, query: Query) -> Result<(), SendError> {
-        self.mailbox
-            .send(Mailbox::Query(query))
-            .await
-            .map_err(|_| SendError::Closed)
+        self.send_message(Mailbox::Query(query)).await
     }
 
     pub fn try_query(&self, query: Query) -> Result<(), SendError> {
@@ -538,13 +561,26 @@ impl<Command, Query> OwnerRuntimeHandle<Command, Query> {
     }
 
     pub fn try_send_query(&self, query: Query) -> Result<(), SendError> {
-        self.mailbox
-            .try_send(Mailbox::Query(query))
-            .map_err(map_try_send_error)
+        self.try_send_message(Mailbox::Query(query))
+    }
+
+    async fn send_message(&self, message: Mailbox<Command, Query>) -> Result<(), SendError> {
+        tokio::select! {
+            biased;
+            _ = self.drain.cancelled() => Err(SendError::Closed),
+            result = self.mailbox.send(message) => result.map_err(|_| SendError::Closed),
+        }
+    }
+
+    fn try_send_message(&self, message: Mailbox<Command, Query>) -> Result<(), SendError> {
+        if self.drain.is_cancelled() {
+            return Err(SendError::Closed);
+        }
+        self.mailbox.try_send(message).map_err(map_try_send_error)
     }
 
     pub fn is_closed(&self) -> bool {
-        self.mailbox.is_closed()
+        self.drain.is_cancelled() || self.mailbox.is_closed()
     }
 }
 
@@ -975,14 +1011,21 @@ where
         mut self,
         mut mailbox_rx: mpsc::Receiver<Mailbox<O::Command, O::Query>>,
         cancellation: CancellationToken,
+        drain: CancellationToken,
     ) {
         let mut mailbox_open = true;
+        let mut draining = false;
         let mut pending = None;
         let mut eviction_interval = tokio::time::interval(Duration::from_secs(5));
         eviction_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            if self.closing && self.can_shutdown() {
+            if self.closing {
+                pending = None;
+                mailbox_open = false;
+                mailbox_rx.close();
+            }
+            if (self.closing || (!mailbox_open && pending.is_none())) && self.can_shutdown() {
                 break;
             }
 
@@ -1004,6 +1047,11 @@ where
                     mailbox_rx.close();
                 }
 
+                _ = drain.cancelled(), if !draining && !self.closing => {
+                    draining = true;
+                    mailbox_rx.close();
+                }
+
                 Some(completion) = self.completion_rx.recv() => {
                     self.complete(completion);
                 }
@@ -1017,7 +1065,6 @@ where
                         }
                         None => {
                             mailbox_open = false;
-                            self.begin_shutdown();
                         }
                     }
                 }
@@ -1520,7 +1567,10 @@ where
             && !self.exclusive_running
             && self.global_queue.is_empty()
             && self.exclusive_queue.is_empty()
-            && self.lanes.values().all(|lane| !lane.running)
+            && self
+                .lanes
+                .values()
+                .all(|lane| !lane.running && lane.queue.is_empty())
     }
 }
 

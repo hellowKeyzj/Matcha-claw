@@ -1,3 +1,6 @@
+import type { WikiSourceCallCounts } from '@/types/call-log/wiki';
+import type { WikiDeleteSourceResult } from '@/types/wiki-call-result';
+
 export type WikiSourceWatchConfig = Readonly<{
   enabled: boolean;
   autoIngest: boolean;
@@ -113,22 +116,34 @@ export type WikiSourceTask = Readonly<{
   cancelRequestedAtMs: number | null;
 }>;
 
+export type WikiSearchImage = Readonly<{ url: string; alt: string }>;
+
 export type WikiSearchHit = Readonly<{
   relativePath: string;
   title: string;
   score: number;
   snippets: readonly string[];
+  titleMatch: boolean;
+  vectorScore: number | null;
+  images: readonly WikiSearchImage[];
+  content: string | null;
+  graphRelatedTo: readonly string[];
 }>;
 
 export type WikiSearchResult = Readonly<{
   query: string;
   hits: readonly WikiSearchHit[];
+  mode: string;
+  tokenHits: number;
+  vectorHits: number;
+  graphHits: number;
 }>;
 
 export type WikiGraphNode = Readonly<{
   id: string;
   label: string;
   kind: string;
+  relativePath: string;
 }>;
 
 export type WikiGraphEdge = Readonly<{
@@ -151,7 +166,7 @@ export type WikiReceiptSummary = Readonly<{
   label: string;
 }>;
 
-export type WikiWorkspaceTab = 'wiki' | 'sources' | 'review' | 'search' | 'graph';
+export type WikiWorkspaceTab = 'wiki' | 'sources' | 'review' | 'search' | 'graph' | 'research' | 'search-settings' | 'qa' | 'lint' | 'maintenance';
 export type WikiSourceView = 'sources' | 'settings';
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -370,9 +385,23 @@ export function normalizeSearch(value: unknown): WikiSearchResult {
       title: pickString(hit, ['title', 'label', 'name']) ?? relativePath,
       score: pickNumber(hit, ['score']),
       snippets,
+      titleMatch: hit.titleMatch === true,
+      vectorScore: typeof hit.vectorScore === 'number' ? hit.vectorScore : null,
+      images: firstArray(hit, ['images']).flatMap((image): WikiSearchImage[] =>
+        isRecord(image) && typeof image.url === 'string' && typeof image.alt === 'string'
+          ? [{ url: image.url, alt: image.alt }]
+          : []),
+      content: typeof hit.content === 'string' ? hit.content : null,
+      graphRelatedTo: stringArray(hit.graphRelatedTo),
     }];
   });
-  return { query: pickString(record, ['query']) ?? '', hits };
+  return {
+    query: pickString(record, ['query']) ?? '', hits,
+    mode: pickString(record, ['mode']) ?? 'keyword',
+    tokenHits: pickNumber(record, ['tokenHits']),
+    vectorHits: pickNumber(record, ['vectorHits']),
+    graphHits: pickNumber(record, ['graphHits']),
+  };
 }
 
 export function normalizeGraph(value: unknown): WikiGraphResult {
@@ -385,6 +414,7 @@ export function normalizeGraph(value: unknown): WikiGraphResult {
       id,
       label: pickString(node, ['label', 'title', 'name']) ?? id,
       kind: pickString(node, ['kind', 'type']) ?? 'page',
+      relativePath: pickString(node, ['relativePath']) ?? '',
     } satisfies WikiGraphNode;
   }).filter((node): node is WikiGraphNode => node !== null);
   const edges = firstArray(record, ['edges', 'links']).map((edge) => {
@@ -401,16 +431,12 @@ export function normalizeGraph(value: unknown): WikiGraphResult {
   return { nodes, edges };
 }
 
-export function summarizeReceipt(value: unknown, label: string): WikiReceiptSummary | null {
-  if (!isRecord(value)) return null;
-  return {
-    label,
-    imported: firstArray(value, ['imported']).length,
-    deleted: firstArray(value, ['deleted', 'deletedPages']).length,
-    moved: firstArray(value, ['moved']).length,
-    skipped: firstArray(value, ['skipped']).length,
-    written: firstArray(value, ['writtenPages']).length,
-  };
+export function summarizeSourceCallCounts(counts: WikiSourceCallCounts, label: string): WikiReceiptSummary {
+  return { ...counts, written: 0, label };
+}
+
+export function summarizeDeleteSourceResult(result: WikiDeleteSourceResult, label: string): WikiReceiptSummary {
+  return { label, imported: 0, deleted: result.deletedPages.length, moved: 0, skipped: 0, written: 0 };
 }
 
 export function formatDateTime(ms: number, fallback = ''): string {

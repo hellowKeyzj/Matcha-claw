@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 base64.workspace = true
+foundation = { version = "0.1.0", path = "../../foundation" }
 platform = { version = "0.1.0", path = "../../platform" }
 runtime-directory = { version = "0.1.0", path = "../runtime-directory" }
 serde = { workspace = true, features = ["derive"] }

@@ -165,6 +165,7 @@ pub(crate) enum ConnectorMutationReceipt {
     Unavailable,
 }
 
+#[derive(Clone)]
 pub(crate) enum ConnectorObservationReceipt {
     Connected,
     Disconnected,

@@ -17,7 +17,8 @@ export async function handleAgentsRoutes(
   url: URL,
   transport: AgentsTransport,
 ): Promise<boolean> {
-  if (url.pathname !== '/api/subagents/agents' || req.method !== 'POST') return false;
+  const result = url.pathname === '/api/subagents/results';
+  if ((!result && url.pathname !== '/api/subagents/agents') || req.method !== 'POST') return false;
 
   let request: unknown;
   try {
@@ -28,8 +29,8 @@ export async function handleAgentsRoutes(
   }
 
   try {
-    const response = await transport.execute(request);
-    sendJson(res, response.status, publicAgentsBody(request, response.body));
+    const response = result ? await transport.result(request) : await transport.execute(request);
+    sendJson(res, response.status, result ? response.body : publicAgentsBody(request, response.body));
   } catch {
     sendJson(res, 503, UNAVAILABLE);
   }
@@ -38,9 +39,7 @@ export async function handleAgentsRoutes(
 
 function publicAgentsBody(request: unknown, body: unknown): unknown {
   if (!isRecord(request)
-    || (request.operationId !== 'subagents.package.export'
-      && request.operationId !== 'subagents.package.exportCloud'
-      && request.operationId !== 'subagents.package.install')
+    || request.operationId !== 'subagents.package.install'
     || !isRecord(body)
     || !isRecord(body.package)) {
     return body;

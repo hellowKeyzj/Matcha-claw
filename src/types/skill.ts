@@ -94,6 +94,8 @@ export interface SealedSkillCloudPackage {
   size?: number;
   uploadedAtMs?: number;
   installed?: boolean;
+  status?: string;
+  entitlementStatus?: string;
   downloadable?: boolean;
 }
 

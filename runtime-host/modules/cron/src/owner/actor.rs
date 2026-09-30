@@ -6,10 +6,15 @@ use std::sync::{
 use foundation::execution::{
     LaneRetention, ObservationSink, OperationHandle, OwnerSpec, TraceContext,
 };
+use platform::call::CallStatus;
 use tokio::sync::mpsc;
 
 use crate::{
-    application::commands::{CronCommand, CronOwnerKey, CronQuery},
+    application::{
+        commands::{CronCommand, CronOwnerKey, CronQuery, MutationCommand},
+        results::{MutationResult, MutationResults},
+    },
+    call::{CronCall, ExecutionStatus, Outcome, safe_id},
     model::{
         CronCreateCommand, CronDeleteCommand, CronDeleteOutcome, CronExecutionTerminalEvent,
         CronExecutionTerminalStatus, CronHistoryCommand, CronHistoryOutcome,
@@ -42,6 +47,7 @@ pub(crate) struct CronShared {
     session_history: Arc<dyn CronSessionHistoryPort>,
     events: Option<mpsc::Sender<CronExecutionTerminalEvent>>,
     observation: ObservationSink,
+    results: MutationResults,
 }
 
 pub(crate) struct CronGlobalState {
@@ -54,6 +60,7 @@ struct CronExecution {
     job_id: String,
     run_id: String,
     handle: OperationHandle<CronExecutionTerminalStatus>,
+    call: Option<CronCall>,
 }
 
 pub(crate) struct CronOwner {
@@ -62,7 +69,7 @@ pub(crate) struct CronOwner {
 }
 
 impl CronOwner {
-    pub fn new(input: CronOwnerInput) -> Self {
+    pub(crate) fn new(input: CronOwnerInput, results: MutationResults) -> Self {
         Self {
             shared: CronShared {
                 admission: input.admission,
@@ -70,6 +77,7 @@ impl CronOwner {
                 session_history: input.session_history,
                 events: input.events,
                 observation: input.observation,
+                results,
             },
             global: CronGlobalState {
                 active_executions: Vec::new(),
@@ -120,17 +128,39 @@ impl OwnerSpec for CronOwner {
         command: Self::Command,
     ) {
         match command {
-            CronCommand::Create { command, reply } => {
-                let _ = reply.send(create(&shared, command).await);
+            CronCommand::Mutate { command, mut call } => {
+                let result = if !call.running().await {
+                    MutationResult::Unavailable
+                } else {
+                    match command {
+                        MutationCommand::Create(command) => {
+                            MutationResult::job(create(&shared, command).await)
+                        }
+                        MutationCommand::Update(command) => {
+                            MutationResult::job(update(&shared, command).await)
+                        }
+                        MutationCommand::Delete(command) => {
+                            MutationResult::deleted(delete(&shared, command).await)
+                        }
+                    }
+                };
+                let (status, outcome) = result.finish_detail(&mut call.detail);
+                shared.results.complete(call.id(), result);
+                call.finish(status, outcome).await;
             }
-            CronCommand::Update { command, reply } => {
-                let _ = reply.send(update(&shared, command).await);
-            }
-            CronCommand::Delete { command, reply } => {
-                let _ = reply.send(delete(&shared, command).await);
-            }
-            CronCommand::Trigger { job_id, reply } => {
-                let _ = reply.send(trigger(&shared, global, job_id).await);
+            CronCommand::Trigger {
+                job_id,
+                mut call,
+                reply,
+            } => {
+                let outcome = match &call {
+                    Some(call) if !call.running().await => Err(CronRequestAdmissionClosed),
+                    _ => trigger(&shared, global, job_id, &mut call).await,
+                };
+                if let Some(call) = &mut call {
+                    call.finish_trigger(&outcome).await;
+                }
+                let _ = reply.send(outcome);
             }
             CronCommand::CancelOperations { reply } => {
                 cancel_operations(&shared, global).await;
@@ -155,11 +185,50 @@ impl OwnerSpec for CronOwner {
         query: Self::Query,
     ) {
         match query {
-            CronQuery::List { reply } => {
-                let _ = reply.send(list(&shared).await);
+            CronQuery::List { mut call, reply } => {
+                let outcome = match &call {
+                    Some(call) if !call.running().await => CronListOutcome::Unavailable,
+                    _ => list(&shared).await,
+                };
+                if let Some(call) = &mut call {
+                    let (status, detail_outcome) = match &outcome {
+                        CronListOutcome::Listed(view) => {
+                            call.detail.item_count = Some(view.jobs.len());
+                            (CallStatus::Succeeded, Outcome::Listed)
+                        }
+                        CronListOutcome::Rejected => (CallStatus::Rejected, Outcome::Rejected),
+                        CronListOutcome::Protocol => (CallStatus::Failed, Outcome::Protocol),
+                        CronListOutcome::Unavailable => (CallStatus::Failed, Outcome::Unavailable),
+                    };
+                    call.finish(status, detail_outcome).await;
+                }
+                let _ = reply.send(outcome);
             }
-            CronQuery::LoadHistory { command, reply } => {
-                let _ = reply.send(load_history(&shared, command).await);
+            CronQuery::LoadHistory {
+                command,
+                mut call,
+                reply,
+            } => {
+                let outcome = match &call {
+                    Some(call) if !call.running().await => CronHistoryOutcome::Unavailable,
+                    _ => load_history(&shared, command).await,
+                };
+                if let Some(call) = &mut call {
+                    let (status, detail_outcome) = match &outcome {
+                        CronHistoryOutcome::Loaded(view) => {
+                            call.detail.item_count = Some(view.messages.len());
+                            (CallStatus::Succeeded, Outcome::Loaded)
+                        }
+                        CronHistoryOutcome::Rejected => (CallStatus::Rejected, Outcome::Rejected),
+                        CronHistoryOutcome::Protocol => (CallStatus::Failed, Outcome::Protocol),
+                        CronHistoryOutcome::Deadline => (CallStatus::Failed, Outcome::Deadline),
+                        CronHistoryOutcome::Unavailable => {
+                            (CallStatus::Failed, Outcome::Unavailable)
+                        }
+                    };
+                    call.finish(status, detail_outcome).await;
+                }
+                let _ = reply.send(outcome);
             }
         }
     }
@@ -232,7 +301,15 @@ async fn update(shared: &CronShared, command: CronUpdateCommand) -> CronJobMutat
         return CronJobMutationOutcome::Unavailable;
     }
     match shared.runtime_directory.cron_ops() {
-        Some(ops) => ops.update_cron_job(command).await,
+        Some(ops) => {
+            let job_id = command.job_id.clone();
+            match ops.update_cron_job(command).await {
+                CronJobMutationOutcome::Applied(job) if job.id != job_id => {
+                    CronJobMutationOutcome::OutcomeUnknown
+                }
+                outcome => outcome,
+            }
+        }
         None => CronJobMutationOutcome::Unavailable,
     }
 }
@@ -251,6 +328,7 @@ async fn trigger(
     shared: &CronShared,
     global: &mut CronGlobalState,
     job_id: String,
+    call: &mut Option<CronCall>,
 ) -> Result<CronTriggerResult, CronRequestAdmissionClosed> {
     shared.admission.admit_cron_request()?;
     let Some(ops) = shared.runtime_directory.cron_ops() else {
@@ -269,6 +347,13 @@ async fn trigger(
         Err(_) => return Ok(CronTriggerResult::OutcomeUnknown),
     };
     let run_id = admission.run_id().to_owned();
+    let mut execution_call = call.take();
+    if let Some(call) = &mut execution_call {
+        call.detail.run_id = safe_id(&run_id);
+        call.detail.execution_status = Some(ExecutionStatus::Waiting);
+        call.finish_trigger(&Ok(CronTriggerResult::Accepted)).await;
+    }
+    let mut terminal_call = execution_call.clone();
     let event_job_id = job_id.clone();
     let event_run_id = run_id.clone();
     let operation = if shared.observation.is_enabled() {
@@ -283,6 +368,9 @@ async fn trigger(
                     event_run_id,
                     status,
                 ));
+                if let Some(call) = &mut terminal_call {
+                    call.terminal(status).await;
+                }
                 status
             },
         )
@@ -295,6 +383,9 @@ async fn trigger(
                 event_run_id,
                 status,
             ));
+            if let Some(call) = &mut terminal_call {
+                call.terminal(status).await;
+            }
             status
         })
         .0
@@ -303,6 +394,7 @@ async fn trigger(
         job_id,
         run_id,
         handle: operation,
+        call: execution_call,
     });
     Ok(CronTriggerResult::Accepted)
 }
@@ -314,6 +406,10 @@ async fn cancel_operations(shared: &CronShared, global: &mut CronGlobalState) {
     }
     for mut execution in global.active_executions.drain(..) {
         if execution.handle.join().await.is_err() {
+            if let Some(call) = &mut execution.call {
+                call.terminal(CronExecutionTerminalStatus::OutcomeUnknown)
+                    .await;
+            }
             if let Some(events) = &events {
                 let _ = events.try_send(CronExecutionTerminalEvent::new(
                     execution.job_id,
@@ -331,6 +427,10 @@ async fn reap_active_executions(shared: &CronShared, global: &mut CronGlobalStat
     for mut execution in global.active_executions.drain(..) {
         if execution.handle.is_finished() {
             if execution.handle.join().await.is_err() {
+                if let Some(call) = &mut execution.call {
+                    call.terminal(CronExecutionTerminalStatus::OutcomeUnknown)
+                        .await;
+                }
                 if let Some(events) = &events {
                     let _ = events.try_send(CronExecutionTerminalEvent::new(
                         execution.job_id,

@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct OwnedTask<T> {
     cancellation: CancellationToken,
+    drain: Option<CancellationToken>,
     join: JoinHandle<T>,
     abort_on_drop: bool,
 }
@@ -63,11 +64,16 @@ impl<T: Send + 'static> OwnedTask<T> {
         (
             Self {
                 cancellation,
+                drain: None,
                 join,
                 abort_on_drop: true,
             },
             handle,
         )
+    }
+
+    pub(crate) fn set_drain(&mut self, drain: CancellationToken) {
+        self.drain = Some(drain);
     }
 
     pub fn handle(&self) -> TaskHandle {
@@ -82,6 +88,14 @@ impl<T: Send + 'static> OwnedTask<T> {
 
     pub async fn join(&mut self) -> Result<T, JoinError> {
         (&mut self.join).await
+    }
+
+    /// Close owner admission and finish accepted work; ordinary tasks are only joined.
+    pub async fn drain_and_join(&mut self) -> Result<T, JoinError> {
+        if let Some(drain) = &self.drain {
+            drain.cancel();
+        }
+        self.join().await
     }
 
     pub async fn cancel_and_join(&mut self) -> Result<T, JoinError> {

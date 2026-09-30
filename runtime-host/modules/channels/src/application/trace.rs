@@ -5,6 +5,7 @@ use platform::trace::{channel_trace, current_channel_trace, with_channel_trace_s
 pub struct CommandTrace {
     pub(crate) trace_id: Option<String>,
     queued_at: Instant,
+    pub(crate) call: Option<super::call::ChannelCall>,
 }
 
 impl CommandTrace {
@@ -13,6 +14,7 @@ impl CommandTrace {
         Self {
             trace_id: current_channel_trace(),
             queued_at: Instant::now(),
+            call: None,
         }
     }
 

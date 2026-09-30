@@ -15,6 +15,7 @@ use chrono::Duration;
 use futures_util::TryStreamExt;
 use lancedb::{
     connect,
+    database::CreateTableMode,
     query::{ExecutableQuery, QueryBase},
     table::{CompactionOptions, OptimizeAction},
 };
@@ -43,6 +44,52 @@ pub struct ChunkSearchResult {
     pub chunk_text: String,
     pub heading_path: String,
     pub score: f32,
+}
+
+pub(crate) struct PageSearchResult {
+    pub page_id: String,
+    pub score: f64,
+    pub chunk_text: String,
+    pub heading_path: String,
+}
+
+pub(crate) async fn search_pages(
+    project_path: &Path,
+    embedding: Vec<f32>,
+    top_k: usize,
+) -> Result<Vec<PageSearchResult>, String> {
+    let chunks = search_chunks(project_path, embedding, top_k.saturating_mul(3).max(30)).await?;
+    let mut by_page: HashMap<String, Vec<ChunkSearchResult>> = HashMap::new();
+    for chunk in chunks {
+        by_page
+            .entry(chunk.page_id.clone())
+            .or_default()
+            .push(chunk);
+    }
+    let mut pages = Vec::with_capacity(by_page.len());
+    for (page_id, mut chunks) in by_page {
+        chunks.sort_unstable_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then(a.chunk_index.cmp(&b.chunk_index))
+        });
+        let top = f64::from(chunks[0].score);
+        let tail: f64 = chunks
+            .iter()
+            .skip(1)
+            .map(|chunk| f64::from(chunk.score))
+            .sum();
+        let best = chunks.swap_remove(0);
+        pages.push(PageSearchResult {
+            page_id,
+            score: top + (0.3 * tail).min((1.0 - top).max(0.0)),
+            chunk_text: best.chunk_text,
+            heading_path: best.heading_path,
+        });
+    }
+    pages.sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then(a.page_id.cmp(&b.page_id)));
+    pages.truncate(top_k);
+    Ok(pages)
 }
 
 pub async fn upsert_page_chunks(
@@ -75,6 +122,20 @@ pub async fn upsert_page_chunks(
         .await
         .map_err(|err| format!("DB connect error: {err}"))?;
 
+    upsert_batch(&db, page_id, batch, schema).await?;
+
+    save_revision_unlocked(project_path, page_id, fingerprint).map_err(|err| {
+        let _ = invalidate_revision_unlocked(project_path, page_id);
+        err
+    })
+}
+
+async fn upsert_batch(
+    db: &lancedb::Connection,
+    page_id: &str,
+    batch: RecordBatch,
+    schema: Arc<Schema>,
+) -> Result<(), String> {
     let tables = db
         .table_names()
         .execute()
@@ -102,11 +163,143 @@ pub async fn upsert_page_chunks(
             .await
             .map_err(|err| format!("Create table error: {err}"))?;
     }
+    Ok(())
+}
 
-    save_revision_unlocked(project_path, page_id, fingerprint).map_err(|err| {
-        let _ = invalidate_revision_unlocked(project_path, page_id);
-        err
-    })
+fn prepare_batches(
+    pages: Vec<crate::index::PreparedPageEmbedding>,
+) -> Result<(Arc<Schema>, Vec<(String, String, RecordBatch)>), String> {
+    let dimension = pages
+        .first()
+        .and_then(|page| page.rows.first())
+        .map(|row| row.embedding.len())
+        .unwrap_or(1);
+    let dimension =
+        i32::try_from(dimension).map_err(|_| "embedding dimension is too large".to_owned())?;
+    if dimension == 0 {
+        return Err("embedding dimension is empty".to_owned());
+    }
+    let schema = chunk_schema(dimension);
+    let mut batches = Vec::with_capacity(pages.len());
+    for page in pages {
+        validate_page_id(&page.page_id)?;
+        if page.rows.is_empty() || page.fingerprint.trim().is_empty() {
+            return Err("prepared page has no chunks or revision fingerprint".to_owned());
+        }
+        let batch = chunk_batch(schema.clone(), &page.page_id, page.rows, dimension)?;
+        batches.push((page.page_id, page.fingerprint, batch));
+    }
+    Ok((schema, batches))
+}
+
+pub(crate) async fn replace_pages(
+    project_path: &Path,
+    pages: Vec<crate::index::PreparedPageEmbedding>,
+) -> Result<usize, String> {
+    let (_, prepared) = prepare_batches(pages)?;
+    let lock = db_lock(project_path);
+    let _guard = lock.write().await;
+    let db = connect(&db_uri(project_path))
+        .execute()
+        .await
+        .map_err(|err| format!("DB connect error: {err}"))?;
+    if prepared.is_empty() {
+        let tables = db
+            .table_names()
+            .execute()
+            .await
+            .map_err(|err| format!("List tables error: {err}"))?;
+        if has_table(&tables, TABLE_CHUNKS_V2) {
+            let count = db
+                .open_table(TABLE_CHUNKS_V2)
+                .execute()
+                .await
+                .map_err(|err| format!("Open table error: {err}"))?
+                .count_rows(None)
+                .await
+                .map_err(|err| format!("Count chunks error: {err}"))?;
+            if count > 0 {
+                return Err(
+                    "wiki has no indexable content; existing index was left unchanged".to_owned(),
+                );
+            }
+        }
+        return Ok(0);
+    }
+    // Revision files are a cache; invalidate before the single Lance commit so no stale fast-skip survives it.
+    invalidate_all_revisions_unlocked(project_path)?;
+    let count = prepared.len();
+    let batches = prepared
+        .iter()
+        .map(|(_, _, batch)| batch.clone())
+        .collect::<Vec<_>>();
+    db.create_table(TABLE_CHUNKS_V2, batches)
+        .mode(CreateTableMode::Overwrite)
+        .execute()
+        .await
+        .map_err(|err| format!("Atomic index replacement failed: {err}"))?;
+    for (page_id, fingerprint, _) in prepared {
+        if save_revision_unlocked(project_path, &page_id, &fingerprint).is_err() {
+            let _ = invalidate_revision_unlocked(project_path, &page_id);
+            eprintln!("[WikiEmbedding] rebuilt_revision_cache_write_failed");
+        }
+    }
+    Ok(count)
+}
+
+pub(crate) async fn update_pages(
+    project_path: &Path,
+    pages: Vec<crate::index::PreparedPageEmbedding>,
+    on_written: &(dyn Fn(usize) + Send + Sync),
+) -> (usize, Option<String>) {
+    let (schema, prepared) = match prepare_batches(pages) {
+        Ok(prepared) => prepared,
+        Err(error) => return (0, Some(error)),
+    };
+    if prepared.is_empty() {
+        return (0, None);
+    }
+    let lock = db_lock(project_path);
+    let _guard = lock.write().await;
+    let db = match connect(&db_uri(project_path)).execute().await {
+        Ok(db) => db,
+        Err(error) => return (0, Some(format!("DB connect error: {error}"))),
+    };
+    let compatible = async {
+        let tables = db.table_names().execute().await.map_err(|err| format!("List tables error: {err}"))?;
+        if has_table(&tables, TABLE_CHUNKS_V2) {
+            let table = db.open_table(TABLE_CHUNKS_V2).execute().await.map_err(|err| format!("Open table error: {err}"))?;
+            if table.schema().await.map_err(|err| format!("Read schema error: {err}"))?.as_ref() != schema.as_ref() {
+                return Err("partial rebuild has incompatible vector dimensions; existing index was left unchanged".to_owned());
+            }
+        }
+        Ok(())
+    }.await;
+    if let Err(error) = compatible {
+        return (0, Some(error));
+    }
+    let mut count = 0;
+    let mut failure = None;
+    for (page_id, fingerprint, batch) in prepared {
+        if let Err(error) = invalidate_revision_unlocked(project_path, &page_id) {
+            failure.get_or_insert(error);
+            continue;
+        }
+        match upsert_batch(&db, &page_id, batch, schema.clone()).await {
+            Ok(()) => {
+                count += 1;
+                on_written(count);
+                if save_revision_unlocked(project_path, &page_id, &fingerprint).is_err() {
+                    let _ = invalidate_revision_unlocked(project_path, &page_id);
+                    eprintln!("[WikiEmbedding] partial_revision_cache_write_failed");
+                }
+            }
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    (count, failure)
 }
 
 pub async fn search_chunks(
@@ -298,6 +491,41 @@ pub async fn optimize(project_path: impl AsRef<Path>) -> Result<(), String> {
         .await
         .map_err(|err| format!("Prune old chunk versions error: {err}"))?;
     Ok(())
+}
+
+pub(crate) async fn page_revision_matches(
+    project_path: &Path,
+    page_id: &str,
+    fingerprint: &str,
+) -> Result<bool, String> {
+    validate_page_id(page_id)?;
+    let lock = db_lock(project_path);
+    let _guard = lock.read().await;
+    if load_revision_unlocked(project_path, page_id)?.as_deref() != Some(fingerprint) {
+        return Ok(false);
+    }
+    let db = connect(&db_uri(project_path))
+        .execute()
+        .await
+        .map_err(|err| format!("DB connect error: {err}"))?;
+    let tables = db
+        .table_names()
+        .execute()
+        .await
+        .map_err(|err| format!("List tables error: {err}"))?;
+    if !has_table(&tables, TABLE_CHUNKS_V2) {
+        return Ok(false);
+    }
+    let table = db
+        .open_table(TABLE_CHUNKS_V2)
+        .execute()
+        .await
+        .map_err(|err| format!("Open table error: {err}"))?;
+    let rows = table
+        .count_rows(Some(page_id_filter(page_id)))
+        .await
+        .map_err(|err| format!("Count page chunks error: {err}"))?;
+    Ok(rows > 0)
 }
 
 pub async fn load_revision(

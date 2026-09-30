@@ -9,8 +9,9 @@ import {
   resolveSingleCapabilityScope,
 } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
+import { waitForCronMutation } from '@/lib/cron-call';
+import type { CronMutationOperation } from '@/lib/cron-call';
 import type { CronJob, CronJobCreateInput, CronJobUpdateInput } from '../types/cron';
-import type { CapabilityTarget } from '../types/desktop/capability-target';
 
 interface CronState {
   jobs: CronJob[];
@@ -51,7 +52,6 @@ let cronStoreSubscriberCount = 0;
 const CRON_SNAPSHOT_NOT_READY_RETRY_MS = 1_200;
 const SCHEDULER_CRON_CAPABILITY_ID = 'scheduler.cron';
 
-type CronMutationOperation = 'cron.create' | 'cron.update' | 'cron.delete' | 'cron.toggle';
 type CronTriggerOutcome = 'accepted' | 'skipped' | 'failed' | 'outcome-unknown';
 type CronTriggerSkipReason = 'already-running' | 'not-due' | 'invalid-spec' | 'disabled' | 'stopped';
 type CronTriggerResult = {
@@ -83,9 +83,9 @@ async function cronMutationRequest<TResult>(
   path: string,
   operationId: CronMutationOperation,
   input: Record<string, unknown>,
-  target: CapabilityTarget,
+  target: { kind: 'cron-job'; jobId?: string },
 ): Promise<TResult> {
-  return await hostApiFetch<TResult>(path, {
+  const receipt = await hostApiFetch<unknown>(path, {
     method: 'POST',
     body: JSON.stringify({
       id: SCHEDULER_CRON_CAPABILITY_ID,
@@ -95,6 +95,7 @@ async function cronMutationRequest<TResult>(
       input,
     }),
   });
+  return await waitForCronMutation(receipt, operationId, target.jobId) as TResult;
 }
 
 async function cronTriggerRequest(id: string): Promise<CronTriggerResult> {

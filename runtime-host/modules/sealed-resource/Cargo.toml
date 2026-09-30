@@ -25,4 +25,5 @@ subagents = { version = "0.1.0", path = "../subagents" }
 zeroize.workspace = true
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 tempfile = "3.8"

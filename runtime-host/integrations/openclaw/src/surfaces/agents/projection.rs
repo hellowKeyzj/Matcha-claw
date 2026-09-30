@@ -2,15 +2,6 @@ use crate::native_config::agent_configuration as native_agent_configuration;
 
 use subagents as agents;
 
-pub(crate) fn native_wait(input: agents::AgentWait) -> Result<super::AgentWait, ()> {
-    super::AgentWait::try_new(
-        input.run_id,
-        input.wait_slice_ms,
-        input.rpc_timeout_buffer_ms,
-    )
-    .map_err(|_| ())
-}
-
 pub(crate) fn native_create(input: agents::AgentCreate) -> Result<super::AgentCreate, ()> {
     super::AgentCreate::try_new(input.name, input.workspace, input.model).map_err(|_| ())
 }
@@ -96,14 +87,6 @@ pub(crate) fn agents_file(
     }
 }
 
-pub(crate) fn agents_wait(result: super::AgentsWaitOutcome) -> agents::Outcome {
-    match result {
-        super::AgentsWaitOutcome::Observed(wait) => agents::Outcome::Waited(agent_wait(wait)),
-        super::AgentsWaitOutcome::Rejected => agents::Outcome::Rejected,
-        super::AgentsWaitOutcome::OutcomeUnknown => agents::Outcome::WaitUnknown,
-    }
-}
-
 pub(crate) fn agents_mutation<T>(
     result: super::AgentsMutationOutcome<T>,
     applied: impl FnOnce(T) -> agents::Outcome,
@@ -146,6 +129,11 @@ pub(crate) fn agent_updated(agent: super::AgentUpdated) -> agents::AgentUpdated 
 pub(crate) fn agent_deleted(agent: super::AgentDeleted) -> agents::AgentDeleted {
     agents::AgentDeleted {
         agent_id: agent.agent_id,
+        native_ok: agent.ok,
+        removed_bindings: agent.removed_bindings,
+        failed_count: agent.failed_count,
+        purge_failed_count: agent.purge_failed_count,
+        sealed_purge: agents::SealedPurge::NotAttempted,
     }
 }
 
@@ -162,19 +150,6 @@ pub(crate) fn agent_file(file: super::AgentFile) -> agents::AgentFile {
         size: file.size,
         updated_at_ms: file.updated_at_ms,
         content: file.content,
-    }
-}
-
-pub(crate) fn agent_wait(wait: super::AgentWaitResult) -> agents::AgentWaitResult {
-    agents::AgentWaitResult {
-        status: match wait.status {
-            super::AgentWaitStatus::Completed => agents::AgentWaitStatus::Completed,
-            super::AgentWaitStatus::Failed => agents::AgentWaitStatus::Failed,
-            super::AgentWaitStatus::Timeout => agents::AgentWaitStatus::Timeout,
-            super::AgentWaitStatus::Pending => agents::AgentWaitStatus::Pending,
-        },
-        started_at: wait.started_at,
-        ended_at: wait.ended_at,
     }
 }
 

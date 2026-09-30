@@ -4,6 +4,8 @@
  */
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
+import { waitForCall } from '@/lib/call-log-await';
+import { decodeCallReceipt } from '@/types/call-log/receipt';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { TaskSnapshotEvent } from '../types/session/task-snapshot';
 import {
@@ -223,6 +225,42 @@ async function fetchGatewayStatusSnapshot(): Promise<GatewayStatus> {
     }));
     throw error;
   }
+}
+
+async function runGatewayLifecycle(operation: 'start' | 'stop' | 'restart'): Promise<string | null> {
+  const receipt = decodeCallReceipt(await hostApiFetch<unknown>(`/api/gateway/${operation}`, { method: 'POST' }));
+  const call = await waitForCall(receipt, 'runtime-control');
+  const { detail } = call;
+  if (call.command !== `lifecycle.${operation}`
+    || detail.endpoint?.kind !== 'native-runtime'
+    || detail.endpoint.runtimeAdapterId !== 'openclaw'
+    || detail.endpoint.runtimeInstanceId !== 'local') {
+    throw new Error(`Gateway ${operation} call does not match the requested operation and OpenClaw local endpoint`);
+  }
+  const settled = operation === 'stop'
+    ? detail.lifecycle === 'idle' || detail.lifecycle === 'shutDown'
+    : detail.lifecycle === 'running';
+  if (call.status === 'succeeded' && detail.result === 'succeeded'
+    && settled && detail.error === null && detail.failure === null) {
+    return null;
+  }
+  let outcome = 'outcome is unknown. Check Gateway status before retrying';
+  if (detail.lifecycle === 'waitingToRestart') {
+    outcome = 'was deferred; completion is unknown. Check Gateway status before retrying';
+  } else if (call.status !== 'unknown' && detail.result !== 'unknown') {
+    if (call.status === 'rejected') {
+      outcome = 'was rejected. Check runtime availability before retrying';
+    } else if (detail.result === 'unsupported' || detail.error === 'unsupported') {
+      outcome = 'is unsupported';
+    } else if (detail.result === 'unavailable' || detail.error === 'unavailable') {
+      outcome = 'is unavailable. Check runtime availability before retrying';
+    } else if (call.status === 'failed' || detail.result === 'failed' || detail.error === 'commandFailed') {
+      outcome = 'failed. Check runtime diagnostics before retrying';
+    }
+  }
+  const diagnostics = [detail.lifecycle, detail.failure, detail.startupDiagnostic, detail.error]
+    .filter((value) => value !== null).join(', ');
+  return `Gateway ${operation} ${outcome}${diagnostics ? ` (${diagnostics})` : ''}`;
 }
 
 async function fetchRuntimeHostStatusSnapshot(): Promise<RuntimeHostStatusSnapshot> {
@@ -465,11 +503,9 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
   start: async () => {
     try {
       set({ lastError: null });
-      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/gateway/start', {
-        method: 'POST',
-      });
-      if (!result.success) {
-        set({ lastError: result.error || 'Failed to start Gateway' });
+      const error = await runGatewayLifecycle('start');
+      if (error) {
+        set({ lastError: error });
         return;
       }
       const status = await fetchGatewayStatusSnapshot();
@@ -482,7 +518,11 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
   stop: async () => {
     try {
       set({ lastError: null });
-      await hostApiFetch('/api/gateway/stop', { method: 'POST' });
+      const error = await runGatewayLifecycle('stop');
+      if (error) {
+        set({ lastError: error });
+        return;
+      }
       const status = await fetchGatewayStatusSnapshot();
       set((state) => (isCurrentGatewayStatus(state.status, status) ? { status } : {}));
     } catch (error) {
@@ -493,11 +533,9 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
   restart: async () => {
     try {
       set({ lastError: null });
-      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/gateway/restart', {
-        method: 'POST',
-      });
-      if (!result.success) {
-        set({ lastError: result.error || 'Failed to restart Gateway' });
+      const error = await runGatewayLifecycle('restart');
+      if (error) {
+        set({ lastError: error });
         return;
       }
       const status = await fetchGatewayStatusSnapshot();

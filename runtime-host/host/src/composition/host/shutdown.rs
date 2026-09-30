@@ -8,10 +8,13 @@ use foundation::{
         ObservationRecord, ObservationSink, ShutdownObservation, ShutdownReason, ShutdownStage,
         TraceContext,
     },
-    lifecycle::{EffectRegistration, ModuleScope},
+    lifecycle::{EffectRegistration, ModuleScope, ScopedEffectKind},
     process::{ShutdownOutcome, supervision::SupervisorSnapshot},
 };
-use platform::module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId};
+use platform::{
+    call::CallLogError,
+    module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
+};
 
 use matcha_agent::driver::{MatchaAgentInstance, MatchaRuntimeDriver};
 
@@ -78,13 +81,32 @@ impl Host {
         }
 
         observe_shutdown_start(&observation, "ownerRuntimeTasks");
-        self.owner_runtime_tasks.cancel_and_join().await;
-        observe_shutdown_settle(&observation, "ownerRuntimeTasks", ShutdownReason::Completed);
+        self.owner_runtime_tasks.drain_and_join().await;
+        observe_shutdown_settle(
+            &observation,
+            "ownerRuntimeTasks",
+            if self.shutdown_failures.failures().owner_joins().is_empty() {
+                ShutdownReason::Completed
+            } else {
+                ShutdownReason::JoinFailed
+            },
+        );
         shutdown_open_claw_session(self, &observation).await;
         self.runtime_processes.dispose_open_claw().await;
         self.runtime_processes
             .dispose_matcha(&mut self.event_sinks)
             .await;
+        observe_shutdown_start(&observation, "callLog");
+        self.call_scope.dispose_all_lifo().await;
+        observe_shutdown_settle(
+            &observation,
+            "callLog",
+            if self.shutdown_failures.failures().call_log().is_some() {
+                ShutdownReason::Unresolved
+            } else {
+                ShutdownReason::Completed
+            },
+        );
         if !self.shutdown_failures.all_settled() {
             let failures = self.shutdown_failures.failures();
             let report = self.shutdown_failures.report();
@@ -507,23 +529,57 @@ impl fmt::Display for HostShutdownError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transition(error) => error.fmt(formatter),
-            Self::Resources { .. } => {
-                formatter.write_str("one or more runtime resources did not shut down cleanly")
+            Self::Resources { failures, .. } => {
+                formatter.write_str("one or more runtime resources did not shut down cleanly")?;
+                if !failures.owner_joins().is_empty() {
+                    write!(
+                        formatter,
+                        "; owner task join failed: {}; inspect runtime-host diagnostics before restarting",
+                        failures.owner_joins().join(", ")
+                    )?;
+                }
+                if let Some(error) = failures.call_log() {
+                    write!(
+                        formatter,
+                        "; call log close failed: {error}; inspect runtime-host diagnostics before restarting"
+                    )?;
+                }
+                Ok(())
             }
         }
     }
 }
 
-impl std::error::Error for HostShutdownError {}
+impl std::error::Error for HostShutdownError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transition(error) => Some(error),
+            Self::Resources { failures, .. } => failures
+                .call_log
+                .as_ref()
+                .map(|error| error as &(dyn std::error::Error + 'static)),
+        }
+    }
+}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Failures {
+    owner_joins: Vec<&'static str>,
+    call_log: Option<CallLogError>,
     open_claw_session: Option<SessionShutdownFailure>,
     open_claw: Option<OwnerShutdownFailure>,
     matcha: Option<OwnerShutdownFailure>,
 }
 
 impl Failures {
+    pub fn owner_joins(&self) -> &[&'static str] {
+        &self.owner_joins
+    }
+
+    pub const fn call_log(&self) -> Option<CallLogError> {
+        self.call_log
+    }
+
     pub const fn open_claw_session(&self) -> Option<SessionShutdownFailure> {
         self.open_claw_session
     }
@@ -536,8 +592,12 @@ impl Failures {
         self.matcha
     }
 
-    const fn any(self) -> bool {
-        self.open_claw_session.is_some() || self.open_claw.is_some() || self.matcha.is_some()
+    fn any(&self) -> bool {
+        !self.owner_joins.is_empty()
+            || self.call_log.is_some()
+            || self.open_claw_session.is_some()
+            || self.open_claw.is_some()
+            || self.matcha.is_some()
     }
 }
 
@@ -548,28 +608,62 @@ pub enum OwnerShutdownFailure {
 }
 
 pub(super) struct ShutdownState {
+    owner_joins: Arc<Mutex<Vec<&'static str>>>,
+    call_log: Arc<Mutex<Option<Result<(), CallLogError>>>>,
     open_claw_session: SessionShutdown,
     open_claw: Arc<Mutex<SlotState>>,
     matcha: Arc<Mutex<SlotState>>,
 }
 
 impl ShutdownState {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(owner_joins: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
+            owner_joins,
+            call_log: Arc::new(Mutex::new(None)),
             open_claw_session: SessionShutdown::new(),
             open_claw: Arc::new(Mutex::new(SlotState::Pending)),
             matcha: Arc::new(Mutex::new(SlotState::Pending)),
         }
     }
 
+    pub(super) fn call_log_scope(&self, calls: call_log::CallLogModule) -> ModuleScope {
+        let mut scope = ModuleScope::new("call-log");
+        let outcome = Arc::clone(&self.call_log);
+        scope.register_effect_disposer(
+            ScopedEffectKind::OwnerTask,
+            "owner-task",
+            move || async move {
+                let result = calls.shutdown().await;
+                *outcome
+                    .lock()
+                    .expect("call log shutdown state lock poisoned") = Some(result);
+            },
+        );
+        scope
+    }
+
+    fn call_log_outcome(&self) -> Option<Result<(), CallLogError>> {
+        *self
+            .call_log
+            .lock()
+            .expect("call log shutdown state lock poisoned")
+    }
+
     fn all_settled(&self) -> bool {
-        self.open_claw_session.is_settled()
+        self.call_log_outcome().is_some()
+            && self.open_claw_session.is_settled()
             && self.open_claw_slot(SlotState::is_settled)
             && self.matcha_slot(SlotState::is_settled)
     }
 
     fn failures(&self) -> Failures {
         Failures {
+            owner_joins: self
+                .owner_joins
+                .lock()
+                .expect("owner join failure state lock poisoned")
+                .clone(),
+            call_log: self.call_log_outcome().and_then(Result::err),
             open_claw_session: self.open_claw_session.failure(),
             open_claw: self.open_claw_slot(SlotState::failure),
             matcha: self.matcha_slot(SlotState::failure),

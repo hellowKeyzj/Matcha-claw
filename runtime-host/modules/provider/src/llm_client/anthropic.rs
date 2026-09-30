@@ -49,11 +49,20 @@ pub async fn stream_generate(
     sink: &mut dyn LlmStreamSink,
 ) -> Result<(), LlmClientError> {
     let http_request = build_anthropic_messages_http_request(&anthropic_request(request, true));
-    let body = send_text(http, &http_request).await?;
-    for event in parse_anthropic_messages_sse_chunk(&body) {
-        sink.send(event).await?;
+    let mut builder = http
+        .post(&http_request.endpoint)
+        .body(http_request.body.to_string());
+    for (name, value) in &http_request.headers {
+        builder = builder.header(*name, value);
     }
-    Ok(())
+    let response = builder.send().await?;
+    if !response.status().is_success() {
+        return Err(LlmClientError::Protocol(format!(
+            "Anthropic Messages stream failed with HTTP {}",
+            response.status()
+        )));
+    }
+    super::consume_sse(response, sink, parse_anthropic_messages_sse_chunk).await
 }
 
 pub fn build_anthropic_messages_http_request(

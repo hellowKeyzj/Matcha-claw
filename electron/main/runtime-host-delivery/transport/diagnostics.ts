@@ -1,8 +1,8 @@
+import type { CallReceipt } from '../../../../src/types/call-log';
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import {
   hasExactKeys,
   isRecord,
-  isSafeNonNegativeInteger,
   sendLoopbackJson,
 } from './client';
 
@@ -16,18 +16,9 @@ const NOT_FOUND = {
 } as const;
 const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024;
 
-type DiagnosticsArchiveTerminal = 'completed' | 'cancelled' | 'failed';
-
-export type DiagnosticsArchiveReceipt = Readonly<{
-  archiveId: string;
-  terminal: DiagnosticsArchiveTerminal;
-  entries: number;
-  bytes: number;
-}>;
-
 export type DiagnosticsArchiveTransportResponse = Readonly<{
-  status: 200 | 503;
-  body: DiagnosticsArchiveReceipt | typeof UNAVAILABLE;
+  status: 202 | 503;
+  body: CallReceipt | typeof UNAVAILABLE;
 }>;
 
 export type DiagnosticsArchiveDownloadResponse = Readonly<{
@@ -62,9 +53,9 @@ export function createDiagnosticsArchiveTransport(
         body: {},
         signal,
       });
-      if (response?.status === 200) {
-        const receipt = decodeReceipt(response.body);
-        if (receipt?.terminal === 'completed') return { status: 200, body: receipt };
+      if (response?.status === 202) {
+        const receipt = decodeAdmission(response.body);
+        if (receipt) return { status: 202, body: receipt };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -95,22 +86,10 @@ export function createDiagnosticsArchiveTransport(
   };
 }
 
-function decodeReceipt(value: unknown): DiagnosticsArchiveReceipt | null {
-  if (!isRecord(value) || !hasExactKeys(value, ['archiveId', 'terminal', 'entries', 'bytes'])) {
-    return null;
-  }
-  if (!isArchiveId(value.archiveId)
-    || (value.terminal !== 'completed' && value.terminal !== 'cancelled' && value.terminal !== 'failed')
-    || !isSafeNonNegativeInteger(value.entries)
-    || !isSafeNonNegativeInteger(value.bytes)) {
-    return null;
-  }
-  return {
-    archiveId: value.archiveId,
-    terminal: value.terminal,
-    entries: value.entries,
-    bytes: value.bytes,
-  };
+function decodeAdmission(value: unknown): CallReceipt | null {
+  if (!isRecord(value) || !hasExactKeys(value, ['callId', 'accepted'])
+    || !isArchiveId(value.callId) || value.accepted !== true) return null;
+  return { callId: value.callId, accepted: true };
 }
 
 function decodeDownload(value: unknown, archiveId: string): Uint8Array | null {

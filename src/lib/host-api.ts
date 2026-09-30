@@ -1,4 +1,19 @@
 import { invokeIpc } from '@/lib/api-client';
+import type { CallReceipt } from '@/types/call-log';
+import { decodeCallReceipt } from '@/types/call-log/receipt';
+import { decodeWikiCallResult, type WikiCallResult } from '@/types/wiki-call-result';
+import type {
+  WikiGraphInsightsReceipt,
+  WikiHistoryConfig,
+  WikiHistoryReceipt,
+  WikiHistoryStats,
+  WikiLintConfig,
+  WikiLintRunInput,
+  WikiLintState,
+  WikiQuestionInput,
+  WikiQuestionTaskReceipt,
+  WikiReindexState,
+} from '@/types/wiki-capabilities';
 import { trackUiEvent } from './telemetry';
 import { mapBackendErrorCode, normalizeAppError } from './error-model';
 import {
@@ -414,20 +429,94 @@ export async function hostUvCheck(): Promise<boolean> {
   return result.installed;
 }
 
-export async function hostToolchainPrepare(): Promise<void> {
-  await hostApiFetch('/api/toolchain/uv/prepare', {
-    method: 'POST',
-    timeoutMs: 120000,
-  });
-}
-
 export type HostWikiRequest = Record<string, unknown>;
 
-export type HostWikiImportSourceReceipt = Readonly<{
-  sourceRelativePath: string;
-  pageRelativePath: string;
-  revision: unknown;
+export type HostWikiResearchInput = Readonly<{
+  topic: string;
+  searchQueries?: readonly string[];
+  sourceReviewId?: string;
+  rerunOfTaskId?: string;
 }>;
+
+export type HostWikiResearchTask = Readonly<{
+  id: string;
+  projectId: string;
+  topic: string;
+  searchQueries: readonly string[];
+  sourceReviewId: string | null;
+  rerunOfTaskId: string | null;
+  status: 'queued' | 'searching' | 'synthesizing' | 'saving' | 'done' | 'error';
+  webResults: readonly HostWikiResearchSource[];
+  synthesis: string;
+  savedPath: string | null;
+  error: string | null;
+  createdAt: number;
+}>;
+
+export type HostWikiResearchSource = Readonly<{
+  title: string;
+  url: string;
+  snippet: string;
+  source: string;
+}>;
+
+export type HostWikiResearchTasksReceipt = Readonly<{
+  projectId: string;
+  tasks: readonly HostWikiResearchTask[];
+}>;
+
+export type HostWikiSearchProvider = 'none' | 'tavily' | 'serpapi' | 'searxng' | 'ollama' | 'brave' | 'bocha' | 'firecrawl';
+
+export type HostWikiSearchProviderConfig = Readonly<{
+  baseUrl: string | null;
+  serpApiEngine: string | null;
+  searXngUrl: string | null;
+  searXngCategories: readonly string[] | null;
+  ollamaUrl: string | null;
+  apiKeyConfigured: boolean;
+}>;
+
+export type HostWikiSearchProviderConfigUpdate = Partial<Omit<HostWikiSearchProviderConfig, 'apiKeyConfigured'>> & Readonly<{ apiKey?: string }>;
+
+export type HostWikiAnyTxtConfig = Readonly<{
+  enabled: boolean;
+  endpoint: string;
+  filterDir: string;
+  filterExt: string;
+  limit: number;
+}>;
+
+export type HostWikiEmbeddingConfig = Readonly<{
+  enabled: boolean;
+  endpoint: string;
+  model: string;
+  outputDimensionality: number | null;
+  extraHeaders: Readonly<Record<string, string>>;
+  maxChunkChars: number;
+  overlapChunkChars: number;
+  batchSize: number;
+  concurrency: number;
+  apiKeyConfigured: boolean;
+}>;
+
+export type HostWikiSearchConfig = Readonly<{
+  provider: HostWikiSearchProvider;
+  providerConfigs: Readonly<Partial<Record<Exclude<HostWikiSearchProvider, 'none'>, HostWikiSearchProviderConfig>>>;
+  deepResearchSource: 'web' | 'anytxt' | 'both';
+  anyTxt: HostWikiAnyTxtConfig;
+  embedding: HostWikiEmbeddingConfig;
+}>;
+
+export type HostWikiSearchConfigUpdate = Readonly<{
+  provider?: HostWikiSearchProvider;
+  providerConfigs?: Partial<Record<Exclude<HostWikiSearchProvider, 'none'>, HostWikiSearchProviderConfigUpdate>>;
+  deepResearchSource?: HostWikiSearchConfig['deepResearchSource'];
+  anyTxt?: Partial<HostWikiAnyTxtConfig>;
+  embedding?: Partial<Omit<HostWikiEmbeddingConfig, 'apiKeyConfigured'>> & Readonly<{ apiKey?: string }>;
+}>;
+
+export type HostWikiSearchConfigReceipt = Readonly<{ projectId: string; config: HostWikiSearchConfig }>;
+export type HostWikiSearchProviderTestResult = Readonly<{ projectId: string; results: readonly HostWikiResearchSource[] }>;
 
 export type HostWikiGeneratedPageInput = Readonly<{
   path: string;
@@ -561,6 +650,40 @@ export async function hostWikiSearch(payload: HostWikiRequest): Promise<unknown>
   return hostApiFetch('/api/wiki/search', { method: 'POST', body: JSON.stringify(payload) });
 }
 
+export async function hostWikiResearchTasks(payload: { projectId?: string } = {}): Promise<HostWikiResearchTasksReceipt> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/research-tasks${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiStartResearch(payload: { projectId?: string; inputs: readonly HostWikiResearchInput[]; modelRef?: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/research/start', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiRerunResearchTask(payload: { projectId?: string; taskId: string; modelRef?: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/research-task/rerun', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiRemoveResearchTask(payload: { projectId?: string; taskId: string }): Promise<HostWikiResearchTasksReceipt> {
+  return hostApiFetch('/api/wiki/research-task/remove', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiSearchConfig(payload: { projectId?: string } = {}): Promise<HostWikiSearchConfigReceipt> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/search-config${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiUpdateSearchConfig(payload: HostWikiSearchConfigUpdate & { projectId?: string }): Promise<HostWikiSearchConfigReceipt> {
+  return hostApiFetch('/api/wiki/search-config', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiTestSearchProvider(payload: { projectId?: string; config: HostWikiSearchConfigUpdate; query?: string; maxResults?: number }): Promise<HostWikiSearchProviderTestResult> {
+  return hostApiFetch('/api/wiki/search-provider/test', { method: 'POST', body: JSON.stringify({ ...payload, query: payload.query ?? 'wikipedia', maxResults: payload.maxResults ?? 1 }) });
+}
+
 export async function hostWikiGraph(payload: { projectId?: string } = {}): Promise<unknown> {
   const query = new URLSearchParams();
   if (payload.projectId) query.set('projectId', payload.projectId);
@@ -579,28 +702,32 @@ export async function hostWikiUpdateSourceWatchConfig(payload: HostWikiSourceWat
   return hostApiFetch('/api/wiki/source-watch-config', { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiRescanSources(payload: HostWikiRequest = {}): Promise<unknown> {
-  return hostApiFetch('/api/wiki/rescan-sources', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiRescanSources(payload: HostWikiRequest = {}): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/rescan-sources', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiImportSource(payload: { projectId?: string; sourcePath: string }): Promise<HostWikiImportSourceReceipt> {
-  return hostApiFetch('/api/wiki/import-source', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiImportSource(payload: { projectId?: string; sourcePath: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/import-source', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiImportFolder(payload: { projectId?: string; folderPath: string }): Promise<unknown> {
-  return hostApiFetch('/api/wiki/import-folder', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiImportFolder(payload: { projectId?: string; folderPath: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/import-folder', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiRefreshSources(payload: { projectId?: string } = {}): Promise<unknown> {
-  return hostApiFetch('/api/wiki/refresh-sources', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiRefreshSources(payload: { projectId?: string } = {}): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/refresh-sources', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiApplyGeneratedPages(payload: { projectId?: string; sourcePath: string; files: HostWikiGeneratedPageInput[] }): Promise<unknown> {
-  return hostApiFetch('/api/wiki/apply-generated-pages', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiApplyGeneratedPages(payload: { projectId?: string; sourcePath: string; files: HostWikiGeneratedPageInput[] }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/apply-generated-pages', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiDeleteSource(payload: { projectId?: string; sourcePath: string; fileAlreadyDeleted?: boolean }): Promise<unknown> {
-  return hostApiFetch('/api/wiki/delete-source', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiDeleteSource(payload: { projectId?: string; sourcePath: string; fileAlreadyDeleted?: boolean }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/delete-source', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiCallResult(payload: { callId: string }): Promise<WikiCallResult> {
+  return hostApiFetchDecoded('/api/wiki/call-result', decodeWikiCallResult, { method: 'POST', body: JSON.stringify(payload) });
 }
 
 export async function hostWikiReviews(payload: { projectId?: string } = {}): Promise<unknown> {
@@ -637,12 +764,140 @@ export async function hostWikiCancelSourceTask(payload: { projectId?: string; so
   return hostApiFetch('/api/wiki/source-task/cancel', { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiEmbedPage(payload: HostWikiRequest): Promise<unknown> {
-  return hostApiFetch('/api/wiki/embed-page', { method: 'POST', body: JSON.stringify(payload) });
+export async function hostWikiEmbedPage(payload: HostWikiRequest): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/embed-page', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
 export async function hostWikiRetrieveContext(payload: HostWikiRequest): Promise<unknown> {
   return hostApiFetch('/api/wiki/retrieve-context', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiHistoryList(payload: { projectId?: string; path: string }): Promise<WikiHistoryReceipt> {
+  return hostApiFetch('/api/wiki/history/list', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiHistoryRestore(payload: { projectId?: string; path: string; versionId: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/history/restore', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiHistoryStats(payload: { projectId?: string } = {}): Promise<WikiHistoryStats> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/history/stats${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiHistoryConfig(payload: { projectId?: string } = {}): Promise<WikiHistoryConfig> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/history/config${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiUpdateHistoryConfig(payload: WikiHistoryConfig & { projectId?: string }): Promise<WikiHistoryConfig> {
+  return hostApiFetch('/api/wiki/history/config', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiHistoryClear(payload: { projectId?: string } = {}): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/history/clear', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiExportArchive(payload: { projectId?: string; destination: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/project/export-archive', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiImportArchive(payload: { archivePath: string; destination: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/project/import-archive', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiRebuildIndex(payload: { projectId?: string } = {}): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/rebuild-index', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiAskQuestion(payload: WikiQuestionInput): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/qa/ask', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiQuestionTask(payload: { projectId?: string; taskId: string }): Promise<WikiQuestionTaskReceipt> {
+  const query = new URLSearchParams({ taskId: payload.taskId });
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  return hostApiFetch(`/api/wiki/qa/task?${query}`);
+}
+
+export async function hostWikiCancelQuestion(payload: { projectId?: string; taskId: string }): Promise<WikiQuestionTaskReceipt> {
+  return hostApiFetch('/api/wiki/qa/cancel', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiSaveQuestion(payload: { projectId?: string; taskId: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/qa/save', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiLintConfig(payload: { projectId?: string } = {}): Promise<WikiLintConfig> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/lint/config${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiUpdateLintConfig(payload: WikiLintConfig & { projectId?: string }): Promise<WikiLintConfig> {
+  return hostApiFetch('/api/wiki/lint/config', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiLintState(payload: { projectId?: string } = {}): Promise<WikiLintState> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/lint/state${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiRunLint(payload: WikiLintRunInput = {}): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/lint/run', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiCancelLint(payload: { projectId?: string; taskId: string }): Promise<WikiLintState> {
+  return hostApiFetch('/api/wiki/lint/cancel', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiFixLint(payload: { projectId?: string; ids: string[] }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/lint/fix', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiReviewLint(payload: { projectId?: string; ids: string[] }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/lint/review', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiDeleteLint(payload: { projectId?: string; ids: string[] }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/lint/delete', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiDismissLint(payload: { projectId?: string; ids: string[] }): Promise<WikiLintState> {
+  return hostApiFetch('/api/wiki/lint/dismiss', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiReindexState(payload: { projectId?: string } = {}): Promise<WikiReindexState> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/embedding/reindex${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiStartReindex(payload: { projectId?: string } = {}): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/embedding/reindex', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiGraphInsights(payload: { projectId?: string } = {}): Promise<WikiGraphInsightsReceipt> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetch(`/api/wiki/graph/insights${queryText ? `?${queryText}` : ''}`);
+}
+
+export async function hostWikiDismissGraphInsight(payload: { projectId?: string; insightKey: string }): Promise<WikiGraphInsightsReceipt> {
+  return hostApiFetch('/api/wiki/graph/insights/dismiss', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiPrepareInsightResearch(payload: { projectId?: string; insightKey: string; modelRef?: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/graph/insights/research-input', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
 type WorkspaceFileRequest = {
@@ -1629,12 +1884,13 @@ export async function hostSessionAbort(
     runId?: string;
     approvalIds?: string[];
   },
+  options?: { traceId?: string | null },
 ): Promise<HostSessionAbortResult> {
   return sessionIdentityCapabilityExecute<HostSessionAbortResult>({
     capabilityId: SESSION_PROMPT_CAPABILITY_ID,
     operationId: 'sessions.abort',
     payload: bindSessionIdentityInput(payload),
-  }, { timeoutMs: SESSION_PEER_RPC_TIMEOUT_MS });
+  }, { timeoutMs: SESSION_PEER_RPC_TIMEOUT_MS, traceId: options?.traceId });
 }
 
 export async function hostSessionApprovals(

@@ -91,11 +91,11 @@ export async function handleMatchaAgentAppServerRoutes(
         sendJson(res, 503, { success: false, error: RESTART_UNKNOWN });
         return true;
       }
-      if (response.status !== 200 || !readMatchaLifecycle(response.body)) {
+      if (response.status !== 202) {
         sendJson(res, 500, { success: false, error: RESTART_UNAVAILABLE });
         return true;
       }
-      sendJson(res, 200, { success: true });
+      sendJson(res, 202, response.body);
     } catch {
       sendJson(res, 500, {
         success: false,
@@ -138,18 +138,6 @@ function readSafeStatusError(result: RuntimeStateProjection): string | null {
   const failure = typeof result.failure === 'string' ? result.failure : null;
   const startupDiagnostic = typeof result.startupDiagnostic === 'string' ? result.startupDiagnostic : null;
   return startupDiagnostic ?? failure;
-}
-
-function readMatchaLifecycle(body: RuntimeLifecycleResponse): MatchaLifecycle | null {
-  const result = body.result;
-  if (!isRecord(result)
-    || !isMatchaLifecycle(result.lifecycle)
-    || (result.failure !== undefined && typeof result.failure !== 'string')
-    || (result.startupDiagnostic !== undefined && typeof result.startupDiagnostic !== 'string')
-    || Object.keys(result).some((key) => !['lifecycle', 'failure', 'startupDiagnostic'].includes(key))) {
-    return null;
-  }
-  return result.lifecycle;
 }
 
 function isMatchaLifecycle(value: unknown): value is MatchaLifecycle {

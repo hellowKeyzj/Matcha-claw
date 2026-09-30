@@ -20,6 +20,7 @@ use crate::{
 };
 
 pub(crate) mod handler;
+mod results;
 
 const SUBAGENT_MANAGEMENT_CAPABILITY_ID: &str = "subagent.management";
 const SUBAGENT_SKILLS_CAPABILITY_ID: &str = "subagent.skills";
@@ -76,26 +77,30 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
 
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
-    (path == AUTHORIZATION_ENDPOINT || path.starts_with(SEALED_AGENT_READ_ENDPOINT_PREFIX)).then(
-        || {
-            let plan = if head.method == "POST" && path == AUTHORIZATION_ENDPOINT {
-                RouteHeadPlan::body_deadline
-            } else {
-                RouteHeadPlan::new
-            };
-            plan(
-                body_policy_for_method(head.method.as_str(), SUBAGENTS_REQUEST_BYTES),
-                SHORT_DEADLINE,
-                timeout_response,
-            )
-        },
-    )
+    (path == AUTHORIZATION_ENDPOINT
+        || path == results::ENDPOINT
+        || path == results::PRIVATE_ENDPOINT
+        || path.starts_with(SEALED_AGENT_READ_ENDPOINT_PREFIX))
+    .then(|| {
+        let plan = if head.method == "POST" && path == AUTHORIZATION_ENDPOINT {
+            RouteHeadPlan::body_deadline
+        } else {
+            RouteHeadPlan::new
+        };
+        plan(
+            body_policy_for_method(head.method.as_str(), SUBAGENTS_REQUEST_BYTES),
+            SHORT_DEADLINE,
+            timeout_response,
+        )
+    })
 }
 
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
         let path = pathname(request.path());
-        if path.starts_with(SEALED_AGENT_READ_ENDPOINT_PREFIX) {
+        if path == results::ENDPOINT || path == results::PRIVATE_ENDPOINT {
+            results::handle(request, dependencies).await.into()
+        } else if path.starts_with(SEALED_AGENT_READ_ENDPOINT_PREFIX) {
             sealed_agent_read(request, dependencies.sealed_agents)
                 .await
                 .into()
@@ -335,6 +340,8 @@ pub(crate) struct AgentsRequest {
     scope: Scope,
     target: Target,
     input: Value,
+    #[serde(skip)]
+    principal: String,
 }
 
 impl AgentsRequest {
@@ -344,8 +351,8 @@ impl AgentsRequest {
         verifier: &mut CapabilityDecisionVerifier,
         now: u64,
     ) -> Result<Self, RequestError> {
-        let request = Self::decode_semantics(value)?;
-        verifier
+        let mut request = Self::decode_semantics(value)?;
+        let decision = verifier
             .verify(
                 authorization,
                 now,
@@ -355,6 +362,7 @@ impl AgentsRequest {
                 AUTHORIZATION_SUBJECT,
             )
             .map_err(|_| RequestError::Invalid)?;
+        request.principal = decision.principal().to_owned();
         Ok(request)
     }
 
@@ -392,17 +400,6 @@ impl AgentsRequest {
         let input = Input::decode(operation, self.input)?;
         match (operation, input) {
             (Operation::List, Input::List { .. }) => Ok(agents::Command::List { endpoint }),
-            (
-                Operation::DraftWait,
-                Input::DraftWait {
-                    run_id,
-                    wait_slice_ms,
-                    rpc_timeout_buffer_ms,
-                    ..
-                },
-            ) => agents::AgentWait::try_new(run_id, wait_slice_ms, rpc_timeout_buffer_ms)
-                .map(|input| agents::Command::Wait { endpoint, input })
-                .map_err(|_| RequestError::Invalid),
             (
                 Operation::Create,
                 Input::Create {
@@ -618,7 +615,6 @@ fn parse_file_name(value: String) -> Result<agents::AgentFileName, RequestError>
 #[serde(rename_all = "camelCase")]
 enum Operation {
     List,
-    DraftWait,
     Create,
     Update,
     Delete,
@@ -642,8 +638,7 @@ impl Operation {
     fn requires_openclaw(self) -> bool {
         matches!(
             self,
-            Self::DraftWait
-                | Self::DisplayConfiguration
+            Self::DisplayConfiguration
                 | Self::PackageExport
                 | Self::PackageExportCloud
                 | Self::PackageInstall
@@ -668,7 +663,6 @@ impl Operation {
     fn parse(value: &str) -> Option<Self> {
         match value {
             "subagents.list" => Some(Self::List),
-            "subagents.draft.wait" => Some(Self::DraftWait),
             "subagents.create" => Some(Self::Create),
             "subagents.update" => Some(Self::Update),
             "subagents.delete" => Some(Self::Delete),
@@ -762,17 +756,6 @@ impl Endpoint {
 enum Input {
     List {
         endpoint: Endpoint,
-    },
-    DraftWait {
-        endpoint: Endpoint,
-        #[serde(rename = "agentId")]
-        agent_id: String,
-        #[serde(rename = "runId")]
-        run_id: String,
-        #[serde(rename = "waitSliceMs")]
-        wait_slice_ms: u64,
-        #[serde(rename = "rpcTimeoutBufferMs")]
-        rpc_timeout_buffer_ms: u64,
     },
     Create {
         endpoint: Endpoint,
@@ -1065,7 +1048,6 @@ impl Input {
     fn endpoint(&self) -> Option<&Endpoint> {
         match self {
             Self::List { endpoint }
-            | Self::DraftWait { endpoint, .. }
             | Self::Create { endpoint, .. }
             | Self::Update { endpoint, .. }
             | Self::Delete { endpoint, .. }
@@ -1090,22 +1072,6 @@ impl Input {
         let target_matches = |agent_id: &str| target.subagent_id.as_deref() == Some(agent_id);
         match (operation, self) {
             (Operation::List, Self::List { .. }) => true,
-            (
-                Operation::DraftWait,
-                Self::DraftWait {
-                    agent_id,
-                    run_id,
-                    wait_slice_ms,
-                    rpc_timeout_buffer_ms,
-                    ..
-                },
-            ) => {
-                valid_id(agent_id)
-                    && target_matches(agent_id)
-                    && valid_id(run_id)
-                    && (1_000..=60_000).contains(wait_slice_ms)
-                    && *rpc_timeout_buffer_ms <= 10_000
-            }
             (
                 Operation::Create,
                 Self::Create {
@@ -1747,88 +1713,6 @@ mod tests {
             ))
             .body(),
             json!({ "success": true, "package": { "agentId": "writer" } })
-        );
-    }
-
-    #[test]
-    fn draft_wait_accepts_only_bound_openclaw_input_and_redacts_receipts() {
-        let request = json!({
-            "id": "subagent.management",
-            "operationId": "subagents.draft.wait",
-            "scope": { "kind": "agent", "endpoint": endpoint("openclaw"), "agentId": "main" },
-            "target": { "kind": "subagent", "subagentId": "writer" },
-            "input": {
-                "kind": "draftWait",
-                "endpoint": endpoint("openclaw"),
-                "agentId": "writer",
-                "runId": "run-1",
-                "waitSliceMs": 30_000,
-                "rpcTimeoutBufferMs": 10_000,
-            },
-        });
-        assert!(AgentsRequest::decode_semantics(request.clone()).is_ok());
-
-        for value in [
-            {
-                let mut value = request.clone();
-                value["target"]["subagentId"] = json!("other");
-                value
-            },
-            {
-                let mut value = request.clone();
-                value["input"]["runId"] = json!("\u{0}");
-                value
-            },
-            {
-                let mut value = request.clone();
-                value["input"]["waitSliceMs"] = json!(999);
-                value
-            },
-            {
-                let mut value = request.clone();
-                value["input"]["rpcTimeoutBufferMs"] = json!(10_001);
-                value
-            },
-            {
-                let mut value = request.clone();
-                value["scope"]["endpoint"] = endpoint("matcha-agent");
-                value["input"]["endpoint"] = endpoint("matcha-agent");
-                value
-            },
-        ] {
-            assert_eq!(
-                AgentsRequest::decode_semantics(value),
-                Err(RequestError::Invalid)
-            );
-        }
-
-        let delivery = crate::projection::public::map_outcome(agents::Outcome::Waited(
-            agents::AgentWaitResult {
-                status: agents::AgentWaitStatus::Timeout,
-                started_at: Some(1),
-                ended_at: None,
-            },
-        ));
-        assert_eq!(delivery.status_code(), 200);
-        assert_eq!(
-            delivery.body(),
-            json!({
-                "success": true,
-                "status": "timeout",
-                "startedAt": 1,
-                "endedAt": null,
-            })
-        );
-        assert!(!delivery.body().to_string().contains("error"));
-
-        let unknown = crate::projection::public::map_outcome(agents::Outcome::WaitUnknown);
-        assert_eq!(unknown.status_code(), 409);
-        assert_eq!(
-            unknown.body(),
-            json!({
-                "success": false,
-                "error": "Subagent wait outcome is unknown",
-            })
         );
     }
 }

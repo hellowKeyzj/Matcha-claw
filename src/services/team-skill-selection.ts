@@ -1,4 +1,6 @@
 import { hostApiFetchDecoded } from '@/lib/host-api';
+import type { CallReceipt } from '@/types/call-log';
+import { decodeCallReceipt } from '@/types/call-log/receipt';
 
 export type TeamSkillSelectionId = `teamskill:v1:${string}`;
 
@@ -39,10 +41,6 @@ export type TeamSkillDependencyPlanResult =
   | Readonly<{ status: 'available'; plan: TeamSkillDependencyPlan }>
   | Readonly<{ status: 'invalid' | 'unavailable' }>;
 
-export type TeamSkillMaterialization = Readonly<{
-  status: 'materialized' | 'rejected' | 'outcome_unknown';
-}>;
-
 const SELECTION_ID = /^teamskill:v1:[a-f0-9]{64}$/;
 
 export function decodeValidation(value: unknown): TeamSkillPackageValidation {
@@ -77,17 +75,6 @@ export function decodeDependencyPlan(value: unknown): TeamSkillDependencyPlanRes
   return unavailable('TeamSkill selection is unavailable');
 }
 
-export function decodeMaterialization(value: unknown): TeamSkillMaterialization {
-  if (
-    isRecord(value)
-    && hasExactKeys(value, ['status'])
-    && (value.status === 'materialized' || value.status === 'rejected' || value.status === 'outcome_unknown')
-  ) {
-    return value as TeamSkillMaterialization;
-  }
-  return unavailable('TeamSkill materialization is unavailable');
-}
-
 export async function authorizeTeamSkillSelection(
   packageRoot: string,
 ): Promise<Readonly<{ selectionId: TeamSkillSelectionId }>> {
@@ -119,8 +106,8 @@ export async function materializeTeamSkillSelection(
   selectionId: string,
   teamId: string,
   idempotencyKey: string,
-): Promise<TeamSkillMaterialization> {
-  return hostApiFetchDecoded('/api/team/skill', decodeMaterialization, {
+): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/team/skill', decodeCallReceipt, {
     method: 'POST',
     body: JSON.stringify({ operation: 'team.skill.materialize', selectionId, teamId, idempotencyKey }),
   });

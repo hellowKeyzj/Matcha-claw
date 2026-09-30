@@ -18,6 +18,11 @@ const WIKI_ROUTES = {
   '/api/wiki/read-source-preview': { method: 'POST', action: 'readSourcePreview' },
   '/api/wiki/write-file': { method: 'POST', action: 'writeFile' },
   '/api/wiki/search': { method: 'POST', action: 'search' },
+  '/api/wiki/search-provider/test': { method: 'POST', action: 'testSearchProvider' },
+  '/api/wiki/research-tasks': { method: 'GET', action: 'researchTasks' },
+  '/api/wiki/research/start': { method: 'POST', action: 'startResearch' },
+  '/api/wiki/research-task/rerun': { method: 'POST', action: 'rerunResearchTask' },
+  '/api/wiki/research-task/remove': { method: 'POST', action: 'removeResearchTask' },
   '/api/wiki/graph': { method: 'GET', action: 'graph' },
   '/api/wiki/rescan-sources': { method: 'POST', action: 'rescanSources' },
   '/api/wiki/import-source': { method: 'POST', action: 'importSource' },
@@ -25,6 +30,7 @@ const WIKI_ROUTES = {
   '/api/wiki/refresh-sources': { method: 'POST', action: 'refreshSources' },
   '/api/wiki/apply-generated-pages': { method: 'POST', action: 'applyGeneratedPages' },
   '/api/wiki/delete-source': { method: 'POST', action: 'deleteSource' },
+  '/api/wiki/call-result': { method: 'POST', action: 'callResult' },
   '/api/wiki/reviews': { method: 'GET', action: 'reviews' },
   '/api/wiki/review/resolve': { method: 'POST', action: 'resolveReview' },
   '/api/wiki/review/dismiss': { method: 'POST', action: 'dismissReview' },
@@ -34,6 +40,27 @@ const WIKI_ROUTES = {
   '/api/wiki/source-task/cancel': { method: 'POST', action: 'cancelSourceTask' },
   '/api/wiki/embed-page': { method: 'POST', action: 'embedPage' },
   '/api/wiki/retrieve-context': { method: 'POST', action: 'retrieveContext' },
+  '/api/wiki/history/list': { method: 'POST', action: 'historyList' },
+  '/api/wiki/history/restore': { method: 'POST', action: 'historyRestore' },
+  '/api/wiki/history/stats': { method: 'GET', action: 'historyStats' },
+  '/api/wiki/history/clear': { method: 'POST', action: 'historyClear' },
+  '/api/wiki/project/export-archive': { method: 'POST', action: 'exportArchive' },
+  '/api/wiki/project/import-archive': { method: 'POST', action: 'importArchive' },
+  '/api/wiki/rebuild-index': { method: 'POST', action: 'rebuildIndex' },
+  '/api/wiki/qa/ask': { method: 'POST', action: 'askQuestion' },
+  '/api/wiki/qa/task': { method: 'GET', action: 'questionTask' },
+  '/api/wiki/qa/cancel': { method: 'POST', action: 'cancelQuestion' },
+  '/api/wiki/qa/save': { method: 'POST', action: 'saveQuestion' },
+  '/api/wiki/lint/state': { method: 'GET', action: 'lintState' },
+  '/api/wiki/lint/run': { method: 'POST', action: 'runLint' },
+  '/api/wiki/lint/cancel': { method: 'POST', action: 'cancelLint' },
+  '/api/wiki/lint/fix': { method: 'POST', action: 'fixLint' },
+  '/api/wiki/lint/review': { method: 'POST', action: 'reviewLint' },
+  '/api/wiki/lint/delete': { method: 'POST', action: 'deleteLint' },
+  '/api/wiki/lint/dismiss': { method: 'POST', action: 'dismissLint' },
+  '/api/wiki/graph/insights': { method: 'GET', action: 'graphInsights' },
+  '/api/wiki/graph/insights/dismiss': { method: 'POST', action: 'dismissGraphInsight' },
+  '/api/wiki/graph/insights/research-input': { method: 'POST', action: 'prepareInsightResearch' },
 } as const satisfies Record<string, { method: 'GET' | 'POST'; action: keyof WikiTransport }>;
 
 export async function handleWikiRoutes(
@@ -43,11 +70,21 @@ export async function handleWikiRoutes(
   transport: WikiTransport,
 ): Promise<boolean> {
   const route = WIKI_ROUTES[url.pathname as keyof typeof WIKI_ROUTES];
-  if (url.pathname === '/api/wiki/source-watch-config') {
+  if (url.pathname === '/api/wiki/source-watch-config' || url.pathname === '/api/wiki/search-config'
+    || url.pathname === '/api/wiki/history/config' || url.pathname === '/api/wiki/lint/config'
+    || url.pathname === '/api/wiki/embedding/reindex') {
     if (req.method === 'GET') {
       try {
         const projectId = url.searchParams.get('projectId')?.trim() || undefined;
-        const response = await transport.sourceWatchConfig(projectId);
+        const response = url.pathname === '/api/wiki/search-config'
+          ? await transport.searchConfig(projectId)
+          : url.pathname === '/api/wiki/history/config'
+            ? await transport.historyConfig(projectId)
+            : url.pathname === '/api/wiki/lint/config'
+              ? await transport.lintConfig(projectId)
+              : url.pathname === '/api/wiki/embedding/reindex'
+                ? await transport.reindexState(projectId)
+                : await transport.sourceWatchConfig(projectId);
         sendJson(res, response.status, response.body);
       } catch {
         sendJson(res, 503, UNAVAILABLE);
@@ -63,7 +100,15 @@ export async function handleWikiRoutes(
         return true;
       }
       try {
-        const response = await transport.updateSourceWatchConfig(body);
+        const response = url.pathname === '/api/wiki/search-config'
+          ? await transport.updateSearchConfig(body)
+          : url.pathname === '/api/wiki/history/config'
+            ? await transport.updateHistoryConfig(body)
+            : url.pathname === '/api/wiki/lint/config'
+              ? await transport.updateLintConfig(body)
+              : url.pathname === '/api/wiki/embedding/reindex'
+                ? await transport.startReindex(body)
+                : await transport.updateSourceWatchConfig(body);
         sendJson(res, response.status, response.body);
       } catch {
         sendJson(res, 503, UNAVAILABLE);
@@ -79,13 +124,21 @@ export async function handleWikiRoutes(
       const projectId = url.searchParams.get('projectId')?.trim() || undefined;
       const response = route.action === 'files'
         ? await transport.files(projectId, url.searchParams.get('directory') ?? undefined)
-        : route.action === 'graph'
-          ? await transport.graph(projectId)
+        : route.action === 'graph' || route.action === 'graphInsights'
+          ? await transport[route.action](projectId)
           : route.action === 'sourceFiles'
             ? await transport.sourceFiles(projectId)
             : route.action === 'reviews'
               ? await transport.reviews(projectId)
-              : await (transport[route.action] as () => Promise<{ status: number; body: unknown }>)();
+              : route.action === 'researchTasks'
+                ? await transport.researchTasks(projectId)
+                : route.action === 'historyStats'
+                  ? await transport.historyStats(projectId)
+                  : route.action === 'lintState'
+                    ? await transport.lintState(projectId)
+                    : route.action === 'questionTask'
+                      ? await transport.questionTask(projectId, url.searchParams.get('taskId') ?? undefined)
+                      : await (transport[route.action] as () => Promise<{ status: number; body: unknown }>)();
       sendJson(res, response.status, response.body);
       return true;
     }

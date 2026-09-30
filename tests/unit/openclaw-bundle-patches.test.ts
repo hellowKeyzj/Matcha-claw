@@ -24,14 +24,25 @@ function wrapReadToolWithSkillContent(tool, skills, options) {
 		if (content === void 0) throw Object.assign(/* @__PURE__ */ new Error(\`Virtual skill file not found: \${filePath}\`), { code: "ENOENT" });
 		return content;
 	};
-	const instructionTool = typeof instructionContent.get(instructionPath) === "string" ? virtualRead ??= createOpenClawReadTool(eraseSessionFileTool(createReadTool("/", {
-				operations: {
-					resolvePath: (filePath) => filePath,
-					access: async (filePath) => void readContent(filePath),
-					readFile: async (filePath) => Buffer.from(readContent(filePath), "utf8")
-				}
-	})), options) : tool;
-	if (!normalizedPath || !instructionPath || !instructionContent.has(instructionPath)) return tool.execute(toolCallId, args, signal, onUpdate);
+	let virtualRead;
+	return {
+		...tool,
+		execute: async (toolCallId, args, signal, onUpdate) => {
+			const normalizedPath = typeof args.path === "string" ? args.path : void 0;
+			const instructionPath = normalizedPath ? resolveInstructionPath(normalizedPath) : void 0;
+			if (!normalizedPath || !instructionPath || !instructionContent.has(instructionPath)) return tool.execute(toolCallId, args, signal, onUpdate);
+			const instructionTool = typeof instructionContent.get(instructionPath) === "string" ? virtualRead ??= createOpenClawReadTool(eraseSessionFileTool(createReadTool("/", {
+					operations: {
+						resolvePath: (filePath) => filePath,
+						access: async (filePath) => void readContent(filePath),
+						readFile: async (filePath) => Buffer.from(readContent(filePath), "utf8")
+					}
+			})), options) : tool;
+			const instructionArgs = { ...args, path: instructionPath };
+			const result = await instructionTool.execute(toolCallId, instructionArgs, signal, onUpdate);
+			return result;
+		}
+	};
 }
 `;
 
@@ -201,7 +212,119 @@ const AGENT_RUN_REGISTRY_FIXTURE = `
 function getAgentRunContext(runId) {
 	return { runId };
 }
+function unregisterAgentRunContext(runId) {
+	const removed = state.contexts.delete(runId);
+	return removed;
+}
+function releaseAgentRunContext(runId) {
+	const owners = state.owners.get(runId);
+	if (!owners || owners.leases.size > 0) return;
+	state.owners.delete(runId);
+	if (owners.clearRequested) unregisterAgentRunContext(runId);
+}
+function pruneAgentRunContexts(now) {
+	for (const [runId, context] of state.contexts) {
+		if (context.expiresAt <= now) {
+			state.contexts.delete(runId);
+		}
+	}
+}
 export { getAgentRunContext as c };
+`;
+
+const BUILTIN_OPENCLAW_FIXTURE = `
+async function prepareEmbeddedAttemptSessionBoundary(input) {
+	const convertToLlm = async (messages) => {
+		const normalized = normalizeMessages(messages);
+		return await baseConvertToLlm(input.appendOnlyRuntimeContext ? normalized : relocateCurrentRuntimeContextCarrierToTail(normalized));
+	};
+	return convertToLlm;
+}
+function createToolBase(params) {
+	return {
+		computerContextEpoch,
+		skillInstructionDeliveryCache,
+	};
+}
+async function runEmbeddedAttempt() {
+	return prepareEmbeddedAttemptSessionBoundary({
+		abortSignal: runAbortSignal,
+		activeSession,
+		appendOnlyRuntimeContext: true,
+	});
+}
+function createCacheTrace(params) {
+	const recordStage = (stage, payload = {}) => {
+		writeTrace(stage, payload);
+	};
+	return { recordStage };
+}
+function createAnthropicPayloadLogger(params) {
+	return (baseStreamFn) => (model, context, options) => {
+			const nextOnPayload = (payload) => {
+				const redactedPayload = redactPayload(payload);
+				writePayload(redactedPayload);
+				return options?.onPayload?.(payload, model);
+			};
+		return baseStreamFn(model, context, { ...options, onPayload: nextOnPayload });
+	};
+}
+`;
+
+const RESOURCE_LOADER_FIXTURE = `
+function estimateMessageTokenPressure(message) {
+	let tokens = MESSAGE_BOUNDARY_OVERHEAD_TOKENS;
+	return tokens + estimateContentTokens(message.content);
+}
+async function compactSession(pathEntries) {
+		const projectReplacement = (result, summary) => buildSessionContext([
+			...pathEntries,
+			{ ...result, summary },
+		]);
+		const compactionResult = await compact(buildSessionContext(pathEntries).messages);
+		const result = compactionResult;
+		const replacement = {
+			...result,
+			type: "compaction",
+			summary: capCompactionSummary(compactionResult.summary)
+		};
+		return projectReplacement(replacement, replacement.summary);
+}
+`;
+
+const SESSION_CONTEXT_FIXTURE = `
+function projectSessionEntryMessage(entry) {
+	return entry.message;
+}
+function* iterateSessionContextMessages(entries) {
+	for (const hydrated of entries) {
+		const message = projectSessionEntryMessage(hydrated);
+		if (!message) continue;
+		yield message;
+	}
+}
+/** Build model context */
+function buildSessionContext(entries) {
+	return { messages: [...iterateSessionContextMessages(entries)] };
+}
+`;
+
+const MODEL_DIAGNOSTIC_EVENTS_FIXTURE = `
+function createModelObserver(params) {
+	return (model, streamContext, options) => {
+		const ctx = params;
+		return observeModel({
+			contentCapture: ctx.contentCapture,
+		});
+	};
+}
+`;
+
+const CJK_CHARS_FIXTURE = `
+function estimateStringChars(text) {
+	return text.length;
+}
+export { estimateStringChars as e };
 `;
 
 const TRANSCRIPT_WRITE_CONTEXT_FIXTURE = `
@@ -355,6 +478,11 @@ function seedOpenClawBundleFixtures(openclawDir: string): {
   seedDistFile(openclawDir, 'agent-bundle-mcp-manager-api-test.js', MCP_MANAGER_API_FIXTURE);
   seedDistFile(openclawDir, 'agent-run-registry-test.js', AGENT_RUN_REGISTRY_FIXTURE);
   seedDistFile(openclawDir, 'transcript-write-context-test.js', TRANSCRIPT_WRITE_CONTEXT_FIXTURE);
+  seedDistFile(openclawDir, 'builtin-openclaw-test.js', BUILTIN_OPENCLAW_FIXTURE);
+  seedDistFile(openclawDir, 'resource-loader-test.js', RESOURCE_LOADER_FIXTURE);
+  seedDistFile(openclawDir, 'session-test.js', SESSION_CONTEXT_FIXTURE);
+  seedDistFile(openclawDir, 'attempt.model-diagnostic-events-test.js', MODEL_DIAGNOSTIC_EVENTS_FIXTURE);
+  seedDistFile(openclawDir, 'cjk-chars-test.js', CJK_CHARS_FIXTURE);
   return {
     readFile,
     loaderFile,
@@ -423,15 +551,52 @@ describe('openclaw bundle patches', () => {
     const workspaceSource = fs.readFileSync(workspaceFile, 'utf8');
     const bootstrapCacheSource = fs.readFileSync(bootstrapCacheFile, 'utf8');
     const providerFetchSource = fs.readFileSync(providerFetchFile, 'utf8');
+    const sealedContextSource = fs.readFileSync(path.join(openclawDir, 'dist', 'transcript-write-context-test.js'), 'utf8');
+    const builtinSource = fs.readFileSync(path.join(openclawDir, 'dist', 'builtin-openclaw-test.js'), 'utf8');
+    const resourceSource = fs.readFileSync(path.join(openclawDir, 'dist', 'resource-loader-test.js'), 'utf8');
+    const sessionSource = fs.readFileSync(path.join(openclawDir, 'dist', 'session-test.js'), 'utf8');
+    const diagnosticSource = fs.readFileSync(path.join(openclawDir, 'dist', 'attempt.model-diagnostic-events-test.js'), 'utf8');
+    const registrySource = fs.readFileSync(path.join(openclawDir, 'dist', 'agent-run-registry-test.js'), 'utf8');
 
     expect(results).toEqual([expect.objectContaining({
       id: 'matcha-sealed-skills',
       status: 'applied',
     })]);
-    expect(readSource).toContain('function readMatchaSealedSkillFile(');
-    expect(readSource).toContain('function rememberMatchaSealedSkillMeteringBinding(');
-    expect(readSource).toContain('rememberMatchaSealedSkillMeteringBinding(body.meteringBinding);');
-    expect(readSource).toContain('filePath.startsWith(MATCHA_SEALED_SKILL_PREFIX)');
+    expect(readSource).toContain('const matchaSealedAllowedKeys = matchaSealedSkillKeys(skills);');
+    expect(readSource).toContain('filePath.startsWith("matcha-skill://")');
+    expect(readSource).toContain('? await readMatchaSealedSkill(instructionPath, matchaSealedAllowedKeys, signal,');
+    expect(readSource).toContain('toolResultFitsBudget(text, resolveToolResultBudget(options?.modelContextWindowTokens))');
+    expect(readSource).toContain('const result = instructionPath.startsWith("matcha-skill://")');
+    expect(readSource).toContain(': await instructionTool.execute(toolCallId, instructionArgs, signal, onUpdate);');
+    expect(readSource).not.toContain('function readMatchaSealedSkillFile(');
+    expect(fs.existsSync(path.join(openclawDir, 'dist', 'matcha-sealed-skill-context.mjs'))).toBe(false);
+    expect(sealedContextSource).toContain('export { getOwnedSessionTranscriptWriterFence as o };');
+    expect(sealedContextSource).toContain('import { e as estimateStringChars } from "./cjk-chars-test.js";');
+    for (const source of [readSource, builtinSource, resourceSource, sessionSource, diagnosticSource, registrySource, providerFetchSource]) {
+      expect(source).toMatch(/^import \{ .+ \} from "\.\/transcript-write-context-test\.js";$/m);
+      expect(source).not.toContain('matcha-sealed-skill-context.mjs');
+    }
+    expect(sealedContextSource).toContain('function rememberMeteringBinding(value, runId)');
+    expect(sealedContextSource).toContain('rememberMeteringBinding(body.meteringBinding, runId);');
+    expect(sealedContextSource).toContain('state.skillBindingsByRunId.set(runId, current);');
+    expect(sealedContextSource).toContain('text: JSON.stringify(ref)');
+    expect(sealedContextSource).toContain('ref.packageSha256 && body.packageSha256 !== ref.packageSha256');
+    expect(builtinSource).toContain('await hydrateMatchaSealedSkills(normalized, input.matchaSealedAllowedKeys, input.abortSignal, attempt.runId)');
+    expect(builtinSource).toContain('matchaSealedSkillKeys: matchaSealedSkillKeys(params.skillsSnapshot?.resolvedSkills)');
+    expect(builtinSource).toContain('matchaSealedAllowedKeys: toolBase.matchaSealedSkillKeys');
+    expect(builtinSource).toContain('if (isMatchaSealedModelContext(payload, params.runId)) return;');
+    expect(builtinSource).toContain('return markMatchaSealedModelMessages(converted, attempt.runId);');
+    expect(builtinSource).toContain('if (isMatchaSealedModelContext(context, params.runId)) return;');
+    expect(resourceSource).toContain('MESSAGE_BOUNDARY_OVERHEAD_TOKENS + matchaSealedSkillTokenPressure(message)');
+    expect(resourceSource).toContain('collectMatchaSealedSkillRefs(buildSessionContext(pathEntries).messages)');
+    expect(resourceSource).toContain('return withMatchaSealedCompactionDetails(result.details, matchaSealedRefs, retainedMessages);');
+    expect(resourceSource).toContain('details: matchaSealedCompactionDetails(result)');
+    expect(resourceSource).toContain('details: matchaSealedCompactionDetails(compactionResult)');
+    expect(sessionSource).toContain('createMatchaSealedSkillCarry(hydrated.details, message.timestamp)');
+    expect(diagnosticSource).toContain('contentCapture: isMatchaSealedModelContext(streamContext, ctx.runId) ? void 0 : ctx.contentCapture');
+    expect(registrySource).toContain('clearMatchaSealedSkillRun(runId);\n\tconst removed = state.contexts.delete(runId);');
+    expect(registrySource).toContain('clearMatchaSealedSkillRun(runId);\n\tstate.owners.delete(runId);');
+    expect(registrySource).toContain('clearMatchaSealedSkillRun(runId);\n\t\t\tstate.contexts.delete(runId);');
     expect(loaderSource).toContain('function loadMatchaSealedSkillRecords(');
     expect(loaderSource).toContain('metadata: JSON.stringify({ openclaw: { skillKey } })');
     expect(loaderSource).not.toContain('metadata: JSON.stringify({ skillKey })');

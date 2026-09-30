@@ -10,6 +10,8 @@ import {
   storeProviderPrivateAccount,
   type ProviderAccountIntent,
 } from '../ipc/provider-private-auth';
+import { decodeCallReceipt } from '../../../src/types/call-log/receipt';
+import type { createProviderCallObserver } from '../ipc/provider-call-observation';
 import { logger } from '../../utils/logger';
 
 const ACCOUNT_ID = 'matcha-cloud';
@@ -19,6 +21,7 @@ type SyncDependencies = Readonly<{
   fetchClientBootstrap(token: string): Promise<CloudClientBootstrap>;
   providerAccountsTransport: ProviderAccountsTransport;
   providerModelsTransport: ProviderModelsTransport;
+  awaitProviderCall: ReturnType<typeof createProviderCallObserver>;
 }>;
 
 type ModelDraft = Readonly<{
@@ -75,7 +78,7 @@ async function reconcileNow(
   const account = await accountFromBootstrap(deps.providerAccountsTransport, bootstrap, owner);
   if (!account) return active;
   const stored = await storeProviderPrivateAccount(
-    deps.providerAccountsTransport,
+    { transport: deps.providerAccountsTransport, awaitProviderCall: deps.awaitProviderCall },
     account,
     apiKeyFromBootstrap(bootstrap),
   );
@@ -83,7 +86,7 @@ async function reconcileNow(
     logger.warn(`Cloud provider account sync failed: ${stored.status}`);
     return active;
   }
-  await replaceDiscoveredModels(deps.providerModelsTransport);
+  await replaceDiscoveredModels(deps);
   return owner;
 }
 
@@ -129,7 +132,8 @@ async function accountFromBootstrap(
   };
 }
 
-async function replaceDiscoveredModels(transport: ProviderModelsTransport): Promise<void> {
+async function replaceDiscoveredModels(deps: SyncDependencies): Promise<void> {
+  const transport = deps.providerModelsTransport;
   const discovery = await transport.discover(ACCOUNT_ID);
   if (discovery.status !== 200 || !isModelDiscovery(discovery.body)) {
     logger.warn(`Cloud provider model discovery failed: ${discovery.status}`);
@@ -142,8 +146,17 @@ async function replaceDiscoveredModels(transport: ProviderModelsTransport): Prom
     target: { kind: 'provider-models' },
     input: { kind: 'replace', accountId: ACCOUNT_ID, models: discovery.body.models },
   });
-  if (replacement.status !== 200) {
+  if (replacement.status !== 202) {
     logger.warn(`Cloud provider model sync failed: ${replacement.status}`);
+    return;
+  }
+  const call = await deps.awaitProviderCall(decodeCallReceipt(replacement.body), 'providerModels.replace');
+  if (call.detail.kind !== 'replaceModels' || call.detail.accountId !== ACCOUNT_ID) {
+    throw new Error('Cloud provider model call identity is invalid');
+  }
+  if (call.detail.phase !== 'terminal' || call.detail.outcome !== 'stored'
+    || call.detail.persisted !== 'confirmed' || call.detail.commit !== 'committed') {
+    logger.warn('Cloud provider model sync result was not confirmed');
   }
 }
 
@@ -165,7 +178,7 @@ async function removeCloudProvider(deps: SyncDependencies, active: SyncState): P
     return;
   }
   const deleted = await deleteProviderPrivateAccount(
-    deps.providerAccountsTransport,
+    { transport: deps.providerAccountsTransport, awaitProviderCall: deps.awaitProviderCall },
     ACCOUNT_ID,
     listed.body.account.revision,
   );

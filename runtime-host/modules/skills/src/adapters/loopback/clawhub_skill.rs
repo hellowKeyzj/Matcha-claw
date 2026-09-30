@@ -22,6 +22,7 @@ const BEARER_PREFIX: &str = "Bearer ";
 pub(super) enum RequestError {
     Invalid,
     Unauthorized,
+    Admission(platform::call::CallLogError),
 }
 
 #[derive(Deserialize)]
@@ -79,6 +80,7 @@ pub(super) struct Delivery {
     outcome: &'static str,
     slug: String,
     version: Option<String>,
+    receipt: Option<platform::call::CallReceipt>,
 }
 
 impl Delivery {
@@ -87,6 +89,7 @@ impl Delivery {
             outcome: "accepted",
             slug,
             version,
+            receipt: None,
         }
     }
 
@@ -95,6 +98,7 @@ impl Delivery {
             outcome: "rejected",
             slug,
             version,
+            receipt: None,
         }
     }
 
@@ -103,10 +107,18 @@ impl Delivery {
             outcome: "unknown",
             slug,
             version,
+            receipt: None,
         }
     }
 
+    pub(super) fn status_code(&self) -> u16 {
+        if self.receipt.is_some() { 202 } else { 200 }
+    }
+
     pub(super) fn body(&self) -> Value {
+        if let Some(receipt) = &self.receipt {
+            return json!(receipt);
+        }
         let mut body = json!({
             "outcome": self.outcome,
             "slug": self.slug,
@@ -126,6 +138,7 @@ pub(super) async fn handle(
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     handle: SkillsModule,
     now: u64,
+    call: Option<crate::operation::RecordedCall>,
 ) -> Result<Delivery, RequestError> {
     let authorization = headers
         .iter()
@@ -142,12 +155,37 @@ pub(super) async fn handle(
         slug,
         version,
     } = command;
-    let delivery = match handle.install_clawhub_skill(command).await {
-        Ok(SkillInstallOutcome::Accepted { .. }) => Delivery::accepted(slug, version),
-        Ok(SkillInstallOutcome::Rejected) => Delivery::rejected(slug, version),
-        Ok(SkillInstallOutcome::Unknown) | Err(_) => Delivery::unknown(slug, version),
-    };
-    Ok(delivery)
+    let call = call.ok_or(RequestError::Admission(
+        platform::call::CallLogError::Unavailable,
+    ))?;
+    {
+        let worker = handle.clone();
+        let terminal_slug = slug.clone();
+        let terminal_version = version.clone();
+        let receipt = handle
+            .submit_operation(call, async move {
+                let delivery = match worker.install_clawhub_skill(command).await {
+                    Ok(SkillInstallOutcome::Accepted { .. }) => {
+                        Delivery::accepted(terminal_slug, terminal_version)
+                    }
+                    Ok(SkillInstallOutcome::Rejected) => {
+                        Delivery::rejected(terminal_slug, terminal_version)
+                    }
+                    Ok(SkillInstallOutcome::Unknown) | Err(_) => {
+                        Delivery::unknown(terminal_slug, terminal_version)
+                    }
+                };
+                platform::loopback::Response::json(200, delivery.body())
+            })
+            .await
+            .map_err(RequestError::Admission)?;
+        return Ok(Delivery {
+            outcome: "accepted",
+            slug,
+            version,
+            receipt: Some(receipt),
+        });
+    }
 }
 
 #[cfg(test)]

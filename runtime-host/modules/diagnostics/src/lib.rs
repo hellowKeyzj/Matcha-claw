@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use foundation::execution::{ObservationSink, OwnedTask, OwnerRuntimeConfig, OwnerRuntimeSystem};
 use platform::{
+    call::{CallReceipt, CallRecorder},
     capability::CapabilityDecisionVerifier,
     module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
 };
@@ -62,6 +63,18 @@ impl DiagnosticsModule {
         Self { handle }
     }
 
+    pub fn with_call_recorder(mut self, recorder: CallRecorder) -> Self {
+        self.handle = self.handle.with_call_recorder(recorder);
+        self
+    }
+
+    pub async fn admit_archive(
+        &self,
+        cancellation: DiagnosticsArchiveCancellation,
+    ) -> Result<CallReceipt, DiagnosticsArchiveError> {
+        self.handle.admit_archive(cancellation).await
+    }
+
     pub async fn collect_archive(
         &self,
         cancellation: DiagnosticsArchiveCancellation,
@@ -99,7 +112,7 @@ impl DiagnosticsModule {
     ) -> platform::loopback::ModuleDescriptor {
         adapters::loopback::descriptor(adapters::loopback::Dependencies::new(
             verifier,
-            self.handle.clone(),
+            self.handle.clone().with_observation(observation.clone()),
             observation,
         ))
     }

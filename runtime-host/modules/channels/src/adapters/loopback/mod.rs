@@ -82,7 +82,9 @@ pub fn required_request_body_within_limit(
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
     is_route(path).then(|| {
-        let plan = if head.method == "POST" && path == "/api/channels/configure" {
+        let plan = if head.method == "POST"
+            && matches!(path, "/api/channels/configure" | "/api/channels/delete-config")
+        {
             RouteHeadPlan::body_deadline
         } else {
             RouteHeadPlan::new

@@ -58,7 +58,7 @@ async fn handle_request(
     };
     drop(verifier);
     match security.emergency(correlation).await {
-        Ok(outcome) => Response::from_delivery(outcome.into()),
+        Ok(receipt) => Response { status: 202, body: serde_json::json!(receipt) },
         Err(_) => Response::unavailable(),
     }
 }

@@ -89,6 +89,41 @@ function ensureIpcBridge(hub: HostEventHub, ipc: IpcRendererLike): void {
   };
 }
 
+const recoveryListeners = new Set<() => void>();
+let recoveryQueued = false;
+
+function notifyBrowserRecovery(): void {
+  if (recoveryQueued) return;
+  recoveryQueued = true;
+  queueMicrotask(() => {
+    recoveryQueued = false;
+    for (const listener of Array.from(recoveryListeners)) listener();
+  });
+}
+
+function onVisible(): void {
+  if (document.visibilityState === 'visible') notifyBrowserRecovery();
+}
+
+function onPageRestore(event: PageTransitionEvent): void {
+  if (event.persisted) notifyBrowserRecovery();
+}
+
+export function subscribeBrowserRecovery(listener: () => void): () => void {
+  if (recoveryListeners.size === 0) {
+    window.addEventListener('focus', notifyBrowserRecovery);
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onPageRestore);
+  }
+  recoveryListeners.add(listener);
+  return () => {
+    if (!recoveryListeners.delete(listener) || recoveryListeners.size !== 0) return;
+    window.removeEventListener('focus', notifyBrowserRecovery);
+    document.removeEventListener('visibilitychange', onVisible);
+    window.removeEventListener('pageshow', onPageRestore);
+  };
+}
+
 export function subscribeHostEvent<T = unknown>(
   eventName: string,
   handler: (payload: T) => void,

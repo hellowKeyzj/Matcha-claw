@@ -14,6 +14,7 @@ import {
 import { isTeamRuntimeCapabilityRequest } from './team-runtime-capability';
 import { parseJsonBody, sendJson } from '../route-utils';
 import type { TaskManagerTransport } from '../../main/runtime-host-delivery/transport/task-manager';
+import { decodeCallReceipt } from '../../../src/types/call-log/receipt';
 
 const CAPABILITY_NOT_AVAILABLE = {
   success: false,
@@ -268,7 +269,7 @@ export async function handleCapabilityRoutes(
       });
       logSessionTrace('electron.team.runtime.response', traceId, {
         status: response.status,
-        contract: response.status === 200 ? 'operation-result' : 'unavailable',
+        contract: response.status === 202 ? 'admission' : response.status === 200 ? 'operation-result' : 'unavailable',
       });
       sendJson(res, response.status, response.body);
     } catch {
@@ -305,7 +306,7 @@ export async function handleCapabilityRoutes(
     }
     try {
       const response = await deps.runtimeHostTransports.providerRoutingTransport.execute(body);
-      if (!isProviderRoutingResponse(response.body)) {
+      if (!isProviderRoutingResponse(response.body, response.status, body.operationId)) {
         sendJson(res, 503, PROVIDER_ROUTING_UNAVAILABLE);
       } else {
         sendJson(res, response.status, response.body);
@@ -489,13 +490,7 @@ async function executePluginRuntimeCapability(
       pluginId: body.target.pluginId,
       enabled: body.input.enabled,
     });
-    if (response.outcome === 'configured') {
-      return { status: 200, body: { outcome: 'configured' } };
-    }
-    if (response.outcome === 'rejected') {
-      return { status: 409, body: { outcome: 'rejected' } };
-    }
-    return { status: 503, body: PLUGIN_RUNTIME_UNAVAILABLE };
+    return { status: 202, body: response };
   } catch {
     return { status: 503, body: PLUGIN_RUNTIME_UNAVAILABLE };
   }
@@ -719,24 +714,20 @@ function isProviderRoutingScope(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['kind']) && value.kind === 'provider-routing';
 }
 
-function isProviderRoutingResponse(value: unknown): boolean {
+function isProviderRoutingResponse(value: unknown, status: number, operation: unknown): boolean {
+  if (status === 202 && operation === 'providerRouting.replace') {
+    decodeCallReceipt(value);
+    return true;
+  }
   if (!isRecord(value)) return false;
   if (hasExactKeys(value, ['success', 'error']) && value.success === false && typeof value.error === 'string') {
     return value.error === PROVIDER_ROUTING_INVALID.error
       || value.error === PROVIDER_ROUTING_UNAVAILABLE.error
       || value.error === 'Provider routing request was rejected';
   }
-  if (hasExactKeys(value, ['routing'])) return value.routing === null || isRouting(value.routing);
-  return hasExactKeys(value, ['desired', 'configuration'])
-    && isRecord(value.desired)
-    && hasExactKeys(value.desired, ['status', 'revision'])
-    && value.desired.status === 'stored'
-    && isSafePositiveInteger(value.desired.revision)
-    && isRecord(value.configuration)
-    && ((hasExactKeys(value.configuration, ['status']) && value.configuration.status === 'unavailable')
-      || (hasExactKeys(value.configuration, ['status', 'changed'])
-        && value.configuration.status === 'written'
-        && typeof value.configuration.changed === 'boolean'));
+  return status === 200 && operation === 'providerRouting.list'
+    && hasExactKeys(value, ['routing'])
+    && (value.routing === null || isRouting(value.routing));
 }
 
 function isRouting(value: unknown): boolean {

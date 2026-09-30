@@ -1,78 +1,98 @@
-# Owner-local async operation contract
+# Call log 与 owner-local 长操作
 
-## Final owner/facade model
+## 边界
 
-The public and internal compatibility surfaces are retired. Runtime Host does not expose a generic asynchronous-operation API or maintain a cross-owner queue, registry, priority policy, retry policy, retention store, or result store.
-
-The retained model is owner-local typed operation state. A concrete owner/facade owns admission, progress, terminal outcome and recovery query.
-
-## Final-form rule
+本轮批准统一持久 call log、全局 Calls 表和变化提示；没有恢复通用执行系统。`platform::call` 定义调用记录语言，`modules/call-log` 单写审计记录与 revision history；业务队列、执行、结果、恢复与 native ports 仍归原 owner。[VERIFY: runtime-host/platform/src/call.rs:221-225] [VERIFY: runtime-host/modules/call-log/src/lib.rs:32-44]
 
 ```text
-needs real business result to continue
-  -> command waits for the owner/native fact and returns that fact
-
-submission accepted is enough
-  -> command returns accepted + owner-local operationId
-  -> owner/facade typed query observes running/completed/failed/unknown
-  -> owner/facade typed event is only a best-effort hint
+module command/query -> typed CallContext -> original owner queue/operation
+                                          -> original canonical/native facts
+                    -> call-log writer -> calls + call_changes
+commit -> call.changed {callId, revision} -> consumer re-read
 ```
 
-Examples:
+`CallId` 是调用记录身份，不替代 session identity、runId、dispatchId、operationId 或其他 native/business identity。call log 不接收可执行工作，不保存通用 args/results/native raw/secrets；`detail` 只能是模块自有的安全摘要。[VERIFY: runtime-host/platform/src/call.rs:8-23] [VERIFY: runtime-host/platform/src/call.rs:74-105] [VERIFY: runtime-host/platform/src/call.rs:269-319]
+
+## 返回语义
 
 ```text
-Session send
-  -> wait for OpenClaw/Matcha to return the real runId/queued result
-  -> HTTP returns runId
-  -> tokens/completion continue through session delta/timeline
+public long operation
+  -> persist received -> concrete owner's bounded admission
+  -> persist accepted -> strict 202 {callId, accepted:true}
+  -> owner executes and records typed terminal
+  -> consumer waits for the same call identity
+  -> needs exact payload: short read of that module's typed retained result
+  -> needs committed state: short read of original canonical facts
+
+internal completion barrier / MCP immediate payload
+  -> preserve original await and typed response
 ```
 
-```text
-Toolchain prepare
-  -> Renderer lazy hostToolchainPrepare after explicit main-entry
-  -> Electron POST /api/toolchain/uv/prepare
-  -> Electron toolchainTransport.prepare()
-  -> modules/toolchain owner loopback waits for the real uv/Python result
-```
+`accepted` 只证明原 owner 接单，不证明 effect、连接、安装或任务成功。HTTP waiter 被丢弃不会自动结算/取消记录；body deadline 只限制收 body，不自动把操作后台化。[VERIFY: runtime-host/platform/src/call.rs:269-305] [VERIFY: runtime-host/platform/src/loopback.rs:266-326]
 
-```text
-Diagnostics collect and other accepted-only operations
-  -> return owner-local operationId
-  -> concrete owner/facade typed query observes running/completed/failed/unknown
-  -> concrete owner/facade typed event is only a best-effort hint
-```
+### 已核源码接线
 
-## Contract shape
+| 路径 | 实际语义 |
+|---|---|
+| Settings desired replace | POST desired 返回 202；Renderer wait，confirmed 后短 POST desired/projection 只传 callId，Main 重读验证 settings command/terminal/安全 bool 后执行 OS effect；Unknown 不执行 projection。[VERIFY: runtime-host/modules/settings/src/api.rs:25-47] [VERIFY: src/lib/settings-runtime.ts:48-78] [VERIFY: electron/main/runtime-host-delivery/products/settings/desired.ts:122-139] |
+| Connector mutations / observations | upsert/remove/session MCP 保留既有 admission；probe 与全量 status 新接原 owner queue / strict 202。consumer 等同 call 终态后短读完整 observation，不以最多 16 项审计摘要或最新 snapshot 代替；connected/disconnected/disabled/unsupported/unknown 全保留。sessionStatus 同样 strict 202，完整结果绑定原 signed principal 与完整 sessionIdentity，不公开 sessionKey，也不把 identity 塞入审计摘要。[VERIFY: runtime-host/modules/connectors/src/api.rs] [VERIFY: runtime-host/modules/connectors/src/owner/observations.rs] [VERIFY: src/lib/connectors-call.ts] |
+| Security mutations / emergency | transport 接受 receipt，Renderer helper 按模块 detail 等待；原 policy/receipt facts 保留。[VERIFY: electron/main/runtime-host-delivery/transport/security/policy.ts:192] [VERIFY: electron/main/runtime-host-delivery/transport/security/emergency.ts:44-45] [VERIFY: src/lib/security-runtime.ts:56-72] |
+| Plugins mutations | module-local bounded worker 接单，route 返回 202；不是 call-log writer 执行插件操作。[VERIFY: runtime-host/modules/plugins/src/operations.rs:47-109] [VERIFY: runtime-host/modules/plugins/src/adapters/loopback/handler.rs:88] [VERIFY: src/lib/plugins.ts:23-45] |
+| Skills long mutations / artifacts | 原 module-local bounded operations 接配置/启停/批量/卸载/commit/bundle/sealed export，strict 202；owner 完成后精确配置、批量 partial、upload receipt 与 bundle 由本模块 typed result 短读，普通卸载及 sealed 操作按安全终态确认。shutdown 排空/join，sealed cloud 包只走 Main 私有结果入口。[VERIFY: runtime-host/modules/skills/src/operation.rs] [VERIFY: runtime-host/modules/skills/src/result.rs] [VERIFY: src/lib/skills.ts] [VERIFY: electron/main/runtime-host-delivery/transport/skills/sealed.ts] |
+| Cloud sealed-skill / agent install | Main reserve/bind 原 lease 与 callId；Renderer wait 后短 POST packages/install/confirm。Skills 从安全终态派生结果；agent install 领取 Subagents 本次 typed result，保留 agentId/compensation，只有精确 packageInstalled 成功才 ack true。private lease 无 pending 时 no-op，epoch guard 保留；观察失败不猜安装失败，不自动重试。[VERIFY: electron/api/routes/packages.ts] [VERIFY: electron/main/cloud-account/package-authorization.ts] [VERIFY: src/stores/sealed-skills.ts] [VERIFY: src/stores/subagents.ts] |
+| Provider accounts replace/delete、models replace、routing replace | 四项 `providerAccounts.replace/delete`、`providerModels.replace`、`providerRouting.replace` 复用原 Global command queue `try_send`，持久 accepted 后 strict 202 `CallReceipt`；旧 200 mutation payload 不再成功。owner 本地 mutation → 发布 snapshot/记录 persisted+commit → 原 native reconcile → 安全 terminal；native Unknown/mismatch 不覆盖真实本地 commit，也不伪报 native success。Renderer wait 校验 command/kind 与账号 id/revision，用 closed safe detail 确认本地提交后短读 canonical projection；Main Cloud/OAuth 通过 call observer 等安全结果，交互 payload 不改。[VERIFY: runtime-host/modules/provider/src/api.rs:44-51] [VERIFY: runtime-host/modules/provider/src/api.rs:101-182] [VERIFY: runtime-host/modules/provider/src/api.rs:315-357] [VERIFY: runtime-host/modules/provider/src/api.rs:725-727] [VERIFY: runtime-host/modules/provider/src/owner/actor.rs:190-306] [VERIFY: runtime-host/modules/provider/src/call.rs:319-358] [VERIFY: electron/main/runtime-host-delivery/transport/providers/accounts.ts:180-213] [VERIFY: electron/main/runtime-host-delivery/transport/providers/models.ts:194-217] [VERIFY: electron/main/runtime-host-delivery/transport/providers/routing.ts:105-116] [VERIFY: src/lib/provider-call.ts:12-30] [VERIFY: src/stores/provider-model-catalog.ts:53-65] [VERIFY: src/lib/capability-routing.ts:192-208] [VERIFY: electron/main/ipc/provider-call-observation.ts:7-24] |
+| Provider private account handoff | public store/delete IPC 只短返 receipt；Main 保有 encrypted previous bytes/reference/revision lock，内部 transaction id 随 signed request 交 owner 私有 resolver claim/settle，不进入 public receipt/detail。Stored/Deleted→retained，Unknown→unknown，其余→rejected；只有 rejected restore。已知 400/422/not-admitted 503 且未 claimed 可直接回滚，普通 unavailable/非法 receipt/观察失败不能猜未接单。settle failure 强制 safe call Unknown；不撤销真实 committed、不伪报私有确认。[VERIFY: electron/main/ipc/provider-private-auth.ts:156-188] [VERIFY: electron/main/ipc/provider-private-auth.ts:246-254] [VERIFY: electron/main/ipc/provider-private-auth.ts:587-654] [VERIFY: electron/main/ipc/provider-private-auth/account-transactions.ts:18-75] [VERIFY: runtime-host/modules/provider/src/owner/actor.rs:316-362] [VERIFY: runtime-host/modules/provider/src/call.rs:337-358] |
+| Channel configure | 原 Channel owner 接单返回 receipt；catalog/config read/login 等不能据此宣称全部 202。[VERIFY: runtime-host/modules/channels/src/api.rs:158-189] [VERIFY: electron/main/runtime-host-delivery/transport/channels/catalog.ts:148-149] |
+| Channel delete-config | 原 keyed Delete queue `try_send`，持久 accepted 后返回 strict 202 `CallReceipt`；capability 为 `channels.config.delete`，call command/detail.operation 为 `deleteConfig`。Renderer wait 校验同 channel/account 与 succeeded/confirmed 后，store 才移除 UI 项并短读 canonical snapshot；拒绝/Unknown 不假报删除。disconnect/logout 另已接 strict 202，保留原七字段安全终态及 accountId 必填/可缺省分界；connect、QR login、pairing 不改。[VERIFY: runtime-host/modules/channels/src/api.rs:55-73] [VERIFY: runtime-host/modules/channels/src/api.rs:192-200] [VERIFY: runtime-host/modules/channels/src/adapters/loopback/delete.rs:5-8] [VERIFY: runtime-host/modules/channels/src/adapters/loopback/delete.rs:74-91] [VERIFY: electron/main/runtime-host-delivery/transport/channels/delete-config.ts:37-63] [VERIFY: src/lib/channel-runtime.ts:292-311] [VERIFY: src/stores/channels.ts:327-344] |
+| Fleet long actions | 原 owner admit_*；既有七项 long action 保持 HTTP 200 accepted body，附 callId/accepted、dispatchId 保留，不统一改 202。probe/delete UI 仍 waitForCall('fleet') 后短读 canonical snapshot；不新增 execution HTTP wait query/15min snapshot 轮询。[VERIFY: runtime-host/modules/fleet/src/owner/handle.rs:69-220] [VERIFY: runtime-host/modules/fleet/src/adapters/loopback/mod.rs:276-308] [VERIFY: electron/main/runtime-host-delivery/transport/fleet.ts:532-537] [VERIFY: src/stores/remote-fleet.ts:998-1018] |
+| Fleet resources register | 本轮仅 register 原 Global lane 短 admit：try_send 后持久 accepted，202 body 为 `{outcome:'accepted',callId,accepted:true}`；owner 原 source-backed registration 写终态。transport 拒绝 200/旧 resourceRegistered 假成功；没有真实 Renderer caller，不新增 UI 或结果 store。[VERIFY: runtime-host/modules/fleet/src/owner/handle.rs:1012-1036] [VERIFY: runtime-host/modules/fleet/src/owner/actor.rs:2655-2661] [VERIFY: runtime-host/modules/fleet/src/adapters/loopback/mod.rs:302-308] [VERIFY: electron/main/runtime-host-delivery/transport/fleet.ts:800-809] |
+| Diagnostics archive | Rust route/transport 202；Renderer wait 读取 diagnostics typed receipt；download/export 仍保留原结果。[VERIFY: runtime-host/modules/diagnostics/src/adapters/loopback/mod.rs:155-163] [VERIFY: electron/main/runtime-host-delivery/transport/diagnostics.ts:56-58] [VERIFY: src/lib/diagnostics-archive.ts:21-36] |
+| Runtime-control start / restart / stop | OpenClaw / Matcha 手动 lifecycle 进入原 PeerOwner bounded queue，closing / full 拒绝，持久 accepted 后返回 strict 202；PeerOwner await 原 supervisor 真实完成结果再写 safe terminal。Gateway 等同 command/endpoint 成功终态后短读 status；internal stop/bootstrap/shutdown 仍等待完成屏障，status 与 interactive login 不改。AlreadySatisfied 保留原错误→Unknown，不用最新 snapshot 猜成功。[VERIFY: runtime-host/host/src/composition/peer/handle.rs] [VERIFY: runtime-host/host/src/composition/peer/actor.rs] [VERIFY: electron/main/runtime-host-delivery/transport/runtime-control.ts] [VERIFY: src/stores/gateway.ts] |
+| Toolchain prepare | 原 owner bounded queue 接单、持久 accepted 后 route/transport 返回 202 `CallReceipt`；MainLayout lazy warmup 只需要接单。owner 继续 native prepare 并写 typed outcome，UV check/status 保持短查询与原结果。[VERIFY: runtime-host/modules/toolchain/src/api.rs:91-130] [VERIFY: runtime-host/modules/toolchain/src/owner/actor.rs:80-104] [VERIFY: runtime-host/modules/toolchain/src/owner/actor.rs:162-173] [VERIFY: electron/main/runtime-host-delivery/transport/toolchain.ts:53-71] [VERIFY: src/App.tsx:70-83] |
+| Organization materialization / runDelete | provision、TeamSkill materialize、manual materialize-and-create 与 runDelete 走原 bounded workflow / strict 202；native readback、commit、compensation、purge 仍归原 owner。成功物化需 nativeInstalled=true 且 commit=committed；删除需同 call/run 身份及 succeeded/purged 才清理 UI，partial/Unknown 不当成功。超出原安全引用格式的请求 ID 只投影专用 teamIdHash/runIdHash，consumer 对请求 UTF-8 SHA256 核验；manual 生成的安全 runId 保留，不能为审计扩大原串或收窄合法请求。team.runCreate 与内部/MCP 必要即时 payload 保留 await。[VERIFY: runtime-host/modules/organization/src/call.rs] [VERIFY: runtime-host/modules/organization/src/adapters/loopback/manual/handler.rs] [VERIFY: src/stores/teams.ts] |
+| Wiki embed | embed-page 进入原 `Embed(project:path)` command queue，持久 accepted 后返回 202；当前 project 在 admission 时解析绑定。Wiki 页面 wait 校验 command、detail.operation、succeeded/completed 才提示成功；HTTP 不持 embedding gate，MCP 原 await 不变。[VERIFY: runtime-host/modules/wiki/src/api.rs:695-725] [VERIFY: runtime-host/modules/wiki/src/adapters/loopback/mod.rs:334-343] [VERIFY: electron/main/runtime-host-delivery/transport/wiki/index.ts:86-118] [VERIFY: src/lib/host-api.ts:629-630] [VERIFY: src/pages/Wiki/index.tsx:621-630] |
+| Wiki import-source / import-folder / refresh-sources | 三项 HTTP admit 复用原 bounded 32 `OwnedTask` workflow 与 stage/parse/commit lanes，当前 project 在 admission 时绑定，持久 accepted 后 strict 202 receipt。operation 与 command 同 endpoint basename；counts 仅 imported/skipped/deleted/moved，未完或失败为 null，completed 与 counts 同一次 terminal finish。页面 wait 校验同 command/operation 与 succeeded/completed、counts 后显示摘要并短读 canonical snapshot；refreshSources callback 无真实 UI 挂载入口；rescan 已在后续批次改为 admission/wait。这三项仅需安全 counts，不另存完整结果；apply/delete 的精确结果及 MCP 分界见后续批次。[VERIFY: runtime-host/modules/wiki/src/api.rs:214-230] [VERIFY: runtime-host/modules/wiki/src/api.rs:312-328] [VERIFY: runtime-host/modules/wiki/src/api.rs:370-386] [VERIFY: runtime-host/modules/wiki/src/api.rs:753-768] [VERIFY: runtime-host/modules/wiki/src/call.rs:285-362] [VERIFY: runtime-host/modules/wiki/src/call.rs:178-205] [VERIFY: electron/main/runtime-host-delivery/transport/wiki/index.ts:73-118] [VERIFY: src/pages/Wiki/index.tsx:429-503] [VERIFY: src/pages/Wiki/index.tsx:653] [VERIFY: runtime-host/modules/wiki/src/adapters/mcp/mod.rs:126-134] |
 
-Each async owner defines its own public DTO. Shared generic fields are naming conventions, not a Host-wide operation type:
+前两批新增范围：上一批 Provider 四项、Channel delete-config、Wiki 三项；后续批次为 Provider discover、Connector probe/status、Skills 配置/启停/批量/卸载/产物、Subagents 创建/更新/删除/配置/包安装、Team materialize/manual create/runDelete、Wiki rescan/applyGeneratedPages/deleteSource、Runtime stop。各模块实现与验证状态分开记录，源码接线不等于整体验证通过。Sessions 整块、team.runCreate 与条件候选不在此批；queries、登录交互、内部完成屏障与 MCP 必要即时 payload 不机械后台化。Renderer 经 IPC 的默认观察超时仍为 30s，body deadline、native 执行预算与观察超时各自独立，不能宣称所有 5s/30s 问题已修复。[VERIFY: electron/main/ipc/hostapi-proxy-ipc.ts:21] [VERIFY: electron/main/ipc/hostapi-proxy-ipc.ts:152-165]
 
-```text
-operationId
-status: accepted | running | succeeded | failed | unknown
-progress?        // owner-defined
-result?          // owner-defined and secret-safe
-error?           // owner-defined public error
-updatedAt?
-```
+### 后续批次精确结果接线
 
-No owner may expose private auth material, raw native payload, process argv, secret paths or trace-only fields through operation DTOs or events.
+| 路径 | 结果消费者 |
+|---|---|
+| Provider discover | wait 同 command/account 后 GET discovery-result；先核原始 count，再沿原 UI 去重与选择导入，不自动保存发现模型。[VERIFY: src/lib/provider-model-catalog.ts] [VERIFY: electron/api/routes/provider-models.ts] |
+| Subagents mutations | create/update/delete、description/model/skills/tools set 与 package install strict 202；原 native workspace 初始化失败、delete partial、invalid keys/latestView 与安装补偿由本次 typed result 保留。只有确认删除成功才清 UI/头像/角色绑定；export/exportCloud 同样 strict 202；公开结果仅本次 agentId/fileName/size/exportedAtMs，私有 immutable artifact 仅 Main 可取。files 保原契约；人设草稿工作流及专用 `subagents.draft.wait` 已退役。[VERIFY: runtime-host/modules/subagents/src/application/results.rs] [VERIFY: electron/main/runtime-host-delivery/products/agents.ts] [VERIFY: src/lib/subagent-call.ts] |
+| Wiki rescan / apply / delete | 三项复用原 Commit lane，当前 project 在 admission 绑定；rescan 等 completed 后短读状态，apply/delete 从 write-scope 结果入口领取精确 written/deleted 集合。MCP 仍 await，apply 原 embedding best-effort 语义不重裁。[VERIFY: runtime-host/modules/wiki/src/api.rs] [VERIFY: runtime-host/modules/wiki/src/call_result.rs] [VERIFY: src/types/wiki-call-result.ts] [VERIFY: src/pages/Wiki/index.tsx] |
 
-## Foundation execution boundary
+## 第三批：11 种命令与 6 个 Main 入口
 
-```text
-owner command
-  -> OperationHandle<T> / ServiceHandle<T>
-  -> owner-defined state and terminal oracle
-  -> owner-local typed query/event
-```
+本批只纳入明确建议中的剩余项，Sessions、Workspace、Browser、team.runCreate 与 69 个条件候选不动；不把目录剩余项等同于无需后台化。原内部/MCP 完成屏障仍保留。
 
-`foundation::execution` only manages task lifecycle, cancellation and join. It does not own business facts, store results, decide retry policy or provide a recovery projection.
+| 路径 | 执行与结果责任 |
+|---|---|
+| Connector sessionStatus | 原 owner strict 202；同 callId/principal/sessionIdentity 短读完整 statuses，原 unknown/disabled 投影不变。[VERIFY: runtime-host/modules/connectors/src/owner/observations.rs] [VERIFY: src/stores/session-connector-status.ts] |
+| Channel disconnect / logout | 原 keyed owner strict 202，native 确认后安全 terminal；logout 缺省 accountId 仍为 null，无新结果槽。[VERIFY: runtime-host/modules/channels/src/owner/actor.rs] [VERIFY: src/lib/channel-runtime.ts] |
+| Cron create / update / delete | toggle 归 update；原 Global owner strict 202，成功后 POST results `{callId,command,jobId?}` 领取本次 exact job / actual removed；原合法 jobId 不为审计收窄。[VERIFY: runtime-host/modules/cron/src/application/results.rs] [VERIFY: src/lib/cron-call.ts] |
+| Subagents package.export / exportCloud | 原 owner strict 202；公开结果仅 metadata，Main 私有 artifact 绑定原授权/agent/endpoint；本次不可变 bytes，不依赖可被后续导出清理的 path。[VERIFY: runtime-host/modules/subagents/src/adapters/loopback/results.rs] [VERIFY: runtime-host/modules/sealed-resource/src/store/agent.rs] |
+| Wiki source-task.retry / resume | 原 workflow strict 202；核本次 project/规范化 source，done 且执行无错误才 completed；failed/cancelled 按实际状态，pending/running/paused/missing 为 Unknown/incomplete。无新完整结果槽或 UI 入口。[VERIFY: runtime-host/modules/wiki/src/api.rs] [VERIFY: runtime-host/modules/wiki/src/call.rs] |
+| Team delete | 原 owner strict 202，原 native settlement callbacks 收口同次取消、purge 与 materialization；只有 succeeded/tombstoned 才清 UI，partial/Unknown 不冒充删除。[VERIFY: runtime-host/modules/organization/src/owner/actor.rs] [VERIFY: src/stores/teams.ts] |
+| Main full child restart | 原 lifecycle owner 返回 restartId，GET 同次状态；只保 latest，旧 id 404。内部 restart Promise 屏障保留，不寄托到将被替换的 Rust host。[VERIFY: electron/main/runtime-host-delivery/lifecycle-owner.ts] [VERIFY: electron/api/routes/runtime-host-process.ts] |
+| Main update download | IPC 短返 accepted；原 updater 单次 in-flight 与 status/progress/downloaded/error 完成，不建 Rust job。[VERIFY: electron/main/updater.ts] [VERIFY: src/stores/update.ts] |
+| Main package download / install preparation / agent upload / skill upload confirm | 原 CloudAccountService 具体 bounded operation，独立 `cloud-package:` operationId；POST operation-result 非消费短读，account epoch 隔离，shutdown 封 admission 后排空。install 结果携独立 Rust receipt，confirm/lease/compensation 保留；export 与 upload 成功分开。[VERIFY: electron/main/cloud-account/service.ts] [VERIFY: electron/main/cloud-account/package-operations.ts] [VERIFY: src/types/cloud-package-operation.ts] [VERIFY: src/lib/cloud-package-call.ts] |
 
-## Cutover checklist per async operation
+## 模块自有结果
 
-- identify the concrete owner/facade;
-- define the owner-local operation id and typed query/event;
-- prove the completion/failure/unknown oracle;
-- prove lost event recovery through the query path;
-- remove any generic async-operation producer or compatibility lookup for that operation;
-- keep Renderer/Electron route ownership unchanged unless the operation block explicitly authorizes and updates that public contract.
+完整模型列表、native mutation view、配置 invalid keys、批量 partial 集合、Wiki 写入/删除集合与 bundle/包字节不进入 CallLog。Provider、Connectors、Cron、Subagents、Wiki、Skills 各自在 admission 前预留本模块有限结果槽，pending 不按 TTL 删除，完成结果先存入再写审计终态；读不消费，missing/expired 明确返回，重启不恢复或 replay，不回退最新 snapshot。短结果读不排入 native 长操作占用的执行队列，授权仍沿原 signed principal/scope/subject，CallId 不是凭证。[VERIFY: runtime-host/modules/provider/src/owner/discovery.rs] [VERIFY: runtime-host/modules/connectors/src/owner/observations.rs] [VERIFY: runtime-host/modules/subagents/src/application/results.rs] [VERIFY: runtime-host/modules/wiki/src/call_result.rs] [VERIFY: runtime-host/modules/skills/src/result.rs]
+
+Provider 64 槽/完成后 10min、Connectors 64 槽/5min、Wiki 64 槽/10min、Cron 16 槽/10min、Subagents 16 槽/10min；Subagents export 每槽预留 512KiB、总预留 8MiB，原 package 上限 256KiB，预算不保证锁外编码的进程内存峰值。Main package operation 16 槽/10min、pending 不过期、具体网络链串行；结果不跨 epoch、不恢复 replay。Skills pending 与 retained 共 16 槽/10min、预留总预算 64MiB，普通结果 2MiB、bundle 4MiB、sealed 14MiB 按原输入/产物上界预留。sealed cloud export 保留本次不可变包字节，通过未公开给 Renderer 的 signed 私有结果入口交 Main，一次解码/校验后进入原 cloud upload；不能用可能被下一次 export 清理的 installed packagePath 替代本次产物。[VERIFY: runtime-host/modules/provider/src/owner/discovery.rs] [VERIFY: runtime-host/modules/connectors/src/owner/observations.rs] [VERIFY: runtime-host/modules/wiki/src/call_result.rs] [VERIFY: runtime-host/modules/subagents/src/application/results.rs] [VERIFY: runtime-host/modules/skills/src/result.rs] [VERIFY: runtime-host/modules/sealed-resource/src/store/skill.rs] [VERIFY: electron/api/routes/packages.ts]
+
+## 持久观察与恢复
+
+- 一套 SQLite `calls` 当前行 + `call_changes` revision history；两者事务提交后才发 `{callId, revision}`。通知可丢，查询才是审计观察权威。[VERIFY: runtime-host/modules/call-log/src/store.rs:44-65] [VERIFY: runtime-host/modules/call-log/src/store.rs:108-121] [VERIFY: runtime-host/modules/call-log/src/lib.rs:169-195]
+- list/get/history 不递归记 call；重启将 unfinished `received/accepted/running/waiting` 事务结算为 `unknown`，追加 revision，不 replay business command。[VERIFY: runtime-host/modules/call-log/src/loopback.rs:125-151] [VERIFY: runtime-host/modules/call-log/src/store.rs:76-95]
+- consumer 先订阅再读取；正常只由同 callId 的新 revision 提示唤醒，读期间的新提示合并为补读，无固定周期查询。broadcast lag 经 `calls.resync` 提示活跃观察者补查；Host 恢复、窗口 focus/重新可见或页面恢复时也补查原身份。观察断连明确结束等待，不替 owner 判业务失败、不取消或重新提交；首次非终态读取另通过现有 Host status 确认 control 可观察，覆盖晚订阅已错过断连事件的场景。[VERIFY: src/types/call-log/wait.ts] [VERIFY: src/lib/call-log-await.ts] [VERIFY: src/lib/host-events.ts] [VERIFY: runtime-host/host/src/composition/events.rs] [VERIFY: electron/main/runtime-host-delivery/lifecycle-owner.ts]
+- Main 云包结果存入具体 owner 并设置完成 TTL 后发布 `package:changed {operationId}`，Renderer 再短读原 operation-result；账号 epoch 失效唤醒旧 pending 观察并停止旧 epoch 的内部 native 观察，不取消已接单 effect。Main Provider 与 agent export 同样使用事件订阅；当前断连事实由 lifecycle owner 直接交观察者，不依赖总等待超时或轮询。[VERIFY: electron/main/cloud-account/service.ts] [VERIFY: electron/main/cloud-account/package-operations.ts] [VERIFY: electron/main/call-observation.ts] [VERIFY: src/lib/cloud-package-call.ts]
+- Foundation 只管理原 tasks/operations 的生命周期与 join；call-log 的 bounded writer queue 是持久化请求队列，不是 RuntimeJobQueue/Registry、重试策略或 generic job endpoint。
+
+## 改动验收
+
+核原 owner admission、业务终态 oracle、typed safe detail、commit 后提示、丢提示重查、重启 Unknown 和 shutdown drain/join。编译/类型检查/运行证据分别记录；源码存在不等于 checks passed。完整覆盖及 PASS/FAIL/未测只维护于 [Call Log / Calls 唯一验收账](../architecture-knowledge/modules/call-log/dev.md#接线--验证-open)。

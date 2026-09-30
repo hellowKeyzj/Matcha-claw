@@ -29,7 +29,7 @@ describe('external connectors Host API route', () => {
     const execute = vi.fn()
       .mockResolvedValueOnce(transportResponse)
       .mockResolvedValueOnce({ status: 200, body: { programs: [] } })
-      .mockResolvedValueOnce({ status: 200, body: { statuses: [] } });
+      .mockResolvedValueOnce({ status: 202, body: { callId: 'a'.repeat(32), accepted: true } });
 
     for (const [path, operationId, kind] of [
       ['/api/external-connectors', 'externalConnectors.list', 'list'],
@@ -43,7 +43,7 @@ describe('external connectors Host API route', () => {
         new URL(`http://127.0.0.1${path}`),
         { execute },
       )).resolves.toBe(true);
-      expect(result.state.statusCode).toBe(200);
+      expect(result.state.statusCode).toBe(kind === 'status' ? 202 : 200);
       expect(execute).toHaveBeenLastCalledWith({
         id: 'external.connectors',
         operationId,
@@ -100,7 +100,7 @@ describe('external connectors Host API route', () => {
       sessionKey: 'session-2',
     },
   ] as const)('dispatches session status for $endpoint.kind identity', async (sessionIdentity) => {
-    const execute = vi.fn().mockResolvedValue({ status: 200, body: { statuses: [] } });
+    const execute = vi.fn().mockResolvedValue({ status: 202, body: { callId: 'a'.repeat(32), accepted: true } });
     const result = response();
     await expect(handleExternalConnectorsRoutes(
       request({ sessionIdentity }),
@@ -108,7 +108,7 @@ describe('external connectors Host API route', () => {
       new URL('http://127.0.0.1/api/external-connectors/session-status'),
       { execute },
     )).resolves.toBe(true);
-    expect(result.state).toEqual({ statusCode: 200, body: { statuses: [] } });
+    expect(result.state).toEqual({ statusCode: 202, body: { callId: 'a'.repeat(32), accepted: true } });
     expect(execute).toHaveBeenCalledWith({
       id: 'external.connectors',
       operationId: 'externalConnectors.sessionStatus',

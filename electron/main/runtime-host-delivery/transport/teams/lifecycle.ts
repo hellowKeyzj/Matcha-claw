@@ -1,3 +1,5 @@
+import type { CallReceipt } from '../../../../../src/types/call-log';
+import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 
@@ -51,12 +53,12 @@ type ResumeRun = Readonly<{
 }>;
 
 type LifecycleResponse = Readonly<{
-  status: 200 | 409 | 503;
+  status: 200 | 202 | 409 | 503;
   body:
+    | CallReceipt
     | Readonly<{ success: true; action: 'list'; runs: readonly TeamRun[] }>
     | Readonly<{ success: true; action: 'create'; runId: string; outcome: 'created' | 'replayed' }>
     | Readonly<{ success: true; action: 'delete'; teamId: string; outcome: 'deleted' }>
-    | Readonly<{ success: true; action: 'delete'; runId: string; state: 'tombstoned' | 'cancellation_required' }>
     | Readonly<{ success: true; action: 'resume'; runs: readonly ResumeRun[] }>
     | Readonly<{
       success: true;
@@ -116,6 +118,12 @@ async function send(
   });
   if (response === null) return { status: 503, body: UNAVAILABLE };
   const result = response.body;
+  if (body.action === 'delete' && typeof body.runId === 'string') {
+    if (response.status === 202) {
+      try { return { status: 202, body: decodeCallReceipt(result) }; } catch { return { status: 503, body: UNAVAILABLE }; }
+    }
+    return { status: 503, body: UNAVAILABLE };
+  }
   if (response.status === 200 && isSuccess(result) && (expectedAction === undefined || result.action === expectedAction)) {
     return { status: 200, body: result };
   }
@@ -203,10 +211,6 @@ function isSuccess(value: unknown): value is Extract<LifecycleResponse['body'], 
       && value.action === 'cancel'
       && isIdentifier(value.runId)
       && isCancellationState(value.state))
-    || (hasExactKeys(value, ['success', 'action', 'runId', 'state'])
-      && value.action === 'delete'
-      && isIdentifier(value.runId)
-      && isTombstoneState(value.state))
   );
 }
 
@@ -232,10 +236,6 @@ function isResumeRun(value: unknown): value is ResumeRun {
 
 function isCancellationState(value: unknown): boolean {
   return value === 'cancelling' || value === 'cancelled' || value === 'tombstoned';
-}
-
-function isTombstoneState(value: unknown): boolean {
-  return value === 'tombstoned' || value === 'cancellation_required';
 }
 
 function isGraphStatus(value: unknown): boolean {

@@ -6,15 +6,15 @@ use std::{
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
     api::{
-        SealedAgentTarget, SealedCloudPackageMetadata, SealedCloudPackageType,
-        SealedPackageAuthorizationKey, SealedPackageAuthorizationKeyring, SealedResourceError,
-        SealedResourceMeteringBinding, SealedResourceMeteringKind, SealedResourceMeteringUse,
-        SealedResourceRead,
+        SealedAgentTarget, SealedCloudPackageEntry, SealedCloudPackageMetadata,
+        SealedCloudPackageType, SealedPackageAuthorizationKey, SealedPackageAuthorizationKeyring,
+        SealedResourceError, SealedResourceMeteringBinding, SealedResourceMeteringKind,
+        SealedResourceMeteringUse, SealedResourceRead,
     },
     domain::{AgentKey, PackageRelativePath},
     package::{
@@ -106,8 +106,8 @@ impl SealedAgentCatalogEntry {
 pub struct SealedAgentPackageExport {
     agent_key: AgentKey,
     file_name: String,
-    package_path: PathBuf,
-    size: u64,
+    package_sha256: String,
+    package_bytes: Arc<[u8]>,
     exported_at_ms: u64,
 }
 
@@ -120,12 +120,20 @@ impl SealedAgentPackageExport {
         &self.file_name
     }
 
-    pub fn package_path(&self) -> &Path {
-        &self.package_path
+    pub fn package_sha256(&self) -> &str {
+        &self.package_sha256
+    }
+
+    pub fn package_bytes(&self) -> &[u8] {
+        &self.package_bytes
+    }
+
+    pub fn into_package_bytes(self) -> Arc<[u8]> {
+        self.package_bytes
     }
 
     pub fn size(&self) -> u64 {
-        self.size
+        self.package_bytes.len() as u64
     }
 
     pub fn exported_at_ms(&self) -> u64 {
@@ -139,8 +147,11 @@ impl fmt::Debug for SealedAgentPackageExport {
             .debug_struct("SealedAgentPackageExport")
             .field("agent_key", &self.agent_key)
             .field("file_name", &self.file_name)
-            .field("package_path", &"[REDACTED]")
-            .field("size", &self.size)
+            .field("package_sha256", &self.package_sha256)
+            .field(
+                "package_bytes",
+                &format_args!("[REDACTED:{} bytes]", self.package_bytes.len()),
+            )
             .field("exported_at_ms", &self.exported_at_ms)
             .finish()
     }
@@ -249,6 +260,54 @@ impl SealedAgentStore {
         Ok(SealedAgentCatalog { entries })
     }
 
+    pub(crate) fn cloud_packages(
+        &self,
+    ) -> Result<Vec<SealedCloudPackageEntry>, SealedResourceError> {
+        let started = Instant::now();
+        eprintln!(
+            "[startup-trace] source=sealed-resource phase=cloud-package-scan stage=start kind=agent"
+        );
+        let mut lock_wait_ms = 0;
+        let mut package_count = 0usize;
+        let mut total_bytes = 0u64;
+        let result = (|| {
+            let lock_started = Instant::now();
+            let guard = self.operation_lock.lock();
+            lock_wait_ms = lock_started.elapsed().as_millis();
+            let _guard = guard.map_err(|_| SealedResourceError::Unknown)?;
+            let mut packages = Vec::new();
+            for directory in self.root.maintenance_workspace_directories()? {
+                let Some(directory) = existing_workspace_directory(&directory)? else {
+                    continue;
+                };
+                for entry in fs::read_dir(directory).map_err(|_| SealedResourceError::Unknown)? {
+                    let path = entry.map_err(|_| SealedResourceError::Unknown)?.path();
+                    if !is_sealed_package_path(&path) {
+                        continue;
+                    }
+                    let bytes = read_package_file(&path, SealedResourceError::Unknown)?;
+                    package_count += 1;
+                    total_bytes += bytes.len() as u64;
+                    let package_sha256 = hex_digest(&bytes);
+                    let Some(metadata) = self.cloud_metadata(&package_sha256)? else {
+                        continue;
+                    };
+                    metadata.ensure_matches(SealedCloudPackageType::Agent, &package_sha256)?;
+                    if SealedAgentPackage::open_manifest(&bytes)?.target() == self.root.target() {
+                        packages.push(metadata.into());
+                    }
+                }
+            }
+            Ok(packages)
+        })();
+        eprintln!(
+            "[startup-trace] source=sealed-resource phase=cloud-package-scan stage=end kind=agent duration_ms={} lock_wait_ms={lock_wait_ms} package_count={package_count} total_bytes={total_bytes} outcome={}",
+            started.elapsed().as_millis(),
+            if result.is_ok() { "success" } else { "failed" }
+        );
+        result
+    }
+
     pub fn contains_agent(&self, agent_key: &AgentKey) -> Result<bool, SealedResourceError> {
         let _guard = self
             .operation_lock
@@ -299,6 +358,7 @@ impl SealedAgentStore {
                 package.package_sha256(),
                 SealedResourceMeteringUse::Session,
             )?),
+            package.package_sha256().to_owned(),
         ))
     }
 
@@ -343,6 +403,9 @@ impl SealedAgentStore {
             cloud_public_key,
             cloud_key_id,
         )?;
+        if receipt.package_size() > MAX_PACKAGE_FILE_BYTES {
+            return Err(SealedResourceError::Rejected);
+        }
         let package =
             SealedAgentPackage::open(receipt.package_bytes(), receipt.authorization_key())?;
         let installed_path = self.install_receipt_locked(&workspace, &receipt)?;
@@ -350,8 +413,8 @@ impl SealedAgentStore {
         Ok(SealedAgentPackageExport {
             agent_key,
             file_name: receipt.package_file_name().to_owned(),
-            package_path: installed_path,
-            size: receipt.package_size(),
+            package_sha256: receipt.package_sha256().to_owned(),
+            package_bytes: receipt.into_package_bytes().into(),
             exported_at_ms: now_millis(),
         })
     }
@@ -448,12 +511,10 @@ impl SealedAgentStore {
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        let Some((path, package)) = self.find_sealed_package_locked(&agent_key)? else {
+        let Some((path, package_sha256)) = self.find_sealed_package_locked(&agent_key)? else {
             return Ok(false);
         };
-        fs::remove_file(path).map_err(|_| SealedResourceError::Unknown)?;
-        remove_authorization_key_file(&self.authorization_key_path(package.package_sha256()))?;
-        remove_authorization_key_file(&self.cloud_metadata_path(package.package_sha256()))?;
+        self.remove_package_path_locked(&path, &package_sha256)?;
         Ok(true)
     }
 
@@ -528,6 +589,11 @@ impl SealedAgentStore {
                 return Err(error);
             }
         }
+        self.remove_other_packages_locked(
+            package.agent_key(),
+            &workspace,
+            &workspace.join(receipt.package_file_name()),
+        )?;
         Ok(SealedAgentCatalogEntry {
             agent_key: package.agent_key().clone(),
             target: package.target(),
@@ -594,15 +660,16 @@ impl SealedAgentStore {
         &self,
         agent_key: &AgentKey,
     ) -> Result<SealedAgentPackage, SealedResourceError> {
-        self.find_sealed_package_locked(agent_key)?
-            .map(|(_, package)| package)
-            .ok_or(SealedResourceError::NotFound)
+        let (path, _) = self
+            .find_sealed_package_locked(agent_key)?
+            .ok_or(SealedResourceError::NotFound)?;
+        self.open_package_path_locked(&path)
     }
 
     fn find_sealed_package_locked(
         &self,
         agent_key: &AgentKey,
-    ) -> Result<Option<(PathBuf, SealedAgentPackage)>, SealedResourceError> {
+    ) -> Result<Option<(PathBuf, String)>, SealedResourceError> {
         let workspace = self.root.workspace_directory(agent_key)?;
         let Some(workspace) = existing_workspace_directory(&workspace)? else {
             return Ok(None);
@@ -618,12 +685,12 @@ impl SealedAgentStore {
             if !metadata.is_file() || !is_sealed_package_path(&path) {
                 continue;
             }
-            let package = self.open_package_path_locked(&path)?;
-            if package.target() == self.root.target() && package.agent_key() == agent_key {
+            let (key, target, package_sha256) = self.package_identity_path_locked(&path)?;
+            if target == self.root.target() && &key == agent_key {
                 if found.is_some() {
                     return Err(SealedResourceError::Rejected);
                 }
-                found = Some((path, package));
+                found = Some((path, package_sha256));
             }
         }
         Ok(found)
@@ -665,6 +732,40 @@ impl SealedAgentStore {
                 package.target(),
             ))
         })
+    }
+
+    fn package_identity_path_locked(
+        &self,
+        path: &Path,
+    ) -> Result<(AgentKey, SealedAgentTarget, String), SealedResourceError> {
+        let bytes = read_package_file(path, SealedResourceError::Unknown)?;
+        let package_sha256 = hex_digest(&bytes);
+        if let Some(metadata) = self.cloud_metadata(&package_sha256)? {
+            metadata.ensure_matches(SealedCloudPackageType::Agent, &package_sha256)?;
+            let manifest = SealedAgentPackage::open_manifest(&bytes)?;
+            return Ok((
+                manifest.agent_key().clone(),
+                manifest.target(),
+                package_sha256,
+            ));
+        }
+        let package = self.open_package_bytes_locked(&bytes)?;
+        Ok((
+            package.agent_key().clone(),
+            package.target(),
+            package_sha256,
+        ))
+    }
+
+    fn remove_package_path_locked(
+        &self,
+        path: &Path,
+        package_sha256: &str,
+    ) -> Result<(), SealedResourceError> {
+        fs::remove_file(path).map_err(|_| SealedResourceError::Unknown)?;
+        remove_authorization_key_file(&self.authorization_key_path(package_sha256))?;
+        remove_authorization_key_file(&self.cloud_metadata_path(package_sha256))?;
+        self.authorization_keyring.remove(package_sha256)
     }
 
     fn open_package_path_locked(
@@ -768,13 +869,9 @@ impl SealedAgentStore {
             if !metadata.is_file() || !is_sealed_package_path(&path) {
                 continue;
             }
-            let package = self.open_package_path_locked(&path)?;
-            if package.target() == self.root.target() && package.agent_key() == agent_key {
-                fs::remove_file(path).map_err(|_| SealedResourceError::Unknown)?;
-                remove_authorization_key_file(
-                    &self.authorization_key_path(package.package_sha256()),
-                )?;
-                remove_authorization_key_file(&self.cloud_metadata_path(package.package_sha256()))?;
+            let (key, target, package_sha256) = self.package_identity_path_locked(&path)?;
+            if target == self.root.target() && &key == agent_key {
+                self.remove_package_path_locked(&path, &package_sha256)?;
             }
         }
         Ok(())
@@ -785,7 +882,8 @@ impl SealedAgentStore {
         package_bytes: &[u8],
     ) -> Result<SealedPackageAuthorizationKey, SealedResourceError> {
         let package_sha256 = hex_digest(package_bytes);
-        if self.cloud_metadata(&package_sha256)?.is_some() {
+        if let Some(metadata) = self.cloud_metadata(&package_sha256)? {
+            metadata.ensure_matches(SealedCloudPackageType::Agent, &package_sha256)?;
             return self.cloud_authorization_key(&package_sha256);
         }
         read_authorization_key_file(&self.authorization_key_path(&package_sha256))
@@ -1164,13 +1262,13 @@ mod tests {
             .export_plain_workspace_package(agent_key.clone())
             .unwrap();
 
+        let package_path = root.path().join("input.matcha-agentpkg");
+        fs::write(&package_path, package.package_bytes()).unwrap();
         let target_runtime = FakeAgentRuntime::new();
         let target_workspace = root.path().join("target-workspace");
         target_runtime.add_agent_workspace("writer", target_workspace.clone());
         let target = SealedAgentStore::openclaw(target_runtime, private).unwrap();
-        let entry = target
-            .install_package_path(package.package_path().to_owned())
-            .unwrap();
+        let entry = target.install_package_path(package_path.clone()).unwrap();
 
         assert_eq!(entry.agent_key(), &agent_key);
         assert_eq!(entry.runtime_target(), SealedAgentTarget::OpenClaw);
@@ -1299,6 +1397,146 @@ mod tests {
     }
 
     #[test]
+    fn expired_cloud_agent_can_be_located_replaced_and_removed_without_persisting_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = FakeAgentRuntime::new();
+        let workspace = root.path().join("writer-workspace");
+        runtime.add_agent_workspace("writer", workspace.clone());
+        runtime.add_maintenance_workspace(workspace.clone());
+        let store = SealedAgentStore::openclaw(runtime, root.path().join("private")).unwrap();
+        let key = AgentKey::parse("writer").unwrap();
+        let receipt = SealedAgentPackage::seal(
+            key.clone(),
+            SealedAgentTarget::OpenClaw,
+            vec![SealedAgentFileRequest::try_new("AGENTS.md", "old cloud instructions").unwrap()],
+        )
+        .unwrap();
+        let path = root.path().join(receipt.package_file_name());
+        fs::write(&path, receipt.package_bytes()).unwrap();
+        let metadata = SealedCloudPackageMetadata::new(
+            "version-1".into(),
+            SealedCloudPackageType::Agent,
+            receipt.package_sha256().into(),
+            receipt.package_file_name().into(),
+            1,
+        )
+        .unwrap();
+        let expires = crate::api::now_millis() + 1_000;
+        store
+            .authorization_keyring
+            .register_authorization_key(
+                receipt.package_sha256().into(),
+                receipt.authorization_key().clone(),
+                expires,
+            )
+            .unwrap();
+        store
+            .prepare_install_with_cloud_metadata(path.clone(), metadata.clone())
+            .unwrap();
+        store
+            .install_package_path_with_cloud_metadata(path, metadata.clone())
+            .unwrap();
+        assert!(
+            !store
+                .authorization_key_path(receipt.package_sha256())
+                .exists()
+        );
+        let read_path = PackageRelativePath::parse("AGENTS.md").unwrap();
+        assert!(store.read_file(key.clone(), read_path.clone()).is_ok());
+        std::thread::sleep(std::time::Duration::from_millis(
+            expires.saturating_sub(crate::api::now_millis()) + 1,
+        ));
+        assert_eq!(
+            store.read_file(key.clone(), read_path.clone()).unwrap_err(),
+            SealedResourceError::Rejected
+        );
+        assert!(store.contains_agent(&key).unwrap());
+        assert!(
+            store
+                .contains_agents(&[key.clone()])
+                .unwrap()
+                .contains(&key)
+        );
+        assert_eq!(store.catalog().unwrap().entries().len(), 1);
+        assert_eq!(store.cloud_packages().unwrap(), vec![metadata.into()]);
+
+        let replacement = SealedAgentPackage::seal(
+            key.clone(),
+            SealedAgentTarget::OpenClaw,
+            vec![SealedAgentFileRequest::try_new("AGENTS.md", "new cloud instructions").unwrap()],
+        )
+        .unwrap();
+        let path = root.path().join(replacement.package_file_name());
+        fs::write(&path, replacement.package_bytes()).unwrap();
+        let metadata = SealedCloudPackageMetadata::new(
+            "version-2".into(),
+            SealedCloudPackageType::Agent,
+            replacement.package_sha256().into(),
+            replacement.package_file_name().into(),
+            2,
+        )
+        .unwrap();
+        store
+            .authorization_keyring
+            .register_authorization_key(
+                replacement.package_sha256().into(),
+                replacement.authorization_key().clone(),
+                crate::api::now_millis() + 60_000,
+            )
+            .unwrap();
+        store
+            .install_package_path_with_cloud_metadata(path, metadata.clone())
+            .unwrap();
+        assert_eq!(sealed_packages(&workspace).len(), 1);
+        assert!(!store.cloud_metadata_path(receipt.package_sha256()).exists());
+        assert!(
+            !store
+                .authorization_key_path(replacement.package_sha256())
+                .exists()
+        );
+        assert_eq!(
+            store
+                .read_file(key.clone(), read_path.clone())
+                .unwrap()
+                .content(),
+            b"new cloud instructions"
+        );
+        store.authorization_keyring.clear().unwrap();
+        assert_eq!(
+            store.read_file(key.clone(), read_path).unwrap_err(),
+            SealedResourceError::Rejected
+        );
+        assert!(store.remove_package(key).unwrap());
+        assert!(
+            !store
+                .cloud_metadata_path(replacement.package_sha256())
+                .exists()
+        );
+        assert!(store.cloud_packages().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_agent_removal_still_requires_payload_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = FakeAgentRuntime::new();
+        let workspace = root.path().join("writer-workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("AGENTS.md"), "local instructions").unwrap();
+        runtime.add_agent_workspace("writer", workspace.clone());
+        let store = SealedAgentStore::openclaw(runtime, root.path().join("private")).unwrap();
+        let key = AgentKey::parse("writer").unwrap();
+        let export = store.export_plain_workspace_package(key.clone()).unwrap();
+        let package_path = workspace.join(export.file_name());
+        let hash = hex_digest(export.package_bytes());
+        fs::write(store.authorization_key_path(&hash), [0_u8; 32]).unwrap();
+        assert_eq!(
+            store.remove_package(key).unwrap_err(),
+            SealedResourceError::Rejected
+        );
+        assert!(package_path.exists());
+    }
+
+    #[test]
     fn contains_agents_skips_package_without_local_or_cloud_authorization() {
         let root = tempfile::tempdir().unwrap();
         let runtime = FakeAgentRuntime::new();
@@ -1343,36 +1581,34 @@ mod tests {
             .export_plain_workspace_package(AgentKey::parse("writer").unwrap())
             .unwrap();
 
+        let package_path = root.path().join("input.matcha-agentpkg");
+        fs::write(&package_path, package.package_bytes()).unwrap();
         let target_runtime = FakeAgentRuntime::new();
         let target_workspace = root.path().join("target-workspace");
         target_runtime.add_agent_workspace("writer", target_workspace.clone());
         let target = SealedAgentStore::openclaw(target_runtime, private).unwrap();
-        target
-            .install_package_path(package.package_path().to_owned())
-            .unwrap();
+        target.install_package_path(package_path.clone()).unwrap();
 
-        target
-            .install_package_path(package.package_path().to_owned())
-            .unwrap();
+        target.install_package_path(package_path.clone()).unwrap();
 
         let workspace = fs::canonicalize(target_workspace).unwrap();
         assert_eq!(sealed_packages(&workspace).len(), 1);
     }
 
     #[test]
-    fn package_export_debug_redacts_package_path() {
+    fn package_export_debug_redacts_package_bytes() {
         let export = SealedAgentPackageExport {
             agent_key: AgentKey::parse("writer").unwrap(),
             file_name: "sealed.matcha-agentpkg".to_owned(),
-            package_path: PathBuf::from("C:/secret/sealed.matcha-agentpkg"),
-            size: 7,
+            package_sha256: "hash".to_owned(),
+            package_bytes: Arc::from(&b"private bytes"[..]),
             exported_at_ms: 11,
         };
 
         let debug = format!("{export:?}");
 
-        assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("C:/secret"));
+        assert!(debug.contains("[REDACTED:13 bytes]"));
+        assert!(!debug.contains("private bytes"));
     }
 
     #[test]
@@ -1393,6 +1629,8 @@ mod tests {
             .export_plain_workspace_package(AgentKey::parse("writer").unwrap())
             .unwrap();
 
+        let package_path = root.path().join("input.matcha-agentpkg");
+        fs::write(&package_path, package.package_bytes()).unwrap();
         let target_runtime = FakeAgentRuntime::new();
         let target_workspace = root.path().join("target-workspace");
         fs::create_dir(&target_workspace).unwrap();
@@ -1400,9 +1638,7 @@ mod tests {
         target_runtime.add_agent_workspace("writer", target_workspace.clone());
         let target = SealedAgentStore::openclaw(target_runtime, private).unwrap();
 
-        target
-            .install_package_path(package.package_path().to_owned())
-            .unwrap();
+        target.install_package_path(package_path.clone()).unwrap();
 
         let workspace = fs::canonicalize(target_workspace).unwrap();
         assert_eq!(

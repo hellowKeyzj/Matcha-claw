@@ -15,7 +15,6 @@ use organization::{
         event::OpaqueId,
     },
 };
-use tokio::sync::oneshot;
 
 use super::team_run::{
     ManualTeamCreateOutcome, TeamDeleteOutcome, TeamMaterializationCommandOutcome,
@@ -33,13 +32,13 @@ pub enum TeamDeleteRunNativeSettlement {
 pub enum OrganizationCommand {
     TeamSkillAuthorize {
         package_root: PathBuf,
-        reply: oneshot::Sender<Result<TeamSkillSelectionId, TeamSkillSelectionError>>,
+        reply: crate::call::CallReply<Result<TeamSkillSelectionId, TeamSkillSelectionError>>,
     },
     TeamSkillMaterialize {
         selection_id: TeamSkillSelectionId,
         team_id: TeamId,
         idempotency_key: IdempotencyKey,
-        reply: oneshot::Sender<TeamMaterializationCommandOutcome>,
+        reply: crate::call::CallReply<TeamMaterializationCommandOutcome>,
     },
     ManualTeamMaterialize {
         team_id: TeamId,
@@ -47,7 +46,7 @@ pub enum OrganizationCommand {
         endpoint: organization::RuntimeEndpointReference,
         roles: Vec<organization::ManualTeamRoleBinding>,
         idempotency_key: IdempotencyKey,
-        reply: oneshot::Sender<TeamMaterializationCommandOutcome>,
+        reply: crate::call::CallReply<TeamMaterializationCommandOutcome>,
     },
     ManualTeamCreate {
         team_id: TeamId,
@@ -57,13 +56,13 @@ pub enum OrganizationCommand {
         materialization_idempotency_key: IdempotencyKey,
         run: organization::GraphRunFacts,
         run_idempotency_key: String,
-        reply: oneshot::Sender<ManualTeamCreateOutcome>,
+        reply: crate::call::CallReply<ManualTeamCreateOutcome>,
     },
     TeamDelete {
         team_id: TeamId,
         idempotency_key: IdempotencyKey,
         observed_at: u64,
-        reply: oneshot::Sender<Result<TeamDeleteOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<TeamDeleteOutcome, StoreFault>>,
     },
     TeamDeleteRunNativeSettled {
         team_id: TeamId,
@@ -85,56 +84,56 @@ pub enum OrganizationCommand {
         source_identity: String,
         template_revision: u64,
         created_at: u64,
-        reply: oneshot::Sender<Result<CreateGraphRunOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<CreateGraphRunOutcome, StoreFault>>,
     },
     RunCreateFromTeamTemplate {
         team_id: TeamId,
         run_id: GraphRunId,
         idempotency_key: IdempotencyKey,
         created_at: u64,
-        reply: oneshot::Sender<Result<CreateGraphRunOutcome, TeamRuntimeStatus>>,
+        reply: crate::call::CallReply<Result<CreateGraphRunOutcome, TeamRuntimeStatus>>,
     },
     RunCancel {
         run_id: GraphRunId,
         idempotency_key: String,
         requested_at: u64,
-        reply: oneshot::Sender<Result<BeginCancellationOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<BeginCancellationOutcome, StoreFault>>,
     },
     RunDelete {
         run_id: GraphRunId,
         idempotency_key: String,
         tombstoned_at: u64,
-        reply: oneshot::Sender<Result<TombstoneOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<TombstoneOutcome, StoreFault>>,
     },
     RunDeleteAndPurge {
         run_id: GraphRunId,
         idempotency_key: String,
         observed_at: u64,
-        reply: oneshot::Sender<Result<organization::GraphRunPurgeOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<organization::GraphRunPurgeOutcome, StoreFault>>,
     },
     RunPurge {
         request: organization::TeamRunPurgeRequest,
-        reply: oneshot::Sender<Result<organization::GraphRunPurgeOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<organization::GraphRunPurgeOutcome, StoreFault>>,
     },
     TriggerFire {
         request: TriggerFireRequest,
         fired_at: u64,
-        reply: oneshot::Sender<Result<TeamRunTriggerOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<TeamRunTriggerOutcome, StoreFault>>,
     },
     WebhookTriggerFire {
         webhook_path: String,
         idempotency_key: String,
         fired_at: u64,
-        reply: oneshot::Sender<Result<TeamTriggerFireOutcome, TeamRuntimeStatus>>,
+        reply: crate::call::CallReply<Result<TeamTriggerFireOutcome, TeamRuntimeStatus>>,
     },
     GraphSave {
         command: RunCommand,
         definition: GraphDefinition,
-        reply: oneshot::Sender<Result<TeamRunCommandOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<TeamRunCommandOutcome, StoreFault>>,
     },
     GraphPatch {
         patch: crate::application::team_runtime::TeamGraphPatchDraft,
-        reply: oneshot::Sender<Result<TeamRunCommandOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<TeamRunCommandOutcome, StoreFault>>,
     },
     StartGateTerminalProposalSet {
         run_id: GraphRunId,
@@ -142,22 +141,22 @@ pub enum OrganizationCommand {
         source_delivery_id: String,
         final_assistant_text: String,
         reply:
-            oneshot::Sender<Result<Option<organization::SetRunStartProposalOutcome>, StoreFault>>,
+            tokio::sync::oneshot::Sender<Result<Option<organization::SetRunStartProposalOutcome>, StoreFault>>,
     },
     RunStartConfirm {
         run_id: GraphRunId,
         proposal_id: String,
-        reply: oneshot::Sender<Result<organization::ConfirmRunStartOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<organization::ConfirmRunStartOutcome, StoreFault>>,
     },
     RunStartContinue {
         run_id: GraphRunId,
         proposal_id: String,
-        reply: oneshot::Sender<Result<organization::ContinueRunDiscussionOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<organization::ContinueRunDiscussionOutcome, StoreFault>>,
     },
     NodeEvent {
         command: RunCommand,
         event: TeamNodeEvent,
-        reply: oneshot::Sender<Result<TeamNodeEventOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<TeamNodeEventOutcome, StoreFault>>,
     },
     NodeTerminalResolve {
         run_id: GraphRunId,
@@ -168,45 +167,45 @@ pub enum OrganizationCommand {
         output_port: Option<String>,
         idempotency_key: String,
         resolved_at: u64,
-        reply: oneshot::Sender<Result<TeamNodeTerminalResult, StoreFault>>,
+        reply: crate::call::CallReply<Result<TeamNodeTerminalResult, StoreFault>>,
     },
     ApprovalResolve {
         command: HumanDecisionCommand,
-        reply: oneshot::Sender<Result<HumanDecisionOutcome, StoreFault>>,
+        reply: crate::call::CallReply<Result<HumanDecisionOutcome, StoreFault>>,
     },
     DecisionSubmit {
         command: TeamDecisionCommand,
-        reply: oneshot::Sender<Result<TeamDecisionReceipt, StoreFault>>,
+        reply: crate::call::CallReply<Result<TeamDecisionReceipt, StoreFault>>,
     },
     TaskBoardMutate {
         team_id: TeamId,
         run_id: GraphRunId,
         operation: crate::application::task_board::TaskBoardMutation,
-        reply: oneshot::Sender<Result<crate::application::task_board::MutationResult, StoreFault>>,
+        reply: crate::call::CallReply<Result<crate::application::task_board::MutationResult, StoreFault>>,
     },
     ScheduleReadyNodes {
         run_id: GraphRunId,
         now: u64,
-        reply: oneshot::Sender<Result<Vec<ActivityId>, StoreFault>>,
+        reply: tokio::sync::oneshot::Sender<Result<Vec<ActivityId>, StoreFault>>,
     },
     ClaimActivity {
         run_id: GraphRunId,
         activity_id: ActivityId,
         claimed_at: u64,
-        reply: oneshot::Sender<Result<TeamRunActivityStart, TeamRunActivityError>>,
+        reply: tokio::sync::oneshot::Sender<Result<TeamRunActivityStart, TeamRunActivityError>>,
     },
     SettleActivity {
         run_id: GraphRunId,
         claim: ActivityClaim,
         outcome: ActivityExecutionOutcome,
-        reply: oneshot::Sender<Result<TeamRunActivityOutcome, TeamRunActivityError>>,
+        reply: tokio::sync::oneshot::Sender<Result<TeamRunActivityOutcome, TeamRunActivityError>>,
     },
     NativeRunSettled {
         run_id: GraphRunId,
         delivery_id: DeliveryId,
         settled: NativeRunSettled,
         settled_at: u64,
-        reply: oneshot::Sender<Result<TeamNodeTerminalResult, StoreFault>>,
+        reply: tokio::sync::oneshot::Sender<Result<TeamNodeTerminalResult, StoreFault>>,
     },
     TeamMessageTerminalObserved {
         native_run_id: String,
@@ -214,18 +213,51 @@ pub enum OrganizationCommand {
         status: organization::NativeTerminalStatus,
         final_assistant_text: Option<String>,
         settled_at: u64,
-        reply: oneshot::Sender<Result<organization::TeamMessageTerminalObservation, StoreFault>>,
+        reply: tokio::sync::oneshot::Sender<Result<organization::TeamMessageTerminalObservation, StoreFault>>,
     },
     TeamMessageRepairQueued {
         requested_run_id: String,
         repair: organization::TeamMessageRepairDispatch,
-        reply: oneshot::Sender<()>,
+        reply: tokio::sync::oneshot::Sender<()>,
     },
     TeamMessageRepairRejected {
         repair: organization::TeamMessageRepairDispatch,
-        reply: oneshot::Sender<Result<(), StoreFault>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), StoreFault>>,
     },
     RecoverMaterializationReceipts {
-        reply: oneshot::Sender<()>,
+        reply: tokio::sync::oneshot::Sender<()>,
     },
+    DrainTeamDeleteTasks {
+        reply: tokio::sync::oneshot::Sender<Vec<foundation::execution::OwnedTask<()>>>,
+    },
+}
+
+impl OrganizationCommand {
+    pub(crate) async fn call_running(&self) -> bool {
+        match self {
+            Self::TeamSkillAuthorize { reply, .. } => reply.running().await,
+            Self::TeamSkillMaterialize { reply, .. } => reply.running().await,
+            Self::ManualTeamMaterialize { reply, .. } => reply.running().await,
+            Self::ManualTeamCreate { reply, .. } => reply.running().await,
+            Self::TeamDelete { reply, .. } => reply.running().await,
+            Self::RunCreate { reply, .. } => reply.running().await,
+            Self::RunCreateFromTeamTemplate { reply, .. } => reply.running().await,
+            Self::RunCancel { reply, .. } => reply.running().await,
+            Self::RunDelete { reply, .. } => reply.running().await,
+            Self::RunDeleteAndPurge { reply, .. } => reply.running().await,
+            Self::RunPurge { reply, .. } => reply.running().await,
+            Self::TriggerFire { reply, .. } => reply.running().await,
+            Self::WebhookTriggerFire { reply, .. } => reply.running().await,
+            Self::GraphSave { reply, .. } => reply.running().await,
+            Self::GraphPatch { reply, .. } => reply.running().await,
+            Self::RunStartConfirm { reply, .. } => reply.running().await,
+            Self::RunStartContinue { reply, .. } => reply.running().await,
+            Self::NodeEvent { reply, .. } => reply.running().await,
+            Self::NodeTerminalResolve { reply, .. } => reply.running().await,
+            Self::ApprovalResolve { reply, .. } => reply.running().await,
+            Self::DecisionSubmit { reply, .. } => reply.running().await,
+            Self::TaskBoardMutate { reply, .. } => reply.running().await,
+            _ => true
+        }
+    }
 }

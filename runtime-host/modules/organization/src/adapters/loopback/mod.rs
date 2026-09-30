@@ -34,6 +34,7 @@ pub struct Dependencies {
     organization: crate::OrganizationHandle,
     webhook_token: trigger::WebhookToken,
     role_session_identity: Arc<dyn crate::RoleSessionIdentityResolver>,
+    call_workflows: Option<Arc<crate::call::CallWorkflows>>,
 }
 
 impl Dependencies {
@@ -48,7 +49,18 @@ impl Dependencies {
             organization,
             webhook_token,
             role_session_identity,
+            call_workflows: None,
         }
+    }
+
+    pub(crate) fn with_call_workflows(mut self, workflows: Option<Arc<crate::call::CallWorkflows>>) -> Self {
+        self.call_workflows = workflows;
+        self
+    }
+
+    pub(crate) fn with_call(mut self, call: crate::call::CallScope) -> Self {
+        self.organization = self.organization.with_call(call);
+        self
     }
 }
 
@@ -90,8 +102,16 @@ fn team_runtime_head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     })
 }
 
-fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
+fn route(mut dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
+        match dependencies.call_workflows.take() {
+            Some(workflows) => workflows.execute(dependencies, request, false).await.into(),
+            None => dispatch_team(dependencies, request).await.into(),
+        }
+    })
+}
+
+pub(crate) async fn dispatch_team(dependencies: Dependencies, request: Request) -> Response {
         let method = request.method().to_owned();
         let path = request.path().to_owned();
         let pathname = pathname(request.path()).to_owned();
@@ -212,12 +232,19 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
             }
             _ => Response::not_found(),
         };
-        response.into()
+        response
+}
+
+fn team_runtime_route(mut dependencies: Dependencies, request: Request) -> RouteFuture {
+    Box::pin(async move {
+        match dependencies.call_workflows.take() {
+            Some(workflows) => workflows.execute(dependencies, request, true).await.into(),
+            None => dispatch_team_runtime(dependencies, request).await.into(),
+        }
     })
 }
 
-fn team_runtime_route(dependencies: Dependencies, request: Request) -> RouteFuture {
-    Box::pin(async move {
+pub(crate) async fn dispatch_team_runtime(dependencies: Dependencies, request: Request) -> Response {
         team_runtime::handle_loopback(
             request.method().to_owned(),
             pathname(request.path()).to_owned(),
@@ -228,8 +255,6 @@ fn team_runtime_route(dependencies: Dependencies, request: Request) -> RouteFutu
             dependencies.role_session_identity,
         )
         .await
-        .into()
-    })
 }
 
 fn body_policy_for_method(method: &str, max_bytes: usize) -> BodyPolicy {

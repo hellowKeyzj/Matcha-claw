@@ -49,7 +49,8 @@ pub enum ConfigurationOutcome {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Operation {
     Install,
     Update,

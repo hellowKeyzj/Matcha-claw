@@ -1,4 +1,7 @@
-use platform::capability::CapabilityDecisionVerifier;
+use platform::{
+    call::{CallContext, CallRecorder, CallStatus},
+    capability::CapabilityDecisionVerifier,
+};
 
 use std::{
     sync::Arc,
@@ -6,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    application::receipts::Outcome,
+    application::call::{SettingsCallDetail, SettingsCallFailure, SettingsOperation},
     domain::{BrowserMode, Desired, ProxyDesired},
 };
 use serde_json::{Value, json};
@@ -25,10 +28,48 @@ pub(crate) async fn handle_route(
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     settings_handle: SettingsHandle,
+    call_recorder: Option<CallRecorder>,
 ) -> loopback::Response {
-    handle_request(method, path, authorization, body, verifier, settings_handle)
-        .await
-        .into()
+    let operation = match (method, path) {
+        ("GET", READ_ENDPOINT) => SettingsOperation::ReadCurrent,
+        ("POST", ENDPOINT) => SettingsOperation::ReplaceDesired,
+        _ => return Response::not_found().into(),
+    };
+    let Some(recorder) = call_recorder else {
+        return Response::unavailable().into();
+    };
+    let detail = SettingsCallDetail::new(operation);
+    let command = match operation {
+        SettingsOperation::ReadCurrent => "settings.current",
+        SettingsOperation::ReplaceDesired => "settings.replace",
+    };
+    let call = match recorder.begin(command, &detail).await {
+        Ok(call) => call,
+        Err(_) => return Response::unavailable().into(),
+    };
+    let response = handle_request(
+        method,
+        path,
+        authorization,
+        body,
+        verifier,
+        settings_handle,
+        call.clone(),
+    )
+    .await;
+    if !matches!(response.status, 400 | 401) {
+        return response.into();
+    }
+    let mut detail = detail;
+    detail.failure = Some(if response.status == 401 {
+        SettingsCallFailure::Unauthorized
+    } else {
+        SettingsCallFailure::InvalidRequest
+    });
+    if call.finish(CallStatus::Rejected, &detail).await.is_err() {
+        return Response::unavailable().into();
+    }
+    response.into()
 }
 
 async fn handle_request(
@@ -38,10 +79,13 @@ async fn handle_request(
     body: &[u8],
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     settings_handle: SettingsHandle,
+    call: CallContext<SettingsCallDetail>,
 ) -> Response {
     if method == "GET" && path == READ_ENDPOINT {
-        let snapshot = settings_handle.desired_snapshot().await;
-        return Response::ok(snapshot.to_json());
+        return match settings_handle.desired_snapshot(call).await {
+            Ok(snapshot) => Response::ok(snapshot.to_json()),
+            Err(_) => Response::unavailable(),
+        };
     }
     if method != "POST" || path != ENDPOINT {
         return Response::not_found();
@@ -65,8 +109,13 @@ async fn handle_request(
         Err(()) => return Response::bad_request(),
     };
 
-    let settlement = settings_handle.replace(correlation, desired).await;
-    Response::settled(settlement.revision, settlement.outcome)
+    match settings_handle.replace(correlation, desired, call).await {
+        Ok(receipt) => Response {
+            status: 202,
+            body: json!(receipt),
+        },
+        Err(_) => Response::unavailable(),
+    }
 }
 
 fn desired_from_decision(value: &Value) -> Result<Desired, ()> {
@@ -119,7 +168,10 @@ impl Response {
     fn ok(body: Value) -> Self {
         Self { status: 200, body }
     }
-    fn settled(revision: u64, outcome: Outcome) -> Self {
+    #[cfg(test)]
+    fn settled(revision: u64, outcome: crate::application::receipts::Outcome) -> Self {
+        use crate::application::receipts::Outcome;
+
         match outcome {
             Outcome::Rejected => Self::fixed(422, "Settings desired request was rejected"),
             Outcome::Confirmed | Outcome::Unknown => Self::ok(
@@ -132,6 +184,9 @@ impl Response {
             status,
             body: json!({"success": false, "error": error}),
         }
+    }
+    fn unavailable() -> Self {
+        Self::fixed(503, "Settings call is unavailable")
     }
     fn bad_request() -> Self {
         Self::fixed(400, "Settings desired request is invalid")

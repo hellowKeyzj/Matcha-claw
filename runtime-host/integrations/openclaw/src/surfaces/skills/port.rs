@@ -81,6 +81,15 @@ impl OpenClawGateway {
         operations.update(request).await
     }
 
+    pub async fn configure_skill(
+        &self,
+        request: SkillUpdateRequest,
+    ) -> (SkillMutationOutcome, Vec<String>) {
+        OpenClawSkillOperations::new(self.client())
+            .configure(request)
+            .await
+    }
+
     pub async fn remove_skill_config(&self, skill_key: String) -> SkillConfigRemoveOutcome {
         OpenClawSkillOperations::new(self.client())
             .remove_config(skill_key)

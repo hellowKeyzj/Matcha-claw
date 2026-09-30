@@ -8,7 +8,7 @@ use std::{
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use super::{DecodeError, Delivery, decode, handle};
+use super::{DecodeError, Delivery, decode};
 
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
@@ -63,7 +63,7 @@ async fn handle_request(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     };
     drop(verifier);
-    Response::from_delivery(handle(&owner, request).await)
+    Response::from_delivery(owner.execute_graph_workflow(request).await)
 }
 
 struct Request {

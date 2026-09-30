@@ -1,4 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import type { CallReceipt } from '../../../../../src/types/call-log';
+import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import { beginChannelTrace, channelTraceHeaders } from './trace';
 
@@ -10,15 +12,10 @@ export type ChannelDeleteConfigRequest = Readonly<{
   accountId?: string;
 }>;
 
-export type ChannelDeleteConfigOutcome = 'confirmed' | 'target_rejected' | 'unknown';
-
-export type ChannelDeleteConfigTransportResponse = Readonly<{
-  status: 200 | 400 | 503;
-  body:
-    | Readonly<{ outcome: ChannelDeleteConfigOutcome }>
-    | Rejected
-    | typeof UNKNOWN;
-}>;
+export type ChannelDeleteConfigTransportResponse =
+  | Readonly<{ status: 202; body: CallReceipt }>
+  | Readonly<{ status: 400; body: Rejected }>
+  | Readonly<{ status: 503; body: typeof UNKNOWN }>;
 
 export interface ChannelDeleteConfigTransport {
   deleteConfig(input: ChannelDeleteConfigRequest, traceId?: string): Promise<ChannelDeleteConfigTransportResponse>;
@@ -55,7 +52,9 @@ export function createChannelDeleteConfigTransport(
         status = response?.status ?? 503;
         outcome = response?.body ?? UNKNOWN;
         if (response?.status === 400 && isRejected(response.body)) return { status: 400, body: response.body };
-        if (response?.status === 200 && isOutcome(response.body)) return { status: 200, body: response.body };
+        if (response?.status === 202) {
+          try { return { status: 202, body: decodeCallReceipt(response.body) }; } catch { /* closed public boundary */ }
+        }
         outcome = UNKNOWN;
         errorCode = response === null ? 'UNAVAILABLE' : 'INVALID_RESPONSE';
       } finally {
@@ -71,12 +70,6 @@ function isRequest(value: ChannelDeleteConfigRequest): boolean {
     && Object.keys(value).every((key) => key === 'channel' || key === 'accountId')
     && isIdentity(value.channel)
     && (value.accountId === undefined || isIdentity(value.accountId));
-}
-
-function isOutcome(value: unknown): value is Readonly<{ outcome: ChannelDeleteConfigOutcome }> {
-  return isRecord(value)
-    && hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'confirmed' || value.outcome === 'target_rejected' || value.outcome === 'unknown');
 }
 
 function isRejected(value: unknown): value is Rejected {

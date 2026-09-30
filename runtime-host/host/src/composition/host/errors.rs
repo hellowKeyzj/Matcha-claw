@@ -60,6 +60,7 @@ impl std::error::Error for RuntimeLifecycleFailure {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConstructionError {
     Diagnostics(DiagnosticsArchiveError),
+    CallLog(platform::call::CallLogError),
     ParentCallback(ParentCallbackConfigError),
     TeamSkillSelection,
     ProviderAccounts,
@@ -82,6 +83,7 @@ impl fmt::Display for ConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Diagnostics(error) => error.fmt(formatter),
+            Self::CallLog(error) => error.fmt(formatter),
             Self::ParentCallback(error) => error.fmt(formatter),
             Self::TeamSkillSelection => {
                 formatter.write_str("TeamSkill selection owner could not be constructed")
@@ -124,6 +126,7 @@ impl std::error::Error for ConstructionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Diagnostics(error) => Some(error),
+            Self::CallLog(error) => Some(error),
             Self::ParentCallback(error) => Some(error),
             Self::TeamSkillSelection
             | Self::ProviderAccounts

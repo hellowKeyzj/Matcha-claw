@@ -1,8 +1,12 @@
-use foundation::execution::OwnerRuntimeHandle;
+use std::sync::Arc;
+
+use foundation::execution::{OwnerRuntimeHandle, OwnerRuntimeSendError};
 use openclaw::gateway::request::{
     OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest,
     OpenClawQuestionResolveGatewayRequest,
 };
+use platform::call::CallReceipt;
+use runtime_directory::{RuntimeControlLifecycleError, call::RuntimeControlCallContext};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
@@ -15,14 +19,12 @@ use crate::{
     },
 };
 
-use super::{
-    PeerCommand, PeerQuery, RuntimeRestartCommandError, RuntimeStartCommandError,
-    RuntimeStopCommandError,
-};
+use super::{PeerCommand, PeerQuery, RuntimeStopCommandError, command::RuntimeLifecycleCall};
 
 #[derive(Clone)]
 pub(crate) struct PeerHandle {
     owner: OwnerRuntimeHandle<PeerCommand, PeerQuery>,
+    admission: Arc<crate::composition::admission::HostAdmission>,
 }
 
 impl runtime_directory::RuntimeEndpointDirectorySource for PeerHandle {
@@ -37,9 +39,9 @@ impl openclaw::plugins::OpenClawPluginsRestartPort for PeerHandle {
     fn restart_openclaw_runtime<'a>(&'a self) -> plugins_module::ports::PluginsFuture<'a, bool> {
         Box::pin(async move {
             matches!(
-                self.restart_runtime(
-                    runtime_directory::RuntimeDriverIdentity::open_claw().endpoint()
-                )
+                self.request_command(|reply| PeerCommand::RestartOpenClawAfterPluginChange {
+                    reply,
+                })
                 .await,
                 Ok(Ok(_))
             )
@@ -48,8 +50,11 @@ impl openclaw::plugins::OpenClawPluginsRestartPort for PeerHandle {
 }
 
 impl PeerHandle {
-    pub(crate) fn new(owner: OwnerRuntimeHandle<PeerCommand, PeerQuery>) -> Self {
-        Self { owner }
+    pub(crate) fn new(
+        owner: OwnerRuntimeHandle<PeerCommand, PeerQuery>,
+        admission: Arc<crate::composition::admission::HostAdmission>,
+    ) -> Self {
+        Self { owner, admission }
     }
 
     pub(crate) async fn state(&self) -> Result<HostState, ()> {
@@ -90,28 +95,107 @@ impl PeerHandle {
             .await
     }
 
-    pub(crate) async fn start_runtime(
+    pub(crate) async fn admit_runtime_start(
         &self,
         endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
-    ) -> Result<Result<RuntimeState, RuntimeStartCommandError>, ()> {
-        self.request_command(|reply| PeerCommand::StartRuntime { endpoint, reply })
-            .await
+        call: RuntimeControlCallContext,
+    ) -> Result<CallReceipt, RuntimeControlLifecycleError> {
+        let call = RuntimeLifecycleCall::new(call);
+        self.admit_runtime_command(
+            PeerCommand::StartRuntime {
+                endpoint,
+                call: call.clone(),
+            },
+            call,
+        )
+        .await
+    }
+
+    pub(crate) async fn admit_runtime_stop(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        call: RuntimeControlCallContext,
+    ) -> Result<CallReceipt, RuntimeControlLifecycleError> {
+        let call = RuntimeLifecycleCall::new(call);
+        self.admit_runtime_command(
+            PeerCommand::StopRuntime {
+                endpoint,
+                call: Some(call.clone()),
+                reply: None,
+            },
+            call,
+        )
+        .await
+    }
+
+    pub(crate) async fn admit_runtime_restart(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        call: RuntimeControlCallContext,
+    ) -> Result<CallReceipt, RuntimeControlLifecycleError> {
+        let call = RuntimeLifecycleCall::new(call);
+        self.admit_runtime_command(
+            PeerCommand::RestartRuntime {
+                endpoint,
+                call: call.clone(),
+            },
+            call,
+        )
+        .await
+    }
+
+    async fn admit_runtime_command(
+        &self,
+        command: PeerCommand,
+        call: RuntimeLifecycleCall,
+    ) -> Result<CallReceipt, RuntimeControlLifecycleError> {
+        let endpoint = match &command {
+            PeerCommand::StartRuntime { endpoint, .. }
+            | PeerCommand::StopRuntime { endpoint, .. }
+            | PeerCommand::RestartRuntime { endpoint, .. } => endpoint,
+            _ => unreachable!("manual admission only accepts lifecycle start/stop/restart"),
+        };
+        let mut detail = runtime_directory::call::RuntimeControlCallDetail::new(endpoint);
+        let admission = self
+            .admission
+            .admit_request()
+            .map_err(|_| OwnerRuntimeSendError::Closed)
+            .and_then(|()| self.owner.try_send_command(command));
+        if let Err(error) = admission {
+            eprintln!(
+                "[runtime-control] call_id={} enqueue rejected: {error}",
+                call.context.id().as_str()
+            );
+            detail.result = Some(runtime_directory::call::RuntimeControlCallResult::Unavailable);
+            detail.error = Some(RuntimeControlLifecycleError::Unavailable);
+            runtime_directory::call::finish_runtime_control_call(
+                Some(call.context),
+                platform::call::CallStatus::Rejected,
+                &detail,
+            )
+            .await;
+            return Err(RuntimeControlLifecycleError::Unavailable);
+        }
+        call.accepted().await.map_err(|error| {
+            eprintln!(
+                "[runtime-control] call_id={} enqueued; admission audit failed: {error}",
+                call.context.id().as_str(),
+            );
+            RuntimeControlLifecycleError::CommandFailed
+        })
     }
 
     pub(crate) async fn stop_runtime(
         &self,
         endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        call: Option<runtime_directory::call::RuntimeControlCallContext>,
     ) -> Result<Result<RuntimeState, RuntimeStopCommandError>, ()> {
-        self.request_command(|reply| PeerCommand::StopRuntime { endpoint, reply })
-            .await
-    }
-
-    pub(crate) async fn restart_runtime(
-        &self,
-        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
-    ) -> Result<Result<RuntimeState, RuntimeRestartCommandError>, ()> {
-        self.request_command(|reply| PeerCommand::RestartRuntime { endpoint, reply })
-            .await
+        self.request_command(|reply| PeerCommand::StopRuntime {
+            endpoint,
+            call: call.map(RuntimeLifecycleCall::new),
+            reply: Some(reply),
+        })
+        .await
     }
 
     pub(crate) async fn open_claw_logs(
@@ -257,28 +341,43 @@ impl PeerHandle {
     pub(crate) async fn open_claw_browser_request(
         &self,
         request: OpenClawBrowserGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
     ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
-        self.request_query(|reply| PeerQuery::OpenClawBrowserRequest { request, reply })
-            .await
-            .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
+        self.request_query(|reply| PeerQuery::OpenClawBrowserRequest {
+            request,
+            call,
+            reply,
+        })
+        .await
+        .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
     }
 
     pub(crate) async fn open_claw_mcp_app_request(
         &self,
         request: OpenClawMcpAppGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
     ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
-        self.request_query(|reply| PeerQuery::OpenClawMcpAppRequest { request, reply })
-            .await
-            .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
+        self.request_query(|reply| PeerQuery::OpenClawMcpAppRequest {
+            request,
+            call,
+            reply,
+        })
+        .await
+        .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
     }
 
     pub(crate) async fn open_claw_question_resolve(
         &self,
         request: OpenClawQuestionResolveGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
     ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
-        self.request_query(|reply| PeerQuery::OpenClawQuestionResolve { request, reply })
-            .await
-            .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
+        self.request_query(|reply| PeerQuery::OpenClawQuestionResolve {
+            request,
+            call,
+            reply,
+        })
+        .await
+        .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
     }
 
     async fn request_command<T>(
@@ -286,10 +385,27 @@ impl PeerHandle {
         command: impl FnOnce(oneshot::Sender<T>) -> PeerCommand,
     ) -> Result<T, ()> {
         let (reply, response) = oneshot::channel();
-        self.owner
-            .send_command(command(reply))
-            .await
-            .map_err(|_| ())?;
+        let command = command(reply);
+        let call = match &command {
+            PeerCommand::StopRuntime { endpoint, call, .. } => {
+                call.clone().map(|call| (call, endpoint.clone()))
+            }
+            _ => None,
+        };
+        if self.owner.send_command(command).await.is_err() {
+            if let Some((call, endpoint)) = call {
+                let mut detail = runtime_directory::call::RuntimeControlCallDetail::new(&endpoint);
+                detail.result =
+                    Some(runtime_directory::call::RuntimeControlCallResult::Unavailable);
+                runtime_directory::call::finish_runtime_control_call(
+                    Some(call.context),
+                    platform::call::CallStatus::Rejected,
+                    &detail,
+                )
+                .await;
+            }
+            return Err(());
+        }
         response.await.map_err(|_| ())
     }
 
@@ -298,7 +414,42 @@ impl PeerHandle {
         query: impl FnOnce(oneshot::Sender<T>) -> PeerQuery,
     ) -> Result<T, ()> {
         let (reply, response) = oneshot::channel();
-        self.owner.send_query(query(reply)).await.map_err(|_| ())?;
+        let query = query(reply);
+        let call = match &query {
+            PeerQuery::OpenClawBrowserRequest { call, .. } => call.clone().map(|call| {
+                (
+                    call,
+                    openclaw::gateway::loopback::GatewayOperation::BrowserRequest,
+                )
+            }),
+            PeerQuery::OpenClawMcpAppRequest { call, .. } => call.clone().map(|call| {
+                (
+                    call,
+                    openclaw::gateway::loopback::GatewayOperation::McpAppRequest,
+                )
+            }),
+            PeerQuery::OpenClawQuestionResolve { call, .. } => call.clone().map(|call| {
+                (
+                    call,
+                    openclaw::gateway::loopback::GatewayOperation::QuestionResolve,
+                )
+            }),
+            _ => None,
+        };
+        if self.owner.send_query(query).await.is_err() {
+            if let Some((call, operation)) = call {
+                if let Err(error) = openclaw::gateway::loopback::finish_gateway_call_status(
+                    &call,
+                    operation,
+                    platform::call::CallStatus::Rejected,
+                )
+                .await
+                {
+                    eprintln!("[peer] call rejection could not be recorded: {error}");
+                }
+            }
+            return Err(());
+        }
         response.await.map_err(|_| ())
     }
 }

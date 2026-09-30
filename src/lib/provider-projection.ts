@@ -1,13 +1,12 @@
-import {
-  decodeProviderMutationReceipt,
-  type ProviderMutationReceipt,
-} from '@/lib/host-api-transport-contract';
+import { invokeIpc } from '@/lib/api-client';
+import { isProviderMutationCommitted, waitForProviderMutation } from '@/lib/provider-call';
+import type { ProviderCallDetail } from '@/types/call-log/provider';
 import { nativeProjectionError } from '@/lib/provider-projection-errors';
 import { PROVIDER_TYPE_INFO, type ProviderCredential, type ProviderOAuthMode, type ProviderType } from '@/lib/providers';
 import { summarizeIdentifier } from '@/lib/session-trace';
 
 function invokePrivate<T>(channel: string, input: unknown): Promise<T> {
-  return window.electron.ipcRenderer.invoke(channel, input) as Promise<T>;
+  return invokeIpc<T>(channel, input);
 }
 
 type AccountIntent = Readonly<{
@@ -23,16 +22,11 @@ type AccountIntent = Readonly<{
   revision: number;
 }>;
 
-type MutationOutcome = 'stored' | 'deleted' | 'rejected' | 'unknown' | 'unavailable';
-type MutationResult = Readonly<{
-  status: MutationOutcome;
-  receipt?: ProviderMutationReceipt;
-}>;
 type ProjectionResult = Readonly<{
   success: boolean;
   error?: string;
   warning?: string;
-  receipt?: ProviderMutationReceipt;
+  receipt?: ProviderCallDetail;
 }>;
 
 function authMode(authMode: ProviderCredential['authMode']): AccountIntent['authMode'] {
@@ -161,23 +155,12 @@ function logProviderConfigTrace(phase: string, payload: Record<string, unknown> 
   }));
 }
 
-function providerProjectionTrace(receipt: ProviderMutationReceipt): Record<string, unknown> {
+function providerProjectionTrace(receipt: ProviderCallDetail): Record<string, unknown> {
   return {
-    changed: receipt.native.changed,
-    applied: receipt.native.applied.status,
-    observed: receipt.native.observed.status,
-    diagnostic: receipt.native.diagnostic
-      ? {
-          phase: receipt.native.diagnostic.phase,
-          reason: receipt.native.diagnostic.reason,
-          configPath: receipt.native.diagnostic.configPath,
-          method: receipt.native.diagnostic.method,
-          expectedPath: receipt.native.diagnostic.expectedPath,
-          detail: receipt.native.diagnostic.detail
-            ? summarizeIdentifier(receipt.native.diagnostic.detail)
-            : undefined,
-        }
-      : undefined,
+    changed: receipt.native?.changed,
+    applied: receipt.native?.applied,
+    observed: receipt.native?.observed,
+    diagnostic: receipt.diagnostic,
   };
 }
 
@@ -209,52 +192,47 @@ function providerMutationInputTrace(input: unknown): Record<string, unknown> {
   };
 }
 
-async function mutate(channel: string, input: unknown, success: 'stored' | 'deleted'): Promise<ProjectionResult> {
+async function mutate(
+  channel: string,
+  input: { account: AccountIntent; apiKey?: string; token?: string } | { accountId: string; revision: number },
+  success: 'stored' | 'deleted',
+): Promise<ProjectionResult> {
   const trace = providerMutationInputTrace(input);
+  const target = 'account' in input
+    ? { accountId: input.account.id, accountRevision: input.account.revision }
+    : { accountId: input.accountId, accountRevision: input.revision };
   try {
     logProviderConfigTrace('request-start', { channel, ...trace });
-    const result = await invokePrivate<MutationResult>(channel, input);
-    const receipt = result.receipt
-      ? decodeProviderMutationReceipt(result.receipt, result.status === 'unknown' ? 'commit-outcome-unknown' : 'committed')
-      : undefined;
-    if (receipt) {
-      logProviderConfigTrace('request-finished', {
-        channel,
-        status: result.status,
-        ...providerProjectionTrace(receipt),
-      });
-    } else {
-      logProviderConfigTrace('request-finished', { channel, status: result.status, receipt: false });
-    }
-    if (result.status === success && receipt?.commit === 'committed' && receipt.persisted.status === 'confirmed') {
+    const receipt = await waitForProviderMutation(
+      await invokePrivate<unknown>(channel, input),
+      success === 'stored' ? 'providerAccounts.replace' : 'providerAccounts.delete',
+      target,
+    );
+    logProviderConfigTrace('request-finished', {
+      channel,
+      outcome: receipt.outcome,
+      ...providerProjectionTrace(receipt),
+    });
+    if (isProviderMutationCommitted(receipt, success)) {
       const warning = nativeProjectionError(receipt);
-      return {
-        success: true,
-        receipt,
-        ...(warning ? { warning } : {}),
-      };
+      return { success: true, receipt, ...(warning ? { warning } : {}) };
     }
-    return {
-      success: false,
-      error: outcomeError(result.status),
-      ...(receipt ? { receipt } : {}),
-    };
+    return { success: false, error: outcomeError(receipt), receipt };
   } catch (error) {
     logProviderConfigTrace('request-failed', {
       channel,
       errorName: error instanceof Error ? error.name : typeof error,
-      message: summarizeIdentifier(error instanceof Error ? error.message : String(error)),
     });
-    if (error instanceof Error && error.name === 'ProviderMutationReceiptUnavailableError') {
-      return { success: false, error: 'Provider accounts are unavailable' };
-    }
-    return { success: false, error: 'Provider account request was rejected' };
+    return { success: false, error: 'Provider account request outcome is unknown; reopen before retrying' };
   }
 }
 
-function outcomeError(outcome: MutationOutcome): string {
-  if (outcome === 'rejected') return 'Provider account request was rejected';
-  if (outcome === 'unknown') return 'Provider account request outcome is unknown';
+function outcomeError(receipt: ProviderCallDetail): string {
+  if (receipt.outcome === 'rejected' || receipt.outcome === 'missing') return 'Provider account request was rejected';
+  if (receipt.phase !== 'terminal' || receipt.outcome === 'unknown'
+    || receipt.commit === 'unknown' || receipt.persisted === 'unknown') {
+    return 'Provider account request outcome is unknown; reopen before retrying';
+  }
   return 'Provider accounts are unavailable';
 }
 

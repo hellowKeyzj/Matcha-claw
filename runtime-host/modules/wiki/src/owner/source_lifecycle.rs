@@ -760,8 +760,7 @@ pub(super) async fn delete_source(
             deleted_pages.push(relative_page);
         } else {
             let next = write_frontmatter_array(&content, "sources", &survivors);
-            std::fs::write(&page_path, next.as_bytes())
-                .map_err(|error| WikiFailure::io(path_text(&page_path), error))?;
+            write_wiki_page(root, &relative_page, &next)?;
             updated_pages.push(relative_page);
         }
     }
@@ -848,8 +847,7 @@ pub(super) async fn cleanup_deleted_wiki_pages(
             updated = write_frontmatter_array(&updated, "related", &filtered);
         }
         if updated != content {
-            std::fs::write(&page_path, updated.as_bytes())
-                .map_err(|error| WikiFailure::io(path_text(&page_path), error))?;
+            write_wiki_page(root, &relative_path, &updated)?;
             refreshed.push(relative_path);
         }
     }
@@ -891,6 +889,9 @@ pub(super) fn migrate_source_path(
         ));
     }
 
+    if should_move_summary {
+        crate::history::record(root, &old_summary, "baseline", "before.wiki.write_page")?;
+    }
     let can_migrate_legacy_basename = can_migrate_legacy_basename(root, &old_identity)?;
     let mut page_updates = Vec::new();
     for page_path in wiki_markdown_files(root)? {
@@ -935,10 +936,10 @@ pub(super) fn migrate_source_path(
     }
 
     let mut updated_pages = Vec::new();
-    for (page_path, relative_path, original, next) in &page_updates {
-        if let Err(error) = std::fs::write(page_path, next.as_bytes()) {
-            rollback_page_updates(&page_updates, &updated_pages);
-            return Err(WikiFailure::io(path_text(page_path), error));
+    for (_, relative_path, original, next) in &page_updates {
+        if let Err(error) = write_wiki_page(root, relative_path, next) {
+            rollback_page_updates(root, &page_updates, &updated_pages);
+            return Err(error);
         }
         updated_pages.push(relative_path.clone());
         let _ = original;
@@ -948,12 +949,12 @@ pub(super) fn migrate_source_path(
     if should_move_summary {
         if let Some(parent) = new_summary_path.parent() {
             if let Err(error) = std::fs::create_dir_all(parent) {
-                rollback_page_updates(&page_updates, &updated_pages);
+                rollback_page_updates(root, &page_updates, &updated_pages);
                 return Err(WikiFailure::io(path_text(parent), error));
             }
         }
         if let Err(error) = std::fs::rename(&old_summary_path, &new_summary_path) {
-            rollback_page_updates(&page_updates, &updated_pages);
+            rollback_page_updates(root, &page_updates, &updated_pages);
             return Err(WikiFailure::io(path_text(&new_summary_path), error));
         }
         moved_summary = Some(new_summary.clone());
@@ -971,7 +972,7 @@ pub(super) fn migrate_source_path(
             &new_summary_path,
             moved_summary.is_some(),
         );
-        rollback_page_updates(&page_updates, &updated_pages);
+        rollback_page_updates(root, &page_updates, &updated_pages);
         return Err(error);
     }
     if let Err(error) = move_source_media(root, &old_identity, &new_identity) {
@@ -987,7 +988,7 @@ pub(super) fn migrate_source_path(
             &new_summary_path,
             moved_summary.is_some(),
         );
-        rollback_page_updates(&page_updates, &updated_pages);
+        rollback_page_updates(root, &page_updates, &updated_pages);
         return Err(error);
     }
     if let Err(error) =
@@ -1006,7 +1007,7 @@ pub(super) fn migrate_source_path(
             &new_summary_path,
             moved_summary.is_some(),
         );
-        rollback_page_updates(&page_updates, &updated_pages);
+        rollback_page_updates(root, &page_updates, &updated_pages);
         return Err(error);
     }
     if let Err(error) = mark_source_task_done(root, project_id, new_source_relative_path) {
@@ -1024,12 +1025,13 @@ pub(super) fn migrate_source_path(
             &new_summary_path,
             moved_summary.is_some(),
         );
-        rollback_page_updates(&page_updates, &updated_pages);
+        rollback_page_updates(root, &page_updates, &updated_pages);
         return Err(error);
     }
     let mut snapshot_paths = vec![old_source_relative_path, new_source_relative_path];
     snapshot_paths.extend(updated_pages.iter().map(String::as_str));
     if let Some(summary) = moved_summary.as_deref() {
+        record_written_wiki_page(root, summary);
         snapshot_paths.push(&old_summary);
         snapshot_paths.push(summary);
     }
@@ -1043,12 +1045,15 @@ pub(super) fn migrate_source_path(
 }
 
 fn rollback_page_updates(
+    root: &Path,
     page_updates: &[(PathBuf, String, String, String)],
     updated_pages: &[String],
 ) {
     for (page_path, relative_path, original, _) in page_updates {
         if updated_pages.iter().any(|updated| updated == relative_path) {
-            let _ = std::fs::write(page_path, original.as_bytes());
+            if std::fs::write(page_path, original.as_bytes()).is_ok() {
+                record_written_wiki_page(root, relative_path);
+            }
         }
     }
 }
@@ -1171,8 +1176,7 @@ pub(super) async fn apply_generated_pages(
             std::fs::create_dir_all(parent)
                 .map_err(|error| WikiFailure::io(path_text(parent), error))?;
         }
-        std::fs::write(&path, content.as_bytes())
-            .map_err(|error| WikiFailure::io(path_text(&path), error))?;
+        write_wiki_page(root, &relative_path, &content)?;
         let metadata =
             std::fs::metadata(&path).map_err(|error| WikiFailure::io(path_text(&path), error))?;
         written.push(WikiWriteReceipt::new(
@@ -1457,7 +1461,7 @@ fn parse_merge_frontmatter(content: &str) -> MergeFrontmatter<'_> {
     }
 }
 
-fn locate_frontmatter_block(content: &str) -> Option<(usize, usize, usize, usize)> {
+pub(crate) fn locate_frontmatter_block(content: &str) -> Option<(usize, usize, usize, usize)> {
     if let Some(bounds) = frontmatter_block_at(content, 0) {
         return Some(bounds);
     }
@@ -1519,7 +1523,7 @@ fn strip_leading_yaml_fence_close<'a>(prefix: &str, body: &'a str) -> Cow<'a, st
     Cow::Borrowed(body)
 }
 
-fn repair_wikilink_lists(payload: &str) -> String {
+pub(crate) fn repair_wikilink_lists(payload: &str) -> String {
     payload
         .lines()
         .map(|line| {
@@ -1566,7 +1570,7 @@ fn wikilink_list_line(line: &str) -> Option<(&str, &str)> {
     .then_some((prefix, rest))
 }
 
-fn strip_body_wikilink_path_prefixes(content: &str) -> String {
+pub(crate) fn strip_body_wikilink_path_prefixes(content: &str) -> String {
     let Some((_, _, _, body_start)) = frontmatter_block_at(content, 0) else {
         return content.to_owned();
     };
@@ -1771,7 +1775,7 @@ fn wiki_page_stem(relative_path: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn normalize_wiki_ref_key(value: &str) -> String {
+pub(super) fn normalize_wiki_ref_key(value: &str) -> String {
     let normalized = value.trim().replace('\\', "/");
     let leaf = normalized.rsplit('/').next().unwrap_or(&normalized);
     let without_md = leaf
@@ -1785,7 +1789,7 @@ fn normalize_wiki_ref_key(value: &str) -> String {
         .collect()
 }
 
-fn clean_index_listing(content: &str, deleted_keys: &BTreeSet<String>) -> String {
+pub(super) fn clean_index_listing(content: &str, deleted_keys: &BTreeSet<String>) -> String {
     if deleted_keys.is_empty() {
         return content.to_owned();
     }
@@ -1812,7 +1816,7 @@ fn clean_index_listing(content: &str, deleted_keys: &BTreeSet<String>) -> String
         .join("\n")
 }
 
-fn strip_deleted_wikilinks(content: &str, deleted_keys: &BTreeSet<String>) -> String {
+pub(super) fn strip_deleted_wikilinks(content: &str, deleted_keys: &BTreeSet<String>) -> String {
     if deleted_keys.is_empty() {
         return content.to_owned();
     }
@@ -2301,7 +2305,13 @@ fn migrate_legacy_source_summary_if_safe(
             "Failed to migrate legacy source summary {legacy_path} -> {source_summary_path}."
         ));
     }
-    if std::fs::write(&canonical_path, canonical.as_bytes()).is_ok()
+    if crate::history::record(root, &legacy_path, "baseline", "before.wiki.write_page").is_err() {
+        return Some(
+            "Source summary migration stopped before writing: file history recording failed."
+                .to_owned(),
+        );
+    }
+    if write_wiki_page(root, source_summary_path, &canonical).is_ok()
         && std::fs::remove_file(&legacy_full_path).is_ok()
     {
         None
@@ -2357,6 +2367,21 @@ fn append_ingest_warnings(root: &Path, identity: &str, warnings: &[String]) {
     }
 }
 
+fn write_wiki_page(root: &Path, relative_path: &str, content: &str) -> Result<(), WikiFailure> {
+    let path = resolve_project_path(root, relative_path)?;
+    crate::history::record(root, relative_path, "baseline", "before.wiki.write_page")?;
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|error| WikiFailure::io(path_text(&path), error))?;
+    record_written_wiki_page(root, relative_path);
+    Ok(())
+}
+
+fn record_written_wiki_page(root: &Path, relative_path: &str) {
+    if crate::history::record(root, relative_path, "agent", "wiki.write_page").is_err() {
+        eprintln!("[wiki] page written; file history recording failed");
+    }
+}
+
 fn backup_existing_page(root: &Path, relative_path: &str, existing: &str) {
     let stamp = Local::now().format("%Y%m%d-%H%M%S");
     let sanitized = relative_path.replace(['/', '\\'], "__");
@@ -2402,8 +2427,7 @@ fn append_log_entries(
         std::fs::create_dir_all(parent)
             .map_err(|error| WikiFailure::io(path_text(parent), error))?;
     }
-    std::fs::write(&path, content.as_bytes())
-        .map_err(|error| WikiFailure::io(path_text(&path), error))?;
+    write_wiki_page(root, "wiki/log.md", &content)?;
     Ok(true)
 }
 
@@ -2724,7 +2748,7 @@ fn dedupe_case_insensitive(values: Vec<String>) -> Vec<String> {
     out
 }
 
-fn wiki_markdown_files(root: &Path) -> Result<Vec<PathBuf>, WikiFailure> {
+pub(super) fn wiki_markdown_files(root: &Path) -> Result<Vec<PathBuf>, WikiFailure> {
     let mut files = Vec::new();
     collect_wiki_markdown(root, &root.join("wiki"), &mut files)?;
     Ok(files)
@@ -2803,8 +2827,7 @@ fn move_source_media(
 fn remove_parsed_markdown(root: &Path, source_relative_path: &str) -> Result<(), WikiFailure> {
     let path = root
         .join(RAW_PARSED_DIR)
-        .join(source_identity(source_relative_path))
-        .with_extension("md");
+        .join(format!("{}.md", source_identity(source_relative_path)));
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -2819,15 +2842,13 @@ fn move_parsed_markdown(
 ) -> Result<(), WikiFailure> {
     let old_path = root
         .join(RAW_PARSED_DIR)
-        .join(source_identity(old_source_relative_path))
-        .with_extension("md");
+        .join(format!("{}.md", source_identity(old_source_relative_path)));
     if !old_path.is_file() {
         return Ok(());
     }
     let new_path = root
         .join(RAW_PARSED_DIR)
-        .join(source_identity(new_source_relative_path))
-        .with_extension("md");
+        .join(format!("{}.md", source_identity(new_source_relative_path)));
     if let Some(parent) = new_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| WikiFailure::io(path_text(parent), error))?;
@@ -2881,6 +2902,7 @@ fn update_source_task_for_run(
     write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
     Ok(WikiSourceTaskRunPlan {
         project_id: project_id.to_owned(),
+        source_relative_path,
         staged,
     })
 }

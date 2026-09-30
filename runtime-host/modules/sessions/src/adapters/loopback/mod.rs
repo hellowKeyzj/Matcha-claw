@@ -132,6 +132,9 @@ fn route_events(dependencies: Dependencies, request: Request) -> RouteFuture {
         {
             Some(events::Action::Response(response)) => response.into(),
             Some(events::Action::Stream(stream)) => {
+                if dependencies.session.record_events_subscription().await.is_err() {
+                    return timeout_response().into();
+                }
                 let (receiver, keepalive_interval) = stream.into_parts();
                 RouteOutcome::Stream(StreamResponse::owned(SessionDeltaStream::new(
                     receiver,

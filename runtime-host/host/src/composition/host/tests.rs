@@ -478,23 +478,48 @@ async fn peer_lifecycle_failures_do_not_shut_down_the_host() {
     assert_eq!(
         handles
             .peer
-            .stop_runtime(RuntimeDriverIdentity::open_claw().endpoint())
+            .stop_runtime(RuntimeDriverIdentity::open_claw().endpoint(), None)
             .await
             .unwrap()
             .unwrap_err(),
-        super::super::peer::RuntimeStopCommandError::RuntimeStop
+        super::super::peer::RuntimeStopCommandError::RuntimeStop(
+            crate::RuntimeLifecycleFailure::AlreadySatisfied,
+        )
     );
     assert_eq!(host.admission_state().phase(), HostPhase::Ready);
     assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);
 
+    let endpoint = RuntimeDriverIdentity::open_claw().endpoint();
+    let call = handles
+        .calls
+        .recorder()
+        .begin(
+            "lifecycle.restart",
+            &runtime_directory::call::RuntimeControlCallDetail::new(&endpoint),
+        )
+        .await
+        .unwrap();
+    let mut changes = handles.calls.subscribe();
+    let receipt = handles
+        .peer
+        .admit_runtime_restart(endpoint, call)
+        .await
+        .unwrap();
+    let record = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let record = handles.calls.get(receipt.call_id.clone()).await.unwrap();
+            if record.status.is_terminal() {
+                break record;
+            }
+            changes.recv().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(record.status, platform::call::CallStatus::Failed);
     assert_eq!(
-        handles
-            .peer
-            .restart_runtime(RuntimeDriverIdentity::open_claw().endpoint())
-            .await
-            .unwrap()
-            .unwrap_err(),
-        super::super::peer::RuntimeRestartCommandError::RuntimeRestart
+        serde_json::to_value(record.detail).unwrap()["error"],
+        "commandFailed"
     );
     assert_eq!(host.admission_state().phase(), HostPhase::Ready);
     assert_eq!(host.state().lifecycle(), HostLifecycle::Ready);

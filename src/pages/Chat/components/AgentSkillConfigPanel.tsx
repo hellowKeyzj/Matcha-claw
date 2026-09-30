@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { Loader2 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
@@ -17,6 +18,7 @@ export function AgentSkillConfigPanel({
   headerAccessory,
   skillOptions,
   skillsLoading,
+  savingSkillId,
   selectedSkillIds,
   onToggleSkill,
 }: {
@@ -24,10 +26,11 @@ export function AgentSkillConfigPanel({
   headerAccessory?: ReactNode;
   skillOptions: AgentSkillOption[];
   skillsLoading: boolean;
+  savingSkillId: string | null;
   selectedSkillIds: string[];
   onToggleSkill: (skillId: string, checked: boolean) => void;
 }) {
-  const { t } = useTranslation('chat');
+  const { t } = useTranslation(['chat', 'common']);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -48,10 +51,12 @@ export function AgentSkillConfigPanel({
             <div className="min-w-0 divide-y divide-border/35">
               {skillOptions.map((skill) => {
                 const checked = selectedSkillIds.includes(skill.id);
-                const switchDisabled = skillsLoading || (skill.selectable === false && !checked);
+                const saving = savingSkillId === skill.id;
+                const switchDisabled = savingSkillId !== null || (skill.selectable === false && !checked);
                 return (
                   <div
                     key={skill.id}
+                    aria-busy={saving}
                     className={cn(
                       'flex min-w-0 w-full items-start gap-3 overflow-hidden px-2 py-3 transition-colors',
                       checked
@@ -84,7 +89,15 @@ export function AgentSkillConfigPanel({
                             </p>
                           ) : null}
                         </div>
-                        <div className="shrink-0 flex items-center">
+                        <div className="shrink-0 flex items-center gap-2">
+                          <span className="flex h-4 w-4 items-center justify-center" role="status">
+                            {saving ? (
+                              <>
+                                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-hidden />
+                                <span className="sr-only">{t('common:status.saving')}</span>
+                              </>
+                            ) : null}
+                          </span>
                           <Switch
                             aria-label={skill.name}
                             checked={checked}

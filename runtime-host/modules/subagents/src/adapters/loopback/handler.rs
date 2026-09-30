@@ -83,6 +83,7 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
         }),
     );
     let operation_id = request.operation_id.clone();
+    let principal = request.principal.clone();
     let command = match request.command(trace_id.as_deref()) {
         Ok(command) => command,
         Err(_) => {
@@ -100,6 +101,15 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
         trace_id.as_deref(),
         serde_json::json!({ "operation": operation_id }),
     );
+    if crate::application::results::is_background_mutation(&command) {
+        return match dependencies.subagents.admit(command, principal).await {
+            Ok(receipt) => ResponseBody {
+                status: 202,
+                body: serde_json::json!(receipt),
+            },
+            Err(()) => ResponseBody::from_delivery(Delivery::Unavailable),
+        };
+    }
     let is_query = is_short_deadline_query(&command);
     let dispatch = dependencies.subagents.subagents(command);
     let result = if is_query {
@@ -192,10 +202,11 @@ impl ResponseBody {
 fn delivery_trace_kind(delivery: &Delivery) -> &'static str {
     match delivery {
         Delivery::Agents { .. } => "agents",
-        Delivery::Wait(_) => "wait",
         Delivery::Created(_) => "created",
         Delivery::Updated(_) => "updated",
         Delivery::Deleted(_) => "deleted",
+        Delivery::WorkspaceInitializationFailed(_) => "workspaceInitializationFailed",
+        Delivery::PackageInstallFailed { .. } => "packageInstallFailed",
         Delivery::Files(_) => "files",
         Delivery::File(_) => "file",
         Delivery::Configuration(_) => "configuration",
@@ -206,7 +217,6 @@ fn delivery_trace_kind(delivery: &Delivery) -> &'static str {
         Delivery::PackageInstall(_) => "packageInstall",
         Delivery::Rejected => "rejected",
         Delivery::OutcomeUnknown => "outcomeUnknown",
-        Delivery::WaitUnknown => "waitUnknown",
         Delivery::Unsupported => "unsupported",
         Delivery::Unavailable => "unavailable",
     }
@@ -255,7 +265,7 @@ fn id_shape(value: Option<&str>) -> Value {
     }
 }
 
-fn now_millis() -> u64 {
+pub(super) fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -278,11 +288,6 @@ mod tests {
         assert!(!is_short_deadline_query(&Command::Delete {
             endpoint: NativeEndpoint::OpenClawLocal,
             input: AgentDelete::try_new("agent-1".into(), true).expect("delete input"),
-        }));
-        assert!(!is_short_deadline_query(&Command::Wait {
-            endpoint: NativeEndpoint::OpenClawLocal,
-            input: crate::domain::model::AgentWait::try_new("run-1".into(), 30_000, 10_000)
-                .expect("wait input"),
         }));
     }
 }

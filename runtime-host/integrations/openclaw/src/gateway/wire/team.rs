@@ -350,9 +350,11 @@ pub(crate) fn decode_agents_update(response: GatewayResponse) -> Result<AgentUpd
 }
 
 pub(crate) fn decode_agents_delete(response: GatewayResponse) -> Result<AgentDeleted, WireError> {
-    super::agents::decode_delete(response).map(|deleted| AgentDeleted {
-        agent_id: deleted.agent_id,
-    })
+    let deleted = super::agents::decode_delete(response)?;
+    if !deleted.ok || deleted.failed_count != 0 || deleted.purge_failed_count != 0 {
+        return Err(WireError::InvalidAgentsDelete);
+    }
+    Ok(AgentDeleted { agent_id: deleted.agent_id })
 }
 
 pub(crate) fn decode_config_get(response: GatewayResponse) -> Result<ConfigSnapshot, WireError> {
@@ -846,100 +848,25 @@ mod tests {
     fn materialize_agents_patch_keeps_raw_local_to_managed_fields() {
         let initial = json!({
             "agents": {
-                "list": [{
-                    "id": "managed-first",
-                    "name": "old-first",
-                    "workspace": "old-workspace",
-                    "model": {"primary": "provider/model-canary"},
-                    "tools": ["tool-canary"]
-                }]
-            },
-            "models": {"leak": "must-not-appear"}
-        });
-        let snapshot = decode_config_get(response(
-            "config-get-1",
-            config_snapshot_with_raw(initial.to_string(), "patch-base-hash"),
-        ))
-        .unwrap();
-        let patch = snapshot
-            .patch_agents(vec![ConfigAgentPatch::new(
-                "managed-first".into(),
-                "new-first".into(),
-                "workspace-first".into(),
-            )])
-            .unwrap();
-        let (raw, _, facts, replace_paths) = patch.into_parts();
-        assert!(replace_paths.is_empty());
-        assert_eq!(
-            serde_json::from_str::<Value>(raw.as_str().unwrap()).unwrap(),
-            json!({
-                "agents": {
-                    "list": [{
-                        "id": "managed-first",
-                        "name": "new-first",
-                        "workspace": "workspace-first"
-                    }]
-                }
-            })
-        );
-
-        let restored_snapshot = decode_config_get(response(
-            "config-get-2",
-            config_snapshot_with_raw(
-                json!({
-                    "agents": {
-                        "list": [{
-                            "id": "managed-first",
-                            "name": "new-first",
-                            "workspace": "workspace-first",
-                            "model": {"primary": "provider/model-canary"},
-                            "tools": ["tool-canary"]
-                        }]
-                    },
-                    "models": {"keep": "outside-restore-patch"}
-                })
-                .to_string(),
-                "restore-base-hash",
-            ),
-        ))
-        .unwrap();
-        let ConfigRestorePreparation::Ready { request, fenced } =
-            restored_snapshot.prepare_restore(facts).unwrap()
-        else {
-            panic!("matching entry with preserved fields must prepare a restore");
-        };
-        assert!(!fenced);
-        let encoded: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
-        assert_eq!(encoded["method"], "config.patch");
-        assert_eq!(encoded["params"]["replacePaths"], json!(["agents.list"]));
-        assert_eq!(
-            serde_json::from_str::<Value>(encoded["params"]["raw"].as_str().unwrap()).unwrap(),
-            json!({
-                "agents": {
-                    "list": [{
-                        "id": "managed-first",
+                "entries": {
+                    "managed-first": {
                         "name": "old-first",
                         "workspace": "old-workspace",
-                        "model": {"primary": "provider/model-canary"},
-                        "tools": ["tool-canary"]
-                    }]
+                        "model": {"primary": "provider/model-canary"}
+                    },
+                    "external-first": {
+                        "name": "external-name",
+                        "workspace": "external-workspace",
+                        "tools": {"alsoAllow": ["tool-canary"]},
+                        "sandbox": {"mode": "all"}
+                    }
                 }
-            })
-        );
-    }
-
-    #[test]
-    fn restore_removes_reordered_matching_entries_without_touching_other_entries() {
-        let initial = json!({
-            "agents": {
-                "list": [{"id": "unrelated", "value": "keep"}]
-            }
+            },
+            "models": {"keep": "outside-team-fields"}
         });
-        let snapshot = decode_config_get(response(
-            "config-get-1",
-            config_snapshot_with_raw(initial.to_string(), "patch-base-hash"),
-        ))
-        .unwrap();
+        let mut payload = config_snapshot_with_raw(initial.to_string(), "patch-base-hash");
+        payload["sourceConfig"] = initial.clone();
+        let snapshot = decode_config_get(response("config-get-1", payload)).unwrap();
         let patch = snapshot
             .patch_agents(vec![
                 ConfigAgentPatch::new(
@@ -947,73 +874,163 @@ mod tests {
                     "new-first".into(),
                     "workspace-first".into(),
                 ),
-                ConfigAgentPatch::new(
-                    "managed-second".into(),
-                    "new-second".into(),
-                    "workspace-second".into(),
-                ),
+                ConfigAgentPatch::external("external-first".into()),
             ])
             .unwrap();
-        let (raw, base_hash, facts, replace_paths) = patch.into_parts();
+        let (raw, base_hash, facts) = patch.into_parts();
         assert_eq!(base_hash.unwrap().as_str().unwrap(), "patch-base-hash");
-        assert!(replace_paths.is_empty());
+        let mut expected = initial.clone();
+        expected["agents"]["entries"]["managed-first"]["name"] = json!("new-first");
+        expected["agents"]["entries"]["managed-first"]["workspace"] = json!("workspace-first");
+        for agent in ["managed-first", "external-first"] {
+            expected["agents"]["entries"][agent]["tools"] = json!({
+                "profile": "full", "deny": ["sessions_spawn", "sessions_yield", "subagents"]
+            });
+            expected["agents"]["entries"][agent]["sandbox"] = json!({"mode": "off"});
+        }
         assert_eq!(
             serde_json::from_str::<Value>(raw.as_str().unwrap()).unwrap(),
-            json!({
-                "agents": {
-                    "list": [
-                        {
-                            "id": "managed-first",
-                            "name": "new-first",
-                            "workspace": "workspace-first"
-                        },
-                        {
-                            "id": "managed-second",
-                            "name": "new-second",
-                            "workspace": "workspace-second"
-                        }
-                    ]
-                }
-            })
+            expected
         );
 
-        let reordered = json!({
-            "agents": {
-                "list": [
-                    {
-                        "id": "managed-second",
-                        "name": "new-second",
-                        "workspace": "workspace-second"
-                    },
-                    {"id": "unrelated", "value": "keep"},
-                    {
-                        "id": "managed-first",
-                        "name": "new-first",
-                        "workspace": "workspace-first"
-                    }
-                ]
-            }
-        });
-        let restored_snapshot = decode_config_get(response(
-            "config-get-2",
-            config_snapshot_with_raw(reordered.to_string(), "restore-base-hash"),
-        ))
-        .unwrap();
-        let ConfigRestorePreparation::Ready { request, fenced } =
+        expected["models"] = json!({"keep": "outside-restore-fields"});
+        let mut payload = config_snapshot_with_raw(expected.to_string(), "restore-base-hash");
+        payload["sourceConfig"] = expected.clone();
+        let mut changed_identity = payload.clone();
+        changed_identity["sourceConfig"]["agents"]["entries"]["external-first"]["workspace"] =
+            json!("different-workspace");
+        let changed_snapshot =
+            decode_config_get(response("config-get-fenced", changed_identity)).unwrap();
+        assert!(!changed_snapshot.matches_agents(&facts));
+        assert!(matches!(
+            changed_snapshot
+                .prepare_restore(
+                    ConfigRestoreFacts::from_private_value(facts.to_private_value().unwrap())
+                        .unwrap(),
+                )
+                .unwrap(),
+            ConfigRestorePreparation::Fenced
+        ));
+        let restored_snapshot = decode_config_get(response("config-get-2", payload)).unwrap();
+        assert!(restored_snapshot.matches_agents(&facts));
+        let ConfigRestorePreparation::Ready { request } =
             restored_snapshot.prepare_restore(facts).unwrap()
         else {
-            panic!("matching reordered entries must prepare a restore");
+            panic!("matching external entry with preserved fields must prepare a restore");
         };
-        assert!(!fenced);
+        let encoded: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
+        assert_eq!(encoded["method"], "config.set");
+        assert_eq!(encoded["params"]["baseHash"], "restore-base-hash");
+        assert!(encoded["params"].get("replacePaths").is_none());
+        expected["agents"]["entries"]["external-first"] =
+            initial["agents"]["entries"]["external-first"].clone();
+        assert_eq!(
+            serde_json::from_str::<Value>(encoded["params"]["raw"].as_str().unwrap()).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn restore_removes_reordered_matching_entries_without_touching_other_entries() {
+        let initial = json!({
+            "agents": {
+                "entries": {"unrelated": {"name": "keep"}}
+            }
+        });
+        let mut payload = config_snapshot_with_raw(initial.to_string(), "patch-base-hash");
+        payload["sourceConfig"] = initial.clone();
+        let snapshot = decode_config_get(response("config-get-1", payload)).unwrap();
+        let patch = snapshot
+            .patch_agents(vec![
+                ConfigAgentPatch::external("external-first".into())
+                    .with_tools(vec!["tool-first".into()]),
+                ConfigAgentPatch::external("external-second".into())
+                    .with_tools(vec!["tool-second".into()]),
+            ])
+            .unwrap();
+        let (raw, base_hash, facts) = patch.into_parts();
+        assert_eq!(base_hash.unwrap().as_str().unwrap(), "patch-base-hash");
+        let expected = json!({
+            "agents": {
+                "entries": {
+                    "external-first": {
+                        "tools": {
+                            "profile": "full", "deny": ["sessions_spawn", "sessions_yield", "subagents"],
+                            "alsoAllow": ["tool-first"]
+                        },
+                        "sandbox": {"mode": "off"}
+                    },
+                    "external-second": {
+                        "tools": {
+                            "profile": "full", "deny": ["sessions_spawn", "sessions_yield", "subagents"],
+                            "alsoAllow": ["tool-second"]
+                        },
+                        "sandbox": {"mode": "off"}
+                    },
+                    "unrelated": {"name": "keep"}
+                }
+            }
+        });
+        assert_eq!(
+            serde_json::from_str::<Value>(raw.as_str().unwrap()).unwrap(),
+            expected
+        );
+        let reordered = json!({
+            "agents": {
+                "entries": {
+                    "external-second": expected["agents"]["entries"]["external-second"],
+                    "unrelated": initial["agents"]["entries"]["unrelated"],
+                    "external-first": expected["agents"]["entries"]["external-first"]
+                }
+            },
+            "models": {"keep": "outside-restore-fields"}
+        });
+        let mut payload = config_snapshot_with_raw(reordered.to_string(), "restore-base-hash");
+        payload["sourceConfig"] = reordered.clone();
+        payload["config"] = reordered.clone();
+        payload["config"]["agents"]["entries"]["external-second"]["modelPolicy"] =
+            json!({"allow": ["runtime-model-canary"]});
+        let restored_snapshot = decode_config_get(response("config-get-2", payload)).unwrap();
+        assert!(restored_snapshot.matches_agents(&facts));
+        let ConfigRestorePreparation::Ready { request } =
+            restored_snapshot.prepare_restore(facts).unwrap()
+        else {
+            panic!("matching reordered external entries must prepare a restore");
+        };
         let encoded: Value = serde_json::from_str(&request.encode().unwrap()).unwrap();
         assert_eq!(encoded["method"], "config.patch");
         assert_eq!(encoded["params"]["baseHash"], "restore-base-hash");
-        assert_eq!(encoded["params"]["replacePaths"], json!(["agents.list"]));
-        let restored: Value =
+        assert_eq!(
+            encoded["params"]["replacePaths"],
+            json!([
+                "agents.entries.external-first.tools.alsoAllow",
+                "agents.entries.external-first.tools.deny",
+                "agents.entries.external-second.modelPolicy.allow",
+                "agents.entries.external-second.tools.alsoAllow",
+                "agents.entries.external-second.tools.deny"
+            ])
+        );
+        let restore_patch: Value =
             serde_json::from_str(encoded["params"]["raw"].as_str().unwrap()).unwrap();
         assert_eq!(
+            restore_patch,
+            json!({"agents": {"entries": {"external-first": null, "external-second": null}}})
+        );
+        let mut restored = reordered;
+        let entries = restored["agents"]["entries"].as_object_mut().unwrap();
+        for agent in restore_patch["agents"]["entries"]
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            entries.remove(agent);
+        }
+        assert_eq!(
             restored,
-            json!({"agents": {"list": [{"id": "unrelated", "value": "keep"}]}})
+            json!({
+                "agents": {"entries": {"unrelated": {"name": "keep"}}},
+                "models": {"keep": "outside-restore-fields"}
+            })
         );
     }
 

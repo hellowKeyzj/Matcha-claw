@@ -1523,6 +1523,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use futures_util::{SinkExt, StreamExt};
+    use platform::state_dir::CanonicalStateDir;
     use serde_json::{Map, Value, json};
     use tokio::{net::TcpListener, time::timeout};
     use tokio_tungstenite::tungstenite::Message;

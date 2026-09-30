@@ -29,6 +29,7 @@ impl ReadinessProbe for OpenClawReadiness {
         _: ProcessObservation,
         cancellation: CancellationToken,
     ) -> PolicyFuture<ReadinessResult> {
+        eprintln!("[startup-trace] source=openclaw-launch phase=process-start stage=activated");
         let client = Arc::clone(&self.client);
         Box::pin(wait_for_gateway_stability(
             cancellation,

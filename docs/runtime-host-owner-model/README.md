@@ -1,6 +1,6 @@
 # Runtime Host Owner / State Model
 
-> 在不修改 Renderer、Electron、preload、page UI 和既有客户端 API 的前提下，从当前 TS、Electron、peer runtime 与 Rust 代码重建的事实源与责任边界。
+> 从当前 TS、Electron、peer runtime 与 Rust 代码重建的事实源与责任边界；除本轮显式批准的 call-log/Calls 与具体 admit consumer 外，不改变既有客户端 API。
 >
 > 本目录不是 Rust crate 设计，也不是当前 `runtime-host/` 资产的认可清单。owner/state 关系必须由 active code 与迁移账本共同裁决。
 
@@ -54,10 +54,10 @@ config write != runtime ready != connected != operation succeeded
 
 ## 当前硬约束
 
-1. Renderer、Electron、preload、page/store 调用代码不因 Rust 设计而修改。
+1. Renderer、Electron、preload、page/store 调用代码不因 Rust 设计任意修改；本轮显式批准的 call-log/Calls 与具体 admit consumer 除外。
 2. Rust 必须提供既有 API 的相同输入、输出、错误和可观察行为。
 3. Rust Host 不复制 peer-native session、run、approval、transcript、tool、model 或 lifecycle 事实。
-4. 旧 generic RuntimeJob public contract 已删除：不存在 `RuntimeJobQueue` / `RuntimeJobRegistry`、`runtimeHost.jobGet`、`runtime-job:*`、generic `RuntimeJob*` DTO 或 `job_compatibility`；异步完成归属具体 owner/facade 的 typed operation，不得重新引入这些已删除面。
+4. 旧 generic RuntimeJob public contract 已删除：不存在 `RuntimeJobQueue` / `RuntimeJobRegistry`、`runtimeHost.jobGet`、`runtime-job:*`、generic `RuntimeJob*` DTO 或 `job_compatibility`。本轮批准统一持久 call log：`modules/call-log` 单写调用记录/history，原 owner/facade 仍拥有业务队列、执行、canonical facts、native ports 与终态；`CallId` 不替代 native/business identity，不保存通用 args/results/raw/secrets，也不 replay 未完成操作。当前源码覆盖与接线/验证 OPEN 见 [Call Log / Calls](../architecture-knowledge/modules/call-log/README.md)。[VERIFY: runtime-host/platform/src/call.rs:221-225] [VERIFY: runtime-host/modules/call-log/src/store.rs:76-95]
 5. ClawHub marketplace search 是 third-party external registry lookup，不是 durable Domain owner，也不是 OpenClaw Gateway native skill RPC；安装请求仍归 Skills runtime ops，但执行方是 legacy ClawHub CLI + registry fallback。
 6. Runtime address 的身份边界固定为 `RuntimeEndpoint`、`SessionIdentity(endpoint + agentId + sessionKey)` 与 `RuntimeScope`；`endpointSessionId` 是 peer-local 元数据，不是 Host identity。
 7. 不能从现有 `runtime-host-rust/` 目录反推最终架构。

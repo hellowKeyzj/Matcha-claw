@@ -1,9 +1,4 @@
 import type { GatewayRpcInvoker } from '@/services/openclaw/types';
-import { fetchLatestAssistantSnapshot } from '@/services/runtime/session-runtime';
-import type {
-  AgentScope,
-  SessionIdentity,
-} from '../../types/desktop/runtime-address';
 
 interface AgentRunResult {
   runId?: unknown;
@@ -32,38 +27,8 @@ export interface WaitAgentRunInput {
   logPrefix?: string;
 }
 
-export interface WaitAgentRunWithProgressInput {
-  runId: string;
-  sessionKey: string;
-  endpointSessionId?: string;
-  sessionIdentity: SessionIdentity;
-  waitScope: AgentScope;
-  waitSliceMs: number;
-  idleTimeoutMs: number;
-  rpcTimeoutBufferMs: number;
-  logPrefix?: string;
-  waitSlice?: (input: {
-    scope: AgentScope;
-    runId: string;
-    waitSliceMs: number;
-    rpcTimeoutBufferMs: number;
-  }) => Promise<AgentWaitResult>;
-}
-
 const AGENT_WAIT_SUCCESS_STATUSES = new Set(['', 'ok', 'completed', 'done', 'success']);
 const AGENT_WAIT_ERROR_STATUSES = new Set(['error', 'failed', 'aborted']);
-
-function readGatewayRpc(rpc: GatewayRpcInvoker | null): GatewayRpcInvoker {
-  if (!rpc) {
-    throw new Error('agent.wait gateway rpc is required when waitSlice is not provided');
-  }
-  return rpc;
-}
-
-function buildSnapshotFingerprint(input: { text: string; toolNames: string[] }): string {
-  const normalizedTools = input.toolNames.map((item) => item.trim()).filter((item) => item.length > 0);
-  return `${input.text}|${normalizedTools.join(',')}`;
-}
 
 export async function startAgentRun(
   rpc: GatewayRpcInvoker,
@@ -149,123 +114,4 @@ export async function waitAgentRun(
   }
 
   throw new Error(`Timed out waiting for agent run after ${maxWaitMs}ms`);
-}
-
-export async function waitAgentRunWithProgress(
-  rpc: GatewayRpcInvoker | null,
-  input: WaitAgentRunWithProgressInput,
-): Promise<AgentWaitResult> {
-  const {
-    runId,
-    sessionKey,
-    endpointSessionId,
-    waitSliceMs,
-    idleTimeoutMs,
-    rpcTimeoutBufferMs,
-    logPrefix = 'agent-wait-progress',
-  } = input;
-
-  const startedAt = Date.now();
-  let lastProgressAt = startedAt;
-  let round = 0;
-  let fingerprint = '';
-
-  try {
-    const initial = await fetchLatestAssistantSnapshot({
-      sessionKey,
-      ...(endpointSessionId ? { endpointSessionId } : {}),
-      sessionIdentity: input.sessionIdentity,
-      limit: 20,
-    });
-    fingerprint = buildSnapshotFingerprint(initial);
-    if (fingerprint) {
-      lastProgressAt = Date.now();
-    }
-  } catch {
-    // Ignore snapshot fetch errors before run starts producing output.
-  }
-
-  while (true) {
-    const now = Date.now();
-    if (now - lastProgressAt >= idleTimeoutMs) {
-      throw new Error(`Timed out with no progress after ${idleTimeoutMs}ms`);
-    }
-
-    round += 1;
-    const rpcTimeoutMs = waitSliceMs + rpcTimeoutBufferMs;
-    console.info(
-      `[${logPrefix}] agent.wait start runId=${runId} round=${round} waitTimeoutMs=${waitSliceMs} rpcTimeoutMs=${rpcTimeoutMs} idleMs=${now - lastProgressAt}`,
-    );
-
-    let result: AgentWaitResult;
-    try {
-      result = input.waitSlice
-        ? await input.waitSlice({
-          scope: input.waitScope,
-          runId,
-          waitSliceMs,
-          rpcTimeoutBufferMs,
-        })
-        : await readGatewayRpc(rpc)<AgentWaitResult>('agent.wait', { runId, timeoutMs: waitSliceMs }, rpcTimeoutMs);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes('RPC timeout: agent.wait')) {
-        console.warn(
-          `[${logPrefix}] agent.wait rpc-timeout runId=${runId} round=${round}, continue waiting`,
-        );
-      } else {
-        console.error(
-          `[${logPrefix}] agent.wait failed runId=${runId} round=${round} error=${message}`,
-        );
-        throw error;
-      }
-
-      try {
-        const snapshot = await fetchLatestAssistantSnapshot({
-          sessionKey,
-          ...(endpointSessionId ? { endpointSessionId } : {}),
-          sessionIdentity: input.sessionIdentity,
-          limit: 20,
-        });
-        const nextFingerprint = buildSnapshotFingerprint(snapshot);
-        if (nextFingerprint !== fingerprint) {
-          fingerprint = nextFingerprint;
-          lastProgressAt = Date.now();
-          console.info(`[${logPrefix}] progress detected runId=${runId} round=${round} source=snapshot-change`);
-        }
-      } catch {
-        // Ignore snapshot fetch errors and continue waiting.
-      }
-      continue;
-    }
-
-    const status = typeof result.status === 'string' ? result.status.toLowerCase() : '';
-    if (AGENT_WAIT_SUCCESS_STATUSES.has(status)) {
-      console.info(
-        `[${logPrefix}] agent.wait ok runId=${runId} round=${round} elapsedMs=${Date.now() - startedAt} status=${status || 'ok'}`,
-      );
-      return result;
-    }
-    if (AGENT_WAIT_ERROR_STATUSES.has(status)) {
-      const reason = typeof result.error === 'string' ? result.error.trim() : '';
-      throw new Error(reason || `agent.wait returned ${status}`);
-    }
-
-    try {
-      const snapshot = await fetchLatestAssistantSnapshot({
-        sessionKey,
-        ...(endpointSessionId ? { endpointSessionId } : {}),
-        sessionIdentity: input.sessionIdentity,
-        limit: 20,
-      });
-      const nextFingerprint = buildSnapshotFingerprint(snapshot);
-      if (nextFingerprint !== fingerprint) {
-        fingerprint = nextFingerprint;
-        lastProgressAt = Date.now();
-        console.info(`[${logPrefix}] progress detected runId=${runId} round=${round} source=snapshot-change`);
-      }
-    } catch {
-      // Ignore snapshot fetch errors and continue waiting.
-    }
-  }
 }

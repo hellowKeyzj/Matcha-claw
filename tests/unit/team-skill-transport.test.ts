@@ -31,13 +31,13 @@ describe('Electron Main TeamSkill transport', () => {
           },
         }),
       })
-      .mockResolvedValueOnce({ status: 200, json: async () => ({ status: 'materialized' }) });
+      .mockResolvedValueOnce({ status: 202, json: async () => ({ callId: 'a'.repeat(32), accepted: true }) });
     const transport = createTeamSkillTransport({ verificationKey: 'public', signDecision }, 34_128, fetcher);
 
     await expect(transport.authorize('E:/skills/writing')).resolves.toEqual({ status: 200, body: { selectionId } });
     await expect(transport.validate(selectionId)).resolves.toMatchObject({ status: 200, body: { status: 'valid' } });
     await expect(transport.dependencyPlan(selectionId)).resolves.toMatchObject({ status: 200, body: { status: 'available' } });
-    await expect(transport.materialize(selectionId, teamId, idempotencyKey)).resolves.toEqual({ status: 200, body: { status: 'materialized' } });
+    await expect(transport.materialize(selectionId, teamId, idempotencyKey)).resolves.toEqual({ status: 202, body: { callId: 'a'.repeat(32), accepted: true } });
 
     expect(signDecision).toHaveBeenNthCalledWith(1, expect.objectContaining({
       endpoint: '/api/team/skill', scope: 'team:write', capability: 'team.skill.authorize', subject: 'team-skill-selection',

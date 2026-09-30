@@ -1,7 +1,8 @@
+use platform::call::CallContext;
 use tokio::sync::oneshot;
 
 use crate::{
-    application::receipts::{Outcome, Settlement},
+    application::{call::SettingsCallDetail, receipts::Outcome},
     domain::Desired,
 };
 
@@ -9,7 +10,7 @@ pub enum SettingsCommand {
     ReplaceDesired {
         correlation: String,
         desired: Desired,
-        reply: oneshot::Sender<Settlement>,
+        call: CallContext<SettingsCallDetail>,
     },
     RecoverPendingProjection {
         reply: oneshot::Sender<()>,

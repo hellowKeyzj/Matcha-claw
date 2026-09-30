@@ -99,20 +99,8 @@
   "editDialogTitle": "Edit Subagent",
   "manageTitle": "Managing: {{agentId}}",
   "manage": {
-    "promptLabel": "Prompt",
-    "promptPlaceholder": "Describe what this subagent should write for AGENTS.md / SOUL.md / USER.md / MEMORY.md",
-    "includeCurrentFilesLabel": "Use current files",
-    "generateDraft": "Generate Draft",
-    "generatingDraft": "Generating...",
-    "applyingDraft": "Applying...",
-    "generateDiffPreview": "Generate Diff Preview",
-    "diffPreviewTitle": "Diff Preview",
     "currentFilesTitle": "Current Files",
     "emptyFileContent": "(empty)",
-    "confirmApplyDraft": "Confirm Apply Draft",
-    "cancelDraft": "Cancel Draft",
-    "applyDraftSuccess": "Draft applied successfully.",
-    "rawOutputTitle": "Raw model output",
     "noAgentSelected": "Select an agent before configuring persona."
   },
   "deleteDialog": {
@@ -129,7 +117,6 @@
   },
   "form": {
     "basicInfo": "Basic Information",
-    "aiConfig": "AI Configuration",
     "skillConfig": "Skill Configuration",
     "useAllSkills": "Use all skills",
     "skillsLoading": "Loading skills...",
@@ -146,8 +133,6 @@
       "botttsNeutral": "Bottts Neutral"
     },
     "avatarRefresh": "Refresh",
-    "initialPrompt": "System Prompt",
-    "initialPromptPlaceholder": "Optional: set a system prompt for this subagent",
     "create": "Create",
     "save": "Save",
     "nameDuplicate": "Agent name is duplicated.",
@@ -208,6 +193,26 @@
   },
   "cloudPackages": {
     "title": "Cloud Agent Packages",
+    "mineTitle": "My cloud packages",
+    "mineDescription": "Uploads remain drafts until you publish them to the market.",
+    "mineEmpty": "No uploaded packages yet.",
+    "marketTitle": "Package market",
+    "loading": "Loading packages...",
+    "loadFailed": "Unable to load packages. Please retry.",
+    "retry": "Retry",
+    "publish": "Publish",
+    "publishing": "Publishing...",
+    "published": "Package published",
+    "publishFailed": "Failed to publish package",
+    "uploadFailed": "Failed to upload package",
+    "installFailed": "Failed to install package",
+    "installed": "Installed",
+    "installing": "Installing...",
+    "status": { "draft": "Draft", "published": "Published", "disabled": "Disabled", "unknown": "Unknown status" },
+    "errors": {
+      "MATCHA_PACKAGE_CLOUD_ENVELOPE_REQUIRED": "Export the package again for the cloud, then upload it.",
+      "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "This version cannot be published. Refresh your uploaded packages."
+    },
     "empty": "No cloud agent packages.",
     "install": "Install"
   },

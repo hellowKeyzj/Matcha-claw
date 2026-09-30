@@ -32,6 +32,7 @@ import { resolveChatSendGateForPayload, type ChatSendGate } from '@/stores/chat/
 import type { ChatContextUsageViewModel } from './context-usage';
 import type { ComposerDraftSelection } from '@/stores/composer-drafts';
 import type { SessionRunPhase } from '@/types/session/runtime-state';
+import { createSessionTraceId, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -124,6 +125,7 @@ interface SkillManagerState {
   title: string;
   options: AgentSkillOption[];
   loading: boolean;
+  savingSkillId: string | null;
   selectedSkillIds: string[];
   skillPreview: AgentSkillPreviewState | null;
   onToggleSkill: (skillId: string, checked: boolean) => void;
@@ -1161,9 +1163,18 @@ export const ChatInput = memo(function ChatInput({
   }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, input, onSend, releaseStagedAttachmentIds, selectedSkills, setInputAndSelection]);
 
   const handleStop = useCallback(() => {
+    logSessionTrace('stop.intent', createSessionTraceId('stop-intent'), {
+      canStop,
+      sending,
+      stopping,
+      disabled,
+      runPhase,
+      runId: summarizeIdentifier(activeRunId),
+      sessionIdentity: summarizeSessionIdentity(sessionIdentity),
+    });
     if (!canStop) return;
     onStop?.();
-  }, [canStop, onStop]);
+  }, [activeRunId, canStop, disabled, onStop, runPhase, sending, sessionIdentity, stopping]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -1811,6 +1822,7 @@ export const ChatInput = memo(function ChatInput({
             title={skillManager.title}
             skillOptions={skillManager.options}
             skillsLoading={skillManager.loading}
+            savingSkillId={skillManager.savingSkillId}
             selectedSkillIds={skillManager.selectedSkillIds}
             skillPreview={skillManager.skillPreview}
             onToggleSkill={skillManager.onToggleSkill}

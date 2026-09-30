@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
-
-const REMOTE_FLEET_BOOTSTRAP_REQUEST_TIMEOUT_MS = 15 * 60_000;
+import { waitForCall } from '@/lib/call-log-await';
+import { isCallId } from '@/types/call-log/decode';
 
 export type RemoteFleetNodeTargetKind = 'ssh-host' | 'container' | 'vm' | 'k8s-pod' | 'custom';
 export type RemoteFleetConnectionKind = RemoteFleetNodeTargetKind;
@@ -995,7 +995,28 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
   ): Promise<RemoteFleetActionPayload> {
     set({ mutatingAction: actionKey, error: null });
     try {
-      const payload = normalizeRemoteFleetActionPayload(await remoteFleetPost<unknown>(path, body, options));
+      const response = readRecord(await remoteFleetPost<unknown>(path, body, options));
+      let payload = normalizeRemoteFleetActionPayload(response);
+      if (payload.command?.status === 'queued'
+        && (path === '/api/remote-fleet/probe-connection' || path === '/api/remote-fleet/delete-environment')) {
+        if (!isCallId(response.callId) || response.accepted !== true) throw new Error('Fleet admission is missing its call receipt');
+        const call = await waitForCall({ callId: response.callId, accepted: true }, 'fleet');
+        const snapshot = normalizeSnapshot(await hostApiFetch<unknown>('/api/remote-fleet/snapshot'));
+        const deleting = path === '/api/remote-fleet/delete-environment';
+        const entityId = deleting ? body.environmentId : body.connectionId;
+        const confirmed = deleting
+          ? call.command === 'fleet.environments.delete.begin' && call.detail.outcome === 'completed'
+            && !snapshot.environments.some((item) => item.id === entityId && item.status !== 'deleted')
+          : call.command === 'fleet.connections.probe.begin' && call.detail.outcome === 'ready'
+            && snapshot.connections.some((item) => item.id === entityId && item.status === 'online');
+        const succeeded = call.status === 'succeeded' && call.detail.entityId === entityId && confirmed;
+        const deleted = deleting && succeeded;
+        payload = { ...payload, command: { ...payload.command,
+          status: succeeded ? 'succeeded' : call.status === 'unknown' ? 'unknown' : 'failed' },
+          snapshot: deleted
+            ? { ...snapshot, environments: snapshot.environments.filter((item) => item.id !== body.environmentId || item.status !== 'deleted') }
+            : snapshot };
+      }
       set((state) => ({
         ...projectionPatchFromActionPayload(state, payload),
         ready: payload.snapshot ? true : state.ready,
@@ -1071,7 +1092,6 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
         '/api/remote-fleet/deploy-environment',
         { environmentId },
         '部署 Remote Fleet environment 失败',
-        { timeoutMs: REMOTE_FLEET_BOOTSTRAP_REQUEST_TIMEOUT_MS },
       );
     },
 
@@ -1093,7 +1113,6 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
         '/api/remote-fleet/install-agent',
         { nodeId },
         '执行 Remote Fleet 安装或环境部署失败',
-        { timeoutMs: REMOTE_FLEET_BOOTSTRAP_REQUEST_TIMEOUT_MS },
       );
     },
 

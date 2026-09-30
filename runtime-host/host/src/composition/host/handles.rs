@@ -25,6 +25,7 @@ use super::super::{admission::HostAdmission, peer::PeerHandle};
 
 pub(crate) struct HostHandles {
     pub admission: Arc<HostAdmission>,
+    pub calls: call_log::CallLogModule,
     pub peer: PeerHandle,
     pub open_claw: Arc<OpenClawDriver>,
     pub session_module: SessionModule,

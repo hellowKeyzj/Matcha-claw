@@ -1,6 +1,28 @@
-use std::path::PathBuf;
+#[path = "api/history.rs"]
+mod history_api;
+#[path = "api/insights.rs"]
+mod insights_api;
+#[path = "api/lint.rs"]
+mod lint_api;
+#[path = "api/maintenance.rs"]
+mod maintenance_api;
+#[path = "api/qa.rs"]
+mod qa_api;
+#[path = "api/reindex.rs"]
+mod reindex_api;
 
-use foundation::execution::OwnerRuntimeHandle;
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
+
+use crate::call::{
+    self, CallReply, CallWorkflows, WikiCallDetail, WikiCallOperation, WikiCallTaskState,
+    WikiSourceCallCounts, WikiWorkflowSummary,
+};
+use platform::call::{CallContext, CallReceipt, CallRecorder};
+
+use foundation::execution::{OwnerRuntimeHandle, TaskHandle};
 use tokio::sync::oneshot;
 
 use crate::{
@@ -24,127 +46,219 @@ use crate::{
 #[derive(Clone)]
 pub struct WikiHandle {
     owner: OwnerRuntimeHandle<WikiCommand, WikiQuery>,
+    recorder: Arc<OnceLock<CallRecorder>>,
+    audit: bool,
+    workflows: Arc<CallWorkflows>,
+    results: Arc<crate::call_result::WikiCallResults>,
+    shutdown: Arc<OnceLock<TaskHandle>>,
+    research: Arc<crate::research::ResearchScheduler>,
 }
 
 impl WikiHandle {
     pub(crate) fn new(owner: OwnerRuntimeHandle<WikiCommand, WikiQuery>) -> Self {
-        Self { owner }
+        Self {
+            owner,
+            recorder: Arc::new(OnceLock::new()),
+            audit: true,
+            workflows: Arc::new(CallWorkflows::default()),
+            results: Arc::new(crate::call_result::WikiCallResults::default()),
+            shutdown: Arc::new(OnceLock::new()),
+            research: Arc::new(crate::research::ResearchScheduler::default()),
+        }
+    }
+
+    pub(crate) fn with_call_recorder(self, recorder: CallRecorder) -> Self {
+        let _ = self.recorder.set(recorder);
+        self
+    }
+
+    pub(crate) fn with_shutdown(self, shutdown: TaskHandle) -> Self {
+        let _ = self.shutdown.set(shutdown);
+        self
+    }
+
+    pub async fn shutdown_call_workflows(&self) {
+        if let Some(shutdown) = self.shutdown.get() {
+            shutdown.cancel();
+        }
+        self.drain_call_workflows().await;
+    }
+
+    pub(crate) async fn drain_call_workflows(&self) {
+        self.workflows.shutdown().await;
     }
 
     pub async fn status(&self) -> Result<WikiStatusReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::Status { reply })
+        self.request_query(Some("status"), |reply| WikiQuery::Status { reply })
             .await
             .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn projects(&self) -> Result<WikiProjectsReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::Projects { reply })
+        self.request_query(Some("projects"), |reply| WikiQuery::Projects { reply })
             .await
             .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn project_templates(&self) -> Result<WikiProjectTemplatesReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::ProjectTemplates { reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_query(Some("project-templates"), |reply| {
+            WikiQuery::ProjectTemplates { reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn create_project(
         &self,
         input: WikiCreateProjectInput,
     ) -> Result<WikiProjectsReceipt, WikiFailure> {
-        self.request_command(|reply| WikiCommand::CreateProject { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("project.create"), |reply| WikiCommand::CreateProject {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn open_project(
         &self,
         input: WikiOpenProjectInput,
     ) -> Result<WikiProjectsReceipt, WikiFailure> {
-        self.request_command(|reply| WikiCommand::OpenProject { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("project.open"), |reply| WikiCommand::OpenProject {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn set_current_project(
         &self,
         input: WikiProjectSelector,
     ) -> Result<WikiProjectsReceipt, WikiFailure> {
-        self.request_command(|reply| WikiCommand::SetCurrentProject { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("project.current"), |reply| {
+            WikiCommand::SetCurrentProject { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn source_watch_config(
         &self,
         input: WikiProjectSelector,
     ) -> Result<WikiSourceWatchConfigReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::SourceWatchConfig { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_query(Some("source-watch-config.read"), |reply| {
+            WikiQuery::SourceWatchConfig { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn update_source_watch_config(
         &self,
-        mut input: WikiSourceWatchConfigInput,
+        input: WikiSourceWatchConfigInput,
     ) -> Result<WikiSourceWatchConfigReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::UpdateSourceWatchConfig { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("source-watch-config.update"), |reply| {
+            WikiCommand::UpdateSourceWatchConfig { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn files(&self, input: WikiFilesInput) -> Result<WikiFilesReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::Files { input, reply })
+        self.request_query(Some("files"), |reply| WikiQuery::Files { input, reply })
             .await
             .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn read(&self, input: WikiReadInput) -> Result<WikiReadReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::ReadFile { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_query(Some("read-file"), |reply| WikiQuery::ReadFile {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn read_binary(
         &self,
         input: WikiReadBinaryInput,
     ) -> Result<WikiReadBinaryReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::ReadBinaryFile { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_query(Some("read-binary-file"), |reply| {
+            WikiQuery::ReadBinaryFile { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn read_source_preview(
         &self,
         input: WikiReadInput,
     ) -> Result<WikiReadReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::ReadSourcePreview { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_query(Some("read-source-preview"), |reply| {
+            WikiQuery::ReadSourcePreview { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
-    pub async fn write(&self, mut input: WikiWriteInput) -> Result<WikiWriteReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::WriteFile { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+    pub async fn write(&self, input: WikiWriteInput) -> Result<WikiWriteReceipt, WikiFailure> {
+        self.request_command(Some("write-file"), |reply| WikiCommand::WriteFile {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn search(&self, input: WikiSearchInput) -> Result<WikiSearchReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::Search { input, reply })
+        self.request_query(Some("search"), |reply| WikiQuery::Search { input, reply })
             .await
             .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn import_source(
         &self,
-        mut input: WikiImportSourceInput,
+        input: WikiImportSourceInput,
     ) -> Result<WikiImportSourceReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
+        let owner = self.unrecorded();
+        self.workflows
+            .run(self.recorder(), "import-source", async move {
+                owner.import_source_inline(input).await
+            })
+            .await
+    }
+
+    pub(crate) async fn admit_import_source(
+        &self,
+        mut input: WikiImportSourceInput,
+    ) -> Result<CallReceipt, WikiFailure> {
+        let operation = WikiCallOperation::ImportSource;
+        let call = self
+            .begin_admission(operation, &mut input.project_id)
+            .await?;
+        let owner = self.unrecorded();
+        self.workflows
+            .admit(
+                call,
+                operation,
+                async move { owner.import_source_inline(input).await },
+                |receipt| {
+                    WikiWorkflowSummary::Sources(WikiSourceCallCounts::import_source(receipt))
+                },
+            )
+            .await
+    }
+
+    async fn import_source_inline(
+        &self,
+        input: WikiImportSourceInput,
+    ) -> Result<WikiImportSourceReceipt, WikiFailure> {
         let staged = self
-            .request_command(|reply| WikiCommand::StageImportSource { input, reply })
+            .request_command(None, |reply| WikiCommand::StageImportSource {
+                input,
+                reply,
+            })
             .await
             .unwrap_or(Err(WikiFailure::OwnerUnavailable))?;
         self.import_staged_source(staged).await
@@ -155,7 +269,7 @@ impl WikiHandle {
         staged: crate::application::commands::WikiStagedImportSource,
     ) -> Result<WikiImportSourceReceipt, WikiFailure> {
         let parsed = match self
-            .request_command(|reply| WikiCommand::ParseImportSource {
+            .request_command(None, |reply| WikiCommand::ParseImportSource {
                 input: staged.clone(),
                 reply,
             })
@@ -171,7 +285,7 @@ impl WikiHandle {
             }
         };
         match self
-            .request_command(|reply| WikiCommand::CommitImportSource {
+            .request_command(None, |reply| WikiCommand::CommitImportSource {
                 input: parsed,
                 reply,
             })
@@ -194,7 +308,7 @@ impl WikiHandle {
         error: &WikiFailure,
     ) {
         let _ = self
-            .request_command(|reply| WikiCommand::MarkSourceTaskFailed {
+            .request_command(None, |reply| WikiCommand::MarkSourceTaskFailed {
                 project_id: staged.project_id.clone(),
                 source_relative_path: staged.source_relative_path.clone(),
                 error: format!("{error:?}"),
@@ -205,11 +319,46 @@ impl WikiHandle {
 
     pub async fn import_folder(
         &self,
-        mut input: WikiImportFolderInput,
+        input: WikiImportFolderInput,
     ) -> Result<WikiImportFolderReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
+        let owner = self.unrecorded();
+        self.workflows
+            .run(self.recorder(), "import-folder", async move {
+                owner.import_folder_inline(input).await
+            })
+            .await
+    }
+
+    pub(crate) async fn admit_import_folder(
+        &self,
+        mut input: WikiImportFolderInput,
+    ) -> Result<CallReceipt, WikiFailure> {
+        let operation = WikiCallOperation::ImportFolder;
+        let call = self
+            .begin_admission(operation, &mut input.project_id)
+            .await?;
+        let owner = self.unrecorded();
+        self.workflows
+            .admit(
+                call,
+                operation,
+                async move { owner.import_folder_inline(input).await },
+                |receipt| {
+                    WikiWorkflowSummary::Sources(WikiSourceCallCounts::import_folder(receipt))
+                },
+            )
+            .await
+    }
+
+    async fn import_folder_inline(
+        &self,
+        input: WikiImportFolderInput,
+    ) -> Result<WikiImportFolderReceipt, WikiFailure> {
         let plan = self
-            .request_command(|reply| WikiCommand::StageImportFolder { input, reply })
+            .request_command(None, |reply| WikiCommand::StageImportFolder {
+                input,
+                reply,
+            })
             .await
             .unwrap_or(Err(WikiFailure::OwnerUnavailable))?;
         let mut imported = Vec::new();
@@ -230,11 +379,46 @@ impl WikiHandle {
 
     pub async fn refresh_sources(
         &self,
-        mut input: WikiProjectSelector,
+        input: WikiProjectSelector,
     ) -> Result<WikiRefreshSourcesReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
+        let owner = self.unrecorded();
+        self.workflows
+            .run(self.recorder(), "refresh-sources", async move {
+                owner.refresh_sources_inline(input).await
+            })
+            .await
+    }
+
+    pub(crate) async fn admit_refresh_sources(
+        &self,
+        mut input: WikiProjectSelector,
+    ) -> Result<CallReceipt, WikiFailure> {
+        let operation = WikiCallOperation::RefreshSources;
+        let call = self
+            .begin_admission(operation, &mut input.project_id)
+            .await?;
+        let owner = self.unrecorded();
+        self.workflows
+            .admit(
+                call,
+                operation,
+                async move { owner.refresh_sources_inline(input).await },
+                |receipt| {
+                    WikiWorkflowSummary::Sources(WikiSourceCallCounts::refresh_sources(receipt))
+                },
+            )
+            .await
+    }
+
+    async fn refresh_sources_inline(
+        &self,
+        input: WikiProjectSelector,
+    ) -> Result<WikiRefreshSourcesReceipt, WikiFailure> {
         let plan = self
-            .request_command(|reply| WikiCommand::StageRefreshSources { input, reply })
+            .request_command(None, |reply| WikiCommand::StageRefreshSources {
+                input,
+                reply,
+            })
             .await
             .unwrap_or(Err(WikiFailure::OwnerUnavailable))?;
         self.apply_refresh_plan(plan, true).await
@@ -246,8 +430,24 @@ impl WikiHandle {
         paths: Vec<PathBuf>,
         auto_ingest: bool,
     ) -> Result<WikiRefreshSourcesReceipt, WikiFailure> {
+        let owner = self.unrecorded();
+        self.workflows
+            .run(self.recorder(), "refresh-source-paths", async move {
+                owner
+                    .refresh_source_paths_inline(project_id, paths, auto_ingest)
+                    .await
+            })
+            .await
+    }
+
+    async fn refresh_source_paths_inline(
+        &self,
+        project_id: String,
+        paths: Vec<PathBuf>,
+        auto_ingest: bool,
+    ) -> Result<WikiRefreshSourcesReceipt, WikiFailure> {
         let plan = self
-            .request_command(|reply| WikiCommand::StageRefreshSourcePaths {
+            .request_command(None, |reply| WikiCommand::StageRefreshSourcePaths {
                 project_id,
                 paths,
                 reply,
@@ -260,14 +460,50 @@ impl WikiHandle {
     async fn run_source_task_plan(
         &self,
         plan: crate::application::commands::WikiSourceTaskRunPlan,
-    ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
-        if let Some(staged) = plan.staged {
-            let _ = self.import_staged_source(staged).await;
-        }
-        self.source_tasks(WikiProjectSelector {
-            project_id: Some(plan.project_id),
+    ) -> Result<WikiWorkflowSummary, WikiFailure> {
+        let failure = match plan.staged {
+            Some(staged) => self.import_staged_source(staged).await.err(),
+            None => None,
+        };
+        let tasks = self
+            .source_tasks(WikiProjectSelector {
+                project_id: Some(plan.project_id.clone()),
+            })
+            .await;
+        let tasks = match tasks {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                return Ok(WikiWorkflowSummary::SourceTask {
+                    state: None,
+                    failure: failure.or(Some(error)),
+                });
+            }
+        };
+        // Generation can replace the task id; the plan's project/source is the lifecycle identity.
+        let state = tasks
+            .tasks()
+            .iter()
+            .rev()
+            .find(|task| {
+                task.project_id() == plan.project_id
+                    && task.source_path() == plan.source_relative_path
+            })
+            .map_or(WikiCallTaskState::Missing, |task| {
+                if task.is_paused() {
+                    return WikiCallTaskState::Paused;
+                }
+                match task.status() {
+                    crate::WikiSourceTaskStatus::Pending => WikiCallTaskState::Pending,
+                    crate::WikiSourceTaskStatus::Running => WikiCallTaskState::Running,
+                    crate::WikiSourceTaskStatus::Done => WikiCallTaskState::Done,
+                    crate::WikiSourceTaskStatus::Failed => WikiCallTaskState::Failed,
+                    crate::WikiSourceTaskStatus::Cancelled => WikiCallTaskState::Cancelled,
+                }
+            });
+        Ok(WikiWorkflowSummary::SourceTask {
+            state: Some(state),
+            failure,
         })
-        .await
     }
 
     async fn apply_refresh_plan(
@@ -278,7 +514,7 @@ impl WikiHandle {
         let mut moved = Vec::new();
         for (old_source_relative_path, new_source_relative_path) in plan.moves {
             moved.push(
-                self.request_command(|reply| WikiCommand::MigrateSourcePath {
+                self.request_command(None, |reply| WikiCommand::MigrateSourcePath {
                     project_id: plan.project_id.clone(),
                     old_source_relative_path,
                     new_source_relative_path,
@@ -300,7 +536,7 @@ impl WikiHandle {
             );
         }
         if !plan.wiki_deletions.is_empty() {
-            self.request_command(|reply| WikiCommand::CleanupDeletedWikiPages {
+            self.request_command(None, |reply| WikiCommand::CleanupDeletedWikiPages {
                 project_id: plan.project_id.clone(),
                 paths: plan.wiki_deletions,
                 reply,
@@ -328,91 +564,305 @@ impl WikiHandle {
         ))
     }
 
-    pub async fn delete_source(
+    pub(crate) async fn admit_delete_source(
         &self,
         mut input: WikiDeleteSourceInput,
+    ) -> Result<CallReceipt, WikiFailure> {
+        let operation = WikiCallOperation::DeleteSource;
+        let call = self
+            .begin_admission(operation, &mut input.project_id)
+            .await?;
+        self.admit_command(call, operation, true, |reply| WikiCommand::DeleteSource {
+            input,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn admit_apply_generated_pages(
+        &self,
+        mut input: WikiApplyGeneratedPagesInput,
+    ) -> Result<CallReceipt, WikiFailure> {
+        let operation = WikiCallOperation::ApplyGeneratedPages;
+        let call = self
+            .begin_admission(operation, &mut input.project_id)
+            .await?;
+        self.admit_command(call, operation, true, |reply| {
+            WikiCommand::ApplyGeneratedPages { input, reply }
+        })
+        .await
+    }
+
+    pub(crate) fn call_result(
+        &self,
+        call_id: &platform::call::CallId,
+    ) -> Result<crate::call_result::WikiCallResultReceipt, WikiFailure> {
+        self.results.get(call_id)
+    }
+
+    pub async fn delete_source(
+        &self,
+        input: WikiDeleteSourceInput,
     ) -> Result<WikiDeleteSourceReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::DeleteSource { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("delete-source"), |reply| WikiCommand::DeleteSource {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn apply_generated_pages(
         &self,
-        mut input: WikiApplyGeneratedPagesInput,
+        input: WikiApplyGeneratedPagesInput,
     ) -> Result<WikiApplyGeneratedPagesReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::ApplyGeneratedPages { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("apply-generated-pages"), |reply| {
+            WikiCommand::ApplyGeneratedPages { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn reviews(
         &self,
         input: WikiProjectSelector,
     ) -> Result<WikiReviewsReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::Reviews { input, reply })
+        self.request_query(Some("reviews"), |reply| WikiQuery::Reviews { input, reply })
             .await
             .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn resolve_review(
         &self,
-        mut input: WikiReviewResolveInput,
+        input: WikiReviewResolveInput,
     ) -> Result<WikiReviewsReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::ResolveReview { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("review.resolve"), |reply| WikiCommand::ResolveReview {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn dismiss_review(
         &self,
-        mut input: WikiReviewDismissInput,
+        input: WikiReviewDismissInput,
     ) -> Result<WikiReviewsReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::DismissReview { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("review.dismiss"), |reply| WikiCommand::DismissReview {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn clear_resolved_reviews(
         &self,
-        mut input: WikiReviewClearResolvedInput,
+        input: WikiReviewClearResolvedInput,
     ) -> Result<WikiReviewsReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::ClearResolvedReviews { input, reply })
+        self.request_command(Some("reviews.clear-resolved"), |reply| {
+            WikiCommand::ClearResolvedReviews { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+    }
+
+    pub async fn research_tasks(
+        &self,
+        input: WikiProjectSelector,
+    ) -> Result<crate::research::WikiResearchTasksReceipt, WikiFailure> {
+        self.request_query(Some("research-tasks"), |reply| WikiQuery::ResearchTasks {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+    }
+
+    pub async fn start_research(
+        &self,
+        input: crate::research::WikiResearchInput,
+    ) -> Result<CallReceipt, WikiFailure> {
+        self.admit_research(input, WikiCallOperation::StartResearch)
             .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+    }
+
+    pub async fn rerun_research(
+        &self,
+        mut input: crate::research::WikiResearchTaskActionInput,
+    ) -> Result<CallReceipt, WikiFailure> {
+        self.resolve_current_project(&mut input.project_id).await?;
+        let tasks = self
+            .unrecorded()
+            .research_tasks(WikiProjectSelector {
+                project_id: input.project_id.clone(),
+            })
+            .await?;
+        let task = tasks
+            .tasks
+            .iter()
+            .find(|task| task.id == input.task_id)
+            .ok_or_else(|| WikiFailure::invalid_input("taskId", "Research task was not found"))?;
+        self.admit_research(
+            crate::research::WikiResearchInput {
+                project_id: input.project_id,
+                inputs: vec![crate::research::WikiResearchTaskInput {
+                    topic: task.topic.clone(),
+                    search_queries: Some(task.search_queries.clone()),
+                    source_review_id: task.source_review_id.clone(),
+                    rerun_of_task_id: Some(task.id.clone()),
+                }],
+                model_ref: input.model_ref,
+            },
+            WikiCallOperation::RerunResearch,
+        )
+        .await
+    }
+
+    async fn admit_research(
+        &self,
+        mut input: crate::research::WikiResearchInput,
+        operation: WikiCallOperation,
+    ) -> Result<CallReceipt, WikiFailure> {
+        let call = self
+            .begin_admission(operation, &mut input.project_id)
+            .await?;
+        let slots = match self.research.reserve(input.inputs.len()) {
+            Ok(slots) => slots,
+            Err(error) => {
+                call::finish_detail(Some(&call), Some(&error), Some(operation)).await;
+                return Err(error);
+            }
+        };
+        let owner = self.unrecorded();
+        let cancellation = self.workflows.cancellation.child_token();
+        let (staged, stage_result) = tokio::sync::oneshot::channel();
+        let receipt = self
+            .workflows
+            .admit(
+                call,
+                operation,
+                async move {
+                    let plan = owner
+                        .request_command(None, |reply| WikiCommand::StageResearch { input, reply })
+                        .await
+                        .unwrap_or(Err(WikiFailure::OwnerUnavailable));
+                    let _ = staged.send(plan.as_ref().map(|_| ()).map_err(Clone::clone));
+                    crate::research::workflow::run(owner, plan?, slots, cancellation).await
+                },
+                |counts| WikiWorkflowSummary::Research(*counts),
+            )
+            .await?;
+        stage_result
+            .await
+            .unwrap_or(Err(WikiFailure::OwnerUnavailable))?;
+        Ok(receipt)
+    }
+
+    pub async fn remove_research_task(
+        &self,
+        input: crate::research::WikiResearchRemoveInput,
+    ) -> Result<crate::research::WikiResearchTasksReceipt, WikiFailure> {
+        self.request_command(Some("research-task.remove"), |reply| {
+            WikiCommand::RemoveResearchTask { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+    }
+
+    pub async fn search_config(
+        &self,
+        input: WikiProjectSelector,
+    ) -> Result<crate::search_config::SearchConfig, WikiFailure> {
+        self.request_query(Some("search-config.read"), |reply| {
+            WikiQuery::SearchConfig { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+    }
+
+    pub async fn update_search_config(
+        &self,
+        project_id: Option<String>,
+        input: crate::search_config::SearchConfigUpdate,
+    ) -> Result<crate::search_config::SearchConfig, WikiFailure> {
+        self.request_command(Some("search-config.update"), |reply| {
+            WikiCommand::UpdateSearchConfig {
+                project_id,
+                input,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+    }
+
+    pub async fn test_search_provider(
+        &self,
+        project_id: Option<String>,
+        input: crate::external_search::SearchProviderTest,
+    ) -> Result<Vec<crate::research::ResearchSource>, WikiFailure> {
+        let cancellation = self.workflows.cancellation.child_token();
+        self.request_query(Some("search-provider.test"), |reply| {
+            WikiQuery::TestSearchProvider {
+                project_id,
+                input,
+                cancellation,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn source_tasks(
         &self,
         input: WikiProjectSelector,
     ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::SourceTasks { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_query(Some("source-tasks"), |reply| WikiQuery::SourceTasks {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn cancel_source_task(
         &self,
-        mut input: WikiCancelSourceTaskInput,
+        input: WikiCancelSourceTaskInput,
     ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::CancelSourceTask { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("source-task.cancel"), |reply| {
+            WikiCommand::CancelSourceTask { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
-    pub(crate) async fn retry_source_task(
+    pub(crate) async fn admit_retry_source_task(
         &self,
         mut input: WikiSourceTaskActionInput,
-    ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
+    ) -> Result<CallReceipt, WikiFailure> {
+        let operation = WikiCallOperation::RetrySourceTask;
+        let call = self
+            .begin_admission(operation, &mut input.project_id)
+            .await?;
+        let owner = self.unrecorded();
+        self.workflows
+            .admit(
+                call,
+                operation,
+                async move { owner.retry_source_task_inline(input).await },
+                Clone::clone,
+            )
+            .await
+    }
+
+    async fn retry_source_task_inline(
+        &self,
+        input: WikiSourceTaskActionInput,
+    ) -> Result<WikiWorkflowSummary, WikiFailure> {
         let plan = self
-            .request_command(|reply| WikiCommand::RetrySourceTask { input, reply })
+            .request_command(None, |reply| WikiCommand::RetrySourceTask { input, reply })
             .await
             .unwrap_or(Err(WikiFailure::OwnerUnavailable))?;
         self.run_source_task_plan(plan).await
@@ -420,21 +870,40 @@ impl WikiHandle {
 
     pub(crate) async fn pause_source_task(
         &self,
-        mut input: WikiSourceTaskActionInput,
+        input: WikiSourceTaskActionInput,
     ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::PauseSourceTask { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("source-task.pause"), |reply| {
+            WikiCommand::PauseSourceTask { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
-    pub(crate) async fn resume_source_task(
+    pub(crate) async fn admit_resume_source_task(
         &self,
         mut input: WikiSourceTaskActionInput,
-    ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
+    ) -> Result<CallReceipt, WikiFailure> {
+        let operation = WikiCallOperation::ResumeSourceTask;
+        let call = self
+            .begin_admission(operation, &mut input.project_id)
+            .await?;
+        let owner = self.unrecorded();
+        self.workflows
+            .admit(
+                call,
+                operation,
+                async move { owner.resume_source_task_inline(input).await },
+                Clone::clone,
+            )
+            .await
+    }
+
+    async fn resume_source_task_inline(
+        &self,
+        input: WikiSourceTaskActionInput,
+    ) -> Result<WikiWorkflowSummary, WikiFailure> {
         let plan = self
-            .request_command(|reply| WikiCommand::ResumeSourceTask { input, reply })
+            .request_command(None, |reply| WikiCommand::ResumeSourceTask { input, reply })
             .await
             .unwrap_or(Err(WikiFailure::OwnerUnavailable))?;
         self.run_source_task_plan(plan).await
@@ -442,53 +911,161 @@ impl WikiHandle {
 
     pub(crate) async fn reorder_source_task(
         &self,
-        mut input: WikiReorderSourceTaskInput,
+        input: WikiReorderSourceTaskInput,
     ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::ReorderSourceTask { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("source-task.reorder"), |reply| {
+            WikiCommand::ReorderSourceTask { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn source_files(
         &self,
         input: WikiProjectSelector,
     ) -> Result<WikiSourceFilesReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::SourceFiles { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_query(Some("source-files"), |reply| WikiQuery::SourceFiles {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn graph(&self, input: WikiProjectSelector) -> Result<WikiGraphReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::Graph { input, reply })
+        self.request_query(Some("graph"), |reply| WikiQuery::Graph { input, reply })
             .await
             .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn rescan(
         &self,
-        mut input: WikiProjectSelector,
+        input: WikiProjectSelector,
     ) -> Result<WikiStatusReceipt, WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::Rescan { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        self.request_command(Some("rescan-sources"), |reply| WikiCommand::Rescan {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
-    pub async fn embed_page(&self, mut input: WikiPathSelector) -> Result<(), WikiFailure> {
-        self.resolve_current_project(&mut input.project_id).await?;
-        self.request_command(|reply| WikiCommand::EmbedPage { input, reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+    pub(crate) async fn admit_rescan(
+        &self,
+        mut input: WikiProjectSelector,
+    ) -> Result<CallReceipt, WikiFailure> {
+        let operation = WikiCallOperation::RescanSources;
+        let call = self
+            .begin_admission(operation, &mut input.project_id)
+            .await?;
+        self.admit_command(call, operation, false, |reply| WikiCommand::Rescan {
+            input,
+            reply,
+        })
+        .await
+    }
+
+    async fn admit_command<T>(
+        &self,
+        call: CallContext<WikiCallDetail>,
+        operation: WikiCallOperation,
+        retain_result: bool,
+        command: impl FnOnce(CallReply<T>) -> WikiCommand,
+    ) -> Result<CallReceipt, WikiFailure> {
+        let (sender, _response) = oneshot::channel();
+        let mut reply = CallReply::new(sender);
+        reply.call = Some(call.clone());
+        reply.operation = Some(operation);
+        let acceptance = Arc::new(tokio::sync::OnceCell::new());
+        reply.acceptance = Some(acceptance.clone());
+        if retain_result {
+            match self.results.reserve(call.id()) {
+                Ok(reservation) => reply.result = Some(reservation),
+                Err(error) => {
+                    call::reject_admission(
+                        &call,
+                        operation,
+                        foundation::execution::OwnerRuntimeSendError::Full,
+                    )
+                    .await;
+                    return Err(error);
+                }
+            }
+        }
+        if let Err(error) = self.owner.try_send_command(command(reply)) {
+            call::reject_admission(&call, operation, error).await;
+            return Err(WikiFailure::OwnerUnavailable);
+        }
+        call::accepted(&call, &acceptance).await
+    }
+
+    pub(crate) async fn admit_embed_page(
+        &self,
+        mut input: WikiPathSelector,
+    ) -> Result<CallReceipt, WikiFailure> {
+        let operation = WikiCallOperation::EmbedPage;
+        let call = self
+            .begin_admission(operation, &mut input.project_id)
+            .await?;
+        self.admit_command(call, operation, false, |reply| WikiCommand::EmbedPage {
+            input,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn embed_page(&self, input: WikiPathSelector) -> Result<(), WikiFailure> {
+        self.request_command(Some("embed-page"), |reply| WikiCommand::EmbedPage {
+            input,
+            reply,
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn retrieve_context(
         &self,
         input: WikiRetrieveContextInput,
     ) -> Result<WikiSearchReceipt, WikiFailure> {
-        self.request_query(|reply| WikiQuery::RetrieveContext { input, reply })
+        self.request_query(Some("retrieve-context"), |reply| {
+            WikiQuery::RetrieveContext { input, reply }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+    }
+
+    fn unrecorded(&self) -> Self {
+        Self {
+            owner: self.owner.clone(),
+            recorder: self.recorder.clone(),
+            audit: false,
+            workflows: self.workflows.clone(),
+            results: self.results.clone(),
+            shutdown: self.shutdown.clone(),
+            research: self.research.clone(),
+        }
+    }
+
+    fn recorder(&self) -> Option<&CallRecorder> {
+        self.audit.then(|| self.recorder.get()).flatten()
+    }
+
+    async fn begin_admission(
+        &self,
+        operation: WikiCallOperation,
+        project_id: &mut Option<String>,
+    ) -> Result<CallContext<WikiCallDetail>, WikiFailure> {
+        let call = self
+            .recorder()
+            .ok_or(WikiFailure::OwnerUnavailable)?
+            .begin(operation.command(), &WikiCallDetail::new(operation))
             .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+            .map_err(|_| WikiFailure::OwnerUnavailable)?;
+        if let Err(error) = self.resolve_current_project(project_id).await {
+            call::finish_detail(Some(&call), Some(&error), Some(operation)).await;
+            return Err(error);
+        }
+        Ok(call)
     }
 
     async fn resolve_current_project(
@@ -499,7 +1076,8 @@ impl WikiHandle {
             return Ok(());
         }
         *project_id = Some(
-            self.projects()
+            self.unrecorded()
+                .projects()
                 .await?
                 .current_project_id()
                 .ok_or(WikiFailure::CurrentProjectUnset)?
@@ -508,24 +1086,51 @@ impl WikiHandle {
         Ok(())
     }
 
-    async fn request_command<T>(
+    pub(crate) async fn request_command<T>(
         &self,
-        command: impl FnOnce(oneshot::Sender<T>) -> WikiCommand,
-    ) -> Result<T, ()> {
+        operation: Option<&'static str>,
+        command: impl FnOnce(CallReply<T>) -> WikiCommand,
+    ) -> Result<Result<T, WikiFailure>, ()> {
         let (reply, response) = oneshot::channel();
-        self.owner
-            .send_command(command(reply))
-            .await
-            .map_err(|_| ())?;
+        let call = match operation {
+            Some(operation) => call::begin(self.recorder(), operation)
+                .await
+                .map_err(|_| ())?,
+            None => None,
+        };
+        let mut command = command(CallReply::new(reply));
+        command.set_call(call.clone());
+        if let Some(project_id) = command.project_id_mut() {
+            if let Err(error) = self.resolve_current_project(project_id).await {
+                call::finish(call.as_ref(), Some(&error)).await;
+                return Ok(Err(error));
+            }
+        }
+        if self.owner.send_command(command).await.is_err() {
+            call::finish(call.as_ref(), Some(&WikiFailure::OwnerUnavailable)).await;
+            return Err(());
+        }
         response.await.map_err(|_| ())
     }
 
-    async fn request_query<T>(
+    pub(crate) async fn request_query<T>(
         &self,
-        query: impl FnOnce(oneshot::Sender<T>) -> WikiQuery,
-    ) -> Result<T, ()> {
+        operation: Option<&'static str>,
+        query: impl FnOnce(CallReply<T>) -> WikiQuery,
+    ) -> Result<Result<T, WikiFailure>, ()> {
         let (reply, response) = oneshot::channel();
-        self.owner.send_query(query(reply)).await.map_err(|_| ())?;
+        let call = match operation {
+            Some(operation) => call::begin(self.recorder(), operation)
+                .await
+                .map_err(|_| ())?,
+            None => None,
+        };
+        let mut query = query(CallReply::new(reply));
+        query.set_call(call.clone());
+        if self.owner.send_query(query).await.is_err() {
+            call::finish(call.as_ref(), Some(&WikiFailure::OwnerUnavailable)).await;
+            return Err(());
+        }
         response.await.map_err(|_| ())
     }
 }

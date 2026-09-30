@@ -83,7 +83,6 @@ pub fn management_descriptor() -> Value {
             operation("subagents.description.set", "Set subagent description", "subagent"),
             operation("subagents.model.set", "Set subagent model", "subagent"),
             operation("subagents.skills.set", "Set subagent skills", "subagent"),
-            operation("subagents.draft.wait", "Wait for subagent draft", "subagent"),
             operation("subagents.create", "Create subagent", "subagent"),
             operation("subagents.update", "Update subagent", "subagent"),
             operation("subagents.delete", "Delete subagent", "subagent"),

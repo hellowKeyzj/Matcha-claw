@@ -1,10 +1,12 @@
+use platform::call::{CallContext, CallLogError};
 use tokio::sync::oneshot;
 
-use crate::projection::public::DesiredReadModel;
+use crate::{application::call::SettingsCallDetail, projection::public::DesiredReadModel};
 
 pub enum SettingsQuery {
     DesiredReadModel {
-        reply: oneshot::Sender<DesiredReadModel>,
+        call: CallContext<SettingsCallDetail>,
+        reply: oneshot::Sender<Result<DesiredReadModel, CallLogError>>,
     },
     GatewayAutoStart {
         reply: oneshot::Sender<bool>,

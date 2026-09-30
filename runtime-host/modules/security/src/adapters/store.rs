@@ -193,6 +193,13 @@ impl SecurityOperationReceiptStore {
         Ok(())
     }
 
+    pub(crate) fn receipt(&self, correlation: &str) -> Result<Option<operation::Outcome>, ()> {
+        let state = self.state.lock().map_err(|_| ())?;
+        Ok(state.receipts.iter().find(|receipt| receipt.correlation == correlation)
+            .filter(|receipt| receipt.outcome != PersistedOperationOutcome::Pending)
+            .map(receipt_outcome))
+    }
+
     pub(crate) fn begin(&self, correlation: &str) -> Result<Option<operation::Outcome>, ()> {
         let mut state = self.state.lock().map_err(|_| ())?;
         if let Some(receipt) = state

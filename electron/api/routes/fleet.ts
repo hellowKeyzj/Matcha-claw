@@ -148,6 +148,7 @@ function fleetCommandForPath(pathname: string, request: FleetMutationRequest, bo
       return projectDispatchCommand(body, payload, 'installAgent');
     case '/api/remote-fleet/probe-connection':
       return projectOperationCommand(body, payload, 'probeConnection', 'connectionId', {
+        accepted: 'queued',
         probeCompleted: 'succeeded',
         probeRejected: 'failed',
         probeUnknown: 'unknown',
@@ -166,9 +167,17 @@ function fleetCommandForPath(pathname: string, request: FleetMutationRequest, bo
       });
     case '/api/remote-fleet/deploy-environment':
       return projectOperationCommand(body, payload, 'deployEnvironment', 'environmentId', {
+        accepted: 'queued',
         deploymentCompleted: 'succeeded',
         deploymentFailed: 'failed',
         deploymentUnknown: 'unknown',
+      });
+    case '/api/remote-fleet/delete-environment':
+      return projectOperationCommand(body, payload, 'deleteEnvironment', 'environmentId', {
+        accepted: 'queued',
+        deletionCompleted: 'succeeded',
+        deletionFailed: 'failed',
+        deletionUnknown: 'unknown',
       });
     default:
       return null;
@@ -330,7 +339,7 @@ function readRegistrationMutationOutcome(
 function isRegistrationProjection(
   value: ReturnType<typeof projectFleetRegistration>,
 ): value is Extract<ReturnType<typeof projectFleetRegistration>, { source: 'canonical-fleet-read' }> {
-  return isRecord(value) && value.source === 'canonical-fleet-read';
+  return 'source' in value && value.source === 'canonical-fleet-read';
 }
 
 function readCanonicalConnections(value: unknown): FleetCanonicalConnection[] | null {

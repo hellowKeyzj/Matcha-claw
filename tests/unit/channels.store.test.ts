@@ -103,7 +103,7 @@ describe('channels store', () => {
     ]);
     await useChannelsStore.getState().deleteChannel('wecom-main');
 
-    expect(hostChannelsDeleteConfigMock).toHaveBeenCalledWith('wecom', undefined, { traceId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i) });
+    expect(hostChannelsDeleteConfigMock).toHaveBeenCalledWith('wecom', 'main', { traceId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i) });
     expect(useChannelsStore.getState().channels).toEqual([]);
   });
 
@@ -119,7 +119,7 @@ describe('channels store', () => {
     ]);
     await useChannelsStore.getState().deleteChannel('wecom-main');
 
-    expect(hostChannelsDeleteConfigMock).toHaveBeenCalledWith('wecom', undefined, { traceId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i) });
+    expect(hostChannelsDeleteConfigMock).toHaveBeenCalledWith('wecom', 'main', { traceId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i) });
     expect(useChannelsStore.getState().channels).toEqual([
       expect.objectContaining({
         id: 'wecom-main',

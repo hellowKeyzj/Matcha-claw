@@ -53,6 +53,18 @@ export async function handleProviderModelsRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/provider-models/discovery-result' && req.method === 'GET') {
+    const callId = url.searchParams.get('callId');
+    const accountId = url.searchParams.get('accountId');
+    if ([...url.searchParams].length !== 2 || !callId || !/^[a-f0-9]{32}$/.test(callId)
+      || !isProviderModelAccountIdentifier(accountId)) {
+      sendJson(res, 400, INVALID);
+      return true;
+    }
+    await deliver(res, transport.readDiscoveryResult(callId, accountId), UNAVAILABLE);
+    return true;
+  }
+
   if (url.pathname !== '/api/provider-models' || req.method !== 'POST') return false;
 
   let body: unknown;

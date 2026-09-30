@@ -1,6 +1,6 @@
 # Runtime Host Contract Baseline v1
 
-> Rust `runtime-host` 迁移的观察基线。它固定现有客户端可观察行为；不是新的 Rust 架构，也不授权修改 Renderer、preload 或 Electron API。
+> Rust `runtime-host` 迁移的观察基线。它固定现有客户端可观察行为；仅本轮显式批准的 call-log/Calls 与具体 admit consumer 作为契约增量，不授权其他 Renderer、preload 或 Electron API 改动。
 
 ## 使用方式
 
@@ -13,7 +13,7 @@
 | `host:event`、事件 payload、顺序和丢失语义是什么？ | [events.md](events.md) |
 | child 如何调用 Electron parent？ | [parent-callbacks.md](parent-callbacks.md) |
 | child 如何启动、ready、停止、重启和代理 WebSocket？ | [lifecycle.md](lifecycle.md) |
-| 异步 operation 的 owner-local 终态契约是什么？ | [async-projection.md](async-projection.md) |
+| 统一 call log 与原 owner 长操作怎样分工？ | [async-projection.md](async-projection.md) |
 | 现有测试证明了什么，还缺什么？ | [verification.md](verification.md) |
 | 当前源码、类型、文档之间有哪些未裁决差异？ | [open-items.md](open-items.md) |
 | TS 真实行为对应哪些 owner、事实源和状态平面？ | [runtime-host-owner-model/README.md](../runtime-host-owner-model/README.md) |
@@ -58,14 +58,16 @@ Rust 替换 child 与其内部实现；Renderer/preload contract 不因迁移改
 - legacy dispatch envelope 的 `PAYLOAD_TOO_LARGE` / `INVALID_TRANSPORT_PAYLOAD` 只保留为历史测试/迁移证据，不是 Rust final-form active contract。
 - Host private health/snapshot 与 Electron process-manager lifecycle 分层处理，不强行统一枚举。
 - **旧 generic RuntimeJob public contract 已删除，不是待办：** 不存在 `runtimeHost.jobGet`、`runtime-job:*`、generic `RuntimeJob*` DTO 或 `job_compatibility`；文档中的这些名称只用于标识已删除项，禁止重新引入。
-- **Toolchain final path 已冻结：** Setup 已退休；Renderer 进入主界面后 lazy 调 `hostToolchainPrepare()`，Electron `POST /api/toolchain/uv/prepare` 经 `toolchainTransport.prepare()` 调 modules/toolchain owner loopback，等待 `modules/toolchain::NativeToolchain` 真实结果后返回；`GET /api/toolchain/uv/check` 经 `toolchainTransport.status()` 并只投影 `{ installed }`。
+- **Toolchain final path 已冻结：** Setup 已退休；Renderer 进入主界面后 lazy 调 `prepareToolchain()`，Electron `POST /api/toolchain/uv/prepare` 经 `toolchainTransport.prepare()` 调 modules/toolchain 原 owner bounded queue，持久 accepted 后返回 202 `CallReceipt`；MainLayout warmup 只需接单，不等待安装终态。真实 prepare outcome 由 owner 写入 call-log typed detail，不等同 receipt；`GET /api/toolchain/uv/check` 仍经 `toolchainTransport.status()` 只投影 UV `{ installed }`。[VERIFY: runtime-host/modules/toolchain/src/api.rs:91-130] [VERIFY: runtime-host/modules/toolchain/src/adapters/loopback.rs:94-111] [VERIFY: electron/api/routes/toolchain.ts:16-35] [VERIFY: src/lib/toolchain.ts:1-7] [VERIFY: src/App.tsx:70-83]
 - **ClawHub marketplace route 不变：** `POST /api/clawhub/search` 由 Rust external `ClawHubRegistryClient` 执行 registry HTTP search，不经 RuntimeDriver 或 OpenClaw Gateway；`POST /api/skills/clawhub/install` 仍经 Skills runtime ops，但底层执行 legacy ClawHub CLI + registry fallback。
 
 ## 当前迁移决定
 
-- Renderer、Electron、preload 和页面 API **不因 Rust 移植而改动**。
-- Rust 内部 **不建立跨 owner 的通用异步 operation queue、registry 或 compatibility projection**。
-- 异步完成由具体 owner/facade 的 typed operation query/event 表达，详见 [async-projection.md](async-projection.md)。
+- Renderer、Electron、preload 和页面 API **不因 Rust 移植任意改动**；本轮显式批准的 Calls 页面、查询/提示与具体 admit consumer 属于契约增量，不授权其他 API 重裁。
+- Rust 内部 **不建立跨 owner 的通用执行 queue、registry 或 compatibility projection**；新增 `modules/call-log` 只持久化调用记录与 revision history，业务执行仍入原 owner queue。
+- 已批准后台化由原八项扩展至 Provider discover、Connector probe/status/sessionStatus、Channel disconnect/logout、Cron create/update/delete（toggle→update）、Skills 配置/启停/批量/卸载/产物、Subagents 创建/更新/删除/配置/包安装/export/exportCloud、Team materialize/manual create/runDelete/delete、Wiki rescan/applyGeneratedPages/deleteSource/source-task.retry/source-task.resume、Runtime stop；这些公共长操作成功接单只返回 strict 202 `CallReceipt`，原 execution owner/queue 不迁入 CallLog。必要完整 payload 由具体模块有限、非消费 typed result 领取，不存入审计 detail；sealed cloud 包只走 Main 私有交接。Sessions 整块、team.runCreate 与条件候选不在此批；原 MCP/内部完成屏障保留 await。各模块接线与实际验证分开记录，详见 [async-projection.md](async-projection.md)。[VERIFY: runtime-host/modules/provider/src/api.rs] [VERIFY: runtime-host/modules/connectors/src/api.rs] [VERIFY: runtime-host/modules/skills/src/result.rs] [VERIFY: runtime-host/modules/subagents/src/application/results.rs] [VERIFY: runtime-host/modules/organization/src/call.rs] [VERIFY: runtime-host/modules/wiki/src/api.rs] [VERIFY: runtime-host/host/src/composition/peer/handle.rs]
+- Main 六个长入口不迁入 Rust CallLog：完整 child restart 返回 restartId、读取同次状态；updater download 短返 accepted、沿原事件完成；Cloud package download/install preparation/agent upload/skill upload confirm 返回独立 operationId，通过 `/api/packages/operation-result` 领取闭合 typed result。包字节、授权 lease 与凭证不公开，native install/export 仍使用独立 CallReceipt。[VERIFY: electron/api/routes/runtime-host-process.ts] [VERIFY: electron/main/updater.ts] [VERIFY: electron/api/routes/packages.ts] [VERIFY: src/types/cloud-package-operation.ts]
+- `platform::call` 字段、安全 detail、commit 后 `call.changed {callId, revision}` 与 original await/admit 分界见 [async-projection.md](async-projection.md)；当前真实覆盖与 PASS/FAIL/未测只维护于 [Call Log / Calls 唯一验收账](../architecture-knowledge/modules/call-log/dev.md#接线--验证-open)。[VERIFY: runtime-host/platform/src/call.rs:126-179] [VERIFY: runtime-host/modules/call-log/src/lib.rs:169-195]
 - 新 Rust owner、crate、状态模型和切换顺序必须在本基线之上推导，不能从现有 `runtime-host-rust/` 目录反推契约。
 
 ## 完整性的边界

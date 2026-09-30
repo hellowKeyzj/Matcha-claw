@@ -12,11 +12,212 @@ use super::command::{FleetCommand, FleetQuery};
 #[derive(Clone)]
 pub struct FleetHandle {
     owner: OwnerRuntimeHandle<FleetCommand, FleetQuery>,
+    recorder: Option<platform::call::CallRecorder>,
+    recording: Option<crate::call::FleetCall>,
 }
 
 impl FleetHandle {
     pub fn new(owner: OwnerRuntimeHandle<FleetCommand, FleetQuery>) -> Self {
-        Self { owner }
+        Self {
+            owner,
+            recorder: None,
+            recording: None,
+        }
+    }
+
+    pub(crate) fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
+        self.recorder = Some(recorder);
+        self
+    }
+
+    pub(crate) fn recording(&self, call: Option<crate::call::FleetCall>) -> Self {
+        let mut handle = self.clone();
+        handle.recording = call;
+        handle
+    }
+
+    pub(crate) fn recorder(&self) -> Option<&platform::call::CallRecorder> {
+        self.recorder.as_ref()
+    }
+
+    async fn admit(&self, command: FleetCommand) -> Result<(), RequestAdmissionClosed> {
+        let Some(call) = &self.recording else {
+            return self
+                .owner
+                .send_command(command)
+                .await
+                .map_err(|_| RequestAdmissionClosed);
+        };
+        if self
+            .owner
+            .send_command(FleetCommand::Recorded {
+                command: Box::new(command),
+                call: call.clone(),
+            })
+            .await
+            .is_err()
+        {
+            call.outcome("admissionClosed", platform::call::CallStatus::Rejected)
+                .await;
+            return Err(RequestAdmissionClosed);
+        }
+        call.admitted
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) async fn admit_dispatch(
+        &self,
+        dispatch_id: fleet::outbox::DispatchId,
+    ) -> Result<Result<(), fleet::FleetDeliveryError>, RequestAdmissionClosed> {
+        let target_id = match self
+            .recording(None)
+            .dispatch_target_id(dispatch_id.clone())
+            .await
+        {
+            Ok(Ok(id)) => id,
+            Ok(Err(error)) => {
+                if let Some(call) = &self.recording {
+                    call.finish(&Err::<(), _>(&error)).await;
+                }
+                return Ok(Err(error));
+            }
+            Err(error) => {
+                if let Some(call) = &self.recording {
+                    call.outcome("unavailable", platform::call::CallStatus::Unknown)
+                        .await;
+                }
+                return Err(error);
+            }
+        };
+        let (reply, _) = oneshot::channel();
+        self.admit(FleetCommand::Begin {
+            target_id,
+            dispatch_id,
+            reply,
+        })
+        .await?;
+        Ok(Ok(()))
+    }
+
+    pub(crate) async fn admit_connection_probe(
+        &self,
+        id: fleet::connection::ConnectionId,
+        command_id: fleet::command::CommandId,
+    ) -> Result<Result<(), fleet::FleetDeliveryError>, RequestAdmissionClosed> {
+        let target_id = match self
+            .recording(None)
+            .connection_target_id(id.clone())
+            .await?
+        {
+            Ok(id) => id,
+            Err(error) => return Ok(Err(error)),
+        };
+        let (reply, _) = oneshot::channel();
+        self.admit(FleetCommand::RunConnectionProbe {
+            target_id,
+            id,
+            command_id,
+            reply,
+        })
+        .await?;
+        Ok(Ok(()))
+    }
+
+    pub(crate) async fn admit_environment_deployment(
+        &self,
+        id: fleet::environment::EnvironmentId,
+        command_id: fleet::command::CommandId,
+        phase: fleet::effect::PhaseKey,
+    ) -> Result<Result<(), fleet::FleetDeliveryError>, RequestAdmissionClosed> {
+        let target_id = match self
+            .recording(None)
+            .environment_target_id(id.clone())
+            .await?
+        {
+            Ok(id) => id,
+            Err(error) => return Ok(Err(error)),
+        };
+        let (reply, _) = oneshot::channel();
+        self.admit(FleetCommand::RunEnvironmentDeployment {
+            target_id,
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await?;
+        Ok(Ok(()))
+    }
+
+    pub(crate) async fn admit_environment_deletion(
+        &self,
+        id: fleet::environment::EnvironmentId,
+        command_id: fleet::command::CommandId,
+        phase: fleet::effect::PhaseKey,
+    ) -> Result<Result<(), fleet::FleetDeliveryError>, RequestAdmissionClosed> {
+        let target_id = match self
+            .recording(None)
+            .environment_target_id(id.clone())
+            .await?
+        {
+            Ok(id) => id,
+            Err(error) => return Ok(Err(error)),
+        };
+        let (reply, _) = oneshot::channel();
+        self.admit(FleetCommand::RunEnvironmentDeletion {
+            target_id,
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await?;
+        Ok(Ok(()))
+    }
+
+    pub(crate) async fn admit_resource_provisioning(
+        &self,
+        id: fleet::environment::ManagedResourceId,
+        command_id: fleet::command::CommandId,
+        phase: fleet::effect::PhaseKey,
+    ) -> Result<Result<(), fleet::FleetDeliveryError>, RequestAdmissionClosed> {
+        let target_id = match self.recording(None).resource_target_id(id.clone()).await? {
+            Ok(id) => id,
+            Err(error) => return Ok(Err(error)),
+        };
+        let (reply, _) = oneshot::channel();
+        self.admit(FleetCommand::RunResourceProvisioning {
+            target_id,
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await?;
+        Ok(Ok(()))
+    }
+
+    pub(crate) async fn admit_resource_deletion(
+        &self,
+        id: fleet::environment::ManagedResourceId,
+        command_id: fleet::command::CommandId,
+        phase: fleet::effect::PhaseKey,
+    ) -> Result<Result<(), fleet::FleetDeliveryError>, RequestAdmissionClosed> {
+        let target_id = match self.recording(None).resource_target_id(id.clone()).await? {
+            Ok(id) => id,
+            Err(error) => return Ok(Err(error)),
+        };
+        let (reply, _) = oneshot::channel();
+        self.admit(FleetCommand::RunResourceDeletion {
+            target_id,
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await?;
+        Ok(Ok(()))
     }
 
     pub async fn terminal_open_allocated(
@@ -28,14 +229,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::TerminalOpenAllocated {
-                selector,
-                dimensions,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::TerminalOpenAllocated {
+            selector,
+            dimensions,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -47,8 +247,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::TerminalConsumeTicket { ticket, reply })
+        self.admit(FleetCommand::TerminalConsumeTicket { ticket, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -60,14 +259,13 @@ impl FleetHandle {
     ) -> Result<crate::application::terminal::TerminalProviderOpen, ()> {
         let target_id = fleet::TargetId::try_from(context.target.as_str()).map_err(|_| ())?;
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::TerminalProviderOpen {
-                target_id,
-                context,
-                reply,
-            })
-            .await
-            .map_err(|_| ())?;
+        self.admit(FleetCommand::TerminalProviderOpen {
+            target_id,
+            context,
+            reply,
+        })
+        .await
+        .map_err(|_| ())?;
         reply_rx.await.map_err(|_| ())?
     }
 
@@ -79,8 +277,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::TerminalContext { summary, reply })
+        self.send_query(FleetQuery::TerminalContext { summary, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -95,14 +292,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::TerminalResolveContext {
-                selector,
-                summary,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.send_query(FleetQuery::TerminalResolveContext {
+            selector,
+            summary,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -115,14 +311,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::TerminalClose {
-                session,
-                generation,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::TerminalClose {
+            session,
+            generation,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -135,14 +330,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::TerminalFail {
-                session,
-                generation,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::TerminalFail {
+            session,
+            generation,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -154,8 +348,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::TerminalCloseCurrent { session, reply })
+        self.admit(FleetCommand::TerminalCloseCurrent { session, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -169,8 +362,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::TerminalBeginCloseCurrent { session, reply })
+        self.admit(FleetCommand::TerminalBeginCloseCurrent { session, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -184,8 +376,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::TerminalFinishCloseCurrent { session, reply })
+        self.admit(FleetCommand::TerminalFinishCloseCurrent { session, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -199,8 +390,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::TerminalReconnect { session, reply })
+        self.admit(FleetCommand::TerminalReconnect { session, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -215,14 +405,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::TerminalBeginClose {
-                session,
-                generation,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::TerminalBeginClose {
+            session,
+            generation,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -235,14 +424,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::TerminalFinishClose {
-                session,
-                generation,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::TerminalFinishClose {
+            session,
+            generation,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -250,8 +438,7 @@ impl FleetHandle {
         &self,
     ) -> Result<Vec<fleet::terminal::SessionSummary>, RequestAdmissionClosed> {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::TerminalList { reply })
+        self.send_query(FleetQuery::TerminalList { reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -265,11 +452,43 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::QuerySnapshot { now, reply })
+        self.send_query(FleetQuery::QuerySnapshot { now, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
+    }
+
+    async fn send_query(&self, query: FleetQuery) -> Result<(), RequestAdmissionClosed> {
+        // Durable queries read a live snapshot without waiting for provider I/O lanes.
+        // Terminal state is in-memory and stays on the global owner.
+        let query = if matches!(
+            &query,
+            FleetQuery::TerminalList { .. }
+                | FleetQuery::TerminalContext { .. }
+                | FleetQuery::TerminalResolveContext { .. }
+        ) {
+            query
+        } else {
+            FleetQuery::Live {
+                query: Box::new(query),
+            }
+        };
+        let public_query = matches!(&query, FleetQuery::Live { query } if matches!(query.as_ref(),
+            FleetQuery::QuerySnapshot { .. } | FleetQuery::Snapshot { .. }
+                | FleetQuery::SelectorPreview { .. } | FleetQuery::TargetSummaries { .. }
+                | FleetQuery::TopologySummary { .. }))
+            || matches!(&query, FleetQuery::TerminalList { .. });
+        let query = match self.recording.as_ref().filter(|_| public_query) {
+            Some(call) => FleetQuery::Recorded {
+                query: Box::new(query),
+                call: call.clone(),
+            },
+            None => query,
+        };
+        self.owner
+            .send_query(query)
+            .await
+            .map_err(|_| RequestAdmissionClosed)
     }
 
     pub async fn snapshot(
@@ -279,12 +498,15 @@ impl FleetHandle {
         Result<crate::owner::actor::FleetSnapshot, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
+        let sessions = self.recording(None).terminal_list().await?;
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::Snapshot { now, reply })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
-        reply_rx.await.map_err(|_| RequestAdmissionClosed)
+        self.send_query(FleetQuery::Snapshot { now, reply }).await?;
+        let mut snapshot = match reply_rx.await.map_err(|_| RequestAdmissionClosed)? {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Ok(Err(error)),
+        };
+        snapshot.sessions = sessions;
+        Ok(Ok(snapshot))
     }
 
     pub async fn selector_preview(
@@ -296,14 +518,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::SelectorPreview {
-                constraints,
-                now,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.send_query(FleetQuery::SelectorPreview {
+            constraints,
+            now,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -314,8 +535,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::TargetSummaries { reply })
+        self.send_query(FleetQuery::TargetSummaries { reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -331,15 +551,14 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::TargetSelector {
-                id,
-                revision,
-                kind,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.send_query(FleetQuery::TargetSelector {
+            id,
+            revision,
+            kind,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -350,8 +569,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::TopologySummary { reply })
+        self.send_query(FleetQuery::TopologySummary { reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -364,8 +582,7 @@ impl FleetHandle {
     ) -> Result<Result<fleet::TargetSnapshot, fleet::FleetDeliveryError>, RequestAdmissionClosed>
     {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::PutTarget { id, config, reply })
+        self.admit(FleetCommand::PutTarget { id, config, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -376,8 +593,7 @@ impl FleetHandle {
         id: fleet::TargetId,
     ) -> Result<Result<bool, fleet::FleetDeliveryError>, RequestAdmissionClosed> {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RemoveTarget { id, reply })
+        self.admit(FleetCommand::RemoveTarget { id, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -389,8 +605,7 @@ impl FleetHandle {
     ) -> Result<Result<fleet::FleetSubmitOutcome, fleet::FleetDeliveryError>, RequestAdmissionClosed>
     {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::Submit { request, reply })
+        self.admit(FleetCommand::Submit { request, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -404,8 +619,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::NodeCommandRequest { request, reply })
+        self.send_query(FleetQuery::NodeCommandRequest { request, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -416,14 +630,13 @@ impl FleetHandle {
         pending: crate::owner::actor::PendingDispatch,
     ) -> Result<(), RequestAdmissionClosed> {
         let (reply, _reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::Begin {
-                target_id: pending.target_id,
-                dispatch_id: pending.dispatch_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)
+        self.admit(FleetCommand::Begin {
+            target_id: pending.target_id,
+            dispatch_id: pending.dispatch_id,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)
     }
 
     async fn dispatch_target_id(
@@ -431,8 +644,7 @@ impl FleetHandle {
         dispatch_id: fleet::outbox::DispatchId,
     ) -> Result<Result<fleet::TargetId, fleet::FleetDeliveryError>, RequestAdmissionClosed> {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::DispatchTarget { dispatch_id, reply })
+        self.send_query(FleetQuery::DispatchTarget { dispatch_id, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -443,8 +655,7 @@ impl FleetHandle {
         id: fleet::connection::ConnectionId,
     ) -> Result<Result<fleet::TargetId, fleet::FleetDeliveryError>, RequestAdmissionClosed> {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::ConnectionTarget { id, reply })
+        self.send_query(FleetQuery::ConnectionTarget { id, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -455,8 +666,7 @@ impl FleetHandle {
         id: fleet::environment::EnvironmentId,
     ) -> Result<Result<fleet::TargetId, fleet::FleetDeliveryError>, RequestAdmissionClosed> {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::EnvironmentTarget { id, reply })
+        self.send_query(FleetQuery::EnvironmentTarget { id, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -467,8 +677,7 @@ impl FleetHandle {
         id: fleet::environment::ManagedResourceId,
     ) -> Result<Result<fleet::TargetId, fleet::FleetDeliveryError>, RequestAdmissionClosed> {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_query(FleetQuery::ResourceTarget { id, reply })
+        self.send_query(FleetQuery::ResourceTarget { id, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -481,19 +690,22 @@ impl FleetHandle {
         Result<crate::owner::actor::FleetDispatchResult, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
-        let target_id = match self.dispatch_target_id(dispatch_id.clone()).await? {
+        let target_id = match self
+            .recording(None)
+            .dispatch_target_id(dispatch_id.clone())
+            .await?
+        {
             Ok(target_id) => target_id,
             Err(error) => return Ok(Err(error)),
         };
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::Begin {
-                target_id,
-                dispatch_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::Begin {
+            target_id,
+            dispatch_id,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -506,14 +718,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::Accept {
-                dispatch_id,
-                attempt,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::Accept {
+            dispatch_id,
+            attempt,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -526,14 +737,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::Reject {
-                dispatch_id,
-                attempt,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::Reject {
+            dispatch_id,
+            attempt,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -546,14 +756,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::Unknown {
-                dispatch_id,
-                attempt,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::Unknown {
+            dispatch_id,
+            attempt,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -566,14 +775,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::Replay {
-                command_id,
-                dispatch_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::Replay {
+            command_id,
+            dispatch_id,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -585,8 +793,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::UpsertConnection { record, reply })
+        self.admit(FleetCommand::UpsertConnection { record, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -600,8 +807,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::DeleteConnection { id, reply })
+        self.admit(FleetCommand::DeleteConnection { id, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -616,14 +822,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::BeginConnectionProbe {
-                id,
-                command_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::BeginConnectionProbe {
+            id,
+            command_id,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -635,20 +840,23 @@ impl FleetHandle {
         Result<crate::owner::lifecycle::FleetConnectionLifecycleOutcome, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
-        let target_id = match self.connection_target_id(id.clone()).await? {
+        let target_id = match self
+            .recording(None)
+            .connection_target_id(id.clone())
+            .await?
+        {
             Ok(target_id) => target_id,
             Err(error) => return Ok(Err(error)),
         };
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RunConnectionProbe {
-                target_id,
-                id,
-                command_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::RunConnectionProbe {
+            target_id,
+            id,
+            command_id,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -661,21 +869,24 @@ impl FleetHandle {
         Result<crate::owner::lifecycle::FleetLifecycleOutcome, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
-        let target_id = match self.environment_target_id(id.clone()).await? {
+        let target_id = match self
+            .recording(None)
+            .environment_target_id(id.clone())
+            .await?
+        {
             Ok(target_id) => target_id,
             Err(error) => return Ok(Err(error)),
         };
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RunEnvironmentDeployment {
-                target_id,
-                id,
-                command_id,
-                phase,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::RunEnvironmentDeployment {
+            target_id,
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -688,21 +899,24 @@ impl FleetHandle {
         Result<crate::owner::lifecycle::FleetLifecycleOutcome, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
-        let target_id = match self.environment_target_id(id.clone()).await? {
+        let target_id = match self
+            .recording(None)
+            .environment_target_id(id.clone())
+            .await?
+        {
             Ok(target_id) => target_id,
             Err(error) => return Ok(Err(error)),
         };
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RunEnvironmentDeletion {
-                target_id,
-                id,
-                command_id,
-                phase,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::RunEnvironmentDeletion {
+            target_id,
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -715,21 +929,20 @@ impl FleetHandle {
         Result<crate::owner::lifecycle::FleetLifecycleOutcome, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
-        let target_id = match self.resource_target_id(id.clone()).await? {
+        let target_id = match self.recording(None).resource_target_id(id.clone()).await? {
             Ok(target_id) => target_id,
             Err(error) => return Ok(Err(error)),
         };
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RunResourceProvisioning {
-                target_id,
-                id,
-                command_id,
-                phase,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::RunResourceProvisioning {
+            target_id,
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -742,21 +955,20 @@ impl FleetHandle {
         Result<crate::owner::lifecycle::FleetLifecycleOutcome, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
-        let target_id = match self.resource_target_id(id.clone()).await? {
+        let target_id = match self.recording(None).resource_target_id(id.clone()).await? {
             Ok(target_id) => target_id,
             Err(error) => return Ok(Err(error)),
         };
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RunResourceDeletion {
-                target_id,
-                id,
-                command_id,
-                phase,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::RunResourceDeletion {
+            target_id,
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -771,16 +983,15 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::CompleteConnectionProbe {
-                id,
-                command_id,
-                outcome,
-                message,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::CompleteConnectionProbe {
+            id,
+            command_id,
+            outcome,
+            message,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -792,26 +1003,36 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RegisterEnvironment { record, reply })
+        self.admit(FleetCommand::RegisterEnvironment { record, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn register_resource(
+    pub(crate) async fn admit_resource_registration(
         &self,
         request: crate::owner::actor::ManagedResourceRegistrationRequest,
-    ) -> Result<
-        Result<fleet::environment::ManagedResourceMutation, fleet::FleetDeliveryError>,
-        RequestAdmissionClosed,
-    > {
-        let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RegisterResource { request, reply })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
-        reply_rx.await.map_err(|_| RequestAdmissionClosed)
+    ) -> Result<Result<(), fleet::FleetDeliveryError>, RequestAdmissionClosed> {
+        let Some(call) = &self.recording else {
+            return Err(RequestAdmissionClosed);
+        };
+        let (reply, _) = oneshot::channel();
+        if self
+            .owner
+            .try_send_command(FleetCommand::Recorded {
+                command: Box::new(FleetCommand::RegisterResource { request, reply }),
+                call: call.clone(),
+            })
+            .is_err()
+        {
+            call.outcome("admissionClosed", platform::call::CallStatus::Rejected)
+                .await;
+            return Err(RequestAdmissionClosed);
+        }
+        call.admitted
+            .store(true, std::sync::atomic::Ordering::Release);
+        call.accepted().await.map_err(|_| RequestAdmissionClosed)?;
+        Ok(Ok(()))
     }
 
     pub async fn upsert_node(
@@ -822,8 +1043,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::UpsertNode { observation, reply })
+        self.admit(FleetCommand::UpsertNode { observation, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -837,8 +1057,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::UpsertAgent { observation, reply })
+        self.admit(FleetCommand::UpsertAgent { observation, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -855,8 +1074,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::WriteCredential { request, reply })
+        self.admit(FleetCommand::WriteCredential { request, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -870,8 +1088,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RevokeAgent { id, reply })
+        self.admit(FleetCommand::RevokeAgent { id, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -885,8 +1102,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::UpsertRuntime { observation, reply })
+        self.admit(FleetCommand::UpsertRuntime { observation, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -900,8 +1116,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::UpsertEndpoint { observation, reply })
+        self.admit(FleetCommand::UpsertEndpoint { observation, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -915,8 +1130,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RetireNode { id, reply })
+        self.admit(FleetCommand::RetireNode { id, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -931,14 +1145,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::BeginRuntimeStart {
-                id,
-                command_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::BeginRuntimeStart {
+            id,
+            command_id,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -951,14 +1164,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::CompleteRuntimeStart {
-                id,
-                command_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::CompleteRuntimeStart {
+            id,
+            command_id,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -971,14 +1183,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::BeginRuntimeStop {
-                id,
-                command_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::BeginRuntimeStop {
+            id,
+            command_id,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -991,14 +1202,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::CompleteRuntimeStop {
-                id,
-                command_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::CompleteRuntimeStop {
+            id,
+            command_id,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1010,8 +1220,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RetireRuntime { id, reply })
+        self.admit(FleetCommand::RetireRuntime { id, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -1025,8 +1234,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::DrainEndpoint { id, reply })
+        self.admit(FleetCommand::DrainEndpoint { id, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -1040,8 +1248,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RetireEndpoint { id, reply })
+        self.admit(FleetCommand::RetireEndpoint { id, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -1056,14 +1263,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::BeginEndpointProbe {
-                id,
-                command_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::BeginEndpointProbe {
+            id,
+            command_id,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1077,15 +1283,14 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::CompleteEndpointProbe {
-                id,
-                command_id,
-                health,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::CompleteEndpointProbe {
+            id,
+            command_id,
+            health,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1098,14 +1303,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::BeginCapabilitySync {
-                id,
-                command_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::BeginCapabilitySync {
+            id,
+            command_id,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1119,15 +1323,14 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::CompleteCapabilitySync {
-                id,
-                command_id,
-                sync,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::CompleteCapabilitySync {
+            id,
+            command_id,
+            sync,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1141,15 +1344,14 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::CompleteEnvironmentDeployment {
-                id,
-                command_id,
-                phase,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::CompleteEnvironmentDeployment {
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1164,16 +1366,15 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::FailEnvironmentDeployment {
-                id,
-                command_id,
-                phase,
-                message,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::FailEnvironmentDeployment {
+            id,
+            command_id,
+            phase,
+            message,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1187,15 +1388,14 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::CompleteEnvironmentDeletion {
-                id,
-                command_id,
-                phase,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::CompleteEnvironmentDeletion {
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1210,16 +1410,15 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::FailEnvironmentDeletion {
-                id,
-                command_id,
-                phase,
-                message,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::FailEnvironmentDeletion {
+            id,
+            command_id,
+            phase,
+            message,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1233,15 +1432,14 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::CompleteResourceProvisioning {
-                id,
-                command_id,
-                phase,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::CompleteResourceProvisioning {
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1255,15 +1453,14 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::CompleteResourceDeletion {
-                id,
-                command_id,
-                phase,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::CompleteResourceDeletion {
+            id,
+            command_id,
+            phase,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1278,16 +1475,15 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::FailResourceDeletion {
-                id,
-                command_id,
-                phase,
-                message,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::FailResourceDeletion {
+            id,
+            command_id,
+            phase,
+            message,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1299,8 +1495,7 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::AuthenticateRuntimeAgentIngress { identity, reply })
+        self.admit(FleetCommand::AuthenticateRuntimeAgentIngress { identity, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -1311,8 +1506,7 @@ impl FleetHandle {
         agent: fleet::runtime_agent::RuntimeAgent,
     ) -> Result<Result<(), fleet::FleetDeliveryError>, RequestAdmissionClosed> {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RegisterRuntimeAgent { agent, reply })
+        self.admit(FleetCommand::RegisterRuntimeAgent { agent, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
@@ -1327,17 +1521,16 @@ impl FleetHandle {
         dispatch_attempt: fleet::outbox::DispatchAttempt,
     ) -> Result<Result<(), fleet::FleetDeliveryError>, RequestAdmissionClosed> {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RegisterRuntimeAgentCommand {
-                agent_id,
-                correlation,
-                queued_at,
-                command_attempt,
-                dispatch_attempt,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::RegisterRuntimeAgentCommand {
+            agent_id,
+            correlation,
+            queued_at,
+            command_attempt,
+            dispatch_attempt,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1350,14 +1543,13 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RecordRuntimeAgentHeartbeat {
-                agent_id,
-                heartbeat,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::RecordRuntimeAgentHeartbeat {
+            agent_id,
+            heartbeat,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1374,18 +1566,17 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RecordRuntimeAgentProgress {
-                agent_id,
-                correlation,
-                progress,
-                reported_at,
-                command_attempt,
-                dispatch_attempt,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::RecordRuntimeAgentProgress {
+            agent_id,
+            correlation,
+            progress,
+            reported_at,
+            command_attempt,
+            dispatch_attempt,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
@@ -1401,17 +1592,16 @@ impl FleetHandle {
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
-        self.owner
-            .send_command(FleetCommand::RecordRuntimeAgentResult {
-                agent_id,
-                correlation,
-                result,
-                command_attempt,
-                dispatch_attempt,
-                reply,
-            })
-            .await
-            .map_err(|_| RequestAdmissionClosed)?;
+        self.admit(FleetCommand::RecordRuntimeAgentResult {
+            agent_id,
+            correlation,
+            result,
+            command_attempt,
+            dispatch_attempt,
+            reply,
+        })
+        .await
+        .map_err(|_| RequestAdmissionClosed)?;
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 }

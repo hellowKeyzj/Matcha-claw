@@ -316,13 +316,21 @@ fn ensure_electron_run_as_node(environment: &mut Vec<(OsString, OsString)>) {
 }
 
 fn patch_path_environment(environment: &mut Vec<(OsString, OsString)>, working_directory: &Path) {
-    let inherited_path = select_path_environment(environment.iter().cloned(), cfg!(windows));
-    let Some(path) = bundled_bin_path(working_directory) else {
+    let paths = [
+        cli_path(working_directory),
+        bundled_bin_path(working_directory),
+    ];
+    if paths.iter().all(Option::is_none) {
         return;
-    };
-    let (key, current) = inherited_path.unwrap_or_else(|| (preferred_path_key(), OsString::new()));
+    }
+    let inherited_path = select_path_environment(environment.iter().cloned(), cfg!(windows));
+    let (key, mut current) =
+        inherited_path.unwrap_or_else(|| (preferred_path_key(), OsString::new()));
+    for path in paths.into_iter().rev().flatten() {
+        current = prepend_path(&path, &current);
+    }
     environment.retain(|(existing, _)| !existing.eq_ignore_ascii_case(OsStr::new(PATH_ENV)));
-    environment.push((key, prepend_path(&path, &current)));
+    environment.push((key, current));
 }
 
 fn uv_environment() -> [(OsString, OsString); 2] {
@@ -333,6 +341,16 @@ fn uv_environment() -> [(OsString, OsString); 2] {
         ),
         (UV_INDEX_URL.into(), UV_INDEX_MIRROR_URL.into()),
     ]
+}
+
+fn cli_path(working_directory: &Path) -> Option<PathBuf> {
+    let packaged = working_directory.join("cli");
+    if packaged.is_dir() {
+        return Some(packaged);
+    }
+
+    let development = working_directory.join("node_modules").join(".bin");
+    development.is_dir().then_some(development)
 }
 
 fn bundled_bin_path(working_directory: &Path) -> Option<PathBuf> {

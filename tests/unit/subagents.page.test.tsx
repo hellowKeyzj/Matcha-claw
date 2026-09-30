@@ -218,8 +218,6 @@ describe('subagents page', () => {
   const importAgentConfig = vi.fn().mockResolvedValue({ agentId: 'imported-agent' });
   const loadAgents = vi.fn().mockResolvedValue(undefined);
   const loadAvailableModels = vi.fn().mockResolvedValue(undefined);
-  const generateDraftFromPrompt = vi.fn().mockResolvedValue(undefined);
-  const cancelDraft = vi.fn().mockResolvedValue(undefined);
   const loadPersistedFilesForAgent = vi.fn().mockResolvedValue({});
 
   afterEach(() => {
@@ -287,8 +285,6 @@ describe('subagents page', () => {
     importAgentConfig.mockClear();
     loadAgents.mockClear();
     loadAvailableModels.mockClear();
-    generateDraftFromPrompt.mockClear();
-    cancelDraft.mockClear();
     loadPersistedFilesForAgent.mockClear();
     vi.mocked(toast.success).mockReset();
     vi.mocked(toast.warning).mockReset();
@@ -363,11 +359,6 @@ describe('subagents page', () => {
       mutating: false,
       error: null,
       managedAgentId: null,
-      draftPromptByAgent: {},
-      draftGeneratingByAgent: {},
-      draftApplyingByAgent: {},
-      draftApplySuccessByAgent: {},
-      draftIncludeCurrentFilesByAgent: {},
       persistedFilesByAgent: {
         'agent-alpha': {
           'AGENTS.md': 'saved agents',
@@ -376,12 +367,18 @@ describe('subagents page', () => {
           'MEMORY.md': 'saved memory',
         },
       },
-      draftByFile: {},
-      draftError: null,
-      previewDiffByFile: {},
       selectedAgentId: null,
       loadAgents,
       loadCloudPackages: vi.fn().mockResolvedValue(undefined),
+      loadMyCloudPackages: vi.fn().mockResolvedValue(undefined),
+      myCloudPackages: [],
+      myCloudLoading: false,
+      myCloudError: null,
+      installedCloudPackages: [],
+      cloudLoading: false,
+      cloudError: null,
+      cloudInstallingByVersionId: {},
+      cloudPublishingByVersionId: {},
       loadAvailableModels,
       loadPersistedFilesForAgent,
       selectAgent: vi.fn(),
@@ -394,8 +391,6 @@ describe('subagents page', () => {
       uploadAgentPackageToCloud,
       installAgentPackageFromCloud,
       importAgentConfig,
-      generateDraftFromPrompt,
-      cancelDraft,
     });
     useAgentSkillConfigStore.setState({
       viewByAgentId: {
@@ -575,7 +570,7 @@ describe('subagents page', () => {
     expect(screen.getByRole('dialog', { name: 'Create Subagent' })).toBeInTheDocument();
   });
 
-  it('submits create form and calls createAgent', async () => {
+  it('submits create form, calls createAgent and closes dialog', async () => {
     renderSubagentsPage();
 
     await openCreateDialog();
@@ -597,6 +592,11 @@ describe('subagents page', () => {
         avatarStyle: 'pixelArt',
       }));
     });
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'Create Subagent' })).toBeNull();
+    });
+    expect(screen.queryByRole('dialog', { name: 'Edit Subagent' })).toBeNull();
+    expect(useSubagentsStore.getState().managedAgentId).toBeNull();
   });
 
   it('createAgent 失败时保持弹窗打开，不进入管理态', async () => {
@@ -656,31 +656,7 @@ describe('subagents page', () => {
     });
   });
 
-  it('prefills manage prompt from create dialog initial prompt', async () => {
-    renderSubagentsPage();
-
-    await openCreateDialog();
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
-    fireEvent.change(screen.getByLabelText('System Prompt'), {
-      target: { value: 'act as a finance analyst' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
-
-    await waitFor(() => {
-      expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
-        name: 'writer',
-        workspace: '/home/dev/.openclaw/workspace-subagents/writer',
-        model: OPENAI_GPT41_MINI_RUNTIME_REF,
-        avatarSeed: expect.any(String),
-        avatarStyle: 'pixelArt',
-      }));
-    });
-
-    expect(screen.getByRole('dialog', { name: 'Edit Subagent' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Prompt')).toHaveValue('act as a finance analyst');
-  });
-
-  it('create 返回 warning 时仍进入管理态，并显示 warning toast', async () => {
+  it('create 返回 warning 时关闭弹窗，并显示 warning toast', async () => {
     createAgent.mockResolvedValueOnce({
       agentId: 'writer',
       warning: '智能体 "writer" 已创建，但模型配置写入失败：RPC timeout: agents.update。请在编辑中重新确认',
@@ -704,7 +680,9 @@ describe('subagents page', () => {
       '智能体 "writer" 已创建，但模型配置写入失败：RPC timeout: agents.update。请在编辑中重新确认',
     );
     });
-    expect(screen.getByRole('dialog', { name: 'Edit Subagent' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Create Subagent' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Edit Subagent' })).toBeNull();
+    expect(useSubagentsStore.getState().managedAgentId).toBeNull();
   });
 
   it('opens persona tab through edit dialog', async () => {
@@ -715,80 +693,8 @@ describe('subagents page', () => {
 
     expect(loadPersistedFilesForAgent).toHaveBeenCalledWith('agent-alpha');
     expect(screen.getByRole('dialog', { name: 'Edit Subagent' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Prompt')).toBeInTheDocument();
-  });
-
-  it('submits prompt to generate subagent draft', async () => {
-    useRuntimeHostStore.setState({
-      runtimeHost: { lifecycle: 'running' },
-    });
-    renderSubagentsPage();
-
-    await openEditDialog('agent-alpha');
-    fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
-    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'draft policy docs' } });
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Generate Draft' })).toBeEnabled();
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Generate Draft' }));
-
-    await waitFor(() => {
-      expect(generateDraftFromPrompt).toHaveBeenCalledWith({
-        agentId: 'agent-alpha',
-        prompt: 'draft policy docs',
-        includeCurrentFiles: false,
-      });
-    });
-  });
-
-  it('passes current-file baseline option when draft switch is enabled', async () => {
-    useRuntimeHostStore.setState({
-      runtimeHost: { lifecycle: 'running' },
-    });
-    renderSubagentsPage();
-
-    await openEditDialog('agent-alpha');
-    fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
-    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'draft policy docs' } });
-    fireEvent.click(screen.getByRole('switch', { name: /Use current files/i }));
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Generate Draft' })).toBeEnabled();
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Generate Draft' }));
-
-    await waitFor(() => {
-      expect(generateDraftFromPrompt).toHaveBeenCalledWith({
-        agentId: 'agent-alpha',
-        prompt: 'draft policy docs',
-        includeCurrentFiles: true,
-      });
-    });
-  });
-
-  it('does not show applying label while only generating draft', async () => {
-    useSubagentsStore.setState({
-      managedAgentId: 'agent-alpha',
-      draftGeneratingByAgent: { 'agent-alpha': true },
-      draftApplyingByAgent: { 'agent-alpha': false },
-      draftByFile: {
-        'AGENTS.md': {
-          name: 'AGENTS.md',
-          content: 'content',
-          reason: 'reason',
-          confidence: 0.9,
-          needsReview: false,
-        },
-      },
-      previewDiffByFile: {},
-      draftError: null,
-    });
-
-    renderSubagentsPage();
-    await screen.findByRole('dialog', { name: 'Edit Subagent' });
-
-    expect(screen.getByRole('button', { name: 'Generating...' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Confirm Apply Draft' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Applying...' })).toBeNull();
+    expect(screen.getByText('Current Files')).toBeInTheDocument();
+    expect(screen.getByText('saved agents')).toBeInTheDocument();
   });
 
   it('calls edit/delete actions for non-main agent', async () => {
@@ -946,7 +852,41 @@ describe('subagents page', () => {
     expect(toast.success).toHaveBeenCalledWith('Agent package installed: agent-alpha');
   });
 
-  it('does not open prompt editor for managed sealed agent', async () => {
+  it('publishes mine drafts separately from entitled market packages', async () => {
+    const publishCloudAgentPackage = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({
+      myCloudPackages: [{ packageId: 'mine', packageVersionId: 'draft-id', name: 'My Draft', packageType: 'agent', version: 'a'.repeat(64), status: 'draft', downloadable: false }],
+      publishCloudAgentPackage,
+      cloudPackages: [{ packageId: 'pkg-alpha', packageVersionId: 'version-alpha', name: 'Cloud Agent', packageType: 'agent', version: 'b'.repeat(64), status: 'published', entitlementStatus: 'active', downloadable: true }],
+    });
+    renderSubagentsPage();
+    await openAgentActionMenu('agent-alpha');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Cloud Packages' }));
+    expect(await screen.findByText('My Draft')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Install' })).toBeEnabled();
+    expect(screen.queryByText('Installed')).not.toBeInTheDocument();
+    expect(publishCloudAgentPackage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Publish' }));
+    await waitFor(() => expect(publishCloudAgentPackage).toHaveBeenCalledWith('draft-id'));
+    act(() => useSubagentsStore.setState({ installedCloudPackages: [{ packageVersionId: 'version-alpha', packageType: 'agent', packageSha256: 'b'.repeat(64), fileName: 'agent.matcha-agentpkg' }] }));
+    expect(screen.getByText('Installed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Install' })).not.toBeInTheDocument();
+  });
+
+  it('shows market loading and retry instead of hiding failures', async () => {
+    const loadCloudPackages = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({ cloudLoading: true, loadCloudPackages });
+    renderSubagentsPage();
+    await openAgentActionMenu('agent-alpha');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Cloud Packages' }));
+    expect(await screen.findByText('Loading packages...')).toBeInTheDocument();
+    act(() => useSubagentsStore.setState({ cloudLoading: false, cloudError: 'cloudUnavailable' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('Unable to load packages. Please retry.');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(loadCloudPackages).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not open edit dialog for managed sealed agent', async () => {
     useSubagentsStore.setState({
       agents: [
         ...useSubagentsStore.getState().agents,
@@ -967,7 +907,7 @@ describe('subagents page', () => {
       expect(toast.error).toHaveBeenCalledWith('Sealed agents cannot be edited.');
     });
     expect(screen.queryByRole('dialog', { name: 'Edit Subagent' })).toBeNull();
-    expect(screen.queryByLabelText('Prompt')).toBeNull();
+    expect(screen.queryByText('Current Files')).toBeNull();
   });
 
   it('imports agent config from a picked json file', async () => {
@@ -1353,47 +1293,20 @@ describe('subagents page', () => {
 
     await openEditDialog('agent-alpha');
     fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
-    expect(screen.getByLabelText('Prompt')).toBeInTheDocument();
+    expect(screen.getByText('Current Files')).toBeInTheDocument();
 
     unmount();
     renderSubagentsPage();
 
-    expect(await screen.findByLabelText('Prompt')).toBeInTheDocument();
+    expect(await screen.findByText('Current Files')).toBeInTheDocument();
   });
 
-  it('shows apply success feedback and hides apply buttons when draft is cleared', async () => {
-    useSubagentsStore.setState({
-      managedAgentId: 'agent-alpha',
-      draftApplySuccessByAgent: { 'agent-alpha': true },
-      draftByFile: {},
-      previewDiffByFile: {},
-      draftError: null,
-    });
-
-    renderSubagentsPage();
-    await screen.findByRole('dialog', { name: 'Edit Subagent' });
-
-    expect(screen.getByText('Draft applied successfully.')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Generate Diff Preview' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Confirm Apply Draft' })).toBeNull();
-  });
-
-  it('closes edit dialog via top-right close button and triggers cancel action', async () => {
+  it('closes edit dialog via top-right close button and clears managed agent', async () => {
     useRuntimeHostStore.setState({
       runtimeHost: { lifecycle: 'running' },
     });
     useSubagentsStore.setState({
       managedAgentId: 'agent-alpha',
-      draftByFile: {
-        'AGENTS.md': {
-          name: 'AGENTS.md',
-          content: 'content',
-          reason: 'reason',
-          confidence: 0.9,
-          needsReview: false,
-        },
-      },
-      previewDiffByFile: {},
     });
 
     renderSubagentsPage();
@@ -1401,7 +1314,7 @@ describe('subagents page', () => {
     expect(await screen.findByRole('dialog', { name: 'Edit Subagent' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => {
-      expect(cancelDraft).toHaveBeenCalledWith('agent-alpha');
+      expect(useSubagentsStore.getState().managedAgentId).toBeNull();
     });
     expect(screen.queryByRole('dialog', { name: 'Edit Subagent' })).toBeNull();
   });

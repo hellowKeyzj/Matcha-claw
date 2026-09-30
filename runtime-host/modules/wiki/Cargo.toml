@@ -25,15 +25,16 @@ lancedb.workspace = true
 mobi.workspace = true
 notify.workspace = true
 office_oxide.workspace = true
-ort.workspace = true
 pdfium-render.workspace = true
 platform = { version = "0.1.0", path = "../../platform" }
 reqwest = { workspace = true, features = ["json", "multipart"] }
+regex = "1"
+unicode-normalization = "0.1.25"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
+tempfile = "3"
 tokio.workspace = true
 tokio-util.workspace = true
-tokenizers.workspace = true
 zip.workspace = true

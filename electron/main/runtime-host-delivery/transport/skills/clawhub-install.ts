@@ -1,5 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import { isSkillsCallReceipt, type SkillsCallReceipt } from './management';
 
 const ENDPOINT = '/api/clawhub/skills/install';
 const INSTALL_SCOPE = 'skills:install';
@@ -19,9 +20,9 @@ export type ClawHubSkillInstallResult = Readonly<{
 }>;
 
 export type ClawHubSkillInstallTransportResponse = Readonly<{
-  status: 200 | 400 | 422 | 503;
+  status: 400 | 422 | 503;
   body: ClawHubSkillInstallResult;
-}>;
+}> | Readonly<{ status: 202; body: SkillsCallReceipt }>;
 
 export interface ClawHubSkillInstallTransport {
   install(request: unknown): Promise<ClawHubSkillInstallTransportResponse>;
@@ -52,8 +53,8 @@ export function createClawHubSkillInstallTransport(
         fetcher,
         body: request,
       });
-      if (response?.status === 200 && isInstallResult(response.body, request.slug)) {
-        return { status: 200, body: response.body };
+      if (response?.status === 202 && isSkillsCallReceipt(response.body)) {
+        return { status: 202, body: response.body };
       }
       if (response?.status === 400 && isInstallResult(response.body, request.slug) && response.body.outcome === 'rejected') {
         return { status: 400, body: response.body };

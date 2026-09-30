@@ -1,16 +1,21 @@
-use std::{collections::HashMap, path::Path};
+mod community;
+mod relevance;
+
+use std::{collections::BTreeMap, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-use super::{error::WikiFailure, path::normalize_relative_path};
+use super::{error::WikiFailure, search::SearchPage};
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiGraphNode {
-    id: String,
-    label: String,
-    kind: String,
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) kind: String,
     relative_path: String,
+    pub(crate) link_count: usize,
+    pub(crate) community: usize,
 }
 
 impl WikiGraphNode {
@@ -20,6 +25,8 @@ impl WikiGraphNode {
             label,
             kind,
             relative_path,
+            link_count: 0,
+            community: 0,
         }
     }
 
@@ -28,12 +35,13 @@ impl WikiGraphNode {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiGraphEdge {
-    from: String,
-    to: String,
+    pub(crate) from: String,
+    pub(crate) to: String,
     confidence: String,
+    pub(crate) weight: f64,
 }
 
 impl WikiGraphEdge {
@@ -42,129 +50,88 @@ impl WikiGraphEdge {
             from,
             to,
             confidence,
+            weight: 1.0,
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WikiGraphCommunity {
+    pub id: usize,
+    pub node_count: usize,
+    pub cohesion: f64,
+    pub top_nodes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiGraphReceipt {
-    nodes: Vec<WikiGraphNode>,
-    edges: Vec<WikiGraphEdge>,
+    pub(crate) nodes: Vec<WikiGraphNode>,
+    pub(crate) edges: Vec<WikiGraphEdge>,
+    pub(crate) communities: Vec<WikiGraphCommunity>,
 }
 
 impl WikiGraphReceipt {
     pub fn new(nodes: Vec<WikiGraphNode>, edges: Vec<WikiGraphEdge>) -> Self {
-        Self { nodes, edges }
+        let mut graph = Self {
+            nodes,
+            edges,
+            communities: Vec::new(),
+        };
+        community::assign(&mut graph);
+        graph
     }
 }
 
 pub fn build_graph(root: &Path) -> Result<WikiGraphReceipt, WikiFailure> {
-    let mut nodes = Vec::new();
-    let mut bodies = HashMap::new();
-    for (directory, kind) in graph_directories() {
-        let base = root.join(directory);
-        if !base.is_dir() {
-            continue;
-        }
-        collect_nodes(root, &base, kind, &mut nodes, &mut bodies)?;
-    }
+    let pages = relevance::load_pages(root)?;
+    let graph = relevance::build(pages);
+    Ok(WikiGraphReceipt::new(graph.0, graph.1))
+}
 
-    let ids = nodes
-        .iter()
-        .map(|node| (node.id.clone(), ()))
-        .collect::<HashMap<_, _>>();
-    let mut edges = Vec::new();
-    for (from, content) in bodies {
-        for target in wiki_links(&content) {
-            if target != from && ids.contains_key(&target) {
-                edges.push(WikiGraphEdge::new(
-                    from.clone(),
-                    target,
-                    "EXTRACTED".to_owned(),
-                ));
-            }
+// Search expansion retains its path/title aliases, independent of graph stem identity.
+pub(super) fn page_aliases(pages: &BTreeMap<String, &SearchPage>) -> BTreeMap<String, String> {
+    let mut aliases = BTreeMap::new();
+    for (normalized_path, page) in pages {
+        let wiki_relative = page
+            .relative_path
+            .strip_prefix("wiki/")
+            .unwrap_or(&page.relative_path);
+        let stem = page_stem(&page.relative_path);
+        for alias in [
+            page.relative_path.as_str(),
+            wiki_relative,
+            stem.as_str(),
+            page.title.as_str(),
+        ] {
+            aliases.insert(normalize_graph_alias(alias), normalized_path.clone());
         }
     }
-    edges.sort_by(|left, right| {
-        left.from
-            .cmp(&right.from)
-            .then_with(|| left.to.cmp(&right.to))
-    });
-    edges.dedup_by(|left, right| left.from == right.from && left.to == right.to);
-    Ok(WikiGraphReceipt::new(nodes, edges))
+    aliases
 }
 
-fn graph_directories() -> [(&'static str, &'static str); 6] {
-    [
-        ("wiki/entities", "entity"),
-        ("wiki/concepts", "concept"),
-        ("wiki/sources", "source"),
-        ("wiki/queries", "query"),
-        ("wiki/comparisons", "comparison"),
-        ("wiki/synthesis", "synthesis"),
-    ]
+pub(super) fn normalize_graph_alias(value: &str) -> String {
+    value
+        .split('#')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches(".md")
+        .replace('\\', "/")
+        .replace(' ', "-")
+        .to_lowercase()
 }
 
-fn collect_nodes(
-    root: &Path,
-    directory: &Path,
-    kind: &str,
-    nodes: &mut Vec<WikiGraphNode>,
-    bodies: &mut HashMap<String, String>,
-) -> Result<(), WikiFailure> {
-    for entry in std::fs::read_dir(directory)
-        .map_err(|error| WikiFailure::io(path_text(directory), error))?
-    {
-        let entry = entry.map_err(|error| WikiFailure::io(path_text(directory), error))?;
-        let path = entry.path();
-        let metadata = entry
-            .metadata()
-            .map_err(|error| WikiFailure::io(path_text(&path), error))?;
-        if metadata.is_dir() {
-            collect_nodes(root, &path, kind, nodes, bodies)?;
-            continue;
-        }
-        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
-            continue;
-        }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|error| WikiFailure::io(path_text(&path), error))?;
-        let id = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or_default()
-            .to_owned();
-        if id.is_empty() {
-            continue;
-        }
-        let label = first_heading(&content).unwrap_or_else(|| id.clone());
-        let relative_path = path
-            .strip_prefix(root)
-            .map(normalize_relative_path)
-            .unwrap_or_else(|_| path_text(&path));
-        nodes.push(WikiGraphNode::new(
-            id.clone(),
-            label,
-            kind.to_owned(),
-            relative_path,
-        ));
-        bodies.insert(id, content);
-    }
-    nodes.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(())
+fn page_stem(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("")
+        .to_owned()
 }
 
-fn first_heading(content: &str) -> Option<String> {
-    content.lines().find_map(|line| {
-        line.strip_prefix("# ")
-            .map(str::trim)
-            .filter(|heading| !heading.is_empty())
-            .map(str::to_owned)
-    })
-}
-
-fn wiki_links(content: &str) -> Vec<String> {
+pub(super) fn wiki_links(content: &str) -> Vec<String> {
     let mut links = Vec::new();
     let mut rest = content;
     while let Some(start) = rest.find("[[") {
@@ -183,8 +150,4 @@ fn wiki_links(content: &str) -> Vec<String> {
         rest = &after_start[end + 2..];
     }
     links
-}
-
-fn path_text(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }

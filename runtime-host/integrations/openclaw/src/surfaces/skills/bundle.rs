@@ -10,17 +10,13 @@ use std::{
 use platform::state_dir::CanonicalStateDir;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use skills_module::bundle::MAX_CONTENT_BYTES;
 use zip::ZipArchive;
 
 const SKILL_MANIFEST: &str = "SKILL.md";
 const MANAGED_MARKER: &str = ".matchaclaw-managed";
 const MAX_BUNDLES: usize = 32;
 const MAX_FILES_PER_BUNDLE: usize = 64;
-// This owner shares the provider-model loopback listener, whose request ceiling is
-// 64 KiB. Leave room for JSON structure and file paths.
-const MAX_FILE_BYTES: usize = 48 * 1024;
-const MAX_BUNDLE_BYTES: usize = 48 * 1024;
-const MAX_TOTAL_BYTES: usize = 48 * 1024;
 const MAX_PATH_BYTES: usize = 240;
 const MAX_SKILL_KEY_BYTES: usize = 96;
 const MAX_EXPORT_DEPTH: usize = 8;
@@ -75,7 +71,7 @@ pub struct SkillBundleFile {
 impl SkillBundleFile {
     pub fn try_new(path: String, content: String) -> Result<Self, BundleError> {
         let path = normalize_file_path(path)?;
-        if content.len() > MAX_FILE_BYTES {
+        if content.len() > MAX_CONTENT_BYTES {
             return Err(BundleError::Rejected);
         }
         Ok(Self { path, content })
@@ -486,7 +482,7 @@ fn normalize_bundles(bundles: Vec<SkillBundle>) -> Result<Vec<SkillBundle>, Bund
         for file in bundle.files {
             let path = normalize_file_path(file.path)?;
             let bytes = file.content.len();
-            if bytes > MAX_FILE_BYTES || files.insert(path, file.content).is_some() {
+            if bytes > MAX_CONTENT_BYTES || files.insert(path, file.content).is_some() {
                 return Err(BundleError::Rejected);
             }
             bundle_bytes = bundle_bytes
@@ -496,7 +492,7 @@ fn normalize_bundles(bundles: Vec<SkillBundle>) -> Result<Vec<SkillBundle>, Bund
                 .checked_add(bytes)
                 .ok_or(BundleError::Rejected)?;
         }
-        if bundle_bytes > MAX_BUNDLE_BYTES || total_bytes > MAX_TOTAL_BYTES {
+        if bundle_bytes > MAX_CONTENT_BYTES || total_bytes > MAX_CONTENT_BYTES {
             return Err(BundleError::Rejected);
         }
         let files = files
@@ -658,7 +654,7 @@ fn parse_archive(bytes: &[u8]) -> Result<Vec<SkillBundle>, BundleError> {
         }
         let size = entry.size();
         total = total.checked_add(size).ok_or(BundleError::Rejected)?;
-        if size > MAX_FILE_BYTES as u64 || total > MAX_ARCHIVE_UNCOMPRESSED_BYTES {
+        if size > MAX_CONTENT_BYTES as u64 || total > MAX_ARCHIVE_UNCOMPRESSED_BYTES {
             return Err(BundleError::Rejected);
         }
         let mut content = Vec::new();
@@ -854,7 +850,7 @@ fn collect_files_at(
         }
         if !metadata.is_file()
             || files.len() >= MAX_EXPORT_FILES
-            || metadata.len() > MAX_FILE_BYTES as u64
+            || metadata.len() > MAX_CONTENT_BYTES as u64
         {
             return Err(BundleError::Rejected);
         }
@@ -863,7 +859,7 @@ fn collect_files_at(
         *total_bytes = total_bytes
             .checked_add(bytes)
             .ok_or(BundleError::Rejected)?;
-        if *total_bytes > MAX_TOTAL_BYTES {
+        if *total_bytes > MAX_CONTENT_BYTES {
             return Err(BundleError::Rejected);
         }
         let path = canonical

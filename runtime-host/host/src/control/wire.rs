@@ -361,6 +361,13 @@ pub(crate) enum SafeEvent {
         #[serde(deserialize_with = "deserialize_safe_millis")]
         observed_at_ms: u64,
     },
+    #[serde(rename = "call.changed", rename_all = "camelCase")]
+    CallChanged {
+        call_id: platform::call::CallId,
+        revision: u64,
+    },
+    #[serde(rename = "calls.resync")]
+    CallsResync {},
     #[serde(rename = "openclaw.cron.execution", rename_all = "camelCase")]
     OpenClawCronExecution {
         job_id: CronExecutionId,

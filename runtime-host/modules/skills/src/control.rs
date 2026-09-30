@@ -119,7 +119,11 @@ pub fn is_skill_capability_request(operation: &str, target: &Value, input: &Valu
         "skills.updateConfig" => {
             skill_target_matches_input(target, input)
                 && input.contains_key("apiKey")
-                && input.contains_key("env")
+                && input.get("apiKey").is_some_and(Value::is_string)
+                && input
+                    .get("env")
+                    .and_then(Value::as_object)
+                    .is_some_and(|env| env.values().all(Value::is_string))
                 && input.len() == 3
         }
         "skills.updateState" => {
@@ -179,7 +183,7 @@ pub fn decode_skill_bundles(input: &Value) -> Option<Vec<bundle::Bundle>> {
     Some(decoded)
 }
 
-async fn dispatch_management_request(
+pub(crate) async fn dispatch_management_request(
     skills: &crate::SkillsModule,
     request: ManagementRequest,
 ) -> ManagementOutcome {
@@ -192,16 +196,13 @@ async fn dispatch_management_request(
             skill_keys,
             enabled,
         } => {
-            let mut outcome = ManagementOutcome::Succeeded(
-                json!({ "success": true, "updated": skill_keys, "enabled": enabled }),
-            );
-            for command in commands {
-                outcome = skill_management_outcome(skills.manage_skills(command).await);
-                if !matches!(outcome, ManagementOutcome::Succeeded(_)) {
-                    return outcome;
-                }
+            let result = crate::result::batch_state(skills, commands, skill_keys, enabled).await;
+            let body = json!(result);
+            if body.get("outcome") == Some(&json!("unknown")) {
+                ManagementOutcome::Unknown(body)
+            } else {
+                ManagementOutcome::Succeeded(body)
             }
-            outcome
         }
         ManagementRequest::RefreshStatus => skill_status_outcome(skills.skill_status().await),
         ManagementRequest::ExportBundles(command) => match skills.skill_bundles(command).await {
@@ -260,6 +261,17 @@ async fn dispatch_management_request(
 
 fn skill_management_outcome(result: Result<management::Outcome, ()>) -> ManagementOutcome {
     match result {
+        Ok(management::Outcome::Config {
+            outcome,
+            invalid_keys,
+        }) => {
+            let body = json!({ "success": outcome == management::ConfigOutcome::Accepted, "outcome": outcome, "invalidKeys": invalid_keys });
+            if outcome == management::ConfigOutcome::Unknown {
+                ManagementOutcome::Unknown(body)
+            } else {
+                ManagementOutcome::Succeeded(body)
+            }
+        }
         Ok(management::Outcome::Mutation(management::MutationOutcome::Accepted))
         | Ok(management::Outcome::Import(management::ImportOutcome::Accepted)) => {
             ManagementOutcome::Succeeded(json!({ "success": true }))

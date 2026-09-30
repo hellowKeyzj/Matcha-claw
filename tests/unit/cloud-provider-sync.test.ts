@@ -4,6 +4,7 @@ const hoisted = vi.hoisted(() => ({
   storeProviderPrivateAccountMock: vi.fn(),
   deleteProviderPrivateAccountMock: vi.fn(),
   loggerWarnMock: vi.fn(),
+  awaitProviderCall: vi.fn(),
 }));
 
 vi.mock('../../electron/main/ipc/provider-private-auth', () => ({
@@ -58,6 +59,16 @@ describe('cloud provider sync', () => {
     vi.clearAllMocks();
     hoisted.storeProviderPrivateAccountMock.mockResolvedValue({ status: 'stored' });
     hoisted.deleteProviderPrivateAccountMock.mockResolvedValue({ status: 'deleted' });
+    hoisted.awaitProviderCall.mockResolvedValue({
+      command: 'providerModels.replace',
+      status: 'succeeded',
+      detail: {
+        kind: 'replaceModels', phase: 'terminal', outcome: 'stored', count: null,
+        acceptedCount: null, persisted: 'confirmed', commit: 'committed',
+        accountId: 'matcha-cloud', accountRevision: null, diagnostic: null,
+        native: { changed: true, applied: 'confirmed', observed: 'matches' },
+      },
+    });
   });
 
   it('stores the cloud gateway account and replaces discovered models', async () => {
@@ -70,19 +81,20 @@ describe('cloud provider sync', () => {
         status: 200,
         body: { models: [{ modelId: 'gpt-5.6', capabilities: ['chat'] }] },
       }),
-      execute: vi.fn().mockResolvedValue({ status: 200, body: { success: true } }),
+      execute: vi.fn().mockResolvedValue({ status: 202, body: { callId: 'a'.repeat(32), accepted: true } }),
     };
     const { createCloudProviderSync } = await import('../../electron/main/cloud-account/provider-sync');
 
     await createCloudProviderSync({
       fetchClientBootstrap,
       providerAccountsTransport: providerAccountsTransport as never,
+      awaitProviderCall: hoisted.awaitProviderCall,
       providerModelsTransport: providerModelsTransport as never,
     }).reconcile(session);
 
     expect(fetchClientBootstrap).toHaveBeenCalledWith('cloud-token');
     expect(hoisted.storeProviderPrivateAccountMock).toHaveBeenCalledWith(
-      providerAccountsTransport,
+      { transport: providerAccountsTransport, awaitProviderCall: hoisted.awaitProviderCall },
       {
         id: 'matcha-cloud',
         provider: 'custom',
@@ -95,6 +107,10 @@ describe('cloud provider sync', () => {
         revision: 1,
       },
       'sk-live',
+    );
+    expect(hoisted.awaitProviderCall).toHaveBeenCalledWith(
+      { callId: 'a'.repeat(32), accepted: true },
+      'providerModels.replace',
     );
     expect(providerModelsTransport.discover).toHaveBeenCalledWith('matcha-cloud');
     expect(providerModelsTransport.execute).toHaveBeenCalledWith({
@@ -135,18 +151,19 @@ describe('cloud provider sync', () => {
     };
     const providerModelsTransport = {
       discover: vi.fn().mockResolvedValue({ status: 200, body: { models: [{ modelId: 'gpt-5.6', capabilities: ['chat'] }] } }),
-      execute: vi.fn().mockResolvedValue({ status: 200, body: { success: true } }),
+      execute: vi.fn().mockResolvedValue({ status: 202, body: { callId: 'a'.repeat(32), accepted: true } }),
     };
     const { createCloudProviderSync } = await import('../../electron/main/cloud-account/provider-sync');
 
     await createCloudProviderSync({
       fetchClientBootstrap,
       providerAccountsTransport: providerAccountsTransport as never,
+      awaitProviderCall: hoisted.awaitProviderCall,
       providerModelsTransport: providerModelsTransport as never,
     }).reconcile(session);
 
     expect(hoisted.storeProviderPrivateAccountMock).toHaveBeenCalledWith(
-      providerAccountsTransport,
+      { transport: providerAccountsTransport, awaitProviderCall: hoisted.awaitProviderCall },
       expect.objectContaining({ endpoint: 'https://gateway.example.com/v2', revision: 4 }),
       'sk-live',
     );
@@ -176,11 +193,12 @@ describe('cloud provider sync', () => {
     await createCloudProviderSync({
       fetchClientBootstrap: vi.fn(),
       providerAccountsTransport: providerAccountsTransport as never,
+      awaitProviderCall: hoisted.awaitProviderCall,
       providerModelsTransport: { discover: vi.fn(), execute: vi.fn() } as never,
     }).reconcile(null);
 
     expect(hoisted.deleteProviderPrivateAccountMock).toHaveBeenCalledWith(
-      providerAccountsTransport,
+      { transport: providerAccountsTransport, awaitProviderCall: hoisted.awaitProviderCall },
       'matcha-cloud',
       3,
     );

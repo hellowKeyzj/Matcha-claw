@@ -1,6 +1,7 @@
 mod adapters;
 mod api;
 mod application;
+pub mod call;
 pub mod delivery;
 mod domain;
 mod owner;
@@ -52,6 +53,11 @@ impl ConnectorModule {
         Self { handle }
     }
 
+    pub fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
+        self.handle = self.handle.with_call_recorder(recorder);
+        self
+    }
+
     pub async fn configure_private_resolver(
         &self,
         resolver: Arc<dyn ConnectorSecretResolverPort>,
@@ -91,9 +97,10 @@ pub fn spawn_owner(
     input: ConnectorOwnerInput,
 ) -> Result<(ConnectorModule, OwnedTask<()>), ()> {
     let owner = ConnectorOwner::new(input)?;
+    let observations = owner.observations();
     let (handle, task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(64, ConnectorOwner::lane_retention()),
     );
-    Ok((ConnectorModule::new(ConnectorHandle::new(handle)), task))
+    Ok((ConnectorModule::new(ConnectorHandle::new(handle, observations)), task))
 }

@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use foundation::execution::{LaneRetention, OwnerSpec};
+use platform::call::CallStatus;
 
 use crate::{
-    PlatformToolsOutcome,
+    PlatformToolsCallResult, PlatformToolsOutcome,
     application::commands::{PlatformToolsCommand, PlatformToolsOwnerKey, PlatformToolsQuery},
     ports::{PlatformToolsOps, PlatformToolsRequestAdmission},
 };
@@ -97,8 +98,19 @@ impl OwnerSpec for PlatformToolsOwner {
         query: Self::Query,
     ) {
         match query {
-            PlatformToolsQuery::List { reply } => {
-                let _ = reply.send(list_tools(&shared).await);
+            PlatformToolsQuery::List { reply, call } => {
+                if let Some(call) = &call {
+                    let _ = call.running().await;
+                }
+                let (outcome, status) = list_tools(&shared).await;
+                if let Some(call) = call {
+                    let mut detail = outcome.call_detail();
+                    if status == CallStatus::Rejected {
+                        detail.result = Some(PlatformToolsCallResult::Rejected);
+                    }
+                    let _ = call.finish(status, &detail).await;
+                }
+                let _ = reply.send(outcome);
             }
         }
     }
@@ -112,11 +124,17 @@ impl OwnerSpec for PlatformToolsOwner {
     }
 }
 
-async fn list_tools(shared: &PlatformToolsShared) -> PlatformToolsOutcome {
-    if shared.admission.admit_platform_tools_request().is_err()
-        || !shared.tools.platform_tools_ready()
-    {
-        return PlatformToolsOutcome::Unavailable;
+async fn list_tools(shared: &PlatformToolsShared) -> (PlatformToolsOutcome, CallStatus) {
+    if shared.admission.admit_platform_tools_request().is_err() {
+        return (PlatformToolsOutcome::Unavailable, CallStatus::Rejected);
     }
-    shared.tools.platform_tools().await
+    if !shared.tools.platform_tools_ready() {
+        return (PlatformToolsOutcome::Unavailable, CallStatus::Failed);
+    }
+    let outcome = shared.tools.platform_tools().await;
+    let status = match &outcome {
+        PlatformToolsOutcome::Tools(_) => CallStatus::Succeeded,
+        PlatformToolsOutcome::Unavailable => CallStatus::Failed,
+    };
+    (outcome, status)
 }

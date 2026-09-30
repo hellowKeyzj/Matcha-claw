@@ -1,8 +1,11 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use foundation::{
     execution::{OwnedTask, OwnerRuntimeSystem},
-    lifecycle::{EffectRegistration, ModuleScope},
+    lifecycle::{EffectRegistration, ModuleScope, ScopedEffectKind},
 };
 use platform::state_dir::CanonicalStateDir;
 
@@ -32,7 +35,11 @@ pub(in crate::composition::host) struct OwnerRuntimeTasks {
     pub(in crate::composition::host) system: OwnerRuntimeSystem,
     pub(in crate::composition::host) peer: OwnedTask<()>,
     pub(in crate::composition::host) module_scopes: Vec<ModuleScope>,
+    organization_calls: OrganizationModule,
+    wiki_calls: wiki::WikiHandle,
+    join_failures: Arc<Mutex<Vec<&'static str>>>,
     pub(in crate::composition::host) organization: OrganizationRuntime,
+    closed: bool,
 }
 
 pub(in crate::composition::host) struct OrganizationRuntime {
@@ -41,14 +48,16 @@ pub(in crate::composition::host) struct OrganizationRuntime {
 }
 
 impl OrganizationRuntime {
-    async fn cancel_and_join_after_session(&mut self) {
-        self.coordinator.cancel();
-        let _ = self.coordinator.join().await;
+    async fn dispose_after_session(&mut self) {
         self.scope.dispose_all_lifo().await;
     }
 }
 
 impl OwnerRuntimeTasks {
+    pub(in crate::composition::host) fn join_failures(&self) -> Arc<Mutex<Vec<&'static str>>> {
+        Arc::clone(&self.join_failures)
+    }
+
     pub(in crate::composition::host) fn module_effect_registrations(
         &self,
     ) -> Vec<EffectRegistration> {
@@ -59,24 +68,37 @@ impl OwnerRuntimeTasks {
             .collect()
     }
 
-    pub(in crate::composition::host) async fn cancel_and_join(&mut self) {
-        self.peer.cancel();
-        self.cancel_module_scope("provider");
-        self.cancel_module_scope("sessions");
+    pub(in crate::composition::host) async fn drain_and_join(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.organization_calls.shutdown_call_workflows().await;
+        self.wiki_calls.shutdown_call_workflows().await;
+        self.dispose_module_scope("skills").await;
+        self.dispose_module_scope("plugins").await;
         self.organization.coordinator.cancel();
-        let _ = self.peer.join().await;
+        let _ = self.organization.coordinator.join().await;
         for scope in self
             .module_scopes
             .iter_mut()
             .rev()
-            .filter(|scope| !is_provider_or_session_scope(scope.id()))
+            .filter(|scope| !is_runtime_dependency_scope(scope.id()))
         {
             scope.dispose_all_lifo().await;
         }
-        self.dispose_module_scope("provider").await;
+        if self.peer.drain_and_join().await.is_err() {
+            record_join_failure(&self.join_failures, "peer");
+        }
+        self.dispose_module_scope("settings").await;
+        self.dispose_module_scope("security").await;
         self.dispose_module_scope("sessions").await;
-        self.organization.cancel_and_join_after_session().await;
-        let _ = self.system.cancel_and_join().await;
+        self.dispose_module_scope("provider").await;
+        self.organization.dispose_after_session().await;
+        self.dispose_module_scope("runtime-directory").await;
+        if self.system.drain_and_join().await.is_err() {
+            record_join_failure(&self.join_failures, "owner-runtime-system");
+        }
+        self.closed = true;
     }
 
     pub(in crate::composition::host) fn module_scope_mut(
@@ -98,16 +120,6 @@ impl OwnerRuntimeTasks {
         self.module_scope_mut(module_id)
     }
 
-    fn cancel_module_scope(&self, module_id: &'static str) {
-        if let Some(scope) = self
-            .module_scopes
-            .iter()
-            .find(|scope| scope.id() == module_id)
-        {
-            scope.cancel_owned_tasks();
-        }
-    }
-
     async fn dispose_module_scope(&mut self, module_id: &'static str) {
         if let Some(scope) = self
             .module_scopes
@@ -119,14 +131,18 @@ impl OwnerRuntimeTasks {
     }
 }
 
-fn is_provider_or_session_scope(module_id: &'static str) -> bool {
-    matches!(module_id, "provider" | "sessions")
+fn is_runtime_dependency_scope(module_id: &'static str) -> bool {
+    matches!(
+        module_id,
+        "provider" | "sessions" | "settings" | "security" | "runtime-directory"
+    )
 }
 
-fn module_scope(id: &'static str, task: OwnedTask<()>) -> ModuleScope {
-    let mut scope = ModuleScope::new(id);
-    scope.register_owned_task(task);
-    scope
+fn record_join_failure(failures: &Mutex<Vec<&'static str>>, owner: &'static str) {
+    failures
+        .lock()
+        .expect("owner join failure state lock poisoned")
+        .push(owner);
 }
 
 fn runtime_directory_scope(
@@ -178,6 +194,7 @@ pub(in crate::composition::host) struct RuntimeOwners {
 }
 
 pub(in crate::composition::host) struct RuntimeOwnerInput {
+    pub(in crate::composition::host) calls: platform::call::CallRecorder,
     pub(in crate::composition::host) organization:
         super::super::resources::OrganizationOwnerProvision,
     pub(in crate::composition::host) runtime_state_dir: std::path::PathBuf,
@@ -207,6 +224,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     owner_input: RuntimeOwnerInput,
 ) -> Result<RuntimeOwners, ConstructionError> {
     let RuntimeOwnerInput {
+        calls,
         organization,
         runtime_state_dir,
         diagnostics_state_root,
@@ -227,6 +245,21 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         open_claw_runtime,
         cron_events,
     } = owner_input;
+    let join_failures = Arc::new(Mutex::new(Vec::new()));
+    let module_scope = |id: &'static str, mut task: OwnedTask<()>| {
+        let mut scope = ModuleScope::new(id);
+        let failures = Arc::clone(&join_failures);
+        scope.register_effect_disposer(
+            ScopedEffectKind::OwnerTask,
+            "owner-task",
+            move || async move {
+                if task.drain_and_join().await.is_err() {
+                    record_join_failure(&failures, id);
+                }
+            },
+        );
+        scope
+    };
     let fleet_owner_input = ::fleet::FleetOwnerInput::new(
         runtime_state_dir.join("fleet-facts.log"),
         fleet_private_root,
@@ -254,6 +287,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     );
     let (fleet_module, fleet_task) = ::fleet::spawn_owner(&owner_runtime_system, fleet_owner_input)
         .map_err(|_| ConstructionError::Fleet)?;
+    let fleet_module = fleet_module.with_call_recorder(calls.clone());
     let fleet_handle = fleet_module.handle().clone();
     let (security, security_task) = security::spawn_owner(
         &owner_runtime_system,
@@ -263,6 +297,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         },
     )
     .map_err(|_| ConstructionError::Security)?;
+    let security = security.with_call_recorder(calls.clone());
     let channel_endpoint = RuntimeDriverIdentity::open_claw().endpoint();
     let (channel, channel_task) = channels::spawn_owner(
         &owner_runtime_system,
@@ -272,6 +307,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         },
     );
 
+    let channel = channel.with_call_recorder(calls.clone());
     let (connector, connector_task) = connectors::spawn_owner(
         &owner_runtime_system,
         connectors::ConnectorOwnerInput {
@@ -282,6 +318,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         },
     )
     .map_err(|_| ConstructionError::ExternalConnectors)?;
+    let connector = connector.with_call_recorder(calls.clone());
 
     let (settings, settings_task) = settings::spawn_owner(
         &owner_runtime_system,
@@ -291,6 +328,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         },
     )
     .map_err(|_| ConstructionError::Settings)?;
+    let settings = settings.with_call_recorder(calls.clone());
 
     let (provider_module, provider_task) = provider_module::spawn_owner(
         &owner_runtime_system,
@@ -299,6 +337,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             runtime_directory: runtime_directory.clone(),
         },
     );
+    let provider_module = provider_module.with_call_recorder(calls.clone());
     let provider_handle = provider_module.handle().clone();
 
     let (organization_module, organization_task) = organization::spawn_owner(
@@ -307,6 +346,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             runtime_directory.clone() as Arc<dyn organization::OrganizationRuntimeDirectory>
         ),
     );
+    let organization_module = organization_module.with_call_recorder(calls.clone());
     let organization_handle = organization_module.handle().clone();
     let mut organization_scope = module_scope("organization", organization_task);
 
@@ -339,6 +379,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             ),
         },
     );
+    let session_module = session_module.with_call_recorder(calls.clone());
     let session_handle = session_module.handle().clone();
     session_terminal.bind_repair_session(super::super::ports::organization::repair_port(
         session_handle.clone(),
@@ -356,6 +397,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             observation: runtime_observation.sink(),
         },
     );
+    let cron = cron.with_call_recorder(calls.clone());
     let (usage, usage_task) = usage::spawn_owner(
         &owner_runtime_system,
         usage::UsageOwnerInput {
@@ -363,6 +405,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             runtime_directory: runtime_directory.clone(),
         },
     );
+    let usage = usage.with_call_recorder(calls.clone());
     let (task_manager, task_manager_task) = task_manager::spawn_owner(
         &owner_runtime_system,
         task_manager::TaskOwnerInput {
@@ -370,6 +413,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             runtime_directory: runtime_directory.clone(),
         },
     );
+    let task_manager = task_manager.with_call_recorder(calls.clone());
     let sealed_agents = sealed_resource.agents_port();
     let (subagents, subagents_task) = subagents::spawn_owner(
         &owner_runtime_system,
@@ -379,6 +423,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             sealed_agents,
         },
     );
+    let subagents = subagents.with_call_recorder(calls.clone());
     let (workspace, workspace_task) = workspace::spawn_owner(
         &owner_runtime_system,
         workspace::WorkspaceOwnerInput {
@@ -386,18 +431,19 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             runtime_directory: runtime_directory.clone(),
         },
     );
-    let vector_index = wiki::index::LocalWikiVectorIndex::load_default()
-        .map(|index| Arc::new(index) as Arc<dyn wiki::index::WikiVectorIndex>)
-        .ok();
+    let vector_index =
+        Arc::new(wiki::index::RemoteWikiVectorIndex::new().map_err(|_| ConstructionError::Wiki)?)
+            as Arc<dyn wiki::index::WikiVectorIndex>;
     let (wiki, wiki_task) = wiki::spawn_owner(
         &owner_runtime_system,
         wiki::WikiOwnerInput::new(runtime_state_dir.clone())
-            .with_vector_index(vector_index)
+            .with_vector_index(Some(vector_index))
             .with_ingest_llm(Some(Arc::new(
                 super::super::ports::ProviderWikiIngestLlm::new(provider_handle.clone()),
             ))),
     )
     .map_err(|_| ConstructionError::Wiki)?;
+    let wiki = wiki.with_call_recorder(calls.clone());
     let (toolchain, toolchain_task) = toolchain::spawn_owner(
         &owner_runtime_system,
         toolchain::ToolchainOwnerInput {
@@ -405,6 +451,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             toolchain,
         },
     );
+    let toolchain = toolchain.with_call_recorder(calls.clone());
     let platform_tools_ops: Arc<dyn platform_tools::PlatformToolsOps> = open_claw.clone();
     let (platform_tools, platform_tools_task) = platform_tools::spawn_owner(
         &owner_runtime_system,
@@ -414,6 +461,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         },
     );
 
+    let platform_tools = platform_tools.with_call_recorder(calls.clone());
     let activity_executor = Arc::new(super::super::ports::organization::TeamSessionExecutor::new(
         Arc::clone(&admission),
         session_handle.clone(),
@@ -441,6 +489,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         settings.clone(),
         security.clone(),
         team_run_coordinator_handle.clone(),
+        organization_handle.clone(),
         Arc::clone(&runtime_directory),
         open_claw_runtime,
         peer_startup.clone(),
@@ -452,7 +501,8 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             crate::composition::peer::PeerOwner::lane_retention(),
         ),
     );
-    let peer_handle = crate::composition::peer::PeerHandle::new(peer_owner_handle);
+    let peer_handle =
+        crate::composition::peer::PeerHandle::new(peer_owner_handle, Arc::clone(&admission));
     let (diagnostics, diagnostics_task) = ::diagnostics::spawn_owner(
         &owner_runtime_system,
         ::diagnostics::DiagnosticsOwnerInput {
@@ -465,6 +515,8 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         },
     );
 
+    let diagnostics = diagnostics.with_call_recorder(calls.clone());
+    let workspace = workspace.with_call_recorder(calls);
     Ok(RuntimeOwners {
         tasks: OwnerRuntimeTasks {
             system: owner_runtime_system,
@@ -495,10 +547,14 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
                 route_only_scope("sealed-resource"),
                 route_only_scope("skills"),
             ],
+            organization_calls: organization_module.clone(),
+            wiki_calls: wiki.handle().clone(),
+            join_failures,
             organization: OrganizationRuntime {
                 scope: organization_scope,
                 coordinator: team_run_coordinator,
             },
+            closed: false,
         },
         runtime_directory,
         peer_startup,

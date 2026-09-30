@@ -56,6 +56,11 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
             timeout_response,
         ));
     }
+    if matches!(path, "/api/security/policy/current" | "/api/security/audit" | "/api/security/audit/current") {
+        return Some(RouteHeadPlan::body_deadline(
+            body_policy_for_get_route(head.method.as_str()), SHORT_DEADLINE, timeout_response,
+        ));
+    }
     is_security_policy_route("GET", path).then(|| {
         RouteHeadPlan::new(
             body_policy_for_get_route(head.method.as_str()),
@@ -116,11 +121,12 @@ fn is_security_policy_route(method: &str, path: &str) -> bool {
             | ("GET", "/api/security/destructive-rule-catalog/current")
             | ("POST", "/api/security/operation")
             | ("POST", "/api/security/policy")
+            | ("POST", "/api/security/operation/receipt")
     )
 }
 
 fn is_security_policy_post_route(path: &str) -> bool {
-    matches!(path, "/api/security/operation" | "/api/security/policy")
+    matches!(path, "/api/security/operation" | "/api/security/policy" | "/api/security/operation/receipt")
 }
 
 fn body_policy_for_method(method: &str, max_bytes: usize) -> BodyPolicy {

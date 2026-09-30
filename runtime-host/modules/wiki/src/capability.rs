@@ -37,6 +37,7 @@ fn descriptor(scope: Value) -> Value {
             operation("wiki.refreshSources", "Refresh wiki sources", "wiki"),
             operation("wiki.applyGeneratedPages", "Apply generated wiki pages", "wiki"),
             operation("wiki.deleteSource", "Delete wiki source", "wiki"),
+            operation("wiki.callResult", "Read wiki call result", "wiki"),
             operation("wiki.sourceFiles", "List wiki source files", "wiki"),
             operation("wiki.sourceTasks", "List wiki source tasks", "wiki"),
             operation("wiki.cancelSourceTask", "Cancel wiki source task", "wiki"),

@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { waitForCall } from '@/lib/call-log-await';
+import { matchesOrganizationIdentity } from '@/types/call-log/organization';
 import { useChatStore } from '@/stores/chat';
 import { buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
 import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types';
@@ -996,8 +998,17 @@ export const useTeamsStore = create<TeamsState>()(
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
-          const result = await deleteTeamInstance({ teamId });
-          const runIdsToDelete = mergeRunIds(runIds, result.deletedRunIds ?? []);
+          const receipt = await deleteTeamInstance({ teamId });
+          const call = await waitForCall(receipt, 'organization');
+          if (call.command !== 'team.delete'
+            || !await matchesOrganizationIdentity(call.detail.teamId, call.detail.teamIdHash, teamId)
+            || call.status !== 'succeeded' || call.detail.outcome !== 'tombstoned') {
+            throw new Error(call.status === 'unknown'
+              ? 'Team deletion outcome is unknown'
+              : 'Team deletion was not confirmed');
+          }
+          const runIdsToDelete = mergeRunIds(runIds, get().runIdsByTeamId[teamId] ?? []);
+          const result: TeamDeleteResult = { teamId, deleted: true, state: 'tombstoned', deletedRunIds: [], deletedAgentIds: [] };
           removeTeamRunRoleSessions(collectTeamRunRoleSessionBindings(get(), teamId, runIdsToDelete));
           set((state) => ({
             teams: state.teams.filter((team) => team.id !== teamId),
@@ -1049,13 +1060,22 @@ export const useTeamsStore = create<TeamsState>()(
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
-          await provisionTeamAgents({
+          const receipt = await provisionTeamAgents({
             teamId: team.id,
             packagePath: team.packagePath,
             idempotencyKey: idempotencyKey(team.id, provisionActionKey(team)),
             ...(team.sourceType ? { sourceType: team.sourceType } : {}),
             ...(team.manualTeam ? { manualTeam: team.manualTeam } : {}),
           });
+          const call = await waitForCall(receipt, 'organization');
+          if (call.command !== 'team.provisionAgents'
+            || !await matchesOrganizationIdentity(call.detail.teamId, call.detail.teamIdHash, team.id)
+            || call.status !== 'succeeded' || call.detail.outcome !== 'materialized'
+            || call.detail.provision?.nativeInstalled !== true || call.detail.provision.commit !== 'committed') {
+            throw new Error(call.status === 'unknown'
+              ? 'Team provision outcome is unknown'
+              : 'Team provision was not confirmed');
+          }
         } catch (error) {
           set((state) => ({
             errorByTeamId: {
@@ -1151,7 +1171,15 @@ export const useTeamsStore = create<TeamsState>()(
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
-          await deleteTeamRun({ runId });
+          const receipt = await deleteTeamRun({ runId });
+          const call = await waitForCall(receipt, 'organization');
+          if (call.command !== 'team.runDelete'
+            || !await matchesOrganizationIdentity(call.detail.runId, call.detail.runIdHash, runId)
+            || call.status !== 'succeeded' || call.detail.outcome !== 'purged') {
+            throw new Error(call.status === 'unknown'
+              ? 'Team run deletion outcome is unknown'
+              : 'Team run deletion was not confirmed');
+          }
           removeTeamRunRoleSessions(collectTeamRunRoleSessionBindings(get(), teamId, [runId]));
           set((state) => {
             const remainingRunIds = (state.runIdsByTeamId[teamId] ?? []).filter((candidate) => candidate !== runId);

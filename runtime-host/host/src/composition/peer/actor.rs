@@ -9,12 +9,13 @@ use crate::{
     composition::admission::HostAdmission, composition::runtime_ports::RuntimeDriverDirectory,
     composition::runtime_ports::RuntimeStartFailure as DriverStartFailure,
 };
-use organization::TeamRunCoordinatorHandle;
+use organization::{OrganizationHandle, TeamRunCoordinatorHandle};
 use provider_module::ProviderHandle;
 
 use super::{
     AutostartOpenClawError, PeerCommand, PeerGlobalState, PeerKey, PeerLaneState, PeerQuery,
     RuntimeRestartCommandError, RuntimeStartCommandError, RuntimeStopCommandError,
+    command::RuntimeLifecycleCall,
 };
 
 #[derive(Clone)]
@@ -58,6 +59,7 @@ pub(crate) struct PeerShared {
     settings: settings::SettingsModule,
     security: security::SecurityModule,
     team_run: TeamRunCoordinatorHandle,
+    organization: OrganizationHandle,
     runtime_directory: Arc<RuntimeDriverDirectory>,
     open_claw_runtime_events: Option<tokio::sync::mpsc::Sender<()>>,
     matcha_start: Arc<Mutex<Option<Result<StartOutcome, DriverStartFailure>>>>,
@@ -95,6 +97,10 @@ impl PeerShared {
 
     pub(super) fn team_run(&self) -> &TeamRunCoordinatorHandle {
         &self.team_run
+    }
+
+    pub(super) fn organization(&self) -> &OrganizationHandle {
+        &self.organization
     }
 
     pub(super) fn runtime_directory(&self) -> &RuntimeDriverDirectory {
@@ -140,6 +146,7 @@ impl PeerOwner {
         settings: settings::SettingsModule,
         security: security::SecurityModule,
         team_run: TeamRunCoordinatorHandle,
+        organization: OrganizationHandle,
         runtime_directory: Arc<RuntimeDriverDirectory>,
         open_claw_runtime_events: Option<tokio::sync::mpsc::Sender<()>>,
         startup: PeerStartupState,
@@ -154,6 +161,7 @@ impl PeerOwner {
                 settings,
                 security,
                 team_run,
+                organization,
                 runtime_directory,
                 open_claw_runtime_events,
                 matcha_start: startup.matcha_start,
@@ -237,11 +245,11 @@ impl OwnerSpec for PeerOwner {
 
 async fn handle_command(shared: &PeerShared, key: &PeerKey, command: PeerCommand) {
     let Some(driver) = shared.runtime_directory().lookup(key) else {
-        reject_missing_lifecycle(shared, command);
+        reject_missing_lifecycle(shared, command).await;
         return;
     };
     let Some(lifecycle) = driver.host_lifecycle_ops() else {
-        reject_missing_lifecycle(shared, command);
+        reject_missing_lifecycle(shared, command).await;
         return;
     };
     match command {
@@ -251,14 +259,114 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, command: PeerCommand
         PeerCommand::AutostartOpenClaw { reply } => {
             let _ = reply.send(super::openclaw::autostart(shared, lifecycle).await);
         }
-        PeerCommand::StartRuntime { reply, .. } => {
-            let _ = reply.send(start_runtime(shared, key, lifecycle).await);
+        PeerCommand::StartRuntime { call, .. } => {
+            if !run_lifecycle_call(&call, key).await {
+                return;
+            }
+            let result = start_runtime(shared, key, lifecycle).await;
+            let status = match &result {
+                Ok(state) => lifecycle_success_status(
+                    key,
+                    state,
+                    runtime_directory::control_loopback::RuntimeControlOperation::LifecycleStart,
+                ),
+                Err(RuntimeStartCommandError::RuntimeStart(error)) => start_failure_status(*error),
+            };
+            let state = result
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|_| runtime_state(shared, key));
+            finish_manual_lifecycle_call(
+                Some(call),
+                key,
+                status,
+                &state,
+                result
+                    .as_ref()
+                    .err()
+                    .map(|_| runtime_directory::RuntimeControlLifecycleError::CommandFailed),
+            )
+            .await;
         }
-        PeerCommand::StopRuntime { reply, .. } => {
-            let _ = reply.send(stop_runtime(shared, key, lifecycle).await);
+        PeerCommand::StopRuntime { call, reply, .. } => {
+            if let Some(call) = &call {
+                if !run_lifecycle_call(call, key).await {
+                    if let Some(reply) = reply {
+                        let _ = reply.send(Err(RuntimeStopCommandError::AdmissionClosed));
+                    }
+                    return;
+                }
+            }
+            let result = stop_runtime(shared, key, lifecycle).await;
+            let status = match &result {
+                Ok(state) => lifecycle_success_status(
+                    key,
+                    state,
+                    runtime_directory::control_loopback::RuntimeControlOperation::LifecycleStop,
+                ),
+                Err(RuntimeStopCommandError::AdmissionClosed) => {
+                    platform::call::CallStatus::Rejected
+                }
+                Err(RuntimeStopCommandError::RuntimeStop(error)) => {
+                    lifecycle_failure_status(*error)
+                }
+            };
+            let state = result
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|_| runtime_state(shared, key));
+            finish_manual_lifecycle_call(
+                call,
+                key,
+                status,
+                &state,
+                result.as_ref().err().map(|error| match error {
+                    RuntimeStopCommandError::AdmissionClosed => {
+                        runtime_directory::RuntimeControlLifecycleError::Unavailable
+                    }
+                    RuntimeStopCommandError::RuntimeStop(_) => {
+                        runtime_directory::RuntimeControlLifecycleError::CommandFailed
+                    }
+                }),
+            )
+            .await;
+            if let Some(reply) = reply {
+                let _ = reply.send(result);
+            }
         }
-        PeerCommand::RestartRuntime { reply, .. } => {
-            let _ = reply.send(restart_runtime(shared, key, lifecycle).await);
+        PeerCommand::RestartOpenClawAfterPluginChange { reply } => {
+            let _ = reply.send(super::openclaw::restart_admitted(shared, lifecycle).await);
+        }
+        PeerCommand::RestartRuntime { call, .. } => {
+            if !run_lifecycle_call(&call, key).await {
+                return;
+            }
+            let result = restart_runtime(shared, key, lifecycle).await;
+            let status = match &result {
+                Ok(state) => lifecycle_success_status(
+                    key,
+                    state,
+                    runtime_directory::control_loopback::RuntimeControlOperation::LifecycleRestart,
+                ),
+                Err(RuntimeRestartCommandError::RuntimeRestart(error)) => {
+                    lifecycle_failure_status(*error)
+                }
+            };
+            let state = result
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|_| runtime_state(shared, key));
+            finish_manual_lifecycle_call(
+                Some(call),
+                key,
+                status,
+                &state,
+                result
+                    .as_ref()
+                    .err()
+                    .map(|_| runtime_directory::RuntimeControlLifecycleError::CommandFailed),
+            )
+            .await;
         }
     }
 }
@@ -269,15 +377,12 @@ async fn start_runtime(
     lifecycle: &dyn crate::composition::runtime_ports::LifecycleOps,
 ) -> Result<crate::RuntimeState, RuntimeStartCommandError> {
     if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
-        return super::openclaw::start(shared, lifecycle).await;
-    }
-    if shared.admission().admit_request().is_err() {
-        return Err(RuntimeStartCommandError::AdmissionClosed);
+        return super::openclaw::start_admitted(shared, lifecycle).await;
     }
     let result = lifecycle.start().await;
     super::status::runtime_start_result(result)
         .map(|()| runtime_state(shared, key))
-        .map_err(|_| RuntimeStartCommandError::RuntimeStart)
+        .map_err(RuntimeStartCommandError::RuntimeStart)
 }
 
 async fn stop_runtime(
@@ -294,7 +399,7 @@ async fn stop_runtime(
     let result = lifecycle.stop().await;
     super::status::runtime_stop_result(result)
         .map(|()| runtime_state(shared, key))
-        .map_err(|_| RuntimeStopCommandError::RuntimeStop)
+        .map_err(RuntimeStopCommandError::RuntimeStop)
 }
 
 async fn restart_runtime(
@@ -303,15 +408,12 @@ async fn restart_runtime(
     lifecycle: &dyn crate::composition::runtime_ports::LifecycleOps,
 ) -> Result<crate::RuntimeState, RuntimeRestartCommandError> {
     if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
-        return super::openclaw::restart(shared, lifecycle).await;
-    }
-    if shared.admission().admit_request().is_err() {
-        return Err(RuntimeRestartCommandError::AdmissionClosed);
+        return super::openclaw::restart_manual(shared, lifecycle).await;
     }
     let result = lifecycle.restart().await;
     super::status::runtime_restart_result(result)
         .map(|()| runtime_state(shared, key))
-        .map_err(|_| RuntimeRestartCommandError::RuntimeRestart)
+        .map_err(RuntimeRestartCommandError::RuntimeRestart)
 }
 
 fn runtime_state(shared: &PeerShared, key: &PeerKey) -> crate::RuntimeState {
@@ -404,31 +506,64 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
         PeerQuery::RuntimeControlUiUrl { endpoint, reply } => {
             let _ = reply.send(runtime_control_ui_url(shared, endpoint).await);
         }
-        PeerQuery::OpenClawBrowserRequest { request, reply } => {
+        PeerQuery::OpenClawBrowserRequest {
+            request,
+            call,
+            reply,
+        } => {
+            run_call(call.as_ref()).await;
             let result = match shared.admission().admit_request() {
                 Ok(()) => Ok(shared.open_claw().browser_request(request).await),
                 Err(error) => Err(error),
             };
+            finish_gateway_call(
+                call,
+                openclaw::gateway::loopback::GatewayOperation::BrowserRequest,
+                &result,
+            )
+            .await;
             let _ = reply.send(result);
         }
-        PeerQuery::OpenClawMcpAppRequest { request, reply } => {
+        PeerQuery::OpenClawMcpAppRequest {
+            request,
+            call,
+            reply,
+        } => {
+            run_call(call.as_ref()).await;
             let result = match shared.admission().admit_request() {
                 Ok(()) => Ok(shared.open_claw().mcp_app_request(request).await),
                 Err(error) => Err(error),
             };
+            finish_gateway_call(
+                call,
+                openclaw::gateway::loopback::GatewayOperation::McpAppRequest,
+                &result,
+            )
+            .await;
             let _ = reply.send(result);
         }
-        PeerQuery::OpenClawQuestionResolve { request, reply } => {
+        PeerQuery::OpenClawQuestionResolve {
+            request,
+            call,
+            reply,
+        } => {
+            run_call(call.as_ref()).await;
             let result = match shared.admission().admit_request() {
                 Ok(()) => Ok(shared.open_claw().question_resolve(request).await),
                 Err(error) => Err(error),
             };
+            finish_gateway_call(
+                call,
+                openclaw::gateway::loopback::GatewayOperation::QuestionResolve,
+                &result,
+            )
+            .await;
             let _ = reply.send(result);
         }
     }
 }
 
-fn reject_missing_lifecycle(shared: &PeerShared, command: PeerCommand) {
+async fn reject_missing_lifecycle(shared: &PeerShared, command: PeerCommand) {
     match command {
         PeerCommand::AutostartMatcha => {
             shared.record_matcha_start(Err(DriverStartFailure::Unsupported));
@@ -438,30 +573,63 @@ fn reject_missing_lifecycle(shared: &PeerShared, command: PeerCommand) {
             shared.notify_open_claw_runtime();
             let _ = reply.send(Err(AutostartOpenClawError::RuntimeStart));
         }
-        PeerCommand::StartRuntime { endpoint, reply } => {
+        PeerCommand::StartRuntime { endpoint, call } => {
+            finish_lifecycle_call(
+                Some(call),
+                &endpoint,
+                runtime_directory::control_loopback::RuntimeControlOperation::LifecycleStart,
+                &Err(runtime_directory::RuntimeControlLifecycleError::Unsupported),
+            )
+            .await;
             if endpoint
                 == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint()
             {
                 shared.record_open_claw_start(Err(DriverStartFailure::Unsupported));
                 shared.notify_open_claw_runtime();
             }
-            let _ = reply.send(Err(RuntimeStartCommandError::RuntimeStart));
         }
-        PeerCommand::StopRuntime { endpoint, reply } => {
+        PeerCommand::StopRuntime {
+            endpoint,
+            call,
+            reply,
+        } => {
+            finish_lifecycle_call(
+                call,
+                &endpoint,
+                runtime_directory::control_loopback::RuntimeControlOperation::LifecycleStop,
+                &Err(runtime_directory::RuntimeControlLifecycleError::Unsupported),
+            )
+            .await;
             if endpoint
                 == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint()
             {
                 shared.notify_open_claw_runtime();
             }
-            let _ = reply.send(Err(RuntimeStopCommandError::RuntimeStop));
+            if let Some(reply) = reply {
+                let _ = reply.send(Err(RuntimeStopCommandError::RuntimeStop(
+                    crate::RuntimeLifecycleFailure::Rejected,
+                )));
+            }
         }
-        PeerCommand::RestartRuntime { endpoint, reply } => {
+        PeerCommand::RestartOpenClawAfterPluginChange { reply } => {
+            shared.notify_open_claw_runtime();
+            let _ = reply.send(Err(RuntimeRestartCommandError::RuntimeRestart(
+                crate::RuntimeLifecycleFailure::Rejected,
+            )));
+        }
+        PeerCommand::RestartRuntime { endpoint, call } => {
+            finish_lifecycle_call(
+                Some(call),
+                &endpoint,
+                runtime_directory::control_loopback::RuntimeControlOperation::LifecycleRestart,
+                &Err(runtime_directory::RuntimeControlLifecycleError::Unsupported),
+            )
+            .await;
             if endpoint
                 == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint()
             {
                 shared.notify_open_claw_runtime();
             }
-            let _ = reply.send(Err(RuntimeRestartCommandError::RuntimeRestart));
         }
     }
 }
@@ -551,4 +719,168 @@ fn runtime_control_driver(
         .runtime_directory()
         .lookup(endpoint)
         .ok_or(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported)
+}
+
+async fn run_lifecycle_call(call: &RuntimeLifecycleCall, endpoint: &PeerKey) -> bool {
+    let admission = async {
+        call.accepted().await?;
+        call.context.running().await
+    }
+    .await;
+    if let Err(error) = admission {
+        eprintln!(
+            "[runtime-control] call_id={} admission audit failed; lifecycle effect withheld: {error}",
+            call.context.id().as_str()
+        );
+        let mut detail = runtime_directory::call::RuntimeControlCallDetail::new(endpoint);
+        detail.result = Some(runtime_directory::call::RuntimeControlCallResult::Unknown);
+        detail.error = Some(runtime_directory::RuntimeControlLifecycleError::CommandFailed);
+        runtime_directory::call::finish_runtime_control_call(
+            Some(call.context.clone()),
+            platform::call::CallStatus::Unknown,
+            &detail,
+        )
+        .await;
+        return false;
+    }
+    true
+}
+
+async fn run_call<D: platform::call::CallDetail>(call: Option<&platform::call::CallContext<D>>) {
+    if let Some(call) = call {
+        record_call_error(call.accepted().await.map(|_| ()));
+        record_call_error(call.running().await);
+    }
+}
+
+fn record_call_error(result: Result<(), platform::call::CallLogError>) {
+    if let Err(error) = result {
+        eprintln!("[peer] call transition could not be recorded: {error}");
+    }
+}
+
+async fn finish_lifecycle_call(
+    call: Option<RuntimeLifecycleCall>,
+    endpoint: &PeerKey,
+    operation: runtime_directory::control_loopback::RuntimeControlOperation,
+    result: &Result<
+        runtime_directory::RuntimeControlLifecycleStatus,
+        runtime_directory::RuntimeControlLifecycleError,
+    >,
+) {
+    if let Some(call) = &call {
+        if !run_lifecycle_call(call, endpoint).await {
+            return;
+        }
+    }
+    let (status, detail) = runtime_directory::call::RuntimeControlCallDetail::lifecycle_result(
+        endpoint, operation, result,
+    );
+    runtime_directory::call::finish_runtime_control_call(
+        call.map(|call| call.context),
+        status,
+        &detail,
+    )
+    .await;
+}
+
+async fn finish_gateway_call(
+    call: Option<openclaw::gateway::loopback::GatewayCallContext>,
+    operation: openclaw::gateway::loopback::GatewayOperation,
+    result: &Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
+) {
+    if let Some(call) = call {
+        let recorded = match result {
+            Ok(outcome) => {
+                openclaw::gateway::loopback::finish_gateway_call(&call, operation, outcome).await
+            }
+            Err(_) => {
+                openclaw::gateway::loopback::finish_gateway_call_status(
+                    &call,
+                    operation,
+                    platform::call::CallStatus::Rejected,
+                )
+                .await
+            }
+        };
+        record_call_error(recorded);
+    }
+}
+
+fn lifecycle_success_status(
+    endpoint: &PeerKey,
+    state: &crate::RuntimeState,
+    operation: runtime_directory::control_loopback::RuntimeControlOperation,
+) -> platform::call::CallStatus {
+    runtime_directory::call::RuntimeControlCallDetail::lifecycle_result(
+        endpoint,
+        operation,
+        &Ok(crate::composition::runtime_ports::runtime_control_status(
+            state,
+        )),
+    )
+    .0
+}
+
+fn start_failure_status(error: crate::RuntimeStartFailure) -> platform::call::CallStatus {
+    use crate::RuntimeStartFailure;
+    use platform::call::CallStatus;
+    match error {
+        RuntimeStartFailure::Busy
+        | RuntimeStartFailure::Rejected
+        | RuntimeStartFailure::ShuttingDown => CallStatus::Rejected,
+        RuntimeStartFailure::CompletionFailed | RuntimeStartFailure::Cancelled => {
+            CallStatus::Failed
+        }
+        RuntimeStartFailure::SupervisorStopped => CallStatus::Unknown,
+    }
+}
+
+fn lifecycle_failure_status(error: crate::RuntimeLifecycleFailure) -> platform::call::CallStatus {
+    use crate::RuntimeLifecycleFailure;
+    use platform::call::CallStatus;
+    match error {
+        RuntimeLifecycleFailure::Busy
+        | RuntimeLifecycleFailure::Rejected
+        | RuntimeLifecycleFailure::ShuttingDown => CallStatus::Rejected,
+        RuntimeLifecycleFailure::CompletionFailed | RuntimeLifecycleFailure::Cancelled => {
+            CallStatus::Failed
+        }
+        RuntimeLifecycleFailure::SupervisorStopped | RuntimeLifecycleFailure::AlreadySatisfied => {
+            CallStatus::Unknown
+        }
+    }
+}
+
+async fn finish_manual_lifecycle_call(
+    call: Option<RuntimeLifecycleCall>,
+    endpoint: &PeerKey,
+    status: platform::call::CallStatus,
+    state: &crate::RuntimeState,
+    error: Option<runtime_directory::RuntimeControlLifecycleError>,
+) {
+    let mut detail = runtime_directory::call::RuntimeControlCallDetail::new(endpoint);
+    let observation = crate::composition::runtime_ports::runtime_control_status(state);
+    detail.lifecycle = Some(observation.lifecycle);
+    detail.failure = observation.failure;
+    detail.startup_diagnostic = observation.startup_diagnostic;
+    detail.error = error;
+    detail.result = Some(match status {
+        platform::call::CallStatus::Succeeded => {
+            runtime_directory::call::RuntimeControlCallResult::Succeeded
+        }
+        platform::call::CallStatus::Rejected => {
+            runtime_directory::call::RuntimeControlCallResult::Unavailable
+        }
+        platform::call::CallStatus::Failed => {
+            runtime_directory::call::RuntimeControlCallResult::Failed
+        }
+        _ => runtime_directory::call::RuntimeControlCallResult::Unknown,
+    });
+    runtime_directory::call::finish_runtime_control_call(
+        call.map(|call| call.context),
+        status,
+        &detail,
+    )
+    .await;
 }

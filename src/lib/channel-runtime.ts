@@ -1,5 +1,9 @@
-import { hostApiFetch } from '@/lib/host-api';
+import { hostApiFetch, hostApiFetchDecoded } from '@/lib/host-api';
+import { decodeCallReceipt } from '@/types/call-log/receipt';
 import type { ChannelType } from '@/types/channel';
+import { waitForCall } from '@/lib/call-log-await';
+import { decodeChannelsCallDetail } from '@/types/call-log/channels';
+import type { CallReceipt } from '@/types/call-log';
 
 export function channelErrorCode(error: unknown): string {
   const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
@@ -32,6 +36,7 @@ export interface ChannelSnapshotFetchResult {
 }
 
 export interface ChannelLoginProgress {
+  callId?: string;
   outcome: 'progress' | 'connected' | 'target_rejected' | 'unknown';
   channel: string;
   accountId?: string;
@@ -48,6 +53,7 @@ export interface ChannelLoginWaitOptions {
 }
 
 export interface ChannelAuthorizationProgress {
+  callId?: string;
   outcome: 'progress' | 'connected' | 'target_rejected' | 'unknown' | 'cancelled';
   channel: string;
   accountId?: string;
@@ -95,9 +101,8 @@ export async function hostChannelsConfigure(input: {
   agentId?: string;
 }, options?: { traceId?: string }): Promise<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }> {
   const agentId = input.agentId?.trim();
-  const result = await hostApiFetch<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/configure', {
+  const result = await hostApiFetch<CallReceipt | { outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/configure', {
     traceId: options?.traceId,
-    // Covers config retries/readback; this is a client wait budget, not a restart deadline.
     timeoutMs: 240_000,
     method: 'POST',
     body: JSON.stringify({
@@ -108,12 +113,21 @@ export async function hostChannelsConfigure(input: {
       values: input.config,
     }),
   });
-  if (result.outcome === 'confirmed') {
+  let outcome: 'confirmed' | 'target_rejected' | 'unknown';
+  if ('callId' in result) {
+    const record = await waitForCall(result, 'channels');
+    const detail = decodeChannelsCallDetail(record.detail);
+    if (detail.operation !== 'configure') throw new Error('Invalid channels configure call');
+    outcome = detail.outcome === 'confirmed' ? 'confirmed' : detail.outcome === 'rejected' ? 'target_rejected' : 'unknown';
+  } else {
+    outcome = result.outcome;
+  }
+  if (outcome === 'confirmed') {
     return { success: true };
   }
   return {
     success: false,
-    error: result.outcome === 'target_rejected'
+    error: outcome === 'target_rejected'
       ? 'Channel configuration was rejected'
       : 'Channel configuration outcome is unknown',
   };
@@ -140,7 +154,10 @@ export async function hostChannelsActivate(input: {
       }),
     });
     if (result.outcome === 'progress' || result.outcome === 'connected') {
-      return { success: true, progress: result };
+      const progress = await settleConnectedChannel(result, 'login');
+      return progress.outcome === 'connected' || progress.outcome === 'progress'
+        ? { success: true, progress }
+        : { success: false, error: 'Channel login configuration could not be confirmed', progress };
     }
     return {
       success: false,
@@ -157,7 +174,7 @@ export async function hostChannelsLoginWait(
   accountId: string,
   options: ChannelLoginWaitOptions = {},
 ): Promise<ChannelLoginProgress> {
-  return await hostApiFetch<ChannelLoginProgress>('/api/channels/login', {
+  const progress = await hostApiFetch<ChannelLoginProgress>('/api/channels/login', {
     method: 'POST',
     traceId: options.traceId,
     timeoutMs: options.timeoutMs,
@@ -171,6 +188,24 @@ export async function hostChannelsLoginWait(
       ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
     }),
   });
+  return settleConnectedChannel(progress, 'login', options.signal);
+}
+
+async function settleConnectedChannel<T extends ChannelLoginProgress | ChannelAuthorizationProgress>(
+  progress: T,
+  operation: 'login' | 'configure',
+  signal?: AbortSignal,
+): Promise<T> {
+  if (progress.outcome !== 'connected' || !progress.callId) return progress;
+  const record = await waitForCall({ callId: progress.callId, accepted: true }, 'channels', { signal });
+  const detail = decodeChannelsCallDetail(record.detail);
+  if (operation === 'configure'
+    ? detail.operation !== 'configure'
+    : detail.operation !== 'loginStart' && detail.operation !== 'loginWait') {
+    throw new Error(`Invalid channels ${operation} call`);
+  }
+  if (record.status === 'succeeded') return progress;
+  return { ...progress, outcome: record.status === 'rejected' ? 'target_rejected' : 'unknown' };
 }
 
 export async function hostChannelsStartAuthorization(input: {
@@ -180,7 +215,7 @@ export async function hostChannelsStartAuthorization(input: {
   config?: Record<string, unknown>;
 }, options?: { traceId?: string }): Promise<ChannelAuthorizationProgress> {
   const agentId = input.agentId?.trim();
-  return await hostApiFetch<ChannelAuthorizationProgress>('/api/channels/authorization', {
+  const progress = await hostApiFetch<ChannelAuthorizationProgress>('/api/channels/authorization', {
     traceId: options?.traceId,
     method: 'POST',
     body: JSON.stringify({
@@ -191,6 +226,7 @@ export async function hostChannelsStartAuthorization(input: {
       ...(input.config ? { config: input.config } : {}),
     }),
   });
+  return settleConnectedChannel(progress, 'configure');
 }
 
 export async function hostChannelsWaitAuthorization(
@@ -198,7 +234,7 @@ export async function hostChannelsWaitAuthorization(
   sessionKey: string,
   options: { traceId?: string; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<ChannelAuthorizationProgress> {
-  return await hostApiFetch<ChannelAuthorizationProgress>('/api/channels/authorization', {
+  const progress = await hostApiFetch<ChannelAuthorizationProgress>('/api/channels/authorization', {
     traceId: options.traceId,
     timeoutMs: options.timeoutMs,
     signal: options.signal,
@@ -210,6 +246,7 @@ export async function hostChannelsWaitAuthorization(
       ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
     }),
   });
+  return settleConnectedChannel(progress, 'configure', options.signal);
 }
 
 export async function hostChannelsCancelAuthorization(
@@ -257,11 +294,21 @@ export async function hostChannelsDeleteConfig(
   accountId?: string,
   options?: { traceId?: string },
 ): Promise<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }> {
-  return await hostApiFetch<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/delete-config', {
+  const receipt = await hostApiFetchDecoded('/api/channels/delete-config', decodeCallReceipt, {
     traceId: options?.traceId,
     method: 'POST',
     body: JSON.stringify({ channel: channelType, accountId }),
   });
+  const record = await waitForCall(receipt, 'channels');
+  const detail = decodeChannelsCallDetail(record.detail);
+  if (record.command !== 'deleteConfig' || detail.operation !== 'deleteConfig'
+    || detail.channel !== channelType || detail.accountId !== (accountId ?? null)) {
+    throw new Error('Invalid channels delete call');
+  }
+  return {
+    outcome: record.status === 'succeeded' && detail.outcome === 'confirmed' ? 'confirmed'
+      : record.status === 'rejected' && detail.outcome === 'rejected' ? 'target_rejected' : 'unknown',
+  };
 }
 
 export async function hostChannelsConnect(
@@ -283,7 +330,7 @@ export async function hostChannelsDisconnect(
   channelType: ChannelType,
   accountId?: string,
 ): Promise<{ success: boolean }> {
-  const result = await hostApiFetch<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/control', {
+  const receipt = await hostApiFetchDecoded('/api/channels/control', decodeCallReceipt, {
     method: 'POST',
     body: JSON.stringify({
       action: 'disconnect',
@@ -291,7 +338,13 @@ export async function hostChannelsDisconnect(
       accountId: accountId ?? 'default',
     }),
   });
-  return { success: result.outcome === 'confirmed' };
+  const record = await waitForCall(receipt, 'channels');
+  const detail = decodeChannelsCallDetail(record.detail);
+  if (record.command !== 'disconnect' || detail.operation !== 'disconnect'
+    || detail.channel !== channelType || detail.accountId !== (accountId ?? 'default')) {
+    throw new Error('Invalid channels disconnect call');
+  }
+  return { success: record.status === 'succeeded' && detail.outcome === 'confirmed' };
 }
 
 export async function hostChannelsCancelSession(

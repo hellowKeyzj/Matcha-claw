@@ -64,8 +64,9 @@ export type PluginConfigurationInput = Readonly<{
   enabled: boolean;
 }>;
 
-export type PluginConfigurationOutcome = Readonly<{
-  outcome: 'configured' | 'rejected' | 'unknown';
+export type PluginMutationReceipt = Readonly<{
+  callId: string;
+  accepted: true;
 }>;
 
 export type PluginOperation = 'install' | 'update' | 'uninstall';
@@ -74,10 +75,6 @@ export type PluginOperationInput = Readonly<{
   runtime: PluginRuntimeId;
   operation: PluginOperation;
   pluginId: string;
-}>;
-
-export type PluginOperationOutcome = Readonly<{
-  outcome: 'configured' | 'rejected' | 'unknown';
 }>;
 
 export type PluginCatalogTransportResponse = Readonly<{
@@ -93,8 +90,8 @@ export type PluginRuntimeTransportResponse = Readonly<{
 export interface PluginsTransport {
   catalog(): Promise<PluginCatalogTransportResponse>;
   runtime(): Promise<PluginRuntimeTransportResponse>;
-  configuration(input: unknown): Promise<PluginConfigurationOutcome>;
-  operation(input: unknown): Promise<PluginOperationOutcome>;
+  configuration(input: unknown): Promise<PluginMutationReceipt>;
+  operation(input: unknown): Promise<PluginMutationReceipt>;
 }
 
 export function createPluginsTransport(
@@ -137,8 +134,8 @@ export function createPluginsTransport(
       if (response?.status === 200 && isPluginRuntime(response.body)) return { status: 200, body: response.body };
       return { status: 503, body: RUNTIME_UNAVAILABLE };
     },
-    async configuration(input): Promise<PluginConfigurationOutcome> {
-      if (!isPluginConfigurationInput(input)) return { outcome: 'unknown' };
+    async configuration(input): Promise<PluginMutationReceipt> {
+      if (!isPluginConfigurationInput(input)) throw new Error('Plugin mutation admission is unavailable');
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: '/api/plugins/configuration',
@@ -153,11 +150,11 @@ export function createPluginsTransport(
         fetcher,
         body: input,
       });
-      if (response?.status === 200 && isPluginConfigurationOutcome(response.body)) return response.body;
-      return { outcome: 'unknown' };
+      if (response?.status === 202 && isPluginMutationReceipt(response.body)) return response.body;
+      throw new Error('Plugin mutation admission is unavailable');
     },
-    async operation(input): Promise<PluginOperationOutcome> {
-      if (!isPluginOperationInput(input)) return { outcome: 'unknown' };
+    async operation(input): Promise<PluginMutationReceipt> {
+      if (!isPluginOperationInput(input)) throw new Error('Plugin mutation admission is unavailable');
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: '/api/plugins/operation',
@@ -172,8 +169,8 @@ export function createPluginsTransport(
         fetcher,
         body: input,
       });
-      if (response?.status === 200 && isPluginOperationOutcome(response.body)) return response.body;
-      return { outcome: 'unknown' };
+      if (response?.status === 202 && isPluginMutationReceipt(response.body)) return response.body;
+      throw new Error('Plugin mutation admission is unavailable');
     },
   };
 }
@@ -269,10 +266,12 @@ function isPluginConfigurationInput(value: unknown): value is PluginConfiguratio
     && typeof value.enabled === 'boolean';
 }
 
-function isPluginConfigurationOutcome(value: unknown): value is PluginConfigurationOutcome {
+function isPluginMutationReceipt(value: unknown): value is PluginMutationReceipt {
   return isRecord(value)
-    && hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'configured' || value.outcome === 'rejected' || value.outcome === 'unknown');
+    && hasExactKeys(value, ['callId', 'accepted'])
+    && typeof value.callId === 'string'
+    && /^[a-f0-9]{32}$/.test(value.callId)
+    && value.accepted === true;
 }
 
 function isPluginOperationInput(value: unknown): value is PluginOperationInput {
@@ -281,12 +280,6 @@ function isPluginOperationInput(value: unknown): value is PluginOperationInput {
     && isPluginRuntimeId(value.runtime)
     && (value.operation === 'install' || value.operation === 'update' || value.operation === 'uninstall')
     && isIdentity(value.pluginId);
-}
-
-function isPluginOperationOutcome(value: unknown): value is PluginOperationOutcome {
-  return isRecord(value)
-    && hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'configured' || value.outcome === 'rejected' || value.outcome === 'unknown');
 }
 
 function isIdentity(value: unknown): value is string {

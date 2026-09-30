@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+import { isCallId } from '../../../src/types/call-log/decode';
 import {
   normalizeSettingsProxyServer,
   type SettingsDesiredRequest,
@@ -21,13 +22,23 @@ export async function handleSettingsDesiredRoutes(
   url: URL,
   transport: SettingsDesiredTransport,
 ): Promise<boolean> {
-  if (url.pathname !== '/api/settings/desired' || req.method !== 'POST') return false;
+  const projection = url.pathname === '/api/settings/desired/projection';
+  if ((!projection && url.pathname !== '/api/settings/desired') || req.method !== 'POST') return false;
 
   let body: unknown;
   try {
     body = await parseJsonBody(req);
   } catch {
     sendJson(res, 400, INVALID);
+    return true;
+  }
+  if (projection) {
+    if (!isRecord(body) || !hasExactKeys(body, ['callId']) || !isCallId(body.callId)) {
+      sendJson(res, 400, INVALID);
+      return true;
+    }
+    const response = await transport.project(body.callId);
+    sendJson(res, response.status, response.body);
     return true;
   }
   const request = normalizeRequest(body);

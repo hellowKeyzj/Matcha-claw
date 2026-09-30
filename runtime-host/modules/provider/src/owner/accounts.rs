@@ -81,6 +81,30 @@ impl ProviderAccountsOwner {
         self.private_resolver = private_resolver;
     }
 
+    pub(super) fn claim_transaction(
+        &self,
+        transaction: &crate::api::ProviderAccountPrivateTransaction,
+    ) -> Result<(), crate::ResolverFailure> {
+        self.private_resolver.claim_account_transaction(
+            &transaction.id,
+            &transaction.reference,
+            transaction.revision,
+        )
+    }
+
+    pub(super) fn settle_transaction(
+        &self,
+        transaction: &crate::api::ProviderAccountPrivateTransaction,
+        settlement: &str,
+    ) -> Result<(), crate::ResolverFailure> {
+        self.private_resolver.settle_account_transaction(
+            &transaction.id,
+            &transaction.reference,
+            transaction.revision,
+            settlement,
+        )
+    }
+
     pub(super) fn replace(
         &mut self,
         cascade: &mut ProviderCascade,
@@ -334,12 +358,27 @@ pub(super) enum PrivateProfileProjectionError {
     Deadline,
     CredentialMissing,
     InvalidProviderKey,
-    Resolver,
+    Resolver(crate::ResolverFailure),
 }
 
 impl PrivateProfileProjectionError {
-    fn resolver(_error: crate::ResolverFailure) -> Self {
-        Self::Resolver
+    fn resolver(error: crate::ResolverFailure) -> Self {
+        Self::Resolver(error)
+    }
+
+    pub(super) fn diagnostic(
+        &self,
+    ) -> (
+        crate::call::ProviderCallDiagnosticReason,
+        Option<crate::call::ProviderCallPrivateResolverCode>,
+    ) {
+        use crate::call::ProviderCallDiagnosticReason as Reason;
+        match self {
+            Self::Deadline => (Reason::PrivateProfileDeadline, None),
+            Self::CredentialMissing => (Reason::PrivateProfileCredentialMissing, None),
+            Self::InvalidProviderKey => (Reason::PrivateProfileInvalidProviderKey, None),
+            Self::Resolver(error) => (Reason::PrivateResolverUnavailable, Some(error.safe_code())),
+        }
     }
 }
 

@@ -321,7 +321,9 @@ function confirmOptimisticSendItems(params: {
       && item.key !== clientAssistantKey
     ));
     const items = current.items.filter((item) => {
-      if (hasRunAssistant && item.kind === 'assistant-turn' && item.key === clientAssistantKey) {
+      if ((hasRunAssistant || !isRunActive(current.runtime)
+        || (current.runtime.activeRunId !== null && current.runtime.activeRunId !== runId))
+        && item.kind === 'assistant-turn' && item.key === clientAssistantKey) {
         changed = true;
         return false;
       }
@@ -352,20 +354,16 @@ function confirmOptimisticSendItems(params: {
     return changed ? {
       loadedSessions: patchSessionRecord(state, sessionKey, {
         items,
-        runtime: {
-          ...current.runtime,
-          activeRunId: runId,
-          runPhase: 'submitted',
-          activeTurnItemKey: null,
-          pendingTurnKey: runAssistantKey,
-          pendingTurnLaneKey: 'main',
-          runProgress: null,
-          imageGeneration: undefined,
-          lastUserMessageAt,
-          lastError: null,
-          lastIssue: null,
-          updatedAt: Date.now(),
-        },
+        // Only the still-pending client turn may acquire the receipt's run identity.
+        runtime: current.runtime.activeRunId === null
+          && current.runtime.pendingTurnKey === clientAssistantKey
+          && isRunActive(current.runtime) ? {
+            ...current.runtime,
+            activeRunId: runId,
+            pendingTurnKey: runAssistantKey,
+            lastUserMessageAt,
+            updatedAt: current.runtime.runPhase === 'stopping' || current.runtime.lastIssue ? current.runtime.updatedAt : Date.now(),
+          } : current.runtime,
       }),
     } : state;
   });
@@ -375,6 +373,8 @@ function clearOptimisticRuntimeState(
   runtime: ChatSessionRuntimeState,
   optimisticAssistantItemKey: string,
 ): ChatSessionRuntimeState {
+  // Send failure cannot settle a concurrent stop before its native terminal event.
+  if (runtime.runPhase === 'stopping') return runtime;
   const ownsPendingTurn = runtime.pendingTurnKey === optimisticAssistantItemKey;
   const ownsActiveTurn = runtime.activeTurnItemKey === optimisticAssistantItemKey;
   const ownsSubmittedPhase = runtime.runPhase === 'submitted' && runtime.activeRunId == null;

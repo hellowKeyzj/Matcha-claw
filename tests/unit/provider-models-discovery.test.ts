@@ -15,9 +15,33 @@ const hostApiFetchMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: hostApiFetchMock,
+  hostApiFetchDecoded: async (path: string, decode: (value: unknown) => unknown, init: unknown) =>
+    decode(await hostApiFetchMock(path, init)),
 }));
 
+vi.mock('@/lib/host-events', () => ({
+  subscribeHostEvent: () => () => {},
+  subscribeBrowserRecovery: () => () => {},
+}));
+
+const discoverReceipt = { callId: '0123456789abcdef0123456789abcdef', accepted: true };
+const discoveredCall = {
+  callId: discoverReceipt.callId,
+  module: 'provider',
+  command: 'providerModels.discover',
+  status: 'succeeded',
+  start: 1,
+  end: 2,
+  revision: 3,
+  detail: {
+    kind: 'discoverModels', phase: 'terminal', outcome: 'discovered',
+    count: 1, acceptedCount: null, persisted: null, commit: null,
+    accountId: 'account-main', accountRevision: null, diagnostic: null, native: null,
+  },
+};
 const discoverBody = {
+  callId: discoverReceipt.callId,
+  accountId: 'account-main',
   models: [{
     modelId: 'gpt-5.5',
     capabilities: ['chat', 'imageUnderstand'],
@@ -78,17 +102,22 @@ describe('provider models discovery', () => {
   });
 
   it('renderer decoder accepts discovery drafts and removes duplicate ids', async () => {
-    hostApiFetchMock.mockResolvedValue({
-      models: [
-        { modelId: 'gpt-5.5', capabilities: ['chat', 'chat', 'imageUnderstand'], contextWindow: 128000 },
-        { modelId: 'gpt-5.5', capabilities: ['chat'], contextWindow: 256000 },
-      ],
-    });
+    hostApiFetchMock
+      .mockResolvedValueOnce(discoverReceipt)
+      .mockResolvedValueOnce({ ...discoveredCall, detail: { ...discoveredCall.detail, count: 2 } })
+      .mockResolvedValueOnce({
+        callId: discoverReceipt.callId,
+        accountId: 'account-main',
+        models: [
+          { modelId: 'gpt-5.5', capabilities: ['chat', 'chat', 'imageUnderstand'], contextWindow: 128000 },
+          { modelId: 'gpt-5.5', capabilities: ['chat'], contextWindow: 256000 },
+        ],
+      });
 
     await expect(discoverProviderModels(' account-main ')).resolves.toEqual({
       models: [{ modelId: 'gpt-5.5', capabilities: ['chat', 'imageUnderstand'], contextWindow: 128000 }],
     });
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-models/discover?accountId=account-main');
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-models/discover?accountId=account-main', { signal: undefined });
   });
 
   it('renderer decoder rejects discovery drafts with legacy or private fields', async () => {
@@ -98,18 +127,21 @@ describe('provider models discovery', () => {
       { models: [{ ...discoverBody.models[0], accountId: 'account-main' }] },
       { models: [{ ...discoverBody.models[0], apiKey: 'sk-private' }] },
     ]) {
-      hostApiFetchMock.mockResolvedValueOnce(body);
+      hostApiFetchMock
+        .mockResolvedValueOnce(discoverReceipt)
+        .mockResolvedValueOnce(discoveredCall)
+        .mockResolvedValueOnce({ ...discoverBody, ...body });
       await expect(discoverProviderModels('account-main')).rejects.toThrow('Provider model discovery is unavailable');
     }
   });
 
   it('decodes public discover responses and sends only the account identity to Rust', async () => {
-    const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => discoverBody });
+    const fetcher = vi.fn().mockResolvedValue({ status: 202, json: async () => discoverReceipt });
     const transport = createProviderModelsTransport(createRuntimeHostDeliveryIssuer(), 3227, fetcher);
 
     await expect(transport.discover('account-main')).resolves.toEqual({
-      status: 200,
-      body: discoverBody,
+      status: 202,
+      body: discoverReceipt,
     });
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:3227/api/provider-models', expect.objectContaining({
       method: 'POST',
@@ -142,10 +174,10 @@ describe('provider models discovery', () => {
       const transport = createProviderModelsTransport(
         createRuntimeHostDeliveryIssuer(),
         3227,
-        vi.fn().mockResolvedValue({ status: 200, json: async () => body }),
+        vi.fn().mockResolvedValue({ status: 200, json: async () => ({ ...discoverBody, ...body }) }),
       );
 
-      await expect(transport.discover('account-main')).resolves.toEqual({
+      await expect(transport.readDiscoveryResult(discoverReceipt.callId, 'account-main')).resolves.toEqual({
         status: 503,
         body: unavailableBody,
       });
@@ -177,7 +209,7 @@ describe('provider models discovery', () => {
   it('routes GET discovery by accountId without touching list or replace transports', async () => {
     const read = vi.fn();
     const readSelectable = vi.fn();
-    const discover = vi.fn().mockResolvedValue({ status: 200, body: discoverBody });
+    const discover = vi.fn().mockResolvedValue({ status: 202, body: discoverReceipt });
     const execute = vi.fn();
     const result = response();
 
@@ -185,14 +217,14 @@ describe('provider models discovery', () => {
       incoming({}, 'GET') as never,
       result.raw as never,
       new URL('http://127.0.0.1/api/provider-models/discover?accountId=account-main'),
-      { read, readSelectable, discover, execute },
+      { read, readSelectable, discover, readDiscoveryResult: vi.fn(), execute },
     )).resolves.toBe(true);
 
     expect(discover).toHaveBeenCalledWith('account-main');
     expect(read).not.toHaveBeenCalled();
     expect(readSelectable).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
-    expect(result.state).toEqual({ statusCode: 200, body: discoverBody });
+    expect(result.state).toEqual({ statusCode: 202, body: discoverReceipt });
   });
 
   it('rejects invalid discovery accountId queries before transport dispatch', async () => {
@@ -213,7 +245,7 @@ describe('provider models discovery', () => {
         incoming({}, 'GET') as never,
         result.raw as never,
         new URL(url),
-        { read, readSelectable, discover, execute },
+        { read, readSelectable, discover, readDiscoveryResult: vi.fn(), execute },
       )).resolves.toBe(true);
       expect(result.state).toEqual({ statusCode: 400, body: invalidBody });
     }

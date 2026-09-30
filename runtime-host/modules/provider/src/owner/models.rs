@@ -86,7 +86,8 @@ impl ProviderModelOwner {
         cascade: &ProviderCascade,
         request: ProviderTextGenerationRequest,
         cancellation: CancellationToken,
-    ) -> ProviderTextGenerationOutcome {
+        stream: Option<&mut dyn crate::llm_client::LlmStreamSink>,
+    ) -> Result<ProviderTextGenerationOutcome, LlmClientError> {
         let capability = if request.messages.iter().any(|message| message.has_image()) {
             ProviderRoutingCapability::ImageUnderstand
         } else {
@@ -99,10 +100,13 @@ impl ProviderModelOwner {
             request.model_ref.as_deref(),
         ) {
             Ok(Some(candidates)) => candidates,
-            Ok(None) => return ProviderTextGenerationOutcome::Rejected,
-            Err(()) => return ProviderTextGenerationOutcome::Unavailable,
+            Ok(None) => return Ok(ProviderTextGenerationOutcome::Rejected),
+            Err(()) => return Ok(ProviderTextGenerationOutcome::Unavailable),
         };
         let mut unavailable = false;
+        let mut stream_error = None;
+        let mut response_sink = GenerationStreamSink::new(stream);
+        let is_streaming = response_sink.sink.is_some();
         for (account, model, timeout_ms) in candidates {
             let Some(protocol) = provider_generation_protocol(account) else {
                 continue;
@@ -125,42 +129,62 @@ impl ProviderModelOwner {
                 messages: request.messages.clone(),
                 options: request.options.clone(),
             };
-            let response = match timeout_ms {
-                Some(timeout_ms) => match tokio::select! {
-                    _ = cancellation.cancelled() => return ProviderTextGenerationOutcome::Cancelled,
-                    result = tokio::time::timeout(Duration::from_millis(timeout_ms), self.llm_client.generate(request)) => result,
-                } {
-                    Ok(response) => response,
-                    Err(_) => {
-                        unavailable = true;
-                        continue;
+            let generation = async {
+                if is_streaming {
+                    self.llm_client
+                        .stream_generate(request, &mut response_sink)
+                        .await?;
+                    if response_sink.response.finish_reason.is_none() {
+                        return Err(LlmClientError::Protocol(
+                            "provider stream omitted finish reason".into(),
+                        ));
                     }
-                },
-                None => tokio::select! {
-                    _ = cancellation.cancelled() => return ProviderTextGenerationOutcome::Cancelled,
-                    response = self.llm_client.generate(request) => response,
-                },
+                    Ok(response_sink.response.clone())
+                } else {
+                    self.llm_client.generate(request).await
+                }
+            };
+            let response = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Ok(ProviderTextGenerationOutcome::Cancelled),
+                response = async {
+                    match timeout_ms {
+                        Some(timeout_ms) => tokio::time::timeout(Duration::from_millis(timeout_ms), generation)
+                            .await.unwrap_or_else(|_| Err(LlmClientError::Protocol("provider generation timed out".into()))),
+                        None => generation.await,
+                    }
+                } => response,
             };
             match response {
                 Ok(response) => {
-                    return ProviderTextGenerationOutcome::Generated {
+                    return Ok(ProviderTextGenerationOutcome::Generated {
                         response,
                         model_limits: text_generation_model_limits(model, timeout_ms),
-                    };
+                    });
                 }
                 Err(LlmClientError::UnsupportedProtocol) => continue,
-                Err(
-                    LlmClientError::Http(_)
-                    | LlmClientError::Protocol(_)
-                    | LlmClientError::StreamSink(_),
-                ) => unavailable = true,
+                Err(error) => {
+                    // Once output reaches the consumer, another candidate would corrupt the stream.
+                    if is_streaming
+                        && (response_sink.emitted || matches!(error, LlmClientError::StreamSink(_)))
+                    {
+                        return Err(error);
+                    }
+                    unavailable = true;
+                    if is_streaming {
+                        stream_error = Some(error);
+                    }
+                }
             }
         }
-        if unavailable {
+        if let Some(error) = stream_error {
+            return Err(error);
+        }
+        Ok(if unavailable {
             ProviderTextGenerationOutcome::Unavailable
         } else {
             ProviderTextGenerationOutcome::Rejected
-        }
+        })
     }
 
     pub(super) fn select_session_model(
@@ -615,6 +639,59 @@ impl ProviderModelOwner {
                 ProviderCommitOutcome::CommitOutcomeUnknown
             },
         }
+    }
+}
+
+struct GenerationStreamSink<'a> {
+    sink: Option<&'a mut dyn crate::llm_client::LlmStreamSink>,
+    response: crate::llm_client::LlmResponse,
+    emitted: bool,
+}
+
+impl<'a> GenerationStreamSink<'a> {
+    fn new(sink: Option<&'a mut dyn crate::llm_client::LlmStreamSink>) -> Self {
+        Self {
+            sink,
+            response: crate::llm_client::LlmResponse {
+                text: String::new(),
+                finish_reason: None,
+                usage: None,
+            },
+            emitted: false,
+        }
+    }
+}
+
+impl crate::llm_client::LlmStreamSink for GenerationStreamSink<'_> {
+    fn send<'a>(
+        &'a mut self,
+        event: crate::llm_client::LlmStreamEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), LlmClientError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            use crate::llm_client::LlmStreamEvent;
+            match &event {
+                LlmStreamEvent::TextDelta(delta) => self.response.text.push_str(delta),
+                LlmStreamEvent::FinalText(text) if self.response.text.is_empty() => {
+                    self.response.text = text.clone()
+                }
+                LlmStreamEvent::FinishReason(reason) => {
+                    self.response.finish_reason = Some(reason.clone())
+                }
+                LlmStreamEvent::Usage(usage) => self.response.usage = Some(*usage),
+                LlmStreamEvent::Diagnostic(_) => {
+                    return Err(LlmClientError::Protocol(
+                        "provider stream reported an error".into(),
+                    ));
+                }
+                LlmStreamEvent::FinalText(_) => {}
+            }
+            if let Some(sink) = self.sink.as_mut() {
+                self.emitted = true;
+                sink.send(event).await?;
+            }
+            Ok(())
+        })
     }
 }
 

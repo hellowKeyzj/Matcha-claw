@@ -10,6 +10,7 @@ mod projection;
 use std::sync::Arc;
 
 use platform::{
+    call::CallRecorder,
     capability::CapabilityDecisionVerifier,
     module::{CapabilityDescriptorProvider, CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
 };
@@ -34,11 +35,11 @@ const EFFECTS: &[EffectKind] = &[EffectKind::OwnerTask, EffectKind::Route];
 pub use domain::model;
 pub use domain::model::{
     AgentCreate, AgentCreated, AgentDelete, AgentDeleted, AgentFile, AgentFileName, AgentFiles,
-    AgentKind, AgentModelUpdate, AgentSummary, AgentUpdate, AgentUpdated, AgentWait,
-    AgentWaitResult, AgentWaitStatus, CloudPackageMetadata, Command, ConfigurationAgent,
+    AgentKind, AgentModelUpdate, AgentSummary, AgentUpdate, AgentUpdated,
+    CloudPackageMetadata, Command, ConfigurationAgent,
     ConfigurationDefaults, ConfigurationDisplay, ConfigurationModel, ConfigurationMutationOutcome,
     ConfigurationReadFailure, MissingSkillRequirements, NativeEndpoint, Outcome,
-    PackageExportReceipt, PackageInstallPlan, PackageInstallReceipt, SkillConfigurationOutcome,
+    PackageExportReceipt, PackageInstallPlan, PackageInstallReceipt, SealedPurge, SkillConfigurationOutcome,
     SkillConfigurationView, SkillOption, SkillSelection, SkillUnavailableReason, ToolCatalog,
     ToolConfigurationOutcome, ToolConfigurationView, ToolGroup, ToolOption, ToolPolicy,
     ToolProfile, ToolSelection, WorkspaceInitialization, configuration, configuration_mutation,
@@ -61,6 +62,11 @@ impl SubagentsModule {
             handle,
             sealed_agents,
         }
+    }
+
+    pub fn with_call_recorder(mut self, recorder: CallRecorder) -> Self {
+        self.handle = self.handle.with_call_recorder(recorder);
+        self
     }
 
     pub async fn subagents(&self, command: Command) -> Result<Outcome, ()> {

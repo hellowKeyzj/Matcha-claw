@@ -1,38 +1,44 @@
 use foundation::execution::QueryRoute;
+
+use crate::call::ConnectorCall;
 use tokio::sync::oneshot;
 
 use super::{
     ConnectorOwnerKey,
     receipts::{
-        ConnectorCatalogReceipt, ConnectorGetReceipt, ConnectorListReceipt, ConnectorProbeReceipt,
-        ConnectorSessionStatusReceipt, ConnectorSessionTarget, ConnectorStatusReceipt,
+        ConnectorCatalogReceipt, ConnectorGetReceipt, ConnectorListReceipt, ConnectorSessionTarget,
         OpenClawMcpServersReceipt,
     },
 };
 
 pub(crate) enum ConnectorQuery {
     List {
+        call: Option<ConnectorCall>,
         reply: oneshot::Sender<ConnectorListReceipt>,
     },
     Catalog {
+        call: Option<ConnectorCall>,
         reply: oneshot::Sender<ConnectorCatalogReceipt>,
     },
     Status {
-        reply: oneshot::Sender<ConnectorStatusReceipt>,
+        call: ConnectorCall,
     },
     Get {
         id: String,
+        call: Option<ConnectorCall>,
         reply: oneshot::Sender<ConnectorGetReceipt>,
     },
     Probe {
         id: String,
-        reply: oneshot::Sender<ConnectorProbeReceipt>,
+        call: ConnectorCall,
     },
     SessionStatus {
         target: ConnectorSessionTarget,
-        reply: oneshot::Sender<ConnectorSessionStatusReceipt>,
+        session_identity: crate::delivery::SessionIdentity,
+        call: ConnectorCall,
     },
     OpenClawMcpServers {
+        call: Option<ConnectorCall>,
         reply: oneshot::Sender<OpenClawMcpServersReceipt>,
     },
 }

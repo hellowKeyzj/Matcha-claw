@@ -1,5 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import { isSkillsCallReceipt, type SkillsCallReceipt } from './management';
 
 const EXPORT_ENDPOINT = '/api/subagents/skill-bundles/export';
 const IMPORT_ENDPOINT = '/api/subagents/skill-bundles/import';
@@ -17,7 +18,7 @@ export type SkillBundleTransferResult = Readonly<{
 export type SkillBundleTransportResponse = Readonly<{
   status: 200 | 400 | 401 | 503;
   body: SkillBundleTransferResult;
-}>;
+}> | Readonly<{ status: 202; body: SkillsCallReceipt }>;
 
 export interface SkillBundleTransport {
   exportBundles(request: unknown): Promise<SkillBundleTransportResponse>;
@@ -73,7 +74,9 @@ async function transfer(
     fetcher,
     body: request,
   });
-  if (response?.status === 200 && isResult(operation, response.body)) return { status: 200, body: response.body };
+  if (response?.status === 202 && isSkillsCallReceipt(response.body)) {
+    return { status: 202, body: response.body };
+  }
   if (response?.status === 400 && isRejectedResult(response.body)) return { status: 400, body: response.body };
   if (response?.status === 401 && isUnknownResult(response.body)) return { status: 401, body: response.body };
 
@@ -86,17 +89,6 @@ function isRequest(operation: 'export' | 'import', value: unknown): boolean {
     return hasExactKeys(value, ['skillKeys']) && Array.isArray(value.skillKeys) && value.skillKeys.every(isSkillKey);
   }
   return hasExactKeys(value, ['skillBundles']) && Array.isArray(value.skillBundles) && value.skillBundles.every(isBundle);
-}
-
-function isResult(operation: 'export' | 'import', value: unknown): value is SkillBundleTransferResult {
-  if (!isRecord(value)) return false;
-  if (operation === 'export') {
-    return value.outcome === 'accepted'
-      && hasExactKeys(value, ['outcome', 'skillBundles'])
-      && Array.isArray(value.skillBundles)
-      && value.skillBundles.every(isBundle);
-  }
-  return isOutcome(value.outcome) && hasExactKeys(value, ['outcome']);
 }
 
 function isRejectedResult(value: unknown): value is SkillBundleTransferResult {
@@ -129,10 +121,6 @@ function isFilePath(value: unknown): value is string {
     && !value.startsWith('/')
     && !value.includes('\\')
     && value.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
-}
-
-function isOutcome(value: unknown): value is SkillBundleTransferResult['outcome'] {
-  return value === 'accepted' || value === 'rejected' || value === 'unknown';
 }
 
 function rejectedResponse(): SkillBundleTransportResponse {

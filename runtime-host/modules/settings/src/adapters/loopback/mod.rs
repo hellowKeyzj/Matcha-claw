@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use platform::{
+    call::CallRecorder,
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
@@ -19,11 +20,20 @@ const SHORT_DEADLINE: Duration = Duration::from_secs(5);
 pub struct Dependencies {
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     settings: SettingsHandle,
+    call_recorder: Option<CallRecorder>,
 }
 
 impl Dependencies {
-    pub fn new(verifier: Arc<Mutex<CapabilityDecisionVerifier>>, settings: SettingsHandle) -> Self {
-        Self { verifier, settings }
+    pub fn new(
+        verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+        settings: SettingsHandle,
+        call_recorder: Option<CallRecorder>,
+    ) -> Self {
+        Self {
+            verifier,
+            settings,
+            call_recorder,
+        }
     }
 }
 
@@ -65,6 +75,7 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
             &request.body,
             Arc::clone(&dependencies.verifier),
             dependencies.settings,
+            dependencies.call_recorder,
         )
         .await
         .into()

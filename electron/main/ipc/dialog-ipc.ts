@@ -129,8 +129,7 @@ export function registerDialogHandlers(): void {
   });
 
 const SKILL_IMPORT_MAX_FILES = 256;
-const SKILL_IMPORT_MAX_FILE_BYTES = 48 * 1024;
-const SKILL_IMPORT_MAX_TOTAL_BYTES = 48 * 1024;
+const SKILL_IMPORT_MAX_BYTES = 5 * 1024 * 1024;
 const SKILL_IMPORT_MAX_DEPTH = 8;
 const SKILL_IMPORT_MAX_KEY_BYTES = 96;
 
@@ -180,9 +179,9 @@ function deriveSkillKey(content: string): string {
 
 async function readBoundedText(filePath: string): Promise<string> {
   const fileStat = await stat(filePath);
-  if (!fileStat.isFile() || fileStat.size > SKILL_IMPORT_MAX_FILE_BYTES) throw new Error('invalid');
+  if (!fileStat.isFile() || fileStat.size > SKILL_IMPORT_MAX_BYTES) throw new Error('invalid');
   const content = await readFile(filePath, 'utf8');
-  if (Buffer.byteLength(content, 'utf8') > SKILL_IMPORT_MAX_FILE_BYTES || content.includes('\0')) throw new Error('invalid');
+  if (Buffer.byteLength(content, 'utf8') > SKILL_IMPORT_MAX_BYTES || content.includes('\0')) throw new Error('invalid');
   return content;
 }
 
@@ -200,7 +199,7 @@ async function collectSkillFiles(root: string, current: string, files: Array<{ p
     if (!relativePath || relativePath.includes('..')) throw new Error('invalid');
     const content = await readBoundedText(absolute);
     total.value += Buffer.byteLength(content, 'utf8');
-    if (total.value > SKILL_IMPORT_MAX_TOTAL_BYTES) throw new Error('invalid');
+    if (total.value > SKILL_IMPORT_MAX_BYTES) throw new Error('invalid');
     files.push({ path: relativePath, content });
   }
 }

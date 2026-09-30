@@ -14,7 +14,7 @@ use platform::{
     },
 };
 use serde_json::Value;
-use tokio::{net::TcpStream, sync::Mutex, time::timeout};
+use tokio::{net::TcpStream, sync::Mutex};
 
 use crate::{
     owner::handle::FleetHandle,
@@ -106,7 +106,17 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 fn route(dependencies: Dependencies, request: LoopbackRequest) -> RouteFuture {
     Box::pin(async move {
         if is_terminal_route(request.method(), request.path()) {
-            return handle_terminal_route(request, dependencies.terminal);
+            let call = match begin_call(
+                &dependencies.owner,
+                "fleet.terminals.stream",
+                Default::default(),
+            )
+            .await
+            {
+                Ok(call) => call,
+                Err(response) => return RouteOutcome::Response(into_loopback_response(response)),
+            };
+            return handle_terminal_route(request, dependencies.terminal, call).await;
         }
         if !is_fleet_route(request.method(), request.path())
             && !is_credential_write_route(request.method(), request.path())
@@ -117,22 +127,15 @@ fn route(dependencies: Dependencies, request: LoopbackRequest) -> RouteFuture {
         if request.body.len() > max_body_bytes(request.method(), request.path()) {
             return RouteOutcome::Response(into_loopback_response(Response::bad_request()));
         }
-        let response = match timeout(
-            REQUEST_READ_DEADLINE,
-            handle(request, dependencies.verifier, dependencies.owner),
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(_) => Response::bad_request(),
-        };
+        let response = handle(request, dependencies.verifier, dependencies.owner).await;
         RouteOutcome::Response(into_loopback_response(response))
     })
 }
 
-fn handle_terminal_route(
+async fn handle_terminal_route(
     request: LoopbackRequest,
     terminal: TerminalServerDependencies,
+    call: Option<crate::call::FleetCall>,
 ) -> RouteOutcome {
     let Some(key) = request
         .head
@@ -141,12 +144,20 @@ fn handle_terminal_route(
         .filter(|key| !key.is_empty())
         .map(str::to_owned)
     else {
+        if let Some(call) = &call {
+            call.outcome("rejected", platform::call::CallStatus::Rejected)
+                .await;
+        }
         return RouteOutcome::Response(LoopbackResponse::json(
             400,
             serde_json::json!({"error":"invalid terminal websocket upgrade"}),
         ));
     };
     if !request.head.websocket || !request.body.is_empty() {
+        if let Some(call) = &call {
+            call.outcome("rejected", platform::call::CallStatus::Rejected)
+                .await;
+        }
         return RouteOutcome::Response(LoopbackResponse::json(
             400,
             serde_json::json!({"error":"invalid terminal websocket upgrade"}),
@@ -156,6 +167,7 @@ fn handle_terminal_route(
         path: request.head.path,
         key,
         terminal,
+        call,
     }))
 }
 
@@ -163,6 +175,7 @@ struct FleetTerminalUpgrade {
     path: String,
     key: String,
     terminal: TerminalServerDependencies,
+    call: Option<crate::call::FleetCall>,
 }
 
 impl platform::loopback::UpgradeHandler for FleetTerminalUpgrade {
@@ -171,8 +184,23 @@ impl platform::loopback::UpgradeHandler for FleetTerminalUpgrade {
         stream: TcpStream,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send>> {
         Box::pin(async move {
-            crate::terminal_stream::serve_upgrade(stream, self.path, self.key, true, self.terminal)
-                .await
+            if let Some(call) = &self.call {
+                if call.running().await.is_err() {
+                    return Err(io::Error::other("Fleet call audit is unavailable"));
+                }
+            }
+            let result = crate::terminal_stream::serve_upgrade(
+                stream,
+                self.path,
+                self.key,
+                true,
+                self.terminal,
+            )
+            .await;
+            if let Some(call) = &self.call {
+                call.finish(&result).await;
+            }
+            result
         })
     }
 }
@@ -219,8 +247,20 @@ async fn handle(
             return Response::unauthorized();
         }
         drop(verifier);
-        return credentials::handle(&owner, value).await;
+        let call = match begin_call(&owner, "fleet.credentials.write", Default::default()).await {
+            Ok(call) => call,
+            Err(response) => return response,
+        };
+        let response = credentials::handle(&owner.recording(call.clone()), value).await;
+        if let Some(call) = &call {
+            if !call.admitted.load(std::sync::atomic::Ordering::Acquire) {
+                call.outcome("rejected", platform::call::CallStatus::Rejected)
+                    .await;
+            }
+        }
+        return response;
     }
+    let detail = call_detail(&value);
     let mut verifier = verifier.lock().await;
     let request = match dto::Request::decode(value, &authorization, &mut verifier, now_millis()) {
         Ok(request) => request,
@@ -228,7 +268,169 @@ async fn handle(
         Err(DecodeError::Invalid) => return Response::bad_request(),
     };
     drop(verifier);
-    Response::from_delivery(read::read(&owner, request).await)
+    let command = operation_name(request.operation);
+    let call = match begin_call(&owner, command, detail).await {
+        Ok(call) => call,
+        Err(response) => return response,
+    };
+    let mut delivery = read::read(&owner.recording(call.clone()), request).await;
+    if let Some(call) = &call {
+        if let projection::Delivery::Mutation(body) = &mut delivery {
+            if body["outcome"] == "accepted"
+                && call.admitted.load(std::sync::atomic::Ordering::Acquire)
+            {
+                if let Some(body) = body.as_object_mut() {
+                    body.insert(
+                        "callId".to_owned(),
+                        serde_json::json!(call.context.id().as_str()),
+                    );
+                    body.insert("accepted".to_owned(), serde_json::json!(true));
+                }
+            }
+        }
+        if !call.admitted.load(std::sync::atomic::Ordering::Acquire) {
+            let (outcome, status) = match &delivery {
+                projection::Delivery::Invalid => ("rejected", platform::call::CallStatus::Rejected),
+                projection::Delivery::Unavailable => {
+                    ("unavailable", platform::call::CallStatus::Unknown)
+                }
+                _ => ("completed", platform::call::CallStatus::Succeeded),
+            };
+            call.outcome(outcome, status).await;
+        }
+    }
+    let mut response = Response::from_delivery(delivery);
+    if command == "fleet.resources.register"
+        && response.body["outcome"] == "accepted"
+        && response.body["accepted"] == true
+    {
+        response.status = 202;
+    }
+    response
+}
+
+async fn begin_call(
+    owner: &FleetHandle,
+    command: &'static str,
+    detail: crate::call::FleetCallDetail,
+) -> Result<Option<crate::call::FleetCall>, Response> {
+    match owner.recorder() {
+        Some(recorder) => recorder
+            .begin(command, &detail)
+            .await
+            .map(|context| {
+                Some(crate::call::FleetCall {
+                    context,
+                    detail,
+                    command,
+                    started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    admitted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                })
+            })
+            .map_err(|_| Response::fixed(503, "Fleet call recording is unavailable")),
+        None => Ok(None),
+    }
+}
+
+fn operation_name(operation: dto::Operation) -> &'static str {
+    use dto::Operation;
+    match operation {
+        Operation::TargetsList => "fleet.targets.list",
+        Operation::TargetPut => "fleet.targets.put",
+        Operation::TargetRemove => "fleet.targets.remove",
+        Operation::TopologyGet => "fleet.topology.get",
+        Operation::CommandSubmit => "fleet.commands.submit",
+        Operation::NodeCommandSubmit => "fleet.commands.submit.node",
+        Operation::CommandBegin => "fleet.commands.begin",
+        Operation::CommandAccept => "fleet.commands.accept",
+        Operation::CommandReject => "fleet.commands.reject",
+        Operation::CommandUnknown => "fleet.commands.unknown",
+        Operation::CommandReplay => "fleet.commands.replay",
+        Operation::ConnectionUpsert => "fleet.connections.upsert",
+        Operation::ConnectionRemove => "fleet.connections.remove",
+        Operation::EnvironmentRegister => "fleet.environments.register",
+        Operation::ResourceRegister => "fleet.resources.register",
+        Operation::NodeUpsert => "fleet.nodes.upsert",
+        Operation::AgentUpsert => "fleet.agents.upsert",
+        Operation::AgentRevoke => "fleet.agents.revoke",
+        Operation::RuntimeUpsert => "fleet.runtimes.upsert",
+        Operation::EndpointUpsert => "fleet.endpoints.upsert",
+        Operation::ConnectionProbeBegin => "fleet.connections.probe.begin",
+        Operation::ConnectionProbeComplete => "fleet.connections.probe.complete",
+        Operation::EnvironmentDeployBegin => "fleet.environments.deploy.begin",
+        Operation::EnvironmentDeployComplete => "fleet.environments.deploy.complete",
+        Operation::EnvironmentDeployFail => "fleet.environments.deploy.fail",
+        Operation::EnvironmentDeleteBegin => "fleet.environments.delete.begin",
+        Operation::EnvironmentDeleteComplete => "fleet.environments.delete.complete",
+        Operation::EnvironmentDeleteFail => "fleet.environments.delete.fail",
+        Operation::ResourceProvisionBegin => "fleet.resources.provision.begin",
+        Operation::ResourceProvisionComplete => "fleet.resources.provision.complete",
+        Operation::ResourceDeleteBegin => "fleet.resources.delete.begin",
+        Operation::ResourceDeleteComplete => "fleet.resources.delete.complete",
+        Operation::ResourceDeleteFail => "fleet.resources.delete.fail",
+        Operation::NodeRetire => "fleet.nodes.retire",
+        Operation::RuntimeStartBegin => "fleet.runtimes.start.begin",
+        Operation::RuntimeStartComplete => "fleet.runtimes.start.complete",
+        Operation::RuntimeStopBegin => "fleet.runtimes.stop.begin",
+        Operation::RuntimeStopComplete => "fleet.runtimes.stop.complete",
+        Operation::RuntimeRetire => "fleet.runtimes.retire",
+        Operation::EndpointDrain => "fleet.endpoints.drain",
+        Operation::EndpointRetire => "fleet.endpoints.retire",
+        Operation::EndpointProbeBegin => "fleet.endpoints.probe.begin",
+        Operation::CapabilitySyncBegin => "fleet.capabilities.sync.begin",
+        Operation::CapabilitySyncComplete => "fleet.capabilities.sync.complete",
+        Operation::TerminalOpen => "fleet.terminals.open",
+        Operation::TerminalReconnect => "fleet.terminals.reconnect",
+        Operation::TerminalBeginClose => "fleet.terminals.close.begin",
+        Operation::TerminalFinishClose => "fleet.terminals.close.complete",
+        Operation::TerminalClose => "fleet.terminals.close",
+        Operation::TerminalList => "fleet.terminals.list",
+        Operation::ConnectionsList => "fleet.connections.list",
+        Operation::CapabilitiesList => "fleet.capabilities.list",
+        Operation::EnvironmentsList => "fleet.environments.list",
+        Operation::ResourcesList => "fleet.resources.list",
+        Operation::CommandsList => "fleet.commands.list",
+        Operation::AuditList => "fleet.audit.list",
+        Operation::LeasesList => "fleet.leases.list",
+        Operation::MetricsGet => "fleet.metrics.get",
+        Operation::SnapshotGet => "fleet.snapshot.get",
+        Operation::SelectorPreview => "fleet.selector.preview",
+    }
+}
+
+fn call_detail(value: &Value) -> crate::call::FleetCallDetail {
+    let payload = &value["input"]["payload"];
+    let reference = |key: &str| {
+        payload[key]
+            .as_str()
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 128
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':')
+                    })
+            })
+            .map(str::to_owned)
+    };
+    crate::call::FleetCallDetail {
+        target_id: payload["selector"]["targetId"].as_str().and_then(|value| {
+            (!value.is_empty()
+                && value.len() <= 128
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':')
+                }))
+            .then(|| value.to_owned())
+        }),
+        entity_id: reference("id")
+            .or_else(|| reference("nodeId"))
+            .or_else(|| reference("sessionId")),
+        command_id: reference("commandId"),
+        dispatch_id: reference("dispatchId"),
+        attempt: payload["attempt"]
+            .as_u64()
+            .filter(|value| *value > 0 && *value <= 9_007_199_254_740_991),
+        outcome: None,
+    }
 }
 
 fn timeout_response() -> LoopbackResponse {

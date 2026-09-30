@@ -8,6 +8,7 @@ import type { HostApiContext } from './context';
 import { handleAccountRoutes } from './routes/account';
 import { handleBillingRoutes } from './routes/billing';
 import { handleCapabilityRoutes } from './routes/capabilities';
+import { handleCallRoutes } from './routes/calls';
 import { handleAgentsRoutes } from './routes/agents';
 import { handleAppRoutes } from './routes/app';
 import { handleChannelAuthorizationRoutes } from './routes/channel-authorization';
@@ -85,6 +86,7 @@ const routeHandlers: readonly RouteHandler[] = [
   (req, res, url, deps) => handleAgentsRoutes(req, res, url, deps.runtimeHostTransports.agentsTransport),
   (req, res, url, deps) => handleBillingRoutes(req, res, url, deps),
   (req, res, url, deps) => handleCapabilityRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleCallRoutes(req, res, url, deps.runtimeHostTransports.callLogTransport),
   (req, res, url, deps) => handleChannelAuthorizationRoutes(req, res, url, deps.runtimeHostTransports.channelAuthorizationTransport),
   (req, res, url, deps) => handleChannelCatalogRoutes(req, res, url, deps.runtimeHostTransports.channelCatalogTransport),
   (req, res, url, deps) => handleChannelConfigureRoutes(req, res, url, deps.runtimeHostTransports.channelCatalogTransport),

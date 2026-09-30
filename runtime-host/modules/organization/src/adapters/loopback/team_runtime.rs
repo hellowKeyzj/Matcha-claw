@@ -49,14 +49,21 @@ pub(crate) async fn handle_loopback(
         Err(crate::TeamRuntimeDecodeError::InvalidInput) => return invalid_request(),
         Err(crate::TeamRuntimeDecodeError::Unavailable) => return unavailable(),
     };
-    let outcome =
-        match crate::execute_team_runtime_capability_request(&owner, resolver.as_ref(), request)
-            .await
-        {
-            Ok((_, outcome)) => outcome,
-            Err(crate::TeamRuntimeDecodeError::InvalidInput) => return invalid_request(),
-            Err(crate::TeamRuntimeDecodeError::Unavailable) => return unavailable(),
+    if matches!(request.operation_id(), "team.provisionAgents" | "team.delete" | "team.runDelete") {
+        return match owner.admit_team_capability(resolver, request).await {
+            Ok(receipt) => Response::json(202, json!(receipt)),
+            Err(crate::TeamRuntimeDecodeError::InvalidInput) => invalid_request(),
+            Err(crate::TeamRuntimeDecodeError::Unavailable) => unavailable(),
         };
+    }
+    let outcome = match owner
+        .execute_team_runtime_capability_request(resolver, request)
+        .await
+    {
+        Ok((_, outcome)) => outcome,
+        Err(crate::TeamRuntimeDecodeError::InvalidInput) => return invalid_request(),
+        Err(crate::TeamRuntimeDecodeError::Unavailable) => return unavailable(),
+    };
     project_outcome(outcome)
 }
 

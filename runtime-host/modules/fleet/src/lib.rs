@@ -1,6 +1,7 @@
 mod adapters;
 mod api;
 mod application;
+mod call;
 mod domain;
 mod events;
 mod owner;

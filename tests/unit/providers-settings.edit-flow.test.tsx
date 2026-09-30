@@ -301,7 +301,7 @@ describe('providers settings edit flow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
 
     await waitFor(() => {
-      expect(providerModelCatalogMock.discoverProviderModels).toHaveBeenCalledWith('custom-1');
+      expect(providerModelCatalogMock.discoverProviderModels).toHaveBeenCalledWith('custom-1', expect.any(AbortSignal));
       expect(screen.getByText('Models available to import')).toBeInTheDocument();
     });
     expect(catalogState.replaceAccountModels).not.toHaveBeenCalled();

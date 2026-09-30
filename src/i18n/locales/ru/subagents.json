@@ -99,20 +99,8 @@
   "editDialogTitle": "Edit Subagent",
   "manageTitle": "Managing: {{agentId}}",
   "manage": {
-    "promptLabel": "Prompt",
-    "promptPlaceholder": "Describe what this subagent should write for AGENTS.md / SOUL.md / USER.md / MEMORY.md",
-    "generateDraft": "Generate Draft",
-    "generatingDraft": "Generating...",
-    "applyingDraft": "Applying...",
-    "generateDiffPreview": "Generate Diff Preview",
-    "diffPreviewTitle": "Diff Preview",
     "currentFilesTitle": "Current Files",
     "emptyFileContent": "(empty)",
-    "confirmApplyDraft": "Confirm Apply Draft",
-    "cancelDraft": "Cancel Draft",
-    "applyDraftSuccess": "Draft applied successfully.",
-    "rawOutputTitle": "Raw model output",
-    "includeCurrentFilesLabel": "Use current files",
     "noAgentSelected": "Выберите Agent перед настройкой персоны."
   },
   "deleteDialog": {
@@ -129,7 +117,6 @@
   },
   "form": {
     "basicInfo": "Basic Information",
-    "aiConfig": "AI Configuration",
     "skillConfig": "Skill Configuration",
     "useAllSkills": "Use all skills",
     "skillsLoading": "Loading skills...",
@@ -146,8 +133,6 @@
       "botttsNeutral": "Bottts Neutral"
     },
     "avatarRefresh": "Refresh",
-    "initialPrompt": "System Prompt",
-    "initialPromptPlaceholder": "Optional: set a system prompt for this subagent",
     "create": "Create",
     "save": "Save",
     "nameDuplicate": "Agent name is duplicated.",
@@ -207,7 +192,27 @@
     }
   },
   "cloudPackages": {
-    "title": "Cloud Agent Packages",
+    "title": "Облачные пакеты агентов",
+    "mineTitle": "Мои облачные пакеты",
+    "mineDescription": "Загрузки сохраняются как черновики до публикации в маркете.",
+    "mineEmpty": "Загруженных пакетов пока нет.",
+    "marketTitle": "Маркет пакетов",
+    "loading": "Загрузка пакетов…",
+    "loadFailed": "Не удалось загрузить пакеты. Повторите попытку.",
+    "retry": "Повторить",
+    "publish": "Опубликовать",
+    "publishing": "Публикация…",
+    "published": "Пакет опубликован",
+    "publishFailed": "Не удалось опубликовать пакет",
+    "uploadFailed": "Не удалось загрузить пакет",
+    "installFailed": "Не удалось установить пакет",
+    "installed": "Установлен",
+    "installing": "Установка…",
+    "status": { "draft": "Черновик", "published": "Опубликован", "disabled": "Отключён", "unknown": "Неизвестный статус" },
+    "errors": {
+      "MATCHA_PACKAGE_CLOUD_ENVELOPE_REQUIRED": "Повторно экспортируйте пакет для облака и загрузите его.",
+      "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "Эту версию нельзя опубликовать. Обновите список своих пакетов."
+    },
     "empty": "No cloud agent packages.",
     "install": "Install"
   },

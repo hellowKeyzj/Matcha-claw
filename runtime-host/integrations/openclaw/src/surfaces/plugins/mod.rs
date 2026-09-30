@@ -15,6 +15,7 @@ pub trait OpenClawPluginsAdmissionPort: Send + Sync {
 }
 
 pub trait OpenClawPluginsRestartPort: Send + Sync {
+    /// Called only within an admitted plugin mutation, including its shutdown drain.
     fn restart_openclaw_runtime<'a>(&'a self) -> PluginsFuture<'a, bool>;
 }
 
@@ -48,6 +49,47 @@ async fn restart_open_claw_runtime(restart: Arc<dyn OpenClawPluginsRestartPort>)
 }
 
 impl plugins_module::ports::PluginsPort for OpenClawPluginsPort {
+    fn admit_mutation(&self) -> Result<(), ()> {
+        if self.admission.admit_openclaw_plugins_request() { Ok(()) } else { Err(()) }
+    }
+
+    fn set_enabled_admitted<'a>(
+        &'a self,
+        plugin_id: String,
+        enabled: bool,
+    ) -> PluginsFuture<'a, Result<ConfigurationOutcome, ()>> {
+        Box::pin(async move {
+            let restart = Arc::clone(&self.restart);
+            Ok(self
+                .driver
+                .plugin_provider()
+                .set_enabled_with_restart(&plugin_id, enabled, move || {
+                    restart_open_claw_runtime(restart)
+                })
+                .await)
+        })
+    }
+
+    fn operation_admitted<'a>(
+        &'a self,
+        operation: Operation,
+        plugin_id: String,
+    ) -> PluginsFuture<'a, Result<OperationOutcome, ()>> {
+        Box::pin(async move {
+            if !self.open_claw_is_running() {
+                return Ok(OperationOutcome::Unknown);
+            }
+            let restart = Arc::clone(&self.restart);
+            Ok(self
+                .driver
+                .plugin_provider()
+                .operation_with_restart(operation, &plugin_id, move || {
+                    restart_open_claw_runtime(restart)
+                })
+                .await)
+        })
+    }
+
     fn catalog<'a>(&'a self) -> PluginsFuture<'a, Result<Result<Catalog, PluginError>, ()>> {
         Box::pin(async move {
             if !self.admission.admit_openclaw_plugins_request() {
@@ -78,14 +120,7 @@ impl plugins_module::ports::PluginsPort for OpenClawPluginsPort {
             if !self.admission.admit_openclaw_plugins_request() {
                 return Ok(ConfigurationOutcome::Unknown);
             }
-            let restart = Arc::clone(&self.restart);
-            Ok(self
-                .driver
-                .plugin_provider()
-                .set_enabled_with_restart(&plugin_id, enabled, move || {
-                    restart_open_claw_runtime(restart)
-                })
-                .await)
+            self.set_enabled_admitted(plugin_id, enabled).await
         })
     }
 
@@ -95,17 +130,10 @@ impl plugins_module::ports::PluginsPort for OpenClawPluginsPort {
         plugin_id: String,
     ) -> PluginsFuture<'a, Result<OperationOutcome, ()>> {
         Box::pin(async move {
-            if !self.admission.admit_openclaw_plugins_request() || !self.open_claw_is_running() {
+            if !self.admission.admit_openclaw_plugins_request() {
                 return Ok(OperationOutcome::Unknown);
             }
-            let restart = Arc::clone(&self.restart);
-            Ok(self
-                .driver
-                .plugin_provider()
-                .operation_with_restart(operation, &plugin_id, move || {
-                    restart_open_claw_runtime(restart)
-                })
-                .await)
+            self.operation_admitted(operation, plugin_id).await
         })
     }
 }

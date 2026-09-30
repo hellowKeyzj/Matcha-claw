@@ -86,7 +86,8 @@ Electron ends the child stdin stream. Rust control observes EOF and runs Host sh
 
 | Path / command | Owner | Meaning |
 | --- | --- | --- |
-| `POST /api/runtime-host/restart` | Electron main | full Rust child process restart. |
+| `POST /api/runtime-host/restart` | Electron main | full Rust child process restart；短返 202 `{accepted:true,restartId}`，不是 ready/success。 |
+| `GET /api/runtime-host/restart?restartId=…` | Electron main | 原 lifecycle owner 的同次 `running/succeeded/failed/unknown`；仅保留最新记录，旧 id 返回404，不回退当前 health。 |
 | runtime-control `POST /api/runtime-control/lifecycle/restart` | Rust runtime-control / Integration | restart peer runtime lifecycle; no Rust child PID change. |
 
 Do not make process restart and peer lifecycle restart aliases.

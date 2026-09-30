@@ -76,6 +76,7 @@ pub async fn handle_login(
             drop(verifier);
             platform::trace::channel_trace("channel.loopback.decode", "outcome=decoded");
 
+            let mut call_id = None;
             let outcome = match command.action {
                 crate::login::ChannelLoginAction::Start {
                     force,
@@ -95,6 +96,7 @@ pub async fn handle_login(
                     channel
                         .login_start(key, force, timeout_ms, agent_id, config)
                         .await
+                        .map(|(outcome, id)| { call_id = id; outcome })
                         .map_err(|_| crate::login::Outcome::Unknown)
                 }
                 crate::login::ChannelLoginAction::Wait {
@@ -120,6 +122,7 @@ pub async fn handle_login(
                             cancellation,
                         )
                         .await
+                        .map(|(outcome, id)| { call_id = id; outcome })
                         .map_err(|_| crate::login::Outcome::Unknown)
                 }
                 crate::login::ChannelLoginAction::Logout { account_id } => {
@@ -131,10 +134,10 @@ pub async fn handle_login(
                         Ok(key) => key,
                         Err(_) => return (400, serde_json::json!({"outcome": "rejected"})),
                     };
-                    channel
-                        .logout(key)
-                        .await
-                        .map_err(|_| crate::login::Outcome::Unknown)
+                    return match channel.logout(key).await {
+                        Ok(receipt) => (202, serde_json::json!(receipt)),
+                        Err(_) => (503, serde_json::json!({"outcome": "unknown"})),
+                    };
                 }
                 crate::login::ChannelLoginAction::Cancel { account_id } => {
                     let key = match ChannelKey::try_new(
@@ -162,10 +165,17 @@ pub async fn handle_login(
                 }
                 crate::login::Outcome::Unknown => Delivery::Unknown,
             };
-            (delivery.status_code(), delivery.body())
+            let mut body = delivery.body();
+            if body.get("channel").is_some() {
+                if let Some(call_id) = call_id {
+                    body["callId"] = serde_json::json!(call_id);
+                }
+            }
+            (delivery.status_code(), body)
         }
         .await;
         span.finish(match response.0 {
+            202 => "accepted",
             200 => "delivered",
             400 => "invalid",
             401 => "unauthorized",

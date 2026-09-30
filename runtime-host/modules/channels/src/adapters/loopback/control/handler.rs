@@ -112,14 +112,19 @@ async fn handle_request(
                 Err(_) => return Response::bad_request(),
             };
             match channel.control(key, command.action).await {
-                Ok(outcome) => {
+                Ok(crate::api::ControlDelivery::Outcome(outcome)) => {
                     Response::from_delivery(ChannelControlDelivery::Outcome(outcome.into()))
                 }
+                Ok(crate::api::ControlDelivery::Accepted(receipt)) => Response {
+                    status: 202,
+                    body: serde_json::json!(receipt),
+                },
                 Err(_) => Response::unavailable(),
             }
         }
         .await;
         span.finish(match response.status {
+            202 => "accepted",
             200 => "delivered",
             400 => "invalid",
             401 => "unauthorized",
@@ -180,7 +185,7 @@ async fn handle_delete_config(
         Err(_) => return Response::bad_request(),
     };
     let delivery = match channel.delete_config(key).await {
-        Ok(outcome) => super::super::delete::Delivery::Outcome(outcome),
+        Ok(receipt) => super::super::delete::Delivery::Accepted(receipt),
         Err(_) => super::super::delete::Delivery::Unavailable,
     };
     Response {

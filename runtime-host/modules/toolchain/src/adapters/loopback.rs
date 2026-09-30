@@ -105,15 +105,9 @@ async fn prepare(request: Request, dependencies: Dependencies) -> Response {
         return unauthorized();
     }
 
-    let outcome = match dependencies.toolchain.prepare().await {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(_)) | Err(_) => return unavailable(),
-    };
-    match crate::control::project_prepare(outcome) {
-        ToolchainControlOutcome::Prepare(outcome) => {
-            Response::json(200, json!({ "outcome": outcome.as_str() }))
-        }
-        ToolchainControlOutcome::Status(_) | ToolchainControlOutcome::Unavailable => unavailable(),
+    match dependencies.toolchain.admit_prepare().await {
+        Ok(receipt) => Response::json(202, json!(receipt)),
+        Err(()) => unavailable(),
     }
 }
 

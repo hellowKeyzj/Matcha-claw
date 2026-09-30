@@ -20,6 +20,10 @@ export interface UpdateStatus {
   error?: string;
 }
 
+export type UpdateDownloadAdmission =
+  | Readonly<{ accepted: true }>
+  | Readonly<{ accepted: false; error: string }>;
+
 export interface UpdaterEvents {
   'status-changed': (status: UpdateStatus) => void;
   'checking-for-update': () => void;
@@ -42,6 +46,7 @@ function detectChannel(version: string): string {
 export class AppUpdater extends EventEmitter {
   private mainWindow: BrowserWindow | null = null;
   private status: UpdateStatus = { status: 'idle' };
+  private downloadInFlight: Promise<void> | undefined;
 
   constructor() {
     super();
@@ -207,13 +212,26 @@ export class AppUpdater extends EventEmitter {
   /**
    * Download available update
    */
-  async downloadUpdate(): Promise<void> {
-    try {
-      await autoUpdater.downloadUpdate();
-    } catch (error) {
-      logger.error('[Updater] Download update failed:', error);
-      throw error;
+  downloadUpdate(): UpdateDownloadAdmission {
+    if (this.downloadInFlight) return { accepted: true };
+    if (this.status.status !== 'available') {
+      return { accepted: false, error: 'No available update to download.' };
     }
+
+    const info = this.status.info;
+    const download = Promise.resolve().then(() => autoUpdater.downloadUpdate()).then(
+      () => { this.downloadInFlight = undefined; },
+      () => {
+        this.downloadInFlight = undefined;
+        logger.warn('[Updater] Download update failed');
+        if (this.status.status !== 'error') {
+          this.updateStatus({ status: 'error', error: 'Failed to download update' });
+        }
+      },
+    );
+    this.downloadInFlight = download;
+    this.updateStatus({ status: 'downloading', info });
+    return { accepted: true };
   }
 
   /**
@@ -255,7 +273,7 @@ export function registerE2EUpdateHandlers(): void {
   ipcMain.handle('update:status', () => ({ status: 'idle' }));
   ipcMain.handle('update:version', () => app.getVersion());
   ipcMain.handle('update:check', () => ({ success: true, status: { status: 'idle' } }));
-  ipcMain.handle('update:download', () => ({ success: false, error: 'Updates are disabled in E2E mode.' }));
+  ipcMain.handle('update:download', () => ({ accepted: false, error: 'Updates are disabled in E2E mode.' }));
   ipcMain.handle('update:install', () => ({ success: false, error: 'Updates are disabled in E2E mode.' }));
   ipcMain.handle('update:setChannel', () => ({ success: false, error: 'Updates are disabled in E2E mode.' }));
 }
@@ -288,14 +306,7 @@ export function registerUpdateHandlers(
   });
 
   // Download update
-  ipcMain.handle('update:download', async () => {
-    try {
-      await updater.downloadUpdate();
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  });
+  ipcMain.handle('update:download', () => updater.downloadUpdate());
 
   // Install update and restart
   ipcMain.handle('update:install', () => {

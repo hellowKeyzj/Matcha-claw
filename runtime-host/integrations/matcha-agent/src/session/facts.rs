@@ -103,7 +103,7 @@ impl NativeEventFact {
 
     pub fn kind(&self) -> NativeEventKind {
         match self.activity {
-            EventActivity::Run(_) => NativeEventKind::Run,
+            EventActivity::Run(_) | EventActivity::RunFailed { .. } => NativeEventKind::Run,
             EventActivity::Message(_) => NativeEventKind::Message,
             EventActivity::Tool(_) => NativeEventKind::Tool,
             EventActivity::Approval(_) => NativeEventKind::Approval,
@@ -117,9 +117,8 @@ impl NativeEventFact {
             EventActivity::Run(
                 crate::session::events::RunLifecycle::Cancelled
                     | crate::session::events::RunLifecycle::Completed
-                    | crate::session::events::RunLifecycle::Failed
                     | crate::session::events::RunLifecycle::Interrupted
-            )
+            ) | EventActivity::RunFailed { .. }
         )
     }
 }

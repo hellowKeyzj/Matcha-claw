@@ -11,6 +11,7 @@ interface UseAgentSkillConfigResult {
   allowedSkillIdsForChat: string[] | null;
   availableSkillOptions: AgentSkillOption[];
   skillsLoading: boolean;
+  savingSkillId: string | null;
   prepare: () => void;
   resetSession: () => void;
   toggleSkill: (skillId: string, checked: boolean) => void;
@@ -85,14 +86,17 @@ export function useAgentSkillConfig({ currentAgentId }: UseAgentSkillConfigInput
   const setAgentSkillConfig = useAgentSkillConfigStore((state) => state.setAgentSkillConfig);
 
   const [localSelection, setLocalSelection] = useState<LocalSkillSelection | null>(null);
-  const [savingAgentId, setSavingAgentId] = useState<string | null>(null);
+  const [savingSelection, setSavingSelection] = useState<{ agentId: string; skillId: string } | null>(null);
   const savingAgentIdRef = useRef<string | null>(null);
   const writeSeqRef = useRef(0);
 
   const localSelectedSkillIds = localSelection?.agentId === normalizedAgentId
     ? localSelection.skillIds
     : null;
-  const isSavingCurrentAgentSkillConfig = savingAgentId === normalizedAgentId;
+  const savingSkillId = savingSelection?.agentId === normalizedAgentId
+    ? savingSelection.skillId
+    : null;
+  const isSavingCurrentAgentSkillConfig = savingSkillId !== null;
   const selectedSkillIds = useMemo(() => {
     if (localSelectedSkillIds) {
       return normalizeSkillIds(localSelectedSkillIds);
@@ -169,7 +173,7 @@ export function useAgentSkillConfig({ currentAgentId }: UseAgentSkillConfigInput
 
     setLocalSelection({ agentId, skillIds: nextSelectedSkillIds });
     savingAgentIdRef.current = agentId;
-    setSavingAgentId(agentId);
+    setSavingSelection({ agentId, skillId });
     const writeSeq = writeSeqRef.current + 1;
     writeSeqRef.current = writeSeq;
 
@@ -199,8 +203,8 @@ export function useAgentSkillConfig({ currentAgentId }: UseAgentSkillConfigInput
         return;
       }
       savingAgentIdRef.current = null;
-      setSavingAgentId((currentSavingAgentId) => (
-        currentSavingAgentId === agentId ? null : currentSavingAgentId
+      setSavingSelection((currentSavingSelection) => (
+        currentSavingSelection?.agentId === agentId ? null : currentSavingSelection
       ));
     });
   }, [localSelectedSkillIds, normalizedAgentId, selectedSkillIds, setAgentSkillConfig, view]);
@@ -209,7 +213,8 @@ export function useAgentSkillConfig({ currentAgentId }: UseAgentSkillConfigInput
     selectedSkillIds,
     allowedSkillIdsForChat,
     availableSkillOptions,
-    skillsLoading: (loading && !view) || isSavingCurrentAgentSkillConfig,
+    skillsLoading: loading && !view,
+    savingSkillId,
     prepare,
     resetSession,
     toggleSkill,

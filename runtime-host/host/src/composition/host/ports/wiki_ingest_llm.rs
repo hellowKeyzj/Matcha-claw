@@ -2,13 +2,16 @@ use provider_module::{
     ProviderHandle, ProviderTextGenerationModelLimits, ProviderTextGenerationModelLimitsOutcome,
     ProviderTextGenerationModelLimitsRequest, ProviderTextGenerationOutcome,
     ProviderTextGenerationRequest,
-    llm_client::{LlmGenerationOptions, LlmImageContent, LlmMessage, LlmMessagePart, LlmRole},
+    llm_client::{
+        LlmClientError, LlmGenerationOptions, LlmImageContent, LlmMessage, LlmMessagePart, LlmRole,
+        LlmStreamEvent, LlmStreamSink,
+    },
 };
 use tokio_util::sync::CancellationToken;
 use wiki::{
     WikiFailure, WikiFuture, WikiIngestImageCaptionRequest, WikiIngestImageCaptionResponse,
-    WikiIngestLlm, WikiIngestLlmMessage, WikiIngestLlmModelLimits, WikiIngestLlmRequest,
-    WikiIngestLlmResponse, WikiIngestLlmRole,
+    WikiIngestLlm, WikiIngestLlmDeltaSink, WikiIngestLlmMessage, WikiIngestLlmModelLimits,
+    WikiIngestLlmRequest, WikiIngestLlmResponse, WikiIngestLlmRole,
 };
 
 pub(in crate::composition::host) struct ProviderWikiIngestLlm {
@@ -68,6 +71,34 @@ impl WikiIngestLlm for ProviderWikiIngestLlm {
         })
     }
 
+    fn stream_generate_cancellable<'a>(
+        &'a self,
+        request: WikiIngestLlmRequest,
+        cancellation: CancellationToken,
+        sink: &'a mut dyn WikiIngestLlmDeltaSink,
+    ) -> WikiFuture<'a, Result<WikiIngestLlmResponse, WikiFailure>> {
+        Box::pin(async move {
+            let mut stream_sink = WikiProviderStreamSink {
+                sink,
+                failure: None,
+            };
+            let outcome = self
+                .provider
+                .stream_generate_text_cancellable(
+                    map_text_generation_request(request),
+                    cancellation,
+                    &mut stream_sink,
+                )
+                .await;
+            if let Some(failure) = stream_sink.failure {
+                return Err(failure);
+            }
+            match_generation_outcome(
+                outcome.map_err(|_| WikiFailure::state("provider text streaming failed"))?,
+            )
+        })
+    }
+
     fn caption_image<'a>(
         &'a self,
         request: WikiIngestImageCaptionRequest,
@@ -94,6 +125,31 @@ impl WikiIngestLlm for ProviderWikiIngestLlm {
                 }),
                 Err(error) => Err(error),
             }
+        })
+    }
+}
+
+struct WikiProviderStreamSink<'a> {
+    sink: &'a mut dyn WikiIngestLlmDeltaSink,
+    failure: Option<WikiFailure>,
+}
+
+impl LlmStreamSink for WikiProviderStreamSink<'_> {
+    fn send<'a>(
+        &'a mut self,
+        event: LlmStreamEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), LlmClientError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            if let LlmStreamEvent::TextDelta(delta) = event {
+                if let Err(failure) = self.sink.send(delta).await {
+                    self.failure = Some(failure);
+                    return Err(LlmClientError::StreamSink(
+                        "wiki stream consumer failed".into(),
+                    ));
+                }
+            }
+            Ok(())
         })
     }
 }

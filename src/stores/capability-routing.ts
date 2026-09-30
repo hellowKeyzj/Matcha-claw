@@ -24,7 +24,7 @@ async function applyRoutingMutation(
   current: CapabilityRouting,
   revision: number,
   mutate: (draft: CapabilityRouting) => CapabilityRouting,
-): Promise<{ next: CapabilityRouting; revision: number; error?: string; warning?: string }> {
+): Promise<{ next: CapabilityRouting; revision: number | null; error?: string; warning?: string }> {
   const next = mutate({ ...current });
   const result = await persistCapabilityRouting(next, revision);
   if (!result.success) {

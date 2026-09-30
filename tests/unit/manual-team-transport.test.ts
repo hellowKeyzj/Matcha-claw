@@ -17,14 +17,14 @@ describe('Electron Main Manual Team transport', () => {
   it('signs and sends only the closed Manual Team delivery request', async () => {
     const signDecision = vi.fn().mockReturnValue('signed-decision');
     const fetcher = vi.fn().mockResolvedValue({
-      status: 200,
-      json: async () => ({ status: 'materialized' }),
+      status: 202,
+      json: async () => ({ callId: 'a'.repeat(32), accepted: true }),
     });
     const transport = createManualTeamTransport({ verificationKey: 'public', signDecision }, 3235, fetcher);
 
     await expect(transport.materializeAndCreate(request)).resolves.toEqual({
-      status: 200,
-      body: { status: 'materialized' },
+      status: 202,
+      body: { callId: 'a'.repeat(32), accepted: true },
     });
     expect(signDecision).toHaveBeenCalledWith(expect.objectContaining({
       endpoint: '/api/team/manual-materialize-and-create',

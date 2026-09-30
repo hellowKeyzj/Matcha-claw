@@ -1,215 +1,357 @@
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::{net::IpAddr, time::Duration};
 
-use ort::session::Session;
-use ort::value::Tensor;
-use tokenizers::tokenizer::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
+use reqwest::{Client, RequestBuilder, Url};
+use serde_json::{Value, json};
 
-const MODEL_FILE: &str = "onnx/model.onnx";
-const TOKENIZER_FILE: &str = "tokenizer.json";
-const EMBEDDING_DIMENSION: usize = 384;
+use crate::search_config::{EmbeddingConfig, EmbeddingCredentials};
 
 pub struct Embedder {
-    tokenizer: Tokenizer,
-    session: Mutex<Session>,
+    client: Client,
 }
 
 impl Embedder {
-    pub fn load(model_dir: PathBuf) -> Result<Embedder, String> {
-        let tokenizer_path = model_dir.join(TOKENIZER_FILE);
-        let model_path = model_dir.join(MODEL_FILE);
-
-        let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|error| {
-            format!(
-                "failed to load tokenizer {}: {error}",
-                tokenizer_path.display()
-            )
-        })?;
-        ensure_truncation(&mut tokenizer)?;
-        ensure_padding(&mut tokenizer)?;
-
-        let session = Session::builder()
-            .map_err(|error| format!("failed to create ONNX session builder: {error}"))?
-            .commit_from_file(&model_path)
-            .map_err(|error| {
-                format!(
-                    "failed to load ONNX model {}: {error}",
-                    model_path.display()
-                )
-            })?;
-
+    pub fn new() -> Result<Self, String> {
         Ok(Self {
-            tokenizer,
-            session: Mutex::new(session),
+            client: Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(8))
+                .build()
+                .map_err(|_| "failed to initialize embedding HTTP client".to_owned())?,
         })
     }
 
-    pub fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
-        let mut embeddings = self.embed_batch(&[text.to_owned()])?;
-        embeddings
-            .pop()
-            .ok_or_else(|| "embedding batch returned no vectors".to_owned())
+    pub async fn embed(
+        &self,
+        text: &str,
+        config: &EmbeddingConfig,
+        credentials: &EmbeddingCredentials,
+        max_retries: usize,
+    ) -> Result<Vec<f32>, String> {
+        let mut current = text;
+        for attempt in 0..=max_retries {
+            match self.embed_once(current, config, credentials).await {
+                Ok(vector) => return Ok(vector),
+                Err(FetchError::Oversize)
+                    if attempt < max_retries && current.chars().count() > 64 =>
+                {
+                    let keep = current.chars().count() / 2;
+                    let end = current
+                        .char_indices()
+                        .nth(keep)
+                        .map(|(offset, _)| offset)
+                        .unwrap_or(current.len());
+                    current = &current[..end];
+                }
+                Err(FetchError::Oversize) => {
+                    return Err(
+                        "embedding input exceeds the provider context; lower maxChunkChars"
+                            .to_owned(),
+                    );
+                }
+                Err(FetchError::Other(reason)) => return Err(reason),
+            }
+        }
+        unreachable!("each final embedding attempt returns")
     }
 
-    pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
+    pub async fn embed_batch(
+        &self,
+        texts: &[String],
+        config: &EmbeddingConfig,
+        credentials: &EmbeddingCredentials,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        if texts.is_empty() || texts.len() > 64 {
+            return Err("embedding batch must contain between 1 and 64 inputs".to_owned());
         }
-
-        let encodings = self
-            .tokenizer
-            .encode_batch(texts.to_vec(), true)
-            .map_err(|error| format!("failed to tokenize embedding batch: {error}"))?;
-        let batch_size = encodings.len();
-        let sequence_length = encodings
-            .first()
-            .map(|encoding| encoding.get_ids().len())
-            .ok_or_else(|| "tokenizer returned no encodings".to_owned())?;
-
-        let mut input_ids = Vec::with_capacity(batch_size * sequence_length);
-        let mut attention_mask = Vec::with_capacity(batch_size * sequence_length);
-        let mut token_type_ids = Vec::with_capacity(batch_size * sequence_length);
-
-        for encoding in &encodings {
-            if encoding.get_ids().len() != sequence_length {
-                return Err("tokenizer returned an unpadded batch".to_owned());
+        if !supports_batch(config) {
+            return Err("embedding provider does not support OpenAI-compatible batches".to_owned());
+        }
+        let endpoint = provider_endpoint(config)?;
+        let response = self
+            .request(&endpoint, config, credentials, false)
+            .json(&json!({"model": config.model, "input": texts}))
+            .send()
+            .await
+            .map_err(|_| "embedding batch request failed".to_owned())?;
+        let value = read_response(response).await.map_err(FetchError::reason)?;
+        let entries = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "embedding batch response is missing data".to_owned())?;
+        if entries.len() != texts.len() {
+            return Err("embedding batch response has an incomplete vector count".to_owned());
+        }
+        let mut vectors = vec![None; texts.len()];
+        for (position, entry) in entries.iter().enumerate() {
+            let index = match entry.get("index") {
+                Some(index) => index
+                    .as_u64()
+                    .and_then(|index| usize::try_from(index).ok())
+                    .ok_or_else(|| "embedding batch response has an invalid index".to_owned())?,
+                None => position,
+            };
+            if index >= vectors.len() || vectors[index].is_some() {
+                return Err(
+                    "embedding batch response has duplicate or out-of-range indexes".to_owned(),
+                );
             }
-            input_ids.extend(encoding.get_ids().iter().map(|id| i64::from(*id)));
-            attention_mask.extend(
-                encoding
-                    .get_attention_mask()
-                    .iter()
-                    .map(|mask| i64::from(*mask)),
-            );
-            token_type_ids.extend(
-                encoding
-                    .get_type_ids()
-                    .iter()
-                    .map(|type_id| i64::from(*type_id)),
-            );
+            vectors[index] = Some(parse_vector(entry.get("embedding"))?);
         }
-
-        let shape = [batch_size, sequence_length];
-        let input_ids = Tensor::from_array((shape, input_ids.into_boxed_slice()))
-            .map_err(|error| format!("failed to create input_ids tensor: {error}"))?;
-        let attention_mask_tensor =
-            Tensor::from_array((shape, attention_mask.clone().into_boxed_slice()))
-                .map_err(|error| format!("failed to create attention_mask tensor: {error}"))?;
-        let token_type_ids = Tensor::from_array((shape, token_type_ids.into_boxed_slice()))
-            .map_err(|error| format!("failed to create token_type_ids tensor: {error}"))?;
-
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| "embedding ONNX session lock was poisoned".to_owned())?;
-        let outputs = session
-            .run(ort::inputs! {
-                "input_ids" => input_ids,
-                "attention_mask" => attention_mask_tensor,
-                "token_type_ids" => token_type_ids,
-            })
-            .map_err(|error| format!("failed to run MiniLM embedding model: {error}"))?;
-        let (output_shape, output_values) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|error| format!("failed to read MiniLM output tensor: {error}"))?;
-        let output_dims: &[i64] = output_shape;
-        if output_dims.len() != 3 {
-            return Err(format!(
-                "MiniLM output must be [batch, tokens, hidden], got {output_shape}"
-            ));
+        let vectors = vectors
+            .into_iter()
+            .map(|vector| vector.expect("validated complete batch"))
+            .collect::<Vec<_>>();
+        let dimension = vectors[0].len();
+        if vectors.iter().any(|vector| vector.len() != dimension) {
+            return Err("embedding batch response has inconsistent dimensions".to_owned());
         }
-        let output_batch = usize::try_from(output_dims[0])
-            .map_err(|_| format!("invalid MiniLM output batch size: {}", output_dims[0]))?;
-        let output_tokens = usize::try_from(output_dims[1])
-            .map_err(|_| format!("invalid MiniLM output token count: {}", output_dims[1]))?;
-        let output_hidden = usize::try_from(output_dims[2])
-            .map_err(|_| format!("invalid MiniLM output hidden size: {}", output_dims[2]))?;
-        if output_batch != batch_size
-            || output_tokens != sequence_length
-            || output_hidden != EMBEDDING_DIMENSION
+        Ok(vectors)
+    }
+
+    async fn embed_once(
+        &self,
+        text: &str,
+        config: &EmbeddingConfig,
+        credentials: &EmbeddingCredentials,
+    ) -> Result<Vec<f32>, FetchError> {
+        let google = is_google(config);
+        let doubao = is_doubao(config);
+        let endpoint = provider_endpoint(config).map_err(FetchError::Other)?;
+        let body = if google {
+            let model = config.model.trim();
+            let model = if model.starts_with("models/") {
+                model.to_owned()
+            } else {
+                format!("models/{model}")
+            };
+            let mut body = json!({"model": model, "content": {"parts": [{"text": text}]}});
+            if let Some(dim) = config
+                .output_dimensionality
+                .filter(|dim| dim.is_finite() && *dim >= 1.0)
+            {
+                body["output_dimensionality"] = json!(dim.floor() as u32);
+            }
+            body
+        } else if doubao {
+            json!({"model": config.model, "encoding_format": "float", "input": [{"type": "text", "text": text}]})
+        } else {
+            json!({"model": config.model, "input": text})
+        };
+        let response = self
+            .request(&endpoint, config, credentials, google)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| FetchError::Other("embedding request failed".to_owned()))?;
+        let value = read_response(response).await?;
+        let vector = if google {
+            value.get("embedding").and_then(|value| value.get("values"))
+        } else if doubao {
+            value.get("data").and_then(|value| value.get("embedding"))
+        } else {
+            value
+                .get("data")
+                .and_then(Value::as_array)
+                .and_then(|entries| entries.first())
+                .and_then(|entry| entry.get("embedding"))
+        };
+        parse_vector(vector).map_err(FetchError::Other)
+    }
+
+    fn request(
+        &self,
+        endpoint: &Url,
+        config: &EmbeddingConfig,
+        credentials: &EmbeddingCredentials,
+        google: bool,
+    ) -> RequestBuilder {
+        let mut request = self
+            .client
+            .post(endpoint.clone())
+            .header("Content-Type", "application/json");
+        if is_local_endpoint(endpoint) {
+            request = request.header("Origin", "http://localhost");
+        }
+        if !credentials.api_key.trim().is_empty() {
+            request = if google {
+                request.header("x-goog-api-key", credentials.api_key.trim())
+            } else {
+                request.bearer_auth(credentials.api_key.trim())
+            };
+        }
+        for (name, value) in config
+            .extra_headers
+            .iter()
+            .chain(credentials.extra_headers.iter())
         {
-            return Err(format!(
-                "MiniLM output shape mismatch: expected [{batch_size}, {sequence_length}, {EMBEDDING_DIMENSION}], got {output_shape}"
-            ));
+            if !is_reserved_header(name) && !name.trim().is_empty() && !value.trim().is_empty() {
+                request = request.header(name.trim(), value.trim());
+            }
         }
-
-        Ok(mean_pool_and_normalize(
-            output_values,
-            &attention_mask,
-            batch_size,
-            sequence_length,
-        ))
+        request
     }
 }
 
-fn ensure_truncation(tokenizer: &mut Tokenizer) -> Result<(), String> {
-    let params = tokenizer
-        .get_truncation()
-        .cloned()
-        .unwrap_or_else(TruncationParams::default);
-    tokenizer
-        .with_truncation(Some(params))
-        .map_err(|error| format!("failed to configure tokenizer truncation: {error}"))?;
-    Ok(())
+pub(crate) fn supports_batch(config: &EmbeddingConfig) -> bool {
+    !is_google(config) && !is_doubao(config)
 }
 
-fn ensure_padding(tokenizer: &mut Tokenizer) -> Result<(), String> {
-    let params = tokenizer
-        .get_padding()
-        .cloned()
-        .unwrap_or_else(default_padding_params);
-    tokenizer.with_padding(Some(params));
-    Ok(())
+fn is_google(config: &EmbeddingConfig) -> bool {
+    let endpoint = config.endpoint.to_ascii_lowercase();
+    endpoint.contains("generativelanguage.googleapis.com")
+        || endpoint.contains(":embedcontent")
+        || endpoint.contains(":batchembedcontents")
 }
 
-fn default_padding_params() -> PaddingParams {
-    PaddingParams {
-        strategy: PaddingStrategy::Fixed(128),
-        ..PaddingParams::default()
+fn is_doubao(config: &EmbeddingConfig) -> bool {
+    config
+        .model
+        .to_ascii_lowercase()
+        .contains("doubao-embedding-vision")
+}
+
+fn provider_endpoint(config: &EmbeddingConfig) -> Result<Url, String> {
+    let mut endpoint = Url::parse(config.endpoint.trim())
+        .map_err(|_| "embedding endpoint must be a valid HTTP URL".to_owned())?;
+    if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host_str().is_none() {
+        return Err("embedding endpoint must be a valid HTTP URL".to_owned());
+    }
+    let path = endpoint.path().trim_end_matches('/').to_owned();
+    let lower_path = path.to_ascii_lowercase();
+    if is_google(config) {
+        let kept = endpoint
+            .query_pairs()
+            .filter(|(key, _)| !key.eq_ignore_ascii_case("key"))
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+        endpoint.set_query(None);
+        if !kept.is_empty() {
+            endpoint.query_pairs_mut().extend_pairs(kept);
+        }
+        let path = if lower_path.ends_with(":batchembedcontents") {
+            format!(
+                "{}:embedContent",
+                &path[..path.len() - ":batchEmbedContents".len()]
+            )
+        } else if lower_path.ends_with(":embedcontent") {
+            path
+        } else if lower_path.contains("/models/") {
+            format!("{path}:embedContent")
+        } else {
+            format!(
+                "{path}/models/{}:embedContent",
+                config.model.trim().trim_start_matches("models/")
+            )
+        };
+        endpoint.set_path(&path);
+        return Ok(endpoint);
+    }
+    let host = endpoint.host_str().unwrap_or_default().to_ascii_lowercase();
+    if host == "volces.com" || host.ends_with(".volces.com") || host.contains("volcengine") {
+        let path = if is_doubao(config) {
+            if lower_path.ends_with("/embeddings/multimodal") {
+                path
+            } else if lower_path.ends_with("/embeddings") {
+                format!("{path}/multimodal")
+            } else {
+                format!("{path}/embeddings/multimodal")
+            }
+        } else if lower_path.ends_with("/embeddings/multimodal") {
+            path[..path.len() - "/multimodal".len()].to_owned()
+        } else if lower_path.ends_with("/embeddings") {
+            path
+        } else {
+            format!("{path}/embeddings")
+        };
+        endpoint.set_path(&path);
+    }
+    Ok(endpoint)
+}
+
+fn is_local_endpoint(endpoint: &Url) -> bool {
+    let host = endpoint
+        .host_str()
+        .unwrap_or_default()
+        .trim_matches(['[', ']']);
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| match ip {
+            IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+            IpAddr::V6(ip) => ip.is_loopback(),
+        })
+}
+
+fn is_reserved_header(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "authorization" | "content-type" | "host" | "content-length" | "origin" | "x-goog-api-key"
+    )
+}
+
+enum FetchError {
+    Oversize,
+    Other(String),
+}
+
+impl FetchError {
+    fn reason(self) -> String {
+        match self {
+            Self::Oversize => "embedding batch input exceeds the provider context".to_owned(),
+            Self::Other(reason) => reason,
+        }
     }
 }
 
-fn mean_pool_and_normalize(
-    token_embeddings: &[f32],
-    attention_mask: &[i64],
-    batch_size: usize,
-    sequence_length: usize,
-) -> Vec<Vec<f32>> {
-    (0..batch_size)
-        .map(|batch_index| {
-            let mut embedding = vec![0.0; EMBEDDING_DIMENSION];
-            let mut token_count = 0.0_f32;
+async fn read_response(response: reqwest::Response) -> Result<Value, FetchError> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|_| FetchError::Other("embedding response could not be read".to_owned()))?;
+    if !status.is_success() {
+        let lower = body.to_ascii_lowercase();
+        if status.as_u16() == 413
+            || [
+                "too long",
+                "maximum context",
+                "max_tokens",
+                "max tokens",
+                "context length",
+                "token limit",
+                "exceeds",
+                "input length",
+            ]
+            .iter()
+            .any(|phrase| lower.contains(phrase))
+        {
+            return Err(FetchError::Oversize);
+        }
+        // Provider bodies and URLs may echo credentials; only the status leaves this boundary.
+        return Err(FetchError::Other(format!(
+            "embedding provider returned HTTP {}",
+            status.as_u16()
+        )));
+    }
+    serde_json::from_str(&body)
+        .map_err(|_| FetchError::Other("embedding response is not valid JSON".to_owned()))
+}
 
-            for token_index in 0..sequence_length {
-                if attention_mask[batch_index * sequence_length + token_index] == 0 {
-                    continue;
-                }
-                token_count += 1.0;
-                let token_offset =
-                    (batch_index * sequence_length + token_index) * EMBEDDING_DIMENSION;
-                for dimension_index in 0..EMBEDDING_DIMENSION {
-                    embedding[dimension_index] += token_embeddings[token_offset + dimension_index];
-                }
+fn parse_vector(value: Option<&Value>) -> Result<Vec<f32>, String> {
+    let values = value
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| "embedding response is missing a nonempty vector".to_owned())?;
+    values
+        .iter()
+        .map(|value| {
+            let number = value
+                .as_f64()
+                .filter(|number| number.is_finite())
+                .ok_or_else(|| "embedding response contains invalid numeric values".to_owned())?;
+            let number = number as f32;
+            if !number.is_finite() {
+                return Err("embedding response contains out-of-range numeric values".to_owned());
             }
-
-            if token_count > 0.0 {
-                for value in &mut embedding {
-                    *value /= token_count;
-                }
-            }
-
-            let norm = embedding
-                .iter()
-                .map(|value| value * value)
-                .sum::<f32>()
-                .sqrt();
-            if norm > 0.0 {
-                for value in &mut embedding {
-                    *value /= norm;
-                }
-            }
-
-            embedding
+            Ok(number)
         })
         .collect()
 }

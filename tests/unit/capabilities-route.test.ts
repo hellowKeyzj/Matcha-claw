@@ -138,7 +138,6 @@ const subagentDescriptor = {
   availability: 'available',
   operations: [
     { id: 'subagents.list', title: 'List subagents', targetKind: 'subagent', targetRequired: true },
-    { id: 'subagents.draft.wait', title: 'Wait for subagent draft', targetKind: 'subagent', targetRequired: true },
     { id: 'subagents.create', title: 'Create subagent', targetKind: 'subagent', targetRequired: true },
     { id: 'subagents.update', title: 'Update subagent', targetKind: 'subagent', targetRequired: true },
     { id: 'subagents.delete', title: 'Delete subagent', targetKind: 'subagent', targetRequired: true },

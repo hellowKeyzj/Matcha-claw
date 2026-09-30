@@ -158,6 +158,7 @@ function createDirectRuntimeHostFixture() {
     pid: 10_001,
     command: vi.fn(),
     onSafeEvent: vi.fn(() => () => {}),
+    onDisconnect: vi.fn(() => () => {}),
     onExit: vi.fn(() => () => {}),
     readE2ECronProviderTrace: vi.fn(() => ['cron-before']),
     stop: vi.fn().mockResolvedValue(undefined),
@@ -249,6 +250,9 @@ function createRuntimeHostTransportBundleFixture() {
     skillBundleTransport: { exportBundles: vi.fn(), importBundles: vi.fn() },
     skillsManagementTransport: { execute: vi.fn() },
     sealedSkillsTransport: { execute: vi.fn() },
+    sealedResourceAuthorizationTransport: {
+      authorizePackage: vi.fn(), listCloudPackages: vi.fn(), clearAuthorizations: vi.fn(),
+    },
     pluginsTransport: { execute: vi.fn() },
     usageTransport: { read: vi.fn() },
     sessionHistoryTransport: { read: vi.fn() },
@@ -319,6 +323,7 @@ beforeEach(() => {
   hoisted.createCloudProviderSyncMock.mockReturnValue({ reconcile: vi.fn() });
   hoisted.createCloudAccountServiceMock.mockReturnValue({
     prewarm: hoisted.cloudAccountServicePrewarmMock,
+    runtimeExited: vi.fn(), runtimeRestarted: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined),
   });
   hoisted.createCloudAccountClientMock.mockReturnValue({ fetchClientBootstrap: vi.fn() });
   hoisted.createDiagnosticsExportDependenciesMock.mockReturnValue({
@@ -343,6 +348,24 @@ afterEach(() => {
 });
 
 describe('bootstrapMainApplication', () => {
+  it('wires package authorization restore to restart/exit and closes before delivery disposal', async () => {
+    const bootstrapMainApplication = await importBootstrapMainApplication();
+    const context = createBootstrapContext();
+    let exited!: (exit: unknown) => void;
+    context.directRuntimeHost.onExit.mockImplementation((handler: never) => { exited = handler; return () => {}; });
+    const replacement = createDirectRuntimeHostFixture();
+    context.launchRuntimeHost.mockResolvedValueOnce(context.directRuntimeHost).mockResolvedValueOnce(replacement);
+    const result = await bootstrapMainApplication(context.deps as never);
+    const service = hoisted.createCloudAccountServiceMock.mock.results[0].value;
+    exited({ code: 1, signal: null });
+    expect(service.runtimeExited).toHaveBeenCalledOnce();
+    await result.directRuntimeHost.restart();
+    expect(service.runtimeRestarted).toHaveBeenCalledOnce();
+    await result.closeRuntimeHostDelivery();
+    expect(service.close).toHaveBeenCalledOnce();
+    expect(service.close.mock.invocationCallOrder[0]).toBeLessThan(context.closeRuntimeHostDelivery.mock.invocationCallOrder[0]);
+  });
+
   it('直接启动 Rust Host，并将同一 transport bundle 交给 Host API、IPC 与事件桥', async () => {
     const bootstrapMainApplication = await importBootstrapMainApplication();
     const context = createBootstrapContext();
@@ -364,10 +387,19 @@ describe('bootstrapMainApplication', () => {
       fetchClientBootstrap: expect.any(Function),
       providerAccountsTransport: bundle.hostApiTransports.providerAccountsTransport,
       providerModelsTransport: bundle.hostApiTransports.providerModelsTransport,
+      awaitProviderCall: expect.any(Function),
     });
     expect(hoisted.createCloudAccountServiceMock).toHaveBeenCalledWith(
       hoisted.createCloudAccountClientMock.mock.results[0]?.value,
       hoisted.createCloudProviderSyncMock.mock.results[0]?.value,
+      bundle.hostApiTransports.sealedResourceAuthorizationTransport,
+      {
+        agentsTransport: bundle.hostApiTransports.agentsTransport,
+        sealedSkillsTransport: bundle.hostApiTransports.sealedSkillsTransport,
+        callLogTransport: bundle.hostApiTransports.callLogTransport,
+        subscribeCalls: expect.any(Function),
+        packageChanged: expect.any(Function),
+      },
     );
     expect(hoisted.cloudAccountServicePrewarmMock).toHaveBeenCalledOnce();
 
@@ -402,6 +434,7 @@ describe('bootstrapMainApplication', () => {
       expect.objectContaining({ command: expect.any(Function) }),
       context.deps.getMainWindow,
       bundle.hostApiTransports.providerAccountsTransport,
+      expect.any(Function),
       bundle.hostApiTransports.fleetCredentialsTransport,
       expect.objectContaining({ transport: expect.objectContaining({ download: expect.any(Function) }) }),
     );
@@ -566,7 +599,7 @@ describe('bootstrapMainApplication', () => {
     await bootstrapMainApplication(context.deps as never);
 
     expect(context.launchRuntimeHost).toHaveBeenCalledTimes(1);
-    expect(hoisted.registerRuntimeIpcHandlersMock.mock.calls[0]).toHaveLength(5);
+    expect(hoisted.registerRuntimeIpcHandlersMock.mock.calls[0]).toHaveLength(6);
   });
 
   it('E2E 模式仍通过同一 Rust Host 路径启动，并只在 bundle 注入 Cron trace callback', async () => {

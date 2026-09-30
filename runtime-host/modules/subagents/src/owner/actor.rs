@@ -24,6 +24,7 @@ pub(crate) struct SubagentShared {
     admission: Arc<dyn SubagentRequestAdmission>,
     runtime_directory: Arc<dyn SubagentRuntimeDirectory>,
     sealed_agents: Arc<dyn SealedAgentStorePort>,
+    results: crate::application::results::MutationResults,
 }
 
 pub(crate) struct SubagentGlobalState;
@@ -34,12 +35,16 @@ pub(crate) struct SubagentOwner {
 }
 
 impl SubagentOwner {
-    pub fn new(input: SubagentOwnerInput) -> Self {
+    pub fn new(
+        input: SubagentOwnerInput,
+        results: crate::application::results::MutationResults,
+    ) -> Self {
         Self {
             shared: SubagentShared {
                 admission: input.admission,
                 runtime_directory: input.runtime_directory,
                 sealed_agents: input.sealed_agents,
+                results,
             },
         }
     }
@@ -87,8 +92,42 @@ impl OwnerSpec for SubagentOwner {
         command: Self::Command,
     ) {
         match command {
-            SubagentCommandEnvelope::Execute { command, reply } => {
-                let _ = reply.send(execute_subagent(&shared, command).await);
+            SubagentCommandEnvelope::Execute {
+                command,
+                call,
+                mut detail,
+                admission,
+                reply,
+            } => {
+                let outcome = 'execution: {
+                    if let Some(call) = &call {
+                        let accepted = match &admission {
+                            Some(admission) => {
+                                admission.get_or_init(|| call.accepted()).await.clone()
+                            }
+                            None => call.accepted().await,
+                        };
+                        if let Err(error) = accepted {
+                            eprintln!("subagents call-log acceptance: {error}");
+                            break 'execution Outcome::Unavailable;
+                        }
+                        if let Err(error) = call.running().await {
+                            eprintln!("subagents call-log running: {error}");
+                            break 'execution Outcome::Unavailable;
+                        }
+                    }
+                    execute_subagent(&shared, command).await
+                };
+                if let Some(call) = &call {
+                    if admission.is_some() {
+                        shared.results.complete(call.id(), outcome.clone());
+                    }
+                    let status = detail.finish(&outcome);
+                    if let Err(error) = call.finish(status, &detail).await {
+                        eprintln!("subagents call-log terminal: {error}");
+                    }
+                }
+                let _ = reply.send(outcome);
             }
         }
     }
@@ -128,10 +167,13 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
             if endpoint != NativeEndpoint::OpenClawLocal {
                 return Outcome::Unsupported;
             }
-            return sealed_outcome(
-                shared.sealed_agents.export_package(agent_id),
-                Outcome::PackageExported,
-            );
+            let sealed_agents = Arc::clone(&shared.sealed_agents);
+            return match tokio::task::spawn_blocking(move || sealed_agents.export_package(agent_id))
+                .await
+            {
+                Ok(result) => sealed_outcome(result, Outcome::PackageExported),
+                Err(_) => Outcome::Unavailable,
+            };
         }
         Command::ExportCloudPackage {
             endpoint,
@@ -142,12 +184,15 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
             if endpoint != NativeEndpoint::OpenClawLocal {
                 return Outcome::Unsupported;
             }
-            return sealed_outcome(
-                shared
-                    .sealed_agents
-                    .export_cloud_package(agent_id, cloud_public_key, cloud_key_id),
-                Outcome::PackageExported,
-            );
+            let sealed_agents = Arc::clone(&shared.sealed_agents);
+            return match tokio::task::spawn_blocking(move || {
+                sealed_agents.export_cloud_package(agent_id, cloud_public_key, cloud_key_id)
+            })
+            .await
+            {
+                Ok(result) => sealed_outcome(result, Outcome::PackageExported),
+                Err(_) => Outcome::Unavailable,
+            };
         }
         Command::InstallPackage {
             endpoint,
@@ -163,15 +208,20 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
                 return Outcome::Unavailable;
             }
             let outcome = ops.subagents(Command::Delete { endpoint, input }).await;
-            if matches!(outcome, Outcome::Deleted(_)) {
-                match shared.sealed_agents.remove_package(agent_id) {
-                    Ok(_) | Err(SealedAgentError::NotFound) => {}
-                    Err(SealedAgentError::Rejected) => return Outcome::Rejected,
-                    Err(SealedAgentError::AlreadyExists) => return Outcome::Unknown,
-                    Err(SealedAgentError::Unknown) => return Outcome::Unavailable,
+            match outcome {
+                Outcome::Deleted(mut agent) => {
+                    if agent.native_succeeded() {
+                        agent.sealed_purge = match shared.sealed_agents.remove_package(agent_id) {
+                            Ok(_) | Err(SealedAgentError::NotFound) => {
+                                crate::model::SealedPurge::Completed
+                            }
+                            Err(_) => crate::model::SealedPurge::Failed,
+                        };
+                    }
+                    Outcome::Deleted(agent)
                 }
+                other => other,
             }
-            outcome
         }
         command => {
             let Some(ops) = shared.runtime_directory.subagent_ops(command.endpoint()) else {
@@ -219,25 +269,59 @@ async fn install_agent_package(
             workspace_initialization: WorkspaceInitialization::EmptyWorkspace,
         })
         .await;
-    if !matches!(outcome, Outcome::Created(_)) {
+    let Outcome::Created(agent) = outcome else {
         return outcome;
-    }
-    match shared
-        .sealed_agents
-        .install_prepared_package(package_path, cloud_metadata)
-    {
+    };
+    let result = if agent.agent_id == plan.agent_id() {
+        shared
+            .sealed_agents
+            .install_prepared_package(package_path, cloud_metadata)
+    } else {
+        Err(SealedAgentError::Rejected)
+    };
+    match result {
         Ok(receipt) => Outcome::PackageInstalled(receipt),
         Err(error) => {
-            let _ = ops
+            let compensation = ops
                 .subagents(Command::Delete {
                     endpoint,
                     input: AgentDelete {
-                        agent_id: plan.agent_id().to_owned(),
+                        agent_id: agent.agent_id.clone(),
                         delete_files: !plan.workspace_preexisted(),
                     },
                 })
                 .await;
-            sealed_error(error)
+            use crate::model::{CompensationOutcome, InstallCompensation, PackageInstallFailure};
+            let (outcome, failed_count, purge_failed_count) = match compensation {
+                Outcome::Deleted(deleted) => (
+                    if deleted.native_succeeded() {
+                        CompensationOutcome::Deleted
+                    } else {
+                        CompensationOutcome::Unavailable
+                    },
+                    deleted.failed_count,
+                    deleted.purge_failed_count,
+                ),
+                Outcome::Rejected => (CompensationOutcome::Rejected, 0, 0),
+                Outcome::Unsupported => (CompensationOutcome::Unsupported, 0, 0),
+                Outcome::Unavailable => (CompensationOutcome::Unavailable, 0, 0),
+                _ => (CompensationOutcome::OutcomeUnknown, 0, 0),
+            };
+            Outcome::PackageInstallFailed {
+                agent_id: agent.agent_id,
+                failure: match error {
+                    SealedAgentError::NotFound | SealedAgentError::Rejected => {
+                        PackageInstallFailure::Rejected
+                    }
+                    SealedAgentError::AlreadyExists => PackageInstallFailure::OutcomeUnknown,
+                    SealedAgentError::Unknown => PackageInstallFailure::Unavailable,
+                },
+                compensation: InstallCompensation {
+                    outcome,
+                    failed_count,
+                    purge_failed_count,
+                },
+            }
         }
     }
 }

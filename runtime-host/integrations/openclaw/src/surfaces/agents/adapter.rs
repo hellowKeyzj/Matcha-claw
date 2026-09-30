@@ -4,9 +4,9 @@ use crate::driver::OpenClawDriver;
 
 use super::projection::{
     agent_created, agent_deleted, agent_file, agent_updated, agents_file, agents_files,
-    agents_mutation, agents_read, agents_wait, configuration_display, configuration_mutation,
+    agents_mutation, agents_read, configuration_display, configuration_mutation,
     configuration_read_failure, native_configuration_model, native_create, native_delete,
-    native_file_name, native_skill_selection, native_tool_selection, native_update, native_wait,
+    native_file_name, native_skill_selection, native_tool_selection, native_update,
     skill_configuration_outcome, tool_configuration_outcome,
 };
 use subagents as agents;
@@ -43,12 +43,6 @@ impl OpenClawDriver {
                     });
                 agents_read(result)
             }
-            Command::Wait { input, .. } => {
-                let Ok(input) = native_wait(input) else {
-                    return Outcome::Rejected;
-                };
-                agents_wait(self.gateway.lock().await.wait_agent(input).await)
-            }
             Command::Create {
                 input,
                 workspace_initialization,
@@ -73,7 +67,7 @@ impl OpenClawDriver {
                             })
                             .is_err()
                         {
-                            Outcome::Unknown
+                            Outcome::WorkspaceInitializationFailed(agent_created(agent))
                         } else {
                             Outcome::Created(agent_created(agent))
                         }
@@ -170,13 +164,12 @@ impl OpenClawDriver {
             }
             Command::SetSkills {
                 agent_id, skills, ..
-            } => agents::configuration_mutation(configuration_mutation(
-                self.gateway
-                    .lock()
-                    .await
-                    .set_agent_skills(agent_id, skills)
-                    .await,
-            )),
+            } => match self.gateway.lock().await.set_agent_skills(agent_id, skills).await {
+                Ok(outcome) => agents::configuration_mutation(configuration_mutation(outcome)),
+                Err((unknown_skill_keys, non_canonical_skill_keys)) => Outcome::SkillConfiguration(
+                    agents::SkillConfigurationOutcome::InvalidSkillKeys { unknown_skill_keys, non_canonical_skill_keys },
+                ),
+            },
             Command::SkillConfiguration {
                 agent_id, trace_id, ..
             } => Outcome::SkillConfiguration(skill_configuration_outcome(

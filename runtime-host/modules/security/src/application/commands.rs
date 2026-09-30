@@ -3,10 +3,7 @@ use std::fmt;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-use crate::{
-    delivery::Settlement as SecurityPolicyDeliverySettlement, emergency::SecurityEmergencyOutcome,
-    operation as security_operation,
-};
+use crate::application::call::SecurityCall;
 
 pub enum SecurityCommand {
     ApplySavedPolicyProjection {
@@ -15,20 +12,20 @@ pub enum SecurityCommand {
     ReplacePolicy {
         correlation: String,
         policy: Value,
-        reply: oneshot::Sender<SecurityPolicyDeliverySettlement>,
+        call: SecurityCall,
     },
     RecoverPending {
         reply: oneshot::Sender<()>,
     },
     Emergency {
         correlation: String,
-        reply: oneshot::Sender<SecurityEmergencyOutcome>,
+        call: SecurityCall,
     },
     Operation {
         correlation: String,
         operation_id: String,
         input: Value,
-        reply: oneshot::Sender<security_operation::Outcome>,
+        call: SecurityCall,
     },
 }
 

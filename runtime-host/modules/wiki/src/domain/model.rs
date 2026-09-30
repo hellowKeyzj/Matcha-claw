@@ -718,6 +718,109 @@ pub struct WikiWriteInput {
     pub content: String,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WikiArchiveExportInput {
+    pub project_id: Option<String>,
+    pub destination: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WikiArchiveImportInput {
+    pub archive_path: String,
+    pub destination: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WikiRebuildIndexReceipt {
+    pub project_id: String,
+    pub pages: usize,
+    pub groups: usize,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WikiQuestionInput {
+    pub project_id: Option<String>,
+    pub task_id: String,
+    pub model_ref: String,
+    pub question: String,
+    #[serde(default)]
+    pub history: Vec<WikiQuestionHistory>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WikiQuestionHistory {
+    pub role: WikiQuestionHistoryRole,
+    pub content: String,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WikiQuestionHistoryRole {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WikiQuestionReference {
+    pub title: String,
+    pub path: String,
+    pub snippet: String,
+    pub graph_related_to: Vec<String>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WikiQuestionStatus {
+    Queued,
+    Retrieving,
+    Answering,
+    Done,
+    Cancelled,
+    Error,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WikiQuestionTask {
+    pub id: String,
+    pub project_id: String,
+    pub question: String,
+    pub model_ref: String,
+    pub status: WikiQuestionStatus,
+    pub answer: String,
+    pub references: Vec<WikiQuestionReference>,
+    pub error: Option<String>,
+    pub saved_path: Option<String>,
+    pub revision: u64,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WikiQuestionTaskSelector {
+    pub project_id: Option<String>,
+    pub task_id: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WikiQuestionTaskReceipt {
+    pub project_id: String,
+    pub task: WikiQuestionTask,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WikiQuestionSaveReceipt {
+    pub project_id: String,
+    pub saved_path: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiImportSourceInput {
@@ -773,6 +876,14 @@ impl WikiImportFolderReceipt {
     pub fn new(imported: Vec<WikiImportSourceReceipt>, skipped: Vec<WikiSourceSkip>) -> Self {
         Self { imported, skipped }
     }
+
+    pub(crate) fn imported(&self) -> &[WikiImportSourceReceipt] {
+        &self.imported
+    }
+
+    pub(crate) fn skipped(&self) -> &[WikiSourceSkip] {
+        &self.skipped
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -819,6 +930,22 @@ impl WikiRefreshSourcesReceipt {
             skipped,
         }
     }
+
+    pub(crate) fn imported(&self) -> &[WikiImportSourceReceipt] {
+        &self.imported
+    }
+
+    pub(crate) fn skipped(&self) -> &[WikiSourceSkip] {
+        &self.skipped
+    }
+
+    pub(crate) fn deleted(&self) -> &[WikiDeleteSourceReceipt] {
+        &self.deleted
+    }
+
+    pub(crate) fn moved(&self) -> &[WikiSourceMoveReceipt] {
+        &self.moved
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -851,6 +978,16 @@ impl WikiDeleteSourceReceipt {
             updated_pages,
             deleted_media,
         }
+    }
+
+    pub(crate) fn deleted_pages(&self) -> &[String] {
+        &self.deleted_pages
+    }
+    pub(crate) fn updated_pages(&self) -> &[String] {
+        &self.updated_pages
+    }
+    pub(crate) fn deleted_media(&self) -> &[String] {
+        &self.deleted_media
     }
 }
 
@@ -1004,6 +1141,10 @@ pub struct WikiSourceTasksReceipt {
 impl WikiSourceTasksReceipt {
     pub fn new(tasks: Vec<WikiSourceTask>) -> Self {
         Self { tasks }
+    }
+
+    pub(crate) fn tasks(&self) -> &[WikiSourceTask] {
+        &self.tasks
     }
 }
 
@@ -1310,20 +1451,37 @@ impl WikiWriteReceipt {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WikiSearchImage {
+    pub url: String,
+    pub alt: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WikiSearchHit {
-    relative_path: String,
-    title: String,
-    score: usize,
-    snippets: Vec<String>,
+    pub(crate) relative_path: String,
+    pub(crate) title: String,
+    pub(crate) score: f64,
+    pub(crate) snippets: Vec<String>,
+    pub(crate) title_match: bool,
+    pub(crate) vector_score: Option<f64>,
+    pub(crate) images: Vec<WikiSearchImage>,
+    pub(crate) content: Option<String>,
+    pub(crate) graph_related_to: Vec<String>,
 }
 
 impl WikiSearchHit {
-    pub fn new(relative_path: String, title: String, score: usize, snippets: Vec<String>) -> Self {
+    pub fn new(relative_path: String, title: String, score: f64, snippets: Vec<String>) -> Self {
         Self {
             relative_path,
             title,
             score,
             snippets,
+            title_match: false,
+            vector_score: None,
+            images: Vec::new(),
+            content: None,
+            graph_related_to: Vec::new(),
         }
     }
 
@@ -1331,21 +1489,33 @@ impl WikiSearchHit {
         &self.relative_path
     }
 
-    pub const fn score(&self) -> usize {
+    pub const fn score(&self) -> f64 {
         self.score
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WikiSearchReceipt {
-    query: String,
-    hits: Vec<WikiSearchHit>,
+    pub(crate) query: String,
+    pub(crate) hits: Vec<WikiSearchHit>,
+    pub(crate) mode: String,
+    pub(crate) token_hits: usize,
+    pub(crate) vector_hits: usize,
+    pub(crate) graph_hits: usize,
 }
 
 impl WikiSearchReceipt {
     pub fn new(query: String, hits: Vec<WikiSearchHit>) -> Self {
-        Self { query, hits }
+        let token_hits = hits.len();
+        Self {
+            query,
+            hits,
+            mode: "keyword".to_owned(),
+            token_hits,
+            vector_hits: 0,
+            graph_hits: 0,
+        }
     }
 
     pub fn hits(&self) -> &[WikiSearchHit] {

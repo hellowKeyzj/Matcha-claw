@@ -72,6 +72,10 @@ pub enum Command {
 pub enum Outcome {
     Detail(Result<Detail, ReadError>),
     Mutation(MutationOutcome),
+    Config {
+        outcome: ConfigOutcome,
+        invalid_keys: Vec<String>,
+    },
     Upload(UploadOutcome),
     Uninstall(RemoveOutcome),
     Import(ImportOutcome),
@@ -127,13 +131,23 @@ pub enum MutationOutcome {
     Rejected,
     Unknown,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConfigOutcome {
+    Accepted,
+    Partial,
+    Rejected,
+    Unknown,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UploadOutcome {
     Accepted(UploadReceipt),
     Rejected,
     Unknown,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UploadReceipt {
     pub upload_id: String,
     pub received_bytes: u64,
@@ -388,9 +402,11 @@ impl Command {
         })
     }
     pub fn import_markdown(content: String) -> Result<Self, ()> {
-        (!content.is_empty())
-            .then_some(Self::ImportMarkdown { content })
-            .ok_or(())
+        (!content.is_empty()
+            && content.len() <= crate::bundle::MAX_CONTENT_BYTES
+            && !content.contains('\0'))
+        .then_some(Self::ImportMarkdown { content })
+        .ok_or(())
     }
     pub fn import_bundle(bundle: Bundle) -> Result<Self, ()> {
         Ok(Self::ImportBundle { bundle })

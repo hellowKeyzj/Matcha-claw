@@ -1,6 +1,5 @@
 use serde_json::{Value, json};
 
-use crate::delete::Outcome;
 use platform::capability::CapabilityDecisionVerifier;
 
 const OPERATION_ID: &str = "channels.config.delete";
@@ -73,21 +72,21 @@ fn identity(value: Option<&Value>) -> Option<String> {
 }
 
 pub enum Delivery {
-    Outcome(Outcome),
+    Accepted(platform::call::CallReceipt),
     Unavailable,
 }
 
 impl Delivery {
     pub const fn status_code(&self) -> u16 {
         match self {
-            Self::Outcome(_) => 200,
+            Self::Accepted(_) => 202,
             Self::Unavailable => 503,
         }
     }
 
     pub fn body(&self) -> Value {
         match self {
-            Self::Outcome(outcome) => json!({ "outcome": outcome }),
+            Self::Accepted(receipt) => json!(receipt),
             Self::Unavailable => json!({ "outcome": "unknown" }),
         }
     }
@@ -120,15 +119,19 @@ mod tests {
     }
 
     #[test]
-    fn delete_delivery_preserves_each_terminal_outcome() {
+    fn delete_delivery_preserves_admission_and_unavailable() {
+        let call_id = platform::call::CallId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let delivery = Delivery::Accepted(platform::call::CallReceipt { call_id, accepted: true });
+        assert_eq!(delivery.status_code(), 202);
+        assert_eq!(delivery.body(), json!({ "callId": "0123456789abcdef0123456789abcdef", "accepted": true }));
+        assert_eq!(Delivery::Unavailable.status_code(), 503);
+        assert_eq!(Delivery::Unavailable.body()["outcome"], "unknown");
         for (outcome, expected) in [
-            (Outcome::Confirmed, "confirmed"),
-            (Outcome::TargetRejected, "target_rejected"),
-            (Outcome::Unknown, "unknown"),
+            (crate::delete::Outcome::Confirmed, "confirmed"),
+            (crate::delete::Outcome::TargetRejected, "target_rejected"),
+            (crate::delete::Outcome::Unknown, "unknown"),
         ] {
-            let delivery = Delivery::Outcome(outcome);
-            assert_eq!(delivery.status_code(), 200);
-            assert_eq!(delivery.body()["outcome"], expected);
+            assert_eq!(json!(outcome), expected);
         }
     }
 }

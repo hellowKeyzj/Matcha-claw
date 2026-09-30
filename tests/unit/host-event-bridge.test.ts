@@ -130,6 +130,7 @@ function createRuntimeHost(input: {
         safeEventHandler = null;
       };
     }),
+    onDisconnect: vi.fn(() => () => {}),
     onExit: vi.fn((handler: (exit: DirectRuntimeHostExit) => void) => {
       exitHandler = handler;
       return () => {

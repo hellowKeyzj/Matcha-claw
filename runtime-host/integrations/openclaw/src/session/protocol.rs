@@ -742,11 +742,16 @@ impl fmt::Debug for SessionDeleteParams {
 #[derive(Clone, Eq, PartialEq)]
 pub struct SessionCreateResult {
     native_session_id: NativeSessionId,
+    model_state: Option<sessions_module::state::SessionModelState>,
 }
 
 impl SessionCreateResult {
     pub fn native_session_id(&self) -> &NativeSessionId {
         &self.native_session_id
+    }
+
+    pub fn model_state(&self) -> Option<sessions_module::state::SessionModelState> {
+        self.model_state.clone()
     }
 }
 
@@ -1798,6 +1803,7 @@ pub fn decode_session_create_result(
     (result.ok && result.key == expected_key.as_str())
         .then_some(SessionCreateResult {
             native_session_id: result.native_session_id,
+            model_state: result.model_state,
         })
         .ok_or(ProtocolError::InvalidSessionCreateResult)
 }
@@ -1830,11 +1836,51 @@ struct PeerSessionCreateResult {
     ok: bool,
     key: String,
     native_session_id: NativeSessionId,
+    model_state: Option<sessions_module::state::SessionModelState>,
 }
 
 impl<'de> Deserialize<'de> for PeerSessionCreateResult {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ResolvedModel {
+            model_provider: ModelRef,
+            model: ModelRef,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Entry {
+            model_override_source: Option<SessionModelOverrideSource>,
+        }
+        #[derive(Deserialize)]
+        struct ModelProjection {
+            resolved: Option<ResolvedModel>,
+            entry: Option<Entry>,
+        }
+
         let payload = Value::deserialize(deserializer)?;
+        let projection = ModelProjection::deserialize(&payload).map_err(D::Error::custom)?;
+        let model_state = projection.resolved.map(|resolved| {
+            sessions_module::state::SessionModelState {
+                selected: Some(openclaw_model_identity(
+                    Some(resolved.model_provider.as_str()),
+                    resolved.model.as_str(),
+                )),
+                active: None,
+                override_source: projection
+                    .entry
+                    .and_then(|entry| entry.model_override_source)
+                    .map(|source| match source {
+                        SessionModelOverrideSource::User => {
+                            sessions_module::state::SessionModelOverrideSource::User
+                        }
+                        SessionModelOverrideSource::Auto => {
+                            sessions_module::state::SessionModelOverrideSource::Auto
+                        }
+                    }),
+                selection_id: None,
+            }
+        });
         let object = payload
             .as_object()
             .ok_or_else(|| D::Error::custom("sessions.create result must be an object"))?;
@@ -1858,6 +1904,7 @@ impl<'de> Deserialize<'de> for PeerSessionCreateResult {
             key: serde_json::from_value(key).map_err(D::Error::custom)?,
             native_session_id: serde_json::from_value(native_session_id)
                 .map_err(D::Error::custom)?,
+            model_state,
         })
     }
 }

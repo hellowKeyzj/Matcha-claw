@@ -150,26 +150,50 @@ impl ClawHubSearchResult {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SealedSkillPackageExport {
     skill_key: String,
-    package_path: String,
+    file_name: String,
+    package_sha256: String,
+    package_bytes: Vec<u8>,
 }
 
 impl SealedSkillPackageExport {
-    pub fn new(skill_key: String, package_path: String) -> Self {
+    pub fn new(
+        skill_key: String,
+        file_name: String,
+        package_sha256: String,
+        package_bytes: Vec<u8>,
+    ) -> Self {
         Self {
             skill_key,
-            package_path,
+            file_name,
+            package_sha256,
+            package_bytes,
         }
     }
 
     pub fn skill_key(&self) -> &str {
         &self.skill_key
     }
+    pub fn file_name(&self) -> &str {
+        &self.file_name
+    }
+    pub fn package_sha256(&self) -> &str {
+        &self.package_sha256
+    }
+    pub fn into_package_bytes(self) -> Vec<u8> {
+        self.package_bytes
+    }
+}
 
-    pub fn package_path(&self) -> &str {
-        &self.package_path
+impl std::fmt::Debug for SealedSkillPackageExport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SealedSkillPackageExport")
+            .field("skill_key", &self.skill_key)
+            .field("size_bytes", &self.package_bytes.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -199,6 +223,7 @@ pub trait SealedSkillStorePort: Send + Sync {
         token: &str,
         skill_key: String,
         path: String,
+        expected_package_sha256: Option<&str>,
     ) -> Result<SealedResourceRead, SealedSkillError>;
 
     fn remove_sealed_skill(&self, skill_key: String) -> Result<bool, SealedSkillError>;
@@ -259,17 +284,19 @@ impl SealedSkillCatalogEntry {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SealedResourceRead {
     content: Vec<u8>,
     metering_binding: Option<String>,
+    package_sha256: String,
 }
 
 impl SealedResourceRead {
-    pub fn new(content: Vec<u8>, metering_binding: Option<String>) -> Self {
+    pub fn new(content: Vec<u8>, metering_binding: Option<String>, package_sha256: String) -> Self {
         Self {
             content,
             metering_binding,
+            package_sha256,
         }
     }
 
@@ -279,6 +306,24 @@ impl SealedResourceRead {
 
     pub fn metering_binding(&self) -> Option<&str> {
         self.metering_binding.as_deref()
+    }
+
+    pub fn package_sha256(&self) -> &str {
+        &self.package_sha256
+    }
+}
+
+impl std::fmt::Debug for SealedResourceRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SealedResourceRead")
+            .field(
+                "content",
+                &format_args!("[REDACTED:{} bytes]", self.content.len()),
+            )
+            .field("metering_binding", &self.metering_binding)
+            .field("package_sha256", &self.package_sha256)
+            .finish()
     }
 }
 
@@ -309,6 +354,7 @@ impl SealedSkillRejectionDetail {
 pub enum SealedSkillError {
     AlreadyExists,
     NotFound,
+    PackageChanged,
     Rejected,
     RejectedWith(SealedSkillRejectionDetail),
     Unknown,
