@@ -38,7 +38,7 @@ impl CanonicalIngressResult {
     pub(crate) fn from_transcript_message(
         session_key: SessionKey,
         source_epoch: Option<u64>,
-        route_key: Option<String>,
+
         message: Message,
     ) -> Option<Self> {
         let run_id = message
@@ -53,12 +53,12 @@ impl CanonicalIngressResult {
             run_id.clone(),
             source_epoch,
             source_cursor,
-            route_key.clone(),
+
             message_id,
         );
         Some(Self::Produced(CanonicalSessionDelta {
             session_key,
-            route_key,
+
             source_epoch: provenance.source_epoch(),
             source_cursor: provenance.source_cursor(),
             run_id,
@@ -71,19 +71,19 @@ impl CanonicalIngressResult {
         session_key: SessionKey,
         source_epoch: Option<u64>,
         source_cursor: u64,
-        route_key: Option<String>,
+
     ) -> Self {
         let provenance = SessionEventProvenance::from_replay_source(
             session_key.clone(),
             None,
             source_epoch,
             Some(source_cursor),
-            route_key.clone(),
+
             None,
         );
         Self::Produced(CanonicalSessionDelta {
             session_key,
-            route_key,
+
             source_epoch: provenance.source_epoch(),
             source_cursor: provenance.source_cursor(),
             run_id: None,
@@ -100,7 +100,7 @@ impl CanonicalIngressResult {
 #[derive(Clone, Eq, PartialEq)]
 pub struct CanonicalSessionDelta {
     session_key: SessionKey,
-    route_key: Option<String>,
+
     source_epoch: Option<u64>,
     source_cursor: Option<u64>,
     run_id: Option<RunId>,
@@ -113,9 +113,6 @@ impl CanonicalSessionDelta {
         &self.session_key
     }
 
-    pub fn route_key(&self) -> Option<&str> {
-        self.route_key.as_deref()
-    }
 
     pub const fn source_epoch(&self) -> Option<u64> {
         self.source_epoch
@@ -135,6 +132,10 @@ impl CanonicalSessionDelta {
 
     pub fn changes(&self) -> &[CanonicalSessionChange] {
         &self.changes
+    }
+
+    pub(crate) fn replace_changes(&mut self, changes: Vec<CanonicalSessionChange>) {
+        self.changes = changes;
     }
 }
 
@@ -392,6 +393,11 @@ pub enum CanonicalSessionChange {
     TranscriptMessage {
         message: Message,
     },
+    ItemsReplaced {
+        old_item_ids: Vec<String>,
+        anchor: sessions_module::state::ItemAnchor,
+        items: Vec<sessions_module::state::SessionItem>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -521,6 +527,8 @@ impl fmt::Debug for CanonicalSessionChange {
                 .debug_struct("RecoveryRequired")
                 .field("reason", reason)
                 .finish(),
+            Self::ItemsReplaced { old_item_ids, items, .. } => formatter.debug_struct("ItemsReplaced")
+                .field("old_count", &old_item_ids.len()).field("new_count", &items.len()).finish(),
             Self::TranscriptMessage { message } => formatter
                 .debug_struct("TranscriptMessage")
                 .field("role", &message.role())
@@ -560,29 +568,26 @@ pub struct CanonicalSessionDeltaProducer;
 impl CanonicalSessionDeltaProducer {
     pub fn from_facts(
         facts: &LiveSessionFacts,
-        route_key: Option<String>,
+
     ) -> Option<CanonicalSessionDelta> {
         let cursor = facts.cursor();
-        Self::from_native_event(facts.event(), cursor.gateway_epoch(), route_key)
+        Self::from_native_event(facts.event(), cursor.gateway_epoch())
     }
 
     pub(crate) fn from_native_changes(
         event: &SessionEventEnvelope,
         source_epoch: Option<crate::gateway::ingress::GatewayEpoch>,
-        route_key: Option<String>,
+
         changes: Vec<CanonicalSessionChange>,
     ) -> Option<CanonicalSessionDelta> {
-        if changes.is_empty() {
-            return None;
-        }
         let provenance = SessionEventProvenance::from_native_event(
             event,
             source_epoch.map(crate::gateway::ingress::GatewayEpoch::as_u64),
-            route_key.clone(),
+
         );
         Some(CanonicalSessionDelta {
             session_key: event.session_key.clone(),
-            route_key,
+
             source_epoch: provenance.source_epoch(),
             source_cursor: provenance.source_cursor(),
             run_id: event.run_id.clone(),
@@ -594,7 +599,7 @@ impl CanonicalSessionDeltaProducer {
     pub(crate) fn from_native_event(
         event: &SessionEventEnvelope,
         source_epoch: Option<crate::gateway::ingress::GatewayEpoch>,
-        route_key: Option<String>,
+
     ) -> Option<CanonicalSessionDelta> {
         let run_id = event.run_id.clone();
         let change = match event.kind {
@@ -610,17 +615,17 @@ impl CanonicalSessionDeltaProducer {
                             return Self::from_native_changes(
                                 event,
                                 source_epoch,
-                                route_key,
-                                chat_snapshot_chunks(event, chat),
+
+                                chat_snapshot_chunks(chat),
                             );
                         }
                         return Self::from_native_changes(
                             event,
                             source_epoch,
-                            route_key,
+
                             vec![CanonicalSessionChange::AssistantTurnChunk {
                                 run_id: chat.run_id.clone(),
-                                message_id: native_message_id(event),
+                                message_id: None,
                                 kind: AssistantTurnChunkKind::Text,
                                 text: chat.delta_text.clone()?,
                                 replace: chat.replace,
@@ -640,12 +645,12 @@ impl CanonicalSessionDeltaProducer {
                         };
                         let mut changes =
                             if chat.message_text.is_some() || chat.message_thinking.is_some() {
-                                chat_snapshot_chunks(event, chat)
+                                chat_snapshot_chunks(chat)
                             } else {
                                 Vec::new()
                             };
                         changes.push(terminal);
-                        return Self::from_native_changes(event, source_epoch, route_key, changes);
+                        return Self::from_native_changes(event, source_epoch, changes);
                     }
                 }
             }
@@ -665,8 +670,11 @@ impl CanonicalSessionDeltaProducer {
                         run_id: activity.run_id.clone(),
                         message_id: Some(message_id.clone()),
                         kind: AssistantTurnChunkKind::Text,
-                        text: text.clone().unwrap_or_default(),
-                        replace: false,
+                        text: match lifecycle {
+                            MessageActivityLifecycle::Delta => text.clone()?,
+                            MessageActivityLifecycle::Started | MessageActivityLifecycle::Completed => String::new(),
+                        },
+                        replace: matches!(lifecycle, MessageActivityLifecycle::Delta),
                         status: AssistantTurnStatus::from_message_lifecycle(*lifecycle),
                     },
                     SessionActivityKind::Tool {
@@ -695,7 +703,7 @@ impl CanonicalSessionDeltaProducer {
                                 .or_else(|| event.embedded_message_id.clone()),
                             kind: AssistantTurnChunkKind::Thinking,
                             text: text.clone(),
-                            replace: false,
+                            replace: true,
                             status: AssistantTurnStatus::Streaming,
                         }
                     }
@@ -772,23 +780,23 @@ impl CanonicalSessionDeltaProducer {
             }
             SessionEventKind::Changed => return None,
         };
-        Self::from_native_changes(event, source_epoch, route_key, vec![change])
+        Self::from_native_changes(event, source_epoch, vec![change])
     }
 
     pub(crate) fn recovery(
         session_key: SessionKey,
-        route_key: Option<String>,
+
         source_epoch: Option<crate::gateway::ingress::GatewayEpoch>,
         reason: CanonicalRecoveryReason,
     ) -> CanonicalSessionDelta {
         let provenance = SessionEventProvenance::recovery(
             session_key.clone(),
-            route_key.clone(),
+
             source_epoch.map(crate::gateway::ingress::GatewayEpoch::as_u64),
         );
         CanonicalSessionDelta {
             session_key,
-            route_key,
+
             source_epoch: provenance.source_epoch(),
             source_cursor: None,
             run_id: None,
@@ -824,30 +832,19 @@ fn chat_status_change(chat: &super::protocol::ChatEvent) -> Option<CanonicalSess
     })
 }
 
-fn chat_snapshot_chunks(
-    event: &SessionEventEnvelope,
-    chat: &super::protocol::ChatEvent,
-) -> Vec<CanonicalSessionChange> {
+fn chat_snapshot_chunks(chat: &super::protocol::ChatEvent) -> Vec<CanonicalSessionChange> {
     let mut changes = Vec::with_capacity(2);
-    if let Some(text) = chat.message_thinking.clone() {
-        changes.push(CanonicalSessionChange::AssistantTurnChunk {
-            run_id: chat.run_id.clone(),
-            message_id: native_message_id(event),
-            kind: AssistantTurnChunkKind::Thinking,
-            text,
-            replace: chat.replace,
-            status: AssistantTurnStatus::Streaming,
-        });
-    }
-    if let Some(text) = chat.message_text.clone() {
-        changes.push(CanonicalSessionChange::AssistantTurnChunk {
-            run_id: chat.run_id.clone(),
-            message_id: native_message_id(event),
-            kind: AssistantTurnChunkKind::Text,
-            text,
-            replace: chat.replace,
-            status: AssistantTurnStatus::Streaming,
-        });
+    let text = chat.delta_text.as_deref().filter(|_| chat.replace).or(chat.message_text.as_deref());
+    for (kind, text) in [
+        (AssistantTurnChunkKind::Thinking, chat.message_thinking.as_deref()),
+        (AssistantTurnChunkKind::Text, text),
+    ] {
+        if let Some(text) = text {
+            changes.push(CanonicalSessionChange::AssistantTurnChunk {
+                run_id: chat.run_id.clone(), message_id: None, kind, text: text.to_owned(),
+                replace: true, status: AssistantTurnStatus::Streaming,
+            });
+        }
     }
     changes
 }

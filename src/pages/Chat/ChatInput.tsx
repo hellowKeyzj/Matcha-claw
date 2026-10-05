@@ -6,10 +6,10 @@
  * Files are staged to disk via IPC. Inline attachments send opaque staged IDs;
  * larger local files keep their source path for prompt-side reads.
  */
-import { memo, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, type ReactNode, type SetStateAction } from 'react';
+import { memo, useState, useRef, useEffect, useLayoutEffect, useImperativeHandle, useCallback, useMemo, type ReactNode, type Ref, type SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
 import * as SelectPrimitive from '@radix-ui/react-select';
-import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare, ShieldCheck, Settings2 } from 'lucide-react';
+import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare, ShieldCheck, Settings2, GitBranch, Target } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import type {
@@ -23,6 +23,7 @@ import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
 import { ChatImageLightbox } from './components/ChatImageLightbox';
 import { ChatSessionConnectorStatus } from './components/ChatSessionConnectorStatus';
+import { ChatWikiProjectPicker } from './components/ChatWikiProjectPicker';
 import { AgentSkillManagerDialog, type AgentSkillPreviewState } from './components/AgentSkillManagerDialog';
 import type { AgentSkillOption } from './components/AgentSkillConfigPanel';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
@@ -30,7 +31,7 @@ import type { ChatSendAttachment, ChatSendResult } from '@/stores/chat';
 import { CHAT_INLINE_ATTACHMENT_MAX_BYTES } from '@/stores/chat/types';
 import { resolveChatSendGateForPayload, type ChatSendGate } from '@/stores/chat/send-gate';
 import type { ChatContextUsageViewModel } from './context-usage';
-import type { ComposerDraftSelection } from '@/stores/composer-drafts';
+import type { ComposerMode, ComposerDraftSelection } from '@/stores/composer-drafts';
 import type { SessionRunPhase } from '@/types/session/runtime-state';
 import { createSessionTraceId, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
 
@@ -81,6 +82,8 @@ interface SelectedSkill {
   filePath?: string;
   baseDir?: string;
 }
+
+type SlashItem = (SelectedSkill & { kind: 'skill' }) | { kind: 'goal'; id: 'goal'; name: string };
 
 interface ModelPickerOption {
   id: string;
@@ -152,9 +155,17 @@ interface QuickPhrase {
 
 const DEFAULT_QUICK_PHRASES: QuickPhrase[] = [];
 
+export interface ChatInputHandle {
+  replaceText: (text: string) => void;
+  focus: () => void;
+}
+
 interface ChatInputProps {
+  ref?: Ref<ChatInputHandle>;
   onSend: (text: string, attachments?: ChatSendAttachment[]) => ChatSendResult | Promise<ChatSendResult>;
   onStop?: () => void;
+  goal?: { supported: boolean; mode: ComposerMode | null; busy: boolean; unknown: boolean; canDiscard: boolean; error: string | null; onStart: () => void; onCancel: () => void; onRefresh: () => void; onSubmit: (text: string, attachments?: ChatSendAttachment[]) => Promise<ChatSendResult> };
+  goalDock?: ReactNode;
   draft?: string;
   draftKey?: string;
   onDraftChange?: (update: SetStateAction<string>) => void;
@@ -165,6 +176,7 @@ interface ChatInputProps {
   modelPicker?: ModelPickerState | null;
   permissionPicker?: PermissionPickerState | null;
   contextUsage?: ChatContextUsageViewModel | null;
+  teamDesign?: { active: boolean; disabled: boolean; onStart: () => void; onExit: () => void } | null;
   disabled?: boolean;
   reconnecting?: boolean;
   sending?: boolean;
@@ -414,8 +426,11 @@ function waitForAttachmentPlaceholderFrame(): Promise<void> {
 // ── Component ────────────────────────────────────────────────────
 
 export const ChatInput = memo(function ChatInput({
+  ref,
   onSend,
   onStop,
+  goal,
+  goalDock,
   draft,
   draftKey,
   onDraftChange,
@@ -426,6 +441,7 @@ export const ChatInput = memo(function ChatInput({
   modelPicker = null,
   permissionPicker = null,
   contextUsage = null,
+  teamDesign = null,
   disabled = false,
   reconnecting = false,
   sending = false,
@@ -472,6 +488,7 @@ export const ChatInput = memo(function ChatInput({
     filePath?: string;
   } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [reuseSelection, setReuseSelection] = useState<ComposerDraftSelection | null>(null);
   const permissionPickerRef = useRef<HTMLDivElement>(null);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const isComposingRef = useRef(false);
@@ -489,13 +506,13 @@ export const ChatInput = memo(function ChatInput({
     return new Set(allowedSkillIds.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim()));
   }, [allowedSkillIds]);
 
-  const slashItems = useMemo<SelectedSkill[]>(() => {
+  const slashItems = useMemo<SlashItem[]>(() => {
     if (!slashOpen || slashStart < 0 || slashEnd < slashStart) {
       return [];
     }
     const query = normalizeSearchText(input.slice(slashStart + 1, slashEnd));
     const selectedIds = new Set(selectedSkills.map((skill) => skill.id));
-    return skills
+    const skillItems = skills
       .filter((skill) => (
         skill.enabled
         && skill.eligible === true
@@ -510,13 +527,17 @@ export const ChatInput = memo(function ChatInput({
         return fields.some((field) => normalizeSearchText(field).includes(query));
       })
       .map((skill) => ({
+        kind: 'skill' as const,
         id: skill.id,
         name: skill.name,
         icon: skill.icon || '🧩',
         filePath: skill.filePath,
         baseDir: skill.baseDir,
       }));
-  }, [allowedSkillIdSet, input, selectedSkills, skills, slashEnd, slashOpen, slashStart]);
+    const goalItems: SlashItem[] = goal?.supported && !goal.mode && (!query || 'goal'.includes(query))
+      ? [{ kind: 'goal', id: 'goal', name: t('goal.set') }] : [];
+    return [...goalItems, ...skillItems];
+  }, [allowedSkillIdSet, goal?.mode, goal?.supported, input, selectedSkills, skills, slashEnd, slashOpen, slashStart, t]);
   const slashSkillsLoading = slashOpen && !skillsSnapshotReady;
 
   const rememberDraftSelection = useCallback((textarea = textareaRef.current) => {
@@ -666,6 +687,22 @@ export const ChatInput = memo(function ChatInput({
     setPermissionPickerOpen(false);
   }, [closeMention, closeQuickPhrase, closeSlash]);
 
+  useImperativeHandle(ref, () => ({
+    focus: () => textareaRef.current?.focus({ preventScroll: true }),
+    replaceText: (text) => {
+      const selection: ComposerDraftSelection = { start: text.length, end: text.length, direction: 'none' };
+      setInputAndSelection(text, selection);
+      closeComposerPopovers();
+      setReuseSelection(selection);
+    },
+  }), [closeComposerPopovers, setInputAndSelection]);
+
+  useLayoutEffect(() => {
+    if (!reuseSelection) return;
+    textareaRef.current?.focus({ preventScroll: true });
+    textareaRef.current?.setSelectionRange(reuseSelection.start, reuseSelection.end);
+  }, [reuseSelection]);
+
   const refreshMentionCandidates = useCallback((nextInput: string, cursor: number) => {
     if (mentionCandidates.length === 0) {
       closeMention();
@@ -724,7 +761,7 @@ export const ChatInput = memo(function ChatInput({
     closeQuickPhrase();
   }, [closeMention, closeQuickPhrase, closeSlash]);
 
-  const applySlashSelection = useCallback((candidate: SelectedSkill) => {
+  const applySlashSelection = useCallback((candidate: SlashItem) => {
     if (!textareaRef.current || slashStart < 0 || slashEnd < slashStart) {
       return;
     }
@@ -734,16 +771,17 @@ export const ChatInput = memo(function ChatInput({
     if (before.length > 0 && after.length > 0 && !/\s$/.test(before) && !/^\s/.test(after)) {
       nextValue = `${before} ${after}`;
     }
-    nextValue = nextValue.replace(/\s{2,}/g, ' ');
+    if (candidate.kind === 'skill') nextValue = nextValue.replace(/\s{2,}/g, ' ');
     const caret = before.length;
     setInputAndSelection(nextValue, { start: caret, end: caret, direction: 'none' });
-    setSelectedSkills((prev) => (prev.some((item) => item.id === candidate.id) ? prev : [...prev, candidate]));
+    if (candidate.kind === 'goal') goal?.onStart();
+    else setSelectedSkills((prev) => (prev.some((item) => item.id === candidate.id) ? prev : [...prev, candidate]));
     closeSlash();
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
       textareaRef.current?.setSelectionRange(caret, caret);
     });
-  }, [closeSlash, input, setInputAndSelection, slashEnd, slashStart]);
+  }, [closeSlash, goal, input, setInputAndSelection, slashEnd, slashStart]);
 
   const toggleQuickPhrase = useCallback(() => {
     setQuickPhraseOpen((open) => !open);
@@ -1086,11 +1124,15 @@ export const ChatInput = memo(function ChatInput({
     attachmentCount: readableAttachmentCount,
     selectedSkillCount: selectedSkills.length,
   });
-  const canSend = payloadGate.canSend
+  const invalidGoalAttachments = Boolean(goal?.mode) && attachments.some((attachment) => isDirectoryAttachment(attachment) || attachment.fileSize > CHAT_INLINE_ATTACHMENT_MAX_BYTES || Boolean(goal?.mode?.goalId));
+  const editingGoal = Boolean(goal?.mode?.goalId);
+  const effectiveSending = sending && !editingGoal;
+  const canSend = (payloadGate.canSend || editingGoal && !payloadGate.canSend && (payloadGate.reason === 'active' || payloadGate.reason === 'stopping'))
+    && (!goal?.mode || Boolean(input.trim()) && goal.supported && !goal.busy && !goal.unknown && !invalidGoalAttachments)
     && allReady
     && !disabled
-    && !approvalWaiting
-    && !imageGenerationActive;
+    && (editingGoal || !approvalWaiting)
+    && (editingGoal || !imageGenerationActive);
   const canStop = sending && !stopping && !disabled && !!onStop;
   const modelPickerDisabled = !modelPicker
     || modelPicker.disabled
@@ -1120,7 +1162,7 @@ export const ChatInput = memo(function ChatInput({
     if (!canSend) return;
     const readyAttachments = attachments.filter((attachment) => attachment.status === 'ready');
     const rawText = input.trim();
-    const textToSend = buildSkillPrefixedMessage(rawText, selectedSkills);
+    const textToSend = goal?.mode ? input : buildSkillPrefixedMessage(rawText, selectedSkills);
     const attachmentsToSend = readyAttachments.length > 0
       ? readyAttachments.map(({ stagedAttachmentId, entryKind, fileName, mimeType, fileSize, preview, sourcePath }) => ({
           stagedAttachmentId,
@@ -1137,7 +1179,7 @@ export const ChatInput = memo(function ChatInput({
       .filter((id) => ownedStagedAttachmentIdsRef.current.has(id));
     let result: ChatSendResult;
     try {
-      result = await onSend(textToSend, attachmentsToSend);
+      result = goal?.mode ? await goal.onSubmit(textToSend, attachmentsToSend) : await onSend(textToSend, attachmentsToSend);
     } catch {
       releaseStagedAttachmentIds(stagedIdsToSend, true);
       setAttachments([]);
@@ -1151,7 +1193,7 @@ export const ChatInput = memo(function ChatInput({
     stagedIdsToSend.forEach((stagedAttachmentId) => {
       ownedStagedAttachmentIdsRef.current.delete(stagedAttachmentId);
     });
-    setInputAndSelection('', { start: 0, end: 0, direction: 'none' });
+    if (!goal?.mode) setInputAndSelection('', { start: 0, end: 0, direction: 'none' });
     closeMention();
     closeSlash();
     closeQuickPhrase();
@@ -1160,7 +1202,7 @@ export const ChatInput = memo(function ChatInput({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, input, onSend, releaseStagedAttachmentIds, selectedSkills, setInputAndSelection]);
+  }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, goal, input, onSend, releaseStagedAttachmentIds, selectedSkills, setInputAndSelection]);
 
   const handleStop = useCallback(() => {
     logSessionTrace('stop.intent', createSessionTraceId('stop-intent'), {
@@ -1315,7 +1357,7 @@ export const ChatInput = memo(function ChatInput({
     [stageBufferFiles, stageDroppedPathFiles],
   );
 
-  const placeholderText = resolveInputPlaceholder(disabled, approvalWaiting, t);
+  const placeholderText = goal?.mode && !disabled && !approvalWaiting ? t('goal.placeholder') : resolveInputPlaceholder(disabled, approvalWaiting, t);
   const composerNoticeText = resolveComposerNoticeText(
     disabled,
     approvalWaiting,
@@ -1324,12 +1366,13 @@ export const ChatInput = memo(function ChatInput({
 
   return (
     <div
-      className="w-full"
+      className="w-full text-left"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
       <div className={`${CHAT_LAYOUT_TOKENS.inputRail} chat-scroll-sync-input-inner`}>
+        {goalDock}
         {reconnecting ? (
           <div className="mb-2 rounded-full border border-border/45 bg-background px-3 py-1.5 text-xs text-muted-foreground shadow-none">
             {t('input.gatewayRecoveringNotice')}
@@ -1338,6 +1381,43 @@ export const ChatInput = memo(function ChatInput({
         {composerNoticeText ? (
           <div className="mb-2 rounded-full border border-border/45 bg-background px-3 py-1.5 text-xs text-muted-foreground shadow-none">
             {composerNoticeText}
+          </div>
+        ) : null}
+        {teamDesign ? (
+          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            {teamDesign.active ? (
+              <>
+                <div className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full border border-primary/25 bg-primary/5 pl-3.5 pr-1 text-xs font-medium text-primary">
+                  <GitBranch aria-hidden="true" className="h-3.5 w-3.5" />
+                  <span role="status">{t('input.teamDesignInProgress')}</span>
+                  <span title={t(sending || approvalWaiting || !sendGate.canSend ? 'input.teamDesignExitWaiting' : 'input.teamDesignExit')}>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-primary"
+                      aria-label={t('input.teamDesignExit')}
+                      disabled={disabled || sending || approvalWaiting || teamDesign.disabled || !sendGate.canSend}
+                      onClick={teamDesign.onExit}
+                    >
+                      <X aria-hidden="true" className="h-3.5 w-3.5" />
+                    </Button>
+                  </span>
+                </div>
+                <span className="text-xs text-muted-foreground">{t('input.teamDesignActive')}</span>
+              </>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={disabled || sending || approvalWaiting || teamDesign.disabled}
+                onClick={teamDesign.onStart}
+              >
+                <GitBranch aria-hidden="true" className="h-3.5 w-3.5" />
+                {t('input.teamDesignStart')}
+              </Button>
+            )}
           </div>
         ) : null}
         {/* Input Row */}
@@ -1350,6 +1430,19 @@ export const ChatInput = memo(function ChatInput({
         >
           <div className="relative min-w-0">
             <div className="px-2 pt-1.5">
+              {goal?.mode ? (
+                <div className="mb-2 space-y-1">
+                  <span className="inline-flex items-center gap-2 rounded-full border border-border/60 bg-background px-2.5 py-1 text-xs">
+                    <Target aria-hidden="true" className="h-3.5 w-3.5" />
+                    {t(goal.mode.goalId ? 'goal.edit' : 'goal.set')}
+                    <button type="button" className="rounded-full p-1 focus-visible:ring-2 focus-visible:ring-ring" aria-label={t('goal.cancel')} disabled={goal.busy || goal.unknown && !goal.canDiscard} onClick={goal.onCancel}><X aria-hidden="true" className="h-3 w-3" /></button>
+                  </span>
+                  {invalidGoalAttachments ? <p role="alert" className="text-xs text-destructive">{t(goal.mode.goalId ? 'goal.noAttachmentsOnEdit' : 'goal.inlineOnly')}</p> : null}
+                  {goal.unknown ? <div role="alert" className="flex items-center gap-2 text-xs text-destructive"><span>{t('goal.errors.unknown')}</span><Button type="button" variant="link" className="h-auto text-xs" disabled={goal.busy} onClick={goal.onRefresh}>{t('goal.refresh')}</Button></div> : null}
+                  {goal.error && !goal.unknown ? <p role="alert" className="text-xs text-destructive">{t(`goal.errors.${goal.error}`, { defaultValue: goal.error })}</p> : null}
+                  {!goal.supported ? <p role="status" className="text-xs text-muted-foreground">{t('goal.errors.unsupported')}</p> : null}
+                </div>
+              ) : null}
               {attachments.length > 0 && (
                 <div className="mb-3 flex flex-wrap gap-2">
                   {attachments.map((attachment) => (
@@ -1428,7 +1521,7 @@ export const ChatInput = memo(function ChatInput({
                 }}
                 onPaste={handlePaste}
                 placeholder={placeholderText}
-                disabled={disabled}
+                disabled={disabled || Boolean(goal?.mode && goal.busy)}
                 className={cn(
                   CHAT_LAYOUT_TOKENS.inputTextarea,
                   'placeholder:text-muted-foreground/70',
@@ -1471,7 +1564,7 @@ export const ChatInput = memo(function ChatInput({
                 role="listbox"
                 className="absolute bottom-full z-40 mb-2 max-h-56 w-full overflow-y-auto rounded-2xl border border-border/60 bg-background/95 p-1.5 shadow-[0_16px_50px_rgba(15,23,42,0.12)] backdrop-blur-xl"
               >
-                {slashSkillsLoading ? (
+                {slashSkillsLoading && slashItems.length === 0 ? (
                   <div className="px-2.5 py-2 text-xs text-muted-foreground">{t('skillConfigDialog.loading')}</div>
                 ) : slashItems.length === 0 ? (
                   <div className="px-2.5 py-2 text-xs text-muted-foreground">No matched skill</div>
@@ -1496,7 +1589,7 @@ export const ChatInput = memo(function ChatInput({
                           applySlashSelection(item);
                         }}
                       >
-                        <span className="mr-2">{item.icon}</span>
+                        <span className="mr-2">{item.kind === 'goal' ? <Target aria-hidden="true" className="h-3.5 w-3.5" /> : item.icon}</span>
                         <span className="flex-1 truncate font-medium">{item.name}</span>
                         <span className="ml-2 truncate text-muted-foreground">/{item.id}</span>
                       </button>
@@ -1621,6 +1714,12 @@ export const ChatInput = memo(function ChatInput({
                   ) : null}
                 </div>
               ) : null}
+              {goal?.supported ? (
+                <Button type="button" variant="ghost" size="icon" className={CHAT_LAYOUT_TOKENS.inputAttachButton} disabled={disabled || sending || goal.busy || Boolean(goal.mode)} onClick={() => { closeComposerPopovers(); goal.onStart(); textareaRef.current?.focus(); }} title={t('goal.set')} aria-label={t('goal.set')}>
+                  <Target aria-hidden="true" className="h-4 w-4" />
+                </Button>
+              ) : null}
+              <ChatWikiProjectPicker />
               <div className="min-w-0 flex-1" />
               {contextUsage && (
                 <div className="group relative shrink-0" role="status" aria-label={t('input.contextUsageTitle', { detail: contextUsage.detail, pct: contextUsage.pct })}>
@@ -1794,20 +1893,20 @@ export const ChatInput = memo(function ChatInput({
               </Button>
 
               <Button
-                onClick={sending ? handleStop : handleSend}
-                disabled={sending ? !canStop : !canSend}
+                onClick={effectiveSending ? handleStop : handleSend}
+                disabled={effectiveSending ? !canStop : !canSend}
                 size="icon"
                 className={cn(
                   CHAT_LAYOUT_TOKENS.inputSendButton,
                   'rounded-full shadow-[0_8px_20px_rgba(15,23,42,0.10)]',
                 )}
-                variant={sending ? 'destructive' : 'default'}
-                aria-label={sending ? 'Stop' : 'Send'}
-                title={sending ? 'Stop' : 'Send'}
+                variant={effectiveSending ? 'destructive' : 'default'}
+                aria-label={effectiveSending ? 'Stop' : 'Send'}
+                title={effectiveSending ? 'Stop' : 'Send'}
               >
-                {stopping ? (
+                {stopping && !editingGoal ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
-                ) : sending ? (
+                ) : effectiveSending ? (
                   <Square className="h-4 w-4" />
                 ) : (
                   <Send className="h-4 w-4" />

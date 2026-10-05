@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { Check, Plus, RefreshCw, Search, X } from 'lucide-react';
@@ -31,6 +31,7 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore, type ManualTeamCandidate, type ManualTeamMemberProvisionRecord, type TeamSkillCandidate, type TeamSkillCreationPlan } from '@/stores/teams';
 import type { SubagentSummary } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
+import { ManualTeamCreationProgress } from './ManualTeamCreationProgress';
 
 type TeamSkillReview = {
   candidate: TeamSkillCandidate;
@@ -137,7 +138,9 @@ export function TeamsPage() {
   const errorByTeamId = useTeamsStore((state) => state.errorByTeamId);
   const planTeamSkillCreation = useTeamsStore((state) => state.planTeamSkillCreation);
   const createTeam = useTeamsStore((state) => state.createTeam);
-  const createManualTeam = useTeamsStore((state) => state.createManualTeam);
+  const manualTeamCreation = useTeamsStore((state) => state.manualTeamCreation);
+  const createManualTeamWithProgress = useTeamsStore((state) => state.createManualTeamWithProgress);
+  const resetManualTeamCreation = useTeamsStore((state) => state.resetManualTeamCreation);
   const replaceTeamSkillVersion = useTeamsStore((state) => state.replaceTeamSkillVersion);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
   const deleteTeam = useTeamsStore((state) => state.deleteTeam);
@@ -160,6 +163,7 @@ export function TeamsPage() {
   const [createDialogPhase, setCreateDialogPhase] = useState<CreateDialogPhase>({ type: 'editing_source' });
   const [replacementConfirmed, setReplacementConfirmed] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const createTitleRef = useRef<HTMLHeadingElement>(null);
 
   const packagePath = teamSkillPackagePath.trim();
   const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
@@ -176,9 +180,10 @@ export function TeamsPage() {
     agent: agents.find((agent) => agent.id === member.agentId) ?? null,
   }));
   const manualLeaderCount = manualMembers.filter((member) => member.isLeader).length;
-  const creatingManual = createDialogPhase.type === 'creating_manual';
+  const showingManualCreation = manualTeamCreation !== null;
+  const creatingManual = manualTeamCreation?.status === 'running' || manualTeamCreation?.status === 'cleaning_up';
   const canCreateManualTeam = gatewayOperational
-    && !creatingManual
+    && !showingManualCreation
     && manualMembers.length > 0
     && manualLeaderCount === 1;
   const review = createDialogPhase.type === 'review_ready'
@@ -206,6 +211,12 @@ export function TeamsPage() {
     }
     void loadAgents({ silent: true });
   }, [agentsResource.hasLoadedOnce, agentsResource.status, createDialogOpen, createSourceType, gatewayOperational, loadAgents]);
+
+  useEffect(() => {
+    if (createDialogOpen && showingManualCreation) {
+      createTitleRef.current?.focus({ preventScroll: true });
+    }
+  }, [createDialogOpen, showingManualCreation]);
 
   const handleCreateSourceTypeChange = (value: string) => {
     const nextSourceType = value === 'manual' ? 'manual' : 'teamskill';
@@ -300,11 +311,14 @@ export function TeamsPage() {
       packagePath,
       teamSkillPackage: validation.package,
     };
-    const dependencyPlan = await planTeamDependencies({ packagePath });
+    const dependencyResult = await planTeamDependencies({ packagePath });
+    if (dependencyResult.status !== 'available') {
+      throw new Error(t(dependencyResult.status === 'invalid' ? 'create.invalidPackage' : 'create.dependencyPlanUnavailable'));
+    }
     return {
       candidate,
       creationPlan: planTeamSkillCreation(candidate),
-      dependencyPlan,
+      dependencyPlan: dependencyResult.plan,
     };
   };
 
@@ -324,11 +338,14 @@ export function TeamsPage() {
   };
 
   const refreshDependencyPlan = async (currentReview: TeamSkillReview): Promise<TeamSkillReview> => {
-    const dependencyPlan = await planTeamDependencies({ packagePath: currentReview.candidate.packagePath });
+    const dependencyResult = await planTeamDependencies({ packagePath: currentReview.candidate.packagePath });
+    if (dependencyResult.status !== 'available') {
+      throw new Error(t(dependencyResult.status === 'invalid' ? 'create.invalidPackage' : 'create.dependencyPlanUnavailable'));
+    }
     return {
       ...currentReview,
       creationPlan: planTeamSkillCreation(currentReview.candidate),
-      dependencyPlan,
+      dependencyPlan: dependencyResult.plan,
     };
   };
 
@@ -472,28 +489,20 @@ export function TeamsPage() {
     if (!canCreateManualTeam) {
       return;
     }
-    setCreateDialogPhase({ type: 'creating_manual' });
     setCreateError(null);
-    let teamId: string | null = null;
     try {
       const candidate = buildManualCandidate();
-      teamId = createManualTeam(candidate);
-      await provisionTeamAgents(teamId);
-      await createRun(teamId);
+      setCreateDialogPhase({ type: 'creating_manual' });
+      const teamId = await createManualTeamWithProgress(candidate);
       setActiveTeam(teamId);
       setCreateDialogOpen(false);
+      setCreateDialogPhase({ type: 'editing_source' });
       navigate(`/teams/${teamId}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (teamId) {
-        try {
-          await deleteTeam(teamId);
-        } catch {
-          // Store-level delete failure keeps the team and records its own per-team error.
-        }
+      if (useTeamsStore.getState().manualTeamCreation === null) {
+        setCreateDialogPhase({ type: 'editing_source' });
+        setCreateError(error instanceof Error ? error.message : String(error));
       }
-      setCreateDialogPhase({ type: 'editing_source' });
-      setCreateError(message);
     }
   };
 
@@ -597,25 +606,32 @@ export function TeamsPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="team-create-title"
+            aria-busy={creatingManual}
             className="relative flex h-[min(760px,calc(100dvh-3rem))] w-full max-w-5xl flex-col overflow-hidden rounded-[1.25rem] border bg-[hsl(var(--shell-surface))] text-card-foreground shadow-[var(--shell-shadow-overlay)] [border-color:hsl(var(--shell-border))]"
           >
             <Button
               type="button"
               variant="ghost"
               size="icon"
-              aria-label={t('create.cancelButton')}
+              aria-label={showingManualCreation ? t('create.manualProgress.closeButton') : t('create.cancelButton')}
+              disabled={creatingManual}
               onClick={() => setCreateDialogOpen(false)}
               className="absolute right-4 top-4 z-10 h-8 w-8 rounded-sm opacity-70 transition-opacity hover:bg-transparent hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
             >
               <X className="h-4 w-4" />
-              <span className="sr-only">{t('create.cancelButton')}</span>
+              <span className="sr-only">{showingManualCreation ? t('create.manualProgress.closeButton') : t('create.cancelButton')}</span>
             </Button>
 
             <div className="border-b bg-[hsl(var(--shell-surface-muted))] p-6 pr-14 [border-color:hsl(var(--shell-border))]">
-              <h2 id="team-create-title" className="text-xl font-semibold tracking-[-0.02em]">{t('create.modalTitle')}</h2>
-              <p className="mt-2 text-sm leading-6 text-[hsl(var(--shell-text-muted))]">{t('create.modalDescription')}</p>
+              <h2 id="team-create-title" ref={createTitleRef} tabIndex={-1} className="text-xl font-semibold tracking-[-0.02em] outline-none">
+                {manualTeamCreation ? t(`create.manualProgress.status.${manualTeamCreation.status}`) : t('create.modalTitle')}
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-[hsl(var(--shell-text-muted))]">{showingManualCreation ? t('create.manualProgress.modalDescription') : t('create.modalDescription')}</p>
             </div>
 
+            {manualTeamCreation ? (
+              <ManualTeamCreationProgress creation={manualTeamCreation} />
+            ) : (
             <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-hidden p-6">
               <div className="shrink-0 space-y-2">
                 <Label htmlFor="team-name" className="text-foreground">{t('create.teamName')}</Label>
@@ -931,20 +947,45 @@ export function TeamsPage() {
                 </TabsContent>
               </Tabs>
             </div>
+            )}
 
-            {createError ? (
+            {createError && !showingManualCreation ? (
               <div className="mx-6 rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
                 {createError}
               </div>
             ) : null}
 
             <div className="mt-6 flex items-center justify-between gap-3 border-t border-border p-6 pt-4">
-              <Button type="button" variant="ghost" onClick={() => setCreateDialogOpen(false)} className="text-muted-foreground hover:bg-secondary hover:text-foreground">
-                {t('create.cancelButton')}
-              </Button>
-              <Button type="button" onClick={() => void (createSourceType === 'manual' ? handleCreateManualTeam() : handleCreateOrReplace())} disabled={primaryDisabled}>
-                {primaryButtonLabel}
-              </Button>
+              {manualTeamCreation ? (
+                <>
+                  <Button type="button" variant="ghost" disabled={creatingManual} onClick={() => setCreateDialogOpen(false)} className="text-muted-foreground hover:bg-secondary hover:text-foreground">
+                    {manualTeamCreation.status === 'unconfirmed' ? t('create.manualProgress.viewTeamsButton') : t('create.manualProgress.closeButton')}
+                  </Button>
+                  {manualTeamCreation.status === 'failed' && manualTeamCreation.cleanup === 'confirmed' ? (
+                    <Button type="button" onClick={() => {
+                      setTeamName(manualTeamCreation.candidate.displayName);
+                      setManualMembers(manualTeamCreation.candidate.manualTeam.members.map((member) => ({ agentId: member.agentId, isLeader: member.isLeader })));
+                      resetManualTeamCreation();
+                      setCreateSourceType('manual');
+                      setCreateError(null);
+                      setCreateDialogPhase({ type: 'editing_source' });
+                    }}>
+                      {t('create.manualProgress.editButton')}
+                    </Button>
+                  ) : creatingManual ? (
+                    <span className="text-xs text-muted-foreground">{t('create.manualProgress.keepOpen')}</span>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <Button type="button" variant="ghost" onClick={() => setCreateDialogOpen(false)} className="text-muted-foreground hover:bg-secondary hover:text-foreground">
+                    {t('create.cancelButton')}
+                  </Button>
+                  <Button type="button" onClick={() => void (createSourceType === 'manual' ? handleCreateManualTeam() : handleCreateOrReplace())} disabled={primaryDisabled}>
+                    {primaryButtonLabel}
+                  </Button>
+                </>
+              )}
             </div>
           </div>
         </div>

@@ -16,11 +16,27 @@ pub enum RoleMaterializationAgent {
     External { agent: ManagedAgentReference },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct RoleAgentMaterialization {
     role: RoleId,
     agent: RoleMaterializationAgent,
     tools: Vec<String>,
+    agents_markdown: Option<String>,
+}
+
+impl fmt::Debug for RoleAgentMaterialization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RoleAgentMaterialization")
+            .field("role", &self.role)
+            .field("agent", &self.agent)
+            .field("tools", &self.tools)
+            .field(
+                "agents_markdown",
+                &self.agents_markdown.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl RoleAgentMaterialization {
@@ -36,6 +52,7 @@ impl RoleAgentMaterialization {
             role,
             agent: RoleMaterializationAgent::Managed { name },
             tools: Vec::new(),
+            agents_markdown: None,
         })
     }
 
@@ -44,6 +61,7 @@ impl RoleAgentMaterialization {
             role,
             agent: RoleMaterializationAgent::External { agent },
             tools: Vec::new(),
+            agents_markdown: None,
         }
     }
 
@@ -53,6 +71,16 @@ impl RoleAgentMaterialization {
 
     pub fn agent(&self) -> &RoleMaterializationAgent {
         &self.agent
+    }
+
+    /// Final managed-block body without begin/end markers; only the Manual leader sets it.
+    pub fn agents_markdown(&self) -> Option<&str> {
+        self.agents_markdown.as_deref()
+    }
+
+    pub fn with_agents_markdown(mut self, agents_markdown: impl Into<String>) -> Self {
+        self.agents_markdown = Some(agents_markdown.into());
+        self
     }
 
     pub fn tools(&self) -> &[String] {
@@ -176,6 +204,7 @@ pub struct RoleMaterializationReceipt {
     ownership: RoleMaterializationOwnership,
     endpoint: RuntimeEndpointReference,
     native_workspace: Option<NativeWorkspaceReceipt>,
+    agents_markdown: Option<String>,
 }
 
 impl fmt::Debug for RoleMaterializationReceipt {
@@ -189,6 +218,10 @@ impl fmt::Debug for RoleMaterializationReceipt {
             .field(
                 "native_workspace",
                 &self.native_workspace.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "agents_markdown",
+                &self.agents_markdown.as_ref().map(|_| "<redacted>"),
             )
             .finish()
     }
@@ -215,6 +248,7 @@ impl RoleMaterializationReceipt {
             ownership,
             endpoint,
             native_workspace: None,
+            agents_markdown: None,
         }
     }
 
@@ -231,6 +265,7 @@ impl RoleMaterializationReceipt {
             ownership,
             endpoint,
             native_workspace: Some(native_workspace),
+            agents_markdown: None,
         }
     }
 
@@ -252,6 +287,16 @@ impl RoleMaterializationReceipt {
 
     pub fn native_workspace(&self) -> Option<&NativeWorkspaceReceipt> {
         self.native_workspace.as_ref()
+    }
+
+    /// Confirmed managed-block body without begin/end markers, retained for recovery and cleanup.
+    pub fn agents_markdown(&self) -> Option<&str> {
+        self.agents_markdown.as_deref()
+    }
+
+    pub fn with_agents_markdown(mut self, agents_markdown: impl Into<String>) -> Self {
+        self.agents_markdown = Some(agents_markdown.into());
+        self
     }
 }
 

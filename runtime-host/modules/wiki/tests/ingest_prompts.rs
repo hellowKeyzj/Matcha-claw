@@ -1,5 +1,9 @@
+#[path = "../src/ingest/language.rs"]
+mod language;
 #[path = "../src/ingest/prompts.rs"]
 mod prompts;
+#[path = "../src/ingest/text.rs"]
+mod text;
 
 use prompts::{
     AnalysisPromptParams, ChunkAnalysisSystemPromptParams, ChunkAnalysisUserPromptParams,
@@ -67,9 +71,7 @@ fn analysis_review_repair_and_chunk_prompts_keep_critical_instructions() {
 
     let review = prompts::build_review_suggestion_prompt(prompts::ReviewSuggestionPromptParams {
         purpose: "Purpose",
-        schema: "Schema",
         index: "Index",
-        overview: "Overview",
         source_identity: "source.md",
         analysis: "Analysis",
         source_context: "Source context",
@@ -79,9 +81,7 @@ fn analysis_review_repair_and_chunk_prompts_keep_critical_instructions() {
     });
     assert!(review.contains("high-value follow-up research items for a personal wiki"));
     assert!(review.contains("The wiki page generation already happened"));
-    assert!(
-        review.contains("unresolved knowledge gaps that deserve human attention or Deep Research")
-    );
+    assert!(review.contains("unresolved knowledge gaps that deserve human attention"));
     assert!(review.contains("Return REVIEW blocks only. Do not output FILE blocks."));
 
     let chunk_system =
@@ -132,7 +132,7 @@ fn auto_language_detection_covers_common_latin_languages() {
             .contains("Portuguese")
     );
     assert!(
-        prompts::language_rule(None, "Il metodo che descrive la ricerca con esempi.")
+        prompts::language_rule(None, "Il metodo che descrive questa ricerca con esempi.")
             .contains("Italian")
     );
 }

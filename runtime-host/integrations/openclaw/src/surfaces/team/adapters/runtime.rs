@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
+
+use platform::trace::session_trace;
+use serde_json::json;
 
 use crate::{
     port::{OpenClawGateway, OpenClawSessionError},
@@ -178,16 +181,59 @@ mod native_receipt_tests {
 }
 
 impl organization::OrganizationNativeRuntime for OpenClawDriver {
+    fn read_team_member_profiles(
+        &self,
+        agents: Vec<organization::ManagedAgentReference>,
+    ) -> OwnedRuntimeFuture<
+        Result<Vec<organization::MemberProfile>, organization::MemberIntroductionError>,
+    > {
+        let gateway = Arc::clone(&self.gateway);
+        Box::pin(async move {
+            let started = Instant::now();
+            session_trace("runtime.team.profile.gateway-lock.request", json!({}));
+            let client = gateway.lock().await.client();
+            session_trace(
+                "runtime.team.profile.gateway-lock.end",
+                json!({"elapsedMs":started.elapsed().as_millis()}),
+            );
+            let result = crate::surfaces::team::member_profiles::read(client, agents).await;
+            session_trace(
+                "runtime.team.profile.runtime.end",
+                json!({"outcome":if result.is_ok() {"Succeeded"} else {"Unavailable"},"elapsedMs":started.elapsed().as_millis()}),
+            );
+            result
+        })
+    }
+
     fn materialize_team(
         &self,
         request: organization::TeamMaterializationRequest,
     ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
+        self.materialize_team_observed(request, None)
+    }
+
+    fn materialize_team_observed(
+        &self,
+        request: organization::TeamMaterializationRequest,
+        observer: Option<organization::TeamProvisionObserver>,
+    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move {
+            let started = Instant::now();
+            session_trace("runtime.team.materialize.gateway-lock.request", json!({}));
             let mut gateway = gateway.lock().await;
-            crate::surfaces::team::OpenClawTeamNativeEffects::new(&mut gateway)
-                .materialize(request)
-                .await
+            session_trace(
+                "runtime.team.materialize.gateway-lock.end",
+                json!({"elapsedMs":started.elapsed().as_millis()}),
+            );
+            let outcome = crate::surfaces::team::OpenClawTeamNativeEffects::new(&mut gateway)
+                .materialize_observed(request, observer)
+                .await;
+            session_trace(
+                "runtime.team.materialize.runtime.end",
+                json!({"outcome":match &outcome { organization::MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", organization::MaterializationOperationOutcome::Rejected { .. } => "Rejected", _ => "OutcomeUnknown" },"elapsedMs":started.elapsed().as_millis()}),
+            );
+            outcome
         })
     }
 
@@ -204,16 +250,50 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
         })
     }
 
+    fn remove_unconfirmed_team(
+        &self,
+        request: organization::TeamMaterializationRequest,
+    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
+        let gateway = Arc::clone(&self.gateway);
+        Box::pin(async move {
+            let started = Instant::now();
+            session_trace(
+                "runtime.team.unconfirmed-remove.gateway-lock.request",
+                json!({}),
+            );
+            let mut gateway = gateway.lock().await;
+            let outcome = crate::surfaces::team::OpenClawTeamNativeEffects::new(&mut gateway)
+                .remove_unconfirmed(request)
+                .await;
+            session_trace(
+                "runtime.team.unconfirmed-remove.runtime.end",
+                json!({"outcome":match &outcome { organization::MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", _ => "OutcomeUnknown" },"reason":"native-result","elapsedMs":started.elapsed().as_millis()}),
+            );
+            outcome
+        })
+    }
+
     fn recover_team_materialization(
         &self,
         request: organization::TeamMaterializationRequest,
     ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move {
+            let started = Instant::now();
+            session_trace("runtime.team.recovery.gateway-lock.request", json!({}));
             let mut gateway = gateway.lock().await;
-            crate::surfaces::team::OpenClawTeamNativeEffects::new(&mut gateway)
+            session_trace(
+                "runtime.team.recovery.gateway-lock.end",
+                json!({"elapsedMs":started.elapsed().as_millis()}),
+            );
+            let outcome = crate::surfaces::team::OpenClawTeamNativeEffects::new(&mut gateway)
                 .recover_materialization(request)
-                .await
+                .await;
+            session_trace(
+                "runtime.team.recovery.runtime.end",
+                json!({"outcome":match &outcome { organization::MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", organization::MaterializationOperationOutcome::Rejected { .. } => "Rejected", _ => "OutcomeUnknown" },"elapsedMs":started.elapsed().as_millis()}),
+            );
+            outcome
         })
     }
 

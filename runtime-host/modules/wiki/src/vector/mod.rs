@@ -22,6 +22,8 @@ use lancedb::{
 use sha2::{Digest, Sha256};
 
 const TABLE_CHUNKS_V2: &str = "wiki_chunks_v2";
+const EMBEDDING_SPACE: &str = "wiki.embeddingSpace";
+const MODEL_CHANGED: &str = "wiki embedding model changed; rebuild the full vector index";
 const MAX_PAGE_ID_CHARS: usize = 256;
 const REVISION_DIR: &str = ".llm-wiki/embedding-revisions";
 
@@ -48,7 +50,7 @@ pub struct ChunkSearchResult {
 
 pub(crate) struct PageSearchResult {
     pub page_id: String,
-    pub score: f64,
+    pub score: f32,
     pub chunk_text: String,
     pub heading_path: String,
 }
@@ -57,8 +59,16 @@ pub(crate) async fn search_pages(
     project_path: &Path,
     embedding: Vec<f32>,
     top_k: usize,
+    space_key: &str,
+    pages_by_id: &HashMap<String, &crate::domain::SearchPage>,
 ) -> Result<Vec<PageSearchResult>, String> {
-    let chunks = search_chunks(project_path, embedding, top_k.saturating_mul(3).max(30)).await?;
+    let chunks = search_chunks(
+        project_path,
+        embedding,
+        top_k.saturating_mul(3).max(30),
+        space_key,
+    )
+    .await?;
     let mut by_page: HashMap<String, Vec<ChunkSearchResult>> = HashMap::new();
     for chunk in chunks {
         by_page
@@ -68,26 +78,34 @@ pub(crate) async fn search_pages(
     }
     let mut pages = Vec::with_capacity(by_page.len());
     for (page_id, mut chunks) in by_page {
-        chunks.sort_unstable_by(|a, b| {
+        chunks.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
                 .then(a.chunk_index.cmp(&b.chunk_index))
         });
-        let top = f64::from(chunks[0].score);
-        let tail: f64 = chunks
-            .iter()
-            .skip(1)
-            .map(|chunk| f64::from(chunk.score))
-            .sum();
+        let top = chunks[0].score;
+        let tail: f32 = chunks.iter().skip(1).map(|chunk| chunk.score).sum();
         let best = chunks.swap_remove(0);
         pages.push(PageSearchResult {
             page_id,
-            score: top + (0.3 * tail).min((1.0 - top).max(0.0)),
+            score: top + (tail * 0.3).min((1.0 - top).max(0.0)),
             chunk_text: best.chunk_text,
             heading_path: best.heading_path,
         });
     }
-    pages.sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then(a.page_id.cmp(&b.page_id)));
+    pages.sort_unstable_by(|a, b| {
+        b.score.total_cmp(&a.score).then_with(|| {
+            let path_a = pages_by_id
+                .get(&a.page_id)
+                .map(|page| page.relative_path.as_str())
+                .unwrap_or(&a.page_id);
+            let path_b = pages_by_id
+                .get(&b.page_id)
+                .map(|page| page.relative_path.as_str())
+                .unwrap_or(&b.page_id);
+            path_a.cmp(path_b)
+        })
+    });
     pages.truncate(top_k);
     Ok(pages)
 }
@@ -97,6 +115,7 @@ pub async fn upsert_page_chunks(
     page_id: &str,
     chunks: Vec<ChunkEmbedding>,
     fingerprint: &str,
+    space_key: &str,
 ) -> Result<(), String> {
     validate_page_id(page_id)?;
     let project_path = project_path.as_ref();
@@ -110,12 +129,13 @@ pub async fn upsert_page_chunks(
         return Err("embedding revision fingerprint is required".to_string());
     }
 
-    let dim = chunks[0].embedding.len() as i32;
+    let dim = i32::try_from(chunks[0].embedding.len())
+        .map_err(|_| "embedding dimension is too large".to_owned())?;
     if dim == 0 {
         return Err("chunk #0 has empty embedding".to_string());
     }
 
-    let schema = chunk_schema(dim);
+    let schema = chunk_schema(dim, space_key)?;
     let batch = chunk_batch(schema.clone(), page_id, chunks, dim)?;
     let db = connect(&db_uri(project_path))
         .execute()
@@ -147,6 +167,14 @@ async fn upsert_batch(
             .execute()
             .await
             .map_err(|err| format!("Open table error: {err}"))?;
+        let stored_schema = table
+            .schema()
+            .await
+            .map_err(|err| format!("Read schema error: {err}"))?;
+        check_embedding_space(&stored_schema, &schema.metadata()[EMBEDDING_SPACE], None)?;
+        if stored_schema.fields() != schema.fields() {
+            return Err(MODEL_CHANGED.to_owned());
+        }
         let data = RecordBatchIterator::new(vec![Ok(batch)], schema);
         let mut merge = table.merge_insert(&["chunk_id"]);
         merge
@@ -169,6 +197,10 @@ async fn upsert_batch(
 fn prepare_batches(
     pages: Vec<crate::index::PreparedPageEmbedding>,
 ) -> Result<(Arc<Schema>, Vec<(String, String, RecordBatch)>), String> {
+    if pages.is_empty() {
+        return Ok((Arc::new(Schema::empty()), Vec::new()));
+    }
+    let space_key = pages[0].space_key.clone();
     let dimension = pages
         .first()
         .and_then(|page| page.rows.first())
@@ -179,9 +211,12 @@ fn prepare_batches(
     if dimension == 0 {
         return Err("embedding dimension is empty".to_owned());
     }
-    let schema = chunk_schema(dimension);
+    let schema = chunk_schema(dimension, &space_key)?;
     let mut batches = Vec::with_capacity(pages.len());
     for page in pages {
+        if page.space_key != space_key {
+            return Err(MODEL_CHANGED.to_owned());
+        }
         validate_page_id(&page.page_id)?;
         if page.rows.is_empty() || page.fingerprint.trim().is_empty() {
             return Err("prepared page has no chunks or revision fingerprint".to_owned());
@@ -266,15 +301,29 @@ pub(crate) async fn update_pages(
         Err(error) => return (0, Some(format!("DB connect error: {error}"))),
     };
     let compatible = async {
-        let tables = db.table_names().execute().await.map_err(|err| format!("List tables error: {err}"))?;
+        let tables = db
+            .table_names()
+            .execute()
+            .await
+            .map_err(|err| format!("List tables error: {err}"))?;
         if has_table(&tables, TABLE_CHUNKS_V2) {
-            let table = db.open_table(TABLE_CHUNKS_V2).execute().await.map_err(|err| format!("Open table error: {err}"))?;
-            if table.schema().await.map_err(|err| format!("Read schema error: {err}"))?.as_ref() != schema.as_ref() {
-                return Err("partial rebuild has incompatible vector dimensions; existing index was left unchanged".to_owned());
+            let table = db
+                .open_table(TABLE_CHUNKS_V2)
+                .execute()
+                .await
+                .map_err(|err| format!("Open table error: {err}"))?;
+            let stored_schema = table
+                .schema()
+                .await
+                .map_err(|err| format!("Read schema error: {err}"))?;
+            check_embedding_space(&stored_schema, &schema.metadata()[EMBEDDING_SPACE], None)?;
+            if stored_schema.fields() != schema.fields() {
+                return Err(MODEL_CHANGED.to_owned());
             }
         }
         Ok(())
-    }.await;
+    }
+    .await;
     if let Err(error) = compatible {
         return (0, Some(error));
     }
@@ -306,6 +355,7 @@ pub async fn search_chunks(
     project_path: impl AsRef<Path>,
     embedding: Vec<f32>,
     top_k: usize,
+    space_key: &str,
 ) -> Result<Vec<ChunkSearchResult>, String> {
     if top_k == 0 {
         return Ok(Vec::new());
@@ -335,6 +385,11 @@ pub async fn search_chunks(
         .execute()
         .await
         .map_err(|err| format!("Open table error: {err}"))?;
+    let schema = table
+        .schema()
+        .await
+        .map_err(|err| format!("Read schema error: {err}"))?;
+    check_embedding_space(&schema, space_key, Some(embedding.len()))?;
     let stream = table
         .vector_search(embedding)
         .map_err(|err| format!("Search error: {err}"))?
@@ -497,13 +552,11 @@ pub(crate) async fn page_revision_matches(
     project_path: &Path,
     page_id: &str,
     fingerprint: &str,
+    space_key: &str,
 ) -> Result<bool, String> {
     validate_page_id(page_id)?;
     let lock = db_lock(project_path);
     let _guard = lock.read().await;
-    if load_revision_unlocked(project_path, page_id)?.as_deref() != Some(fingerprint) {
-        return Ok(false);
-    }
     let db = connect(&db_uri(project_path))
         .execute()
         .await
@@ -521,6 +574,14 @@ pub(crate) async fn page_revision_matches(
         .execute()
         .await
         .map_err(|err| format!("Open table error: {err}"))?;
+    let schema = table
+        .schema()
+        .await
+        .map_err(|err| format!("Read schema error: {err}"))?;
+    check_embedding_space(&schema, space_key, None)?;
+    if load_revision_unlocked(project_path, page_id)?.as_deref() != Some(fingerprint) {
+        return Ok(false);
+    }
     let rows = table
         .count_rows(Some(page_id_filter(page_id)))
         .await
@@ -607,19 +668,46 @@ fn has_table(table_names: &[String], table_name: &str) -> bool {
     table_names.iter().any(|name| name == table_name)
 }
 
-fn chunk_schema(dim: i32) -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("chunk_id", DataType::Utf8, false),
-        Field::new("page_id", DataType::Utf8, false),
-        Field::new("chunk_index", DataType::UInt32, false),
-        Field::new("chunk_text", DataType::Utf8, false),
-        Field::new("heading_path", DataType::Utf8, false),
-        Field::new(
-            "vector",
-            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dim),
-            false,
-        ),
-    ]))
+fn check_embedding_space(
+    schema: &Schema,
+    space_key: &str,
+    dimension: Option<usize>,
+) -> Result<(), String> {
+    if space_key.is_empty()
+        || schema.metadata().get(EMBEDDING_SPACE).map(String::as_str) != Some(space_key)
+    {
+        return Err(MODEL_CHANGED.to_owned());
+    }
+    if let Some(dimension) = dimension {
+        let compatible = schema.field_with_name("vector").is_ok_and(|field| {
+            matches!(field.data_type(), DataType::FixedSizeList(_, size) if usize::try_from(*size).ok() == Some(dimension))
+        });
+        if !compatible {
+            return Err(MODEL_CHANGED.to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn chunk_schema(dim: i32, space_key: &str) -> Result<Arc<Schema>, String> {
+    if space_key.is_empty() {
+        return Err("embedding space key is required".to_owned());
+    }
+    Ok(Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("chunk_id", DataType::Utf8, false),
+            Field::new("page_id", DataType::Utf8, false),
+            Field::new("chunk_index", DataType::UInt32, false),
+            Field::new("chunk_text", DataType::Utf8, false),
+            Field::new("heading_path", DataType::Utf8, false),
+            Field::new(
+                "vector",
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dim),
+                false,
+            ),
+        ],
+        HashMap::from([(EMBEDDING_SPACE.to_owned(), space_key.to_owned())]),
+    )))
 }
 
 fn chunk_batch(

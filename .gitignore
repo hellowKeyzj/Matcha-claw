@@ -62,6 +62,8 @@ resources/bin
 
 build/
 packages/memory-lancedb-pro/models/
+resources/wiki/models/
+resources/wiki/onnxruntime/
 
 .cursor/
 .pnpm-store/

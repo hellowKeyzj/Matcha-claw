@@ -28,6 +28,7 @@ const RENDERER_STARTUP_TRACE_FORWARDING_ENV = 'MATCHACLAW_FORWARD_RENDERER_START
 const RENDERER_STARTUP_TRACE_PREFIX = '[startup-trace]';
 const RENDERER_SESSION_TRACE_PREFIX = 'session-trace';
 const RENDERER_STARTUP_TRACE_LIMIT = 500;
+const RENDERER_SESSION_TRACE_LIMIT = 4 * 1024 * 1024;
 
 function shouldForwardRendererStartupTrace(): boolean {
   return !app.isPackaged && process.env[RENDERER_STARTUP_TRACE_FORWARDING_ENV] === '1';
@@ -41,13 +42,25 @@ function sanitizeRendererStartupTrace(message: string): string {
 }
 
 function forwardRendererStartupTrace(win: BrowserWindow): void {
-  if (!shouldForwardRendererStartupTrace()) return;
+  const forwardStartup = shouldForwardRendererStartupTrace();
+  const forwardSession = process.env.MATCHACLAW_SESSION_TRACE === '1';
+  if (!forwardStartup && !forwardSession) return;
   win.webContents.on('console-message', (_event, _level, message) => {
-    const isStartupTrace = message.includes(RENDERER_STARTUP_TRACE_PREFIX);
-    const isSessionTrace = message.includes(`"prefix":"${RENDERER_SESSION_TRACE_PREFIX}"`);
+    const isStartupTrace = forwardStartup && message.includes(RENDERER_STARTUP_TRACE_PREFIX);
+    const isSessionTrace = forwardSession && message.includes(`"prefix":"${RENDERER_SESSION_TRACE_PREFIX}"`);
     if (!isStartupTrace && !isSessionTrace) return;
-    const tracePrefix = isStartupTrace ? RENDERER_STARTUP_TRACE_PREFIX : `[${RENDERER_SESSION_TRACE_PREFIX}]`;
-    logger.info(`${tracePrefix} source=renderer-console message=${sanitizeRendererStartupTrace(message)}`);
+    if (isSessionTrace) {
+      if (message.length > RENDERER_SESSION_TRACE_LIMIT) {
+        logger.warn(`[${RENDERER_SESSION_TRACE_PREFIX}] source=renderer-console dropped=oversize length=${message.length}`);
+        return;
+      }
+      // Session traces contain only diagnostic summaries; preserve the complete assembly record.
+      logger.info(`[${RENDERER_SESSION_TRACE_PREFIX}] source=renderer-console message=${message
+        .replace(/(?:[A-Za-z]:[\\/]|\/(?:Users|home|var|tmp|private)\/)[^\s"'<>)]*/g, '[path]')
+        .replace(/(token|authorization|password|secret|api[-_ ]?key)(["'\s:=]+)[^\s"',}]+/gi, '$1$2[redacted]')}`);
+    } else {
+      logger.info(`${RENDERER_STARTUP_TRACE_PREFIX} source=renderer-console message=${sanitizeRendererStartupTrace(message)}`);
+    }
   });
 }
 
@@ -57,8 +70,8 @@ export function createMainWindow(options: { showOnReady?: boolean } = {}): Brows
   const useCustomTitleBar = isWindows;
 
   const win = new BrowserWindow({
-    width: 1440,
-    height: 900,
+    width: 1200,
+    height: 800,
     minWidth: 960,
     minHeight: 600,
     backgroundColor: getWindowThemeBackgroundColor(nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),

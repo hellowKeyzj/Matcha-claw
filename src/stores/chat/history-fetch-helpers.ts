@@ -5,7 +5,7 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
-import type { SessionIdentity } from '../../types/desktop/runtime-address';
+import { sessionIdentitiesEqual, type SessionIdentity } from '../../types/desktop/runtime-address';
 import {
   decodeSessionView,
   type SessionFact,
@@ -304,6 +304,9 @@ export async function fetchHistoryWindow(
   }
 
   const view = decodeHistorySessionView(rawView);
+  if (!sessionIdentitiesEqual(view.identity, sessionIdentity)) {
+    throw new Error('Session view identity mismatch');
+  }
   return {
     view,
     thinkingLevel: resolveSessionThinkingLevelFromList(sessions, recordKey),

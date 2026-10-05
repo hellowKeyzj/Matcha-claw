@@ -26,12 +26,14 @@ import { createSessionCreateTransport } from './sessions/create';
 import { createSessionDeleteTransport } from './sessions/delete';
 import { createSessionEventsTransport, type SessionEventsTransport } from './sessions/events';
 import { createSessionHistoryTransport } from './sessions/history';
+import { createSessionGoalTransport } from './sessions/goal';
 import { createSessionListTransport } from './sessions/list';
 import { createSessionModelSelectionTransport } from './sessions/model-selection';
 import { createSessionPermissionTransport } from './sessions/permission';
 import { createSessionRenameTransport } from './sessions/rename';
 import { createSessionSendTransport } from './sessions/send';
 import { createSessionTimelineTransport } from './sessions/timeline';
+import { createSessionObservationTransport } from './sessions/observation';
 import { createClawHubSkillInstallTransport } from './skills/clawhub-install';
 import { createClawHubSkillSearchTransport } from './skills/clawhub-search';
 import { createSkillBundleTransport } from './skills/bundle';
@@ -108,6 +110,7 @@ export function createRuntimeHostTransportBundle(
     fleetCredentialsTransport: createFleetCredentialsTransport(issuer, runtimeHostTransportPort),
     sessionContentTransport: createSessionContentTransport(issuer, runtimeHostTransportPort),
     sessionTimelineTransport: createSessionTimelineTransport(issuer, runtimeHostTransportPort),
+    sessionObservationTransport: createSessionObservationTransport(issuer, runtimeHostTransportPort),
     diagnosticsArchiveTransport: createDiagnosticsArchiveTransport(issuer, runtimeHostTransportPort),
     workspaceTextTransport: createWorkspaceTextTransport(issuer, runtimeHostTransportPort),
     workspaceBinaryTransport: createWorkspaceBinaryTransport(issuer, runtimeHostTransportPort),
@@ -120,6 +123,7 @@ export function createRuntimeHostTransportBundle(
     sessionRenameTransport: createSessionRenameTransport(issuer, runtimeHostTransportPort),
     sessionApprovalTransport: createSessionApprovalTransport(issuer, runtimeHostTransportPort),
     sessionSendTransport: createSessionSendTransport(issuer, runtimeHostTransportPort),
+    sessionGoalTransport: createSessionGoalTransport(issuer, runtimeHostTransportPort),
     sessionModelSelectionTransport: createSessionModelSelectionTransport(issuer, runtimeHostTransportPort),
     sessionPermissionTransport: createSessionPermissionTransport(issuer, runtimeHostTransportPort),
     securityEmergencyTransport: createSecurityEmergencyTransport(issuer, runtimeHostTransportPort),

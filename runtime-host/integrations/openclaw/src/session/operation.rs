@@ -71,7 +71,7 @@ impl SessionOperation {
         let request = request(&request_id, protocol::CHAT_HISTORY_METHOD, params)?;
         let response = self
             .gateway
-            .rpc_query(request)
+            .rpc_ordered_query(request)
             .await
             .map_err(OperationError::from)?;
         protocol::decode_chat_history_result(&request_id, response, limit)
@@ -86,7 +86,7 @@ impl SessionOperation {
         let request = request(&request_id, protocol::CHAT_HISTORY_METHOD, params)?;
         let response = self
             .gateway
-            .rpc_query(request)
+            .rpc_ordered_query(request)
             .await
             .map_err(OperationError::from)?;
         payload(&request_id, response)
@@ -94,16 +94,17 @@ impl SessionOperation {
 
     pub(crate) async fn subscribe_session_messages(
         &self,
-        session_key: &protocol::SessionKey,
-    ) -> Result<(), OperationError> {
+        identity: &sessions_module::state::SessionIdentity,
+    ) -> Result<wire::SessionMessagesSubscription, OperationError> {
         let request_id = next_request_id("sessions-messages-subscribe")?;
         let request = wire::sessions_messages_subscribe_request(
             request_id.clone(),
-            session_key.as_str().to_owned(),
+            identity.session_key.clone(),
+            identity.agent_id.clone(),
         )?;
         let response = self
             .gateway
-            .rpc_query(request)
+            .rpc_ordered_query(request)
             .await
             .map_err(OperationError::from)?;
         wire::decode_sessions_messages_subscribe(response).map_err(OperationError::from)
@@ -120,6 +121,71 @@ impl SessionOperation {
                 protocol::decode_chat_send_result(&request_id, response)
             })
             .await)
+    }
+
+    pub(crate) async fn goal_start(&self, params: ChatSendParams) -> Result<InvocationOutcome<sessions_module::goal::SessionGoalReceipt, OperationError>, sessions_module::ports::RuntimeOperationFailure> {
+        let request_id = next_request_id("chat-goal-start").map_err(|_| sessions_module::ports::RuntimeOperationFailure::Unavailable)?;
+        if super::trace::enabled() {
+            super::trace::log_unscoped("openclaw.goal.request", serde_json::json!({
+                "requestHash": sessions_module::trace::fingerprint(&request_id),
+                "sessionKey": sessions_module::trace::id_shape(Some(params.session_key().as_str())),
+                "operationId": sessions_module::trace::id_shape(Some(params.idempotency_key().as_str())),
+                "action": "start",
+            }));
+        }
+        let request = request(&request_id, protocol::CHAT_SEND_METHOD, params).map_err(|_| sessions_module::ports::RuntimeOperationFailure::Unavailable)?;
+        self.mutate_goal(request, |response| super::goal::decode_receipt(&request_id, response)).await
+    }
+
+    pub(crate) async fn mutate_goal_command(&self, command: &sessions_module::goal::SessionGoalCommand) -> Result<InvocationOutcome<sessions_module::goal::SessionGoalReceipt, OperationError>, sessions_module::ports::RuntimeOperationFailure> {
+        let (method, params) = super::goal::mutation_params(command);
+        let request_id = next_request_id("sessions-goal").map_err(|_| sessions_module::ports::RuntimeOperationFailure::Unavailable)?;
+        if super::trace::enabled() {
+            super::trace::log_unscoped("openclaw.goal.request", serde_json::json!({
+                "requestHash": sessions_module::trace::fingerprint(&request_id),
+                "identity": sessions_module::trace::identity_shape(&command.identity),
+                "endpointSessionId": sessions_module::trace::id_shape(Some(&command.endpoint_session_id)),
+                "operationId": sessions_module::trace::id_shape(Some(&command.operation_id)),
+                "action": super::goal::action(&command.mutation),
+            }));
+        }
+        let request = request(&request_id, method, params).map_err(|_| sessions_module::ports::RuntimeOperationFailure::Unavailable)?;
+        self.mutate_goal(request, |response| super::goal::decode_receipt(&request_id, response)).await
+    }
+
+    async fn mutate_goal<T>(&self, request: wire::RpcRequest, decode: impl FnOnce(GatewayResponse) -> Result<T, protocol::ProtocolError>) -> Result<InvocationOutcome<T, OperationError>, sessions_module::ports::RuntimeOperationFailure> {
+        let request_id = request.request_id().to_owned();
+        Ok(match self.gateway.rpc_goal_mutation(request).await? {
+            MutationDelivery::Response(response) if response.request_id() != request_id => InvocationOutcome::Unknown,
+            MutationDelivery::Response(GatewayResponse::Failure { error, .. }) => {
+                if super::trace::enabled() {
+                    let message = error.message();
+                    let rejection = if message.contains("This session still has active or queued work. Wait for it to finish, then retry the Goal.") {
+                        "session_busy"
+                    } else if message.contains("Goal start or resume requires an idle local session with recoverable history.") {
+                        "restart_safe_admission"
+                    } else {
+                        "native_rejected"
+                    };
+                    super::trace::log_unscoped("openclaw.goal.rejected", serde_json::json!({
+                        "requestHash": sessions_module::trace::fingerprint(&request_id),
+                        "rejection": rejection,
+                        "errorCode": match error.code() {
+                            "INVALID_REQUEST" => "invalid_request",
+                            "UNAVAILABLE" => "unavailable",
+                            _ => "other",
+                        },
+                        "retryable": error.retryable(),
+                    }));
+                }
+                InvocationOutcome::TargetRejected(OperationError::gateway_rejected(error))
+            },
+            MutationDelivery::Response(response) => match decode(response) {
+                Ok(receipt) => InvocationOutcome::Succeeded(receipt),
+                Err(_) => InvocationOutcome::Unknown,
+            },
+            MutationDelivery::NotWritten(_) | MutationDelivery::MayHaveReached(_) => InvocationOutcome::Unknown,
+        })
     }
 
     pub(crate) async fn abort_chat(

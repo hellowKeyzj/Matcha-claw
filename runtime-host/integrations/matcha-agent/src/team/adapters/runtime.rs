@@ -1,6 +1,15 @@
 use super::*;
 
 impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
+    fn read_team_member_profiles(
+        &self,
+        _agents: Vec<organization::ManagedAgentReference>,
+    ) -> OwnedRuntimeFuture<
+        Result<Vec<organization::MemberProfile>, organization::MemberIntroductionError>,
+    > {
+        Box::pin(async { Err(organization::MemberIntroductionError::Unsupported) })
+    }
+
     fn materialize_team(
         &self,
         _request: organization::TeamMaterializationRequest,

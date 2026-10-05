@@ -1,6 +1,8 @@
+mod language;
 pub(crate) mod long_source;
 pub(crate) mod parser;
 pub(crate) mod prompts;
+mod text;
 pub(crate) mod write;
 
 use std::{
@@ -23,6 +25,7 @@ use crate::{
 pub(crate) struct GeneratedImportPages {
     pub(crate) files: Vec<WikiGeneratedPageInput>,
     pub(crate) reviews: Vec<WikiReviewItem>,
+    pub(crate) source_analysis: String,
     pub(crate) checkpoint_path: Option<PathBuf>,
 }
 
@@ -33,6 +36,7 @@ pub(crate) async fn generate_imported_pages(
     output_language: Option<&str>,
     generation_model_ref: Option<&str>,
     cancellation: CancellationToken,
+    progress: &(dyn Fn(&str, Option<(usize, usize)>) -> Result<(), WikiFailure> + Send + Sync),
 ) -> Result<Option<GeneratedImportPages>, WikiFailure> {
     let Some(llm) = llm else {
         return Ok(None);
@@ -43,18 +47,21 @@ pub(crate) async fn generate_imported_pages(
         .model_limits(generation_model_ref)
         .await?
         .unwrap_or_default();
-    let max_context_size = model_limits.context_window.and_then(u64_to_usize);
-    let stable_context_len = context.purpose.chars().count()
-        + context.schema.chars().count()
-        + context.index.chars().count()
-        + context.overview.chars().count();
-    let source_budget = prompts::compute_ingest_source_budget(max_context_size, stable_context_len);
+    let model_context_tokens = model_limits.context_window.and_then(u64_to_usize);
+    // Character packing keeps the existing numeric cap; this is not token conversion.
+    let character_budget_cap = model_context_tokens;
+    let stable_context_len = text::len(&context.purpose)
+        + text::len(&context.schema)
+        + text::len(&context.index)
+        + text::len(&context.overview);
+    let source_budget =
+        prompts::compute_ingest_source_budget(character_budget_cap, stable_context_len);
     let generation_tokens = output_token_budget(
-        prompts::compute_ingest_generation_max_tokens(max_context_size),
+        prompts::compute_ingest_generation_max_tokens(model_context_tokens),
         model_limits,
     );
     let review_tokens = output_token_budget(
-        prompts::compute_ingest_review_max_tokens(max_context_size),
+        prompts::compute_ingest_review_max_tokens(model_context_tokens),
         model_limits,
     );
     let today = Local::now().format("%Y-%m-%d").to_string();
@@ -69,6 +76,7 @@ pub(crate) async fn generate_imported_pages(
         output_language,
         generation_model_ref,
         cancellation.clone(),
+        progress,
     )
     .await?;
     let generation = generate_file_blocks(
@@ -81,6 +89,7 @@ pub(crate) async fn generate_imported_pages(
         generation_model_ref,
         &today,
         cancellation.clone(),
+        progress,
     )
     .await?;
     let (files, reviews) = parse_repair_and_review(
@@ -91,16 +100,18 @@ pub(crate) async fn generate_imported_pages(
         generation,
         generation_tokens,
         review_tokens,
-        max_context_size,
+        character_budget_cap,
         output_language,
         generation_model_ref,
         cancellation,
+        progress,
     )
     .await?;
 
     Ok(Some(GeneratedImportPages {
         files,
         reviews,
+        source_analysis: source.analysis,
         checkpoint_path: source.checkpoint_path,
     }))
 }
@@ -141,8 +152,9 @@ async fn prepare_source_context(
     output_language: Option<&str>,
     generation_model_ref: Option<&str>,
     cancellation: CancellationToken,
+    progress: &(dyn Fn(&str, Option<(usize, usize)>) -> Result<(), WikiFailure> + Send + Sync),
 ) -> Result<PreparedSourceContext, WikiFailure> {
-    if input.text.chars().count() > source_budget {
+    if text::len(&input.text) > source_budget {
         prepare_long_source_context(
             llm,
             root,
@@ -153,6 +165,7 @@ async fn prepare_source_context(
             output_language,
             generation_model_ref,
             cancellation,
+            progress,
         )
         .await
     } else {
@@ -160,11 +173,11 @@ async fn prepare_source_context(
             llm,
             input,
             context,
-            source_budget,
             review_tokens,
             output_language,
             generation_model_ref,
             cancellation,
+            progress,
         )
         .await
     }
@@ -174,13 +187,13 @@ async fn prepare_single_source_context(
     llm: Arc<dyn WikiIngestLlm>,
     input: &WikiParsedImportSource,
     context: &ProjectIngestContext,
-    source_budget: usize,
     review_tokens: u32,
     output_language: Option<&str>,
     generation_model_ref: Option<&str>,
     cancellation: CancellationToken,
+    progress: &(dyn Fn(&str, Option<(usize, usize)>) -> Result<(), WikiFailure> + Send + Sync),
 ) -> Result<PreparedSourceContext, WikiFailure> {
-    let source_context = prompts::trim_long_text(&input.text, source_budget);
+    let source_context = input.text.clone();
     let analysis_prompt = prompts::build_analysis_prompt(prompts::AnalysisPromptParams {
         purpose: &context.purpose,
         index: &context.index,
@@ -188,6 +201,7 @@ async fn prepare_single_source_context(
         schema: &context.schema,
         output_language,
     });
+    progress("analyze", None)?;
     let analysis = ask_llm(
         &llm,
         vec![
@@ -230,6 +244,7 @@ async fn prepare_long_source_context(
     output_language: Option<&str>,
     generation_model_ref: Option<&str>,
     cancellation: CancellationToken,
+    progress: &(dyn Fn(&str, Option<(usize, usize)>) -> Result<(), WikiFailure> + Send + Sync),
 ) -> Result<PreparedSourceContext, WikiFailure> {
     let target_chars = long_source::compute_long_source_target_chars(source_budget);
     let overlap_chars = long_source::compute_long_source_overlap_chars(target_chars);
@@ -240,11 +255,11 @@ async fn prepare_long_source_context(
             llm,
             input,
             context,
-            source_budget * 2,
             review_tokens,
             output_language,
             generation_model_ref,
             cancellation,
+            progress,
         )
         .await;
     }
@@ -287,6 +302,7 @@ async fn prepare_long_source_context(
             output_language,
         });
 
+    progress("analyze", Some((completed_through, chunks.len())))?;
     for chunk in chunks.iter().skip(completed_through) {
         let user_prompt =
             prompts::build_chunk_analysis_user_prompt(prompts::ChunkAnalysisUserPromptParams {
@@ -333,6 +349,7 @@ async fn prepare_long_source_context(
                 now_ms(),
             ),
         )?;
+        progress("analyze", Some((completed_through, chunks.len())))?;
     }
 
     let plan = long_source::completed_long_source_plan(
@@ -360,6 +377,7 @@ async fn generate_file_blocks(
     generation_model_ref: Option<&str>,
     today: &str,
     cancellation: CancellationToken,
+    progress: &(dyn Fn(&str, Option<(usize, usize)>) -> Result<(), WikiFailure> + Send + Sync),
 ) -> Result<String, WikiFailure> {
     let generation_prompt = prompts::build_generation_prompt(prompts::GenerationPromptParams {
         schema: &context.schema,
@@ -372,6 +390,7 @@ async fn generate_file_blocks(
         output_language,
         today,
     });
+    progress("generate", None)?;
     ask_llm(
         &llm,
         vec![
@@ -382,8 +401,11 @@ async fn generate_file_blocks(
             WikiIngestLlmMessage {
                 role: WikiIngestLlmRole::User,
                 content: format!(
-                    "Do not summarize the source or repeat its tables, bullet points, or prose. Your output must be FILE/REVIEW blocks as specified in the system prompt — nothing else.\n\n## Stage 1 Analysis (context only — do not repeat)\n\n{}\n\n---\n\n## Source Context (evidence to transform into wiki pages)\n\n{}\n\n---\n\nNow emit the FILE blocks for the wiki files derived from **{}**.\nYour response MUST begin with `---FILE:` as the very first characters.\nNo preamble. No analysis prose. Start immediately.",
-                    source.analysis, source.source_context, input.staged.source_identity
+                    "Source document to process: **{}**\n\nThe Stage 1 analysis below is CONTEXT to inform your output. Do NOT echo\nits tables, bullet points, or prose. Your output must be FILE/REVIEW\nblocks as specified in the system prompt — nothing else.\n\n## Stage 1 Analysis (context only — do not repeat)\n\n{}\n\n## Source Context\n\n{}\n\n---\n\nNow emit the FILE blocks for the wiki files derived from **{}**.\nYour response MUST begin with `---FILE:` as the very first characters.\nNo preamble. No analysis prose. Start immediately.",
+                    input.staged.source_identity,
+                    source.analysis,
+                    source.source_context,
+                    input.staged.source_identity
                 ),
             },
         ],
@@ -406,6 +428,7 @@ async fn parse_repair_and_review(
     output_language: Option<&str>,
     generation_model_ref: Option<&str>,
     cancellation: CancellationToken,
+    progress: &(dyn Fn(&str, Option<(usize, usize)>) -> Result<(), WikiFailure> + Send + Sync),
 ) -> Result<(Vec<WikiGeneratedPageInput>, Vec<WikiReviewItem>), WikiFailure> {
     let mut parsed = parser::parse_file_blocks(&generation);
     if !parsed.truncated_paths.is_empty() {
@@ -427,6 +450,7 @@ async fn parse_repair_and_review(
                 },
                 output_language,
             });
+        progress("repair", None)?;
         let repair = ask_llm(
             &llm,
             vec![
@@ -482,6 +506,7 @@ async fn parse_repair_and_review(
 
     let mut reviews = parser::parse_review_blocks(&generation, &input.staged.source_relative_path);
     if parser::should_run_dedicated_review_stage(&generation) {
+        progress("review", None)?;
         match generate_review_suggestions(
             llm,
             input,
@@ -522,9 +547,7 @@ async fn generate_review_suggestions(
 ) -> Result<String, WikiFailure> {
     let prompt = prompts::build_review_suggestion_prompt(prompts::ReviewSuggestionPromptParams {
         purpose: &context.purpose,
-        schema: &context.schema,
         index: &context.index,
-        overview: &context.overview,
         source_identity: &input.staged.source_identity,
         analysis: &source.analysis,
         source_context: &source.source_context,

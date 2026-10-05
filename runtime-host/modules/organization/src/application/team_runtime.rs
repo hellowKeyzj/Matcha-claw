@@ -122,7 +122,11 @@ impl TeamGraphPatchDraft {
                 .map(team_event_graph_patch_operation)
                 .collect::<Vec<_>>(),
         )
-        .map_err(map_event_input)?;
+        .map_err(map_event_input)?
+        .with_content_fingerprint(
+            crate::store::codec::graph_patch_fingerprint(&patch)
+                .map_err(|_| TeamGraphPatchResolveError::InvalidInput)?,
+        );
         Ok((
             RunCommand::new(
                 self.audit_run_id,
@@ -216,6 +220,9 @@ fn team_event_graph_node_role_id(node: &organization::NodeDefinition) -> Option<
 }
 
 pub enum TeamRuntimeCommand {
+    Design {
+        operation: crate::application::design::DesignOperation,
+    },
     PackageValidate {
         package_root: PathBuf,
     },
@@ -334,6 +341,10 @@ pub enum TeamRuntimeCommand {
 }
 
 pub enum TeamRuntimeCommandOutcome {
+    Design {
+        read: bool,
+        result: Result<Value, StoreFault>,
+    },
     PackageValidate(TeamSkillPackageValidation),
     DependencyPlan(TeamSkillDependencyPlanResult),
     ProvisionAgents(TeamMaterializationCommandOutcome),
@@ -461,6 +472,11 @@ pub fn decode_team_runtime_command(
             };
             Ok(TeamRuntimeCommand::TriggerList { team_id })
         }
+        "team.designStart"
+        | "team.designContinue"
+        | "team.designExit"
+        | "team.designSnapshot"
+        | "team.designGraphPatch" => super::design::decode(operation_id, input, target),
         "team.runCreate" => decode_team_run_create(input, target),
         "team.webhookTriggerFire" => decode_team_webhook_trigger(input, target),
         "team.graphSave" => decode_team_graph_save(input, target),
@@ -1656,7 +1672,10 @@ fn decode_team_graph_node(
                 organization::WorkAssignment::typed(
                     task_id,
                     prompt,
-                    organization::ExecutorPolicy::team_role(role_id),
+                    organization::ExecutorPolicy::team_role_session(
+                        role_id,
+                        decode_team_graph_session_ref(config)?,
+                    ),
                     output_artifact_kind,
                     group_id,
                 ),
@@ -1670,7 +1689,13 @@ fn decode_team_graph_node(
                     id,
                     title,
                     max_attempts,
-                    organization::ReviewAssignment::new(role_id, prompt),
+                    organization::ReviewAssignment::with_executor(
+                        organization::ExecutorPolicy::team_role_session(
+                            role_id,
+                            decode_team_graph_session_ref(config)?,
+                        ),
+                        prompt,
+                    ),
                 ))
             } else {
                 Ok(organization::NodeDefinition::control(
@@ -1687,7 +1712,7 @@ fn decode_team_graph_node(
             max_attempts,
             organization::WorkGroup::new(
                 organization::GroupId::new(graph_string_field(node, "groupId").unwrap_or("group")),
-                organization::JoinPolicy::new(true, false, 0),
+                decode_team_graph_join_policy(config)?,
             ),
         )),
         _ => Ok(organization::NodeDefinition::control(
@@ -1697,6 +1722,41 @@ fn decode_team_graph_node(
             max_attempts,
         )),
     }
+}
+
+fn decode_team_graph_session_ref(
+    config: Option<&serde_json::Map<String, Value>>,
+) -> Result<organization::RoleSessionRef, TeamRuntimeDecodeError> {
+    match config.and_then(|config| config.get("sessionRef")) {
+        None => Ok(organization::RoleSessionRef::initial()),
+        Some(value) => organization::RoleSessionRef::try_new(
+            value.as_str().ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+        )
+        .map_err(|_| TeamRuntimeDecodeError::InvalidInput),
+    }
+}
+
+fn decode_team_graph_join_policy(
+    config: Option<&serde_json::Map<String, Value>>,
+) -> Result<organization::JoinPolicy, TeamRuntimeDecodeError> {
+    let Some(value) = config.and_then(|config| config.get("join")) else {
+        return Ok(organization::JoinPolicy::new(true, false, 0));
+    };
+    let join = value
+        .as_object()
+        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+    Ok(organization::JoinPolicy::new(
+        join.get("requireCompleted")
+            .and_then(Value::as_bool)
+            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+        join.get("allowFailed")
+            .and_then(Value::as_bool)
+            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+        join.get("retryLimit")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+    ))
 }
 
 fn decode_team_graph_node_kind(
@@ -1805,6 +1865,20 @@ fn decode_team_graph_edge(
             .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
         None => true,
     };
+    let dependency = match edge.get("dependency") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let dependency = value
+                .as_object()
+                .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+            Some(organization::DependencyMetadata::new(
+                graph_string_field(dependency, "dependencyTaskId")
+                    .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+                graph_string_field(dependency, "taskId")
+                    .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+            ))
+        }
+    };
     Ok(organization::EdgeDefinition::new(
         organization::EdgeId::new(
             graph_string_field(edge, "edgeId").ok_or(TeamRuntimeDecodeError::InvalidInput)?,
@@ -1817,7 +1891,8 @@ fn decode_team_graph_edge(
     )
     .with_payload(organization::EdgePayloadPolicy::new(
         include_upstream_result,
-    )))
+    ))
+    .with_dependency_opt(dependency))
 }
 
 fn decode_team_graph_edge_action(
@@ -1832,7 +1907,7 @@ fn decode_team_graph_edge_action(
     }
 }
 
-fn decode_team_graph_patch_value(
+pub(crate) fn decode_team_graph_patch_value(
     value: &Value,
     run_id: organization::GraphRunId,
     audit_run_id: organization::run::event::OpaqueId,

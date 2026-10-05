@@ -11,7 +11,7 @@ use foundation::execution::{LaneRetention, OwnerSpec};
 use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -38,21 +38,20 @@ use crate::{
         project_template_or_default, project_template_views, resolve_project_path,
         stable_content_hash, system_time_ms, title_for_root,
     },
-    index::{RemoteWikiVectorIndex, WikiVectorIndex},
+    index::{LanceWikiVectorIndex, WikiVectorIndex},
     ports::{WikiIngestImageCaptionRequest, WikiIngestLlm, WikiIngestLlmOptions},
 };
 
 use super::{
     source_lifecycle::{
-        self, DEFAULT_WATCH_MAX_BYTES, SourceCacheEntry, append_source_task_paths,
+        self, DEFAULT_WATCH_MAX_BYTES, append_source_task_paths,
         append_source_tasks, cleanup_deleted_wiki_pages, collect_regular_files,
         identify_source_moves, is_default_watch_allowed_source_path, is_default_watch_descend_dir,
         is_default_watch_tracked_file, is_deleted_raw_source_path, is_deleted_wiki_page_path,
-        is_ingestable_source_path, is_sensitive_config_source_file, mark_source_task_cancelled,
-        mark_source_task_done, mark_source_task_running, read_source_cache, refresh_file_snapshot,
+        is_ingestable_source_path, is_sensitive_config_source_file,
+        mark_source_task_running, read_source_cache, refresh_file_snapshot,
         request_source_task_cancel, source_content_hash, source_identity, source_summary_slug,
-        source_task_cancel_requested, source_task_paused, staged_raw_source,
-        write_source_cache_entry,
+        staged_raw_source,
     },
     source_watcher::SourceWatchControl,
 };
@@ -101,19 +100,14 @@ pub(crate) struct WikiShared {
     pub(crate) vector_index: Arc<dyn WikiVectorIndex>,
     pub(crate) question_tasks: Arc<crate::qa::QuestionTasks>,
     pub(crate) lint_runs: Arc<crate::lint::LintRuns>,
+    pub(crate) dedup: Arc<crate::dedup::DedupRuns>,
+    pub(crate) missing_pages: Arc<crate::page_links::MissingPageRuns>,
+    pub(crate) review_sweeps: Arc<crate::sweep::ReviewSweeps>,
+    pub(crate) selection: Arc<crate::selection::SelectionRuns>,
     pub(crate) reindex_progress: Arc<crate::reindex::ReindexProgress>,
     pub(crate) ingest_llm: Option<Arc<dyn WikiIngestLlm>>,
-    pub(crate) research_tasks: Arc<crate::research::ResearchTasks>,
-    pub(crate) http_client: reqwest::Client,
     state: Arc<RwLock<WikiState>>,
     source_watch_control: SourceWatchControl,
-    source_task_cancellations: Arc<Mutex<BTreeMap<SourceTaskKey, CancellationToken>>>,
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct SourceTaskKey {
-    project_id: String,
-    source_relative_path: String,
 }
 
 #[derive(Clone)]
@@ -124,55 +118,10 @@ pub(crate) struct WikiState {
 }
 
 impl WikiShared {
-    pub(super) async fn snapshot(&self) -> WikiState {
+    pub(crate) async fn snapshot(&self) -> WikiState {
         self.state.read().await.clone()
     }
 
-    async fn reset_source_task_cancellation(
-        &self,
-        project_id: &str,
-        source_relative_path: &str,
-    ) -> CancellationToken {
-        let token = CancellationToken::new();
-        self.source_task_cancellations.lock().await.insert(
-            source_task_key(project_id, source_relative_path),
-            token.clone(),
-        );
-        token
-    }
-
-    async fn source_task_cancellation(
-        &self,
-        project_id: &str,
-        source_relative_path: &str,
-    ) -> CancellationToken {
-        let key = source_task_key(project_id, source_relative_path);
-        let mut cancellations = self.source_task_cancellations.lock().await;
-        cancellations
-            .entry(key)
-            .or_insert_with(CancellationToken::new)
-            .clone()
-    }
-
-    async fn cancel_source_task_token(&self, project_id: &str, source_relative_path: &str) {
-        self.source_task_cancellation(project_id, source_relative_path)
-            .await
-            .cancel();
-    }
-
-    async fn clear_source_task_cancellation(&self, project_id: &str, source_relative_path: &str) {
-        self.source_task_cancellations
-            .lock()
-            .await
-            .remove(&source_task_key(project_id, source_relative_path));
-    }
-}
-
-fn source_task_key(project_id: &str, source_relative_path: &str) -> SourceTaskKey {
-    SourceTaskKey {
-        project_id: project_id.to_owned(),
-        source_relative_path: source_relative_path.to_owned(),
-    }
 }
 
 pub(crate) struct WikiGlobalState;
@@ -193,13 +142,9 @@ impl WikiOwner {
         std::fs::create_dir_all(&state_root)
             .map_err(|error| WikiFailure::io(path_text(&state_root), error))?;
         let registry: WikiProjectRegistry = read_json(state_root.join(PROJECT_REGISTRY_FILE))?;
-        let research_tasks =
-            crate::research::ResearchTasks::recover(registry.projects().iter().map(|project| {
-                (
-                    project.project_id().to_owned(),
-                    project_root(project).to_path_buf(),
-                )
-            }))?;
+        for project in registry.projects() {
+            source_lifecycle::recover_source_tasks(project_root(project))?;
+        }
         let question_tasks =
             crate::qa::QuestionTasks::recover(registry.projects().iter().map(|project| {
                 (
@@ -209,28 +154,33 @@ impl WikiOwner {
             }))?;
         let vector_index = match input.vector_index {
             Some(index) => index,
-            None => Arc::new(RemoteWikiVectorIndex::new().map_err(WikiFailure::from)?),
+            None => Arc::new(LanceWikiVectorIndex::new().map_err(WikiFailure::from)?),
         };
         let current = read_json::<CurrentProjectFile>(state_root.join(CURRENT_PROJECT_FILE))?;
         Ok(Self {
             shared: WikiShared {
                 vector_index,
                 ingest_llm: input.ingest_llm,
-                research_tasks: Arc::new(research_tasks),
                 question_tasks: Arc::new(question_tasks),
                 lint_runs: Arc::new(crate::lint::LintRuns::default()),
+                dedup: Arc::new(crate::dedup::DedupRuns::default()),
+                missing_pages: Arc::new(crate::page_links::MissingPageRuns::default()),
+                review_sweeps: Arc::new(crate::sweep::ReviewSweeps::default()),
+                selection: Arc::new(crate::selection::SelectionRuns::default()),
                 reindex_progress: Arc::new(crate::reindex::ReindexProgress::default()),
-                http_client: reqwest::Client::new(),
                 state: Arc::new(RwLock::new(WikiState {
                     state_root,
                     registry,
                     current_project_id: current.project_id,
                 })),
                 source_watch_control,
-                source_task_cancellations: Arc::new(Mutex::new(BTreeMap::new())),
             },
             global: WikiGlobalState,
         })
+    }
+
+    pub(crate) fn shared(&self) -> WikiShared {
+        self.shared.clone()
     }
 
     pub const fn lane_retention() -> LaneRetention {
@@ -311,11 +261,111 @@ impl OwnerSpec for WikiOwner {
 
 async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
     if let Err(error) = crate::call::running(command.call(), command.acceptance()).await {
-        command.reject(error).await;
+        match command {
+            WikiCommand::EmbedPage { input, reply } => {
+                reply
+                    .send_embedded(
+                        Err(error),
+                        input.project_id.expect("embed project resolved before dispatch"),
+                    )
+                    .await;
+            }
+            command => command.reject(error).await,
+        }
         return;
     }
     let state = shared.snapshot().await;
     match command {
+        WikiCommand::BeginSourceWork { project_id, reply } => {
+            let _ = reply
+                .send(super::sweep::begin(&shared, &state, project_id))
+                .await;
+        }
+        WikiCommand::StageReviewSweep { project_id, reply } => {
+            let _ = reply
+                .send(super::sweep::stage(&shared, &state, project_id))
+                .await;
+        }
+        WikiCommand::CompleteReviewSweep {
+            plan,
+            resolved_ids,
+            reply,
+        } => {
+            let _ = reply
+                .send(super::sweep::complete(&shared, &state, plan, resolved_ids))
+                .await;
+        }
+        WikiCommand::DetectDuplicates { plan, reply } => {
+            reply
+                .send_duplicates_detected(super::dedup::detect(&shared, &state, plan).await)
+                .await;
+        }
+        WikiCommand::EnqueueDedup {
+            input,
+            task_id,
+            reply,
+        } => {
+            let _ = reply
+                .send(super::dedup::enqueue(&shared, &state, input, task_id).await)
+                .await;
+        }
+        WikiCommand::PrepareDedup { input, reply } => {
+            let _ = reply
+                .send(super::dedup::prepare(&shared, &state, input).await)
+                .await;
+        }
+        WikiCommand::CompleteDedup { plan, reply } => {
+            let _ = reply
+                .send(super::dedup::complete(&shared, &state, plan).await)
+                .await;
+        }
+        WikiCommand::FailDedup {
+            input,
+            error,
+            reply,
+        } => {
+            let _ = reply
+                .send(super::dedup::fail(&shared, &state, input, error).await)
+                .await;
+        }
+        WikiCommand::RetryDedup { input, reply } => {
+            let _ = reply
+                .send(super::dedup::retry(&shared, &state, input).await)
+                .await;
+        }
+        WikiCommand::ResumeDedup { input, reply } => {
+            let _ = reply
+                .send(super::dedup::resume(&shared, &state, input).await)
+                .await;
+        }
+        WikiCommand::ExcludeDuplicates { input, reply } => {
+            let _ = reply
+                .send(super::dedup::exclude(&shared, &state, input).await)
+                .await;
+        }
+        WikiCommand::ApplySelection { input, reply } => {
+            reply
+                .send_selection_applied(super::selection_edit::apply(&shared, &state, input))
+                .await;
+        }
+        WikiCommand::CreateMissingPage { plan, reply } => {
+            reply
+                .send_missing_page_created(super::page_links::create(&shared, &state, plan).await)
+                .await;
+        }
+        WikiCommand::ReloadProjects { reply } => {
+            let result = async {
+                let registry = read_json(state.state_root.join(PROJECT_REGISTRY_FILE))?;
+                let current =
+                    read_json::<CurrentProjectFile>(state.state_root.join(CURRENT_PROJECT_FILE))?;
+                let mut state = shared.state.write().await;
+                state.registry = registry;
+                state.current_project_id = current.project_id;
+                Ok(())
+            }
+            .await;
+            let _ = reply.send(result).await;
+        }
         WikiCommand::RestoreHistory { input, reply } => {
             let result =
                 selected_project(&state, input.project_id.as_deref()).and_then(|project| {
@@ -471,33 +521,6 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
         WikiCommand::DismissGraphInsight { input, reply } => {
             let _ = reply.send(super::insights::dismiss(&state, input)).await;
         }
-        WikiCommand::StageResearch { input, reply } => {
-            let _ = reply
-                .send(stage_research(&shared, &state, input).await)
-                .await;
-        }
-        WikiCommand::CommitResearch {
-            project_id,
-            task,
-            cited,
-            reply,
-        } => {
-            let _ = reply
-                .send(commit_research(&shared, &state, &project_id, task, cited).await)
-                .await;
-        }
-        WikiCommand::RemoveResearchTask { input, reply } => {
-            let result = match selected_project(&state, input.project_id.as_deref()) {
-                Ok(project) => {
-                    shared
-                        .research_tasks
-                        .remove(project_root(project), project.project_id(), &input.task_id)
-                        .await
-                }
-                Err(error) => Err(error),
-            };
-            let _ = reply.send(result).await;
-        }
         WikiCommand::UpdateSearchConfig {
             project_id,
             input,
@@ -536,10 +559,11 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
         WikiCommand::StageRefreshSourcePaths {
             project_id,
             paths,
+            auto_ingest,
             reply,
         } => {
             let _ = reply
-                .send(stage_refresh_source_paths(&state, &project_id, paths))
+                .send(stage_refresh_source_paths(&state, &project_id, paths, auto_ingest))
                 .await;
         }
         WikiCommand::CleanupDeletedWikiPages {
@@ -550,6 +574,22 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             let _ = reply
                 .send(cleanup_deleted_wiki_pages_for_project(&state, &project_id, &paths).await)
                 .await;
+        }
+        WikiCommand::DeletePage { input, reply } => {
+            let result = match selected_project(&state, input.project_id.as_deref()) {
+                Ok(project) => super::pages::delete_page(
+                    project_root(project), project.project_id(), &input.path, false,
+                    |relative_path, content| write_file(
+                        &state,
+                        WikiWriteInput {
+                            project_id: Some(project.project_id().to_owned()),
+                            relative_path, content,
+                        },
+                    ),
+                ).await,
+                Err(error) => Err(error),
+            };
+            reply.send_page_deleted(result).await;
         }
         WikiCommand::DeleteSource { input, reply } => {
             reply.send_deleted(delete_source(&state, input).await).await;
@@ -583,30 +623,13 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
         WikiCommand::ClearResolvedReviews { input, reply } => {
             let _ = reply.send(clear_resolved_reviews(&state, input)).await;
         }
-        WikiCommand::MarkSourceTaskFailed {
-            project_id,
-            source_relative_path,
-            error,
-            reply,
-        } => {
-            let _ = reply
-                .send(mark_source_task_failed_for_project(
-                    &state,
-                    &project_id,
-                    &source_relative_path,
-                    error,
-                ))
-                .await;
-        }
-        WikiCommand::CancelSourceTask { input, reply } => {
-            let _ = reply
-                .send(cancel_source_task(&shared, &state, input).await)
-                .await;
-        }
         WikiCommand::RetrySourceTask { input, reply } => {
             let _ = reply.send(retry_source_task(&state, input)).await;
         }
         WikiCommand::PauseSourceTask { input, reply } => {
+            if let Ok(project) = selected_project(&state, input.project_id.as_deref()) {
+                shared.review_sweeps.invalidate(project.project_id());
+            }
             let _ = reply
                 .send(pause_source_task(&shared, &state, input).await)
                 .await;
@@ -621,7 +644,10 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             let _ = reply.send(rescan(&state, input)).await;
         }
         WikiCommand::EmbedPage { input, reply } => {
-            let _ = reply.send(embed_page(&shared, &state, input).await).await;
+            let project_id = input.project_id.clone().expect("embed project resolved before dispatch");
+            reply
+                .send_embedded(embed_page(&shared, &state, input).await, project_id)
+                .await;
         }
         WikiCommand::CreateProject { input, reply } => {
             let _ = reply.send(create_project(&shared, input).await).await;
@@ -647,6 +673,47 @@ async fn handle_query(shared: WikiShared, query: WikiQuery) {
     }
     let state = shared.snapshot().await;
     match query {
+        WikiQuery::StageSelection { input, reply } => {
+            let _ = reply
+                .send(super::selection::stage(&shared, &state, input))
+                .await;
+        }
+        WikiQuery::SelectionTask { input, reply } => {
+            let _ = reply
+                .send(super::selection::task(&shared, &state, input))
+                .await;
+        }
+        WikiQuery::CancelSelection { input, reply } => {
+            let _ = reply
+                .send(super::selection::cancel(&shared, &state, input))
+                .await;
+        }
+        WikiQuery::StageDedupDetection { input, reply } => {
+            let _ = reply.send(super::dedup::stage_detection(&shared, &state, input).await).await;
+        }
+        WikiQuery::DedupState { input, reply } => {
+            let _ = reply
+                .send(super::dedup::state(&shared, &state, input).await)
+                .await;
+        }
+        WikiQuery::CancelDedup { input, reply } => {
+            let _ = reply
+                .send(super::dedup::cancel(&shared, &state, input).await)
+                .await;
+        }
+        WikiQuery::PageLinks { input, reply } => {
+            let _ = reply
+                .send(super::page_links::links(&shared, &state, input).await)
+                .await;
+        }
+        WikiQuery::StageMissingPage { input, reply } => {
+            let _ = reply.send(super::page_links::stage(&shared, &state, input)).await;
+        }
+        WikiQuery::CancelMissingPage { input, reply } => {
+            let _ = reply
+                .send(super::page_links::cancel(&shared, &state, input).await)
+                .await;
+        }
         WikiQuery::HistoryList { input, reply } => {
             let result =
                 selected_project(&state, input.project_id.as_deref()).and_then(|project| {
@@ -709,23 +776,6 @@ async fn handle_query(shared: WikiShared, query: WikiQuery) {
         WikiQuery::GraphInsights { input, reply } => {
             let _ = reply.send(super::insights::read(&state, input)).await;
         }
-        WikiQuery::StageGraphInsightResearch { input, reply } => {
-            let _ = reply
-                .send(super::insights::stage_research(&shared, &state, input))
-                .await;
-        }
-        WikiQuery::ResearchTasks { input, reply } => {
-            let result = match selected_project(&state, input.project_id.as_deref()) {
-                Ok(project) => {
-                    shared
-                        .research_tasks
-                        .list(project_root(project), project.project_id())
-                        .await
-                }
-                Err(error) => Err(error),
-            };
-            let _ = reply.send(result).await;
-        }
         WikiQuery::SearchConfig { input, reply } => {
             let result =
                 selected_project(&state, input.project_id.as_deref()).and_then(|project| {
@@ -735,29 +785,6 @@ async fn handle_query(shared: WikiShared, query: WikiQuery) {
                         project.project_id(),
                     )
                 });
-            let _ = reply.send(result).await;
-        }
-        WikiQuery::TestSearchProvider {
-            project_id,
-            input,
-            cancellation,
-            reply,
-        } => {
-            let result = match selected_project(&state, project_id.as_deref()) {
-                Ok(project) => match crate::search_config::execution_snapshot(
-                    project_root(project),
-                    &state.state_root,
-                    project.project_id(),
-                ) {
-                    Ok((config, credentials)) => {
-                        crate::external_search::ExternalSearch::new(shared.http_client.clone())
-                            .test_provider(input, &config, &credentials, &cancellation)
-                            .await
-                    }
-                    Err(error) => Err(error),
-                },
-                Err(error) => Err(error),
-            };
             let _ = reply.send(result).await;
         }
         WikiQuery::Status { reply } => {
@@ -784,6 +811,12 @@ async fn handle_query(shared: WikiShared, query: WikiQuery) {
         WikiQuery::Search { input, reply } => {
             let _ = reply.send(search(&shared, &state, input).await).await;
         }
+        WikiQuery::Navigation { input, reply } => {
+            let result = selected_project(&state, input.project_id.as_deref()).and_then(|project| {
+                super::pages::navigation(project_root(project), project.project_id())
+            });
+            let _ = reply.send(result).await;
+        }
         WikiQuery::Graph { input, reply } => {
             let _ = reply.send(graph(&state, input)).await;
         }
@@ -795,9 +828,6 @@ async fn handle_query(shared: WikiShared, query: WikiQuery) {
         WikiQuery::Reviews { input, reply } => {
             let _ = reply.send(reviews(&state, input)).await;
         }
-        WikiQuery::SourceTasks { input, reply } => {
-            let _ = reply.send(source_tasks(&state, input)).await;
-        }
         WikiQuery::SourceFiles { input, reply } => {
             let _ = reply.send(source_files(&state, input)).await;
         }
@@ -805,121 +835,6 @@ async fn handle_query(shared: WikiShared, query: WikiQuery) {
             let _ = reply.send(source_watch_config(&state, input)).await;
         }
     }
-}
-
-async fn stage_research(
-    shared: &WikiShared,
-    state: &WikiState,
-    input: crate::research::WikiResearchInput,
-) -> Result<crate::research::ResearchPlan, WikiFailure> {
-    let project = selected_project(state, input.project_id.as_deref())?;
-    let root = project_root(project);
-    let config = read_source_watch_config(root)?;
-    let model_ref = input
-        .model_ref
-        .or_else(|| config.generation_model_ref().map(str::to_owned))
-        .map(|model| model.trim().to_owned())
-        .filter(|model| !model.is_empty() && model != "auto")
-        .ok_or_else(|| {
-            WikiFailure::invalid_input(
-                "modelRef",
-                "Wiki research generation model is not configured",
-            )
-        })?;
-    let tasks = shared
-        .research_tasks
-        .stage(root, project.project_id(), input.inputs)
-        .await?;
-    Ok(crate::research::ResearchPlan {
-        shared: shared.clone(),
-        project_root: root.to_path_buf(),
-        state_root: state.state_root.clone(),
-        project_id: project.project_id().to_owned(),
-        model_ref: Some(model_ref),
-        language: config.output_language().to_owned(),
-        tasks,
-    })
-}
-
-async fn commit_research(
-    shared: &WikiShared,
-    state: &WikiState,
-    project_id: &str,
-    task: crate::research::WikiResearchTask,
-    cited: Vec<usize>,
-) -> Result<crate::research::WikiResearchTask, WikiFailure> {
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let topic = task
-        .topic
-        .chars()
-        .map(|character| {
-            if character.is_alphanumeric() {
-                character
-            } else {
-                '-'
-            }
-        })
-        .take(80)
-        .collect::<String>();
-    let path = format!(
-        "wiki/queries/{date}-research-{}-{}.md",
-        topic.trim_matches('-'),
-        task.id
-    );
-    let content = crate::research::synthesis::page(
-        &task.topic,
-        &date,
-        &task.synthesis,
-        &task.web_results,
-        &cited,
-    );
-    write_file_with_history(
-        state,
-        WikiWriteInput {
-            project_id: Some(project_id.to_owned()),
-            relative_path: path.clone(),
-            content,
-        },
-        "agent",
-        "research",
-    )?;
-    let project = selected_project(state, Some(project_id))?;
-    let completed = shared
-        .research_tasks
-        .update(project_root(project), project_id, &task.id, |task| {
-            task.status = crate::research::WikiResearchTaskStatus::Done;
-            task.saved_path = Some(path.clone());
-            task.error = None;
-        })
-        .await?;
-    if let Some(id) = completed.source_review_id.as_ref() {
-        if resolve_review(
-            state,
-            WikiReviewResolveInput {
-                project_id: Some(project_id.to_owned()),
-                id: id.clone(),
-                action: format!("Research saved: {path}"),
-            },
-        )
-        .is_err()
-        {
-            eprintln!("[wiki] saved research review resolution failed");
-        }
-    }
-    if embed_page(
-        shared,
-        state,
-        WikiPathSelector {
-            project_id: Some(project_id.to_owned()),
-            relative_path: path,
-        },
-    )
-    .await
-    .is_err()
-    {
-        eprintln!("[wiki] research page indexing failed; saved research preserved");
-    }
-    Ok(completed)
 }
 
 async fn create_project(
@@ -941,6 +856,12 @@ async fn create_project(
         .map_err(|error| WikiFailure::io(path_text(&root), error))?;
 
     let mut state = shared.state.write().await;
+    if state.current_project_id.as_deref() != Some(&project_id_for_root(&root)) {
+        if let Some(previous) = state.current_project_id.as_deref() {
+            shared.dedup.pause(previous).await?;
+        }
+        shared.review_sweeps.invalidate_all();
+    }
     let receipt = upsert_project(&mut state, &root, input.title)?;
     sync_source_watch(shared, &state);
     Ok(receipt)
@@ -955,8 +876,15 @@ pub(super) async fn open_project(
         return Err(WikiFailure::not_found(path_text(&root)));
     }
     ensure_project_layout(&root).map_err(|error| WikiFailure::io(path_text(&root), error))?;
+    source_lifecycle::recover_source_tasks(&root)?;
 
     let mut state = shared.state.write().await;
+    if state.current_project_id.as_deref() != Some(&project_id_for_root(&root)) {
+        if let Some(previous) = state.current_project_id.as_deref() {
+            shared.dedup.pause(previous).await?;
+        }
+        shared.review_sweeps.invalidate_all();
+    }
     let receipt = upsert_project(&mut state, &root, input.title)?;
     sync_source_watch(shared, &state);
     Ok(receipt)
@@ -970,6 +898,12 @@ async fn set_current_project(
     let project_id = input.project_id.ok_or(WikiFailure::CurrentProjectUnset)?;
     if state.registry.find(&project_id).is_none() {
         return Err(WikiFailure::ProjectNotFound { project_id });
+    }
+    if state.current_project_id.as_deref() != Some(&project_id) {
+        if let Some(previous) = state.current_project_id.as_deref() {
+            shared.dedup.pause(previous).await?;
+        }
+        shared.review_sweeps.invalidate_all();
     }
     state.current_project_id = Some(project_id);
     save_state(&state)?;
@@ -1353,24 +1287,23 @@ fn stage_import_source(
     let raw_sources_root = raw_sources
         .canonicalize()
         .map_err(|error| WikiFailure::io(path_text(&raw_sources), error))?;
-    let (source_path, source_relative_path) =
+    let (source_path, source_relative_path, copy_source) =
         if let Ok(relative) = source.strip_prefix(&raw_sources_root) {
             (
                 source.clone(),
                 normalize_relative_path(&Path::new(RAW_SOURCES_DIR).join(relative)),
+                false,
             )
         } else {
             let file_name = source.file_name().ok_or_else(|| {
                 WikiFailure::invalid_input("sourcePath", "source file has no name")
             })?;
             let target = unique_import_target(&raw_sources, file_name);
-            std::fs::copy(&source, &target)
-                .map_err(|error| WikiFailure::io(path_text(&target), error))?;
             let relative = target
                 .strip_prefix(&root)
                 .map(normalize_relative_path)
                 .unwrap_or_else(|_| path_text(&target));
-            (target, relative)
+            (target, relative, true)
         };
 
     if !is_ingestable_source_path(&source_relative_path, false) {
@@ -1382,7 +1315,7 @@ fn stage_import_source(
 
     let identity = source_identity(&source_relative_path).to_owned();
     let slug = source_summary_slug(&identity);
-    let staged = WikiStagedImportSource {
+    let mut staged = WikiStagedImportSource {
         project_id,
         project_root: root,
         import_id: slug.clone(),
@@ -1391,12 +1324,22 @@ fn stage_import_source(
         source_identity: identity,
         page_relative_path: format!("{WIKI_SOURCES_DIR}/{slug}.md"),
         task_kind: WikiSourceTaskKind::Imported,
+        task_id: String::new(),
+        execution: None,
     };
     append_source_tasks(
-        &staged.project_root,
-        &staged.project_id,
-        std::slice::from_ref(&staged),
+        &staged.project_root.clone(),
+        &staged.project_id.clone(),
+        std::slice::from_mut(&mut staged),
+        true,
     )?;
+    if copy_source {
+        if let Err(error) = std::fs::copy(&source, &staged.source_path) {
+            let failure = WikiFailure::io(path_text(&staged.source_path), error);
+            source_execution(&staged)?.finish(&Err::<(), _>(failure.clone()))?;
+            return Err(failure);
+        }
+    }
     refresh_file_snapshot(
         &staged.project_root,
         &[staged.source_relative_path.as_str()],
@@ -1493,22 +1436,21 @@ fn stage_import_folder(
             std::fs::create_dir_all(parent)
                 .map_err(|error| WikiFailure::io(path_text(parent), error))?;
         }
-        if let Err(error) = std::fs::copy(&source, &destination) {
-            skipped.push(WikiSourceSkip::new(
-                relative_inside_folder,
-                error.to_string(),
-            ));
+        let mut staged = staged_raw_source(
+            &project_id, &root, destination.clone(), relative_path, WikiSourceTaskKind::Imported,
+        )?;
+        if let Err(error) = append_source_tasks(&root, &project_id, std::slice::from_mut(&mut staged), true) {
+            skipped.push(WikiSourceSkip::new(relative_inside_folder, format!("{error:?}")));
             continue;
         }
-        imports.push(staged_raw_source(
-            &project_id,
-            &root,
-            destination,
-            relative_path,
-            WikiSourceTaskKind::Imported,
-        )?);
+        if let Err(error) = std::fs::copy(&source, &destination) {
+            let failure = WikiFailure::io(path_text(&destination), error);
+            source_execution(&staged)?.finish(&Err::<(), _>(failure))?;
+            skipped.push(WikiSourceSkip::new(relative_inside_folder, "source copy failed".to_owned()));
+            continue;
+        }
+        imports.push(staged);
     }
-    append_source_tasks(root.as_path(), &project_id, &imports)?;
     let source_paths = imports
         .iter()
         .map(|import| import.source_relative_path.as_str())
@@ -1631,7 +1573,7 @@ fn stage_refresh_sources(
         .filter(|relative_path| !moved_old.contains(relative_path))
         .collect::<Vec<_>>();
 
-    append_source_tasks(root, &project_id, &imports)?;
+    append_source_tasks(root, &project_id, &mut imports, true)?;
     append_source_task_paths(root, &project_id, &deletions, WikiSourceTaskKind::Deleted)?;
     append_source_task_paths(
         root,
@@ -1658,6 +1600,7 @@ fn stage_refresh_source_paths(
     global: &WikiState,
     project_id: &str,
     paths: Vec<PathBuf>,
+    auto_ingest: bool,
 ) -> Result<WikiRefreshSourcesPlan, WikiFailure> {
     let project = selected_project(global, Some(project_id))?;
     let project_id = project.project_id().to_owned();
@@ -1784,7 +1727,7 @@ fn stage_refresh_source_paths(
         .filter(|relative_path| !moved_old.contains(relative_path))
         .collect::<Vec<_>>();
 
-    append_source_tasks(root, &project_id, &imports)?;
+    append_source_tasks(root, &project_id, &mut imports, auto_ingest)?;
     append_source_task_paths(root, &project_id, &deletions, WikiSourceTaskKind::Deleted)?;
     append_source_task_paths(
         root,
@@ -1865,20 +1808,10 @@ async fn parse_import_source(
     shared: &WikiShared,
     input: WikiStagedImportSource,
 ) -> Result<WikiParsedImportSource, WikiFailure> {
-    let project_id = input.project_id.clone();
-    let source_relative_path = input.source_relative_path.clone();
-    let project_root = input.project_root.clone();
-    let cancellation = shared
-        .reset_source_task_cancellation(&project_id, &source_relative_path)
-        .await;
-    let result = parse_import_source_inner(shared, input, cancellation).await;
+    let execution = source_execution(&input)?;
+    let result = execution.observe(parse_import_source_inner(shared, input, execution.cancellation())).await;
     if result.is_err() {
-        if result.as_ref().err().is_some_and(WikiFailure::is_cancelled) {
-            let _ = mark_source_task_cancelled(&project_root, &project_id, &source_relative_path);
-        }
-        shared
-            .clear_source_task_cancellation(&project_id, &source_relative_path)
-            .await;
+        execution.finish(&result)?;
     }
     result
 }
@@ -1891,16 +1824,24 @@ async fn parse_import_source_inner(
     reject_cancelled_source_task(&input, &cancellation)?;
     mark_source_task_running(
         &input.project_root,
-        &input.project_id,
-        &input.source_relative_path,
+        &input.task_id,
         "parse",
-        20,
+        None,
     )?;
     let state = shared.snapshot().await;
     let private = read_mineru_private_config(&state, &input.project_id)?;
     let config = read_source_watch_config(&input.project_root).unwrap_or_default();
-    validate_ingest_model_config(&config)?;
+    if shared.ingest_llm.is_some() {
+        validate_ingest_model_config(&config)?;
+    }
     let parsed = read_import_source_text(&input, &config, &private, cancellation.clone()).await?;
+    reject_cancelled_source_task(&input, &cancellation)?;
+    mark_source_task_running(
+        &input.project_root,
+        &input.task_id,
+        "extract-images",
+        None,
+    )?;
     let images = if !parsed.images.is_empty() {
         parsed.images
     } else if let recovered @ Some(_) = recover_imported_markdown_images(&input, &parsed.markdown)?
@@ -1963,10 +1904,14 @@ async fn read_import_source_text(
             ),
         }
     }
-    let markdown = tokio::select! {
-        _ = cancellation.cancelled() => return Err(WikiFailure::cancelled()),
-        result = crate::preprocess::read_source_text(input.source_path.clone(), false) => result.map_err(WikiFailure::state)?,
-    };
+    let execution = source_execution(input)?;
+    let source_path = input.source_path.clone();
+    let markdown = tokio::task::spawn_blocking(move || {
+        let _execution = execution;
+        crate::preprocess::read_source_text_guarded(&source_path, false)
+    }).await.map_err(|error| WikiFailure::state(format!("source parse task failed: {error}")))?
+        .map_err(WikiFailure::state)?;
+    cancel_if_requested(&cancellation)?;
     Ok(MineruParseResult {
         markdown,
         images: Vec::new(),
@@ -2942,19 +2887,9 @@ async fn commit_import_source(
     shared: &WikiShared,
     input: WikiParsedImportSource,
 ) -> Result<WikiImportSourceReceipt, WikiFailure> {
-    let project_id = input.staged.project_id.clone();
-    let source_relative_path = input.staged.source_relative_path.clone();
-    let project_root = input.staged.project_root.clone();
-    let cancellation = shared
-        .source_task_cancellation(&project_id, &source_relative_path)
-        .await;
-    let result = commit_import_source_inner(global, shared, input, cancellation).await;
-    if result.as_ref().err().is_some_and(WikiFailure::is_cancelled) {
-        let _ = mark_source_task_cancelled(&project_root, &project_id, &source_relative_path);
-    }
-    shared
-        .clear_source_task_cancellation(&project_id, &source_relative_path)
-        .await;
+    let execution = source_execution(&input.staged)?;
+    let result = execution.observe(commit_import_source_inner(global, shared, input, execution.cancellation())).await;
+    execution.finish(&result)?;
     result
 }
 
@@ -2967,41 +2902,45 @@ async fn commit_import_source_inner(
     reject_cancelled_source_task(&input.staged, &cancellation)?;
     mark_source_task_running(
         &input.staged.project_root,
-        &input.staged.project_id,
-        &input.staged.source_relative_path,
+        &input.staged.task_id,
         "commit",
-        45,
+        None,
     )?;
     let project = selected_project(global, Some(&input.staged.project_id))?;
     let root = project_root(project);
     let source_hash = source_content_hash(&input.text);
     let source_config = read_source_watch_config(root).unwrap_or_default();
-    validate_ingest_model_config(&source_config)?;
+    if shared.ingest_llm.is_some() {
+        validate_ingest_model_config(&source_config)?;
+    }
     let output_language = configured_output_language(source_config.output_language());
-    let generation_model_ref = source_config
-        .generation_model_ref()
-        .expect("generation model ref was validated")
-        .to_owned();
+    let generation_model_ref = source_config.generation_model_ref();
     let caption_model_ref = source_config.caption_model_ref().map(str::to_owned);
     let mut images = write_import_images(&input.staged, &input.images)?;
     let (text, markdown_images) = extract_markdown_local_images(&input.staged, &input.text)?;
     images.extend(markdown_images);
     persist_parsed_source(&input.staged, &text, &images)?;
-    if source_config.caption_enabled() && !images.is_empty() && caption_model_ref.is_none() {
+    if shared.ingest_llm.is_some()
+        && source_config.caption_enabled()
+        && !images.is_empty()
+        && caption_model_ref.is_none()
+    {
         return Err(WikiFailure::invalid_input(
             "captionModelRef",
             "Wiki image caption model is not configured",
         ));
     }
-    if source_config.caption_enabled() && !images.is_empty() {
+    let progress = |stage: &str, counts| {
         reject_cancelled_source_task(&input.staged, &cancellation)?;
         mark_source_task_running(
             root,
-            &input.staged.project_id,
-            &input.staged.source_relative_path,
-            "caption",
-            55,
-        )?;
+            &input.staged.task_id,
+            stage,
+            counts,
+        )
+    };
+    if source_config.caption_enabled() && !images.is_empty() {
+        reject_cancelled_source_task(&input.staged, &cancellation)?;
         caption_import_images(
             shared.ingest_llm.clone(),
             root,
@@ -3011,6 +2950,7 @@ async fn commit_import_source_inner(
             output_language,
             caption_model_ref.as_deref(),
             cancellation.clone(),
+            &progress,
         )
         .await?;
     }
@@ -3019,50 +2959,8 @@ async fn commit_import_source_inner(
     } else {
         strip_markdown_image_refs(&text)
     };
-    let content = import_source_markdown(
-        &input.staged,
-        &source_text,
-        source_config
-            .caption_enabled()
-            .then_some(images.as_slice())
-            .unwrap_or(&[]),
-    );
-    let path = resolve_project_path(root, &input.staged.page_relative_path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| WikiFailure::io(path_text(parent), error))?;
-    }
-    crate::history::record(
-        root,
-        &input.staged.page_relative_path,
-        "baseline",
-        "before.ingest_source",
-    )?;
-    std::fs::write(&path, content.as_bytes())
-        .map_err(|error| WikiFailure::io(path_text(&path), error))?;
-    if crate::history::record(
-        root,
-        &input.staged.page_relative_path,
-        "agent",
-        "ingest_source",
-    )
-    .is_err()
-    {
-        eprintln!("[wiki] source summary written; history recording failed");
-    }
-    let metadata =
-        std::fs::metadata(&path).map_err(|error| WikiFailure::io(path_text(&path), error))?;
-    let revision = WikiRevision::for_bytes(
-        content.as_bytes(),
-        metadata.modified().map(system_time_ms).unwrap_or_default(),
-    );
     if shared.ingest_llm.is_none() {
         if let Some(receipt) = cached_import_receipt(root, &input.staged, &source_hash)? {
-            mark_source_task_done(
-                root,
-                &input.staged.project_id,
-                &input.staged.source_relative_path,
-            )?;
             return Ok(receipt);
         }
     }
@@ -3070,69 +2968,112 @@ async fn commit_import_source_inner(
     let mut generation_input = input.clone();
     generation_input.text = source_text;
     reject_cancelled_source_task(&input.staged, &cancellation)?;
-    mark_source_task_running(
-        root,
-        &input.staged.project_id,
-        &input.staged.source_relative_path,
-        "generate",
-        70,
-    )?;
-    let mut written_paths = vec![input.staged.page_relative_path.clone()];
-    if let Some(generated_pages) = crate::ingest::generate_imported_pages(
+    let generated_pages = crate::ingest::generate_imported_pages(
         shared.ingest_llm.clone(),
         root,
         &generation_input,
         output_language,
-        Some(generation_model_ref.as_str()),
+        generation_model_ref,
         cancellation.clone(),
+        &progress,
     )
-    .await?
-    {
-        let checkpoint_path = generated_pages.checkpoint_path.clone();
-        let generated = source_lifecycle::apply_generated_pages(
-            root,
-            &input.staged.project_id,
-            WikiApplyGeneratedPagesInput {
+    .await?;
+    let (files, reviews, checkpoint_path, source_summary_fallback) = match generated_pages {
+        Some(generated) => (
+            generated.files,
+            generated.reviews,
+            generated.checkpoint_path,
+            Some(source_lifecycle::source_summary_markdown(
+                &input.staged.source_identity,
+                if generated.source_analysis.is_empty() {
+                    "(Analysis not available)"
+                } else {
+                    &generated.source_analysis
+                },
+            )),
+        ),
+        None => (
+            vec![crate::domain::WikiGeneratedPageInput {
+                path: input.staged.page_relative_path.clone(),
+                content: import_source_markdown(&input.staged, &generation_input.text, &[]),
+            }],
+            Vec::new(),
+            None,
+            None,
+        ),
+    };
+    let generated = source_lifecycle::apply_generated_pages(
+        root,
+        &input.staged.project_id,
+        WikiApplyGeneratedPagesInput {
+            project_id: Some(input.staged.project_id.clone()),
+            source_path: input.staged.source_relative_path.clone(),
+            files,
+            reviews,
+        },
+        source_summary_fallback,
+        Some(source_hash),
+        shared.ingest_llm.clone(),
+        generation_model_ref,
+        Some(cancellation.clone()),
+        &input.staged.task_id,
+    )
+    .await?;
+    reject_cancelled_source_task(&input.staged, &cancellation)?;
+    let source_page = read_file(
+        global,
+        WikiReadInput {
+            project_id: Some(input.staged.project_id.clone()),
+            relative_path: input.staged.page_relative_path.clone(),
+            limit: 0,
+        },
+    )?;
+    if source_config.caption_enabled() && !images.is_empty() {
+        progress("write", Some((0, 1)))?;
+        let content = inject_import_images(source_page.content(), &images);
+        write_file_with_history(
+            global,
+            WikiWriteInput {
                 project_id: Some(input.staged.project_id.clone()),
-                source_path: input.staged.source_relative_path.clone(),
-                files: generated_pages.files,
-                reviews: generated_pages.reviews,
+                relative_path: input.staged.page_relative_path.clone(),
+                content,
             },
-            Some(source_hash.clone()),
-            shared.ingest_llm.clone(),
-            Some(generation_model_ref.as_str()),
-            Some(cancellation.clone()),
-        )
-        .await?;
-        if let Some(path) = checkpoint_path.as_deref() {
-            let _ = std::fs::remove_file(path);
-        }
-        written_paths.extend(
-            generated
-                .written_pages()
-                .iter()
-                .map(|receipt| receipt.relative_path().to_owned()),
-        );
-    } else {
-        write_source_cache_entry(
-            root,
-            &input.staged.source_identity,
-            SourceCacheEntry {
-                hash: source_hash,
-                timestamp: now_ms(),
-                files_written: written_paths.clone(),
-            },
+            "agent",
+            "ingest_source_images",
         )?;
-        mark_source_task_done(
-            root,
-            &input.staged.project_id,
-            &input.staged.source_relative_path,
-        )?;
+        progress("write", Some((1, 1)))?;
     }
-
+    let revision = read_file(
+        global,
+        WikiReadInput {
+            project_id: Some(input.staged.project_id.clone()),
+            relative_path: input.staged.page_relative_path.clone(),
+            limit: 0,
+        },
+    )?
+    .revision()
+    .clone();
+    if let Some(path) = checkpoint_path.as_deref() {
+        let _ = std::fs::remove_file(path);
+    }
+    let written_paths = generated
+        .written_pages()
+        .iter()
+        .map(|receipt| receipt.relative_path().to_owned())
+        .collect::<Vec<_>>();
     let snapshot_paths = written_paths.iter().map(String::as_str).collect::<Vec<_>>();
+    progress("index", None)?;
     refresh_file_snapshot(root, &snapshot_paths)?;
-    embed_written_paths(shared, global, &input.staged.project_id, &written_paths).await;
+    embed_written_paths(
+        shared,
+        global,
+        &input.staged.project_id,
+        &written_paths,
+        &cancellation,
+        &progress,
+    )
+    .await?;
+    reject_cancelled_source_task(&input.staged, &cancellation)?;
     Ok(WikiImportSourceReceipt::new(
         input.staged.source_relative_path,
         input.staged.page_relative_path,
@@ -3140,32 +3081,16 @@ async fn commit_import_source_inner(
     ))
 }
 
+fn source_execution(staged: &WikiStagedImportSource) -> Result<Arc<super::source_execution::SourceExecution>, WikiFailure> {
+    staged.execution.clone().ok_or_else(|| WikiFailure::state("source task has no execution owner"))
+}
+
 fn reject_cancelled_source_task(
     staged: &WikiStagedImportSource,
     cancellation: &CancellationToken,
 ) -> Result<(), WikiFailure> {
-    if source_task_paused(
-        &staged.project_root,
-        &staged.project_id,
-        &staged.source_relative_path,
-    )? {
-        return Err(WikiFailure::cancelled());
-    }
-    if cancellation.is_cancelled()
-        || source_task_cancel_requested(
-            &staged.project_root,
-            &staged.project_id,
-            &staged.source_relative_path,
-        )?
-    {
-        mark_source_task_cancelled(
-            &staged.project_root,
-            &staged.project_id,
-            &staged.source_relative_path,
-        )?;
-        return Err(WikiFailure::cancelled());
-    }
-    Ok(())
+    cancel_if_requested(cancellation)?;
+    source_execution(staged)?.check_cancelled()
 }
 
 fn cached_import_receipt(
@@ -3207,7 +3132,9 @@ async fn extract_import_images(
     cancellation: CancellationToken,
 ) -> Result<Vec<WikiParsedImportImage>, WikiFailure> {
     let source_path = staged.source_path.clone();
+    let execution = source_execution(staged)?;
     let task = tokio::task::spawn_blocking(move || {
+        let _execution = execution;
         let path = path_text(&source_path);
         let images = match extension(&source_path).as_str() {
             "pdf" => crate::preprocess::extract_pdf_images(
@@ -3236,12 +3163,11 @@ async fn extract_import_images(
                 .collect(),
         )
     });
-    cancel_on_token(&cancellation, task)
-        .await?
-        .map_err(|error| {
-            WikiFailure::state(format!("source image extraction task failed: {error}"))
-        })?
-        .map_err(WikiFailure::state)
+    let result = task.await.map_err(|error| {
+        WikiFailure::state(format!("source image extraction task failed: {error}"))
+    })?.map_err(WikiFailure::state);
+    cancel_if_requested(&cancellation)?;
+    result
 }
 
 fn persist_parsed_source(
@@ -3325,30 +3251,29 @@ fn import_source_markdown(
     text: &str,
     images: &[ImportedImage],
 ) -> String {
-    let title = source_title(&staged.source_identity);
-    let title_json = serde_json::to_string(&title).unwrap_or_else(|_| "\"Source\"".to_owned());
-    let source_json =
-        serde_json::to_string(&staged.source_identity).unwrap_or_else(|_| "\"source\"".to_owned());
-    let mut output = format!(
-        "---\ntitle: {title_json}\nsources:\n  - {source_json}\n---\n\n# {title}\n\n{}",
-        text.trim()
-    );
-    if !images.is_empty() {
-        output.push_str("\n\n<!-- llm-wiki:embedded-images -->\n\n## Embedded Images\n\n");
-        for image in images {
-            let alt = image.caption.as_deref().unwrap_or("Image");
-            output.push_str(&format!(
-                "![{}]({})\n",
-                escape_markdown_alt(alt),
-                source_page_image_path(&image.rel_path),
-            ));
-            if let Some(caption) = image.caption.as_deref() {
-                output.push_str(&format!("\n{caption}\n"));
-            }
-            output.push('\n');
-        }
-        output.push_str("<!-- /llm-wiki:embedded-images -->");
+    let content = source_lifecycle::source_summary_markdown(&staged.source_identity, text);
+    if images.is_empty() {
+        content
+    } else {
+        inject_import_images(&content, images)
     }
+}
+
+fn inject_import_images(content: &str, images: &[ImportedImage]) -> String {
+    let mut output = content.to_owned();
+    if let Some(block) = source_lifecycle::embedded_images_block(content) {
+        output = output.replacen(block, "", 1);
+    }
+    output.truncate(output.trim_end().len());
+    output.push_str("\n\n<!-- llm-wiki:embedded-images -->\n\n## Embedded Images\n\n");
+    for image in images {
+        output.push_str(&format!(
+            "![{}]({})\n\n",
+            escape_markdown_alt(image.caption.as_deref().unwrap_or("")),
+            source_page_image_path(&image.rel_path),
+        ));
+    }
+    output.push_str("<!-- /llm-wiki:embedded-images -->\n");
     output
 }
 
@@ -3390,24 +3315,40 @@ async fn apply_generated_pages(
     input: WikiApplyGeneratedPagesInput,
 ) -> Result<WikiApplyGeneratedPagesReceipt, WikiFailure> {
     let project = selected_project(global, input.project_id.as_deref())?;
-    let receipt = source_lifecycle::apply_generated_pages(
-        project_root(project),
-        project.project_id(),
-        input,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await?;
-    embed_written_pages(
-        shared,
-        global,
-        project.project_id(),
-        receipt.written_pages(),
-    )
-    .await;
-    Ok(receipt)
+    let root = project_root(project);
+    let project_id = project.project_id();
+    let source_relative_path = source_lifecycle::source_relative_path(root, &input.source_path)?;
+    let execution = source_lifecycle::begin_generated_source_execution(root, project_id, &source_relative_path)?;
+    let cancellation = execution.cancellation();
+    let progress = |stage: &str, counts| {
+        execution.check_cancelled()?;
+        mark_source_task_running(root, execution.task_id(), stage, counts)
+    };
+    let result: Result<WikiApplyGeneratedPagesReceipt, WikiFailure> = execution.observe(async {
+        cancel_if_requested(&cancellation)?;
+        let receipt = source_lifecycle::apply_generated_pages(
+            root,
+            project_id,
+            input,
+            None,
+            None,
+            None,
+            None,
+            Some(cancellation.clone()),
+            execution.task_id(),
+        )
+        .await?;
+        let paths = receipt
+            .written_pages()
+            .iter()
+            .map(|receipt| receipt.relative_path().to_owned())
+            .collect::<Vec<_>>();
+        embed_written_paths(shared, global, project_id, &paths, &cancellation, &progress).await?;
+        execution.check_cancelled()?;
+        Ok(receipt)
+    }).await;
+    execution.finish(&result)?;
+    result
 }
 
 fn reviews(
@@ -3442,7 +3383,7 @@ fn clear_resolved_reviews(
     super::review_lifecycle::clear_resolved_reviews(project_root(project), input)
 }
 
-fn source_tasks(
+pub(crate) fn source_tasks(
     global: &WikiState,
     input: WikiProjectSelector,
 ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
@@ -3455,36 +3396,25 @@ fn source_tasks(
     )
 }
 
-fn mark_source_task_failed_for_project(
-    global: &WikiState,
-    project_id: &str,
-    source_relative_path: &str,
-    error: String,
-) -> Result<(), WikiFailure> {
-    let project = selected_project(global, Some(project_id))?;
-    source_lifecycle::mark_source_task_failed(
-        project_root(project),
-        project.project_id(),
-        source_relative_path,
-        error,
-    )
-}
-
-async fn cancel_source_task(
+pub(crate) async fn cancel_source_task(
     shared: &WikiShared,
     global: &WikiState,
     input: WikiCancelSourceTaskInput,
 ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
     let project = selected_project(global, input.project_id.as_deref())?;
+    shared.review_sweeps.invalidate(project.project_id());
     let source_relative_path =
         source_lifecycle::source_relative_path(project_root(project), &input.source_path)?;
-    shared
-        .cancel_source_task_token(project.project_id(), &source_relative_path)
-        .await;
     request_source_task_cancel(
         project_root(project),
         project.project_id(),
         &source_relative_path,
+    )?;
+    source_tasks(
+        global,
+        WikiProjectSelector {
+            project_id: Some(project.project_id().to_owned()),
+        },
     )
 }
 
@@ -3501,16 +3431,11 @@ fn retry_source_task(
 }
 
 async fn pause_source_task(
-    shared: &WikiShared,
+    _shared: &WikiShared,
     global: &WikiState,
     input: WikiSourceTaskActionInput,
 ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
     let project = selected_project(global, input.project_id.as_deref())?;
-    let source_relative_path =
-        source_lifecycle::source_relative_path(project_root(project), &input.source_path)?;
-    shared
-        .cancel_source_task_token(project.project_id(), &source_relative_path)
-        .await;
     source_lifecycle::pause_source_task(
         project_root(project),
         project.project_id(),
@@ -3585,36 +3510,49 @@ fn rescan(
     status(global)
 }
 
-async fn embed_written_pages(
-    shared: &WikiShared,
-    global: &WikiState,
-    project_id: &str,
-    written_pages: &[WikiWriteReceipt],
-) {
-    let paths = written_pages
-        .iter()
-        .map(|receipt| receipt.relative_path().to_owned())
-        .collect::<Vec<_>>();
-    embed_written_paths(shared, global, project_id, &paths).await;
-}
-
 async fn embed_written_paths(
     shared: &WikiShared,
     global: &WikiState,
     project_id: &str,
     paths: &[String],
-) {
-    for path in paths.iter().filter(|path| should_auto_embed_page(path)) {
-        let _ = embed_page(
-            shared,
-            global,
-            WikiPathSelector {
-                project_id: Some(project_id.to_owned()),
-                relative_path: path.clone(),
-            },
-        )
-        .await;
+    cancellation: &CancellationToken,
+    progress: &(dyn Fn(&str, Option<(usize, usize)>) -> Result<(), WikiFailure> + Send + Sync),
+) -> Result<(), WikiFailure> {
+    let project = selected_project(global, Some(project_id))?;
+    let config =
+        crate::search_config::read_config(project_root(project), &global.state_root, project_id);
+    if !config.is_ok_and(|config| config.embedding.is_ready()) {
+        return Ok(());
     }
+    let total = paths
+        .iter()
+        .filter(|path| should_auto_embed_page(path))
+        .count();
+    if total == 0 {
+        return Ok(());
+    }
+    progress("embed", Some((0, total)))?;
+    for (completed, path) in paths
+        .iter()
+        .filter(|path| should_auto_embed_page(path))
+        .enumerate()
+    {
+        cancel_if_requested(cancellation)?;
+        let _ = cancel_on_token(
+            cancellation,
+            embed_page(
+                shared,
+                global,
+                WikiPathSelector {
+                    project_id: Some(project_id.to_owned()),
+                    relative_path: path.clone(),
+                },
+            ),
+        )
+        .await?;
+        progress("embed", Some((completed + 1, total)))?;
+    }
+    Ok(())
 }
 
 fn should_auto_embed_page(path: &str) -> bool {
@@ -3642,6 +3580,17 @@ pub(super) async fn embed_page(
         &global.state_root,
         project.project_id(),
     )?;
+    if !config.enabled || !config.is_ready() {
+        return Err(WikiFailure::IndexUnavailable {
+            backend: "embedding".to_owned(),
+            reason: if !config.enabled {
+                "wiki embedding is disabled"
+            } else {
+                "wiki embedding is not configured"
+            }
+            .to_owned(),
+        });
+    }
     let title = crate::domain::extract_search_title(
         read.content(),
         Path::new(&input.relative_path)
@@ -3696,11 +3645,14 @@ async fn caption_import_images(
     output_language: Option<&str>,
     caption_model_ref: Option<&str>,
     cancellation: CancellationToken,
+    progress: &(dyn Fn(&str, Option<(usize, usize)>) -> Result<(), WikiFailure> + Send + Sync),
 ) -> Result<(), WikiFailure> {
     let Some(llm) = llm else {
         return Ok(());
     };
-    let cache = read_image_caption_cache(root)?;
+    let mut cache = read_image_caption_cache(root)?;
+    let limits = llm.model_limits(caption_model_ref).await?.unwrap_or_default();
+    let max_output_tokens = limits.max_tokens.unwrap_or(4096).min(4096) as u32;
     let requests = images
         .iter()
         .enumerate()
@@ -3713,15 +3665,20 @@ async fn caption_import_images(
                 image.data_base64.clone(),
                 image_caption_prompt(output_language, source_text, image),
                 caption_model_ref.map(str::to_owned),
+                cache.caption(&image.sha256, output_language).map(str::to_owned),
             )
         })
         .collect::<Vec<_>>();
-    let captions = stream::iter(requests)
+    let total = requests.len();
+    if total == 0 {
+        return Ok(());
+    }
+    progress("caption", Some((0, total)))?;
+    let mut captions = stream::iter(requests)
         .map(
-            |(index, sha256, mime_type, data_base64, prompt, caption_model_ref)| {
+            |(index, sha256, mime_type, data_base64, prompt, caption_model_ref, cached)| {
                 let llm = llm.clone();
                 let cancellation = cancellation.clone();
-                let cached = cache.caption(&sha256, output_language).map(str::to_owned);
                 async move {
                     cancel_if_requested(&cancellation)?;
                     if let Some(caption) = cached {
@@ -3735,8 +3692,8 @@ async fn caption_import_images(
                                 mime_type,
                                 data_base64,
                                 options: WikiIngestLlmOptions {
-                                    max_output_tokens: Some(240),
-                                    temperature: Some(0.1),
+                                    max_output_tokens: Some(max_output_tokens),
+                                    temperature: Some(0.0),
                                 },
                             },
                             cancellation.clone(),
@@ -3751,22 +3708,21 @@ async fn caption_import_images(
                 }
             },
         )
-        .buffer_unordered(concurrency.max(1) as usize)
-        .collect::<Vec<_>>()
-        .await;
-    let mut cache = cache;
-    for result in captions {
+        .buffer_unordered(concurrency.max(1) as usize);
+    let mut completed = 0;
+    while let Some(result) = captions.next().await {
         let (index, sha256, caption) = result?;
-        let Some(caption) = caption
+        if let Some(caption) = caption
             .map(clean_caption)
             .filter(|caption| !caption.is_empty())
-        else {
-            continue;
-        };
-        if let Some(image) = images.get_mut(index) {
-            image.caption = Some(caption.clone());
+        {
+            if let Some(image) = images.get_mut(index) {
+                image.caption = Some(caption.clone());
+            }
+            cache.insert(sha256, output_language, caption);
         }
-        cache.insert(sha256, output_language, caption);
+        completed += 1;
+        progress("caption", Some((completed, total)))?;
     }
     if let Err(error) = write_image_caption_cache(root, &cache) {
         eprintln!("[wiki] image caption cache write failed: {error:?}");
@@ -3779,14 +3735,27 @@ fn image_caption_prompt(
     source_text: &str,
     image: &ImportedImage,
 ) -> String {
-    let language = output_language.unwrap_or("the source document language");
-    let context = image_context_window(source_text, image);
-    format!(
-        "Describe this image for a knowledge-base source summary in {language}. Use the surrounding source context when it helps, but describe only what is visible in the image. Preserve any visible text verbatim. For charts, name axes, legends, and apparent values. For diagrams, describe structure and relationships. Do not speculate. Answer in 2-4 concise sentences.\n\nSurrounding source context:\n{context}"
-    )
+    let (before, after) = image_context_window(source_text, image);
+    let mut prompt = if before.trim().is_empty() && after.trim().is_empty() {
+        "Describe this image factually for a knowledge-base index. Include: any visible text verbatim, chart axes and values, diagram structure (boxes/arrows/labels), key visual elements. Do NOT speculate or editorialize. 2 to 4 sentences. Output plain text only — no markdown, no preamble.".to_owned()
+    } else {
+        let before = if before.trim().is_empty() { "(none)" } else { before.trim() };
+        let after = if after.trim().is_empty() { "(none)" } else { after.trim() };
+        format!(
+            "The image is embedded in a longer document. Here is the text that appears IMMEDIATELY BEFORE and AFTER this image in the source:\n\n--- Text before image ---\n{before}\n--- Text after image ---\n{after}\n--- End surrounding text ---\n\nThis surrounding text MAY help describe the image — for example, a sentence like \"Figure 3: Q2 revenue chart\" tells you what the chart actually plots. It MAY ALSO be unrelated body text that just happens to flank the image. Use your judgment: if a passage clearly identifies, references, or labels the image, anchor your caption to it; if not, ignore the surrounding text and describe what you see.\n\nNow describe the image factually for a knowledge-base index. Include: any visible text verbatim, chart axes and values, diagram structure (boxes/arrows/labels), key visual elements. If the surrounding text contains a relevant figure number / caption / referent, incorporate that specifically. Do NOT invent details that aren't visible in the image or directly stated in the surrounding text. Do NOT speculate or editorialize. 2 to 4 sentences. Output plain text only — no markdown, no preamble."
+        )
+    };
+    if let Some(language) = output_language.map(str::trim).filter(|language| {
+        !language.is_empty() && !language.eq_ignore_ascii_case("auto")
+    }) {
+        prompt.push_str(&format!(
+            "\nWrite the description in {language}. Preserve visible text verbatim in its original language."
+        ));
+    }
+    prompt
 }
 
-fn image_context_window(source_text: &str, image: &ImportedImage) -> String {
+fn image_context_window(source_text: &str, image: &ImportedImage) -> (String, String) {
     let mut rest = source_text;
     let mut offset = 0;
     while let Some(image_ref) = next_markdown_image(rest) {
@@ -3800,10 +3769,10 @@ fn image_context_window(source_text: &str, image: &ImportedImage) -> String {
         offset += image_ref.end;
         rest = &rest[image_ref.end..];
     }
-    clean_caption(source_text.chars().take(300).collect())
+    (String::new(), String::new())
 }
 
-fn caption_context_around(source_text: &str, start: usize, end: usize) -> String {
+fn caption_context_around(source_text: &str, start: usize, end: usize) -> (String, String) {
     let before = source_text[..start]
         .chars()
         .rev()
@@ -3811,7 +3780,7 @@ fn caption_context_around(source_text: &str, start: usize, end: usize) -> String
         .collect::<Vec<_>>();
     let before = before.into_iter().rev().collect::<String>();
     let after = source_text[end..].chars().take(150).collect::<String>();
-    clean_caption(format!("{before}{after}"))
+    (before, after)
 }
 
 fn apply_image_captions_to_source_text(text: &str, images: &[ImportedImage]) -> String {
@@ -4104,15 +4073,6 @@ fn unique_import_target(raw_sources: &Path, file_name: &std::ffi::OsStr) -> Path
 fn configured_output_language(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     (!trimmed.is_empty() && trimmed != "auto").then_some(trimmed)
-}
-
-fn source_title(source_relative_path: &str) -> String {
-    Path::new(source_relative_path)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.trim().is_empty())
-        .unwrap_or("Source")
-        .to_owned()
 }
 
 fn extension(path: &Path) -> String {
@@ -4883,6 +4843,8 @@ mod tests {
             source_identity: "source.md".to_owned(),
             page_relative_path: "wiki/sources/source.md".to_owned(),
             task_kind: WikiSourceTaskKind::Imported,
+            task_id: String::new(),
+            execution: None,
         }
     }
 
@@ -4909,7 +4871,7 @@ mod tests {
         let text = format!("{before} ![old](../media/import-a/img-1.png) {after}");
         let prompt = image_caption_prompt(Some("English"), &text, &image);
 
-        assert!(prompt.contains("Preserve any visible text verbatim"));
+        assert!(prompt.contains("any visible text verbatim"));
         assert!(prompt.contains(&"A".repeat(120)));
         assert!(prompt.contains(&"B".repeat(120)));
         assert!(!prompt.contains("![old]"));

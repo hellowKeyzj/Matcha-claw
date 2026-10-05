@@ -101,6 +101,8 @@ pub struct StartGateRegistry {
 struct StartGateProposal {
     run_id: GraphRunId,
     proposal_id: String,
+    generation: String,
+    design: bool,
 }
 
 impl StartGateRegistry {
@@ -108,7 +110,14 @@ impl StartGateRegistry {
         Self::default()
     }
 
-    pub(crate) fn register(&self, native_run_id: String, run_id: GraphRunId, proposal_id: String) {
+    pub(crate) fn register(
+        &self,
+        native_run_id: String,
+        run_id: GraphRunId,
+        proposal_id: String,
+        generation: String,
+        design: bool,
+    ) {
         self.proposals
             .lock()
             .expect("start gate registry lock is never poisoned")
@@ -117,16 +126,25 @@ impl StartGateRegistry {
                 StartGateProposal {
                     run_id,
                     proposal_id,
+                    generation,
+                    design,
                 },
             );
     }
 
-    pub(crate) fn take(&self, native_run_id: &str) -> Option<(GraphRunId, String)> {
+    pub(crate) fn take(&self, native_run_id: &str) -> Option<(GraphRunId, String, String, bool)> {
         self.proposals
             .lock()
             .expect("start gate registry lock is never poisoned")
             .remove(native_run_id)
-            .map(|proposal| (proposal.run_id, proposal.proposal_id))
+            .map(|proposal| {
+                (
+                    proposal.run_id,
+                    proposal.proposal_id,
+                    proposal.generation,
+                    proposal.design,
+                )
+            })
     }
 }
 
@@ -154,11 +172,15 @@ async fn prepare_start_gate_send(
         return Ok(None);
     };
     let system_provenance_receipt = plan.system_provenance_receipt().to_owned();
+    let generation = plan.generation.clone();
+    let design = plan.design;
     let (run_id, proposal_id) = plan.into_registry_parts();
     let state = StartGateSendState {
         start_gate,
         run_id,
         proposal_id,
+        generation,
+        design,
     };
     Ok(Some(PreparedStartGateSend {
         system_provenance_receipt,
@@ -182,6 +204,8 @@ pub struct StartGateSendState {
     start_gate: Arc<StartGateRegistry>,
     run_id: GraphRunId,
     proposal_id: String,
+    generation: String,
+    design: bool,
 }
 
 impl StartGateSendState {
@@ -190,8 +214,10 @@ impl StartGateSendState {
             start_gate,
             run_id,
             proposal_id,
+            generation,
+            design,
         } = self;
-        start_gate.register(native_run_id, run_id, proposal_id);
+        start_gate.register(native_run_id, run_id, proposal_id, generation, design);
     }
 }
 

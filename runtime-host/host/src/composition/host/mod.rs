@@ -158,7 +158,7 @@ fn build_peer_runtime_stage(
         clawhub_registry: prepared.clawhub_registry,
         toolchain: prepared.toolchain,
         runtime_host_mcp_executable: prepared.runtime_host_mcp_executable,
-        team_run_mcp_state_dir: prepared.team_run_mcp_state_dir,
+        runtime_host_mcp_state_dir: prepared.runtime_host_mcp_state_dir,
         sealed_resource: sealed.sealed_resource,
         provider_cascade,
         fleet_private_root,
@@ -212,7 +212,7 @@ fn spawn_owner_runtime_stage(
         clawhub_registry,
         toolchain,
         runtime_host_mcp_executable,
-        team_run_mcp_state_dir,
+        runtime_host_mcp_state_dir,
         sealed_resource,
         provider_cascade,
         fleet_private_root,
@@ -227,7 +227,7 @@ fn spawn_owner_runtime_stage(
         runtime_state_dir,
         diagnostics_state_root,
         runtime_host_mcp_executable,
-        team_run_mcp_state_dir,
+        runtime_host_mcp_state_dir,
         provider_cascade,
         fleet_private_root,
         matcha_startup_diagnostics: matcha_startup_diagnostics.clone(),
@@ -339,6 +339,7 @@ fn assemble_host(
         ..
     } = runtime;
     events.set_call_changes(calls.subscribe());
+    events.set_organization_changes(owners.organization_handle.subscribe_schedule_changes());
     let handles = handle_wiring::build_handles(
         handle_wiring::HostHandleInput {
             admission: Arc::clone(&admission),

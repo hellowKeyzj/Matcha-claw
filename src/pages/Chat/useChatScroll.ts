@@ -36,7 +36,7 @@ export function useChatScroll({
     controller.onScopeChanged();
   }, [controller, enabled, scrollScopeKey]);
 
-  // 列表内容刷新（新消息 / 流式 token / 历史 prepend）：与 ResizeObserver 等价的入口。
+  // 列表内容刷新（新消息 / 流式 token / 历史切页）：与 ResizeObserver 等价的入口。
   useLayoutEffect(() => {
     if (!enabled) {
       return;
@@ -44,7 +44,7 @@ export function useChatScroll({
     controller.onGeometryChanged();
   }, [contentSignal, controller, enabled]);
 
-  // 视口/内容尺寸变化（流式 token / 历史 prepend / composer 高度变化 / 窗口变化）
+  // 视口/内容尺寸变化（流式 token / 历史切页 / composer 高度变化 / 窗口变化）
   useLayoutEffect(() => {
     if (!enabled) {
       return;

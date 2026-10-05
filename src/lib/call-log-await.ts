@@ -1,6 +1,6 @@
 import type { CallModule, CallReceipt, CallRecord } from '@/types/call-log';
 import { decodeCallChanged } from '@/types/call-log/decode';
-import { waitForCallRecord } from '@/types/call-log/wait';
+import { waitForCallRecord, type WaitForCallOptions } from '@/types/call-log/wait';
 import { getCall } from './call-log';
 import { hostApiFetch } from './host-api';
 import { subscribeBrowserRecovery, subscribeHostEvent } from './host-events';
@@ -8,7 +8,7 @@ import { subscribeBrowserRecovery, subscribeHostEvent } from './host-events';
 export function waitForCall<M extends CallModule>(
   receipt: CallReceipt,
   module: M,
-  options?: { signal?: AbortSignal },
+  options?: WaitForCallOptions<M>,
 ): Promise<CallRecord<M>> {
   let firstRead = true;
   return waitForCallRecord(receipt, module, async (callId) => {

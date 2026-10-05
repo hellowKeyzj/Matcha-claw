@@ -27,12 +27,25 @@
         "creativeTasksDesc": "Writing, brainstorming, ideas"
     },
     "input": {
+        "teamDesignStart": "Design Team run graph",
+        "teamDesignInProgress": "Designing run graph",
+        "teamDesignExit": "Exit design and keep the run graph",
+        "teamDesignExitWaiting": "Stop the current response before exiting design",
+        "teamDesignActive": "Adjust Team tasks and collaboration without starting execution",
         "gatewayDisconnectedPlaceholder": "Runtime unavailable...",
         "gatewayRecoveringNotice": "Runtime is preparing…",
         "messagePlaceholder": "Message, / for skills, Enter to send, Shift+Enter for newline",
         "approvalWaitingPlaceholder": "Waiting for approval...",
         "imageGenerationActive": "Generating image",
         "pickModel": "Choose model",
+        "pickWiki": "Choose knowledge base",
+        "wikiPickerLabel": "Knowledge base: {{name}}",
+        "wikiLoading": "Loading knowledge bases…",
+        "wikiEmpty": "No knowledge bases yet. Create or open one on the Wiki page.",
+        "wikiRetry": "Loading failed. Retry",
+        "wikiLoadFailed": "Unable to load knowledge bases. Please retry.",
+        "wikiSwitched": "Switched to knowledge base “{{name}}”",
+        "wikiSwitchFailed": "Unable to switch knowledge bases. Please retry.",
         "modelPickerTitle": "Switch model for this chat",
         "pickPermissionMode": "Choose permission mode",
         "permissionPickerTitle": "Switch session permissions",
@@ -61,6 +74,12 @@
         "contextUsageLabel": "Context used {{pct}}%",
         "contextUsageTitle": "Context used {{pct}}% ({{detail}})"
     },
+    "goal": {
+        "title": "Session goal", "set": "Set goal", "edit": "Edit goal", "cancel": "Cancel goal mode", "placeholder": "Describe the goal, Enter to submit, Shift+Enter for a newline", "pause": "Pause", "resume": "Resume", "complete": "Mark complete", "block": "Mark blocked", "clear": "Clear goal", "more": "More goal actions", "refresh": "Confirm latest state", "unknown": "Goal state unconfirmed", "note": "Note", "tokens": "{{count}} tokens used", "budget": "{{count}} token budget", "inlineOnly": "Goal mode only supports file attachments up to 5 MB. Remove larger files or directories.", "noAttachmentsOnEdit": "Editing only changes the goal. Remove attachments first.",
+        "status": { "active": "Active", "paused": "Paused", "blocked": "Blocked", "complete": "Complete", "budget_limited": "Budget exhausted", "usage_limited": "Usage limited" },
+        "errors": { "unknown": "The result is unconfirmed. Your text is saved; click “Confirm latest state” and do not submit again.", "unsupported": "This runtime does not support goals. Switch to a runtime that supports goals or cancel goal mode.", "unavailable": "Goal actions are unavailable. Check the runtime connection and try again.", "target_rejected": "The runtime rejected the goal action. Confirm the latest state and try again once the current reply has ended.", "empty": "Enter a goal before submitting.", "active": "The current reply is running or stopping. Wait for it to finish before submitting a goal.", "missing-session": "The session is not ready. Wait for it to load or reopen it before submitting.", "goal-attachments": "Goals only support file attachments up to 5 MB. Remove larger files or directories before submitting.", "error": "The goal action failed. Your text is saved; confirm the latest state before trying again." }
+    },
+    "reuseMessage": "Fill message input",
     "noLogs": "(No logs available yet)",
     "toolbar": {
         "refresh": "Refresh chat",

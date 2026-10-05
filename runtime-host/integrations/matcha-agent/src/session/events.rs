@@ -8,6 +8,7 @@ const MAX_PROJECTED_TOOL_NAME_BYTES: usize = 256;
 const MAX_PROJECTED_TOOL_SUMMARY_BYTES: usize = 128 * 1024;
 const MAX_PROJECTED_TOOL_PAYLOAD_BYTES: usize = 128 * 1024;
 const MAX_PROJECTED_MESSAGE_COUNT: usize = 64;
+const MAX_PROJECTED_TOOL_COUNT: usize = 128;
 
 use super::{
     model::{
@@ -611,6 +612,12 @@ enum SdkFullTextPolicy {
     Suppress,
 }
 
+#[derive(Default)]
+struct SdkTool {
+    name: Option<String>,
+    message_id: Option<MessageId>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SdkToolBlock {
     tool_call_id: ToolCallId,
@@ -666,7 +673,7 @@ pub struct SessionEventProjector {
     message_thinking: HashMap<MessageId, String>,
     current_sdk_assistant_message_id: Option<MessageId>,
     current_sdk_tool_blocks: HashMap<u64, SdkToolBlock>,
-    sdk_tool_names: HashMap<ToolCallId, String>,
+    sdk_tools: HashMap<ToolCallId, SdkTool>,
     sdk_text_state: SdkAssistantTextState,
 }
 
@@ -690,7 +697,7 @@ impl SessionEventProjector {
             message_thinking: HashMap::new(),
             current_sdk_assistant_message_id: None,
             current_sdk_tool_blocks: HashMap::new(),
-            sdk_tool_names: HashMap::new(),
+            sdk_tools: HashMap::new(),
             sdk_text_state: SdkAssistantTextState::AwaitingText,
         }
     }
@@ -705,6 +712,13 @@ impl SessionEventProjector {
 
     pub fn final_assistant_text(&self) -> Option<&str> {
         self.final_assistant_text.as_deref()
+    }
+
+    pub(crate) fn tool_message_id(&self, tool_call_id: &str) -> Option<&MessageId> {
+        self.sdk_tools
+            .iter()
+            .find(|(id, _)| id.as_str() == tool_call_id)
+            .and_then(|(_, tool)| tool.message_id.as_ref())
     }
 
     pub fn project(&mut self, envelope: EventEnvelope) -> EventProjectionResult {
@@ -743,12 +757,28 @@ impl SessionEventProjector {
         }
 
         let is_sdk_message = envelope.event.event_type() == "sdk.message";
+        let sdk_assistant_id = envelope
+            .event
+            .as_value()
+            .get("sdkMessage")
+            .and_then(|message| {
+                (message.get("type").and_then(Value::as_str) == Some("assistant"))
+                    .then(|| {
+                        message
+                            .get("message")
+                            .and_then(|message| message.get("id"))
+                            .or_else(|| message.get("uuid"))
+                    })
+                    .flatten()
+                    .and_then(Value::as_str)
+                    .and_then(|id| MessageId::try_new(id).ok())
+            });
         let activity_result = if is_sdk_message {
             project_sdk_message(
                 envelope.event.as_value(),
                 &mut self.current_sdk_assistant_message_id,
                 &mut self.current_sdk_tool_blocks,
-                &mut self.sdk_tool_names,
+                &mut self.sdk_tools,
                 self.sdk_text_state.full_text_policy(),
             )
         } else {
@@ -762,6 +792,30 @@ impl SessionEventProjector {
 
         match activity_result {
             Ok(mut activity) => {
+                if is_sdk_message && let EventActivity::Tool(tool) = &activity {
+                    if self.sdk_tools.len() > MAX_PROJECTED_TOOL_COUNT
+                        || (self.sdk_tools.len() == MAX_PROJECTED_TOOL_COUNT
+                            && !self.sdk_tools.contains_key(tool.tool_call_id()))
+                    {
+                        return EventProjectionResult::Rejected {
+                            sequence: received,
+                            reason: EventRejection::Malformed,
+                        };
+                    }
+                    let location = &mut self.sdk_tools.entry(tool.tool_call_id().clone())
+                        .or_default().message_id;
+                    if tool.phase() == ToolActivityPhase::Started && location.is_none() {
+                        let Some(message_id) = sdk_assistant_id
+                            .or_else(|| self.current_sdk_assistant_message_id.clone())
+                        else {
+                            return EventProjectionResult::Rejected {
+                                sequence: received,
+                                reason: EventRejection::Malformed,
+                            };
+                        };
+                        *location = Some(message_id);
+                    }
+                }
                 if let EventActivity::Message(message) = &mut activity {
                     let message_id = message.message_id().clone();
                     let text_delta = message.text_delta().map(str::to_owned);
@@ -1185,7 +1239,7 @@ fn project_sdk_message(
     value: &Value,
     current_assistant_id: &mut Option<MessageId>,
     current_tool_blocks: &mut HashMap<u64, SdkToolBlock>,
-    tool_names: &mut HashMap<ToolCallId, String>,
+    tools: &mut HashMap<ToolCallId, SdkTool>,
     full_text_policy: SdkFullTextPolicy,
 ) -> Result<EventActivity, EventRejection> {
     if value.get("sdkMessageVersion").and_then(Value::as_str) != Some("claude-code-sdk-message-v1")
@@ -1246,7 +1300,7 @@ fn project_sdk_message(
                     );
                 }
                 if let Some(name) = name.as_ref() {
-                    tool_names.insert(tool_call_id.clone(), name.clone());
+                    tools.entry(tool_call_id.clone()).or_default().name = Some(name.clone());
                 }
                 return Ok(project_tool_event(
                     tool_call_id,
@@ -1365,9 +1419,9 @@ fn project_sdk_message(
         Some("tool_progress") => {
             let tool_call_id = project_tool_call_id(sdk_message.get("tool_use_id"))?;
             let name = projected_tool_name(sdk_message.get("tool_name"))
-                .or_else(|| tool_names.get(&tool_call_id).cloned());
+                .or_else(|| tools.get(&tool_call_id).and_then(|tool| tool.name.clone()));
             if let Some(name) = name.as_ref() {
-                tool_names.insert(tool_call_id.clone(), name.clone());
+                tools.entry(tool_call_id.clone()).or_default().name = Some(name.clone());
             }
             Ok(project_tool_event(
                 tool_call_id,
@@ -1394,7 +1448,7 @@ fn project_sdk_message(
                     let tool_call_id = project_tool_call_id(block.get("id"))?;
                     let name = projected_tool_name(block.get("name"));
                     if let Some(name) = name.as_ref() {
-                        tool_names.insert(tool_call_id.clone(), name.clone());
+                        tools.entry(tool_call_id.clone()).or_default().name = Some(name.clone());
                     }
                     let input = projected_tool_payload(block.get("input"));
                     return Ok(project_tool_event(
@@ -1446,7 +1500,7 @@ fn project_sdk_message(
                             .or_else(|| block.get("toolUseId"))
                             .or_else(|| block.get("id")),
                     )?;
-                    let name = tool_names.get(&tool_call_id).cloned();
+                    let name = tools.get(&tool_call_id).and_then(|tool| tool.name.clone());
                     let is_error = block
                         .get("is_error")
                         .or_else(|| block.get("isError"))

@@ -24,10 +24,15 @@ pub trait SubagentOps: Send + Sync {
 }
 
 pub trait SealedAgentStorePort: Send + Sync {
-    fn export_package(&self, agent_id: String) -> Result<PackageExportReceipt, SealedAgentError>;
+    fn export_package(
+        &self,
+        agent_id: String,
+        agent_name: String,
+    ) -> Result<PackageExportReceipt, SealedAgentError>;
     fn export_cloud_package(
         &self,
         agent_id: String,
+        agent_name: String,
         cloud_public_key: String,
         cloud_key_id: String,
     ) -> Result<PackageExportReceipt, SealedAgentError>;
@@ -42,7 +47,7 @@ pub trait SealedAgentStorePort: Send + Sync {
         cloud_metadata: Option<CloudPackageMetadata>,
     ) -> Result<PackageInstallReceipt, SealedAgentError>;
     fn remove_package(&self, agent_id: String) -> Result<bool, SealedAgentError>;
-    fn contains_agents(&self, agent_ids: &[String]) -> Result<Vec<String>, SealedAgentError>;
+    fn agents_using_sealed_source(&self, agent_ids: &[String]) -> Result<Vec<String>, SealedAgentError>;
     fn read_file(
         &self,
         token: &str,

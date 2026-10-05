@@ -420,6 +420,10 @@ pub struct TeamRunPublicRun {
     team_revision: u64,
     runtime: TeamRuntimeState,
     lifecycle: TeamRunPublicLifecycle,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    design_epoch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph_version: Option<String>,
     start_gate: TeamRunPublicStartGate,
     proposal_id: Option<String>,
     proposal_summary: Option<String>,
@@ -447,6 +451,14 @@ impl TeamRunPublicRun {
         self.lifecycle
     }
 
+    pub fn design_epoch(&self) -> Option<&str> {
+        self.design_epoch.as_deref()
+    }
+
+    pub fn graph_version(&self) -> Option<&str> {
+        self.graph_version.as_deref()
+    }
+
     pub const fn start_gate(&self) -> TeamRunPublicStartGate {
         self.start_gate
     }
@@ -469,6 +481,8 @@ impl TeamRunPublicRun {
 pub enum TeamRunPublicStartGate {
     Intake,
     ProposalPending,
+    Designing,
+    DesignProposalPending,
     Started,
 }
 
@@ -1229,6 +1243,19 @@ fn build_public_snapshot(
             team_revision: run.frozen_team_revision().get(),
             runtime,
             lifecycle: lifecycle_status(run.lifecycle().state()),
+            design_epoch: match run.start_gate() {
+                RunStartGate::Designing { design_epoch, .. }
+                | RunStartGate::DesignProposalPending { design_epoch, .. } => {
+                    Some(design_epoch.clone())
+                }
+                _ => None,
+            },
+            graph_version: match run.start_gate() {
+                RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. } => {
+                    crate::store::codec::graph_version(run.graph().definition()).ok()
+                }
+                _ => None,
+            },
             start_gate: start_gate_status(run.start_gate()),
             proposal_id: run.start_gate().proposal_id().map(ToOwned::to_owned),
             proposal_summary: run.start_gate().summary().map(ToOwned::to_owned),
@@ -1453,6 +1480,8 @@ fn start_gate_status(start_gate: &RunStartGate) -> TeamRunPublicStartGate {
         RunStartGate::Intake => TeamRunPublicStartGate::Intake,
         RunStartGate::ProposalPending { .. } => TeamRunPublicStartGate::ProposalPending,
         RunStartGate::Started => TeamRunPublicStartGate::Started,
+        RunStartGate::Designing { .. } => TeamRunPublicStartGate::Designing,
+        RunStartGate::DesignProposalPending { .. } => TeamRunPublicStartGate::DesignProposalPending,
     }
 }
 
@@ -1663,7 +1692,7 @@ fn runtime_state(
     }
 }
 
-fn graph_projection(facts: &OrganizationFacts, graph: &GraphState) -> TeamPublicGraph {
+pub(crate) fn graph_projection(facts: &OrganizationFacts, graph: &GraphState) -> TeamPublicGraph {
     let projected = project(graph);
     let definition = graph.definition();
     let rework_limit_nodes: BTreeSet<_> = facts

@@ -164,6 +164,7 @@ pub struct GraphPatch {
     base_graph_id: String,
     base_workflow_plan_id: String,
     operations: Vec<GraphPatchOperation>,
+    content_fingerprint: Option<OpaqueId>,
 }
 
 impl GraphPatch {
@@ -192,6 +193,7 @@ impl GraphPatch {
             base_graph_id,
             base_workflow_plan_id,
             operations,
+            content_fingerprint: None,
         })
     }
 
@@ -205,6 +207,15 @@ impl GraphPatch {
 
     pub fn operations(&self) -> &[GraphPatchOperation] {
         &self.operations
+    }
+
+    pub fn with_content_fingerprint(mut self, fingerprint: OpaqueId) -> Self {
+        self.content_fingerprint = Some(fingerprint);
+        self
+    }
+
+    pub fn content_fingerprint(&self) -> Option<&OpaqueId> {
+        self.content_fingerprint.as_ref()
     }
 }
 

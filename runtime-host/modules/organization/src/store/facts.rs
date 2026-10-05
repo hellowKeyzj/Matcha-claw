@@ -205,6 +205,18 @@ pub enum RunStartGate {
         summary: String,
         source_delivery_id: String,
     },
+    Designing {
+        design_epoch: String,
+        prompt_generation: Option<String>,
+    },
+    DesignProposalPending {
+        design_epoch: String,
+        prompt_generation: String,
+        graph_version: String,
+        proposal_id: String,
+        summary: String,
+        source_delivery_id: String,
+    },
     Started,
 }
 
@@ -234,15 +246,18 @@ pub enum ContinueRunDiscussionOutcome {
 impl RunStartGate {
     pub fn proposal_id(&self) -> Option<&str> {
         match self {
-            Self::ProposalPending { proposal_id, .. } => Some(proposal_id),
-            Self::Intake | Self::Started => None,
+            Self::ProposalPending { proposal_id, .. }
+            | Self::DesignProposalPending { proposal_id, .. } => Some(proposal_id),
+            Self::Intake | Self::Designing { .. } | Self::Started => None,
         }
     }
 
     pub fn summary(&self) -> Option<&str> {
         match self {
-            Self::ProposalPending { summary, .. } => Some(summary),
-            Self::Intake | Self::Started => None,
+            Self::ProposalPending { summary, .. } | Self::DesignProposalPending { summary, .. } => {
+                Some(summary)
+            }
+            Self::Intake | Self::Designing { .. } | Self::Started => None,
         }
     }
 
@@ -250,8 +265,11 @@ impl RunStartGate {
         match self {
             Self::ProposalPending {
                 source_delivery_id, ..
+            }
+            | Self::DesignProposalPending {
+                source_delivery_id, ..
             } => Some(source_delivery_id),
-            Self::Intake | Self::Started => None,
+            Self::Intake | Self::Designing { .. } | Self::Started => None,
         }
     }
 
@@ -282,6 +300,7 @@ impl RunStartGate {
         let next = Self::proposal_pending(proposal_id, summary, source_delivery_id)?;
         match self {
             Self::Started => Ok(SetRunStartProposalOutcome::AlreadyStarted),
+            Self::Designing { .. } | Self::DesignProposalPending { .. } => Err(()),
             current if *current == next => Ok(SetRunStartProposalOutcome::Replayed),
             current => {
                 *current = next;
@@ -302,8 +321,17 @@ impl RunStartGate {
                 *self = Self::Started;
                 Ok(ConfirmRunStartOutcome::Started)
             }
-            Self::ProposalPending { .. } => Ok(ConfirmRunStartOutcome::ProposalMismatch),
-            Self::Intake => Ok(ConfirmRunStartOutcome::Intake),
+            Self::DesignProposalPending {
+                proposal_id: existing,
+                ..
+            } if existing == proposal_id => {
+                *self = Self::Started;
+                Ok(ConfirmRunStartOutcome::Started)
+            }
+            Self::ProposalPending { .. } | Self::DesignProposalPending { .. } => {
+                Ok(ConfirmRunStartOutcome::ProposalMismatch)
+            }
+            Self::Intake | Self::Designing { .. } => Ok(ConfirmRunStartOutcome::Intake),
             Self::Started => Ok(ConfirmRunStartOutcome::Replayed),
         }
     }
@@ -323,13 +351,99 @@ impl RunStartGate {
                 *self = Self::Intake;
                 Ok(ContinueRunDiscussionOutcome::Intake)
             }
-            Self::ProposalPending { .. } => Ok(ContinueRunDiscussionOutcome::ProposalMismatch),
-            Self::Intake => Ok(ContinueRunDiscussionOutcome::Replayed),
+            Self::DesignProposalPending {
+                proposal_id: existing,
+                design_epoch,
+                ..
+            } if existing == proposal_id => {
+                let epoch = design_epoch.clone();
+                self.exit_design(&epoch)
+            }
+            Self::ProposalPending { .. } | Self::DesignProposalPending { .. } => {
+                Ok(ContinueRunDiscussionOutcome::ProposalMismatch)
+            }
+            Self::Intake | Self::Designing { .. } => Ok(ContinueRunDiscussionOutcome::Replayed),
             Self::Started => Ok(ContinueRunDiscussionOutcome::AlreadyStarted),
         }
     }
 
+    pub(super) fn exit_design(&mut self, epoch: &str) -> Result<ContinueRunDiscussionOutcome, ()> {
+        match self {
+            Self::Intake => Ok(ContinueRunDiscussionOutcome::Replayed),
+            Self::Designing { design_epoch, .. }
+            | Self::DesignProposalPending { design_epoch, .. }
+                if design_epoch == epoch =>
+            {
+                *self = Self::Intake;
+                Ok(ContinueRunDiscussionOutcome::Intake)
+            }
+            _ => Err(()),
+        }
+    }
+
+    pub(crate) fn valid(&self) -> bool {
+        match self {
+            Self::Intake | Self::Started => true,
+            Self::ProposalPending {
+                proposal_id,
+                summary,
+                source_delivery_id,
+            } => [proposal_id, summary, source_delivery_id]
+                .iter()
+                .all(|value| !value.trim().is_empty()),
+            Self::Designing {
+                design_epoch,
+                prompt_generation,
+            } => {
+                !design_epoch.trim().is_empty()
+                    && prompt_generation
+                        .as_ref()
+                        .is_none_or(|value| !value.trim().is_empty())
+            }
+            Self::DesignProposalPending {
+                design_epoch,
+                prompt_generation,
+                graph_version,
+                proposal_id,
+                summary,
+                source_delivery_id,
+            } => {
+                [
+                    design_epoch,
+                    prompt_generation,
+                    proposal_id,
+                    source_delivery_id,
+                ]
+                .iter()
+                .all(|value| !value.trim().is_empty())
+                    && graph_version.len() == 64
+                    && graph_version
+                        .bytes()
+                        .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
+                    && !summary.trim().is_empty()
+                    && summary.lines().count() == 1
+                    && !summary.contains(['<', '>'])
+                    && proposal_id == prompt_generation
+            }
+        }
+    }
+
     fn can_transition_from(&self, previous: &Self) -> bool {
+        if !self.valid() {
+            return false;
+        }
+        if matches!(
+            self,
+            Self::Designing { .. } | Self::DesignProposalPending { .. }
+        ) {
+            return !matches!(previous, Self::Started);
+        }
+        if matches!(
+            previous,
+            Self::Designing { .. } | Self::DesignProposalPending { .. }
+        ) {
+            return matches!(self, Self::Intake | Self::Started);
+        }
         matches!(
             (previous, self),
             (Self::Intake, Self::Intake | Self::ProposalPending { .. })
@@ -516,7 +630,7 @@ pub struct GraphRunFacts {
     graph: GraphState,
     runtime: Option<RunRuntimeReceipt>,
     lifecycle: GraphRunLifecycle,
-    start_gate: RunStartGate,
+    pub(super) start_gate: RunStartGate,
 }
 
 impl GraphRunFacts {
@@ -563,6 +677,9 @@ impl GraphRunFacts {
     ) -> Result<Self, OrganizationFactsError> {
         if graph.definition().run_id().as_str().trim().is_empty() {
             return Err(OrganizationFactsError::InvalidGraphRun);
+        }
+        if !start_gate.valid() {
+            return Err(OrganizationFactsError::InvalidRunStartGate);
         }
         if runtime
             .as_ref()
@@ -1202,6 +1319,32 @@ impl OrganizationFacts {
             .cloned()
     }
 
+    pub(crate) fn team_unconfirmed_materialization_cleanup_request(
+        &self,
+        team_id: &TeamId,
+    ) -> Option<TeamMaterializationRequest> {
+        self.teams
+            .get(team_id.as_str())
+            .filter(|team| team.tombstoned())?;
+        self.runs
+            .values()
+            .filter(|run| run.team() == team_id)
+            .all(|run| {
+                run.runtime().is_none()
+                    && matches!(
+                        run.lifecycle().state(),
+                        GraphRunLifecycleState::Tombstoned { .. }
+                    )
+            })
+            .then_some(())?;
+        match self.materializations.get(team_id.as_str())? {
+            TeamMaterializationLifecycle::Tombstoned(
+                crate::TombstonedMaterialization::OutcomeUnknown(request),
+            ) => Some(request.clone()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn team_materialization_cleanup_confirmed(&self, team_id: &TeamId) -> bool {
         matches!(
             self.materializations.get(team_id.as_str()),
@@ -1538,6 +1681,10 @@ impl OrganizationFacts {
         self.runs.get(run_id.as_str())
     }
 
+    pub(super) fn design_run_mut(&mut self, run_id: &GraphRunId) -> Option<&mut GraphRunFacts> {
+        self.runs.get_mut(run_id.as_str())
+    }
+
     pub(crate) fn set_run_start_proposal(
         &mut self,
         run_id: &GraphRunId,
@@ -1558,10 +1705,18 @@ impl OrganizationFacts {
         run_id: &GraphRunId,
         proposal_id: &str,
     ) -> Result<ConfirmRunStartOutcome, OrganizationFactsError> {
-        self.runs
+        let run = self
+            .runs
             .get_mut(run_id.as_str())
-            .ok_or(OrganizationFactsError::UnknownRun)?
-            .start_gate
+            .ok_or(OrganizationFactsError::UnknownRun)?;
+        if let RunStartGate::DesignProposalPending { graph_version, .. } = run.start_gate()
+            && crate::store::codec::graph_version(run.graph().definition())
+                .map_err(|_| OrganizationFactsError::InvalidRunStartGate)?
+                != *graph_version
+        {
+            return Err(OrganizationFactsError::InvalidRunStartGate);
+        }
+        run.start_gate
             .confirm_start(proposal_id)
             .map_err(|_| OrganizationFactsError::InvalidRunStartGate)
     }
@@ -1628,6 +1783,10 @@ impl OrganizationFacts {
 
     pub(crate) fn approvals(&self) -> impl Iterator<Item = &Approval> {
         self.approvals.values()
+    }
+
+    pub(crate) fn events(&self) -> &EventLedger {
+        &self.events
     }
 
     pub(crate) fn event_snapshot(&self) -> EventLedgerSnapshot {
@@ -2665,8 +2824,21 @@ impl OrganizationFacts {
             .cloned()
             .ok_or(crate::GraphPatchError::UnknownRun)?;
         let graph = crate::apply_graph_patch(run.graph(), patch, applied_at)?;
-        self.runs
-            .insert(run_id.as_str().to_owned(), GraphRunFacts { graph, ..run });
+        let changed = graph.definition() != run.graph().definition();
+        if changed
+            && matches!(
+                run.start_gate(),
+                RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. }
+            )
+        {
+            crate::application::design::validate_definition(self, &run, graph.definition(), false)
+                .map_err(|_| crate::GraphPatchError::InvalidDefinition)?;
+        }
+        let mut updated = GraphRunFacts { graph, ..run };
+        if changed {
+            super::design::invalidate_graph_design(&mut updated);
+        }
+        self.runs.insert(run_id.as_str().to_owned(), updated);
         Ok(())
     }
 
@@ -2696,11 +2868,27 @@ impl OrganizationFacts {
             .cloned()
             .ok_or(crate::RecordCommandError::InvalidEventId)?;
         let graph = GraphState::initialize(definition, command.created_at());
+        let changed = graph.definition() != current.graph().definition();
+        if changed
+            && matches!(
+                current.start_gate(),
+                RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. }
+            )
+        {
+            crate::application::design::validate_definition(
+                self,
+                &current,
+                graph.definition(),
+                false,
+            )
+            .map_err(|_| crate::RecordCommandError::InvalidEventId)?;
+        }
         let receipt = self.events.try_accept(command)?;
-        self.runs.insert(
-            run_id.as_str().to_owned(),
-            GraphRunFacts { graph, ..current },
-        );
+        let mut updated = GraphRunFacts { graph, ..current };
+        if changed {
+            super::design::invalidate_graph_design(&mut updated);
+        }
+        self.runs.insert(run_id.as_str().to_owned(), updated);
         Ok(receipt)
     }
 
@@ -2726,11 +2914,25 @@ impl OrganizationFacts {
             .ok_or(crate::RecordCommandError::InvalidEventId)?;
         let graph = crate::apply_graph_patch(current.graph(), patch, command.created_at())
             .map_err(|_| crate::RecordCommandError::InvalidEventId)?;
+        let changed = graph.definition() != current.graph().definition();
+        if matches!(
+            current.start_gate(),
+            RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. }
+        ) {
+            crate::application::design::validate_definition(
+                self,
+                &current,
+                graph.definition(),
+                false,
+            )
+            .map_err(|_| crate::RecordCommandError::InvalidEventId)?;
+        }
         let receipt = self.events.try_accept(command)?;
-        self.runs.insert(
-            run_id.as_str().to_owned(),
-            GraphRunFacts { graph, ..current },
-        );
+        let mut updated = GraphRunFacts { graph, ..current };
+        if changed {
+            super::design::invalidate_graph_design(&mut updated);
+        }
+        self.runs.insert(run_id.as_str().to_owned(), updated);
         Ok(receipt)
     }
 

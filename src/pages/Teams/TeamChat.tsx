@@ -1,5 +1,5 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
-import { Download, MessageCircle, Minus, Plus, Upload } from 'lucide-react';
+import { Download, GitBranch, MessageCircle, Minus, Plus, Upload } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -10,10 +10,14 @@ import { useTranslation } from 'react-i18next';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import { readTeamWebhookAuth, type TeamWebhookAuthProjection } from '@/services/openclaw/team-runtime-client';
 import { TeamRunGraphCanvas } from './TeamRunGraphCanvas';
+import { TeamDesignDialog } from './TeamDesignDialog';
+import { useTeamGraphLabels } from './team-graph-labels';
+import { toast } from 'sonner';
+import type { TeamDesignSnapshot, TeamDesignTarget } from '@/types/team-design';
 
-const EMPTY_ROLES: ReturnType<typeof useTeamsStore.getState>['rolesByTeamId'][string] = [];
+const EMPTY_ROLES: TeamDesignSnapshot['roles'] = [];
 
-type TeamGraphProjection = NonNullable<ReturnType<typeof useTeamsStore.getState>['graphByTeamId'][string]>;
+type TeamGraphProjection = TeamDesignSnapshot['graph'];
 
 function hasExportableGraph(graph: TeamGraphProjection | null | undefined): graph is TeamGraphProjection {
   return Boolean(graph && (graph.nodes.length > 0 || graph.edges.length > 0));
@@ -47,6 +51,7 @@ function downloadYamlFile(fileName: string, yaml: string): void {
 
 export function TeamChat({ teamId }: { teamId?: string }) {
   const { t } = useTranslation('teams');
+  const graphLabels = useTeamGraphLabels();
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
@@ -64,7 +69,13 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const confirmProposal = useTeamsStore((state) => state.confirmProposal);
   const continueProposal = useTeamsStore((state) => state.continueProposal);
   const cancelProposal = useTeamsStore((state) => state.cancelProposal);
-  const submitGraphPatch = useTeamsStore((state) => state.submitGraphPatch);
+  const submitRunGraphPatch = useTeamsStore((state) => state.submitRunGraphPatch);
+  const observeTeamDesign = useTeamsStore((state) => state.observeTeamDesign);
+  const refreshDesignSnapshot = useTeamsStore((state) => state.refreshDesignSnapshot);
+  const startDesign = useTeamsStore((state) => state.startDesign);
+  const continueDesign = useTeamsStore((state) => state.continueDesign);
+  const confirmDesign = useTeamsStore((state) => state.confirmDesign);
+  const continueDesignDiscussion = useTeamsStore((state) => state.continueDesignDiscussion);
   const exportGraphYaml = useTeamsStore((state) => state.exportGraphYaml);
   const importGraphYaml = useTeamsStore((state) => state.importGraphYaml);
   const openSessionIdentity = useChatStore((state) => state.openSessionIdentity);
@@ -74,9 +85,16 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const team = teams.find((row) => row.id === resolvedTeamId);
   const run = useTeamsStore((state) => (resolvedTeamId ? state.runByTeamId[resolvedTeamId] : undefined));
   const runList = useTeamsStore((state) => (resolvedTeamId ? (state.runListByTeamId[resolvedTeamId] ?? []) : []));
-  const graph = useTeamsStore((state) => (resolvedTeamId ? state.graphByTeamId[resolvedTeamId] : undefined));
-  const roles = useTeamsStore((state) => (resolvedTeamId ? (state.rolesByTeamId[resolvedTeamId] ?? EMPTY_ROLES) : EMPTY_ROLES));
-  const startGate = useTeamsStore((state) => (resolvedTeamId ? state.startGateByTeamId[resolvedTeamId] : undefined));
+  const designRecord = useTeamsStore((state) => run ? state.designByRunId[run.runId] : undefined);
+  const designSnapshot = designRecord?.snapshot && designRecord.snapshot.teamId === resolvedTeamId && designRecord.snapshot.runId === run?.runId ? designRecord.snapshot : null;
+  const graph = designSnapshot?.graph;
+  const roles = designSnapshot?.roles ?? EMPTY_ROLES;
+  const startGate = designSnapshot?.startGate;
+  const designActive = startGate?.status === 'designing' || startGate?.status === 'design_proposal_pending';
+  const designProposal = startGate?.status === 'design_proposal_pending' ? startGate.proposal : null;
+  const currentDesignTargetKey = JSON.stringify([resolvedTeamId, run?.runId]);
+  const currentDesignTargetRef = useRef(currentDesignTargetKey);
+  currentDesignTargetRef.current = currentDesignTargetKey;
   const loading = useTeamsStore((state) => (resolvedTeamId ? Boolean(state.loadingByTeamId[resolvedTeamId]) : false));
   const error = useTeamsStore((state) => (resolvedTeamId ? state.errorByTeamId[resolvedTeamId] : undefined));
 
@@ -93,6 +111,11 @@ export function TeamChat({ teamId }: { teamId?: string }) {
       await refreshSnapshot(team.id);
     })();
   }, [isGatewayRunning, team, resolvedTeamId, setActiveTeam, syncRunList, refreshSnapshot]);
+
+  useEffect(() => {
+    if (!resolvedTeamId || !run?.runId || !isGatewayRunning) return;
+    return observeTeamDesign({ teamId: resolvedTeamId, runId: run.runId });
+  }, [resolvedTeamId, run?.runId, isGatewayRunning, observeTeamDesign]);
 
   useEffect(() => {
     if (!isGatewayRunning) {
@@ -149,13 +172,28 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     });
   };
 
-  const openLeaderDiscussion = (): void => {
-    const leader = roles.find((role) => role.roleId === 'leader');
+  const openLeaderDiscussion = (openDesignGraph = false): void => {
+    const leader = roles.find((role) => role.roleId === 'leader' && role.runId === run?.runId);
     if (!leader || !team) {
       return;
     }
-    setActiveRun(team.id, leader.runId);
-    openSessionIdentity({ sessionIdentity: leader.sessionIdentity, endpointSessionId: leader.endpointSessionId });
+    if (team.activeRunId !== leader.runId) setActiveRun(team.id, leader.runId);
+    openSessionIdentity({ sessionIdentity: leader.sessionIdentity });
+    navigate('/', openDesignGraph ? { state: { teamDesignSurface: {
+      kind: 'team-graph', sourceSessionIdentity: leader.sessionIdentity, teamId: team.id, runId: leader.runId,
+    } } } : undefined);
+  };
+
+  const runDesignUiAction = async (action: (target: TeamDesignTarget) => Promise<void>, openDiscussion = false): Promise<void> => {
+    if (!team || !run) return;
+    const target = { teamId: team.id, runId: run.runId };
+    const targetKey = currentDesignTargetKey;
+    try {
+      await action(target);
+      if (openDiscussion && currentDesignTargetRef.current === targetKey) openLeaderDiscussion(true);
+    } catch (error) {
+      toast.error(t('design.actionFailed', { error: error instanceof Error ? error.message : String(error) }));
+    }
   };
 
   const continuePendingProposal = async (): Promise<void> => {
@@ -199,13 +237,15 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const canCreateRun = !loading && !pendingActionId;
   const canCancel = canAct && (run?.status === 'provisioning' || run?.status === 'running' || run?.status === 'waiting_for_user' || run?.status === 'paused');
   const canDeleteRun = canAct;
-  const canImportGraphYaml = canAct;
+  const canImportGraphYaml = canAct && Boolean(designSnapshot) && !designActive && !designRecord?.mutationPending;
   const hasGraphToExport = hasExportableGraph(graph);
   const canExportGraphYaml = canAct && hasGraphToExport;
   const exportGraphYamlTitle = hasGraphToExport ? t('run.exportYaml') : t('run.exportYamlNoGraph');
   const proposal = startGate?.status === 'proposal_pending' ? startGate.proposal : null;
   const proposalSummary = proposal?.taskSummary?.trim() ?? '';
   const canActOnProposal = Boolean(proposal?.proposalId && run) && !loading && !pendingActionId;
+  const canStartDesign = Boolean(run) && isGatewayRunning && Boolean(designSnapshot) && !designRecord?.loading && !designRecord?.mutationPending
+    && roles.some((role) => role.roleId === 'leader' && role.runId === run?.runId);
 
   return (
     <section className="space-y-4">
@@ -214,6 +254,24 @@ export function TeamChat({ teamId }: { teamId?: string }) {
           <h1 className="text-xl font-semibold">{team.name}</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {!designActive && startGate?.status !== 'started' ? (
+            <Button
+              variant="outline"
+              disabled={!canStartDesign}
+              onClick={() => { void runDesignUiAction(startDesign, true); }}
+            >
+              <GitBranch aria-hidden="true" className="mr-2 h-4 w-4" />
+              {t('design.start')}
+            </Button>
+          ) : null}
+          <Button
+            variant="outline"
+            onClick={() => openLeaderDiscussion(designActive)}
+            disabled={!canAct || !roles.some((role) => role.roleId === 'leader' && role.runId === run?.runId)}
+          >
+            <MessageCircle aria-hidden="true" className="mr-2 h-4 w-4" />
+            {t('design.discussion')}
+          </Button>
           <Button
             variant="outline"
             onClick={() => void runUiAction(`resume:${team.id}:${run?.runId ?? 'none'}`, () => resumeRun(team.id))}
@@ -230,7 +288,12 @@ export function TeamChat({ teamId }: { teamId?: string }) {
           </Button>
           <Button
             variant="outline"
-            onClick={() => void runUiAction(`refresh:${team.id}:${run?.runId ?? 'none'}`, () => refreshSnapshot(team.id))}
+            onClick={() => void runUiAction(`refresh:${team.id}:${run?.runId ?? 'none'}`, async () => {
+              await Promise.all([
+                refreshSnapshot(team.id),
+                ...(run ? [refreshDesignSnapshot({ teamId: team.id, runId: run.runId }, { invalidate: true })] : []),
+              ]);
+            })}
             disabled={loading || Boolean(pendingActionId) || !run}
           >
             {t('chat.refresh')}
@@ -240,6 +303,28 @@ export function TeamChat({ teamId }: { teamId?: string }) {
           </Button>
         </div>
       </header>
+
+      {designActive ? (
+        <div role="status" className="flex items-center gap-2 rounded-md border border-primary/25 bg-primary/5 p-3 text-sm text-primary">
+          <GitBranch aria-hidden="true" className="h-4 w-4 shrink-0" />
+          {t('design.active')}
+        </div>
+      ) : null}
+      {designProposal ? (
+        <TeamDesignDialog
+          summary={designProposal.taskSummary}
+          busy={Boolean(designRecord?.mutationPending) || Boolean(designRecord?.loading)}
+          error={designRecord?.error ?? undefined}
+          onConfirm={() => { void runDesignUiAction(confirmDesign); }}
+          onReturnDiscussion={() => { void runDesignUiAction(continueDesignDiscussion, true); }}
+          onContinueDesign={() => { void runDesignUiAction(continueDesign, true); }}
+        />
+      ) : null}
+      {designRecord?.error && !designProposal ? (
+        <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+          {designRecord.error}
+        </div>
+      ) : null}
 
       {error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
@@ -304,7 +389,12 @@ export function TeamChat({ teamId }: { teamId?: string }) {
 
       <Card className="min-w-0">
         <CardContent className="pt-6">
+          {run && !designSnapshot && !designRecord?.error ? (
+            <div role="status" className="mb-3 text-sm text-muted-foreground">{t('common:status.loading')}</div>
+          ) : null}
           <TeamRunGraphCanvas
+            mode={designSnapshot ? 'editable' : 'readonly'}
+            mutationPending={Boolean(designRecord?.mutationPending) || Boolean(designRecord?.loading)}
             graph={graph}
             runStatus={run?.status}
             roles={roles}
@@ -387,149 +477,8 @@ export function TeamChat({ teamId }: { teamId?: string }) {
             titleLabel={t('run.graph')}
             executorLabel={t('run.executor')}
             webhookAuth={webhookAuth}
-            labels={{
-              workflowCanvas: t('run.graphCanvas.workflowCanvas'),
-              workflowEdges: t('run.graphCanvas.workflowEdges'),
-              nodePalette: t('run.graphCanvas.nodePalette'),
-              nodePaletteTitle: t('run.graphCanvas.nodePaletteTitle'),
-              nodeConfiguration: t('run.graphCanvas.nodeConfiguration'),
-              nodeConfigurationDescription: t('run.graphCanvas.nodeConfigurationDescription'),
-              edgeConfiguration: t('run.graphCanvas.edgeConfiguration'),
-              edgeConfigurationDescription: t('run.graphCanvas.edgeConfigurationDescription'),
-              configureHint: t('run.graphCanvas.configureHint'),
-              clickNodeToEdit: t('run.graphCanvas.clickNodeToEdit'),
-              saveNode: t('run.graphCanvas.saveNode'),
-              saveEdge: t('run.graphCanvas.saveEdge'),
-              deleteNode: t('run.graphCanvas.deleteNode'),
-              deleteEdge: t('run.graphCanvas.deleteEdge'),
-              addEdge: t('run.graphCanvas.addEdge'),
-              sourceNode: t('run.graphCanvas.sourceNode'),
-              targetNode: t('run.graphCanvas.targetNode'),
-              sourcePort: t('run.graphCanvas.sourcePort'),
-              targetPort: t('run.graphCanvas.targetPort'),
-              edgeType: t('run.graphCanvas.edgeType'),
-              edgeAction: t('run.graphCanvas.edgeAction'),
-              edgeActionOptions: {
-                activate: t('run.graphCanvas.edgeActionOptions.activate'),
-                rework: t('run.graphCanvas.edgeActionOptions.rework'),
-                gate: t('run.graphCanvas.edgeActionOptions.gate'),
-                finish: t('run.graphCanvas.edgeActionOptions.finish'),
-              },
-              includeUpstreamResult: t('run.graphCanvas.includeUpstreamResult'),
-              edgeLabel: t('run.graphCanvas.edgeLabel'),
-              edgeConnection: t('run.graphCanvas.edgeConnection'),
-              edgeTriggerCondition: t('run.graphCanvas.edgeTriggerCondition'),
-              edgeDataTransfer: t('run.graphCanvas.edgeDataTransfer'),
-              edgeAdvancedFields: t('run.graphCanvas.edgeAdvancedFields'),
-              edgeJoinGateHint: t('run.graphCanvas.edgeJoinGateHint'),
-              edgeFallback: t('run.graphCanvas.edgeFallback'),
-              canvasMinimap: t('run.graphCanvas.canvasMinimap'),
-              nodeTitle: t('run.graphCanvas.nodeTitle'),
-              nodeMaxAttempts: t('run.graphCanvas.nodeMaxAttempts'),
-              nodeMaxAttemptsHint: t('run.graphCanvas.nodeMaxAttemptsHint'),
-              nodeMaxAttemptsInvalid: t('run.graphCanvas.nodeMaxAttemptsInvalid'),
-              reworkLimitExceeded: t('run.graphCanvas.reworkLimitExceeded'),
-              roleId: t('run.graphCanvas.roleId'),
-              executorJson: t('run.graphCanvas.executorJson'),
-              prompt: t('run.graphCanvas.prompt'),
-              workPrompt: t('run.graphCanvas.workPrompt'),
-              reviewPrompt: t('run.graphCanvas.reviewPrompt'),
-              outputArtifactKind: t('run.graphCanvas.outputArtifactKind'),
-              reviewExecutorKind: t('run.graphCanvas.reviewExecutorKind'),
-              reviewExecutorTeamRole: t('run.graphCanvas.reviewExecutorTeamRole'),
-              reviewExecutorHuman: t('run.graphCanvas.reviewExecutorHuman'),
-              humanDecisionReason: t('run.graphCanvas.humanDecisionReason'),
-              humanDecisionRequestedAction: t('run.graphCanvas.humanDecisionRequestedAction'),
-              humanDecisionRisk: t('run.graphCanvas.humanDecisionRisk'),
-              scriptReviewRule: t('run.graphCanvas.scriptReviewRule'),
-              scriptReviewRules: {
-                passThrough: t('run.graphCanvas.scriptReviewRules.passThrough'),
-                assertAllUpstreamCompleted: t('run.graphCanvas.scriptReviewRules.assertAllUpstreamCompleted'),
-                assertNoBlockingGate: t('run.graphCanvas.scriptReviewRules.assertNoBlockingGate'),
-                assertArtifactExists: t('run.graphCanvas.scriptReviewRules.assertArtifactExists'),
-              },
-              scriptReviewArtifactKind: t('run.graphCanvas.scriptReviewArtifactKind'),
-              joinConfigurationHint: t('run.graphCanvas.joinConfigurationHint'),
-              endConfigurationHint: t('run.graphCanvas.endConfigurationHint'),
-              advancedJson: t('run.graphCanvas.advancedJson'),
-              roleIdRequired: t('run.graphCanvas.roleIdRequired'),
-              configJson: t('run.graphCanvas.configJson'),
-              invalidJson: t('run.graphCanvas.invalidJson'),
-              saveGraphUnavailable: t('run.graphCanvas.saveGraphUnavailable'),
-              connectionDraft: t('run.graphCanvas.connectionDraft'),
-              runStatusLabel: t('run.graphCanvas.runStatusLabel'),
-              graphStatusLabel: t('run.graphCanvas.graphStatusLabel'),
-              statusValues: {
-                created: t('run.graphCanvas.statusValues.created'),
-                provisioning: t('run.graphCanvas.statusValues.provisioning'),
-                waiting_for_user: t('run.graphCanvas.statusValues.waitingForUser'),
-                running: t('run.graphCanvas.statusValues.running'),
-                paused: t('run.graphCanvas.statusValues.paused'),
-                cancelling: t('run.graphCanvas.statusValues.cancelling'),
-                completed: t('run.graphCanvas.statusValues.completed'),
-                failed: t('run.graphCanvas.statusValues.failed'),
-                cancelled: t('run.graphCanvas.statusValues.cancelled'),
-                draft: t('run.graphCanvas.statusValues.draft'),
-                ready: t('run.graphCanvas.statusValues.ready'),
-                passed: t('run.graphCanvas.statusValues.passed'),
-              },
-              teamRoles: t('run.graphCanvas.teamRoles'),
-              connectToNode: t('run.graphCanvas.connectToNode'),
-              connectFromNode: t('run.graphCanvas.connectFromNode'),
-              nodeCount: t('run.graphCanvas.nodeCount'),
-              edgeCount: t('run.graphCanvas.edgeCount'),
-              startTriggerMode: t('run.graphCanvas.startTriggerMode'),
-              startTriggerWebhook: t('run.graphCanvas.startTriggerWebhook'),
-              startTriggerCron: t('run.graphCanvas.startTriggerCron'),
-              startWebhookPath: t('run.graphCanvas.startWebhookPath'),
-              startWebhookPublicBaseUrl: t('run.graphCanvas.startWebhookPublicBaseUrl'),
-              startWebhookPublicBaseUrlHint: t('run.graphCanvas.startWebhookPublicBaseUrlHint'),
-              startWebhookPublicBaseUrlInvalid: t('run.graphCanvas.startWebhookPublicBaseUrlInvalid'),
-              startWebhookPublicUrl: t('run.graphCanvas.startWebhookPublicUrl'),
-              startWebhookPublicUrlUnavailable: t('run.graphCanvas.startWebhookPublicUrlUnavailable'),
-              startWebhookPathPreview: t('run.graphCanvas.startWebhookPathPreview'),
-              startWebhookPathPreviewHint: t('run.graphCanvas.startWebhookPathPreviewHint'),
-              startWebhookToken: t('run.graphCanvas.startWebhookToken'),
-              startWebhookTokenUnavailable: t('run.graphCanvas.startWebhookTokenUnavailable'),
-              copyWebhookToken: t('run.graphCanvas.copyWebhookToken'),
-              copiedWebhookToken: t('run.graphCanvas.copiedWebhookToken'),
-              copyWebhookPublicUrl: t('run.graphCanvas.copyWebhookPublicUrl'),
-              copiedWebhookPublicUrl: t('run.graphCanvas.copiedWebhookPublicUrl'),
-              startWebhookPathRequired: t('run.graphCanvas.startWebhookPathRequired'),
-              startWebhookPathInvalid: t('run.graphCanvas.startWebhookPathInvalid'),
-              startCronSchedule: t('run.graphCanvas.startCronSchedule'),
-              startCronSchedules: {
-                every10Minutes: t('run.graphCanvas.startCronSchedules.every10Minutes'),
-                every30Minutes: t('run.graphCanvas.startCronSchedules.every30Minutes'),
-                hourly: t('run.graphCanvas.startCronSchedules.hourly'),
-                dailyAt9: t('run.graphCanvas.startCronSchedules.dailyAt9'),
-                custom: t('run.graphCanvas.startCronSchedules.custom'),
-              },
-              startCronCustomKind: t('run.graphCanvas.startCronCustomKind'),
-              startCronCustomKinds: {
-                intervalMinutes: t('run.graphCanvas.startCronCustomKinds.intervalMinutes'),
-                intervalHours: t('run.graphCanvas.startCronCustomKinds.intervalHours'),
-                dailyAt: t('run.graphCanvas.startCronCustomKinds.dailyAt'),
-              },
-              startCronCustomIntervalMinutes: t('run.graphCanvas.startCronCustomIntervalMinutes'),
-              startCronCustomIntervalHours: t('run.graphCanvas.startCronCustomIntervalHours'),
-              startCronCustomTime: t('run.graphCanvas.startCronCustomTime'),
-              startCronCustomValueRequired: t('run.graphCanvas.startCronCustomValueRequired'),
-              startTriggerHint: t('run.graphCanvas.startTriggerHint'),
-              defaultOutputPort: t('run.graphCanvas.defaultOutputPort'),
-              edges: t('run.graphCanvas.edges'),
-              noEdges: t('run.graphCanvas.noEdges'),
-              nodePaletteDescriptions: {
-                start: t('run.graphCanvas.nodePaletteDescriptions.start'),
-                work: t('run.graphCanvas.nodePaletteDescriptions.work'),
-                review: t('run.graphCanvas.nodePaletteDescriptions.review'),
-                human_decision: t('run.graphCanvas.nodePaletteDescriptions.humanDecision'),
-                script_review: t('run.graphCanvas.nodePaletteDescriptions.scriptReview'),
-                join: t('run.graphCanvas.nodePaletteDescriptions.join'),
-                end: t('run.graphCanvas.nodePaletteDescriptions.end'),
-              },
-            }}
-            onPatchGraph={(operations) => submitGraphPatch(team.id, operations)}
+            labels={graphLabels}
+            onPatchGraph={run && designSnapshot ? (operations) => submitRunGraphPatch({ teamId: team.id, runId: run.runId }, operations) : undefined}
           />
         </CardContent>
       </Card>

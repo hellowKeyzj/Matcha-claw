@@ -1143,7 +1143,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
 
   const selectTeamRole = useCallback((teamId: string, runId: string, role: AgentSessionSwitchboardTeamRoleResult) => {
     setActiveRun(teamId, runId);
-    openSessionIdentity({ sessionIdentity: role.sessionIdentity, endpointSessionId: role.endpointSessionId });
+    openSessionIdentity({ sessionIdentity: role.sessionIdentity });
     void refreshSnapshot(teamId, { force: true });
   }, [openSessionIdentity, refreshSnapshot, setActiveRun]);
 
@@ -1158,7 +1158,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
   const selectTeamRun = useCallback((teamId: string, run: AgentSessionSwitchboardTeamRunResult) => {
     setActiveRun(teamId, run.runId);
     if (run.leader) {
-      openSessionIdentity({ sessionIdentity: run.leader.sessionIdentity, endpointSessionId: run.leader.endpointSessionId });
+      openSessionIdentity({ sessionIdentity: run.leader.sessionIdentity });
     }
     void refreshSnapshot(teamId, { force: true });
   }, [openSessionIdentity, refreshSnapshot, setActiveRun]);

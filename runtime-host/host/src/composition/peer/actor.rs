@@ -542,6 +542,13 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
             .await;
             let _ = reply.send(result);
         }
+        PeerQuery::OpenClawQuestionList { request, reply } => {
+            let result = match shared.admission().admit_request() {
+                Ok(()) => Ok(shared.open_claw().question_list(request).await),
+                Err(error) => Err(error),
+            };
+            let _ = reply.send(result);
+        }
         PeerQuery::OpenClawQuestionResolve {
             request,
             call,

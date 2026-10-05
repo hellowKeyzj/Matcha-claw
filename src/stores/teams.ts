@@ -1,7 +1,13 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { waitForCall } from '@/lib/call-log-await';
+import { subscribeBrowserRecovery, subscribeHostEvent } from '@/lib/host-events';
+import type { TeamDesignRecord, TeamDesignSnapshot, TeamDesignTarget } from '@/types/team-design';
+import { createSessionTraceId, logSessionTrace, summarizeError, summarizeIdentifier } from '@/lib/session-trace';
 import { matchesOrganizationIdentity } from '@/types/call-log/organization';
+import type { CallRecord } from '@/types/call-log';
+import type { WaitForCallOptions } from '@/types/call-log/wait';
+import type { ManualTeamCreation, ManualTeamCreationPhase } from '@/types/team-creation';
 import { useChatStore } from '@/stores/chat';
 import { buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
 import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types';
@@ -19,6 +25,11 @@ import {
   listTeamRuns,
   provisionTeamAgents,
   readTeamRunSnapshot,
+  readTeamDesignSnapshot,
+  startTeamDesign,
+  continueTeamDesign,
+  exitTeamDesign,
+  patchTeamDesignGraph,
   resolveTeamApproval,
   resumeTeam,
   submitTeamRunDecision,
@@ -172,12 +183,23 @@ interface TeamsState {
   planTeamSkillCreation: (candidate: TeamSkillCandidate) => TeamSkillCreationPlan;
   createTeam: (input: TeamSkillCandidate) => string;
   createManualTeam: (input: ManualTeamCandidate) => string;
+  manualTeamCreation: ManualTeamCreation | null;
+  designByRunId: Record<string, TeamDesignRecord | undefined>;
+  refreshDesignSnapshot: (target: TeamDesignTarget, options?: { invalidate?: boolean }) => Promise<void>;
+  observeTeamDesign: (target: TeamDesignTarget) => () => void;
+  startDesign: (target: TeamDesignTarget) => Promise<void>;
+  continueDesign: (target: TeamDesignTarget) => Promise<void>;
+  confirmDesign: (target: TeamDesignTarget) => Promise<void>;
+  continueDesignDiscussion: (target: TeamDesignTarget) => Promise<void>;
+  submitRunGraphPatch: (target: TeamDesignTarget, operations: TeamGraphPatchOperation[]) => Promise<void>;
+  createManualTeamWithProgress: (input: ManualTeamCandidate) => Promise<string>;
+  resetManualTeamCreation: () => void;
   replaceTeamSkillVersion: (input: { teamId: string; expectedCurrentVersion: string; candidate: TeamSkillCandidate }) => string;
   setActiveTeam: (teamId: string | null) => void;
   setActiveRun: (teamId: string, runId: string | null) => void;
   deleteTeam: (teamId: string) => Promise<TeamDeleteResult>;
-  provisionTeamAgents: (teamId: string) => Promise<void>;
-  createRun: (teamId: string) => Promise<TeamRunSummary | undefined>;
+  provisionTeamAgents: (teamId: string, options?: Pick<WaitForCallOptions<'organization'>, 'onUpdate'>) => Promise<void>;
+  createRun: (teamId: string, options?: { onPhase?: (phase: 'initializing_sessions' | 'loading_team') => void }) => Promise<TeamRunSummary | undefined>;
   syncRunList: (teamId: string) => Promise<void>;
   deleteRun: (teamId: string, runId?: string) => Promise<void>;
   refreshSnapshot: (teamId: string, options?: { force?: boolean }) => Promise<void>;
@@ -198,8 +220,111 @@ interface TeamsState {
   submitDecision: (teamId: string, decision: TeamDecisionType, note?: string) => Promise<void>;
 }
 
+interface TeamDesignRead {
+  dirty: boolean;
+  removed: boolean;
+  promise: Promise<void>;
+}
+
+const designReads = new Map<string, TeamDesignRead>();
+const designObservers = new Map<string, { target: TeamDesignTarget; count: number }>();
+let disposeDesignEvents: (() => void) | null = null;
+
+function designTargetKey(target: TeamDesignTarget): string {
+  return JSON.stringify([target.teamId, target.runId]);
+}
+
+function refreshObservedDesigns(): void {
+  for (const { target } of designObservers.values()) {
+    void useTeamsStore.getState().refreshDesignSnapshot(target, { invalidate: true }).catch(() => {});
+  }
+}
+
+function removeDesignReads(teamId: string, runId?: string): void {
+  for (const [key, entry] of actionInFlightByKey) {
+    if (!key.startsWith('design:')) continue;
+    const [entryTeamId, entryRunId] = JSON.parse(key.slice('design:'.length)) as [string, string];
+    if (entryTeamId === teamId && (runId === undefined || entryRunId === runId)) {
+      entry.removed = true;
+      actionInFlightByKey.delete(key);
+    }
+  }
+  for (const [key, entry] of designReads) {
+    const [entryTeamId, entryRunId] = JSON.parse(key) as [string, string];
+    if (entryTeamId === teamId && (runId === undefined || entryRunId === runId)) {
+      entry.removed = true;
+      designReads.delete(key);
+    }
+  }
+  for (const [key, observer] of designObservers) {
+    if (observer.target.teamId === teamId && (runId === undefined || observer.target.runId === runId)) designObservers.delete(key);
+  }
+  if (designObservers.size === 0) {
+    disposeDesignEvents?.();
+    disposeDesignEvents = null;
+  }
+}
+
+async function mutateTeamDesign(target: TeamDesignTarget, operation: string, action: (requestId: string) => Promise<unknown>): Promise<void> {
+  resolveTeamMeta(useTeamsStore.getState().teams, target.teamId);
+  const key = `design:${designTargetKey(target)}`;
+  const existing = actionInFlightByKey.get(key);
+  if (existing) {
+    if (existing.operation !== operation || operation === 'run-graph-patch') throw new Error('Team run mutation is already pending');
+    return existing.promise;
+  }
+  const entry = { requestId: createRequestId(operation), operation, removed: false, promise: Promise.resolve() };
+  entry.promise = Promise.resolve().then(async () => {
+    if (entry.removed) return;
+    try {
+      try {
+        await action(entry.requestId);
+      } catch (error) {
+        if (!entry.removed) {
+          await useTeamsStore.getState().refreshDesignSnapshot(target, { invalidate: true }).catch(() => {});
+          if (!entry.removed) useTeamsStore.setState((state) => {
+            const current = state.designByRunId[target.runId];
+            return current ? { designByRunId: { ...state.designByRunId, [target.runId]: {
+              ...current, error: error instanceof Error ? error.message : String(error),
+            } } } : {};
+          });
+        }
+        throw error;
+      }
+      if (!entry.removed) await useTeamsStore.getState().refreshDesignSnapshot(target, { invalidate: true });
+    } finally {
+      if (actionInFlightByKey.get(key) === entry) {
+        actionInFlightByKey.delete(key);
+        if (!entry.removed) useTeamsStore.setState((state) => {
+          const current = state.designByRunId[target.runId];
+          return current ? { designByRunId: { ...state.designByRunId, [target.runId]: { ...current, mutationPending: false } } } : {};
+        });
+      }
+    }
+  });
+  actionInFlightByKey.set(key, entry);
+  useTeamsStore.setState((state) => ({ designByRunId: { ...state.designByRunId, [target.runId]: {
+    snapshot: state.designByRunId[target.runId]?.snapshot ?? null,
+    loading: state.designByRunId[target.runId]?.loading ?? false,
+    error: null,
+    mutationPending: true,
+  } } }));
+  return entry.promise;
+}
+
+async function invalidateRunGraph(target: TeamDesignTarget): Promise<void> {
+  if (useTeamsStore.getState().designByRunId[target.runId]) {
+    await useTeamsStore.getState().refreshDesignSnapshot(target, { invalidate: true }).catch(() => {});
+  }
+}
+
+function requireDesignProposal(snapshot: TeamDesignSnapshot | null | undefined, target: TeamDesignTarget): string {
+  if (snapshot?.teamId !== target.teamId || snapshot.runId !== target.runId || snapshot.startGate.status !== 'design_proposal_pending') throw new Error('Team design proposal is required');
+  return snapshot.startGate.proposal.proposalId;
+}
+
 const snapshotInFlightByTeamId = new Map<string, Promise<void>>();
-const actionInFlightByKey = new Map<string, { requestId: string; promise: Promise<void> }>();
+const actionInFlightByKey = new Map<string, { requestId: string; promise: Promise<void>; operation?: string; removed?: boolean }>();
 
 export function planTeamSkillCreation(teams: TeamMeta[], candidate: TeamSkillCandidate): TeamSkillCreationPlan {
   const teamSkillName = candidate.teamSkillPackage.name;
@@ -421,6 +546,28 @@ function toManualTeamMeta(input: ManualTeamCandidate, teamId: string, now: numbe
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function freezeManualTeamCandidate(input: ManualTeamCandidate): ManualTeamCandidate {
+  return Object.freeze({
+    ...input,
+    manualTeam: Object.freeze({
+      ...input.manualTeam,
+      members: Object.freeze(input.manualTeam.members.map((member) => Object.freeze({
+        ...member,
+        skills: Object.freeze([...member.skills]),
+        tools: Object.freeze([...member.tools]),
+      }))),
+    }),
+  }) as unknown as ManualTeamCandidate;
+}
+
+class ConfirmedTeamProvisionFailure extends Error {}
+
+function isConfirmedProvisionFailure(call: CallRecord<'organization'>): boolean {
+  return (call.status === 'failed' || call.status === 'rejected')
+    && (call.detail.outcome === 'rejected' || call.detail.outcome === 'unavailable')
+    && call.detail.provision?.commit !== 'outcome_unknown';
 }
 
 function resolveTeamMeta(teams: TeamMeta[], teamId: string): TeamMeta {
@@ -824,6 +971,139 @@ export const useTeamsStore = create<TeamsState>()(
     (set, get) => ({
       teams: [],
       activeTeamId: null,
+      manualTeamCreation: null,
+      designByRunId: {},
+      refreshDesignSnapshot: async (requestedTarget, options) => {
+        const target = { ...requestedTarget };
+        resolveTeamMeta(get().teams, target.teamId);
+        const key = designTargetKey(target);
+        const existing = designReads.get(key);
+        if (existing) {
+          if (options?.invalidate) existing.dirty = true;
+          return existing.promise;
+        }
+        const frozenTarget = { ...target };
+        const entry: TeamDesignRead = { dirty: false, removed: false, promise: Promise.resolve() };
+        designReads.set(key, entry);
+        entry.promise = Promise.resolve().then(async () => {
+          if (entry.removed) return;
+          set((state) => ({ designByRunId: { ...state.designByRunId, [target.runId]: {
+            snapshot: state.designByRunId[target.runId]?.snapshot ?? null, loading: true, mutationPending: state.designByRunId[target.runId]?.mutationPending ?? false, error: null,
+          } } }));
+          try {
+            do {
+              entry.dirty = false;
+              let snapshot: TeamDesignSnapshot;
+              try {
+                snapshot = await readTeamDesignSnapshot(frozenTarget);
+              } catch (error) {
+                if (entry.dirty && !entry.removed) continue;
+                throw error;
+              }
+              if (entry.removed) return;
+              if (entry.dirty) continue;
+              set((state) => state.teams.some((team) => team.id === target.teamId) ? {
+                designByRunId: { ...state.designByRunId, [target.runId]: { snapshot, loading: false, mutationPending: state.designByRunId[target.runId]?.mutationPending ?? false, error: null } },
+              } : {});
+            } while (entry.dirty && !entry.removed);
+          } catch (error) {
+            if (!entry.removed) set((state) => {
+              const current = state.designByRunId[target.runId];
+              return current ? { designByRunId: { ...state.designByRunId, [target.runId]: {
+                ...current, loading: false, error: error instanceof Error ? error.message : String(error),
+              } } } : {};
+            });
+            throw error;
+          } finally {
+            if (designReads.get(key) === entry) designReads.delete(key);
+          }
+        });
+        return entry.promise;
+      },
+      observeTeamDesign: (target) => {
+        resolveTeamMeta(get().teams, target.teamId);
+        const key = designTargetKey(target);
+        const observer = designObservers.get(key) ?? { target: { ...target }, count: 0 };
+        observer.count += 1;
+        designObservers.set(key, observer);
+        if (!disposeDesignEvents) {
+          const disposeChanged = subscribeHostEvent('team:changed', refreshObservedDesigns);
+          const disposeRestart = subscribeHostEvent('runtime-host:restart', refreshObservedDesigns);
+          const disposeRecovery = subscribeBrowserRecovery(refreshObservedDesigns);
+          disposeDesignEvents = () => { disposeChanged(); disposeRestart(); disposeRecovery(); };
+        }
+        void get().refreshDesignSnapshot(observer.target).catch(() => {});
+        let disposed = false;
+        return () => {
+          if (disposed) return;
+          disposed = true;
+          observer.count -= 1;
+          if (observer.count === 0 && designObservers.get(key) === observer) designObservers.delete(key);
+          if (designObservers.size === 0) {
+            disposeDesignEvents?.();
+            disposeDesignEvents = null;
+          }
+        };
+      },
+      startDesign: async (target) => {
+        const frozenTarget = { ...target };
+        await mutateTeamDesign(frozenTarget, 'design-start', (requestId) => startTeamDesign({ ...frozenTarget, idempotencyKey: requestId }));
+      },
+      continueDesign: async (target) => {
+        const frozenTarget = { ...target };
+        const proposalId = requireDesignProposal(get().designByRunId[target.runId]?.snapshot, frozenTarget);
+        await mutateTeamDesign(frozenTarget, `design-continue:${proposalId}`, (requestId) => continueTeamDesign({ ...frozenTarget, proposalId, idempotencyKey: requestId }));
+      },
+      confirmDesign: async (target) => {
+        const frozenTarget = { ...target };
+        const proposalId = requireDesignProposal(get().designByRunId[target.runId]?.snapshot, frozenTarget);
+        await mutateTeamDesign(frozenTarget, `design-confirm:${proposalId}`, (requestId) => confirmTeamRunProposal({ runId: frozenTarget.runId, proposalId, idempotencyKey: requestId }));
+      },
+      continueDesignDiscussion: async (target) => {
+        const frozenTarget = { ...target };
+        const snapshot = get().designByRunId[frozenTarget.runId]?.snapshot;
+        if (snapshot?.teamId !== frozenTarget.teamId || snapshot.runId !== frozenTarget.runId
+          || (snapshot.startGate.status !== 'designing' && snapshot.startGate.status !== 'design_proposal_pending')
+          || !snapshot.designEpoch || snapshot.startGate.designEpoch !== snapshot.designEpoch) {
+          throw new Error('Team design snapshot is required');
+        }
+        const designEpoch = snapshot.designEpoch;
+        await mutateTeamDesign(frozenTarget, `design-discussion:${designEpoch}`, () => exitTeamDesign({ ...frozenTarget, designEpoch }));
+      },
+      submitRunGraphPatch: async (target, operations) => {
+        if (operations.length === 0) return;
+        const frozenTarget = { ...target };
+        const snapshot = get().designByRunId[target.runId]?.snapshot;
+        if (!snapshot || snapshot.teamId !== target.teamId || snapshot.runId !== target.runId) {
+          throw new Error('Team run snapshot is required');
+        }
+        const designActive = snapshot.startGate.status === 'designing' || snapshot.startGate.status === 'design_proposal_pending';
+        const designEpoch = snapshot.designEpoch;
+        if (designActive && !designEpoch) throw new Error('Team design snapshot is required');
+        await mutateTeamDesign(frozenTarget, 'run-graph-patch', async (requestId) => {
+          if (designActive) return await patchTeamDesignGraph({
+            ...frozenTarget,
+            designEpoch: designEpoch!,
+            expectedGraphVersion: snapshot.graphVersion,
+            commandId: requestId,
+            idempotencyKey: requestId,
+            operations,
+          });
+          await submitTeamRunGraphPatch({
+            runId: frozenTarget.runId,
+            summary: 'graph_patch',
+            patch: {
+              ...(snapshot.graph.graphId ? { baseGraphId: snapshot.graph.graphId } : {}),
+              ...(snapshot.graph.workflowPlanId ? { baseWorkflowPlanId: snapshot.graph.workflowPlanId } : {}),
+              operations,
+            },
+            idempotencyKey: requestId,
+          });
+          if (get().teams.find((team) => team.id === frozenTarget.teamId)?.activeRunId === frozenTarget.runId) {
+            await get().refreshSnapshot(frozenTarget.teamId, { force: true });
+          }
+        });
+      },
       runIdsByTeamId: {},
       runListByTeamId: {},
       runsById: {},
@@ -921,6 +1201,70 @@ export const useTeamsStore = create<TeamsState>()(
         }));
         return id;
       },
+      createManualTeamWithProgress: async (input) => {
+        if (get().manualTeamCreation) throw new Error('The previous manual team creation must be resolved before creating another team');
+        const candidate = freezeManualTeamCandidate(input);
+        const startedAt = Date.now();
+        let teamId: string | null = null;
+        let callId: string | null = null;
+        let revision = 0;
+        set({ manualTeamCreation: { status: 'running', cleanup: 'none', teamId, candidate, startedAt, endedAt: null, phase: 'submitting', preparationObserved: false, progress: null, error: null } });
+        const updatePhase = (phase: ManualTeamCreationPhase) => set((state) => {
+          const current = state.manualTeamCreation;
+          return current?.candidate === candidate && current.status === 'running'
+            ? { manualTeamCreation: { ...current, phase } } : {};
+        });
+        try {
+          teamId = get().createManualTeam(candidate);
+          set((state) => ({ manualTeamCreation: { ...state.manualTeamCreation!, teamId } }));
+          const memberCount = candidate.manualTeam.members.filter((member) => !member.isLeader).length;
+          await get().provisionTeamAgents(teamId, { onUpdate: (call) => {
+            const current = get().manualTeamCreation;
+            if (current?.candidate !== candidate || current.status !== 'running') return;
+            if (callId !== null && call.callId !== callId) throw new Error('Manual team progress does not match the provision call');
+            if (call.revision <= revision) return;
+            const progress = call.detail.provision?.progress;
+            if (progress && progress.members.length !== memberCount) throw new Error('Manual team progress does not match the selected members');
+            callId = call.callId;
+            revision = call.revision;
+            set((state) => {
+              const current = state.manualTeamCreation;
+              return current?.candidate === candidate && current.status === 'running'
+                ? { manualTeamCreation: {
+                  ...current,
+                  phase: progress?.stage ?? current.phase,
+                  preparationObserved: current.preparationObserved || progress?.stage === 'reading_profiles' || progress?.stage === 'generating_introductions',
+                  progress: progress ? { ...progress, members: [...progress.members], callId: call.callId, revision: call.revision } : null,
+                } } : {};
+            });
+          } });
+          await get().createRun(teamId, { onPhase: updatePhase });
+          set({ manualTeamCreation: null });
+          return teamId;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const current = get().manualTeamCreation!;
+          if (teamId === null) {
+            set({ manualTeamCreation: { ...current, status: 'failed', cleanup: 'confirmed', error: message, endedAt: Date.now() } });
+          } else if (error instanceof ConfirmedTeamProvisionFailure) {
+            set({ manualTeamCreation: { ...current, status: 'cleaning_up', cleanup: 'none', error: message, endedAt: null } });
+            try {
+              const result = await get().deleteTeam(teamId);
+              if (result.state !== 'tombstoned' || result.teamId !== teamId) throw new Error('Manual team cleanup was not confirmed', { cause: error });
+              set({ manualTeamCreation: { ...current, status: 'failed', cleanup: 'confirmed', error: message, endedAt: Date.now() } });
+            } catch {
+              set({ manualTeamCreation: { ...current, status: 'unconfirmed', cleanup: 'unknown', error: message, endedAt: Date.now() } });
+            }
+          } else {
+            set({ manualTeamCreation: { ...current, status: 'unconfirmed', cleanup: 'none', error: message, endedAt: Date.now() } });
+          }
+          throw error;
+        }
+      },
+      resetManualTeamCreation: () => {
+        const current = get().manualTeamCreation;
+        if (current?.status === 'failed' && current.cleanup === 'confirmed') set({ manualTeamCreation: null });
+      },
       replaceTeamSkillVersion: (input) => {
         const current = resolveTeamMeta(get().teams, input.teamId);
         if (current.teamSkillVersion !== input.expectedCurrentVersion) {
@@ -1008,14 +1352,18 @@ export const useTeamsStore = create<TeamsState>()(
               : 'Team deletion was not confirmed');
           }
           const runIdsToDelete = mergeRunIds(runIds, get().runIdsByTeamId[teamId] ?? []);
+          removeDesignReads(teamId);
           const result: TeamDeleteResult = { teamId, deleted: true, state: 'tombstoned', deletedRunIds: [], deletedAgentIds: [] };
           removeTeamRunRoleSessions(collectTeamRunRoleSessionBindings(get(), teamId, runIdsToDelete));
           set((state) => ({
             teams: state.teams.filter((team) => team.id !== teamId),
+            manualTeamCreation: state.manualTeamCreation?.status === 'unconfirmed' && state.manualTeamCreation.teamId === teamId
+              ? null : state.manualTeamCreation,
             activeTeamId: state.activeTeamId === teamId ? null : state.activeTeamId,
             runIdsByTeamId: withoutKey(state.runIdsByTeamId, teamId),
             runListByTeamId: withoutKey(state.runListByTeamId, teamId),
             runsById: removeRunIdsFromRecord(state.runsById, runIdsToDelete),
+            designByRunId: Object.fromEntries(Object.entries(state.designByRunId).filter(([runId, record]) => !runIdsToDelete.includes(runId) && record?.snapshot?.teamId !== teamId)),
             runByTeamId: withoutKey(state.runByTeamId, teamId),
             rolesByTeamId: withoutKey(state.rolesByTeamId, teamId),
             stagesByTeamId: withoutKey(state.stagesByTeamId, teamId),
@@ -1053,8 +1401,15 @@ export const useTeamsStore = create<TeamsState>()(
           throw error;
         }
       },
-      provisionTeamAgents: async (teamId) => {
+      provisionTeamAgents: async (teamId, options) => {
         const team = resolveTeamMeta(get().teams, teamId);
+        const started = performance.now();
+        let traceId = createSessionTraceId('team-provision');
+        logSessionTrace('renderer.team.provision.start', traceId, {
+          teamHash: summarizeIdentifier(team.id).hash,
+          sourceType: team.sourceType,
+          memberCount: team.manualTeam?.members.length ?? null,
+        });
         set((state) => ({
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
@@ -1067,16 +1422,47 @@ export const useTeamsStore = create<TeamsState>()(
             ...(team.sourceType ? { sourceType: team.sourceType } : {}),
             ...(team.manualTeam ? { manualTeam: team.manualTeam } : {}),
           });
-          const call = await waitForCall(receipt, 'organization');
+          const callTraceId = `session-trace:team-call:${receipt.callId.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5')}`;
+          logSessionTrace('renderer.team.provision.admitted', traceId, {
+            callId: receipt.callId,
+            callTraceId,
+            elapsedMs: performance.now() - started,
+          });
+          traceId = callTraceId;
+          const call = await waitForCall(receipt, 'organization', options?.onUpdate ? { onUpdate: async (call) => {
+            if (call.command !== 'team.provisionAgents'
+              || !await matchesOrganizationIdentity(call.detail.teamId, call.detail.teamIdHash, team.id)) {
+              throw new Error('Team provision progress does not match the requested team');
+            }
+            await options.onUpdate!(call);
+          } } : undefined);
+          const identityMatches = call.command === 'team.provisionAgents'
+            && await matchesOrganizationIdentity(call.detail.teamId, call.detail.teamIdHash, team.id);
+          logSessionTrace('renderer.team.provision.terminal', traceId, {
+            callId: receipt.callId,
+            commandMatches: call.command === 'team.provisionAgents',
+            identityMatches,
+            status: call.status,
+            outcome: call.detail.outcome,
+            nativeInstalled: call.detail.provision?.nativeInstalled ?? null,
+            commit: call.detail.provision?.commit ?? null,
+            elapsedMs: performance.now() - started,
+          });
           if (call.command !== 'team.provisionAgents'
-            || !await matchesOrganizationIdentity(call.detail.teamId, call.detail.teamIdHash, team.id)
+            || !identityMatches
             || call.status !== 'succeeded' || call.detail.outcome !== 'materialized'
             || call.detail.provision?.nativeInstalled !== true || call.detail.provision.commit !== 'committed') {
-            throw new Error(call.status === 'unknown'
+            const message = call.status === 'unknown'
               ? 'Team provision outcome is unknown'
-              : 'Team provision was not confirmed');
+              : 'Team provision was not confirmed';
+            if (identityMatches && isConfirmedProvisionFailure(call)) throw new ConfirmedTeamProvisionFailure(message);
+            throw new Error(message);
           }
         } catch (error) {
+          logSessionTrace('renderer.team.provision.error', traceId, {
+            error: summarizeError(error),
+            elapsedMs: performance.now() - started,
+          });
           set((state) => ({
             errorByTeamId: {
               ...state.errorByTeamId,
@@ -1090,7 +1476,7 @@ export const useTeamsStore = create<TeamsState>()(
           }));
         }
       },
-      createRun: async (teamId) => {
+      createRun: async (teamId, options) => {
         const state = get();
         const team = resolveTeamMeta(state.teams, teamId);
         const runId = createGeneratedTeamRunId();
@@ -1099,6 +1485,7 @@ export const useTeamsStore = create<TeamsState>()(
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
+          options?.onPhase?.('initializing_sessions');
           const created = await createTeamRun({
             teamId: team.id,
             packagePath: team.packagePath,
@@ -1110,6 +1497,7 @@ export const useTeamsStore = create<TeamsState>()(
             teams: state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: created.runId, updatedAt: Date.now() } : team),
             runIdsByTeamId: { ...state.runIdsByTeamId, [teamId]: appendRunId(state.runIdsByTeamId[teamId], created.runId) },
           }));
+          options?.onPhase?.('loading_team');
           await get().syncRunList(teamId);
           await get().refreshSnapshot(teamId, { force: true });
           return get().runByTeamId[teamId] ?? get().runsById[created.runId] ?? created;
@@ -1180,6 +1568,7 @@ export const useTeamsStore = create<TeamsState>()(
               ? 'Team run deletion outcome is unknown'
               : 'Team run deletion was not confirmed');
           }
+          removeDesignReads(teamId, runId);
           removeTeamRunRoleSessions(collectTeamRunRoleSessionBindings(get(), teamId, [runId]));
           set((state) => {
             const remainingRunIds = (state.runIdsByTeamId[teamId] ?? []).filter((candidate) => candidate !== runId);
@@ -1189,6 +1578,7 @@ export const useTeamsStore = create<TeamsState>()(
               runIdsByTeamId: { ...state.runIdsByTeamId, [teamId]: remainingRunIds },
               runListByTeamId: { ...state.runListByTeamId, [teamId]: (state.runListByTeamId[teamId] ?? []).filter((run) => run.runId !== runId) },
               runsById: withoutKey(state.runsById, runId),
+              designByRunId: withoutKey(state.designByRunId, runId),
               eventsByRunId: withoutKey(state.eventsByRunId, runId),
               eventCursorByRunId: withoutKey(state.eventCursorByRunId, runId),
               ...emptyTeamRunProjection(teamId, state),
@@ -1284,7 +1674,9 @@ export const useTeamsStore = create<TeamsState>()(
           set((state) => ({
             graphByTeamId: { ...state.graphByTeamId, [teamId]: applyTeamGraphPatchOperations(currentGraph, operations) },
           }));
+          await invalidateRunGraph({ teamId, runId });
         } catch (error) {
+          await invalidateRunGraph({ teamId, runId });
           set((state) => ({
             errorByTeamId: {
               ...state.errorByTeamId,
@@ -1324,8 +1716,10 @@ export const useTeamsStore = create<TeamsState>()(
           if (result.snapshot) {
             set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
           }
+          await invalidateRunGraph({ teamId, runId });
           return result;
         } catch (error) {
+          await invalidateRunGraph({ teamId, runId });
           set((state) => ({
             errorByTeamId: {
               ...state.errorByTeamId,

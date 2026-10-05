@@ -74,6 +74,15 @@ impl Directory {
         HostRuntimeDirectory::from_lifecycles(matcha, open_claw).into_public_directory()
     }
 
+    pub fn with_goal_support(mut self, supports: impl Fn(RuntimeDriverIdentity) -> bool) -> Self {
+        for (endpoint, identity) in self.endpoints.iter_mut().zip(HostRuntimeDirectory::declared_driver_identities()) {
+            let supported = supports(identity);
+            endpoint.capabilities.supports_goal = supported;
+            for agent in &mut endpoint.agents { agent.capabilities.supports_goal = supported; }
+        }
+        self
+    }
+
     pub fn endpoints(&self) -> &[Endpoint; 2] {
         &self.endpoints
     }
@@ -428,6 +437,7 @@ pub struct Capabilities {
     approvals: bool,
     replay: bool,
     model_selection: bool,
+    supports_goal: bool,
 }
 
 impl Capabilities {
@@ -455,6 +465,10 @@ impl Capabilities {
         self.model_selection
     }
 
+    pub fn supports_goal(&self) -> bool {
+        self.supports_goal
+    }
+
     fn from_surface(surface: crate::RuntimeCapabilitySurface) -> Self {
         let session_supported = surface.supports(RuntimeCapabilityFamily::Session);
         Self {
@@ -464,6 +478,7 @@ impl Capabilities {
             approvals: session_supported,
             replay: session_supported,
             model_selection: session_supported,
+            supports_goal: false,
         }
     }
 }

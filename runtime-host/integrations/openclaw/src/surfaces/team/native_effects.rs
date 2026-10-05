@@ -5,7 +5,7 @@ use organization::{
     RoleSessionAbortReceipt, RoleSessionDeleteOutcome, RoleSessionDeleteReceipt,
     RoleSessionReadbackOutcome, RoleSessionReadbackReceipt, RoleSessionReceipt,
     SessionWindowReference, TeamMaterializationRemoval, TeamMaterializationRequest,
-    TeamNativeEffectsPort,
+    TeamNativeEffectsPort, TeamProvisionObserver,
 };
 use platform::exchange::InvocationOutcome;
 
@@ -37,8 +37,16 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
         &mut self,
         request: TeamMaterializationRequest,
     ) -> Pin<Box<dyn Future<Output = MaterializationOperationOutcome> + Send + '_>> {
+        self.materialize_observed(request, None)
+    }
+
+    fn materialize_observed(
+        &mut self,
+        request: TeamMaterializationRequest,
+        observer: Option<TeamProvisionObserver>,
+    ) -> Pin<Box<dyn Future<Output = MaterializationOperationOutcome> + Send + '_>> {
         let gateway = &*self.gateway;
-        Box::pin(async move { gateway.materialize_team(request).await })
+        Box::pin(async move { gateway.materialize_team_observed(request, observer).await })
     }
 
     fn recover_materialization(
@@ -55,6 +63,18 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
     ) -> Pin<Box<dyn Future<Output = MaterializationOperationOutcome> + Send + '_>> {
         let gateway = &*self.gateway;
         Box::pin(async move { gateway.remove_team_materialization(removal).await })
+    }
+
+    fn remove_unconfirmed(
+        &mut self,
+        request: TeamMaterializationRequest,
+    ) -> Pin<Box<dyn Future<Output = MaterializationOperationOutcome> + Send + '_>> {
+        let gateway = &*self.gateway;
+        Box::pin(async move {
+            gateway
+                .remove_unconfirmed_team_materialization(request)
+                .await
+        })
     }
 
     fn abort(

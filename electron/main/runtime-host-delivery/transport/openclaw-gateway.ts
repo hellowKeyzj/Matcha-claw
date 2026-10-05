@@ -1,3 +1,9 @@
+import {
+  decodeOpenClawQuestionListResult,
+  decodeOpenClawQuestionResolveResult,
+  isOpenClawQuestionListInput,
+  isOpenClawQuestionResolveInput,
+} from '../../../../src/types/openclaw-question';
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from './client';
 
@@ -32,6 +38,12 @@ export function createOpenClawGatewayTransport(
         fetcher,
         body: request,
       });
+      if (response?.status === 200 && isRecord(request) && request.id === 'openclaw.question') {
+        const result = request.operationId === 'question.list'
+          ? decodeOpenClawQuestionListResult(response.body)
+          : decodeOpenClawQuestionResolveResult(response.body);
+        return result ? { status: 200, body: result } : { status: 503, body: UNAVAILABLE };
+      }
       if (response?.status === 200 && isJsonValue(response.body, new Set<object>())) {
         return { status: 200, body: response.body };
       }
@@ -60,15 +72,25 @@ function decisionFor(value: unknown) {
       subject: 'openclaw-mcp-app',
     } as const;
   }
-  if (value.id === 'openclaw.question' && value.operationId === 'question.resolve') {
+  if (value.id === 'openclaw.question'
+    && isOpenClawLocalScope(value.scope) && value.target === null
+    && ((value.operationId === 'question.list' && isOpenClawQuestionListInput(value.input))
+      || (value.operationId === 'question.resolve' && isOpenClawQuestionResolveInput(value.input)))) {
     return {
       endpoint: EXECUTE_PATH,
       scope: 'openclaw.question',
-      capability: 'question.resolve',
+      capability: value.operationId,
       subject: 'openclaw-question',
     } as const;
   }
   return null;
+}
+
+function isOpenClawLocalScope(value: unknown): boolean {
+  return isRecord(value) && hasExactKeys(value, ['kind', 'endpoint']) && value.kind === 'runtime-instance'
+    && isRecord(value.endpoint) && hasExactKeys(value.endpoint, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
+    && value.endpoint.kind === 'native-runtime' && value.endpoint.runtimeAdapterId === 'openclaw'
+    && value.endpoint.runtimeInstanceId === 'local';
 }
 
 function isJsonValue(value: unknown, seen: Set<object>): boolean {

@@ -1,8 +1,9 @@
-use std::{fmt::Write, sync::Arc};
+use std::sync::Arc;
 
+use crate::ports::{RuntimeOperationFailure, SessionReleaseOutcome, SessionSync};
+use crate::goal::{SessionGoalCommand, SessionGoalOutcome};
 use connectors::ConnectorSecretResolverPort;
 use foundation::execution::CommandRoute;
-use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 use super::{
@@ -31,6 +32,7 @@ pub enum SessionEnsureOutcome {
 #[derive(Clone, Debug)]
 pub enum SessionIngestOutcome {
     Applied(SessionDelta),
+    Consumed { cursor: u64 },
     Duplicate { cursor: u64 },
     Stale { cursor: u64, received: u64 },
     Gap { expected: u64, received: u64 },
@@ -56,11 +58,22 @@ pub struct SessionEvent {
 pub struct SessionIngressEvent {
     identity: SessionIdentity,
     event: SessionEvent,
+    receipt: Option<oneshot::Sender<bool>>,
 }
 
 impl SessionIngressEvent {
     pub fn new(identity: SessionIdentity, event: SessionEvent) -> Self {
-        Self { identity, event }
+        Self { identity, event, receipt: None }
+    }
+
+    pub fn with_receipt(mut self) -> (Self, oneshot::Receiver<bool>) {
+        let (receipt, received) = oneshot::channel();
+        self.receipt = Some(receipt);
+        (self, received)
+    }
+
+    pub fn take_receipt(&mut self) -> Option<oneshot::Sender<bool>> {
+        self.receipt.take()
     }
 
     pub fn into_parts(self) -> (SessionIdentity, SessionEvent) {
@@ -90,6 +103,21 @@ pub enum SessionCommand {
         event: SessionEvent,
         reply: oneshot::Sender<SessionIngestOutcome>,
     },
+    SyncCompleted {
+        identity: SessionIdentity,
+        generation: u64,
+        result: Result<SessionSync, RuntimeOperationFailure>,
+    },
+    ObservationClosed {
+        identity: SessionIdentity,
+        generation: u64,
+        restarted: Option<Result<u64, RuntimeOperationFailure>>,
+    },
+    Release {
+        identity: SessionIdentity,
+        lease_id: String,
+        reply: oneshot::Sender<SessionReleaseOutcome>,
+    },
     Evict {
         session_key: String,
         reply: oneshot::Sender<SessionEvictOutcome>,
@@ -100,6 +128,13 @@ pub enum SessionCommand {
     },
     Send {
         request: SessionSendRequest,
+    },
+    SendCompleted {
+        command: SessionSendCommand,
+        goal_demand: Option<(String, Option<String>)>,
+        outcome: SessionSendOutcome,
+        reply: oneshot::Sender<SessionSendOutcome>,
+        call: Option<crate::call::SessionCall>,
     },
     Delete {
         command: SessionDeleteCommand,
@@ -116,6 +151,17 @@ pub enum SessionCommand {
     ModelSelection {
         command: SessionModelSelectionCommand,
         reply: oneshot::Sender<SessionModelSelectionOutcome>,
+    },
+    Goal {
+        command: SessionGoalCommand,
+        reply: oneshot::Sender<SessionGoalOutcome>,
+    },
+    GoalCompleted {
+        command: SessionGoalCommand,
+        demand_lease: String,
+        outcome: SessionGoalOutcome,
+        reply: oneshot::Sender<SessionGoalOutcome>,
+        call: Option<crate::call::SessionCall>,
     },
     Permission {
         command: SessionPermissionCommand,
@@ -137,6 +183,10 @@ impl SessionCommand {
             Self::Ingest { reply, .. } => {
                 let _ = reply.send(SessionIngestOutcome::RuntimeNotFound);
             }
+            Self::SyncCompleted { .. } | Self::ObservationClosed { .. } => {}
+            Self::Release { reply, .. } => {
+                let _ = reply.send(SessionReleaseOutcome::Unavailable);
+            }
             Self::Evict { reply, .. } => {
                 let _ = reply.send(SessionEvictOutcome::Failed);
             }
@@ -148,6 +198,9 @@ impl SessionCommand {
                     let _ = reply.send(SessionSendOutcome::Unavailable);
                 }
             },
+            Self::SendCompleted { reply, .. } => {
+                let _ = reply.send(SessionSendOutcome::Unavailable);
+            }
             Self::Delete { reply, .. } => {
                 let _ = reply.send(SessionDeleteOutcome::Unknown);
             }
@@ -159,6 +212,9 @@ impl SessionCommand {
             }
             Self::ModelSelection { reply, .. } => {
                 let _ = reply.send(SessionModelSelectionOutcome::Unavailable);
+            }
+            Self::Goal { reply, .. } | Self::GoalCompleted { reply, .. } => {
+                let _ = reply.send(SessionGoalOutcome::Unavailable);
             }
             Self::Permission { reply, .. } => {
                 let _ = reply.send(SessionPermissionOutcome::Unavailable);
@@ -172,16 +228,13 @@ impl SessionCommand {
     pub fn route(&self) -> CommandRoute<String> {
         match self {
             Self::Audited { command, .. } => command.route(),
-            Self::Ensure { identity, .. } => CommandRoute::Keyed(session_lane_key(
-                identity.provider(),
-                identity.session_key(),
-            )),
-            Self::Ingest {
-                identity, event, ..
-            } => CommandRoute::Keyed(session_lane_key(
-                identity.provider(),
-                event.binding.session_key(),
-            )),
+            Self::Ensure { identity, .. }
+            | Self::Ingest { identity, .. }
+            | Self::SyncCompleted { identity, .. }
+            | Self::ObservationClosed { identity, .. }
+            | Self::Release { identity, .. } => {
+                CommandRoute::Keyed(session_identity_lane_key(identity))
+            }
             Self::Evict { session_key, .. } => {
                 CommandRoute::Keyed(inferred_session_lane_key(session_key))
             }
@@ -215,15 +268,21 @@ impl SessionCommand {
                 command.endpoint.provider(),
                 command.session_key(),
             )),
+            Self::Goal { command, .. } | Self::GoalCompleted { command, .. } => {
+                CommandRoute::Keyed(session_identity_lane_key(&command.identity))
+            }
             Self::ConfigurePrivateResolver { .. } => CommandRoute::Global,
             Self::Create { command, .. } => {
-                CommandRoute::Keyed(session_lane_key(command.provider(), command.session_key()))
+                CommandRoute::Keyed(session_identity_lane_key(&command.identity()))
             }
             Self::Send { request } => match request {
-                SessionSendRequest::Session { command, .. } => CommandRoute::Keyed(
-                    session_lane_key(command.endpoint.provider(), &command.session_key),
-                ),
+                SessionSendRequest::Session { command, .. } => {
+                    CommandRoute::Keyed(session_identity_lane_key(&command.identity))
+                }
             },
+            Self::SendCompleted { command, .. } => {
+                CommandRoute::Keyed(session_identity_lane_key(&command.identity))
+            }
             Self::Approval { command, .. } => CommandRoute::Keyed(session_lane_key(
                 command.endpoint.provider(),
                 &command.session_id,
@@ -258,16 +317,6 @@ pub fn openclaw_agent_lane_key(agent_id: &str, session_key: &str) -> String {
     }
 }
 
-/// Derives the deterministic renderer route key Host owns for a team role session.
-///
-/// The renderer contract only admits `renderer-route:` followed by `[A-Za-z0-9_-]`,
-/// so a session key carrying `:` separators is folded into a fixed-width digest.
-pub fn role_session_route_key(session_key: &str) -> String {
-    let digest = Sha256::digest(session_key.as_bytes());
-    let mut route_key = String::with_capacity("renderer-route:team-".len() + 24);
-    route_key.push_str("renderer-route:team-");
-    for byte in &digest[..12] {
-        let _ = write!(&mut route_key, "{byte:02x}");
-    }
-    route_key
+pub fn session_identity_lane_key(identity: &SessionIdentity) -> String {
+    serde_json::to_string(identity).expect("session identity serialization")
 }

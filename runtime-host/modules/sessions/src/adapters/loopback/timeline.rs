@@ -114,9 +114,7 @@ impl Request {
                 WINDOW_OPERATION => Operation::Window,
                 _ => return None,
             },
-            self.scope.identity.endpoint.provider()?,
-            self.input.session_key,
-            Some(self.scope.identity.agent_id.clone()),
+            self.scope.identity.into_identity()?,
             window,
             self.input.endpoint_session_id,
             self.input.include_canonical.unwrap_or(true),
@@ -206,6 +204,12 @@ pub(crate) struct Identity {
     session_key: String,
 }
 
+impl Identity {
+    fn into_identity(self) -> Option<crate::state::SessionIdentity> {
+        crate::state::SessionIdentity::new(self.session_key, self.endpoint.provider()?.session_provider(), self.agent_id)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Endpoint {
@@ -270,7 +274,7 @@ impl Delivery {
 fn identity_matches_view(identity: &Identity, view: &SessionView) -> bool {
     view.session_key() == identity.session_key
         && view.identity.session_key() == identity.session_key
-        && view.identity.agent_id.as_deref() == Some(identity.agent_id.as_str())
+        && view.identity.agent_id == identity.agent_id
         && view.identity.endpoint.kind == identity.endpoint.kind
         && view.identity.endpoint.runtime_instance_id == identity.endpoint.runtime_instance_id
         && matches!(
@@ -359,6 +363,7 @@ mod tests {
             endpoint_session_id: None,
             ownership: None,
             model_state: None,
+            goal: crate::goal::SessionGoalView::Unknown,
             identity: SessionIdentity::new(
                 "session-1",
                 SessionProvider::OpenClaw,

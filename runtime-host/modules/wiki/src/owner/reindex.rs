@@ -17,7 +17,7 @@ pub(crate) fn stage(
         &state.state_root,
         project.project_id(),
     )?;
-    if !config.enabled || config.endpoint.trim().is_empty() || config.model.trim().is_empty() {
+    if !config.is_ready() {
         return Err(WikiFailure::invalid_input(
             "embedding",
             "Wiki embedding is disabled or not configured",

@@ -10,7 +10,7 @@ use std::{
 
 use tokio::sync::{Mutex, broadcast};
 
-use crate::{events::SessionDeltaSource, state::SessionDelta};
+use crate::events::{SessionDeltaSource, SessionEvent};
 
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const AUTHORIZATION_HEADER: &str = "authorization";
@@ -76,19 +76,19 @@ pub enum Action {
 }
 
 pub struct EventStream {
-    receiver: broadcast::Receiver<SessionDelta>,
+    receiver: broadcast::Receiver<SessionEvent>,
     keepalive_interval: Duration,
 }
 
 impl EventStream {
-    fn new(receiver: broadcast::Receiver<SessionDelta>) -> Self {
+    fn new(receiver: broadcast::Receiver<SessionEvent>) -> Self {
         Self {
             receiver,
             keepalive_interval: KEEPALIVE_INTERVAL,
         }
     }
 
-    pub fn into_parts(self) -> (broadcast::Receiver<SessionDelta>, Duration) {
+    pub fn into_parts(self) -> (broadcast::Receiver<SessionEvent>, Duration) {
         (self.receiver, self.keepalive_interval)
     }
 }

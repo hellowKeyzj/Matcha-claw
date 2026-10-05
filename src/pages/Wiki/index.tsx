@@ -2,10 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { pickLocalDirectory, pickLocalFile } from '@/services/local-path-picker';
+import { openArtifactPathExternally } from '@/components/file-preview/open-file-utils';
+import type { WikiNavigationPage } from '@/types/wiki-navigation';
+import type { WikiSelectionApplyReceipt, WikiSelectionSnapshot } from '@/types/wiki-selection';
+import { normalizeEditableMarkdown } from '@/lib/wiki-selection';
 import { waitForCall } from '@/lib/call-log-await';
+import { useWikiProjectsStore } from '@/stores/wiki-projects';
 import { LibraryHome } from './components/LibraryHome';
 import { LibraryWorkspace } from './components/LibraryWorkspace';
 import { ActivityBar } from './components/ActivityBar';
+import { isActiveSourceTask } from './wiki-model';
 import { GraphPanel } from './components/GraphPanel';
 import { GraphInsightsPanel } from './components/GraphInsightsPanel';
 import { LintPanel } from './components/LintPanel';
@@ -14,9 +20,6 @@ import { QuestionPanel } from './components/QuestionPanel';
 import { SearchPanel } from './components/SearchPanel';
 import { SourcesPanel } from './components/SourcesPanel';
 import { ReviewPanel } from './components/ReviewPanel';
-import { ResearchPanel } from './components/ResearchPanel';
-import { SearchSettingsPanel } from './components/SearchSettingsPanel';
-import { isTerminalResearchTask, reviewResearchTopic } from './research-model';
 import { WikiContentPanel, type WikiContentPreview } from './components/WikiContentPanel';
 import { classifyWikiPath, isUnsupportedWikiSourcePreview, supportsWikiBinaryPreview, supportsWikiTextPreview, wikiPreviewErrorKey } from './preview';
 import { resolveWikiMarkdownImage } from './wiki-media';
@@ -24,17 +27,15 @@ import { readOriginalImageSource } from './wiki-source-navigation';
 import {
   hostWikiCancelSourceTask,
   hostWikiCallResult,
-  hostWikiCreateProject,
-  hostWikiCurrentProject,
   hostWikiDeleteSource,
+  hostWikiDeletePage,
+  hostWikiNavigation,
   hostWikiEmbedPage,
   hostWikiFiles,
   hostWikiGraph,
   hostWikiImportFolder,
   hostWikiImportSource,
-  hostWikiOpenProject,
   hostWikiProjectTemplates,
-  hostWikiProjects,
   hostWikiReadBinaryFile,
   hostWikiReadFile,
   hostWikiReadSourcePreview,
@@ -46,17 +47,6 @@ import {
   hostWikiDismissReview,
   hostWikiClearResolvedReviews,
   hostWikiSearch,
-  hostWikiResearchTasks,
-  hostWikiStartResearch,
-  hostWikiRerunResearchTask,
-  hostWikiRemoveResearchTask,
-  hostWikiSearchConfig,
-  hostWikiUpdateSearchConfig,
-  hostWikiTestSearchProvider,
-  type HostWikiResearchInput,
-  type HostWikiResearchTask,
-  type HostWikiSearchConfig,
-  type HostWikiSearchConfigUpdate,
   hostWikiSourceFiles,
   hostWikiSourceTasks,
   hostWikiSourceWatchConfig,
@@ -65,11 +55,9 @@ import {
   hostWikiWriteFile,
 } from '@/lib/host-api';
 import {
-  currentProjectFromPayload,
   normalizeFiles,
   normalizeGraph,
   normalizeProjectTemplates,
-  normalizeProjects,
   normalizeRead,
   normalizeReviews,
   normalizeSearch,
@@ -126,7 +114,6 @@ const DEFAULT_SOURCE_WATCH_CONFIG: WikiSourceWatchConfig = {
   mineruLocalServerUrl: '',
 };
 
-const WIKI_TREE_ROOT_DIRECTORIES = ['wiki', 'raw'] as const;
 const WIKI_PREVIEW_MAX_BYTES = 50 * 1024 * 1024;
 
 type ReviewPageType = 'entity' | 'concept' | 'comparison' | 'synthesis' | 'query';
@@ -140,10 +127,6 @@ type ReviewPageDraft = Readonly<{
 const ACTION_PREFIX_RE = /^(Create|Save|Add|Missing page|Missing pages|缺失页面|缺少页面|创建|保存|新增)[:：\s-]*/i;
 const ENTITY_RE = /\b(entity|entities)\b|实体/i;
 const CONCEPT_RE = /\b(concept|concepts)\b|概念/i;
-
-function defaultExpandedDirectories(): ReadonlySet<string> {
-  return new Set(WIKI_TREE_ROOT_DIRECTORIES);
-}
 
 function compareFileItems(left: WikiFileItem, right: WikiFileItem): number {
   return Number(right.isDirectory) - Number(left.isDirectory) || left.path.localeCompare(right.path);
@@ -230,41 +213,51 @@ function createReviewPageDrafts(item: WikiReviewItem, action: string): ReviewPag
   return titles.map((title) => ({ title, pageType, dir: reviewPageDir(pageType) }));
 }
 
-type LoadedWikiFiles = Readonly<{
-  files: readonly WikiFileItem[];
-  directories: readonly string[];
-}>;
+function visibleFileItems(payload: unknown): readonly WikiFileItem[] {
+  return normalizeFiles(payload).filter((item) => !item.path.replace(/\\/g, '/').split('/').some((segment) => segment.startsWith('.')));
+}
 
-async function loadDirectories(directories: readonly string[], projectId?: string): Promise<LoadedWikiFiles> {
-  const results = await Promise.allSettled(directories.map(async (directory) => {
-    const files = normalizeFiles(await hostWikiFiles({ directory, projectId }));
-    return { directory, files };
-  }));
-
-  return results.reduce<LoadedWikiFiles>((loaded, result) => {
-    if (result.status !== 'fulfilled') {
-      return loaded;
-    }
-    return {
-      files: [...loaded.files, ...result.value.files],
-      directories: [...loaded.directories, result.value.directory],
-    };
-  }, { files: [], directories: [] });
+function replaceDirectoryItems(existing: readonly WikiFileItem[], directory: string, incoming: readonly WikiFileItem[]): readonly WikiFileItem[] {
+  const prefix = directory ? `${directory}/` : '';
+  const children = new Map(incoming.map((item) => [item.path, item]));
+  const retained = existing.filter((item) => {
+    if (!item.path.startsWith(prefix) || item.path === directory) return true;
+    const childPath = `${prefix}${item.path.slice(prefix.length).split('/')[0]}`;
+    const child = children.get(childPath);
+    return child !== undefined && (item.path === childPath || child.isDirectory);
+  });
+  return mergeFileItems(retained, incoming);
 }
 
 export default function WikiPage() {
   const { t } = useTranslation('wiki');
   const [pageMode, setPageMode] = useState<WikiPageMode>('home');
   const [status, setStatus] = useState<WikiStatus>(EMPTY_STATUS);
-  const [projects, setProjects] = useState<readonly WikiProject[]>([]);
+  const projects = useWikiProjectsStore((state) => state.projects);
+  const currentProject = useWikiProjectsStore((state) => state.currentProject);
+  const projectSwitching = useWikiProjectsStore((state) => state.switching);
+  const refreshProjects = useWikiProjectsStore((state) => state.refresh);
+  const openProject = useWikiProjectsStore((state) => state.openProject);
+  const createProject = useWikiProjectsStore((state) => state.createProject);
   const [projectTemplates, setProjectTemplates] = useState<readonly WikiProjectTemplate[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState('general');
-  const [currentProject, setCurrentProject] = useState<WikiProject | null>(null);
   const [files, setFiles] = useState<readonly WikiFileItem[]>([]);
   const [sourceFiles, setSourceFiles] = useState<readonly WikiFileItem[]>([]);
-  const [expandedDirectories, setExpandedDirectories] = useState<ReadonlySet<string>>(defaultExpandedDirectories);
+  const [expandedDirectories, setExpandedDirectories] = useState<ReadonlySet<string>>(() => new Set());
   const [loadedDirectories, setLoadedDirectories] = useState<ReadonlySet<string>>(() => new Set());
-  const [sourceTasks, setSourceTasks] = useState<readonly WikiSourceTask[]>([]);
+  const [loadingDirectories, setLoadingDirectories] = useState<ReadonlySet<string>>(() => new Set());
+  const [directoryErrors, setDirectoryErrors] = useState<Readonly<Record<string, string>>>({});
+  const [navigationPages, setNavigationPages] = useState<readonly WikiNavigationPage[]>([]);
+  const [navigationLoading, setNavigationLoading] = useState(false);
+  const [navigationError, setNavigationError] = useState<string | null>(null);
+  const projectId = currentProject?.projectId;
+  const [sourceTaskProjection, setSourceTaskProjection] = useState<Readonly<{ projectId: string; tasks: readonly WikiSourceTask[] }> | null>(null);
+  const sourceTasks = useMemo(() => sourceTaskProjection && sourceTaskProjection.projectId === projectId ? sourceTaskProjection.tasks : [], [projectId, sourceTaskProjection]);
+  const [sourceTasksError, setSourceTasksError] = useState<string | null>(null);
+  const [cancellingSourceTasks, setCancellingSourceTasks] = useState<ReadonlySet<string>>(() => new Set());
+  const cancellingSourceTasksRef = useRef(new Set<string>());
+  const sourceTaskReadRef = useRef<Readonly<{ projectId: string; generation: number; promise: Promise<boolean> }> | null>(null);
+  const sourceTaskRevisionRef = useRef(0);
   const [sourceWatchConfig, setSourceWatchConfig] = useState<WikiSourceWatchConfig>(DEFAULT_SOURCE_WATCH_CONFIG);
   const [reviewItems, setReviewItems] = useState<readonly WikiReviewItem[]>([]);
   const [selectedPath, setSelectedPath] = useState('');
@@ -282,70 +275,222 @@ export default function WikiPage() {
   const [questionProjectId, setQuestionProjectId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<WikiWorkspaceTab>('wiki');
   const [sourceView, setSourceView] = useState<WikiSourceView>('sources');
-  const [busy, setBusy] = useState<string | null>('load');
-  const [researchTasks, setResearchTasks] = useState<readonly HostWikiResearchTask[]>([]);
-  const [searchConfig, setSearchConfig] = useState<Readonly<{ projectId: string; config: HostWikiSearchConfig }> | null>(null);
-  const [researchPollVersion, setResearchPollVersion] = useState(0);
-  const projectId = currentProject?.projectId;
+  const [actionBusy, setBusy] = useState<string | null>('load');
+  const [sourceImportBusy, setSourceImportBusy] = useState<string | null>(null);
+  const sourceImportBusyRef = useRef<string | null>(null);
+  const busy = sourceImportBusy ?? actionBusy;
   const projectIdRef = useRef(projectId);
   const selectedPathRef = useRef(selectedPath);
+  const editorTextRef = useRef(editorText);
+  editorTextRef.current = editorText;
   const fileRequestRef = useRef(0);
   const snapshotRequestRef = useRef(0);
+  const snapshotReadingRef = useRef(false);
+  const treeRequestRef = useRef({ projectId, files: [] as readonly WikiFileItem[], loaded: new Set<string>(), loading: new Set<string>() });
+  const projectGenerationRef = useRef(0);
+  const navigationRequestRef = useRef(0);
+  const mountedRef = useRef(true);
+  const projectGeneration = projectGenerationRef.current;
+  const cancellingSourcePaths = useMemo(() => new Set(sourceTasks.filter((task) => cancellingSourceTasks.has(JSON.stringify([projectId, task.sourcePath]))).map((task) => task.sourcePath)), [cancellingSourceTasks, projectId, sourceTasks]);
   useEffect(() => { projectIdRef.current = projectId; }, [projectId]);
   useEffect(() => { selectedPathRef.current = selectedPath; }, [selectedPath]);
-  useEffect(() => () => { fileRequestRef.current++; snapshotRequestRef.current++; }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; fileRequestRef.current++; snapshotRequestRef.current++; navigationRequestRef.current++; projectGenerationRef.current++; };
+  }, []);
 
   const run = useCallback(async (label: string, task: () => Promise<void>, success?: string) => {
-    setBusy(label);
+    const importing = ['import-source', 'import-folder', 'refresh-sources'].includes(label);
+    if (importing && sourceImportBusyRef.current) return;
+    const generation = projectGenerationRef.current;
+    if (importing) {
+      sourceImportBusyRef.current = label;
+      setSourceImportBusy(label);
+      setSourceTasksError(null);
+    } else setBusy(label);
     try {
       await task();
-      if (success) toast.success(success);
+      if (success && (!importing || generation === projectGenerationRef.current)) toast.success(success);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('actions.failed', { label }));
+      if (!importing || generation === projectGenerationRef.current) toast.error(error instanceof Error ? error.message : t('actions.failed', { label }));
     } finally {
-      setBusy(null);
+      if (importing) {
+        sourceImportBusyRef.current = null;
+        if (mountedRef.current) setSourceImportBusy(null);
+      } else setBusy(null);
     }
+  }, [t]);
+
+  const readSourceTasks = useCallback(async (selectedProjectId: string): Promise<boolean> => {
+    const generation = projectGenerationRef.current;
+    const isCurrent = () => generation === projectGenerationRef.current
+      && projectIdRef.current === selectedProjectId
+      && useWikiProjectsStore.getState().currentProject?.projectId === selectedProjectId
+      && !useWikiProjectsStore.getState().switching;
+    while (sourceTaskReadRef.current) {
+      const previous = sourceTaskReadRef.current;
+      if (previous.projectId === selectedProjectId && previous.generation === generation) return previous.promise;
+      await previous.promise;
+    }
+    if (!isCurrent()) return false;
+    const revision = sourceTaskRevisionRef.current;
+    const promise = (async () => {
+      try {
+        const tasks = normalizeSourceTasks(await hostWikiSourceTasks({ projectId: selectedProjectId }));
+        if (!isCurrent() || revision !== sourceTaskRevisionRef.current) return false;
+        setSourceTaskProjection({ projectId: selectedProjectId, tasks });
+        setSourceTasksError(null);
+        return true;
+      } catch {
+        if (isCurrent() && revision === sourceTaskRevisionRef.current) setSourceTasksError(t('sourceProgress.readFailed'));
+        return false;
+      }
+    })();
+    const reading = { projectId: selectedProjectId, generation, promise };
+    sourceTaskReadRef.current = reading;
+    try {
+      return await promise;
+    } finally {
+      if (sourceTaskReadRef.current === reading) sourceTaskReadRef.current = null;
+    }
+  }, [t]);
+
+  const observeSourceTasks = sourceImportBusy !== null || sourceTasks.some(isActiveSourceTask);
+  useEffect(() => {
+    if (!projectId || projectSwitching || !observeSourceTasks || sourceTasksError) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      await readSourceTasks(projectId);
+      if (!stopped) timer = setTimeout(() => { void poll(); }, 1000);
+    };
+    void poll();
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [observeSourceTasks, projectId, projectSwitching, readSourceTasks, sourceTasksError]);
+
+  useEffect(() => { setSourceTasksError(null); }, [projectId]);
+
+  const loadDirectory = useCallback(async (directory: string, tree = treeRequestRef.current): Promise<void> => {
+    if (!tree.projectId || tree !== treeRequestRef.current || tree.loaded.has(directory) || tree.loading.has(directory)) return;
+    tree.loading.add(directory);
+    setLoadingDirectories(new Set(tree.loading));
+    setDirectoryErrors((current) => { const next = { ...current }; delete next[directory]; return next; });
+    try {
+      const children = visibleFileItems(await hostWikiFiles({ projectId: tree.projectId, directory }));
+      if (tree !== treeRequestRef.current || projectIdRef.current !== tree.projectId) return;
+      const previousRoots = new Set(tree.files.filter((item) => item.isDirectory && !item.path.includes('/')).map((item) => item.path));
+      tree.files = replaceDirectoryItems(tree.files, directory, children);
+      tree.loaded.add(directory);
+      const directoryPaths = new Set(tree.files.filter((item) => item.isDirectory).map((item) => item.path));
+      tree.loaded = new Set([...tree.loaded].filter((path) => path === '' || directoryPaths.has(path)));
+      setFiles(tree.files);
+      setLoadedDirectories(new Set(tree.loaded));
+      if (directory === '') {
+        const roots = children.filter((item) => item.isDirectory).map((item) => item.path);
+        setExpandedDirectories((current) => new Set([...current].filter((path) => directoryPaths.has(path)).concat(roots.filter((path) => !previousRoots.has(path)))));
+        for (const path of roots) tree.loaded.delete(path);
+        setLoadedDirectories(new Set(tree.loaded));
+        await Promise.all(roots.map((path) => loadDirectory(path, tree)));
+      }
+    } catch (cause) {
+      if (tree === treeRequestRef.current && projectIdRef.current === tree.projectId) {
+        tree.files = tree.files.filter((item) => directory !== '' && !item.path.startsWith(`${directory}/`));
+        tree.loaded = new Set([...tree.loaded].filter((path) => directory !== '' && path !== directory && !path.startsWith(`${directory}/`)));
+        setFiles(tree.files);
+        setLoadedDirectories(new Set(tree.loaded));
+        setDirectoryErrors((current) => ({ ...current, [directory]: cause instanceof Error ? cause.message : t('sidebar.loadFailed') }));
+      }
+    } finally {
+      if (tree === treeRequestRef.current) {
+        tree.loading.delete(directory);
+        setLoadingDirectories(new Set(tree.loading));
+      }
+    }
+  }, [t]);
+
+  const loadNavigation = useCallback(async (selectedProjectId: string): Promise<void> => {
+    const request = ++navigationRequestRef.current;
+    const generation = projectGenerationRef.current;
+    const snapshot = snapshotRequestRef.current;
+    const isCurrent = () => request === navigationRequestRef.current && generation === projectGenerationRef.current && snapshot === snapshotRequestRef.current && projectIdRef.current === selectedProjectId;
+    setNavigationLoading(true);
+    setNavigationError(null);
+    setNavigationPages([]);
+    setSourceFiles([]);
+    const [navigation, sources] = await Promise.allSettled([
+      hostWikiNavigation({ projectId: selectedProjectId }),
+      hostWikiSourceFiles({ projectId: selectedProjectId }),
+    ]);
+    if (!isCurrent()) return;
+    const errors: string[] = [];
+    if (navigation.status === 'fulfilled' && navigation.value.projectId === selectedProjectId) setNavigationPages(navigation.value.pages);
+    else errors.push(navigation.status === 'rejected' && navigation.reason instanceof Error ? navigation.reason.message : t('sidebar.loadFailed'));
+    if (sources.status === 'fulfilled') setSourceFiles(mergeFileItems([], normalizeFiles(sources.value)));
+    else errors.push(sources.reason instanceof Error ? sources.reason.message : t('sidebar.loadFailed'));
+    setNavigationError(errors.length ? errors.join('\n') : null);
+    setNavigationLoading(false);
   }, [t]);
 
   const loadWikiSnapshot = useCallback(async (expectedProjectId?: string) => {
     if (expectedProjectId && projectIdRef.current !== expectedProjectId) return;
     const request = ++snapshotRequestRef.current;
-    const [statusResult, projectsResult, templatesResult, currentProjectResult] = await Promise.allSettled([
+    snapshotReadingRef.current = true;
+    navigationRequestRef.current++;
+    const previousTree = treeRequestRef.current;
+    treeRequestRef.current = { ...previousTree, loaded: new Set(previousTree.loaded), loading: new Set() };
+    setLoadingDirectories(new Set(['']));
+    setDirectoryErrors({});
+    setNavigationPages([]);
+    setSourceFiles([]);
+    setNavigationLoading(true);
+    setNavigationError(null);
+    const [statusResult, projectsResult, templatesResult] = await Promise.allSettled([
       hostWikiStatus(),
-      hostWikiProjects(),
+      refreshProjects(),
       hostWikiProjectTemplates(),
-      hostWikiCurrentProject(),
     ]);
 
-    const nextStatus = statusResult.status === 'fulfilled' ? normalizeStatus(statusResult.value) : EMPTY_STATUS;
-    const nextProjects = projectsResult.status === 'fulfilled' ? normalizeProjects(projectsResult.value) : [];
+    if (request !== snapshotRequestRef.current) return;
+    snapshotReadingRef.current = false;
+    if (statusResult.status === 'rejected' || projectsResult.status === 'rejected') {
+      setNavigationLoading(false);
+      setNavigationError(t('sidebar.loadFailed'));
+      setLoadingDirectories(new Set());
+      setDirectoryErrors({ '': t('sidebar.loadFailed') });
+      treeRequestRef.current.files = [];
+      treeRequestRef.current.loaded.clear();
+      setFiles([]);
+      setLoadedDirectories(new Set());
+      throw new Error(t('sidebar.loadFailed'));
+    }
+    const nextStatus = normalizeStatus(statusResult.value);
     const nextTemplates = templatesResult.status === 'fulfilled' ? normalizeProjectTemplates(templatesResult.value) : [];
-    const nextCurrentProject = currentProjectResult.status === 'fulfilled'
-      ? currentProjectFromPayload(currentProjectResult.value, nextStatus, nextProjects)
-      : currentProjectFromPayload(null, nextStatus, nextProjects);
+    const nextCurrentProject = useWikiProjectsStore.getState().currentProject;
 
     const nextProjectId = nextCurrentProject?.projectId;
     if (request !== snapshotRequestRef.current || (expectedProjectId && (projectIdRef.current !== expectedProjectId || nextProjectId !== expectedProjectId))) return;
-    const [fileTreeResult, sourceFilesResult, sourceWatchResult, sourceTasksResult, reviewsResult] = await Promise.allSettled([
-      nextProjectId ? loadDirectories(WIKI_TREE_ROOT_DIRECTORIES, nextProjectId) : Promise.resolve({ files: [], directories: [] }),
-      nextProjectId ? hostWikiSourceFiles({ projectId: nextProjectId }) : Promise.resolve([]),
-      nextProjectId ? hostWikiSourceWatchConfig({ projectId: nextProjectId }) : Promise.resolve({ config: DEFAULT_SOURCE_WATCH_CONFIG }),
-      nextProjectId ? hostWikiSourceTasks({ projectId: nextProjectId }) : Promise.resolve([]),
-      nextProjectId ? hostWikiReviews({ projectId: nextProjectId }) : Promise.resolve([]),
-    ]);
-    if (request !== snapshotRequestRef.current || (expectedProjectId && projectIdRef.current !== expectedProjectId)) return;
-    const nextFileTree = fileTreeResult.status === 'fulfilled' ? fileTreeResult.value : { files: [], directories: [] };
-    const nextSourceFiles = sourceFilesResult.status === 'fulfilled' ? normalizeFiles(sourceFilesResult.value) : [];
-
-    if (projectIdRef.current !== nextCurrentProject?.projectId) {
+    const projectChanged = previousTree.projectId !== nextProjectId;
+    const tree = {
+      projectId: nextProjectId,
+      files: projectChanged ? [] : previousTree.files,
+      loaded: projectChanged ? new Set<string>() : new Set(previousTree.loaded),
+      loading: new Set<string>(),
+    };
+    tree.loaded.delete('');
+    treeRequestRef.current = tree;
+    if (projectChanged) {
+      projectGenerationRef.current++;
+      setFiles([]);
+      setLoadedDirectories(new Set());
+      setExpandedDirectories(new Set());
+    }
+    if (projectChanged) {
       projectIdRef.current = nextCurrentProject?.projectId;
       fileRequestRef.current++;
       selectedPathRef.current = '';
       setQuestionProjectId(null);
       setGraph(null);
       setHighlightedNodeIds([]);
-      setResearchTasks([]);
-      setSearchConfig(null);
       setSearchResult(null);
       setContextResult(null);
       setSelectedPath('');
@@ -354,26 +499,32 @@ export default function WikiPage() {
       setEditorText('');
     }
     setStatus(nextStatus);
-    setProjects(nextProjects);
     setProjectTemplates(nextTemplates);
-    setCurrentProject(nextCurrentProject);
-    setFiles(mergeFileItems([], nextFileTree.files));
-    setSourceFiles(mergeFileItems([], nextSourceFiles));
-    setLoadedDirectories(new Set(nextFileTree.directories));
-    setExpandedDirectories(defaultExpandedDirectories());
+    const [sourceWatchResult, , reviewsResult] = await Promise.allSettled([
+      nextProjectId ? hostWikiSourceWatchConfig({ projectId: nextProjectId }) : Promise.resolve({ config: DEFAULT_SOURCE_WATCH_CONFIG }),
+      nextProjectId ? readSourceTasks(nextProjectId) : Promise.resolve(),
+      nextProjectId ? hostWikiReviews({ projectId: nextProjectId }) : Promise.resolve([]),
+      nextProjectId ? loadDirectory('', tree) : Promise.resolve(),
+      nextProjectId ? loadNavigation(nextProjectId) : Promise.resolve(),
+    ]);
+    if (request !== snapshotRequestRef.current || projectIdRef.current !== nextProjectId || (expectedProjectId && projectIdRef.current !== expectedProjectId)) return;
     setSourceWatchConfig(sourceWatchResult.status === 'fulfilled' ? normalizeSourceWatchConfig(sourceWatchResult.value.config) : DEFAULT_SOURCE_WATCH_CONFIG);
-    setSourceTasks(sourceTasksResult.status === 'fulfilled' ? normalizeSourceTasks(sourceTasksResult.value) : []);
+    if (!nextProjectId) setSourceTaskProjection(null);
     setReviewItems(reviewsResult.status === 'fulfilled' ? normalizeReviews(reviewsResult.value) : []);
 
     if (!nextCurrentProject) {
       setPageMode('home');
+      setFiles([]);
+      setLoadedDirectories(new Set());
+      setLoadingDirectories(new Set());
+      setNavigationLoading(false);
       setSelectedPath('');
       setSourceFiles([]);
       setReviewItems([]);
       setPreview({ kind: 'empty' });
       setEditorText('');
     }
-  }, []);
+  }, [loadDirectory, loadNavigation, readSourceTasks, refreshProjects, t]);
 
   const refresh = useCallback(async () => {
     await run('load', () => loadWikiSnapshot());
@@ -382,6 +533,10 @@ export default function WikiPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!snapshotReadingRef.current && treeRequestRef.current.projectId !== projectId) void refresh();
+  }, [projectId, refresh]);
 
   const chooseLibraryDirectory = useCallback(async () => {
     const path = await pickLocalDirectory({
@@ -398,21 +553,37 @@ export default function WikiPage() {
     await run('create', async () => {
       fileRequestRef.current++;
       snapshotRequestRef.current++;
-      await hostWikiCreateProject({ path, name: projectName.trim() || undefined, templateId: selectedTemplateId });
-      await loadWikiSnapshot();
-      setPageMode('workspace');
+      navigationRequestRef.current++;
+      projectGenerationRef.current++;
+      treeRequestRef.current = { ...treeRequestRef.current, loading: new Set() };
+      snapshotReadingRef.current = true;
+      try {
+        await createProject({ path, name: projectName.trim() || undefined, templateId: selectedTemplateId });
+        await loadWikiSnapshot();
+        setPageMode('workspace');
+      } finally {
+        snapshotReadingRef.current = false;
+      }
     }, t('actions.createdLibrary'));
-  }, [loadWikiSnapshot, openPath, projectName, run, selectedTemplateId, t]);
+  }, [createProject, loadWikiSnapshot, openPath, projectName, run, selectedTemplateId, t]);
 
   const selectProject = useCallback(async (project: WikiProject) => {
     await run('open', async () => {
       fileRequestRef.current++;
       snapshotRequestRef.current++;
-      await hostWikiOpenProject({ path: project.rootPath, name: project.title });
-      await loadWikiSnapshot();
-      setPageMode('workspace');
+      navigationRequestRef.current++;
+      projectGenerationRef.current++;
+      treeRequestRef.current = { ...treeRequestRef.current, loading: new Set() };
+      snapshotReadingRef.current = true;
+      try {
+        await openProject(project);
+        await loadWikiSnapshot();
+        setPageMode('workspace');
+      } finally {
+        snapshotReadingRef.current = false;
+      }
     }, t('actions.switchedLibrary'));
-  }, [loadWikiSnapshot, run, t]);
+  }, [loadWikiSnapshot, openProject, run, t]);
 
   const readProjectFile = useCallback(async (selectedProjectId: string, path: string, open = true) => {
     if (projectIdRef.current !== selectedProjectId || (!open && selectedPathRef.current !== path)) return;
@@ -473,15 +644,15 @@ export default function WikiPage() {
   }, [projectId, readProjectFile, t]);
 
   const onHistoryRestored = useCallback(async (restoredProjectId: string, path: string) => {
-    await readProjectFile(restoredProjectId, path, false);
-  }, [readProjectFile]);
+    if (projectGeneration !== projectGenerationRef.current || projectIdRef.current !== restoredProjectId) return;
+    await loadWikiSnapshot(restoredProjectId);
+    if (projectGeneration === projectGenerationRef.current) await readProjectFile(restoredProjectId, path, false);
+  }, [loadWikiSnapshot, projectGeneration, readProjectFile]);
 
   const onFilesChanged = useCallback(async (changedProjectId: string, writtenPages: string[], deletedPages: string[]) => {
-    if (projectIdRef.current !== changedProjectId) return;
+    if (projectIdRef.current !== changedProjectId || projectGeneration !== projectGenerationRef.current) return;
     const path = selectedPathRef.current;
     const request = fileRequestRef.current;
-    await loadWikiSnapshot(changedProjectId);
-    if (projectIdRef.current !== changedProjectId || request !== fileRequestRef.current || path !== selectedPathRef.current) return;
     if (deletedPages.includes(path)) {
       fileRequestRef.current++;
       selectedPathRef.current = '';
@@ -489,15 +660,56 @@ export default function WikiPage() {
       setPreview({ kind: 'empty' });
       setEditorText('');
       setSourceImageIndex(undefined);
-    } else if (writtenPages.includes(path)) await readProjectFile(changedProjectId, path, false);
-  }, [loadWikiSnapshot, readProjectFile]);
+    }
+    const tree = treeRequestRef.current;
+    const deleted = new Set(deletedPages);
+    tree.files = tree.files.filter((item) => !deleted.has(item.path));
+    setFiles(tree.files);
+    const changedDirectories = new Set([...writtenPages, ...deletedPages].map((page) => page.slice(0, page.lastIndexOf('/') + 1).replace(/\/$/, '')));
+    const reload = [...changedDirectories].filter((directory) => tree.loaded.has(directory));
+    await loadWikiSnapshot(changedProjectId);
+    if (projectIdRef.current !== changedProjectId || projectGeneration !== projectGenerationRef.current) return;
+    const refreshedTree = treeRequestRef.current;
+    for (const directory of reload) refreshedTree.loaded.delete(directory);
+    setLoadedDirectories(new Set(refreshedTree.loaded));
+    await Promise.all(reload.map((directory) => loadDirectory(directory, refreshedTree)));
+    if (projectIdRef.current !== changedProjectId || projectGeneration !== projectGenerationRef.current || request !== fileRequestRef.current || path !== selectedPathRef.current) return;
+    if (writtenPages.includes(path)) await readProjectFile(changedProjectId, path, false);
+  }, [loadDirectory, loadWikiSnapshot, projectGeneration, readProjectFile]);
+
+  const onMaintenanceChanged = useCallback(async () => {
+    if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
+    const request = fileRequestRef.current;
+    const path = selectedPathRef.current;
+    const reload = [...treeRequestRef.current.loaded].filter(Boolean);
+    await loadWikiSnapshot();
+    if (projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
+    const tree = treeRequestRef.current;
+    for (const directory of reload) tree.loaded.delete(directory);
+    await Promise.all(reload.map((directory) => loadDirectory(directory, tree)));
+    if (projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
+    setGraph(null);
+    if (path && path === selectedPathRef.current && request === fileRequestRef.current && (preview.kind !== 'text' || editorText === preview.content)) await readProjectFile(projectId, path, false);
+  }, [editorText, loadDirectory, loadWikiSnapshot, preview, projectGeneration, projectId, readProjectFile]);
+
+  const onMissingPageCreated = useCallback(async (createdProjectId: string, path: string) => {
+    if (createdProjectId !== projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
+    const request = fileRequestRef.current;
+    await loadWikiSnapshot(createdProjectId);
+    if (projectIdRef.current !== createdProjectId || projectGeneration !== projectGenerationRef.current) return;
+    const directory = path.slice(0, path.lastIndexOf('/') + 1).replace(/\/$/, '');
+    const tree = treeRequestRef.current;
+    tree.loaded.delete(directory);
+    await loadDirectory(directory, tree);
+    if (projectIdRef.current === createdProjectId && projectGeneration === projectGenerationRef.current && request === fileRequestRef.current) await readProjectFile(createdProjectId, path);
+  }, [loadDirectory, loadWikiSnapshot, projectGeneration, projectId, readProjectFile]);
 
   const onQuestionSaved = useCallback(async (path: string) => {
-    if (!projectId || projectIdRef.current !== projectId) return;
+    if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     const request = fileRequestRef.current;
     await loadWikiSnapshot(projectId);
-    if (projectIdRef.current === projectId && request === fileRequestRef.current) await readProjectFile(projectId, path);
-  }, [loadWikiSnapshot, projectId, readProjectFile]);
+    if (projectIdRef.current === projectId && projectGeneration === projectGenerationRef.current && request === fileRequestRef.current) await readProjectFile(projectId, path);
+  }, [loadWikiSnapshot, projectGeneration, projectId, readProjectFile]);
 
   const openImageSource = useCallback(async (pagePath: string, imageSrc: string) => {
     if (!projectId) throw new Error(t('search.sourceOpenFailed', { defaultValue: '请先打开知识库，再定位原始来源。' }));
@@ -533,22 +745,96 @@ export default function WikiPage() {
     setExpandedDirectories((current) => new Set(current).add(directory));
     if (loadedDirectories.has(directory)) return;
 
-    await run('files', async () => {
-      const children = normalizeFiles(await hostWikiFiles({ directory }));
-      setFiles((current) => mergeFileItems(current, children));
-      setLoadedDirectories((current) => new Set(current).add(directory));
-    });
-  }, [expandedDirectories, loadedDirectories, run]);
+    await loadDirectory(directory);
+  }, [expandedDirectories, loadDirectory, loadedDirectories]);
+
+  const retryDirectory = useCallback((directory: string) => {
+    void loadDirectory(directory);
+  }, [loadDirectory]);
+
+  const retryNavigation = useCallback(() => {
+    if (projectId) void loadNavigation(projectId);
+  }, [loadNavigation, projectId]);
+
+  const openProjectFolder = useCallback(async () => {
+    if (!currentProject) return;
+    try {
+      const error = await openArtifactPathExternally(currentProject.rootPath);
+      if (error) throw new Error(error);
+    } catch {
+      toast.error(t('sidebar.openFolderFailed'));
+    }
+  }, [currentProject, t]);
+
+  const deletePage = useCallback(async (path: string): Promise<void> => {
+    if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) throw new Error(t('actions.projectChanged'));
+    setBusy('delete-page');
+    try {
+      const receipt = await hostWikiDeletePage({ projectId, path });
+      const call = await waitForCall(receipt, 'wiki');
+      if (projectGeneration !== projectGenerationRef.current || projectIdRef.current !== projectId) throw new Error(t('actions.projectChanged'));
+      if (call.command !== 'delete-page' || call.detail.operation !== 'delete-page') throw new Error(t('actions.resultUnconfirmed'));
+      const result = await hostWikiCallResult({ callId: receipt.callId });
+      if (projectGeneration !== projectGenerationRef.current || projectIdRef.current !== projectId) throw new Error(t('actions.projectChanged'));
+      if (result.callId !== receipt.callId || result.operation !== 'delete-page' || result.result.projectId !== projectId || result.result.path !== path) throw new Error(t('actions.resultUnconfirmed'));
+      await onFilesChanged(projectId, result.result.updatedPages, result.result.deletedPages);
+      if (projectGeneration !== projectGenerationRef.current || projectIdRef.current !== projectId) throw new Error(t('actions.projectChanged'));
+      if (!result.result.deletedPages.includes(path) || result.result.failures.length > 0 || call.status !== 'succeeded' || call.detail.outcome !== 'completed') {
+        const details = result.result.failures.map((failure) => `${failure.stage}: ${failure.message}`).join('\n');
+        throw new Error([t('sidebar.deleteFailed'), details].filter(Boolean).join('\n'));
+      }
+      const counts = call.detail.counts;
+      if (!counts || result.result.deletedPages.length !== counts.deletedPages || result.result.updatedPages.length !== counts.updatedPages || result.result.deletedMedia.length !== counts.deletedMedia) throw new Error(t('actions.resultUnconfirmed'));
+    } finally {
+      if (projectGeneration === projectGenerationRef.current && projectIdRef.current === projectId) setBusy(null);
+    }
+  }, [onFilesChanged, projectGeneration, projectId, t]);
 
   const saveFile = useCallback(async () => {
     if (!selectedPath || preview.kind !== 'text') return;
     const currentPreview = preview;
+    if (!projectId) return;
     await run('write', async () => {
-      await hostWikiWriteFile({ path: selectedPath, content: editorText });
+      await hostWikiWriteFile({ projectId, path: selectedPath, content: editorText });
+      if (projectGeneration !== projectGenerationRef.current || projectIdRef.current !== projectId) return;
       setPreview({ ...currentPreview, content: editorText });
-      await loadWikiSnapshot();
+      await loadWikiSnapshot(projectId);
     }, t('actions.savedPage'));
-  }, [editorText, loadWikiSnapshot, preview, run, selectedPath, t]);
+  }, [editorText, loadWikiSnapshot, preview, projectGeneration, projectId, run, selectedPath, t]);
+
+  const onSelectionPrepare = useCallback(async (selection: WikiSelectionSnapshot) => {
+    if (!projectId || preview.kind !== 'text' || selectedPathRef.current !== selectedPath
+      || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) throw new Error(t('actions.projectChanged'));
+    const content = selection.prefix + selection.selectedText + selection.suffix;
+    const draft = editorTextRef.current;
+    if (draft !== content && normalizeEditableMarkdown(draft) !== content) throw new Error(t('selection.sourceChanged'));
+    if (content === preview.content) return;
+    setBusy('write');
+    try {
+      await hostWikiWriteFile({ projectId, path: selectedPath, content });
+      if (projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current || selectedPathRef.current !== selectedPath) throw new Error(t('actions.projectChanged'));
+      if (editorTextRef.current !== draft) throw new Error(t('selection.sourceChanged'));
+      setEditorText(content);
+      setPreview({ ...preview, content });
+    } finally {
+      if (projectIdRef.current === projectId && projectGeneration === projectGenerationRef.current) setBusy(null);
+    }
+  }, [preview, projectGeneration, projectId, selectedPath, t]);
+
+  const onSelectionApplied = useCallback(async (receipt: WikiSelectionApplyReceipt) => {
+    if (receipt.projectId !== projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
+    if (selectedPathRef.current === receipt.relativePath && preview.kind === 'text' && editorTextRef.current === preview.content) {
+      setEditorText(receipt.content);
+      setPreview((current) => current.kind === 'text' && current.path === receipt.relativePath ? { ...current, content: receipt.content } : current);
+    }
+    setGraph(null);
+    await loadWikiSnapshot(receipt.projectId);
+    if (projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
+    const directory = receipt.relativePath.slice(0, receipt.relativePath.lastIndexOf('/') + 1).replace(/\/$/, '');
+    const tree = treeRequestRef.current;
+    tree.loaded.delete(directory);
+    await loadDirectory(directory, tree);
+  }, [loadDirectory, loadWikiSnapshot, preview, projectGeneration, projectId]);
 
   const rescan = useCallback(async () => {
     await run('rescan', async () => {
@@ -566,8 +852,9 @@ export default function WikiPage() {
   }, [loadWikiSnapshot, run, t]);
 
   const importSourcePath = useCallback(async (path: string) => {
+    if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     await run('import-source', async () => {
-      const call = await hostWikiImportSource({ sourcePath: path })
+      const call = await hostWikiImportSource({ projectId, sourcePath: path })
         .then((receipt) => waitForCall(receipt, 'wiki'))
         .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
       if (call.command !== 'import-source' || call.detail.operation !== 'import-source' || call.status === 'unknown') {
@@ -577,10 +864,11 @@ export default function WikiPage() {
         throw new Error(t('actions.failed', { label: 'import-source' }));
       }
       if (call.detail.counts === null) throw new Error(t('actions.resultUnconfirmed'));
+      if (projectGeneration !== projectGenerationRef.current || projectIdRef.current !== projectId) return;
       setLastReceipt(summarizeSourceCallCounts(call.detail.counts, t('actions.importFileReceipt')));
-      await loadWikiSnapshot();
+      await loadWikiSnapshot(projectId);
     }, t('actions.importedSource'));
-  }, [loadWikiSnapshot, run, t]);
+  }, [loadWikiSnapshot, projectGeneration, projectId, run, t]);
 
   const pickAndImportSource = useCallback(async () => {
     const path = await pickLocalFile({
@@ -592,8 +880,9 @@ export default function WikiPage() {
   }, [importSourcePath, t]);
 
   const importFolderPath = useCallback(async (path: string) => {
+    if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     await run('import-folder', async () => {
-      const call = await hostWikiImportFolder({ folderPath: path })
+      const call = await hostWikiImportFolder({ projectId, folderPath: path })
         .then((receipt) => waitForCall(receipt, 'wiki'))
         .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
       if (call.command !== 'import-folder' || call.detail.operation !== 'import-folder' || call.status === 'unknown') {
@@ -603,10 +892,11 @@ export default function WikiPage() {
         throw new Error(t('actions.failed', { label: 'import-folder' }));
       }
       if (call.detail.counts === null) throw new Error(t('actions.resultUnconfirmed'));
+      if (projectGeneration !== projectGenerationRef.current || projectIdRef.current !== projectId) return;
       setLastReceipt(summarizeSourceCallCounts(call.detail.counts, t('actions.importFolderReceipt')));
-      await loadWikiSnapshot();
+      await loadWikiSnapshot(projectId);
     }, t('actions.importedFolder'));
-  }, [loadWikiSnapshot, run, t]);
+  }, [loadWikiSnapshot, projectGeneration, projectId, run, t]);
 
   const pickAndImportFolder = useCallback(async () => {
     const path = await pickLocalDirectory({
@@ -643,8 +933,9 @@ export default function WikiPage() {
   }, [loadWikiSnapshot, run, t]);
 
   const refreshSources = useCallback(async () => {
+    if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     await run('refresh-sources', async () => {
-      const call = await hostWikiRefreshSources()
+      const call = await hostWikiRefreshSources({ projectId })
         .then((receipt) => waitForCall(receipt, 'wiki'))
         .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
       if (call.command !== 'refresh-sources' || call.detail.operation !== 'refresh-sources' || call.status === 'unknown') {
@@ -654,22 +945,37 @@ export default function WikiPage() {
         throw new Error(t('actions.failed', { label: 'refresh-sources' }));
       }
       if (call.detail.counts === null) throw new Error(t('actions.resultUnconfirmed'));
+      if (projectGeneration !== projectGenerationRef.current || projectIdRef.current !== projectId) return;
       setLastReceipt(summarizeSourceCallCounts(call.detail.counts, t('actions.refreshSourcesReceipt')));
-      await loadWikiSnapshot();
+      await loadWikiSnapshot(projectId);
     }, t('actions.refreshedSources'));
-  }, [loadWikiSnapshot, run, t]);
+  }, [loadWikiSnapshot, projectGeneration, projectId, run, t]);
 
   const loadSourceTasks = useCallback(async () => {
-    await run('source-tasks', async () => {
-      setSourceTasks(normalizeSourceTasks(await hostWikiSourceTasks()));
-    });
-  }, [run]);
+    if (projectId) await readSourceTasks(projectId);
+  }, [projectId, readSourceTasks]);
 
   const cancelSourceTask = useCallback(async (sourcePath: string) => {
-    await run('source-task-cancel', async () => {
-      setSourceTasks(normalizeSourceTasks(await hostWikiCancelSourceTask({ sourcePath })));
-    });
-  }, [run]);
+    if (!projectId || useWikiProjectsStore.getState().switching) return;
+    const key = JSON.stringify([projectId, sourcePath]);
+    if (cancellingSourceTasksRef.current.has(key)) return;
+    const generation = projectGenerationRef.current;
+    const isCurrent = () => generation === projectGenerationRef.current && projectIdRef.current === projectId
+      && useWikiProjectsStore.getState().currentProject?.projectId === projectId && !useWikiProjectsStore.getState().switching;
+    cancellingSourceTasksRef.current.add(key);
+    setCancellingSourceTasks(new Set(cancellingSourceTasksRef.current));
+    try {
+      const tasks = normalizeSourceTasks(await hostWikiCancelSourceTask({ projectId, sourcePath }));
+      if (!isCurrent()) return;
+      sourceTaskRevisionRef.current++;
+      setSourceTaskProjection({ projectId, tasks });
+    } catch {
+      if (isCurrent()) toast.error(t('sourceProgress.cancelFailed'));
+    } finally {
+      cancellingSourceTasksRef.current.delete(key);
+      if (mountedRef.current) setCancellingSourceTasks(new Set(cancellingSourceTasksRef.current));
+    }
+  }, [projectId, t]);
 
   const updateSourceWatchConfig = useCallback(async (payload: WikiSourceWatchConfigUpdate) => {
     await run('source-watch-config', async () => {
@@ -677,146 +983,6 @@ export default function WikiPage() {
       setSourceWatchConfig(normalizeSourceWatchConfig(receipt.config));
     }, t('actions.updatedSourceWatch'));
   }, [run, t]);
-
-  const researchTasksRef = useRef<readonly HostWikiResearchTask[]>([]);
-
-  const readResearchTasks = useCallback(async (selectedProjectId: string, cancelled?: () => boolean) => {
-    const receipt = await hostWikiResearchTasks({ projectId: selectedProjectId });
-    if (cancelled?.() || projectIdRef.current !== selectedProjectId) return;
-    const previous = researchTasksRef.current;
-    researchTasksRef.current = receipt.tasks;
-    setResearchTasks(receipt.tasks);
-    const saved = receipt.tasks.some((task) => task.status === 'done' && task.savedPath
-      && !previous.some((old) => old.id === task.id && old.status === 'done'));
-    if (saved) {
-      const [tree, reviews] = await Promise.all([
-        loadDirectories([...loadedDirectories], selectedProjectId),
-        hostWikiReviews({ projectId: selectedProjectId }),
-      ]);
-      if (cancelled?.() || projectIdRef.current !== selectedProjectId) return;
-      setFiles(mergeFileItems([], tree.files));
-      setReviewItems(normalizeReviews(reviews));
-    }
-  }, [loadedDirectories]);
-
-  const loadResearchTasks = useCallback(async () => {
-    if (!projectId) return;
-    await run('research-tasks', () => readResearchTasks(projectId));
-    setResearchPollVersion((version) => version + 1);
-  }, [projectId, readResearchTasks, run]);
-
-  const loadSearchConfig = useCallback(async () => {
-    if (!projectId) return;
-    await run('search-config', async () => {
-      const receipt = await hostWikiSearchConfig({ projectId });
-      if (projectIdRef.current === projectId) setSearchConfig(receipt);
-    });
-  }, [projectId, run]);
-
-  useEffect(() => {
-    let cancelled = false;
-    researchTasksRef.current = [];
-    if (!projectId) return;
-    void Promise.all([hostWikiResearchTasks({ projectId }), hostWikiSearchConfig({ projectId })]).then(([tasks, config]) => {
-      if (cancelled) return;
-      researchTasksRef.current = tasks.tasks;
-      setResearchTasks(tasks.tasks);
-      setSearchConfig(config);
-    }).catch(() => {
-      if (!cancelled) toast.error(t('research.loadFailed', { defaultValue: '无法读取研究任务或搜索配置，请点击刷新重试。' }));
-    });
-    return () => { cancelled = true; };
-  }, [projectId, t]);
-
-  const hasActiveResearch = researchTasks.some((task) => task.projectId === projectId && !isTerminalResearchTask(task));
-  useEffect(() => {
-    if (!projectId || pageMode !== 'workspace' || !hasActiveResearch) return;
-    let cancelled = false;
-    let attempts = 0;
-    let failures = 0;
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      try {
-        await readResearchTasks(projectId, () => cancelled);
-        failures = 0;
-      } catch {
-        failures++;
-      }
-      if (cancelled || !researchTasksRef.current.some((task) => !isTerminalResearchTask(task))) return;
-      if (++attempts >= 300 || failures >= 3) {
-        toast.error(t('research.progressPaused', { defaultValue: '研究仍由后台执行，自动进度刷新已暂停；请点击研究页刷新继续查看。' }));
-        return;
-      }
-      timer = setTimeout(() => { void poll(); }, 2000);
-    };
-    timer = setTimeout(() => { void poll(); }, 2000);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [hasActiveResearch, pageMode, projectId, readResearchTasks, researchPollVersion, t]);
-
-  const startResearch = useCallback(async (input: HostWikiResearchInput) => {
-    if (!projectId || projectIdRef.current !== projectId) throw new Error(t('actions.projectChanged', { defaultValue: '知识库已切换，请在当前知识库重试。' }));
-    const modelRef = sourceWatchConfig.generationModelRef.trim();
-    if (!modelRef) throw new Error(t('research.modelRequired', { defaultValue: '请先在来源设置中选择生成模型，再开始研究。' }));
-    setBusy('research-start');
-    try {
-      await hostWikiStartResearch({ projectId, inputs: [input], modelRef });
-      if (projectIdRef.current !== projectId) return;
-      setActiveTab('research');
-      setResearchPollVersion((version) => version + 1);
-      void readResearchTasks(projectId).catch(() => {
-        if (projectIdRef.current === projectId) toast.error(t('research.acceptedRefreshFailed', { defaultValue: '研究已提交，但任务列表读取失败，请刷新查看。' }));
-      });
-    } finally {
-      if (projectIdRef.current === projectId) setBusy(null);
-    }
-  }, [projectId, readResearchTasks, sourceWatchConfig.generationModelRef, t]);
-
-  const rerunResearch = useCallback(async (task: HostWikiResearchTask) => {
-    if (!projectId) return;
-    await run('research-rerun', async () => {
-      const modelRef = sourceWatchConfig.generationModelRef.trim();
-      if (!modelRef) throw new Error(t('research.modelRequired', { defaultValue: '请先在来源设置中选择生成模型，再开始研究。' }));
-      await hostWikiRerunResearchTask({ projectId, taskId: task.id, modelRef });
-      if (projectIdRef.current !== projectId) return;
-      await readResearchTasks(projectId);
-    });
-  }, [projectId, readResearchTasks, run, sourceWatchConfig.generationModelRef, t]);
-
-  const removeResearch = useCallback(async (taskId: string) => {
-    if (!projectId) return;
-    await run('research-remove', async () => {
-      const receipt = await hostWikiRemoveResearchTask({ projectId, taskId });
-      if (projectIdRef.current !== projectId) return;
-      researchTasksRef.current = receipt.tasks;
-      setResearchTasks(receipt.tasks);
-    });
-  }, [projectId, run]);
-
-  const researchReview = useCallback((item: WikiReviewItem) => {
-    void startResearch({ topic: reviewResearchTopic(item), searchQueries: item.searchQueries, sourceReviewId: item.id }).catch((error) => {
-      if (projectIdRef.current === projectId) toast.error(error instanceof Error ? error.message : t('actions.failed', { label: 'research-start' }));
-    });
-  }, [projectId, startResearch, t]);
-
-  const saveSearchConfig = useCallback(async (patch: HostWikiSearchConfigUpdate) => {
-    if (!projectId) return;
-    setBusy('search-config-save');
-    try {
-      const receipt = await hostWikiUpdateSearchConfig({ ...patch, projectId });
-      if (projectIdRef.current === projectId) setSearchConfig(receipt);
-    } finally {
-      setBusy(null);
-    }
-  }, [projectId]);
-
-  const testSearchConfig = useCallback(async (patch: HostWikiSearchConfigUpdate) => {
-    setBusy('search-config-test');
-    try {
-      return await hostWikiTestSearchProvider({ projectId, config: patch });
-    } finally {
-      setBusy(null);
-    }
-  }, [projectId]);
 
   const loadReviews = useCallback(async () => {
     await run('reviews', async () => {
@@ -923,16 +1089,29 @@ export default function WikiPage() {
   }, [graph, loadGraph, projectId]);
 
   const embedPage = useCallback(async () => {
-    if (!selectedPath || preview.kind !== 'text' || preview.contentType !== 'markdown') return;
+    if (!projectId || !selectedPath || preview.kind !== 'text' || preview.contentType !== 'markdown') return;
+    if (editorText !== preview.content) {
+      toast.error(t('content.saveBeforeEmbed'));
+      return;
+    }
     await run('embed', async () => {
-      const receipt = await hostWikiEmbedPage({ path: selectedPath });
-      const call = await waitForCall(receipt, 'wiki');
-      if (call.command !== 'embed-page' || call.detail.operation !== 'embed-page'
-        || call.status !== 'succeeded' || call.detail.outcome !== 'completed') {
-        throw new Error(t('actions.failed', { label: 'embed' }));
+      const receipt = await hostWikiEmbedPage({ projectId, path: selectedPath });
+      const call = await waitForCall(receipt, 'wiki')
+        .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
+      if (call.command !== 'embed-page' || call.detail.operation !== 'embed-page' || call.status === 'unknown') {
+        throw new Error(t('actions.resultUnconfirmed'));
+      }
+      const result = await hostWikiCallResult({ callId: receipt.callId })
+        .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
+      if (result.callId !== receipt.callId || result.operation !== 'embed-page' || result.result.projectId !== projectId) {
+        throw new Error(t('actions.resultUnconfirmed'));
+      }
+      if (result.result.status === 'failed') throw new Error(t(`embeddingErrors.${result.result.code}`));
+      if (call.status !== 'succeeded' || call.detail.outcome !== 'completed') {
+        throw new Error(t('actions.resultUnconfirmed'));
       }
     }, t('actions.embeddedPage'));
-  }, [preview, run, selectedPath, t]);
+  }, [editorText, preview, projectId, run, selectedPath, t]);
 
   const changeWorkspaceTab = useCallback((tab: WikiWorkspaceTab) => {
     setActiveTab(tab);
@@ -943,10 +1122,13 @@ export default function WikiPage() {
   const activePanel = useMemo(() => {
     switch (activeTab) {
       case 'sources':
-        return (
+        return projectId ? (
           <SourcesPanel
+            projectId={projectId}
             files={sourceFiles}
             sourceTasks={sourceTasks}
+            sourceTasksError={sourceTasksError}
+            cancellingSourcePaths={cancellingSourcePaths}
             sourceWatchConfig={sourceWatchConfig}
             lastReceipt={lastReceipt}
             busy={busy}
@@ -965,7 +1147,7 @@ export default function WikiPage() {
             onSourceWatchConfigChange={updateSourceWatchConfig}
             onCancelSourceTask={(sourcePath) => { void cancelSourceTask(sourcePath); }}
           />
-        );
+        ) : null;
       case 'review':
         return (
           <ReviewPanel
@@ -976,7 +1158,6 @@ export default function WikiPage() {
             onDismiss={dismissReview}
             onClearResolved={clearResolvedReviews}
             onCreatePage={createReviewPage}
-            onResearch={researchReview}
           />
         );
       case 'qa':
@@ -984,22 +1165,7 @@ export default function WikiPage() {
       case 'lint':
         return projectId ? <LintPanel key={projectId} projectId={projectId} busy={busy} initialModelRef={sourceWatchConfig.generationModelRef} onOpenFile={readFile} onFilesChanged={onFilesChanged} /> : null;
       case 'maintenance':
-        return projectId ? <MaintenancePanel key={projectId} projectId={projectId} projectName={currentProject?.title} busy={busy} onChanged={async () => { if (projectIdRef.current === projectId) await loadWikiSnapshot(); }} /> : null;
-      case 'research':
-        return (
-          <ResearchPanel
-            key={projectId}
-            tasks={researchTasks.filter((task) => task.projectId === projectId)}
-            busy={busy}
-            onStart={(input) => { void startResearch(input).catch((error) => { if (projectIdRef.current === projectId) toast.error(error instanceof Error ? error.message : t('actions.failed', { label: 'research-start' })); }); }}
-            onRerun={rerunResearch}
-            onRemove={removeResearch}
-            onOpenFile={readFile}
-            onRefresh={loadResearchTasks}
-          />
-        );
-      case 'search-settings':
-        return <SearchSettingsPanel key={projectId} config={searchConfig && searchConfig.projectId === projectId ? searchConfig.config : null} busy={busy} onSave={saveSearchConfig} onTest={testSearchConfig} onRefresh={loadSearchConfig} />;
+        return projectId ? <MaintenancePanel key={projectId} projectId={projectId} projectName={currentProject?.title} modelRef={sourceWatchConfig.generationModelRef} busy={busy} onChanged={onMaintenanceChanged} /> : null;
       case 'search':
         return (
           <SearchPanel
@@ -1027,7 +1193,7 @@ export default function WikiPage() {
               onEmbedPage={embedPage}
               onOpenNode={readFile}
             />
-            {projectId ? <div className="min-h-0 overflow-auto border-t xl:border-l xl:border-t-0"><GraphInsightsPanel key={projectId} projectId={projectId} modelRef={sourceWatchConfig.generationModelRef} busy={busy} onLocateNodes={locateGraphNodes} onResearch={startResearch} /></div> : null}
+            {projectId ? <div className="min-h-0 overflow-auto border-t xl:border-l xl:border-t-0"><GraphInsightsPanel key={projectId} projectId={projectId} busy={busy} onLocateNodes={locateGraphNodes} /></div> : null}
           </div>
         );
       case 'wiki':
@@ -1045,6 +1211,11 @@ export default function WikiPage() {
             onSave={saveFile}
             onEmbedPage={embedPage}
             onRestored={onHistoryRestored}
+            onOpenFile={readFile}
+            onCreated={onMissingPageCreated}
+            modelRef={sourceWatchConfig.generationModelRef || undefined}
+            onSelectionPrepare={onSelectionPrepare}
+            onSelectionApplied={onSelectionApplied}
           />
         ) : null;
     }
@@ -1063,9 +1234,12 @@ export default function WikiPage() {
     locateGraphNodes,
     loadReviews,
     loadSourceTasks,
-    loadWikiSnapshot,
     onFilesChanged,
     onHistoryRestored,
+    onMaintenanceChanged,
+    onMissingPageCreated,
+    onSelectionPrepare,
+    onSelectionApplied,
     pickAndImportFolder,
     pickAndImportSource,
     preview,
@@ -1082,6 +1256,8 @@ export default function WikiPage() {
     selectedPath,
     sourceFiles,
     sourceTasks,
+    sourceTasksError,
+    cancellingSourcePaths,
     sourceView,
     sourceWatchConfig,
     updateSourceWatchConfig,
@@ -1089,26 +1265,15 @@ export default function WikiPage() {
     clearResolvedReviews,
     createReviewPage,
     cancelSourceTask,
-    loadResearchTasks,
-    loadSearchConfig,
     openImageSource,
     projectId,
-    researchReview,
-    researchTasks,
-    rerunResearch,
-    removeResearch,
-    saveSearchConfig,
-    searchConfig,
     sourceImageIndex,
-    startResearch,
-    testSearchConfig,
-    t,
   ]);
 
   if (pageMode === 'home' || !currentProject) {
     return (
       <LibraryHome
-        status={status}
+        status={{ ...status, currentProject }}
         projects={projects}
         templates={projectTemplates}
         selectedTemplateId={selectedTemplateId}
@@ -1128,21 +1293,33 @@ export default function WikiPage() {
 
   return (
     <LibraryWorkspace
+      key={currentProject.projectId}
       currentProject={currentProject}
       files={files}
       expandedDirectories={expandedDirectories}
+      loadedDirectories={loadedDirectories}
+      loadingDirectories={loadingDirectories}
+      directoryErrors={directoryErrors}
+      pages={navigationPages}
+      sourceFiles={sourceFiles}
+      navigationLoading={navigationLoading}
+      navigationError={navigationError}
       selectedPath={selectedPath}
       activeTab={activeTab}
       sourceView={sourceView}
       busy={busy}
       questionPanel={questionProjectId === projectId ? <QuestionPanel key={projectId} projectId={currentProject.projectId} initialModelRef={sourceWatchConfig.generationModelRef} busy={busy} onOpenFile={(path) => readProjectFile(currentProject.projectId, path)} onSaved={onQuestionSaved} /> : undefined}
-      activity={<ActivityBar status={status} sourceTasks={sourceTasks} busy={busy} onLoadSourceTasks={loadSourceTasks} onCancelSourceTask={cancelSourceTask} />}
+      activity={<ActivityBar status={status} sourceTasks={sourceTasks} busy={busy} sourceTasksError={sourceTasksError} cancellingSourcePaths={cancellingSourcePaths} onLoadSourceTasks={loadSourceTasks} onCancelSourceTask={cancelSourceTask} />}
       onTabChange={changeWorkspaceTab}
       onSourceViewChange={setSourceView}
       onBackHome={() => setPageMode('home')}
       onRefresh={refresh}
       onSelectFile={readFile}
       onToggleDirectory={toggleDirectory}
+      onRetryDirectory={retryDirectory}
+      onRetryNavigation={retryNavigation}
+      onDeletePage={deletePage}
+      onOpenFolder={openProjectFolder}
     >
       {activePanel}
     </LibraryWorkspace>

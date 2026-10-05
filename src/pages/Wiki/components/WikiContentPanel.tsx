@@ -1,17 +1,21 @@
-import { useEffect, useRef, useState, type JSX } from 'react';
+import { useCallback, useEffect, useRef, useState, type JSX } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
-import { Clock3, FileText, Save, Sparkles } from 'lucide-react';
+import { Clock3, Eye, FileText, Link2, Pencil, Save, Sparkles } from 'lucide-react';
 import { MarkdownPreview } from '@/components/file-preview/MarkdownPreview';
 import { HtmlPreview } from '@/components/file-preview/HtmlPreview';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import type { FileContentType } from '@/lib/generated-files';
+import { findDomTextSelection, findUniqueTextSelection, normalizeEditableMarkdown } from '@/lib/wiki-selection';
+import type { WikiSelectionApplyReceipt, WikiSelectionSnapshot } from '@/types/wiki-selection';
+import { SelectionAssistantPanel } from './SelectionAssistantPanel';
 import { fileName, typeLabel } from '../preview';
 import { formatFileSize } from '../wiki-model';
 import { WikiPanel, WikiPanelHeader, WikiPrimaryButton } from './WikiChrome';
 import { FileHistoryPanel } from './FileHistoryPanel';
+import { PageLinksPanel } from './PageLinksPanel';
 
 export type WikiContentPreview = Readonly<
   | { kind: 'empty' }
@@ -28,12 +32,17 @@ export type WikiContentPanelProps = Readonly<{
   preview: WikiContentPreview;
   editorText: string;
   busy: string | null;
+  modelRef?: string;
+  onSelectionPrepare(snapshot: WikiSelectionSnapshot): Promise<void>;
+  onSelectionApplied(receipt: WikiSelectionApplyReceipt): Promise<void>;
   sourceImageIndex?: number;
   resolveImageSrc?(src: string, filePath: string): Promise<string | null> | string | null;
   onEditorTextChange(value: string): void;
   onSave(): void;
   onEmbedPage(): void;
   onRestored(projectId: string, path: string): Promise<void>;
+  onOpenFile(path: string): Promise<void>;
+  onCreated(projectId: string, path: string): Promise<void>;
 }>;
 
 function binarySource(preview: Extract<WikiContentPreview, { kind: 'binary' }>): string {
@@ -65,29 +74,33 @@ function Notice({ title, description }: Readonly<{ title: string; description: s
   );
 }
 
-function EditorTextArea(props: Readonly<{ value: string; onChange(value: string): void; className?: string }>): JSX.Element {
+function EditorTextArea(props: Readonly<{ value: string; onChange(value: string): void; onSelect?(markdown: string, start: number, end: number): void; className?: string }>): JSX.Element {
   return (
     <Textarea
       value={props.value}
       onChange={(event) => props.onChange(event.target.value)}
+      onSelect={props.onSelect ? (event) => props.onSelect!(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd) : undefined}
       className={`h-full min-h-[500px] resize-none rounded-none border-0 bg-transparent p-6 font-mono text-sm leading-6 shadow-none focus-visible:ring-0 ${props.className ?? ''}`}
       spellCheck={false}
     />
   );
 }
 
-function MarkdownDocument(props: Readonly<{ path: string; content: string; resolveImageSrc?: WikiContentPanelProps['resolveImageSrc'] }>): JSX.Element {
-  return <MarkdownPreview filePath={props.path} markdown={props.content} resolveImageSrc={props.resolveImageSrc} />;
+function MarkdownDocument(props: Readonly<{ path: string; content: string; resolveImageSrc?: WikiContentPanelProps['resolveImageSrc']; onTextSelection?(selection: Selection | null, root: HTMLDivElement): void }>): JSX.Element {
+  return <MarkdownPreview filePath={props.path} markdown={props.content} resolveImageSrc={props.resolveImageSrc} sourceMapping={Boolean(props.onTextSelection)} onTextSelection={props.onTextSelection} />;
 }
 
 function PreviewBody(props: Readonly<{
   preview: WikiContentPreview;
   editorText: string;
+  editing: boolean;
   resolveImageSrc?: WikiContentPanelProps['resolveImageSrc'];
   onEditorTextChange(value: string): void;
+  onEditorSelection(markdown: string, start: number, end: number): void;
+  onTextSelection(selection: Selection | null, root: HTMLDivElement): void;
 }>): JSX.Element {
   const { t } = useTranslation('wiki');
-  const { preview, editorText, resolveImageSrc, onEditorTextChange } = props;
+  const { preview, editorText, editing, resolveImageSrc, onEditorTextChange, onEditorSelection, onTextSelection } = props;
   const unsupportedTitle = t('content.inlineUnsupported');
   const unsupportedDescription = (contentType: FileContentType, ext: string) => t('content.inlineUnsupportedDescription', { type: typeLabel(contentType, ext) });
 
@@ -126,14 +139,9 @@ function PreviewBody(props: Readonly<{
   }
 
   if (preview.contentType === 'markdown') {
-    return (
-      <div className="grid h-full min-h-0 md:grid-cols-2">
-        <EditorTextArea value={editorText} onChange={onEditorTextChange} className="border-r border-border/70" />
-        <div className="min-h-0 overflow-auto bg-background">
-          <MarkdownDocument path={preview.path} content={editorText} resolveImageSrc={resolveImageSrc} />
-        </div>
-      </div>
-    );
+    return editing
+      ? <EditorTextArea value={editorText} onChange={onEditorTextChange} onSelect={onEditorSelection} />
+      : <MarkdownDocument path={preview.path} content={editorText} resolveImageSrc={resolveImageSrc} onTextSelection={onTextSelection} />;
   }
 
   if (preview.contentType === 'html') {
@@ -168,6 +176,46 @@ export function WikiContentPanel(props: WikiContentPanelProps): JSX.Element {
   const size = preview.kind === 'binary' ? formatFileSize(preview.size) : '';
   const previewRef = useRef<HTMLDivElement>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [linksOpen, setLinksOpen] = useState(false);
+  const [selectionRequest, setSelectionRequest] = useState<{ snapshot: WikiSelectionSnapshot; key: number; scope: string } | null>(null);
+  const selectionKey = useRef(0);
+  const scope = `${props.projectId}\n${selectedPath}\n${preview.kind}\n${editing}`;
+  const editableMarkdown = embeddable && editing ? normalizeEditableMarkdown(editorText) : editorText;
+  const selection = selectionRequest?.scope === scope ? selectionRequest : null;
+
+  useEffect(() => {
+    if (embeddable && editing && editableMarkdown !== editorText) onEditorTextChange(editableMarkdown);
+  }, [embeddable, editing, editableMarkdown, editorText, onEditorTextChange]);
+
+  const captureSelection = useCallback((snapshot: WikiSelectionSnapshot | null) => {
+    if (!snapshot?.selectedText.trim()) { setSelectionRequest(null); return; }
+    setLinksOpen(false);
+    setSelectionRequest((current) => current?.scope === scope
+      && current.snapshot.prefix === snapshot.prefix && current.snapshot.selectedText === snapshot.selectedText
+      && current.snapshot.suffix === snapshot.suffix && current.snapshot.sourceMapped === snapshot.sourceMapped
+      ? current : { snapshot, key: ++selectionKey.current, scope });
+  }, [scope]);
+
+  const captureEditorSelection = useCallback((markdown: string, start: number, end: number) => {
+    if (!embeddable || start === end) { captureSelection(null); return; }
+    const value = normalizeEditableMarkdown(markdown);
+    if (value !== editorText) onEditorTextChange(value);
+    captureSelection({ prefix: value.slice(0, start), selectedText: value.slice(start, end), suffix: value.slice(end), sourceMapped: true });
+  }, [captureSelection, editorText, embeddable, onEditorTextChange]);
+
+  const captureRenderedSelection = useCallback((browserSelection: Selection | null, root: HTMLDivElement) => {
+    if (!embeddable || !browserSelection) { captureSelection(null); return; }
+    const rendered = browserSelection.toString().trim();
+    const mapped = findDomTextSelection(editableMarkdown, browserSelection, root)
+      ?? findUniqueTextSelection(editableMarkdown, rendered);
+    captureSelection(mapped ?? { prefix: '', selectedText: rendered, suffix: '', sourceMapped: false });
+  }, [captureSelection, editableMarkdown, embeddable]);
+
+  const changeEditorText = useCallback((value: string) => {
+    setSelectionRequest(null);
+    onEditorTextChange(embeddable ? normalizeEditableMarkdown(value) : value);
+  }, [embeddable, onEditorTextChange]);
 
   useEffect(() => {
     if (preview.kind !== 'source' || props.sourceImageIndex === undefined || !previewRef.current) return;
@@ -203,6 +251,13 @@ export function WikiContentPanel(props: WikiContentPanelProps): JSX.Element {
         )}
         actions={(
           <>
+            {embeddable ? (
+              <Button type="button" size="sm" variant="ghost" onClick={() => { setSelectionRequest(null); setLinksOpen(false); setEditing((value) => !value); }} disabled={busy !== null} className="h-8 rounded-full" aria-label={t(editing ? 'content.preview' : 'content.edit')}>
+                {editing ? <Eye className="h-4 w-4" aria-hidden="true" /> : <Pencil className="h-4 w-4" aria-hidden="true" />}
+                {t(editing ? 'content.preview' : 'content.edit')}
+              </Button>
+            ) : null}
+            {embeddable ? <Button type="button" size="sm" variant="ghost" className="h-8 rounded-full" aria-pressed={linksOpen} onClick={() => { setSelectionRequest(null); setLinksOpen((value) => !value); }}><Link2 className="h-4 w-4" />{t('pageLinks.title')}</Button> : null}
             {editable ? <Button size="sm" variant="ghost" disabled={busy !== null} className="h-8 rounded-full" onClick={() => setHistoryOpen(true)}><Clock3 className="h-4 w-4" />{t('history.title', { defaultValue: '文件历史' })}</Button> : null}
             {editable ? (
               <Button size="sm" variant="ghost" onClick={onSave} disabled={busy !== null} className="h-8 rounded-full">
@@ -219,8 +274,12 @@ export function WikiContentPanel(props: WikiContentPanelProps): JSX.Element {
           </>
         )}
       />
-      <div ref={previewRef} className="min-h-0 flex-1 overflow-hidden">
-        {hasSelectedPage ? <PreviewBody preview={preview} editorText={editorText} resolveImageSrc={resolveImageSrc} onEditorTextChange={onEditorTextChange} /> : <EmptyState />}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div ref={previewRef} className="relative min-w-0 flex-1 overflow-hidden">
+          {hasSelectedPage ? <PreviewBody preview={preview} editorText={editableMarkdown} editing={editing} resolveImageSrc={resolveImageSrc} onEditorTextChange={changeEditorText} onEditorSelection={captureEditorSelection} onTextSelection={captureRenderedSelection} /> : <EmptyState />}
+          {embeddable && !selection && linksOpen ? <PageLinksPanel projectId={props.projectId} relativePath={selectedPath} busy={busy} unsaved={editorText !== preview.content} onOpenFile={props.onOpenFile} onCreated={props.onCreated} onClose={() => setLinksOpen(false)} /> : null}
+        </div>
+        {embeddable && selection ? <SelectionAssistantPanel key={selection.key} projectId={props.projectId} relativePath={selectedPath} selection={selection.snapshot} modelRef={props.modelRef} busy={busy} onPrepare={props.onSelectionPrepare} onApplied={props.onSelectionApplied} onOpenFile={props.onOpenFile} onClose={() => setSelectionRequest(null)} /> : null}
       </div>
       <Dialog.Root open={historyOpen} onOpenChange={setHistoryOpen}>
         <Dialog.Portal>

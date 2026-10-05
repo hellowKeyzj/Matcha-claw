@@ -1,12 +1,12 @@
 use serde::Serialize;
 
 pub use super::state::SessionDeliveryContext;
-use super::state::SessionSourceBinding;
+use super::state::{SessionIdentity, SessionSourceBinding};
+use crate::goal::{SessionGoalReceipt, SessionSendIntent};
 
 pub use super::endpoint::NativeEndpoint;
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
-const MAX_SESSION_KEY_BYTES: usize = 4096;
 const MAX_ENDPOINT_SESSION_ID_BYTES: usize = 4096;
 const MAX_RUN_ID_BYTES: usize = 4096;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
@@ -41,13 +41,12 @@ impl Attachment {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionSendCommand {
-    pub endpoint: NativeEndpoint,
-    pub session_key: String,
+    pub identity: SessionIdentity,
     /// Peer-native session binding. OpenClaw sends use `session_key`; Matcha sends use
     /// this native handle when it is present.
     pub endpoint_session_id: Option<String>,
-    pub route_key: String,
     pub message: String,
+    pub intent: Option<SessionSendIntent>,
     pub run_id: Option<String>,
     pub idempotency_key: Option<String>,
     /// Upper-layer delivery hint; it is never projected into native wire or outcome selection.
@@ -62,10 +61,8 @@ pub struct SessionSendCommand {
 
 impl SessionSendCommand {
     pub fn try_new(
-        endpoint: NativeEndpoint,
-        session_key: String,
+        identity: SessionIdentity,
         endpoint_session_id: Option<String>,
-        route_key: String,
         message: String,
         run_id: Option<String>,
         idempotency_key: Option<String>,
@@ -73,12 +70,11 @@ impl SessionSendCommand {
         attachments: Vec<Attachment>,
         trace_id: Option<String>,
     ) -> Result<Self, InvalidCommand> {
-        if !valid_bounded_text(&session_key, MAX_SESSION_KEY_BYTES)
+        if identity.validate().is_err()
             || !valid_optional_identity(
                 endpoint_session_id.as_deref(),
                 MAX_ENDPOINT_SESSION_ID_BYTES,
             )
-            || !valid_bounded_text(&route_key, MAX_SESSION_KEY_BYTES)
             || message.len() > MAX_MESSAGE_BYTES
             || !valid_optional_identity(run_id.as_deref(), MAX_RUN_ID_BYTES)
             || !valid_optional_identity(idempotency_key.as_deref(), MAX_IDEMPOTENCY_KEY_BYTES)
@@ -93,11 +89,10 @@ impl SessionSendCommand {
             return Err(InvalidCommand);
         }
         Ok(Self {
-            endpoint,
-            session_key,
+            identity,
             endpoint_session_id,
-            route_key,
             message,
+            intent: None,
             run_id,
             idempotency_key,
             deliver,
@@ -109,12 +104,27 @@ impl SessionSendCommand {
         })
     }
 
+    pub fn with_intent(mut self, intent: SessionSendIntent) -> Result<Self, InvalidCommand> {
+        let SessionSendIntent::GoalStart { issued_at_ms } = &intent;
+        if *issued_at_ms > crate::state::MAX_SAFE_INTEGER
+            || self.message.trim().is_empty()
+            || self.message.encode_utf16().count() > 16_000
+            || !self.idempotency_key.as_deref().is_some_and(|id| valid_bounded_text(id, 128))
+            || self.run_id.is_some()
+            || self.system_provenance_receipt.is_some()
+        {
+            return Err(InvalidCommand);
+        }
+        self.intent = Some(intent);
+        Ok(self)
+    }
+
     pub fn requested_run_id(&self) -> Option<&str> {
         self.run_id.as_deref()
     }
 
     pub fn request_run_identity(&self) -> Option<&str> {
-        self.run_id.as_deref().or(self.idempotency_key.as_deref())
+        if self.intent.is_some() { None } else { self.run_id.as_deref().or(self.idempotency_key.as_deref()) }
     }
 
     pub fn trace_id(&self) -> Option<&str> {
@@ -133,7 +143,7 @@ impl SessionSendCommand {
         mut self,
         receipt: String,
     ) -> Result<Self, InvalidCommand> {
-        if receipt.is_empty() || receipt.len() > MAX_MESSAGE_BYTES {
+        if self.intent.is_some() || receipt.is_empty() || receipt.len() > MAX_MESSAGE_BYTES {
             return Err(InvalidCommand);
         }
         self.system_provenance_receipt = Some(receipt);
@@ -151,6 +161,7 @@ impl SessionSendCommand {
     }
 
     pub fn with_resolved_run_id(mut self, run_id: String) -> Result<Self, InvalidCommand> {
+        if self.intent.is_some() { return Err(InvalidCommand); }
         if !valid_bounded_text(&run_id, MAX_RUN_ID_BYTES) {
             return Err(InvalidCommand);
         }
@@ -235,6 +246,8 @@ pub enum SessionSendOutcome {
     Succeeded {
         run_id: String,
         status: SessionSendStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        goal: Option<SessionGoalReceipt>,
     },
     #[serde(rename = "target_rejected")]
     Rejected,
@@ -248,7 +261,6 @@ pub enum SessionSendOutcome {
 pub enum SessionSendStatus {
     Started,
 }
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -308,6 +320,7 @@ mod tests {
             serde_json::to_value(SessionSendOutcome::Succeeded {
                 run_id: "run-1".into(),
                 status: super::SessionSendStatus::Started,
+                goal: None,
             })
             .unwrap(),
             json!({ "outcome": "succeeded", "runId": "run-1", "status": "started" })

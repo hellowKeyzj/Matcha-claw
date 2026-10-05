@@ -3,6 +3,7 @@ pub mod admission;
 pub mod command;
 pub mod coordinator;
 pub mod handle;
+mod member_introduction;
 pub mod query;
 mod receipt_router;
 mod run_actor;

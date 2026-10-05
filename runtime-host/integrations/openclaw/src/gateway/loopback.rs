@@ -16,7 +16,8 @@ use tokio::sync::Mutex;
 use crate::{
     gateway::request::{
         OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest,
-        OpenClawQuestionResolveGatewayRequest, decode_browser_request, decode_mcp_app_request,
+        OpenClawQuestionListGatewayRequest, OpenClawQuestionResolveGatewayRequest,
+        decode_browser_request, decode_mcp_app_request, decode_question_list_request,
         decode_question_resolve_request,
     },
     port::OpenClawGatewayRequestOutcome,
@@ -37,6 +38,7 @@ const BROWSER_SCOPE: &str = "openclaw.browser";
 const MCP_APP_SCOPE: &str = "openclaw.mcpApp";
 const QUESTION_SCOPE: &str = "openclaw.question";
 const BROWSER_OPERATION: &str = "browser.request";
+const QUESTION_LIST_OPERATION: &str = "question.list";
 const QUESTION_RESOLVE_OPERATION: &str = "question.resolve";
 const BROWSER_SUBJECT: &str = "openclaw-browser";
 const MCP_APP_SUBJECT: &str = "openclaw-mcp-app";
@@ -112,6 +114,11 @@ pub trait OpenClawGatewayCapabilityPort: Send + Sync {
         &self,
         request: OpenClawMcpAppGatewayRequest,
         call: Option<GatewayCallContext>,
+    ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
+
+    fn question_list(
+        &self,
+        request: OpenClawQuestionListGatewayRequest,
     ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
 
     fn question_resolve(
@@ -225,10 +232,17 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
         return unauthorized();
     }
 
+    if let Invocation::QuestionList(request) = decoded.invocation {
+        return match dependencies.gateway.question_list(request).await {
+            Ok(outcome) => response_for_outcome(outcome),
+            Err(_) => unavailable(),
+        };
+    }
     let operation = match &decoded.invocation {
         Invocation::Browser(_) => GatewayOperation::BrowserRequest,
         Invocation::McpApp(_) => GatewayOperation::McpAppRequest,
         Invocation::QuestionResolve(_) => GatewayOperation::QuestionResolve,
+        Invocation::QuestionList(_) => unreachable!("question reads return before mutation audit"),
     };
     let call = match &dependencies.calls {
         Some(calls) => match begin_gateway_call(calls, operation).await {
@@ -241,6 +255,7 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
         Invocation::Browser(request) => dependencies.gateway.browser_request(request, call).await,
         Invocation::McpApp(request) => dependencies.gateway.mcp_app_request(request, call).await,
         Invocation::QuestionResolve(request) => dependencies.gateway.question_resolve(request, call).await,
+        Invocation::QuestionList(_) => unreachable!("question reads return before mutation audit"),
     };
     match outcome {
         Ok(outcome) => response_for_outcome(outcome),
@@ -272,6 +287,7 @@ struct RouteAuthorization {
 enum Invocation {
     Browser(OpenClawBrowserGatewayRequest),
     McpApp(OpenClawMcpAppGatewayRequest),
+    QuestionList(OpenClawQuestionListGatewayRequest),
     QuestionResolve(OpenClawQuestionResolveGatewayRequest),
 }
 
@@ -315,6 +331,16 @@ impl DecodeRequest {
                     ),
                 })
             }
+            ("openclaw.question", QUESTION_LIST_OPERATION) => Ok(Self {
+                authorization: RouteAuthorization {
+                    scope: QUESTION_SCOPE,
+                    capability: QUESTION_LIST_OPERATION.to_owned(),
+                    subject: QUESTION_SUBJECT,
+                },
+                invocation: Invocation::QuestionList(
+                    decode_question_list_request(wire.input).map_err(|_| DecodeError)?,
+                ),
+            }),
             ("openclaw.question", QUESTION_RESOLVE_OPERATION) => Ok(Self {
                 authorization: RouteAuthorization {
                     scope: QUESTION_SCOPE,

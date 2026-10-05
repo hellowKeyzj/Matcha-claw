@@ -1,23 +1,34 @@
-use std::{net::IpAddr, time::Duration};
+mod local;
+
+use std::{net::IpAddr, path::PathBuf, time::Duration};
 
 use reqwest::{Client, RequestBuilder, Url};
 use serde_json::{Value, json};
 
-use crate::search_config::{EmbeddingConfig, EmbeddingCredentials};
+use crate::search_config::{EmbeddingConfig, EmbeddingCredentials, EmbeddingSource};
+
+pub(crate) use local::{DIMENSION as LOCAL_DIMENSION, MODEL as LOCAL_MODEL};
 
 pub struct Embedder {
     client: Client,
+    local: local::LocalMiniLm,
 }
 
 impl Embedder {
     pub fn new() -> Result<Self, String> {
         Ok(Self {
+            local: local::LocalMiniLm::default(),
             client: Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(8))
                 .build()
                 .map_err(|_| "failed to initialize embedding HTTP client".to_owned())?,
         })
+    }
+
+    pub(crate) fn with_local_assets(mut self, assets_root: PathBuf) -> Self {
+        self.local = self.local.with_assets(assets_root);
+        self
     }
 
     pub async fn embed(
@@ -27,6 +38,16 @@ impl Embedder {
         credentials: &EmbeddingCredentials,
         max_retries: usize,
     ) -> Result<Vec<f32>, String> {
+        if !config.is_ready() {
+            return Err("wiki embedding is disabled or not configured".to_owned());
+        }
+        if config.source == EmbeddingSource::LocalMiniLm {
+            return self
+                .local
+                .embed(vec![text.to_owned()])
+                .await
+                .map(|mut vectors| vectors.remove(0));
+        }
         let mut current = text;
         for attempt in 0..=max_retries {
             match self.embed_once(current, config, credentials).await {
@@ -62,6 +83,12 @@ impl Embedder {
     ) -> Result<Vec<Vec<f32>>, String> {
         if texts.is_empty() || texts.len() > 64 {
             return Err("embedding batch must contain between 1 and 64 inputs".to_owned());
+        }
+        if !config.is_ready() {
+            return Err("wiki embedding is disabled or not configured".to_owned());
+        }
+        if config.source == EmbeddingSource::LocalMiniLm {
+            return self.local.embed(texts.to_vec()).await;
         }
         if !supports_batch(config) {
             return Err("embedding provider does not support OpenAI-compatible batches".to_owned());
@@ -193,7 +220,7 @@ impl Embedder {
 }
 
 pub(crate) fn supports_batch(config: &EmbeddingConfig) -> bool {
-    !is_google(config) && !is_doubao(config)
+    config.source == EmbeddingSource::LocalMiniLm || (!is_google(config) && !is_doubao(config))
 }
 
 fn is_google(config: &EmbeddingConfig) -> bool {

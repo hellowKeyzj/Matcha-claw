@@ -48,9 +48,23 @@ Evidence: [capabilities.ts](../../electron/api/routes/capabilities.ts)、[cron.t
 
 Evidence: [capabilities.ts](../../electron/api/routes/capabilities.ts#L164-L283)、[route-boundary.ts](../../electron/api/route-boundary.ts#L201-L207)、[runtime-topology-routes.ts](../../runtime-host/api/routes/runtime-topology-routes.ts#L12-L51)。
 
-## C. session legacy routes
+## C. Session public observation / signed routes
 
-Session mutation is now capability-first. The child nevertheless registers these legacy paths, so the rejection/read behavior remains part of the current contract.
+Session 操作经 `/api/capabilities/execute`；Main 校验后投影到 fixed signed Sessions module routes。新增 observe/release 不直接放开 legacy Renderer paths。[VERIFY: electron/api/routes/sessions.ts:78] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/mod.rs:73-85]
+
+| Signed route | 公共 contract |
+| --- | --- |
+| `POST /api/sessions/observe` | id=`session.management`、operationId=`sessions.observe`；scope/target=`{kind:"session",identity:I}`；input=`{sessionIdentity:I,sessionKey:I.sessionKey,leaseId,limit?}`，limit latest-only 1–200，无 public window。200 strict `{leaseId,view}`；待完成观察被同 lease 主动释放时返回 strict `{leaseId,outcome:"released"}`，无 view，不代表 runtime 不可用。 |
+| `POST /api/sessions/release` | 同 family/identity，operationId=`sessions.release`，input 无 limit；200 strict `{outcome:"released"|"not-found"}`；只关接收需求，不 abort。 |
+| `POST /api/sessions/send` | id=`session.prompt`、operationId=`sessions.send`；三处完整 identity 匹配，input=`{identity:I,endpointSessionId?,message,runId?,idempotencyKey?,deliver?,attachments}`，无 routeKey。既有 response 不变。 |
+| `POST /api/sessions/abort` | id=`session.abort`、operationId=`sessions.abort`；三处完整 identity 匹配，input=`{identity:I,endpointSessionId?,runId?,approvalIds?}`；无审批不发空 approvalIds，既有 response 不变。 |
+| `GET /api/sessions/events` | signed Session SSE；delta 与成功同步 commit resync，Main 只向 authorized complete identity 的页面投递，非全窗口广播。 |
+
+observe/release signed decision scope=`sessions:read`、capability=`session.management`、subject=`session-timeline`、endpoint 为 exact route；invalid/rejected400，unavailable/unknown503。leaseId 不替代身份或 native 授权，opaque history cursor/generation 不公开。[VERIFY: runtime-host/modules/sessions/src/adapters/loopback/observation.rs:9-76] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/observation.ts:9-76] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/send.ts:22-35] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/abort.ts:12-41]
+
+### Legacy session routes
+
+Session mutation is capability-first；下列 legacy read/rejection 与新增 signed active routes 分开记录，不以旧注册清单推断新增 producer 已完成。
 
 | Method | Path | Classification | Current behavior |
 | --- | --- | --- | --- |
@@ -63,6 +77,17 @@ Session mutation is now capability-first. The child nevertheless registers these
 Electron’s public Renderer allowlist does not currently expose these legacy session paths; Renderer uses the capability contract in [renderer-api.md](renderer-api.md)。
 
 Evidence: [session-routes.ts](../../runtime-host/api/routes/session-routes.ts#L36-L144)。
+
+## OpenClaw 普通问答
+
+沿用 `POST /api/capabilities/execute`：id=`openclaw.question`，scope=`{kind:"runtime-instance",endpoint:{kind:"native-runtime",runtimeAdapterId:"openclaw",runtimeInstanceId:"local"}}`，target=`null`。输入中的完整 `sessionIdentity` 必须属于该 endpoint；Electron 使用当前 Session page 授权，不要求 list 先取得 observe lease。[VERIFY: src/types/openclaw-question.ts:43-61] [VERIFY: electron/api/routes/capabilities.ts:470-484]
+
+| operationId | input | 成功结果 |
+| --- | --- | --- |
+| `question.list` | `{sessionIdentity}` | `{questions: OpenClawPendingQuestionRecord[]}`；只含原生 pending、精确 agentId/sessionKey 匹配且无 secret-store 标记的普通问题。 |
+| `question.resolve` | `{sessionIdentity,id,answers:{answers:Record<questionId,string[]>},resolvedBy?,resolutionId?}` | `{status:"answered",answers:{answers:Record<questionId,string[]>}}`；id 是实际 native request ID。 |
+
+固定经 OpenClaw Driver 与 Gateway。resolve 先私有 `question.get` 核对 id、完整会话归属、pending 与非秘密状态，再提交原生 resolve；`get`/`cancel` 不新增公共 operation，Matcha 不启用。list 是只读查询，不建立 mutation call-log；resolve 保留原审计路径。未知或不可用不伪装回答成功。[VERIFY: runtime-host/integrations/openclaw/src/port/control.rs:158-224] [VERIFY: runtime-host/integrations/openclaw/src/gateway/loopback.rs:235-259]
 
 ## D. OpenClaw / provider / settings / skills / channel reads
 

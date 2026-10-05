@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex as StdMutex,
+        Arc, Mutex as StdMutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -13,7 +13,8 @@ use connectors::{
     ConnectorSecretRef, ConnectorSecretResolution, ConnectorSecretResolverPort,
     ConnectorSecretValue, InvalidConnectorSecretRef,
 };
-use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
+use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute, OwnerRuntimeHandle};
+use super::observation::Observation;
 use platform::endpoint::runtime_address::RuntimeEndpoint;
 use tokio::sync::Mutex;
 
@@ -27,7 +28,7 @@ use crate::{
     command::{
         SessionCommand, SessionEnsureOutcome, SessionEvent,
         SessionEvictOutcome, SessionIngestOutcome, SessionSendRequest, openclaw_agent_lane_key,
-        session_lane_key,
+        session_identity_lane_key,
     },
     create::{SessionCreateCommand, SessionCreateOutcome},
     delete::SessionDeleteOutcome,
@@ -78,18 +79,21 @@ pub struct SessionOwnerInput {
 #[derive(Clone)]
 pub struct SessionShared {
     runtime_directory: Arc<dyn SessionRuntimeDirectory>,
-    ownership_reader: Arc<dyn SessionOwnershipReader>,
+    pub(super) ownership_reader: Arc<dyn SessionOwnershipReader>,
     provider_handle: ProviderHandle,
     private_resolver: Arc<StdMutex<Arc<dyn ConnectorSecretResolverPort>>>,
     pub(super) snapshot: Arc<ArcSwap<SessionSnapshot>>,
     snapshot_writer: Arc<Mutex<()>>,
-    session_delta: Option<SessionDeltaSource>,
+    pub(super) session_delta: Option<SessionDeltaSource>,
     terminal_hook: Option<Arc<dyn SessionTerminalHook>>,
-    epoch: u64,
+    pub(super) epoch: u64,
+    pub(super) observations: Arc<StdMutex<HashMap<String, Observation>>>,
+    pub(super) completion_handle: Arc<OnceLock<OwnerRuntimeHandle<SessionCommand, SessionQuery>>>,
+    pub(super) read_tasks: Arc<StdMutex<Vec<foundation::execution::OwnedTask<()>>>>,
 }
 
 pub struct SessionLane {
-    state: Option<SessionState>,
+    pub(super) state: Option<SessionState>,
 }
 
 #[cfg(test)]
@@ -119,9 +123,16 @@ impl SessionOwner {
             session_delta,
             terminal_hook,
             epoch: next_session_epoch(),
+            observations: Arc::new(StdMutex::new(HashMap::new())),
+            completion_handle: Arc::new(OnceLock::new()),
+            read_tasks: Arc::new(StdMutex::new(Vec::new())),
         };
 
         (Self { shared }, snapshot)
+    }
+
+    pub(crate) fn completion_handle_slot(&self) -> Arc<OnceLock<OwnerRuntimeHandle<SessionCommand, SessionQuery>>> {
+        Arc::clone(&self.shared.completion_handle)
     }
 
     pub fn lane_retention() -> LaneRetention {
@@ -162,16 +173,16 @@ impl SessionShared {
         }
     }
 
-    async fn store_snapshot_state(&self, state: SessionState) {
+    pub(super) async fn store_snapshot_state(&self, state: SessionState) {
         let _guard = self.snapshot_writer.lock().await;
         let mut states = self.snapshot.load().states.clone();
         let lane_key =
-            session_lane_key(state.identity().provider(), state.identity().session_key());
+            session_identity_lane_key(state.identity());
         states.insert(lane_key, state);
         self.snapshot.store(Arc::new(SessionSnapshot { states }));
     }
 
-    fn terminal_snapshots(
+    pub(super) fn terminal_snapshots(
         delta: &SessionDelta,
         state: &mut SessionState,
     ) -> Vec<SessionRunTerminalSnapshot> {
@@ -189,9 +200,7 @@ impl SessionShared {
                     return None;
                 }
                 Some(SessionRunTerminalSnapshot {
-                    provider: state.identity().provider(),
-                    session_key: delta.session_key.clone(),
-                    route_key: delta.route_key.clone(),
+                    identity: state.identity().clone(),
                     source_binding: state.source_binding().clone(),
                     native_run_id: run_id.clone(),
                     delivery_context: state.run_delivery_contexts.remove(run_id),
@@ -202,41 +211,19 @@ impl SessionShared {
             .collect()
     }
 
-    fn emit_session_delta(&self, delta: &SessionDelta, terminals: Vec<SessionRunTerminalSnapshot>) {
+    pub(super) fn emit_session_delta(&self, delta: &SessionDelta, terminals: Vec<SessionRunTerminalSnapshot>) {
         if let Some(source) = &self.session_delta {
             source.publish(delta.clone());
         }
         self.emit_terminals(terminals);
     }
 
-    fn emit_terminals(&self, terminals: Vec<SessionRunTerminalSnapshot>) {
+    pub(super) fn emit_terminals(&self, terminals: Vec<SessionRunTerminalSnapshot>) {
         if let Some(hook) = &self.terminal_hook {
             for terminal in terminals {
                 hook.run_terminal(terminal);
             }
         }
-    }
-
-    fn hydrated_terminal_snapshots(state: &mut SessionState) -> Vec<SessionRunTerminalSnapshot> {
-        if !state.is_team_source() {
-            return Vec::new();
-        }
-        state
-            .final_assistant_texts_by_run()
-            .into_iter()
-            .map(
-                |(run_id, final_assistant_text)| SessionRunTerminalSnapshot {
-                    provider: state.identity().provider(),
-                    session_key: state.identity().session_key().to_owned(),
-                    route_key: None,
-                    source_binding: state.source_binding().clone(),
-                    delivery_context: state.run_delivery_contexts.remove(&run_id),
-                    native_run_id: run_id,
-                    phase: RunPhase::Completed,
-                    final_assistant_text: Some(final_assistant_text),
-                },
-            )
-            .collect()
     }
 
     async fn clear_snapshot_state(&self, lane_key: &str) -> bool {
@@ -326,11 +313,7 @@ impl SessionShared {
     }
 
     async fn handle_timeline(&self, command: timeline::Command) -> timeline::Outcome {
-        let endpoint = match command.provider() {
-            timeline::Provider::OpenClaw => RuntimeDriverIdentity::open_claw().endpoint(),
-            timeline::Provider::Matcha => RuntimeDriverIdentity::matcha_agent().endpoint(),
-        };
-        let driver = match self.running_session_driver(Some(endpoint)) {
+        let driver = match self.running_session_driver(identity_endpoint(command.identity())) {
             Ok(driver) => driver,
             Err(failure) => {
                 return timeline::Outcome::unavailable(timeline_driver_failure(failure));
@@ -364,11 +347,7 @@ impl SessionShared {
     }
 
     async fn handle_content(&self, command: ContentCommand) -> ContentOutcome {
-        let endpoint = match command.provider() {
-            timeline::Provider::OpenClaw => RuntimeDriverIdentity::open_claw().endpoint(),
-            timeline::Provider::Matcha => RuntimeDriverIdentity::matcha_agent().endpoint(),
-        };
-        let driver = match self.running_session_driver(Some(endpoint)) {
+        let driver = match self.running_session_driver(identity_endpoint(command.identity())) {
             Ok(driver) => driver,
             Err(failure) => {
                 return ContentOutcome::unavailable(timeline_driver_failure(failure));
@@ -509,7 +488,7 @@ impl SessionShared {
         let mut snapshot = self.snapshot.load().states.clone();
         for state in states {
             let lane_key =
-                session_lane_key(state.identity().provider(), state.identity().session_key());
+                session_identity_lane_key(state.identity());
             let endpoint_session_id = state.native_session_id().map(str::to_owned);
             let state = match snapshot.remove(&lane_key) {
                 Some(existing) if existing.native_session_id().is_some() => existing,
@@ -638,11 +617,11 @@ impl SessionShared {
         &self,
         command: &SessionSendCommand,
     ) -> Result<(), SessionSendOutcome> {
-        if command.endpoint != crate::send::NativeEndpoint::MatchaAgentLocal {
+        if command.identity.provider() != SessionProvider::MatchaAgent {
             return Ok(());
         }
         let driver = self
-            .running_session_driver(command.endpoint.runtime_endpoint())
+            .running_session_driver(identity_endpoint(&command.identity))
             .map_err(send_driver_failure)?;
         let Some(ops) = driver.session_ops() else {
             return Err(SessionSendOutcome::Unsupported);
@@ -733,6 +712,34 @@ impl SessionLane {
                 let outcome = self.handle_ingest(shared, &key, identity, event).await;
                 let _ = reply.send(outcome);
             }
+            SendCompleted { command, goal_demand, outcome, reply, call } => {
+                let outcome = super::goal::validate_start_outcome(&command, outcome);
+                if let Some((lease, native_session_id)) = &goal_demand {
+                    let received = match &outcome {
+                        SessionSendOutcome::Succeeded { goal: Some(receipt), .. } => Some(receipt.session_id.as_str()),
+                        _ => native_session_id.as_deref(),
+                    };
+                    if !self.goal_completion_matches(&command.identity, native_session_id.as_deref(), received) {
+                        self.finish_goal_receive(shared, &command.identity, lease, None);
+                        self.close_if_idle(shared, &command.identity);
+                        crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unknown).await;
+                        return;
+                    }
+                }
+                self.complete_send(shared, command, goal_demand, &outcome).await;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
+            Goal { command, reply } => self.start_goal(shared, command, reply, call).await,
+            GoalCompleted { command, demand_lease, outcome, reply, call } => {
+                let outcome = self.complete_goal(shared, &command, &demand_lease, outcome).await;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
+            SyncCompleted { identity, generation, result } => self.sync_completed(shared, identity, generation, result).await,
+            ObservationClosed { identity, generation, restarted } => self.observation_closed(shared, identity, generation, restarted).await,
+            Release { identity, lease_id, reply } => {
+                let outcome = self.release(shared, identity, lease_id).await;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
             Evict { reply, .. } => {
                 let outcome = self.handle_evict(shared, key).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
@@ -743,8 +750,7 @@ impl SessionLane {
             }
             Send { request } => match request {
                 SessionSendRequest::Session { command, reply } => {
-                    let outcome = self.handle_send(shared, command).await;
-                    crate::call::reply(call.as_ref(), reply, outcome).await;
+                    self.start_send(shared, command, reply, call).await;
                 }
             },
             Delete { command, reply } => {
@@ -781,7 +787,7 @@ impl SessionLane {
         identity: SessionIdentity,
         source_binding: SessionSourceBinding,
     ) -> SessionEnsureOutcome {
-        let expected_key = session_lane_key(identity.provider(), identity.session_key());
+        let expected_key = session_identity_lane_key(&identity);
         if expected_key != key {
             return SessionEnsureOutcome::Failed;
         }
@@ -831,15 +837,42 @@ impl SessionLane {
         event: SessionEvent,
     ) -> SessionIngestOutcome {
         let session_key = event.binding.session_key().to_owned();
-        if session_lane_key(identity.provider(), &session_key) != key {
+        if crate::trace::enabled() {
+            crate::trace::log_unscoped("sessions.ingest.input", serde_json::json!({
+                "identity": crate::trace::identity_shape(&identity),
+                "bindingIdentity": crate::trace::identity_shape(event.binding.identity()),
+                "generation": event.binding.generation(), "currentGeneration": shared.observation_generation(&identity),
+                "sourceEpoch": event.binding.source_epoch(), "nativeCursor": event.cursor,
+                "contiguous": event.binding.source_cursor_contiguous(),
+                "runHash": event.run_id.as_deref().map(crate::trace::fingerprint),
+                "changes": crate::trace::changes_shape(&event.changes),
+                "before": self.state.as_ref().map(|state| crate::trace::view_shape(&state.view())),
+            }));
+        }
+        if session_identity_lane_key(&identity) != key || event.binding.identity() != &identity
+            || event.binding.generation().is_some_and(|generation| shared.observation_generation(&identity) != Some(generation)) {
+            if crate::trace::enabled() {
+                crate::trace::log_unscoped("sessions.ingest.reject", serde_json::json!({
+                    "identity": crate::trace::identity_shape(&identity), "reason": "identity_or_generation_mismatch",
+                    "laneMatches": session_identity_lane_key(&identity) == key,
+                    "bindingMatches": event.binding.identity() == &identity,
+                    "generation": event.binding.generation(), "currentGeneration": shared.observation_generation(&identity),
+                }));
+            }
             return SessionIngestOutcome::Rejected {
                 reason: "Session key mismatch".to_owned(),
             };
         }
         let provider = identity.endpoint.provider();
+        let receive_changes = event.changes.clone();
 
         if let Some(state) = &self.state {
             if state.identity().provider() != provider {
+                if crate::trace::enabled() {
+                    crate::trace::log_unscoped("sessions.ingest.reject", serde_json::json!({
+                        "identity": crate::trace::identity_shape(&identity), "reason": "provider_mismatch",
+                    }));
+                }
                 return SessionIngestOutcome::Rejected {
                     reason: "Provider mismatch".to_owned(),
                 };
@@ -860,11 +893,19 @@ impl SessionLane {
                     *reason,
                 )
                 .await;
-            return Self::map_apply_result(result);
+            self.recover_observation(shared, &identity);
+            return Self::map_apply_result(&identity, result);
         }
 
         if let Some(state) = &self.state {
             if state.native_source_epoch_changed(&event.binding) {
+                if crate::trace::enabled() {
+                    crate::trace::log_unscoped("sessions.ingest.source_boundary", serde_json::json!({
+                        "identity": crate::trace::identity_shape(&identity), "reason": "source_epoch_changed",
+                        "generation": event.binding.generation(), "sourceEpoch": event.binding.source_epoch(),
+                        "nativeCursor": event.cursor, "before": crate::trace::view_shape(&state.view()),
+                    }));
+                }
                 let recovery_result = self
                     .apply_recovery_to_state(
                         shared,
@@ -882,7 +923,7 @@ impl SessionLane {
                     recovery_result,
                     crate::state::SessionApplyResult::Applied(_)
                 ) {
-                    return Self::map_apply_result(recovery_result);
+                    return Self::map_apply_result(&identity, recovery_result);
                 }
             }
         }
@@ -901,7 +942,17 @@ impl SessionLane {
                 None,
             )
             .await;
-        Self::map_apply_result(result)
+        match &result {
+            crate::state::SessionApplyResult::Applied(_) | crate::state::SessionApplyResult::Consumed { .. } => {
+                shared.receive_event(&identity, &receive_changes);
+                if receive_changes.iter().any(|change| matches!(change, SessionChange::RunPhaseChanged { phase, .. } if crate::state::terminal_run_phase(*phase))) {
+                    self.sync_after_terminal(shared, &identity);
+                }
+            }
+            crate::state::SessionApplyResult::Gap { .. } | crate::state::SessionApplyResult::Rejected { .. } => self.recover_observation(shared, &identity),
+            _ => {}
+        }
+        Self::map_apply_result(&identity, result)
     }
 
     async fn apply_changes_to_state(
@@ -924,18 +975,46 @@ impl SessionLane {
         };
 
         let mut next = state;
+        let evicted = if binding.generation().is_some() {
+            let observation_changes = next.observation_changes(&binding, run_id.as_deref(), &changes);
+            match next.reserve_observation_capacity(&observation_changes) {
+                Ok(evicted) => evicted,
+                Err(_) => return crate::state::SessionApplyResult::Rejected { reason: crate::state::SessionApplyRejection::InvalidInput },
+            }
+        } else { false };
         if let (Some(run_id), Some(context)) = (&run_id, delivery_context) {
             next.run_delivery_contexts.insert(run_id.clone(), context);
         }
         let result = next.apply_native_bound(binding, run_id, native_cursor, changes);
 
-        if let crate::state::SessionApplyResult::Applied(delta) = &result {
-            let terminals = SessionShared::terminal_snapshots(delta, &mut next);
-            self.state = Some(next.clone());
-            shared.store_snapshot_state(next).await;
-            shared.emit_session_delta(delta, terminals);
+        match &result {
+            crate::state::SessionApplyResult::Applied(delta) => {
+                let terminals = SessionShared::terminal_snapshots(delta, &mut next);
+                self.state = Some(next.clone());
+                shared.store_snapshot_state(next).await;
+                if evicted {
+                    shared.emit_terminals(terminals);
+                    if let Some(source) = &shared.session_delta {
+                        let mut terminal_delta = delta.clone();
+                        terminal_delta.changes.retain(|change| matches!(change, SessionChange::RunPhaseChanged { phase, .. } if crate::state::terminal_run_phase(*phase)));
+                        if !terminal_delta.changes.is_empty() { source.publish(terminal_delta); }
+                        source.resync(delta.identity.clone(), delta.epoch, delta.seq);
+                    }
+                } else { shared.emit_session_delta(delta, terminals); }
+            }
+            crate::state::SessionApplyResult::Consumed { .. } => {
+                self.state = Some(next.clone()); shared.store_snapshot_state(next).await;
+            }
+            _ => {}
         }
 
+        if crate::trace::enabled() {
+            crate::trace::log_unscoped("sessions.ingest.after", serde_json::json!({
+                "identity": crate::trace::identity_shape(identity), "evicted": evicted,
+                "committed": matches!(&result, crate::state::SessionApplyResult::Applied(_) | crate::state::SessionApplyResult::Consumed { .. }),
+                "after": self.state.as_ref().map(|state| crate::trace::view_shape(&state.view())),
+            }));
+        }
         result
     }
 
@@ -966,6 +1045,13 @@ impl SessionLane {
             shared.store_snapshot_state(next).await;
             shared.emit_session_delta(delta, terminals);
         }
+        if crate::trace::enabled() {
+            crate::trace::log_unscoped("sessions.ingest.recovery_after", serde_json::json!({
+                "identity": crate::trace::identity_shape(identity), "reason": reason,
+                "committed": matches!(&result, crate::state::SessionApplyResult::Applied(_)),
+                "after": self.state.as_ref().map(|state| crate::trace::view_shape(&state.view())),
+            }));
+        }
 
         result
     }
@@ -979,7 +1065,7 @@ impl SessionLane {
         source_binding: &SessionSourceBinding,
     ) -> Result<SessionState, crate::state::SessionApplyResult> {
         match &self.state {
-            Some(state) if state.identity().provider() == provider => {
+            Some(state) if state.identity() == identity => {
                 let mut state = state.clone();
                 if state.bind_source(source_binding.clone()) {
                     Ok(state)
@@ -1007,11 +1093,37 @@ impl SessionLane {
         }
     }
 
-    fn map_apply_result(result: crate::state::SessionApplyResult) -> SessionIngestOutcome {
+    fn map_apply_result(identity: &SessionIdentity, result: crate::state::SessionApplyResult) -> SessionIngestOutcome {
+        if crate::trace::enabled() {
+            use crate::state::{SessionApplyRejection, SessionApplyResult};
+            let summary = match &result {
+                SessionApplyResult::Applied(delta) => serde_json::json!({
+                    "outcome": "applied", "identity": crate::trace::identity_shape(&delta.identity),
+                    "epoch": delta.epoch, "seq": delta.seq, "cursor": delta.cursor,
+                    "changes": crate::trace::changes_shape(&delta.changes),
+                }),
+                SessionApplyResult::Consumed { cursor } => serde_json::json!({ "outcome": "consumed", "nativeCursor": cursor }),
+                SessionApplyResult::Duplicate { cursor } => serde_json::json!({ "outcome": "duplicate", "nativeCursor": cursor }),
+                SessionApplyResult::Stale { cursor, received } => serde_json::json!({ "outcome": "stale", "nativeCursor": cursor, "receivedNativeCursor": received }),
+                SessionApplyResult::Gap { expected, received } => serde_json::json!({ "outcome": "gap", "expectedNativeCursor": expected, "receivedNativeCursor": received }),
+                SessionApplyResult::Rejected { reason } => serde_json::json!({ "outcome": "rejected", "reason": match reason {
+                    SessionApplyRejection::InvalidInput => "invalid_input",
+                    SessionApplyRejection::InvalidChange => "invalid_change",
+                    SessionApplyRejection::CursorConflict { .. } => "cursor_conflict",
+                    SessionApplyRejection::SequenceExhausted => "sequence_exhausted",
+                    SessionApplyRejection::EventBackpressure => "event_backpressure",
+                    SessionApplyRejection::EventSinkUnavailable => "event_sink_unavailable",
+                } }),
+            };
+            crate::trace::log_unscoped("sessions.ingest.outcome", serde_json::json!({
+                "identity": crate::trace::identity_shape(identity), "result": summary,
+            }));
+        }
         match result {
             crate::state::SessionApplyResult::Applied(delta) => {
                 SessionIngestOutcome::Applied(delta)
             }
+            crate::state::SessionApplyResult::Consumed { cursor } => SessionIngestOutcome::Consumed { cursor },
             crate::state::SessionApplyResult::Duplicate { cursor } => {
                 SessionIngestOutcome::Duplicate { cursor }
             }
@@ -1043,22 +1155,6 @@ impl SessionLane {
         }
     }
 
-    fn session_identity(
-        &self,
-        provider: SessionProvider,
-        session_key: &str,
-    ) -> Option<SessionIdentity> {
-        match &self.state {
-            Some(state)
-                if state.identity().provider() == provider
-                    && state.identity().session_key() == session_key =>
-            {
-                Some(state.identity().clone())
-            }
-            _ => SessionIdentity::new(session_key.to_owned(), provider, None),
-        }
-    }
-
     fn matcha_native_session_id(
         &mut self,
         shared: &SessionShared,
@@ -1076,11 +1172,20 @@ impl SessionLane {
             return Some(session_id.to_owned());
         }
 
-        let lane_key = session_lane_key(SessionProvider::MatchaAgent, session_key);
-        let state = shared.snapshot.load().states.get(&lane_key).cloned()?;
+        let snapshot = shared.snapshot.load();
+        let mut matching = snapshot.states.values().filter(|state| state.identity().provider() == SessionProvider::MatchaAgent && state.identity().session_key() == session_key);
+        let state = matching.next()?.clone();
+        if matching.next().is_some() { return None; }
         let session_id = state.native_session_id()?.to_owned();
         self.state = Some(state);
         Some(session_id)
+    }
+
+    fn identity_native_session_id(&mut self, shared: &SessionShared, identity: &SessionIdentity) -> Option<String> {
+        if self.state.as_ref().is_none_or(|state| state.identity() != identity) {
+            self.state = shared.snapshot.load().states.get(&session_identity_lane_key(identity)).cloned();
+        }
+        self.state.as_ref().and_then(SessionState::native_session_id).map(str::to_owned)
     }
 
     fn bind_matcha_send_command(
@@ -1088,10 +1193,10 @@ impl SessionLane {
         shared: &SessionShared,
         command: crate::send::SessionSendCommand,
     ) -> Result<crate::send::SessionSendCommand, SessionSendOutcome> {
-        if command.endpoint != crate::send::NativeEndpoint::MatchaAgentLocal {
+        if command.identity.provider() != SessionProvider::MatchaAgent {
             return Ok(command);
         }
-        let Some(session_id) = self.matcha_native_session_id(shared, &command.session_key) else {
+        let Some(session_id) = self.identity_native_session_id(shared, &command.identity) else {
             return Err(SessionSendOutcome::Rejected);
         };
         command
@@ -1129,7 +1234,7 @@ impl SessionLane {
             return Ok(command);
         }
         let session_id = self
-            .matcha_native_session_id(shared, command.session_key())
+            .identity_native_session_id(shared, command.identity())
             .ok_or_else(|| {
                 timeline::Outcome::unavailable(
                     timeline::UnavailableReason::MatchaMissingNativeSessionId,
@@ -1149,7 +1254,7 @@ impl SessionLane {
             return Ok(command);
         }
         let session_id = self
-            .matcha_native_session_id(shared, command.session_key())
+            .identity_native_session_id(shared, command.identity())
             .ok_or_else(|| {
                 ContentOutcome::unavailable(
                     timeline::UnavailableReason::MatchaMissingNativeSessionId,
@@ -1160,31 +1265,13 @@ impl SessionLane {
         })
     }
 
-    async fn store_timeline_outcome(
-        &mut self,
-        shared: &SessionShared,
-        outcome: &timeline::Outcome,
-    ) {
-        let view = match outcome {
-            timeline::Outcome::Complete(view) | timeline::Outcome::Incomplete(view) => view,
-            timeline::Outcome::Unavailable(_) => return,
-        };
-        let Some(mut state) = state_from_view_seeded(view, self.state.as_ref()) else {
-            return;
-        };
-        let terminals = SessionShared::hydrated_terminal_snapshots(&mut state);
-        self.state = Some(state.clone());
-        shared.store_snapshot_state(state).await;
-        shared.emit_terminals(terminals);
-    }
-
     async fn handle_create(
         &mut self,
         shared: &SessionShared,
         key: &str,
         command: SessionCreateCommand,
     ) -> SessionCreateOutcome {
-        if session_lane_key(command.provider(), command.session_key()) != key {
+        if session_identity_lane_key(&command.identity()) != key {
             return SessionCreateOutcome::Unknown;
         }
         let driver = match shared.running_session_driver(Some(command.endpoint().clone())) {
@@ -1200,8 +1287,10 @@ impl SessionLane {
         let Some(ops) = driver.session_ops() else {
             return SessionCreateOutcome::Unknown;
         };
+        let identity = command.identity();
         match ops.create_session(command, shared.epoch).await {
             SessionCreateOutcome::Succeeded(mut view) => {
+                if view.identity != identity { return SessionCreateOutcome::Unknown; }
                 let Some(state) = state_from_view(&view) else {
                     return SessionCreateOutcome::Unknown;
                 };
@@ -1218,25 +1307,31 @@ impl SessionLane {
         }
     }
 
-    async fn handle_send(
+    async fn start_send(
         &mut self,
         shared: &SessionShared,
         command: crate::send::SessionSendCommand,
-    ) -> SessionSendOutcome {
-        let provider = command.endpoint.provider();
-        let session_key = command.session_key.clone();
-        let route_key = command.route_key.clone();
-        let source_binding = command.source_binding.clone();
-        let delivery_context = command.delivery_context.clone();
-        let failure_run_id = match command.endpoint {
-            crate::send::NativeEndpoint::OpenClawLocal => None,
-            crate::send::NativeEndpoint::MatchaAgentLocal => {
-                command.request_run_identity().map(str::to_owned)
+        reply: tokio::sync::oneshot::Sender<SessionSendOutcome>,
+        call: Option<crate::call::SessionCall>,
+    ) {
+        if let Some(intent) = &command.intent {
+            if command.clone().with_intent(intent.clone()).is_err() {
+                crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
+                return;
             }
-            crate::send::NativeEndpoint::Unsupported => None,
-        };
-        let identity = self.session_identity(provider, &session_key);
-        let binding = SessionEventBinding::new(session_key.clone(), Some(route_key), None);
+            match shared.running_session_driver(identity_endpoint(&command.identity)) {
+                Ok(driver) if driver.session_ops().is_some_and(|ops| ops.supports_goal()) => {},
+                Ok(_) => { crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unsupported).await; return; },
+                Err(failure) => { crate::call::reply(call.as_ref(), reply, send_driver_failure(failure)).await; return; },
+            }
+        }
+        let provider = command.identity.provider();
+        let session_key = command.identity.session_key.clone();
+        let source_binding = command.source_binding.clone();
+        let requested_run_id = command.request_run_identity().map(str::to_owned);
+        let failure_run_id = if provider == SessionProvider::MatchaAgent { requested_run_id.clone() } else { None };
+        let identity = Some(command.identity.clone());
+        let binding = SessionEventBinding::new(command.identity.clone(), None);
         let command = match self.bind_matcha_send_command(shared, command) {
             Ok(command) => command,
             Err(outcome) => {
@@ -1252,39 +1347,137 @@ impl SessionLane {
                     None,
                 )
                 .await;
-                return outcome;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+                return;
             }
         };
 
-        let outcome = match shared.prepare_matcha_send_model_runtime(&command).await {
-            Ok(()) => match shared.running_session_driver(command.endpoint.runtime_endpoint()) {
-                Ok(driver) => match driver.session_ops() {
-                    Some(ops) => ops.send_session(command).await,
-                    None => SessionSendOutcome::Unsupported,
-                },
-                Err(RuntimeOperationFailure::Unsupported) => SessionSendOutcome::Unsupported,
-                Err(RuntimeOperationFailure::Unavailable) => SessionSendOutcome::Unavailable,
-                Err(RuntimeOperationFailure::TargetRejected) => SessionSendOutcome::Rejected,
-                Err(RuntimeOperationFailure::Unknown) => SessionSendOutcome::Unknown,
-            },
-            Err(outcome) => outcome,
+        let receive_identity = command.identity.clone();
+        if crate::trace::enabled() {
+            crate::trace::log_unscoped("sessions.send.receive_demand", serde_json::json!({
+                "identity": crate::trace::identity_shape(&receive_identity),
+                "traceIdHash": command.trace_id().map(crate::trace::fingerprint),
+                "requestedRunHash": requested_run_id.as_deref().map(crate::trace::fingerprint),
+                "generation": shared.observation_generation(&receive_identity),
+            }));
+        }
+        let goal_demand = if command.intent.is_some() {
+            match self.prepare_goal_receive(shared, &receive_identity, command.endpoint_session_id.as_deref()) {
+                Ok(demand) => Some(demand),
+                Err(failure) => { crate::call::reply(call.as_ref(), reply, send_driver_failure(failure)).await; return; }
+            }
+        } else {
+            if let Err(failure) = self.prepare_send_receive(shared, &receive_identity, requested_run_id.as_deref()) {
+                crate::call::reply(call.as_ref(), reply, send_driver_failure(failure)).await;
+                return;
+            }
+            None
         };
-        self.apply_send_outcome(
-            shared,
-            &session_key,
-            provider,
-            identity,
-            &source_binding,
-            binding,
-            &outcome,
-            failure_run_id,
-            delivery_context,
-        )
-        .await;
-        outcome
+        let Some(sender) = shared.completion_handle.get().cloned() else {
+            if let Some((lease, _)) = &goal_demand {
+                self.finish_goal_receive(shared, &receive_identity, lease, None);
+                self.close_if_idle(shared, &receive_identity);
+            }
+            crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
+            return;
+        };
+        let mut next = match self.event_state(shared, &session_key, provider, &receive_identity, &source_binding) {
+            Ok(state) => state,
+            Err(_) => {
+                if let Some((lease, _)) = &goal_demand {
+                    self.finish_goal_receive(shared, &receive_identity, lease, None);
+                } else {
+                    self.send_receive_outcome(shared, &receive_identity, requested_run_id.as_deref(), &SessionSendOutcome::Rejected);
+                }
+                self.close_if_idle(shared, &receive_identity);
+                crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
+                return;
+            }
+        };
+        if let (Some(run_id), Some(context)) = (&requested_run_id, &command.delivery_context) {
+            if !next.has_terminal_run(run_id) {
+                next.run_delivery_contexts.insert(run_id.clone(), context.clone());
+            }
+        }
+        self.state = Some(next.clone());
+        shared.store_snapshot_state(next).await;
+        let shared_for_tasks = shared.clone();
+        let shared = shared.clone();
+        let (task, _) = foundation::execution::OwnedTask::spawn(move |cancel| async move {
+            let send = async {
+                match shared.prepare_matcha_send_model_runtime(&command).await {
+                    Ok(()) => match shared.running_session_driver(identity_endpoint(&command.identity)) {
+                        Ok(driver) => match driver.session_ops() {
+                            Some(ops) => ops.send_session(command.clone()).await,
+                            None => SessionSendOutcome::Unsupported,
+                        },
+                        Err(failure) => send_driver_failure(failure),
+                    },
+                    Err(outcome) => outcome,
+                }
+            };
+            let outcome = tokio::select! {
+                _ = cancel.cancelled() => { crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unknown).await; return; },
+                outcome = send => outcome,
+            };
+            tokio::select! { _ = cancel.cancelled() => {}, _ = sender.send_command(SessionCommand::SendCompleted { command, goal_demand, outcome, reply, call }) => {} }
+        });
+        let mut tasks = shared_for_tasks.read_tasks.lock().expect("session read tasks lock");
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task);
     }
 
-    async fn apply_send_outcome(
+    async fn complete_send(&mut self, shared: &SessionShared, command: SessionSendCommand, goal_demand: Option<(String, Option<String>)>, outcome: &SessionSendOutcome) {
+        let identity = command.identity.clone();
+        let requested = command.request_run_identity().map(str::to_owned);
+        if let Some(requested) = &requested {
+            let remove = match outcome {
+                SessionSendOutcome::Queued { run_id } | SessionSendOutcome::Succeeded { run_id, .. } => run_id != requested,
+                SessionSendOutcome::Rejected | SessionSendOutcome::Unavailable | SessionSendOutcome::Unsupported => true,
+                SessionSendOutcome::Unknown => false,
+            };
+            if remove && let Some(state) = &mut self.state {
+                if state.run_delivery_contexts.remove(requested).is_some() {
+                    shared.store_snapshot_state(state.clone()).await;
+                }
+            }
+        }
+        let replayed_goal = matches!(outcome, SessionSendOutcome::Succeeded { goal: Some(receipt), .. } if receipt.replayed == Some(true));
+        let receive_outcome = if replayed_goal { &SessionSendOutcome::Rejected } else { outcome };
+        if let Some((lease, _)) = &goal_demand {
+            self.finish_goal_receive(shared, &identity, lease, Some(receive_outcome));
+        } else {
+            self.send_receive_outcome(shared, &identity, requested.as_deref(), receive_outcome);
+        }
+        if crate::trace::enabled() {
+            crate::trace::log_unscoped("sessions.send.completed", serde_json::json!({
+                "identity": crate::trace::identity_shape(&identity), "traceIdHash": command.trace_id().map(crate::trace::fingerprint),
+                "requestedRunHash": requested.as_deref().map(crate::trace::fingerprint),
+                "returnedRunHash": match outcome {
+                    SessionSendOutcome::Queued { run_id } | SessionSendOutcome::Succeeded { run_id, .. } => Some(crate::trace::fingerprint(run_id)),
+                    _ => None,
+                },
+                "outcome": match outcome {
+                    SessionSendOutcome::Queued { .. } => "queued", SessionSendOutcome::Succeeded { .. } => "succeeded",
+                    SessionSendOutcome::Rejected => "rejected", SessionSendOutcome::Unavailable => "unavailable",
+                    SessionSendOutcome::Unsupported => "unsupported", SessionSendOutcome::Unknown => "unknown",
+                },
+                "generation": shared.observation_generation(&identity),
+            }));
+        }
+        if !replayed_goal {
+            self.apply_send_outcome(shared, identity.session_key(), identity.provider(), Some(identity.clone()), &command.source_binding,
+                SessionEventBinding::new(identity.clone(), None), outcome,
+                if identity.provider() == SessionProvider::MatchaAgent { requested } else { None }, command.delivery_context).await;
+        }
+        if command.intent.is_some() && matches!(outcome, SessionSendOutcome::Succeeded { .. } | SessionSendOutcome::Unknown) {
+            self.refresh_goal(shared, &identity);
+        } else {
+            self.close_if_idle(shared, &identity);
+        }
+    }
+
+    pub(super) async fn apply_send_outcome(
         &mut self,
         shared: &SessionShared,
         session_key: &str,
@@ -1303,6 +1496,10 @@ impl SessionLane {
             Some(projection) => projection,
             None => return,
         };
+        if matches!(outcome, SessionSendOutcome::Queued { .. } | SessionSendOutcome::Succeeded { .. })
+            && run_id.as_deref().is_some_and(|run_id| shared.received_terminal(&identity, run_id)) {
+            return;
+        }
         let delivery_context = match outcome {
             SessionSendOutcome::Queued { .. } | SessionSendOutcome::Succeeded { .. } => {
                 delivery_context
@@ -1492,15 +1689,35 @@ impl SessionLane {
                 let outcome = shared.handle_pending_approvals(command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
+            SessionQuery::Observe { command, reply } => self.observe(shared, command, reply, call).await,
             SessionQuery::Timeline { command, reply } => {
-                let mut outcome = match self.bind_matcha_timeline_command(shared, command) {
-                    Ok(command) => shared.handle_timeline(command).await,
-                    Err(outcome) => outcome,
+                let command = match self.bind_matcha_timeline_command(shared, command) {
+                    Ok(command) => command,
+                    Err(outcome) => { crate::call::reply(call.as_ref(), reply, outcome).await; return; }
                 };
-                session_ownership::enrich_timeline(shared.ownership_reader.as_ref(), &mut outcome)
-                    .await;
-                self.store_timeline_outcome(shared, &outcome).await;
-                crate::call::reply(call.as_ref(), reply, outcome).await;
+                if command.direction() == timeline::Direction::Latest {
+                    self.latest_timeline(shared, command, reply, call).await;
+                } else {
+                    let shared_for_tasks = shared.clone();
+                    let shared = shared.clone();
+                    // Pagination is a read, never a replacement for the latest running state.
+                    let identity = command.identity().clone();
+                    let committed = self.state.as_ref().map(SessionState::view);
+                    let (task, _) = foundation::execution::OwnedTask::spawn(move |cancel| async move {
+                        let mut outcome = tokio::select! { _ = cancel.cancelled() => return, outcome = shared.handle_timeline(command) => outcome };
+                        if let timeline::Outcome::Complete(view) | timeline::Outcome::Incomplete(view) = &mut outcome {
+                            let snapshot = shared.snapshot.load();
+                            if let Some(watermark) = snapshot.states.get(&session_identity_lane_key(&identity)).map(SessionState::view).or(committed) {
+                                view.epoch = watermark.epoch; view.seq = watermark.seq; view.cursor = watermark.cursor;
+                            }
+                        }
+                        session_ownership::enrich_timeline(shared.ownership_reader.as_ref(), &mut outcome).await;
+                        crate::call::reply(call.as_ref(), reply, outcome).await;
+                    });
+                    let mut tasks = shared_for_tasks.read_tasks.lock().expect("session read tasks lock");
+                    tasks.retain(|task| !task.is_finished());
+                    tasks.push(task);
+                }
             }
             SessionQuery::Content { command, reply } => {
                 let outcome = match self.bind_matcha_content_command(shared, command) {
@@ -1618,6 +1835,9 @@ impl OwnerSpec for SessionOwner {
         _state: &mut Self::GlobalState,
         lanes: Vec<(Self::Key, Self::LaneState)>,
     ) {
+        shared.shutdown_observations().await;
+        let tasks = std::mem::take(&mut *shared.read_tasks.lock().expect("session read tasks lock"));
+        for mut task in tasks { let _ = task.cancel_and_join().await; }
         for (_key, lane) in lanes {
             if let Some(state) = lane.state {
                 shared.store_snapshot_state(state).await;
@@ -1804,11 +2024,7 @@ fn send_outcome_runtime(
             RunPhase::Failed,
             Some(RuntimeIssue::Unavailable),
         ),
-        SessionSendOutcome::Unknown => (
-            failure_run_id,
-            RunPhase::Failed,
-            Some(RuntimeIssue::Unknown),
-        ),
+        SessionSendOutcome::Unknown => return None,
         SessionSendOutcome::Unsupported => return None,
     };
     let active_run_id = match phase {
@@ -1845,14 +2061,11 @@ fn adapter_id_str(provider: &SessionProvider) -> &'static str {
     provider.as_str()
 }
 
-fn state_from_view(view: &SessionView) -> Option<SessionState> {
-    state_from_view_seeded(view, None)
+fn identity_endpoint(identity: &SessionIdentity) -> Option<RuntimeEndpoint> {
+    RuntimeEndpoint::try_new(identity.provider().as_str(), &identity.endpoint.runtime_instance_id).ok()
 }
 
-fn state_from_view_seeded(
-    view: &SessionView,
-    previous: Option<&SessionState>,
-) -> Option<SessionState> {
+fn state_from_view(view: &SessionView) -> Option<SessionState> {
     let facts = SessionFacts {
         items: view.items.clone(),
         tools: view.tools.clone(),
@@ -1861,25 +2074,12 @@ fn state_from_view_seeded(
         window: view.window.clone(),
         completeness: view.completeness.clone(),
     };
-    let (seq, cursor) = match previous {
-        Some(state) if state.epoch() == view.epoch => {
-            (state.seq().max(view.seq), state.cursor().max(view.cursor))
-        }
-        _ => (view.seq, view.cursor),
-    };
-    let source_binding = previous
-        .map(|state| state.source_binding().clone())
-        .unwrap_or_else(SessionSourceBinding::ordinary);
-    let mut state =
-        SessionState::from_view_parts(view.identity.clone(), view.epoch, seq, cursor, facts)
-            .ok()?
-            .with_source_binding(source_binding)
-            .with_endpoint_session_id(view.endpoint_session_id.clone())
-            .ok()?;
-    if let Some(previous) = previous {
-        state.run_delivery_contexts = previous.run_delivery_contexts.clone();
-    }
-    Some(state)
+    SessionState::from_view_parts(view.identity.clone(), view.epoch, view.seq, view.cursor, facts)
+        .ok()?
+        .with_endpoint_session_id(view.endpoint_session_id.clone())
+        .ok()?
+        .with_goal(view.goal.clone())
+        .ok()
 }
 
 fn catalog_state(entry: &SessionCatalogEntry, epoch: u64) -> Option<SessionState> {
@@ -1887,7 +2087,7 @@ fn catalog_state(entry: &SessionCatalogEntry, epoch: u64) -> Option<SessionState
     let identity = SessionIdentity::new(
         entry.key.clone(),
         endpoint.provider(),
-        Some(entry.agent_id.clone()),
+        entry.agent_id.clone(),
     )?;
     SessionState::new(identity, epoch)
         .ok()?

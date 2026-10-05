@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import {
   APP_SERVER_PROTOCOL_VERSION,
   type AppServerConfig,
@@ -209,7 +210,10 @@ export function createDefaultAppServerServices(options: {
   const workerSupervisor = new WorkerSupervisor({
     command: options.config.workerCommand,
     args: options.config.workerArgs,
-    env: workerProcessEnvironment(),
+    env: {
+      ...workerProcessEnvironment(),
+      MATCHA_BUILTIN_MCP_CONFIG: join(options.config.storageRoot, 'matcha-mcp.json'),
+    },
     requestTimeoutMs: options.config.workerReadyTimeoutMs,
     heartbeatTimeoutMs: options.config.workerHeartbeatTimeoutMs,
     shutdownTimeoutMs: WORKER_SHUTDOWN_TIMEOUT_MS,

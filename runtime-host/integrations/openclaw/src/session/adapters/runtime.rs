@@ -91,10 +91,11 @@ impl OpenClawDriver {
         trace::log_unscoped("openclaw.sessions.abort.request", serde_json::json!({
             "traceId": trace_id,
             "method": method,
-            "sessionKey": session_trace::id_shape(Some(&command.session_key)),
+            "sessionKey": session_trace::id_shape(Some(&command.identity.session_key)),
             "runId": session_trace::id_shape(command.run_id.as_deref()),
         }));
-        let session_key = match protocol::SessionKey::try_new(command.session_key) {
+        if !valid_command_identity(&command.identity) { return SessionAbortOutcome::Rejected; }
+        let session_key = match protocol::SessionKey::try_new(command.identity.session_key) {
             Ok(session_key) => session_key,
             Err(_) => {
                 trace::log_unscoped("openclaw.sessions.abort.invalid", serde_json::json!({ "traceId": trace_id, "method": method, "reason": "session-key", "elapsedMs": started.elapsed().as_millis() }));
@@ -324,11 +325,33 @@ impl OpenClawDriver {
     }
 
     pub(crate) async fn send_session(&self, command: SessionSendCommand) -> SessionSendOutcome {
-        let idempotency_key = match command.request_run_identity().map(str::to_owned) {
-            Some(idempotency_key) => idempotency_key,
-            None => return SessionSendOutcome::Rejected,
+        let idempotency_key = match &command.intent {
+            Some(sessions_module::goal::SessionSendIntent::GoalStart { .. }) => command.idempotency_key.as_deref(),
+            None => command.request_run_identity(),
         };
-        let session_key = match crate::session::protocol::SessionKey::try_new(command.session_key) {
+        let Some(idempotency_key) = idempotency_key.map(str::to_owned) else {
+            return SessionSendOutcome::Rejected;
+        };
+        if !valid_command_identity(&command.identity) {
+            return SessionSendOutcome::Rejected;
+        }
+        let goal_start = match &command.intent {
+            Some(sessions_module::goal::SessionSendIntent::GoalStart { issued_at_ms }) => {
+                if *issued_at_ms > sessions_module::state::MAX_SAFE_INTEGER || command.idempotency_key.as_deref() != Some(idempotency_key.as_str()) || idempotency_key.len() > 128 || command.run_id.is_some() || command.message.trim().is_empty() || command.message.encode_utf16().count() > 16_000 || command.system_provenance_receipt.is_some() || command.deliver == Some(true) {
+                    return SessionSendOutcome::Rejected;
+                }
+                match self.session_gateway.goal_availability().await {
+                    Ok(()) => Some(*issued_at_ms),
+                    Err(sessions_module::ports::RuntimeOperationFailure::Unsupported) => return SessionSendOutcome::Unsupported,
+                    Err(_) => return SessionSendOutcome::Unavailable,
+                }
+            }
+            None => None,
+        };
+        let goal_operation_id = idempotency_key.clone();
+        let goal_agent_id = command.identity.agent_id.clone();
+        let goal_session_id = command.endpoint_session_id.clone();
+        let session_key = match crate::session::protocol::SessionKey::try_new(command.identity.session_key) {
             Ok(session_key) => session_key,
             Err(_) => return SessionSendOutcome::Rejected,
         };
@@ -357,14 +380,29 @@ impl OpenClawDriver {
                 Err(_) => return SessionSendOutcome::Rejected,
             };
         }
-        match self
-            .session_gateway
-            .enqueue_chat(params, command.route_key)
-            .await
-        {
-            Ok(result) => SessionSendOutcome::Queued {
+        if let Some(deliver) = command.deliver {
+            params = params.with_delivery(deliver);
+        }
+        if let Some(issued_at_ms) = goal_start {
+            params = params.with_goal_start(goal_agent_id, goal_session_id.clone(), issued_at_ms);
+            return match self.session_gateway.start_goal(params).await {
+                Ok(InvocationOutcome::Succeeded(receipt)) if receipt.action == sessions_module::goal::SessionGoalAction::Start && receipt.operation_id == goal_operation_id && goal_session_id.as_ref().is_none_or(|session| session == &receipt.session_id) => SessionSendOutcome::Succeeded {
+                    run_id: receipt.run_id.clone().expect("validated started Goal receipt"),
+                    status: sessions_module::send::SessionSendStatus::Started,
+                    goal: Some(receipt),
+                },
+                Ok(InvocationOutcome::TargetRejected(_)) => SessionSendOutcome::Rejected,
+                Ok(_) => SessionSendOutcome::Unknown,
+                Err(sessions_module::ports::RuntimeOperationFailure::Unsupported) => SessionSendOutcome::Unsupported,
+                Err(_) => SessionSendOutcome::Unavailable,
+            };
+        }
+        match self.session_gateway.send_chat(params).await {
+            Ok(InvocationOutcome::Succeeded(result)) => SessionSendOutcome::Queued {
                 run_id: result.run_id.as_str().to_owned(),
             },
+            Ok(InvocationOutcome::TargetRejected(_)) => SessionSendOutcome::Rejected,
+            Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) => SessionSendOutcome::Unknown,
             Err(_) => SessionSendOutcome::Unavailable,
         }
     }
@@ -453,7 +491,7 @@ fn project_openclaw_create(
         InvocationOutcome::Succeeded(result) => {
             sessions_module::create::project_created_session_view(
                 command.session_key().to_owned(),
-                Some(command.endpoint_session_id().to_owned()),
+                Some(result.native_session_id().as_str().to_owned()),
                 SessionProvider::OpenClaw,
                 Some(command.agent_id().to_owned()),
                 epoch,
@@ -612,7 +650,7 @@ fn project_openclaw_session_catalog_entry(
         endpoint: RuntimeDriverIdentity::open_claw().endpoint(),
         key: entry.session_key.as_str().to_owned(),
         agent_id: entry.agent_id.as_str().to_owned(),
-        endpoint_session_id: entry.endpoint_session_id,
+        endpoint_session_id: entry.native_session_id.as_str().to_owned(),
         ownership: None,
         model_state: session.model_state(),
         updated_at: session.updated_at,
@@ -878,7 +916,39 @@ fn log_session_model_reconcile_skipped(
     );
 }
 
+fn valid_command_identity(identity: &sessions_module::state::SessionIdentity) -> bool {
+    crate::port::validate_observation_identity(identity).is_ok()
+}
+
 impl SessionOps for OpenClawDriver {
+    fn supports_goal(&self) -> bool { self.session_gateway.supports_goal() }
+
+    fn mutate_session_goal<'a>(&'a self, command: sessions_module::goal::SessionGoalCommand) -> sessions_module::SessionFuture<'a, sessions_module::goal::SessionGoalOutcome> {
+        Box::pin(async move {
+            use sessions_module::{goal::SessionGoalOutcome, ports::RuntimeOperationFailure};
+            if command.validate().is_err() || !valid_command_identity(&command.identity) { return SessionGoalOutcome::TargetRejected; }
+            match self.session_gateway.goal_availability().await {
+                Ok(()) => {},
+                Err(RuntimeOperationFailure::Unsupported) => return SessionGoalOutcome::Unsupported,
+                Err(_) => return SessionGoalOutcome::Unavailable,
+            }
+            match self.session_gateway.mutate_goal(&command).await {
+                Ok(InvocationOutcome::Succeeded(receipt)) if receipt.operation_id == command.operation_id && receipt.session_id == command.endpoint_session_id && receipt.goal_id == command.goal_id && receipt.action == crate::session::goal::action(&command.mutation) => SessionGoalOutcome::Succeeded { receipt },
+                Ok(InvocationOutcome::TargetRejected(_)) => SessionGoalOutcome::TargetRejected,
+                Ok(_) => SessionGoalOutcome::Unknown,
+                Err(RuntimeOperationFailure::Unsupported) => SessionGoalOutcome::Unsupported,
+                Err(_) => SessionGoalOutcome::Unavailable,
+            }
+        })
+    }
+
+    fn prepare_observation(
+        &self,
+        request: sessions_module::ports::SessionObservationRequest,
+    ) -> Result<Arc<dyn sessions_module::ports::SessionObservation>, sessions_module::ports::RuntimeOperationFailure> {
+        self.session_gateway.prepare_observation(request)
+    }
+
     fn admission(&self) -> SessionAdmission {
         SessionAdmission::new(
             RuntimeDriverIdentity::open_claw().endpoint(),

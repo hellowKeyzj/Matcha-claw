@@ -1,4 +1,10 @@
-use std::{collections::HashMap, future::Future, path::Path, pin::Pin, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    time::Duration,
+};
 
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -9,8 +15,8 @@ use crate::{
         WikiSearchReceipt, extract_search_images, finish_search, keyword_hits, load_search_pages,
         stable_content_hash,
     },
-    embedding::{Embedder, supports_batch},
-    search_config::{EmbeddingConfig, EmbeddingCredentials},
+    embedding::{Embedder, LOCAL_DIMENSION, LOCAL_MODEL, supports_batch},
+    search_config::{EmbeddingConfig, EmbeddingCredentials, EmbeddingSource},
     vector::{self, ChunkEmbedding, PageSearchResult},
 };
 
@@ -19,6 +25,7 @@ type WikiIndexFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub struct PreparedPageEmbedding {
     pub(crate) page_id: String,
     pub(crate) fingerprint: String,
+    pub(crate) space_key: String,
     pub(crate) rows: Vec<ChunkEmbedding>,
 }
 
@@ -122,15 +129,20 @@ pub trait WikiVectorIndex: Send + Sync {
     }
 }
 
-pub struct RemoteWikiVectorIndex {
+pub struct LanceWikiVectorIndex {
     embedder: Embedder,
 }
 
-impl RemoteWikiVectorIndex {
+impl LanceWikiVectorIndex {
     pub fn new() -> Result<Self, WikiIndexFailure> {
         Ok(Self {
             embedder: Embedder::new().map_err(WikiIndexFailure::embedding)?,
         })
+    }
+
+    pub fn with_local_assets(mut self, assets_root: PathBuf) -> Self {
+        self.embedder = self.embedder.with_local_assets(assets_root);
+        self
     }
 
     async fn prepare_rows(
@@ -142,7 +154,11 @@ impl RemoteWikiVectorIndex {
         http_slots: Option<&tokio::sync::Semaphore>,
     ) -> Result<Vec<ChunkEmbedding>, WikiIndexFailure> {
         let batch_size = config.batch_size.clamp(1, 64);
-        let concurrency = config.concurrency.clamp(1, 32);
+        let concurrency = if config.source == EmbeddingSource::LocalMiniLm {
+            1
+        } else {
+            config.concurrency.clamp(1, 32)
+        };
         let batches = 0..chunks.len().div_ceil(batch_size);
         let rows = stream::iter(batches)
             .map(|batch_index| async move {
@@ -164,6 +180,9 @@ impl RemoteWikiVectorIndex {
                     };
                     match batch_result {
                         Ok(vectors) => vectors,
+                        Err(reason) if config.source == EmbeddingSource::LocalMiniLm => {
+                            return Err(WikiIndexFailure::embedding(reason));
+                        }
                         Err(_) => {
                             eprintln!("[WikiEmbedding] batch_failed_retry_individual");
                             let mut vectors = Vec::with_capacity(texts.len());
@@ -231,7 +250,7 @@ impl RemoteWikiVectorIndex {
     }
 }
 
-impl WikiVectorIndex for RemoteWikiVectorIndex {
+impl WikiVectorIndex for LanceWikiVectorIndex {
     fn embed_page<'a>(
         &'a self,
         project_root: &'a Path,
@@ -243,10 +262,7 @@ impl WikiVectorIndex for RemoteWikiVectorIndex {
         credentials: &'a EmbeddingCredentials,
     ) -> WikiIndexFuture<'a, Result<(), WikiIndexFailure>> {
         Box::pin(async move {
-            if !config.enabled
-                || config.endpoint.trim().is_empty()
-                || config.model.trim().is_empty()
-            {
+            if !config.is_ready() {
                 return Err(WikiIndexFailure::embedding(
                     "wiki embedding is disabled or not configured",
                 ));
@@ -262,8 +278,9 @@ impl WikiVectorIndex for RemoteWikiVectorIndex {
                 ));
             }
             let page_id = page_id(relative_path);
-            let fingerprint = embedding_fingerprint(revision, title, config, credentials);
-            if vector::page_revision_matches(project_root, &page_id, &fingerprint)
+            let space_key = embedding_space_key(config);
+            let fingerprint = embedding_fingerprint(revision, title, config, &space_key);
+            if vector::page_revision_matches(project_root, &page_id, &fingerprint, &space_key)
                 .await
                 .map_err(WikiIndexFailure::lancedb)?
             {
@@ -278,7 +295,7 @@ impl WikiVectorIndex for RemoteWikiVectorIndex {
             .map_err(|_| {
                 WikiIndexFailure::embedding("wiki embedding provider timed out after 300 seconds")
             })??;
-            vector::upsert_page_chunks(project_root, &page_id, rows, &fingerprint)
+            vector::upsert_page_chunks(project_root, &page_id, rows, &fingerprint, &space_key)
                 .await
                 .map_err(WikiIndexFailure::lancedb)
         })
@@ -295,6 +312,11 @@ impl WikiVectorIndex for RemoteWikiVectorIndex {
         http_slots: &'a tokio::sync::Semaphore,
     ) -> WikiIndexFuture<'a, Result<PreparedPageEmbedding, WikiIndexFailure>> {
         Box::pin(async move {
+            if !config.is_ready() {
+                return Err(WikiIndexFailure::embedding(
+                    "wiki embedding is disabled or not configured",
+                ));
+            }
             if chunks.is_empty() || chunks.len() > 512 {
                 return Err(WikiIndexFailure::embedding(
                     "wiki page must contain between 1 and 512 chunks",
@@ -308,9 +330,11 @@ impl WikiVectorIndex for RemoteWikiVectorIndex {
             .map_err(|_| {
                 WikiIndexFailure::embedding("wiki embedding provider timed out after 300 seconds")
             })??;
+            let space_key = embedding_space_key(config);
             Ok(PreparedPageEmbedding {
                 page_id: page_id(relative_path),
-                fingerprint: embedding_fingerprint(revision, title, config, credentials),
+                fingerprint: embedding_fingerprint(revision, title, config, &space_key),
+                space_key,
                 rows,
             })
         })
@@ -357,34 +381,45 @@ impl WikiVectorIndex for RemoteWikiVectorIndex {
             let pages = load_search_pages(project_root)?;
             let mut hits = keyword_hits(&pages, query, include_content)?;
             let token_hits = hits.len();
-            let vectors = if config.enabled
-                && !config.endpoint.trim().is_empty()
-                && !config.model.trim().is_empty()
-            {
+            let vector_hits = if config.is_ready() {
                 match self.embedder.embed(query, config, credentials, 0).await {
                     Ok(embedding) => {
-                        match vector::search_pages(project_root, embedding, limit.max(10)).await {
-                            Ok(results) => results,
+                        let pages_by_id = pages
+                            .iter()
+                            .map(|page| (page_id(&page.relative_path), page))
+                            .collect::<HashMap<_, _>>();
+                        match vector::search_pages(
+                            project_root,
+                            embedding,
+                            limit.max(10),
+                            &embedding_space_key(config),
+                            &pages_by_id,
+                        )
+                        .await
+                        {
+                            Ok(results) => {
+                                let vector_hits = results.len();
+                                if vector_hits > 0 {
+                                    fuse_results(&pages_by_id, &mut hits, results, include_content);
+                                }
+                                vector_hits
+                            }
                             Err(_) => {
                                 eprintln!(
                                     "[WikiSearch] vector_search_failed_keyword_graph_retained"
                                 );
-                                Vec::new()
+                                0
                             }
                         }
                     }
                     Err(_) => {
                         eprintln!("[WikiSearch] query_embedding_failed_keyword_graph_retained");
-                        Vec::new()
+                        0
                     }
                 }
             } else {
-                Vec::new()
+                0
             };
-            let vector_hits = vectors.len();
-            if vector_hits > 0 {
-                fuse_results(&pages, &mut hits, vectors, include_content);
-            }
             hits.sort_unstable_by(|a, b| {
                 b.score
                     .total_cmp(&a.score)
@@ -404,7 +439,7 @@ impl WikiVectorIndex for RemoteWikiVectorIndex {
 }
 
 fn fuse_results(
-    pages: &[SearchPage],
+    pages_by_id: &HashMap<String, &SearchPage>,
     hits: &mut Vec<WikiSearchHit>,
     vectors: Vec<PageSearchResult>,
     include_content: bool,
@@ -419,10 +454,6 @@ fn fuse_results(
         hit.score = 1.0 / (60.0 + (index + 1) as f64);
         hit_indexes.insert(hit.relative_path.clone(), index);
     }
-    let pages_by_id = pages
-        .iter()
-        .map(|page| (page_id(&page.relative_path), page))
-        .collect::<HashMap<_, _>>();
     for (index, vector) in vectors.into_iter().enumerate() {
         let Some(page) = pages_by_id.get(&vector.page_id) else {
             continue;
@@ -430,7 +461,7 @@ fn fuse_results(
         let score = 1.0 / (60.0 + (index + 1) as f64);
         if let Some(index) = hit_indexes.get(&page.relative_path) {
             hits[*index].score += score;
-            hits[*index].vector_score = Some(vector.score);
+            hits[*index].vector_score = Some(f64::from(vector.score));
             continue;
         }
         let mut hit = WikiSearchHit::new(
@@ -439,7 +470,7 @@ fn fuse_results(
             score,
             vec![vector_snippet(&vector)],
         );
-        hit.vector_score = Some(vector.score);
+        hit.vector_score = Some(f64::from(vector.score));
         hit.images = extract_search_images(&page.content);
         hit.content = include_content.then(|| page.content.clone());
         hits.push(hit);
@@ -481,20 +512,36 @@ fn page_id(relative_path: &str) -> String {
     stable_content_hash(relative_path.as_bytes())
 }
 
+fn embedding_space_key(config: &EmbeddingConfig) -> String {
+    let signature = match config.source {
+        EmbeddingSource::LocalMiniLm => serde_json::json!({
+            "source": config.source,
+            "model": LOCAL_MODEL,
+            "dimension": LOCAL_DIMENSION,
+            "pooling": "mean",
+            "normalize": "l2",
+        }),
+        EmbeddingSource::Remote => serde_json::json!({
+            "source": config.source,
+            "endpoint": config.endpoint.trim(),
+            "model": config.model.trim(),
+            "outputDimensionality": config.output_dimensionality,
+        }),
+    };
+    stable_content_hash(signature.to_string().as_bytes())
+}
+
 fn embedding_fingerprint(
     revision: &WikiRevision,
     title: &str,
     config: &EmbeddingConfig,
-    credentials: &EmbeddingCredentials,
+    space_key: &str,
 ) -> String {
     let signature = serde_json::json!({
+        "space": space_key,
         "revision": revision.id(),
         "title": title,
-        "endpoint": config.endpoint.trim(),
-        "model": config.model.trim(),
-        "outputDimensionality": config.output_dimensionality,
-        "extraHeaders": config.extra_headers,
-        "privateHeaders": credentials.extra_headers,
+        "chunking": "section-first-utf16",
         "maxChunkChars": config.max_chunk_chars,
         "overlapChunkChars": config.overlap_chunk_chars,
     });

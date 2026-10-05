@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     domain::{
         WikiFailure, WikiReviewItem, WikiReviewOption, WikiReviewType, WikiWriteReceipt,
-        normalize_relative_path, resolve_project_path, stable_content_hash,
+        resolve_project_path,
     },
     lint::{
         LintAction, LintRun, LintRunPlan, LintRuns, WikiLintActionInput, WikiLintCancelInput,
@@ -213,7 +213,7 @@ pub(super) fn dismiss(
     Ok(current)
 }
 
-fn wiki_path(root: &Path, relative: &str) -> Result<std::path::PathBuf, WikiFailure> {
+pub(super) fn wiki_path(root: &Path, relative: &str) -> Result<std::path::PathBuf, WikiFailure> {
     if !relative.starts_with("wiki/") || !relative.ends_with(".md") {
         return Err(WikiFailure::invalid_path(relative));
     }
@@ -226,7 +226,10 @@ fn wiki_path(root: &Path, relative: &str) -> Result<std::path::PathBuf, WikiFail
             .join("wiki")
             .canonicalize()
             .map_err(|error| WikiFailure::io("wiki", error))?;
-        if !canonical.starts_with(canonical_root) {
+        let project_root = root
+            .canonicalize()
+            .map_err(|error| WikiFailure::io("project", error))?;
+        if !canonical.starts_with(canonical_root) || !canonical.starts_with(project_root) {
             return Err(WikiFailure::invalid_path(relative));
         }
     } else {
@@ -284,7 +287,6 @@ fn review(finding: &WikiLintFinding) -> WikiReviewItem {
         description: finding.detail.clone(),
         source_path: None,
         affected_pages: affected,
-        search_queries: Vec::new(),
         options,
         resolved: false,
         resolved_action: None,
@@ -492,67 +494,11 @@ async fn delete(
     write: &mut impl FnMut(String, String) -> Result<WikiWriteReceipt, WikiFailure>,
     receipt: &mut WikiLintFixReceipt,
 ) -> Result<(), WikiFailure> {
-    use super::source_lifecycle::{
-        clean_index_listing, normalize_wiki_ref_key, strip_deleted_wikilinks, wiki_markdown_files,
-    };
-    use crate::ingest::write::{
-        parse_frontmatter_array, parse_frontmatter_scalar, write_frontmatter_array,
-    };
-    let page = wiki_path(root, &finding.page)?;
-    let content = match std::fs::read_to_string(&page) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(WikiFailure::io(&finding.page, error)),
-    };
-    let slug = page
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("");
-    let mut keys = BTreeSet::from([normalize_wiki_ref_key(slug)]);
-    if let Some(title) = parse_frontmatter_scalar(&content, "title") {
-        keys.insert(normalize_wiki_ref_key(&title));
-    }
-    match std::fs::remove_file(&page) {
-        Ok(()) => receipt.deleted_pages.push(finding.page.clone()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(WikiFailure::io(&finding.page, error)),
-    }
-    super::source_lifecycle::refresh_file_snapshot(root, &[&finding.page])?;
-    crate::vector::delete_page(root, &stable_content_hash(finding.page.as_bytes()))
-        .await
-        .map_err(|_| WikiFailure::state("Wiki lint index cleanup failed"))?;
-    if finding.page.starts_with("wiki/sources/") && !slug.is_empty() && !slug.starts_with('.') {
-        let media = root.join("wiki/media").join(slug);
-        match std::fs::remove_dir_all(media) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(WikiFailure::io("wiki/media", error)),
-        }
-    }
-    for path in wiki_markdown_files(root)? {
-        let relative = normalize_relative_path(path.strip_prefix(root).unwrap());
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let mut updated = if path.file_name().and_then(|name| name.to_str()) == Some("index.md") {
-            clean_index_listing(&content, &keys)
-        } else {
-            content.clone()
-        };
-        updated = strip_deleted_wikilinks(&updated, &keys);
-        let related = parse_frontmatter_array(&updated, "related");
-        let survivors = related
-            .iter()
-            .filter(|reference| !keys.contains(&normalize_wiki_ref_key(reference)))
-            .cloned()
-            .collect::<Vec<_>>();
-        if survivors.len() != related.len() {
-            updated = write_frontmatter_array(&updated, "related", &survivors);
-        }
-        if updated != content {
-            write(relative.clone(), updated)?;
-            receipt.written_pages.push(relative);
-        }
+    let deleted = super::pages::delete_page(root, &receipt.project_id, &finding.page, true, write).await?;
+    receipt.deleted_pages.extend(deleted.deleted_pages);
+    receipt.written_pages.extend(deleted.updated_pages);
+    if let Some(failure) = deleted.failures.first() {
+        return Err(WikiFailure::state(&failure.message));
     }
     Ok(())
 }

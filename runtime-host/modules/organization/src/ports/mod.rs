@@ -2,7 +2,9 @@ pub mod delivery;
 pub mod fleet;
 pub mod identity;
 pub mod materialization;
+pub mod member_introduction;
 pub mod native_effects;
+pub mod provision_progress;
 pub mod session;
 
 pub use delivery::{
@@ -24,11 +26,18 @@ pub use materialization::{
     TeamMaterializationIntent, TeamMaterializationPort, TeamMaterializationRemoval,
     TeamMaterializationRequest,
 };
+pub use member_introduction::{
+    MemberIntroductionError, MemberIntroductionRequest, MemberProfile, TeamMemberIntroductions,
+};
 pub use native_effects::{
     NativeEffectFailure, OrganizationNativeRuntime, OrganizationRuntimeDirectory,
     RoleSessionAbortOutcome, RoleSessionAbortReceipt, RoleSessionDeleteOutcome,
     RoleSessionDeleteReceipt, RoleSessionReadbackOutcome, RoleSessionReadbackReceipt,
     RuntimeReceiptOutcome, TeamActivityExecutor, TeamNativeEffectsPort,
+};
+pub use provision_progress::{
+    TeamProvisionMemberStatus, TeamProvisionObserver, TeamProvisionProgress,
+    TeamProvisionReporter, TeamProvisionStage, TeamProvisionUpdate,
 };
 pub use session::{
     InvalidRoleSessionRef, ROLE_SESSION_REF_INITIAL, RoleSessionIdentityResolver, RoleSessionPort,

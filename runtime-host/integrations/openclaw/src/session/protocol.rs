@@ -217,6 +217,12 @@ pub struct ChatSendParams {
     attachments: Vec<ChatAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     system_provenance_receipt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intent: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
 }
 impl fmt::Debug for ChatSendParams {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -247,8 +253,19 @@ impl ChatSendParams {
             idempotency_key,
             attachments: Vec::new(),
             system_provenance_receipt: None,
+            intent: None,
+            agent_id: None,
+            session_id: None,
         })
     }
+
+    pub(crate) fn with_goal_start(mut self, agent_id: String, session_id: Option<String>, issued_at_ms: u64) -> Self {
+        self.intent = Some(serde_json::json!({ "kind": "session-goal-start", "version": 1, "issuedAtMs": issued_at_ms }));
+        self.agent_id = Some(agent_id);
+        self.session_id = session_id;
+        self
+    }
+
     pub fn session_key(&self) -> &SessionKey {
         &self.session_key
     }
@@ -365,6 +382,10 @@ impl SessionAbortParams {
 pub struct ChatHistoryParams {
     session_key: SessionKey,
     #[serde(skip_serializing_if = "Option::is_none")]
+    agent_id: Option<AgentId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     limit: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<u64>,
@@ -387,6 +408,8 @@ impl ChatHistoryParams {
     pub fn new(session_key: SessionKey) -> Self {
         Self {
             session_key,
+            agent_id: None,
+            cursor: None,
             limit: None,
             offset: None,
             max_chars: None,
@@ -407,8 +430,21 @@ impl ChatHistoryParams {
         Ok(self)
     }
 
+    pub fn try_for_agent(mut self, agent_id: String) -> Result<Self, ValidationError> {
+        self.agent_id = Some(AgentId::try_new(agent_id)?);
+        Ok(self)
+    }
+
+    pub fn try_with_cursor(mut self, cursor: String) -> Result<Self, ValidationError> {
+        if self.offset.is_some() || cursor.is_empty() || cursor.len() > 8192 {
+            return Err(ValidationError("chat history cursor is invalid"));
+        }
+        self.cursor = Some(cursor);
+        Ok(self)
+    }
+
     pub fn try_with_offset(mut self, offset: u64) -> Result<Self, ValidationError> {
-        if offset > MAX_SAFE_SEQUENCE {
+        if self.cursor.is_some() || offset > MAX_SAFE_SEQUENCE {
             return Err(ValidationError("chat history offset exceeds safe integer"));
         }
         self.offset = Some(offset);
@@ -438,6 +474,10 @@ impl<'de> Deserialize<'de> for ChatHistoryParams {
         struct RawParams {
             session_key: SessionKey,
             #[serde(default)]
+            agent_id: Option<AgentId>,
+            #[serde(default)]
+            cursor: Option<String>,
+            #[serde(default)]
             limit: OptionalHistoryBound,
             #[serde(default)]
             offset: OptionalHistoryBound,
@@ -446,7 +486,9 @@ impl<'de> Deserialize<'de> for ChatHistoryParams {
         }
 
         let raw = RawParams::deserialize(deserializer)?;
-        let params = Self::new(raw.session_key);
+        let mut params = Self::new(raw.session_key);
+        params.agent_id = raw.agent_id;
+        if let Some(cursor) = raw.cursor { params = params.try_with_cursor(cursor).map_err(D::Error::custom)?; }
         let params = match raw.limit {
             OptionalHistoryBound::Value(limit) => params.try_with_limit(limit),
             OptionalHistoryBound::Missing => Ok(params),
@@ -1248,6 +1290,9 @@ impl SessionDescribeParams {
 /// its provider, so [`Self::model_ref`] is the only place that rejoins them into a runtime ref.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SessionDescribeRow {
+    pub key: Option<String>,
+    pub session_id: Option<String>,
+    pub goal: sessions_module::goal::SessionGoalView,
     pub model: Option<String>,
     pub model_provider: Option<String>,
     pub agent_id: Option<AgentId>,
@@ -1255,9 +1300,9 @@ pub struct SessionDescribeRow {
 }
 impl<'de> Deserialize<'de> for SessionDescribeRow {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut payload = Value::deserialize(deserializer)?;
+        let payload = Value::deserialize(deserializer)?;
         let object = payload
-            .as_object_mut()
+            .as_object()
             .ok_or_else(|| D::Error::custom("sessions.describe session must be an object"))?;
         let session_info = object.get("sessionInfo").and_then(Value::as_object);
         let metadata = object.get("metadata").and_then(Value::as_object);
@@ -1265,6 +1310,12 @@ impl<'de> Deserialize<'de> for SessionDescribeRow {
             session_wire_field(object, session_info, metadata, &[name]).unwrap_or(Value::Null)
         };
         Ok(Self {
+            key: serde_json::from_value(read("key")).map_err(D::Error::custom)?,
+            session_id: serde_json::from_value(read("sessionId")).map_err(D::Error::custom)?,
+            goal: match super::goal::view(&payload).map_err(D::Error::custom)? {
+                sessions_module::goal::SessionGoalView::Unknown => sessions_module::goal::SessionGoalView::Known { goal: None },
+                goal => goal,
+            },
             model: serde_json::from_value(read("model")).map_err(D::Error::custom)?,
             model_provider: serde_json::from_value(read("modelProvider"))
                 .map_err(D::Error::custom)?,
@@ -1395,12 +1446,13 @@ pub enum SessionKind {
 pub struct AgentScopedSessionSummary {
     pub session_key: SessionKey,
     pub agent_id: AgentId,
-    pub endpoint_session_id: String,
+    pub native_session_id: NativeSessionId,
 }
 
 #[derive(Clone, PartialEq)]
 pub struct SessionSummary {
     pub key: SessionKey,
+    pub native_session_id: Option<NativeSessionId>,
     pub kind: SessionKind,
     pub agent_id: Option<AgentId>,
     pub label: Option<String>,
@@ -1445,7 +1497,6 @@ impl<'de> Deserialize<'de> for SessionSummary {
             "space",
             "chatType",
             "origin",
-            "sessionId",
             "systemSent",
             "abortedLastRun",
             "thinkingLevel",
@@ -1487,6 +1538,11 @@ impl<'de> Deserialize<'de> for SessionSummary {
         let read = |name: &str| object.get(name).cloned().unwrap_or(Value::Null);
         Ok(Self {
             key: serde_json::from_value(key).map_err(D::Error::custom)?,
+            native_session_id: serde_json::from_value(
+                session_wire_field(object, session_info, metadata, &["sessionId"])
+                    .unwrap_or(Value::Null),
+            )
+            .map_err(D::Error::custom)?,
             kind: serde_json::from_value(kind).map_err(D::Error::custom)?,
             agent_id: serde_json::from_value(
                 session_wire_field(object, session_info, metadata, &["agentId"])
@@ -1566,17 +1622,18 @@ impl SessionSummary {
     }
 
     pub fn agent_scoped_catalog_entry(&self) -> Option<AgentScopedSessionSummary> {
+        let native_session_id = self.native_session_id.clone()?;
         let key = self.key.as_str();
         let agent_id = match key.strip_prefix("agent:") {
             Some(scoped_key) => {
-                let (agent_id, endpoint_session_id) = scoped_key.split_once(':')?;
-                if endpoint_session_id.split(':').any(str::is_empty) {
+                let (agent_id, suffix) = scoped_key.split_once(':')?;
+                if suffix.split(':').any(str::is_empty) {
                     return None;
                 }
                 return Some(AgentScopedSessionSummary {
                     session_key: self.key.clone(),
                     agent_id: AgentId::try_new(agent_id).ok()?,
-                    endpoint_session_id: endpoint_session_id.to_owned(),
+                    native_session_id,
                 });
             }
             None => self.agent_id.clone()?,
@@ -1587,7 +1644,7 @@ impl SessionSummary {
         Some(AgentScopedSessionSummary {
             session_key: SessionKey::try_new(format!("agent:{}:{key}", agent_id.as_str())).ok()?,
             agent_id,
-            endpoint_session_id: key.to_owned(),
+            native_session_id,
         })
     }
 }
@@ -1665,6 +1722,7 @@ pub enum ProtocolError {
     InvalidSessionAbortResult,
     InvalidSessionsListResult,
     InvalidSessionDescribeResult,
+    InvalidSessionGoalResult,
     InvalidSessionModelPatchResult,
     InvalidSessionPermissionPatchResult,
     InvalidSessionLabelPatchResult,
@@ -1683,6 +1741,7 @@ impl fmt::Display for ProtocolError {
             Self::InvalidSessionAbortResult => "sessions.abort result is invalid",
             Self::InvalidSessionsListResult => "sessions.list result is invalid",
             Self::InvalidSessionDescribeResult => "sessions.describe result is invalid",
+            Self::InvalidSessionGoalResult => "session goal result is invalid",
             Self::InvalidSessionModelPatchResult => "sessions.patch model result is invalid",
             Self::InvalidSessionPermissionPatchResult => {
                 "sessions.patch permission result is invalid"
@@ -3083,6 +3142,7 @@ pub enum ToolActivityPhase {
 pub enum SessionApprovalSource {
     Exec,
     Plugin,
+    SystemAgent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3427,6 +3487,8 @@ pub struct SessionEventEnvelope {
     pub activity: Option<SessionActivity>,
     pub approval: Option<SessionApprovalEvent>,
     pub changed: Option<SessionChangedEvent>,
+    pub(crate) transcript_message: Option<super::window::Message>,
+    pub(crate) commentary: Option<(String, String)>,
 }
 impl fmt::Debug for SessionEventEnvelope {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -3469,6 +3531,7 @@ pub fn decode_session_event(
             approval_lifecycle = Some(SessionApprovalLifecycle::Resolved);
             SessionEventKind::ApprovalResolved
         }
+        "session.approval" => SessionEventKind::ApprovalRequested,
         "sessions.changed" => SessionEventKind::Changed,
         _ => return Ok(None),
     };
@@ -3545,6 +3608,30 @@ pub fn decode_session_event(
     } else {
         None
     };
+    if event.name == "session.approval" {
+        let decoded = decode_session_approval(object.get("approval").cloned().ok_or(ProtocolError::InvalidSessionEvent)?, session_key.clone())?;
+        kind = match decoded.lifecycle {
+            SessionApprovalLifecycle::Requested => SessionEventKind::ApprovalRequested,
+            SessionApprovalLifecycle::Resolved => SessionEventKind::ApprovalResolved,
+        };
+        approval = Some(decoded);
+    }
+    let transcript_message = if kind == SessionEventKind::Message && object.get("message").and_then(|value| value.get("role")).is_some() {
+        Some(super::window::decode_session_message(&payload).map_err(|_| ProtocolError::InvalidSessionEvent)?)
+    } else { None };
+    let run_id = run_id.or_else(|| transcript_message.as_ref().and_then(|message| message.run_id()).and_then(|run| RunId::try_new(run.to_owned()).ok()));
+    let commentary = if kind == SessionEventKind::Agent && object.get("stream").and_then(Value::as_str) == Some("item") {
+        let data = object.get("data").and_then(Value::as_object).ok_or(ProtocolError::InvalidSessionEvent)?;
+        if data.get("kind").and_then(Value::as_str) == Some("preamble") {
+            match data.get("itemId").or_else(|| data.get("id")) {
+                Some(value) => {
+                    let id = value.as_str().filter(|id| !id.trim().is_empty() && id.len() <= 256).ok_or(ProtocolError::InvalidSessionEvent)?;
+                    Some((id.to_owned(), bounded_text(data.get("progressText"), MAX_SESSION_UPDATE_TEXT_BYTES)?.unwrap_or_default()))
+                }
+                None => None,
+            }
+        } else { None }
+    } else { None };
     let envelope = SessionEventEnvelope {
         gateway_sequence: event.sequence,
         kind,
@@ -3556,8 +3643,33 @@ pub fn decode_session_event(
         activity,
         approval,
         changed,
+        transcript_message,
+        commentary,
     };
     Ok(Some(envelope))
+}
+
+pub(crate) fn decode_session_approval(snapshot: Value, session_key: SessionKey) -> Result<SessionApprovalEvent, ProtocolError> {
+    let object = snapshot.as_object().ok_or(ProtocolError::InvalidSessionEvent)?;
+    let presentation = object.get("presentation").and_then(Value::as_object).ok_or(ProtocolError::InvalidSessionEvent)?;
+    let source = match presentation.get("kind").and_then(Value::as_str) {
+        Some("exec") => SessionApprovalSource::Exec,
+        Some("plugin") => SessionApprovalSource::Plugin,
+        Some("system-agent") => SessionApprovalSource::SystemAgent,
+        _ => return Err(ProtocolError::InvalidSessionEvent),
+    };
+    let lifecycle = match object.get("status").and_then(Value::as_str) {
+        Some("pending") => SessionApprovalLifecycle::Requested,
+        Some("allowed" | "denied" | "expired" | "cancelled") => SessionApprovalLifecycle::Resolved,
+        _ => return Err(ProtocolError::InvalidSessionEvent),
+    };
+    let options = presentation.get("allowedDecisions").and_then(Value::as_array).ok_or(ProtocolError::InvalidSessionEvent)?;
+    if options.is_empty() || options.len() > 3 { return Err(ProtocolError::InvalidSessionEvent); }
+    let option_ids = options.iter().map(|value| match value.as_str() {
+        Some("allow-once" | "allow-always" | "deny") => ApprovalOptionId::try_new(value.as_str().unwrap().to_owned()).map_err(|_| ProtocolError::InvalidSessionEvent),
+        _ => Err(ProtocolError::InvalidSessionEvent),
+    }).collect::<Result<Vec<_>, _>>()?;
+    Ok(SessionApprovalEvent { source, lifecycle, approval_id: required(object, "id")?, session_key, run_id: optional(object, "runId")?, option_ids })
 }
 
 fn embedded_message_id(object: &Map<String, Value>) -> Result<Option<MessageId>, ProtocolError> {

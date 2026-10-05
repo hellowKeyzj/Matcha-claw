@@ -135,11 +135,23 @@ pub enum OrganizationCommand {
         patch: crate::application::team_runtime::TeamGraphPatchDraft,
         reply: crate::call::CallReply<Result<TeamRunCommandOutcome, StoreFault>>,
     },
+    RecordEvidence {
+        record: crate::run::evidence::EvidenceRecord,
+        reply:
+            tokio::sync::oneshot::Sender<Result<crate::run::evidence::RecordOutcome, StoreFault>>,
+    },
+    Design {
+        operation: crate::application::design::DesignOperation,
+        resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
+        reply: tokio::sync::oneshot::Sender<Result<serde_json::Value, StoreFault>>,
+    },
     StartGateTerminalProposalSet {
         run_id: GraphRunId,
         proposal_id: String,
         source_delivery_id: String,
         final_assistant_text: String,
+        generation: String,
+        design: bool,
         reply:
             tokio::sync::oneshot::Sender<Result<Option<organization::SetRunStartProposalOutcome>, StoreFault>>,
     },

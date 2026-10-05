@@ -3,7 +3,8 @@ import {
   releaseStagedAttachments,
   stageWorkspaceMediaAttachment,
 } from '../../main/ipc/dialog-attachment-staging';
-import type { RendererEventRouteRegistry } from '../../main/renderer-event-routes';
+import type { RendererSessionObservationRegistry, SessionPage } from '../../main/renderer-event-routes';
+import { isSessionObservationRequest, observationRequest } from '../../main/runtime-host-delivery/transport/sessions/observation';
 import type { RuntimeHostTransportContext } from '../context';
 import type { SessionAbortRequest } from '../../main/runtime-host-delivery/transport/sessions/abort';
 import type {
@@ -17,7 +18,9 @@ import type {
   SessionPermissionOperationId,
   SessionPermissionRequest,
 } from '../../main/runtime-host-delivery/transport/sessions/permission';
-import type { SessionSendRequest } from '../../main/runtime-host-delivery/transport/sessions/send';
+import type { SessionGoalReceipt } from '../../../src/types/session-goal';
+import { decodeSessionGoalOutcome, decodeSessionGoalRequest, isGoalIdentifier, isGoalObjective, isSessionSendIntent } from '../../main/runtime-host-delivery/transport/sessions/goal';
+import { isSessionSendGoalResponse, type SessionSendRequest } from '../../main/runtime-host-delivery/transport/sessions/send';
 import type { WorkspaceMediaTransport } from '../../main/runtime-host-delivery/transport/workspace/media';
 import {
   logSessionTrace,
@@ -37,6 +40,7 @@ const MAX_CONTENT_REF_BYTES = 512;
 export type SessionCapabilityRouteDeps = RuntimeHostTransportContext<
   | 'sessionListTransport'
   | 'sessionTimelineTransport'
+  | 'sessionObservationTransport'
   | 'sessionContentTransport'
   | 'sessionAbortTransport'
   | 'sessionCreateTransport'
@@ -44,11 +48,12 @@ export type SessionCapabilityRouteDeps = RuntimeHostTransportContext<
   | 'sessionRenameTransport'
   | 'sessionApprovalTransport'
   | 'sessionSendTransport'
+  | 'sessionGoalTransport'
   | 'sessionModelSelectionTransport'
   | 'sessionPermissionTransport'
   | 'workspaceMediaTransport'
 > & Readonly<{
-  rendererEventRoutes: Pick<RendererEventRouteRegistry, 'issue' | 'isMatchaRoute' | 'release'>;
+  sessionObservers: RendererSessionObservationRegistry;
 }>;
 
 type PublicTransportResponse = Readonly<{
@@ -72,6 +77,8 @@ export async function dispatchSessionCapability(
   body: unknown,
   deps: SessionCapabilityRouteDeps,
   traceId?: string | null,
+  sessionPage?: SessionPage,
+  signal?: AbortSignal,
 ): Promise<PublicTransportResponse | null> {
   if (!isRecord(body)) return null;
   logSessionTrace('capability.dispatch', traceId, {
@@ -79,6 +86,9 @@ export async function dispatchSessionCapability(
     operationId: typeof body.operationId === 'string' ? body.operationId : null,
   });
 
+  if (body.id === 'session.management' && (body.operationId === 'sessions.observe' || body.operationId === 'sessions.release')) {
+    return await dispatchSessionObservation(body, deps, sessionPage, traceId, signal);
+  }
   if (body.id === 'session.prompt' && body.operationId === 'sessions.create') {
     return await deps.runtimeHostTransports.sessionCreateTransport.create(adaptSessionCreateRequest(body), traceId);
   }
@@ -134,13 +144,78 @@ export async function dispatchSessionCapability(
   }
   if (body.id === 'session.prompt'
     && (body.operationId === 'sessions.prompt' || body.operationId === 'sessions.sendWithMedia')) {
-    return await dispatchSessionSend(body, deps, traceId);
+    return await dispatchSessionSend(body, deps, traceId, sessionPage);
+  }
+  if (body.id === 'session.goal'
+    && (body.operationId === 'sessions.goal.update' || body.operationId === 'sessions.goal.clear')) {
+    return await dispatchSessionGoal(body, deps, traceId, sessionPage);
   }
   if (body.id === 'workspace.media') {
     return await dispatchWorkspaceMedia(body, deps.runtimeHostTransports.workspaceMediaTransport);
   }
 
   return null;
+}
+
+async function dispatchSessionObservation(
+  body: Record<string, unknown>, deps: SessionCapabilityRouteDeps, page: SessionPage | undefined, traceId?: string | null,
+  signal?: AbortSignal,
+): Promise<PublicTransportResponse> {
+  const unavailable = { status: 503, body: { success: false, error: 'Session observation is unavailable' } };
+  try {
+    return await deps.sessionObservers.trackOperation(async (): Promise<PublicTransportResponse> => {
+      const operation = body.operationId === 'sessions.observe' ? 'sessions.observe' : 'sessions.release';
+      if (!isSessionObservationRequest(body, operation) || !deps.sessionObservers.isCurrent(page)) {
+        return { status: 400, body: { success: false, error: 'Session observation request is invalid' } };
+      }
+      const { sessionIdentity: identity, leaseId, limit } = body.input;
+      if (operation === 'sessions.release') {
+        const released = await deps.sessionObservers.releaseObservation(page, identity, leaseId);
+        return { status: 200, body: { outcome: released ? 'released' : 'not-found' } };
+      }
+      if (signal?.aborted) return unavailable;
+      let entry: ReturnType<RendererSessionObservationRegistry['beginObservation']>;
+      try {
+        entry = deps.sessionObservers.beginObservation(page, identity, leaseId);
+      } catch {
+        return { status: 400, body: { success: false, error: 'Session observation request is invalid' } };
+      }
+      let cancellation: Promise<void> | undefined;
+      const cancel = (): void => {
+        cancellation = deps.sessionObservers.rollbackObservation(entry).catch(() => undefined);
+      };
+      signal?.addEventListener('abort', cancel, { once: true });
+      try {
+        const response = await deps.runtimeHostTransports.sessionObservationTransport.observe(
+          observationRequest(identity, entry.nativeLeaseId, 'sessions.observe', limit), traceId);
+        if (signal?.aborted) {
+          await deps.sessionObservers.rollbackObservation(entry);
+          return unavailable;
+        }
+        if (response.status === 200 && 'leaseId' in response.body) {
+          if ('outcome' in response.body) {
+            await deps.sessionObservers.rollbackObservation(entry);
+            return { status: 200, body: { leaseId, outcome: response.body.outcome } };
+          }
+          if (deps.sessionObservers.completeObservation(entry, response.body.leaseId)) {
+            return { status: 200, body: { leaseId, view: response.body.view } };
+          }
+          await deps.sessionObservers.rollbackObservation(entry);
+          return unavailable;
+        }
+        await deps.sessionObservers.rollbackObservation(entry);
+        return response;
+      } catch (error) {
+        await deps.sessionObservers.rollbackObservation(entry);
+        throw error;
+      } finally {
+        signal?.removeEventListener('abort', cancel);
+        await cancellation;
+      }
+    });
+  } catch {
+    return unavailable;
+  }
 }
 
 async function dispatchSessionTimeline(
@@ -184,16 +259,60 @@ async function dispatchSessionPermission(
     : await deps.runtimeHostTransports.sessionPermissionTransport[method](request, traceId);
 }
 
+async function dispatchSessionGoal(
+  body: Record<string, unknown>,
+  deps: SessionCapabilityRouteDeps,
+  traceId?: string | null,
+  sessionPage?: SessionPage,
+): Promise<PublicTransportResponse> {
+  const request = decodeSessionGoalRequest(body);
+  if (!request) return { status: 400, body: { success: false, error: 'Session Goal request is invalid' } };
+  const demand = request.operationId === 'sessions.goal.update' && request.input.action === 'resume'
+    ? deps.sessionObservers.beginSend(sessionPage, request.scope.identity)
+    : null;
+  let response: PublicTransportResponse;
+  try {
+    response = await deps.runtimeHostTransports.sessionGoalTransport.execute(request, traceId);
+  } catch {
+    if (demand) deps.sessionObservers.retainUnknownGoalSend(demand);
+    return { status: 503, body: { outcome: 'unknown' } };
+  }
+  if (response.status === 400 && isRecord(response.body)
+    && hasExactKeys(response.body, ['success', 'error']) && response.body.success === false
+    && response.body.error === 'Session Goal request is invalid') {
+    if (demand) deps.sessionObservers.releaseSend(demand);
+    return response;
+  }
+  const outcome = decodeSessionGoalOutcome(response.body, request);
+  if (!outcome || (response.status !== 200 && !(response.status === 503 && outcome.outcome === 'unknown'))) {
+    if (demand) deps.sessionObservers.retainUnknownGoalSend(demand);
+    return { status: 503, body: { outcome: 'unknown' } };
+  }
+  if (demand) {
+    if (outcome.outcome === 'succeeded') {
+      if (outcome.receipt.status === 'started' && !outcome.receipt.replayed && outcome.receipt.runId) {
+        deps.sessionObservers.bindSend(demand, outcome.receipt.runId);
+      } else deps.sessionObservers.releaseSend(demand);
+    } else if (outcome.outcome === 'unknown') deps.sessionObservers.retainUnknownGoalSend(demand);
+    else deps.sessionObservers.releaseSend(demand);
+  }
+  return { status: response.status, body: outcome };
+}
+
 async function dispatchSessionSend(
   body: Record<string, unknown>,
   deps: SessionCapabilityRouteDeps,
   traceId?: string | null,
+  sessionPage?: SessionPage,
 ): Promise<PublicTransportResponse> {
-  const request = await adaptSessionSendRequest(body, deps.rendererEventRoutes);
+  const request = await adaptSessionSendRequest(body);
+  const requestedRunId = request.input.intent === undefined
+    ? request.input.runId ?? request.input.idempotencyKey : undefined;
+  const demand = deps.sessionObservers.beginSend(sessionPage, request.scope.identity, requestedRunId);
   try {
     logSessionTrace('capability.send.request', traceId, {
-      adapter: request.scope.endpoint.runtimeAdapterId,
-      sessionKey: summarizeIdentifier(request.input.sessionKey),
+      adapter: request.scope.identity.endpoint.runtimeAdapterId,
+      sessionKey: summarizeIdentifier(request.input.identity.sessionKey),
       endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
       runId: summarizeIdentifier(request.input.runId),
       idempotencyKey: summarizeIdentifier(request.input.idempotencyKey),
@@ -203,30 +322,41 @@ async function dispatchSessionSend(
       ? await deps.runtimeHostTransports.sessionSendTransport.send(request)
       : await deps.runtimeHostTransports.sessionSendTransport.send(request, traceId);
     const projected = projectSessionSendResponse(response, request);
-    const retainsRoute = projected !== null && retainsSessionRoute(projected, request);
+    if (projected && 'runId' in projected.body) {
+      if ('goal' in projected.body && projected.body.goal?.replayed) deps.sessionObservers.releaseSend(demand);
+      else deps.sessionObservers.bindSend(demand, projected.body.runId);
+    }
+    else if (projected && (projected.status === 400 || ('outcome' in projected.body
+      && (projected.body.outcome === 'target_rejected' || projected.body.outcome === 'unavailable'
+        || projected.body.outcome === 'unsupported')))) {
+      deps.sessionObservers.releaseSend(demand);
+    } else if (request.input.intent !== undefined) deps.sessionObservers.retainUnknownGoalSend(demand);
     logSessionTrace('capability.send.response', traceId, {
       status: response.status,
       projected: Boolean(projected),
-      retainedRoute: retainsRoute,
     });
-    if (!retainsRoute) deps.rendererEventRoutes.release(request.scope.routeKey);
-    return projected ?? { status: 503, body: SESSION_SEND_UNAVAILABLE };
+    return projected ?? (request.input.intent === undefined
+      ? { status: 503, body: SESSION_SEND_UNAVAILABLE }
+      : { status: 200, body: { outcome: 'unknown' } });
   } catch (error) {
-    deps.rendererEventRoutes.release(request.scope.routeKey);
+    if (request.input.intent !== undefined) {
+      deps.sessionObservers.retainUnknownGoalSend(demand);
+      return { status: 200, body: { outcome: 'unknown' } };
+    }
     throw error;
   }
 }
 
 type SessionSendResponse = Readonly<{
   status: 200 | 202 | 400 | 503;
-  body: Readonly<{ outcome: 'queued'; runId: string; routeKey: string }>
+  body: Readonly<{ outcome: 'queued'; runId: string }>
     | Readonly<{
       outcome: 'succeeded';
       runId: string;
-      routeKey?: string;
       status: 'started' | 'in_flight' | 'ok';
+      goal?: SessionGoalReceipt;
     }>
-    | Readonly<{ outcome: 'target_rejected' | 'unavailable' | 'unknown' }>
+    | Readonly<{ outcome: 'target_rejected' | 'unavailable' | 'unknown' | 'unsupported' }>
     | typeof SESSION_SEND_INVALID
     | typeof SESSION_SEND_UNAVAILABLE;
 }>;
@@ -241,7 +371,6 @@ function projectSessionSendResponse(
       body: {
         outcome: 'queued',
         runId: response.body.runId,
-        routeKey: request.scope.routeKey,
       },
     };
   }
@@ -251,14 +380,12 @@ function projectSessionSendResponse(
       body: {
         outcome: 'succeeded',
         runId: response.body.runId,
-        ...(request.scope.endpoint.runtimeAdapterId === 'matcha-agent'
-          ? { routeKey: request.scope.routeKey }
-          : {}),
         status: response.body.status,
+        ...(response.body.goal === undefined ? {} : { goal: response.body.goal }),
       },
     };
   }
-  if (response.status === 200 && isTerminalSessionSendResponse(response.body)) {
+  if (response.status === 200 && isTerminalSessionSendResponse(response.body, request)) {
     return { status: 200, body: { outcome: response.body.outcome } };
   }
   if (response.status === 400 && isExactFailure(response.body, SESSION_SEND_INVALID)) {
@@ -270,50 +397,41 @@ function projectSessionSendResponse(
   return null;
 }
 
-function retainsSessionRoute(
-  response: SessionSendResponse,
-  request: SessionSendRequest,
-): boolean {
-  return isQueuedSessionSendResponse(response.body, request)
-    || isSucceededSessionSendResponse(response.body, request)
-    || isTerminalSessionSendResponse(response.body);
-}
-
 function isQueuedSessionSendResponse(value: unknown, request: SessionSendRequest): value is Readonly<{
   outcome: 'queued';
   runId: string;
-  routeKey?: string;
 }> {
-  return request.scope.endpoint.runtimeAdapterId === 'openclaw'
+  return request.scope.identity.endpoint.runtimeAdapterId === 'openclaw'
+    && request.input.intent === undefined
     && isRecord(value)
-    && hasAllowedKeys(value, ['outcome', 'runId'], ['routeKey'])
+    && hasExactKeys(value, ['outcome', 'runId'])
     && value.outcome === 'queued'
-    && isIdentifier(value.runId)
-    && (value.routeKey === undefined || value.routeKey === request.scope.routeKey);
+    && isIdentifier(value.runId);
 }
 
 function isSucceededSessionSendResponse(value: unknown, request: SessionSendRequest): value is Readonly<{
   outcome: 'succeeded';
-  routeKey?: string;
   runId: string;
   status: 'started' | 'in_flight' | 'ok';
+  goal?: SessionGoalReceipt;
 }> {
   const expectedRunId = request.input.runId ?? request.input.idempotencyKey;
   return isRecord(value)
-    && hasAllowedKeys(value, ['outcome', 'runId', 'status'], ['routeKey'])
+    && hasAllowedKeys(value, ['outcome', 'runId', 'status'], ['goal'])
     && value.outcome === 'succeeded'
     && isIdentifier(value.runId)
-    && (request.scope.endpoint.runtimeAdapterId === 'openclaw' || value.runId === expectedRunId)
+    && (request.scope.identity.endpoint.runtimeAdapterId === 'openclaw' || value.runId === expectedRunId)
     && (value.status === 'started' || value.status === 'in_flight' || value.status === 'ok')
-    && (value.routeKey === undefined || value.routeKey === request.scope.routeKey);
+    && isSessionSendGoalResponse(value, request);
 }
 
-function isTerminalSessionSendResponse(value: unknown): value is Readonly<{
-  outcome: 'target_rejected' | 'unavailable' | 'unknown';
+function isTerminalSessionSendResponse(value: unknown, request: SessionSendRequest): value is Readonly<{
+  outcome: 'target_rejected' | 'unavailable' | 'unknown' | 'unsupported';
 }> {
   return isRecord(value)
     && hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'target_rejected' || value.outcome === 'unavailable' || value.outcome === 'unknown');
+    && (value.outcome === 'target_rejected' || value.outcome === 'unavailable' || value.outcome === 'unknown'
+      || (request.input.intent !== undefined && value.outcome === 'unsupported'));
 }
 
 function isExactFailure(
@@ -1203,10 +1321,10 @@ function adaptSessionAbortRequest(body: Record<string, unknown>, traceId?: strin
     || body.scope.kind !== 'session'
     || !isSessionIdentity(body.scope.identity)
     || !isRecord(body.target)
-    || !hasAllowedKeys(body.target, ['kind'], ['identity'])
+    || !hasExactKeys(body.target, ['kind', 'identity'])
     || body.target.kind !== 'session'
-    || (body.target.identity !== undefined && (!isSessionIdentity(body.target.identity)
-      || !sameIdentity(body.scope.identity, body.target.identity)))
+    || !isSessionIdentity(body.target.identity)
+    || !sameIdentity(body.scope.identity, body.target.identity)
     || !isRecord(body.input)
     || !hasAllowedKeys(body.input, ['sessionKey', 'sessionIdentity'], ['endpointSessionId', 'runId', 'approvalIds'])
     || !isSessionIdentity(body.input.sessionIdentity)
@@ -1241,14 +1359,14 @@ function adaptSessionAbortRequest(body: Record<string, unknown>, traceId?: strin
   return {
     id: 'session.abort',
     operationId: 'sessions.abort',
-    scope: { kind: 'session', endpoint, sessionKey: body.input.sessionKey as string },
-    target: { kind: 'session' },
+    scope: { kind: 'session', identity: body.scope.identity },
+    target: { kind: 'session', identity: body.scope.identity },
     input: {
-      endpoint,
-      sessionKey: body.input.sessionKey as string,
+      identity: body.scope.identity,
       ...(body.input.endpointSessionId === undefined ? {} : { endpointSessionId: body.input.endpointSessionId as string }),
       ...(body.input.runId === undefined ? {} : { runId: body.input.runId as string }),
-      ...(body.input.approvalIds === undefined ? {} : { approvalIds: body.input.approvalIds as string[] }),
+      ...(body.input.approvalIds === undefined || (body.input.approvalIds as string[]).length === 0
+        ? {} : { approvalIds: body.input.approvalIds as string[] }),
     },
   };
 }
@@ -1577,7 +1695,6 @@ function summarizeString(value: unknown): { present: boolean; length: number } {
 
 async function adaptSessionSendRequest(
   body: Record<string, unknown>,
-  rendererEventRoutes: Pick<RendererEventRouteRegistry, 'issue'>,
 ): Promise<SessionSendRequest> {
   if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
     || body.id !== 'session.prompt'
@@ -1587,10 +1704,10 @@ async function adaptSessionSendRequest(
     || body.scope.kind !== 'session'
     || !isSessionIdentity(body.scope.identity)
     || !isRecord(body.target)
-    || !hasAllowedKeys(body.target, ['kind'], ['identity'])
+    || !hasExactKeys(body.target, ['kind', 'identity'])
     || body.target.kind !== 'session'
-    || (body.target.identity !== undefined && (!isSessionIdentity(body.target.identity)
-      || !sameIdentity(body.scope.identity, body.target.identity)))
+    || !isSessionIdentity(body.target.identity)
+    || !sameIdentity(body.scope.identity, body.target.identity)
     || !isRecord(body.input)
     || !hasAllowedKeys(body.input, ['sessionKey', 'sessionIdentity', 'message'], [
       'runId',
@@ -1599,6 +1716,7 @@ async function adaptSessionSendRequest(
       'deliver',
       'attachments',
       'media',
+      'intent',
     ])
     || !isSessionIdentity(body.input.sessionIdentity)
     || !sameIdentity(body.scope.identity, body.input.sessionIdentity)
@@ -1609,6 +1727,9 @@ async function adaptSessionSendRequest(
     || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))
     || (body.input.idempotencyKey !== undefined && !isIdentifier(body.input.idempotencyKey))
     || (body.input.deliver !== undefined && typeof body.input.deliver !== 'boolean')
+    || (Object.hasOwn(body.input, 'intent') && (!isSessionSendIntent(body.input.intent)
+      || body.input.runId !== undefined || !isGoalIdentifier(body.input.idempotencyKey, 128)
+      || !isGoalObjective(body.input.message)))
     || (body.input.attachments !== undefined && !Array.isArray(body.input.attachments))
     || (body.operationId === 'sessions.sendWithMedia'
       && (!Array.isArray(body.input.attachments) || body.input.attachments.length === 0))
@@ -1616,7 +1737,6 @@ async function adaptSessionSendRequest(
     throw new Error('Session send request is invalid');
   }
 
-  const endpoint = body.scope.identity.endpoint;
   const attachments = body.input.attachments ?? [];
   let totalBytes = 0;
   const projected = [];
@@ -1635,25 +1755,21 @@ async function adaptSessionSendRequest(
     });
   }
 
-  const routeKey = rendererEventRoutes.issue({
-    endpoint,
-    agentId: body.scope.identity.agentId,
-    sessionKey: body.input.sessionKey as string,
-  });
+  const identity = body.scope.identity;
   return {
     id: 'session.prompt',
     operationId: 'sessions.send',
-    scope: { kind: 'session', endpoint, sessionKey: body.input.sessionKey as string, routeKey },
-    target: { kind: 'session' },
+    scope: { kind: 'session', identity },
+    target: { kind: 'session', identity },
     input: {
-      endpoint,
-      sessionKey: body.input.sessionKey as string,
+      identity,
       ...(body.input.endpointSessionId === undefined ? {} : { endpointSessionId: body.input.endpointSessionId as string }),
       message: body.input.message as string,
       ...(body.input.runId === undefined
         ? body.input.idempotencyKey === undefined ? {} : { idempotencyKey: body.input.idempotencyKey as string }
         : { runId: body.input.runId as string }),
       ...(body.input.deliver === undefined ? {} : { deliver: body.input.deliver as boolean }),
+      ...(isSessionSendIntent(body.input.intent) ? { intent: body.input.intent } : {}),
       attachments: projected,
     },
   };

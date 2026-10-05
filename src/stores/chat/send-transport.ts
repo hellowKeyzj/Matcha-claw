@@ -1,4 +1,5 @@
 import { hostSessionPrompt } from '@/lib/host-api';
+import type { SessionGoalOutcome, SessionSendIntent } from '@/types/session-goal';
 import {
   logSessionTrace,
   summarizeIdentifier,
@@ -57,6 +58,7 @@ export interface SendChatTransportParams {
   endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
   message: string;
+  intent?: SessionSendIntent;
   idempotencyKey: string;
   attachments?: ChatSendAttachment[];
   timeoutMs?: number;
@@ -64,8 +66,8 @@ export interface SendChatTransportParams {
 }
 
 export type SendChatTransportResult =
-  | { ok: true; runId: string; projection: SessionProjectionEvent | null }
-  | { ok: false; error: string };
+  | { ok: true; runId: string; replayed?: true; projection: SessionProjectionEvent | null }
+  | { ok: false; error: string; outcome?: Exclude<SessionGoalOutcome['outcome'], 'succeeded'> };
 
 export async function sendChatTransport(
   params: SendChatTransportParams,
@@ -88,6 +90,7 @@ export async function sendChatTransport(
     ...(params.endpointSessionId ? { endpointSessionId: params.endpointSessionId } : {}),
     sessionIdentity: params.sessionIdentity,
     message,
+    ...(params.intent ? { intent: params.intent } : {}),
     idempotencyKey: params.idempotencyKey,
     deliver: false,
     ...(attachmentsToInline.length > 0
@@ -109,7 +112,6 @@ export async function sendChatTransport(
     outcome: response.outcome ?? null,
     status: response.status ?? null,
     runId: summarizeIdentifier(response.runId),
-    routeKey: summarizeIdentifier(response.routeKey),
     errorPresent: typeof response.error === 'string' && response.error.trim().length > 0,
   });
   const normalizedRunId = typeof response.runId === 'string'
@@ -120,12 +122,18 @@ export async function sendChatTransport(
     || response.outcome === 'queued'
     || response.outcome === 'succeeded'
   );
-  if (!accepted) {
+  if (!accepted || params.intent && (response.outcome !== 'succeeded' || !response.goal || response.goal.action !== 'start'
+    || response.goal.status !== 'started' || response.goal.runId !== normalizedRunId
+    || response.goal.operationId !== params.idempotencyKey
+    || params.endpointSessionId && response.goal.sessionId !== params.endpointSessionId)) {
     const failureMessage = typeof response.error === 'string'
       ? response.error.trim()
       : '';
     return {
       ok: false,
+      ...(response.outcome === 'target_rejected' || response.outcome === 'unavailable' || response.outcome === 'unsupported' || response.outcome === 'unknown'
+        ? { outcome: response.outcome }
+        : params.intent && (accepted || response.outcome === 'succeeded' || response.success === true) ? { outcome: 'unknown' as const } : {}),
       error: failureMessage
         ? failureMessage
         : CHAT_SEND_DEFAULT_ERROR,
@@ -134,6 +142,7 @@ export async function sendChatTransport(
   return {
     ok: true,
     runId: normalizedRunId,
+    ...(params.intent && response.goal?.replayed ? { replayed: true as const } : {}),
     projection: decodeSessionProjectionEvent(response.projection ?? response.snapshot),
   };
 }

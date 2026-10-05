@@ -354,6 +354,8 @@ pub(crate) enum SafeEvent {
     // empty struct variant. `OpenClawRuntime {}` serializes byte-identically to `OpenClawRuntime`.
     #[serde(rename = "openclaw.runtime")]
     OpenClawRuntime {},
+    #[serde(rename = "openclaw.questions.changed")]
+    OpenClawQuestionsChanged {},
     #[serde(rename = "matcha.lifecycle", rename_all = "camelCase")]
     MatchaLifecycle {
         lifecycle: SafeRuntimeLifecycle,
@@ -368,6 +370,8 @@ pub(crate) enum SafeEvent {
     },
     #[serde(rename = "calls.resync")]
     CallsResync {},
+    #[serde(rename = "organization.changed")]
+    OrganizationChanged {},
     #[serde(rename = "openclaw.cron.execution", rename_all = "camelCase")]
     OpenClawCronExecution {
         job_id: CronExecutionId,

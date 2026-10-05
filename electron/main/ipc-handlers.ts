@@ -4,6 +4,7 @@
  */
 import type { BrowserWindow } from 'electron';
 import type { DirectRuntimeHost } from './runtime-host-delivery/direct-host';
+import type { RendererSessionObservationRegistry } from './renderer-event-routes';
 import { registerShellHandlers } from './ipc/shell-ipc';
 import { registerDialogHandlers } from './ipc/dialog-ipc';
 import { registerAppHandlers } from './ipc/app-ipc';
@@ -23,8 +24,9 @@ import type { DiagnosticsExportDependencies } from './ipc/diagnostics-export-ipc
  */
 export function registerStaticIpcHandlers(
   getMainWindow: () => BrowserWindow | null,
+  sessionObservers?: RendererSessionObservationRegistry,
 ): void {
-  registerHostApiProxyHandlers();
+  registerHostApiProxyHandlers(sessionObservers);
   registerSettingsPrivateProxyHandlers();
   registerShellHandlers();
   registerDialogHandlers();

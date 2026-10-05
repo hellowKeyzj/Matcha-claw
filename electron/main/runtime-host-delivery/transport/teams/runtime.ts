@@ -1,4 +1,5 @@
 import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
+import { decodeTeamDesignMutation, decodeTeamDesignSnapshot } from '../../../../../src/types/team-design';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { isRecord, sendLoopbackJson } from '../client';
 
@@ -46,6 +47,18 @@ export function createTeamRuntimeTransport(
         }
         if (response?.status === 200) return { status: 503, body: UNAVAILABLE };
       } else if (response?.status === 200) {
+        if (isRecord(request) && (request.operationId === 'team.designStart' || request.operationId === 'team.designContinue' || request.operationId === 'team.designExit' || request.operationId === 'team.designSnapshot' || request.operationId === 'team.designGraphPatch')) {
+          try {
+            const body = (request.operationId === 'team.designSnapshot' || request.operationId === 'team.designGraphPatch')
+              && isRecord(request.target) && typeof request.target.teamId === 'string'
+              && isRecord(request.input) && typeof request.input.runId === 'string'
+              ? decodeTeamDesignSnapshot(response.body, { teamId: request.target.teamId, runId: request.input.runId })
+              : decodeTeamDesignMutation(response.body, request.operationId === 'team.designExit' ? 'intake' : 'designing');
+            return { status: 200, body };
+          } catch {
+            return { status: 503, body: UNAVAILABLE };
+          }
+        }
         return { status: 200, body: response.body };
       }
       if (response?.status === 400) return { status: 400, body: response.body ?? INVALID };

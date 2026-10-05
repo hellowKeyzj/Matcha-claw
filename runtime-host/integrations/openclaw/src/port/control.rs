@@ -155,10 +155,55 @@ impl OpenClawGateway {
         gateway_request_outcome(self.client.rpc_mutation(request).await)
     }
 
+    pub async fn question_list(
+        &self,
+        request: crate::gateway::request::OpenClawQuestionListGatewayRequest,
+    ) -> OpenClawGatewayRequestOutcome {
+        if super::validate_observation_identity(&request.session_identity).is_err() {
+            return OpenClawGatewayRequestOutcome::Rejected;
+        }
+        let payload = match self.client.question_list().await {
+            Ok(wire::GatewayResponse::Success { payload: Some(payload), .. }) => payload,
+            Ok(wire::GatewayResponse::Failure { .. }) => return OpenClawGatewayRequestOutcome::Rejected,
+            _ => return OpenClawGatewayRequestOutcome::Unavailable,
+        };
+        let Some(records) = payload.get("questions").and_then(serde_json::Value::as_array) else {
+            return OpenClawGatewayRequestOutcome::Unavailable;
+        };
+        let mut questions = Vec::new();
+        for record in records {
+            match crate::gateway::request::project_pending_question(record.clone(), &request.session_identity) {
+                Ok(Some(record)) => questions.push(record),
+                Ok(None) => {},
+                Err(_) => return OpenClawGatewayRequestOutcome::Unavailable,
+            }
+        }
+        OpenClawGatewayRequestOutcome::Succeeded(serde_json::json!({ "questions": questions }))
+    }
+
     pub async fn question_resolve(
         &self,
         request: crate::gateway::request::OpenClawQuestionResolveGatewayRequest,
     ) -> OpenClawGatewayRequestOutcome {
+        if super::validate_observation_identity(&request.session_identity).is_err() {
+            return OpenClawGatewayRequestOutcome::Rejected;
+        }
+        let record = match self.client.question_get(request.id.clone()).await {
+            Ok(wire::GatewayResponse::Success { payload: Some(payload), .. }) => match payload.get("question") {
+                Some(record) => record.clone(),
+                None => return OpenClawGatewayRequestOutcome::Unavailable,
+            },
+            Ok(wire::GatewayResponse::Failure { .. }) => return OpenClawGatewayRequestOutcome::Rejected,
+            _ => return OpenClawGatewayRequestOutcome::Unavailable,
+        };
+        if record.get("id").and_then(serde_json::Value::as_str) != Some(request.id.as_str()) {
+            return OpenClawGatewayRequestOutcome::Rejected;
+        }
+        match crate::gateway::request::project_pending_question(record, &request.session_identity) {
+            Ok(Some(_)) => {},
+            Ok(None) => return OpenClawGatewayRequestOutcome::Rejected,
+            Err(_) => return OpenClawGatewayRequestOutcome::Unavailable,
+        }
         let request = match wire::question_resolve_request(
             next_request_id("question-resolve"),
             request.id,
@@ -169,7 +214,13 @@ impl OpenClawGateway {
             Ok(request) => request,
             Err(_) => return OpenClawGatewayRequestOutcome::Rejected,
         };
-        gateway_request_outcome(self.client.rpc_mutation(request).await)
+        match gateway_request_outcome(self.client.rpc_mutation(request).await) {
+            OpenClawGatewayRequestOutcome::Succeeded(payload) => match crate::gateway::request::project_question_resolve_result(payload) {
+                Ok(payload) => OpenClawGatewayRequestOutcome::Succeeded(payload),
+                Err(_) => OpenClawGatewayRequestOutcome::OutcomeUnknown,
+            },
+            outcome => outcome,
+        }
     }
 
     pub fn control_ui_url(&self) -> String {

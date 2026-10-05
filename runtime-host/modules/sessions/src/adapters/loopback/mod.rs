@@ -37,6 +37,8 @@ pub(crate) mod presenter;
 mod rename;
 pub(crate) mod send;
 mod timeline;
+mod observation;
+mod goal;
 pub mod trace;
 
 pub use events::{Action as SessionEventsAction, EventStream as SessionEventsStream};
@@ -110,6 +112,12 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
+        if request.method() == "POST" && matches!(request.path(), "/api/sessions/observe" | "/api/sessions/release") {
+            return observation::handle(&request, Arc::clone(&dependencies.verifier), dependencies.session).await.into();
+        }
+        if request.method() == "POST" && request.path() == "/api/sessions/goal" {
+            return goal::handle(&request, Arc::clone(&dependencies.verifier), dependencies.session).await.into();
+        }
         let response = handler::handle_loopback(
             &request,
             Arc::clone(&dependencies.verifier),
@@ -174,6 +182,9 @@ fn is_session_route(path: &str) -> bool {
             | "/api/sessions/permission"
             | "/api/sessions/send"
             | "/api/sessions/abort"
+            | "/api/sessions/goal"
+            | "/api/sessions/observe"
+            | "/api/sessions/release"
             | "/api/sessions/approvals/list"
             | "/api/sessions/approvals/respond"
             | "/api/sessions/model"

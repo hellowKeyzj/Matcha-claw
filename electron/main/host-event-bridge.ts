@@ -3,23 +3,24 @@ import type { HostEventBus } from '../api/event-bus';
 import type { DirectRuntimeHostExit } from './runtime-host-delivery/direct-host';
 import type { RuntimeHostLifecycle } from './runtime-host-delivery/lifecycle-owner';
 import {
-  decodeLegacySessionUpdateDelta,
   decodeSessionDelta,
+  decodeSessionResync,
 } from './runtime-host-delivery/transport/sessions/session-contract';
 import {
   readGatewayStatusProjection,
   readRuntimeHostStatusProjection,
   unavailableGatewayStatus,
 } from '../api/routes/app';
-import type { RendererEventRouteRegistry } from './renderer-event-routes';
-import { logSessionTrace } from './runtime-host-delivery/transport/sessions/trace';
+import type { RendererSessionObservationRegistry } from './renderer-event-routes';
+import type { SessionEventsTransport } from './runtime-host-delivery/transport/sessions/events';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionChanges, summarizeSessionIdentity } from './runtime-host-delivery/transport/sessions/trace';
 
 type HostEventName =
   | 'gateway:status'
   | 'gateway:error'
   | 'gateway:notification'
-  | 'session:update'
   | 'session.delta'
+  | 'session.resync'
   | 'task:snapshot'
   | 'gateway:channel-status'
   | 'gateway:exit'
@@ -29,6 +30,7 @@ type HostEventName =
   | 'runtime-host:disconnected'
   | 'package:changed'
   | 'team:event'
+  | 'team:changed'
   | 'matcha-agent:status'
   | 'openclaw:cli-installed'
   | 'oauth:code'
@@ -36,6 +38,7 @@ type HostEventName =
   | 'oauth:success'
   | 'oauth:error'
   | 'openclaw:lifecycle'
+  | 'openclaw:questions-changed'
   | 'openclaw:cron'
   | 'call:changed'
   | 'calls:resync';
@@ -46,10 +49,6 @@ type RuntimeHostBridge = Pick<
   RuntimeHostLifecycle,
   'command' | 'onDisconnect' | 'onExit' | 'onRestart' | 'onSafeEvent'
 >;
-
-type SessionEventsTransport = Readonly<{
-  onDelta: (handler: (delta: unknown) => void) => () => void;
-}>;
 
 export function emitHostEvent(
   eventBus: HostEventBus,
@@ -73,8 +72,9 @@ export function registerHostEventBridge(deps: {
   runtimeHost: RuntimeHostBridge;
   hostEventBus: HostEventBus;
   getMainWindow: () => BrowserWindow | null;
-  rendererEventRoutes: Pick<RendererEventRouteRegistry, 'matchesSession' | 'release'>;
+  sessionObservers: RendererSessionObservationRegistry;
   sessionEvents?: SessionEventsTransport;
+  resyncSessions: () => Promise<void>;
 }): void {
   const emit: EmitHostEvent = (eventName, payload) => {
     emitHostEvent(deps.hostEventBus, deps.getMainWindow(), eventName, payload);
@@ -97,13 +97,14 @@ export function registerHostEventBridge(deps: {
     emit('gateway:status', status);
   };
 
-  deps.hostEventBus.on('session:update', (payload) => {
-    publishSessionDelta(decodeLegacySessionUpdateDelta(payload), emit, deps.rendererEventRoutes);
-  });
-
   deps.sessionEvents?.onDelta((delta) => {
-    publishSessionDelta(decodeSessionDelta(delta), emit, deps.rendererEventRoutes);
+    publishSessionDelta(decodeSessionDelta(delta), deps.sessionObservers);
   });
+  deps.sessionEvents?.onResync((payload) => {
+    const event = decodeSessionResync(payload);
+    if (event) deps.sessionObservers.publish(event.identity, 'session.resync', event);
+  });
+  deps.sessionEvents?.onReconnect(() => { void deps.resyncSessions(); });
 
   for (const eventName of [
     'gateway:error',
@@ -131,12 +132,18 @@ export function registerHostEventBridge(deps: {
       case 'calls.resync':
         emit('calls:resync', {});
         return;
+      case 'organization.changed':
+        emit('team:changed', {});
+        return;
       case 'openclaw.lifecycle':
         emit('openclaw:lifecycle', {
           active: event.hasRun || event.hasMessage || event.hasSessionActivity,
         });
         void publishRuntimeHostStatus();
         void publishGatewayStatus();
+        return;
+      case 'openclaw.questions.changed':
+        emit('openclaw:questions-changed', {});
         return;
       case 'openclaw.runtime':
         void publishRuntimeHostStatus();
@@ -159,10 +166,6 @@ export function registerHostEventBridge(deps: {
           status: event.status,
         });
         return;
-      case 'matcha.session.activity':
-      case 'openclaw.session.activity':
-      case 'openclaw.session.update':
-        return;
     }
   });
   deps.runtimeHost.onDisconnect(() => {
@@ -173,6 +176,7 @@ export function registerHostEventBridge(deps: {
   });
   deps.runtimeHost.onRestart((restart) => {
     emit('runtime-host:restart', restart);
+    void deps.resyncSessions();
     void publishRuntimeHostStatus();
     void publishGatewayStatus();
   });
@@ -183,33 +187,33 @@ export function registerHostEventBridge(deps: {
 
 function publishSessionDelta(
   delta: ReturnType<typeof decodeSessionDelta>,
-  emit: EmitHostEvent,
-  routes: Pick<RendererEventRouteRegistry, 'matchesSession' | 'release'>,
+  observers: RendererSessionObservationRegistry,
 ): void {
-  if (!delta || delta.routeKey === undefined || !isBoundSessionDelta(delta, routes)) return;
-  logSessionTrace('electron.session.delta.publish', 'session-delta-boundary', {
-    sessionKey: summarizeDeltaIdentifier(delta.sessionKey),
-    runId: summarizeDeltaIdentifier(sessionDeltaRunId(delta)),
+  if (!delta) return;
+  if (isSessionTraceEnabled()) logSessionTrace('electron.session.delta.publish', 'session-delta-boundary', {
+    identity: summarizeSessionIdentity(delta.identity),
+    sessionKey: summarizeIdentifier(delta.sessionKey),
+    runId: summarizeIdentifier(sessionDeltaRunId(delta)),
+    epoch: delta.epoch,
     seq: delta.seq,
     cursor: delta.cursor,
     changeKinds: delta.changes.map((change) => change.kind),
     changeCount: delta.changes.length,
     textLength: sessionDeltaTextLength(delta.changes),
+    mappedChanges: summarizeSessionChanges(delta.changes),
   });
-  emit('session.delta', delta);
-  if (delta.changes.some((change) => (
-    change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase))
-    || (change.kind === 'runtimeChanged' && isTerminalRunPhase(change.runtime.phase))
-  )) {
-    routes.release(delta.routeKey);
-  }
+  observers.publish(delta.identity, 'session.delta', delta);
+  observers.terminal(delta);
 }
 
 function sessionDeltaTextLength(changes: readonly unknown[]): number {
-  return changes.reduce((total, change) => {
+  return changes.reduce<number>((total, change) => {
     if (!isRecord(change)) return total;
     if (change.kind === 'messageDelta') return total + publicTextLength(change.text);
-    if (change.kind !== 'messageUpdated') return total;
+    if (change.kind === 'itemsReplaced' && Array.isArray(change.items)) {
+      return total + change.items.reduce<number>((length, item) => length + sessionItemTextLength(item), 0);
+    }
+    if (change.kind !== 'messageUpdated' && change.kind !== 'messageReplaced') return total;
     return total + sessionItemTextLength(change.item);
   }, 0);
 }
@@ -253,29 +257,6 @@ function sessionDeltaRunId(delta: ReturnType<typeof decodeSessionDelta>): string
     if ('runId' in change && typeof change.runId === 'string') return change.runId;
   }
   return undefined;
-}
-
-function summarizeDeltaIdentifier(value: string | null | undefined): {
-  present: boolean;
-  length: number;
-} {
-  return value ? { present: true, length: value.length } : { present: false, length: 0 };
-}
-
-function isBoundSessionDelta(
-  delta: { readonly sessionKey: string; readonly routeKey?: string },
-  routes: Pick<RendererEventRouteRegistry, 'matchesSession'>,
-): boolean {
-  // The live wire carries only sessionKey/routeKey; matchesSession is the strongest
-  // binding proof available without fabricating endpoint or agent identity.
-  return delta.routeKey !== undefined && routes.matchesSession(delta.routeKey, delta.sessionKey);
-}
-
-function isTerminalRunPhase(phase: unknown): boolean {
-  return phase === 'cancelled'
-    || phase === 'completed'
-    || phase === 'failed'
-    || phase === 'interrupted';
 }
 
 function emitHostExit(emit: EmitHostEvent, exit: DirectRuntimeHostExit): void {

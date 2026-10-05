@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type WheelEvent } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type WheelEvent } from 'react';
 import { AlertCircle, Keyboard, Loader2, MousePointerClick, PanelTopOpen, RefreshCw, SquareActivity } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { hostOpenClawBrowserRequest, hostOpenClawMcpAppRequest } from '@/lib/host-api';
 import type { ChatRuntimeSurfaceDescriptor } from '../useChatSidePanelController';
+import { buildSessionIdentityKey, sessionIdentitiesEqual, type SessionIdentity } from '@/types/desktop/runtime-address';
+
+const TeamGraphRuntimePanel = lazy(() => import('./TeamGraphRuntimePanel').then((module) => ({ default: module.TeamGraphRuntimePanel })));
 
 const SIDE_PANEL_CONTENT_PAD_X = 'px-3';
 const SIDE_PANEL_CONTENT_PAD_Y = 'py-3';
@@ -563,7 +566,20 @@ function McpRuntimePanel({ surface }: { surface: McpSurface }) {
   );
 }
 
-export function ChatRuntimeSurfacePanel({ surface }: { surface: ChatRuntimeSurfaceDescriptor | null }) {
+export function ChatRuntimeSurfacePanel({ surface, sessionIdentity }: {
+  surface: ChatRuntimeSurfaceDescriptor | null;
+  sessionIdentity?: SessionIdentity;
+}) {
+  if (surface?.kind === 'team-graph') {
+    if (!sessionIdentity || !sessionIdentitiesEqual(surface.sourceSessionIdentity, sessionIdentity)) {
+      return null;
+    }
+    return (
+      <Suspense fallback={<div role="status" className="flex min-h-0 flex-1 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>}>
+        <TeamGraphRuntimePanel key={JSON.stringify([buildSessionIdentityKey(surface.sourceSessionIdentity), surface.teamId, surface.runId])} surface={surface} />
+      </Suspense>
+    );
+  }
   if (!surface) {
     return (
       <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground">

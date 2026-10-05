@@ -168,6 +168,18 @@ impl SessionHandle {
         .await
     }
 
+    pub async fn mutate_session_goal(&self, command: crate::goal::SessionGoalCommand) -> Result<crate::goal::SessionGoalOutcome, ()> {
+        self.request_command(|reply| SessionCommand::Goal { command, reply }).await
+    }
+
+    pub async fn observe_session(&self, command: crate::ports::SessionObserveCommand) -> Result<crate::ports::SessionObserveOutcome, ()> {
+        self.request_query(|reply| SessionQuery::Observe { command, reply }).await
+    }
+
+    pub async fn release_observation(&self, identity: SessionIdentity, lease_id: String) -> Result<crate::ports::SessionReleaseOutcome, ()> {
+        self.request_command(|reply| SessionCommand::Release { identity, lease_id, reply }).await
+    }
+
     pub async fn abort_session(
         &self,
         command: SessionAbortCommand,

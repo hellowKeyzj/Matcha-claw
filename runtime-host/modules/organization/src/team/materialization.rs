@@ -27,6 +27,39 @@ impl TeamMaterialization {
     pub fn request(&self) -> &TeamMaterializationRequest {
         &self.request
     }
+
+    pub(crate) fn with_leader_agents_markdown(
+        mut self,
+        markdown: impl Into<String>,
+    ) -> Result<Self, TeamMaterializationError> {
+        let intent = self.request.intent();
+        if intent.source() != MaterializationSource::Manual {
+            return Err(TeamMaterializationError::Invalid);
+        }
+        let markdown = markdown.into();
+        let agents = intent
+            .agents()
+            .iter()
+            .map(|agent| {
+                if agent.role().as_str() == LEADER_ROLE_ID {
+                    agent.clone().with_agents_markdown(markdown.clone())
+                } else {
+                    agent.clone()
+                }
+            })
+            .collect();
+        self.request = TeamMaterializationRequest::new(
+            TeamMaterializationIntent::try_new(
+                intent.team().clone(),
+                intent.endpoint().clone(),
+                intent.source(),
+                agents,
+            )
+            .map_err(|_| TeamMaterializationError::Invalid)?,
+            self.request.idempotency_key().clone(),
+        );
+        Ok(self)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

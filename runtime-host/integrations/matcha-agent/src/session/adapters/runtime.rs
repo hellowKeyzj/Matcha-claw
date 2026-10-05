@@ -11,6 +11,13 @@ impl SessionOps for MatchaRuntimeDriver {
         )
     }
 
+    fn prepare_observation(
+        &self,
+        request: sessions_module::SessionObservationRequest,
+    ) -> Result<std::sync::Arc<dyn sessions_module::SessionObservation>, sessions_module::RuntimeOperationFailure> {
+        super::observation::prepare(self.session_handle(), self.renderer_events(), request)
+    }
+
     fn agent_scoped_session_key(
         &self,
         agent_id: &str,
@@ -108,8 +115,7 @@ impl SessionOps for MatchaRuntimeDriver {
         command: SessionSendCommand,
     ) -> sessions_module::SessionFuture<'a, SessionSendOutcome> {
         let session = self.session_handle();
-        let renderer_events = self.renderer_events();
-        Box::pin(async move { send_session_with_handle(session, command, renderer_events).await })
+        Box::pin(async move { send_session_with_handle(session, command).await })
     }
 
     fn select_session_model<'a>(
@@ -356,7 +362,7 @@ pub(super) async fn send_model_runtime_command(
         return Ok(None);
     };
     let model_runtime = MatchaSessionModelRuntimeCommand::try_new(
-        command.session_key.clone(),
+        command.identity.session_key.clone(),
         command.endpoint_session_id.clone(),
         model,
         session.model_selection_id,
@@ -504,143 +510,29 @@ fn project_matcha_hydration(snapshot: &HydrationSnapshot) -> SessionHistoryView 
 pub(super) async fn send_session_with_handle(
     session: MatchaPeerSessionHandle,
     command: SessionSendCommand,
-    renderer_events: Option<mpsc::Sender<SessionIngressEvent>>,
 ) -> SessionSendOutcome {
+    if command.intent.is_some() {
+        return SessionSendOutcome::Unsupported;
+    }
     let trace_id = command.trace_id().map(str::to_owned);
-    let route_key = command.route_key.clone();
-    let session_key = command.session_key.clone();
-    let endpoint_session_id = command.endpoint_session_id.clone();
-    let message_len = command.message.len();
-    let attachment_count = command.attachments.len();
-    let has_renderer_events = renderer_events.is_some();
-    let requested_run_id = command.request_run_identity().map(str::to_owned);
-    session_trace::log(
-        "runtime.matcha.send.received",
-        trace_id.as_deref(),
-        serde_json::json!({
-            "sessionKey": session_trace::id_shape(Some(&session_key)),
-            "routeKey": session_trace::id_shape(Some(route_key.as_str())),
-            "endpointSessionId": session_trace::id_shape(endpoint_session_id.as_deref()),
-            "runId": session_trace::id_shape(requested_run_id.as_deref()),
-            "messageLength": message_len,
-            "attachmentCount": attachment_count,
-            "hasRendererEventSink": has_renderer_events,
-        }),
-    );
-    let Some(renderer_events) = renderer_events else {
-        session_trace::log(
-            "runtime.matcha.send.unavailable",
-            trace_id.as_deref(),
-            serde_json::json!({ "reason": "missing-renderer-event-sink" }),
-        );
-        return SessionSendOutcome::Unavailable;
-    };
-    let session_id = match session_adapter::matcha_native_session_id(endpoint_session_id.as_deref())
-    {
+    let session_id = match session_adapter::matcha_native_session_id(command.endpoint_session_id.as_deref()) {
         Ok(session_id) => session_id,
-        Err(()) => {
-            session_trace::log(
-                "runtime.matcha.send.rejected",
-                trace_id.as_deref(),
-                serde_json::json!({ "reason": "invalid-session-id" }),
-            );
-            return SessionSendOutcome::Rejected;
-        }
+        Err(()) => return SessionSendOutcome::Rejected,
     };
-    let run_id = match requested_run_id
-        .as_deref()
-        .and_then(|run_id| RunId::try_new(run_id.to_owned()).ok())
-    {
-        Some(run_id) => run_id,
-        None => {
-            session_trace::log(
-                "runtime.matcha.send.rejected",
-                trace_id.as_deref(),
-                serde_json::json!({ "reason": "invalid-run-id" }),
-            );
-            return SessionSendOutcome::Rejected;
-        }
-    };
-    let params = match session_adapter::session_prompt_params(command, session_id.clone()) {
+    let params = match session_adapter::session_prompt_params(command, session_id) {
         Ok(params) => params,
-        Err(()) => {
-            session_trace::log(
-                "runtime.matcha.send.rejected",
-                trace_id.as_deref(),
-                serde_json::json!({ "reason": "invalid-prompt-params" }),
-            );
-            return SessionSendOutcome::Rejected;
-        }
+        Err(()) => return SessionSendOutcome::Rejected,
     };
-    session_trace::log(
-        "runtime.matcha.send.subscribe-start",
-        trace_id.as_deref(),
-        serde_json::json!({
-            "sessionId": session_trace::id_shape(Some(session_id.as_str())),
-            "routeKey": session_trace::id_shape(Some(route_key.as_str())),
-            "runId": session_trace::id_shape(Some(run_id.as_str())),
-        }),
-    );
-    let subscription = match session
-        .subscribe_renderer_events(
-            session_id.clone(),
-            session_key.clone(),
-            run_id.clone(),
-            route_key,
-            renderer_events,
-            trace_id.clone(),
-        )
-        .await
-    {
-        Ok(subscription) => subscription,
-        Err(error) => {
-            session_trace::log(
-                "runtime.matcha.send.subscribe-failed",
-                trace_id.as_deref(),
-                serde_json::json!({ "error": session_adapter::renderer_subscription_error_kind(&error) }),
-            );
-            return session_adapter::renderer_subscription_failure_outcome(error);
-        }
-    };
-    session_trace::log(
-        "runtime.matcha.send.subscribe-ready",
-        trace_id.as_deref(),
-        serde_json::json!({
-            "sessionId": session_trace::id_shape(Some(session_id.as_str())),
-            "runId": session_trace::id_shape(Some(run_id.as_str())),
-        }),
-    );
     match session.prompt_session(params).await {
-        InvocationOutcome::Succeeded(result) => {
-            session_trace::log(
-                "runtime.matcha.send.prompt-started",
-                trace_id.as_deref(),
-                serde_json::json!({
-                    "runId": session_trace::id_shape(Some(result.run_id.as_str())),
-                }),
-            );
-            SessionSendOutcome::Succeeded {
-                run_id: result.run_id.as_str().to_owned(),
-                status: SessionSendStatus::Started,
-            }
-        }
+        InvocationOutcome::Succeeded(result) => SessionSendOutcome::Succeeded {
+            run_id: result.run_id.as_str().to_owned(), status: SessionSendStatus::Started,
+            goal: None,
+        },
         InvocationOutcome::TargetRejected(error) => {
-            subscription.abort();
-            session_trace::log(
-                "runtime.matcha.send.prompt-rejected",
-                trace_id.as_deref(),
-                serde_json::json!({ "error": session_adapter::app_server_client_error_kind(error) }),
-            );
+            session_trace::log("runtime.matcha.send.prompt-rejected", trace_id.as_deref(),
+                serde_json::json!({ "error": session_adapter::app_server_client_error_kind(error) }));
             SessionSendOutcome::Rejected
         }
-        InvocationOutcome::Cancelled | InvocationOutcome::Unknown => {
-            subscription.abort();
-            session_trace::log(
-                "runtime.matcha.send.prompt-unknown",
-                trace_id.as_deref(),
-                serde_json::json!({}),
-            );
-            SessionSendOutcome::Unknown
-        }
+        InvocationOutcome::Cancelled | InvocationOutcome::Unknown => SessionSendOutcome::Unknown,
     }
 }

@@ -7,7 +7,12 @@ export type ComposerDraftSelection = {
   direction: 'forward' | 'backward' | 'none';
 };
 
+export type ComposerMode = { kind: 'typedGoal'; id: string; goalId?: string };
+
 type ComposerDraftState = {
+  modes: Record<string, ComposerMode>;
+  setMode: (key: string, mode: ComposerMode | null) => void;
+  moveDraft: (from: string, to: string, modeId: string) => void;
   drafts: Record<string, string>;
   selections: Record<string, ComposerDraftSelection>;
   setDraft: (key: string, update: SetStateAction<string>) => void;
@@ -42,6 +47,32 @@ function agentDraftKeyPrefix(agentId: string): string | null {
 export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
   drafts: {},
   selections: {},
+  modes: {},
+  setMode: (key, mode) => {
+    if (!key) return;
+    set((state) => {
+      const modes = { ...state.modes };
+      if (mode) modes[key] = mode;
+      else delete modes[key];
+      return { modes };
+    });
+  },
+  moveDraft: (from, to, modeId) => {
+    if (!from || from === to) return;
+    set((state) => {
+      if (state.modes[from]?.id !== modeId) return state;
+      const drafts = { ...state.drafts };
+      const selections = { ...state.selections };
+      const modes = { ...state.modes };
+      if (from in drafts) drafts[to] = drafts[from];
+      if (from in selections) selections[to] = selections[from];
+      if (from in modes) modes[to] = modes[from];
+      delete drafts[from];
+      delete selections[from];
+      delete modes[from];
+      return { drafts, selections, modes };
+    });
+  },
   setDraft: (key, update) => {
     if (!key) return;
     set((state) => {
@@ -67,12 +98,14 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
   clearDraft: (key) => {
     if (!key) return;
     set((state) => {
-      if (!(key in state.drafts) && !(key in state.selections)) return state;
+      if (!(key in state.drafts) && !(key in state.selections) && !(key in state.modes)) return state;
       const drafts = { ...state.drafts };
       const selections = { ...state.selections };
+      const modes = { ...state.modes };
       delete drafts[key];
       delete selections[key];
-      return { drafts, selections };
+      delete modes[key];
+      return { drafts, selections, modes };
     });
   },
   clearAgentDrafts: (agentId) => {
@@ -82,15 +115,18 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       const keys = new Set([
         ...Object.keys(state.drafts),
         ...Object.keys(state.selections),
+        ...Object.keys(state.modes),
       ].filter((key) => key.toLowerCase().includes(prefix)));
       if (keys.size === 0) return state;
       const drafts = { ...state.drafts };
       const selections = { ...state.selections };
+      const modes = { ...state.modes };
       for (const key of keys) {
         delete drafts[key];
         delete selections[key];
+        delete modes[key];
       }
-      return { drafts, selections };
+      return { drafts, selections, modes };
     });
   },
   setSelection: (key, selection) => {

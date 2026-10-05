@@ -89,6 +89,24 @@ Provider model discovery/import 的 Renderer/Electron public DTO 不扩展：dis
 
 `OPEN`: 这不是对每个 operation input/output 的替代类型定义；对应 Renderer wrapper 和 runtime capability descriptor 是字段级权威。后续 Rust cutover 应以 operation family 为单元采集实际 request/response fixture。
 
+### ExistingTeam 工作流设计增量
+
+既有 `team.runtime` 增加五个 operation，不新建 capability、Team/roles 或执行 queue；请求沿原 team target，精确指定 runId。target 必须 exact `{kind:'team',teamId}`，与 input.teamId 相等；input 必须具有下表全部字段，不能缺省或附加字段，不能仅在 target 携带 teamId。[VERIFY: src/services/openclaw/team-runtime-client.ts:957-1008] [VERIFY: electron/api/routes/team-runtime-capability.ts:112-133] [VERIFY: runtime-host/modules/organization/src/capability.rs:45-49] [VERIFY: runtime-host/modules/organization/src/application/design.rs:65-98]
+
+| operation | exact input | 200 结果 |
+| --- | --- | --- |
+| `team.designStart` | `{teamId,runId,idempotencyKey}` | `{success:true,outcome:'designing'}` |
+| `team.designContinue` | `{teamId,runId,proposalId,idempotencyKey}` | 同上 |
+| `team.designExit` | `{teamId,runId,designEpoch}` | `{success:true,outcome:'intake'}` |
+| `team.designSnapshot` | `{teamId,runId}` | exact-run `TeamDesignSnapshot` |
+| `team.designGraphPatch` | teamId、runId、designEpoch、expectedGraphVersion、commandId、idempotencyKey、operations | 更新后的同 run `TeamDesignSnapshot` |
+
+snapshot 固定 `{success,teamId,runId,startGate,graphVersion,designEpoch,graph,roles}`，版本为 64 lowercase hex 的 definition codec SHA256，不含 layout。确认与继续设计仍核当前 proposalId；返回讨论统一调用 designExit，匹配设计 epoch 后回原 Intake，清设计授权但保留 graph/角色/run；Intake 可重放且不提交新事实、不清新讨论 generation，Started、普通 ProposalPending、设计态错 epoch 拒绝。两前端回读同一 exact run；事件 `team:changed {}` 不承载图或 proposal 数据。此处记录源码契约，不宣称实际模型/native/UI 验收通过。[VERIFY: src/types/team-design.ts:108-145] [VERIFY: src/stores/teams.ts:1052-1071] [VERIFY: runtime-host/modules/organization/src/application/design.rs:150-156] [VERIFY: runtime-host/modules/organization/src/store/facts.rs:370-381] [VERIFY: runtime-host/modules/organization/src/store/durable.rs:380-404] [VERIFY: runtime-host/modules/organization/src/owner/actor.rs:1721-1739] [VERIFY: runtime-host/modules/organization/src/store/codec.rs:1236-1241]
+
+### TeamSkill dependencyPlan 响应
+
+`team.dependencyPlan` 保持原 packagePath 请求与 Rust 响应：`{status:'available',plan:{selectionId,packageName,packageVersion,items,canProceed}} | {status:'invalid'} | {status:'unavailable'}`。available 的 item 为 `{kind,name,required,purpose,status,severity,installable}`；Renderer 必须先判 status 再读取 `.plan`，不能当旧平铺 plan 使用，也不要求未返回的 sourcePath/missing* 数组。这里只适配现有服务契约，不重裁协议或 owner。[VERIFY: runtime-host/modules/organization/src/application/team_runtime_control.rs:696-745] [VERIFY: src/services/openclaw/team-runtime-client.ts:142-152] [VERIFY: src/services/openclaw/team-runtime-client.ts:801-808] [VERIFY: src/services/openclaw/team-runtime-client.ts:1283-1306] [VERIFY: src/pages/Teams/index.tsx:314-348]
+
 ### Provider account 认证契约
 
 `ProviderAccountAuthMode` 新增 `Token`、`CliReuse`，wire 分别为 `token`、`cliReuse`；其余值仍为 `apiKey`、`oauthBrowser`、`oauthDevice`、`local`。登录交互方式不等于返回的凭据类型：

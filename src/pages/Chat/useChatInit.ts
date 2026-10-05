@@ -7,6 +7,7 @@ import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
 import { getSessionItemCount } from '@/stores/chat/store-state-helpers';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { ChatHistoryLoadRequest } from '@/stores/chat/types';
+import { createSessionTraceId, logSessionTrace, summarizeEndpoint, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
 
 const SUBAGENTS_SNAPSHOT_TTL_MS = 15_000;
 const SESSION_CATALOG_TTL_MS = 15_000;
@@ -218,8 +219,16 @@ export function useChatInit(input: UseChatInitInput): void {
         return;
       }
       sessionRuntimeLoadInFlight = true;
+      const traceId = createSessionTraceId('chat.init');
+      if (traceId) logSessionTrace('chat.init.runtime.request', traceId, { sessionRuntimeAttempt });
+      const startedAt = traceId ? performance.now() : 0;
       try {
         await bootstrapSessionRuntime();
+        const runtimeElapsedMs = traceId ? performance.now() - startedAt : null;
+        if (traceId) logSessionTrace('chat.init.runtime.response', traceId, {
+          sessionRuntimeAttempt, elapsedMs: runtimeElapsedMs, cancelled,
+          status: useChatStore.getState().sessionRuntimeCatalog.status,
+        });
         if (cancelled) {
           return;
         }
@@ -237,10 +246,29 @@ export function useChatInit(input: UseChatInitInput): void {
           return;
         }
         const shouldLoadAgents = shouldLoadSidebarAgents();
+        const resourcesStartedAt = traceId ? performance.now() : 0;
         const agentsLoadTask = shouldLoadAgents ? loadAgents() : Promise.resolve();
         const shouldLoadSessions = shouldLoadSelectedSessionCatalog();
+        const catalogStartedAt = traceId ? performance.now() : 0;
         const sessionsLoadTask = shouldLoadSessions ? loadSessions() : Promise.resolve();
-        await Promise.all([agentsLoadTask, sessionsLoadTask]);
+        if (traceId) logSessionTrace('chat.init.resources.wait', traceId, {
+          shouldLoadAgents, shouldLoadSessions, runtimeElapsedMs,
+          selectedEndpoint: summarizeEndpoint(useChatStore.getState().currentConversation?.endpoint),
+        });
+        await Promise.all([
+          traceId ? agentsLoadTask.finally(() => logSessionTrace('chat.init.agents.response', traceId, {
+            requested: shouldLoadAgents, elapsedMs: performance.now() - resourcesStartedAt,
+            status: useSubagentsStore.getState().agentsResource.status,
+            count: useSubagentsStore.getState().agentsResource.data.length,
+          })) : agentsLoadTask,
+          traceId ? sessionsLoadTask.finally(() => logSessionTrace('chat.init.catalog.response', traceId, {
+            requested: shouldLoadSessions, elapsedMs: performance.now() - catalogStartedAt,
+            status: useChatStore.getState().sessionCatalogStatus.status,
+          })) : sessionsLoadTask,
+        ]);
+        if (traceId) logSessionTrace('chat.init.resources.settled', traceId, {
+          elapsedMs: performance.now() - resourcesStartedAt, initialElapsedMs: performance.now() - startedAt, cancelled,
+        });
         if (cancelled) return;
         let switchedViaQueryParam = false;
         if (sessionParam) {
@@ -271,6 +299,8 @@ export function useChatInit(input: UseChatInitInput): void {
           return;
         }
         const currentSessionRecord = currentChatState.loadedSessions[currentConversation.sessionRecordKey];
+        const currentEndpoint = currentSessionRecord?.meta.sessionIdentity?.endpoint;
+        if (currentEndpoint?.kind === 'native-runtime' && currentEndpoint.runtimeAdapterId === 'openclaw') return;
         const hasCurrentViewportSnapshot = (
           currentSessionRecord?.meta.historyStatus === 'ready'
           || getSessionItemCount(currentSessionRecord) > 0
@@ -285,20 +315,32 @@ export function useChatInit(input: UseChatInitInput): void {
             if (latestConversation?.kind !== 'session' || !latestConversation.sessionRecordKey) {
               return;
             }
+            if (traceId) logSessionTrace('chat.init.history.enter', traceId, {
+              mode: 'quiet', elapsedMs: performance.now() - startedAt,
+              identity: summarizeSessionIdentity(useChatStore.getState().loadedSessions[latestConversation.sessionRecordKey]?.meta.sessionIdentity),
+              recordKey: summarizeIdentifier(latestConversation.sessionRecordKey),
+            });
             void loadHistory({
               sessionKey: latestConversation.sessionRecordKey,
               mode: 'quiet',
               scope: 'foreground',
               reason: 'chat_init_snapshot_quiet_refresh',
+              traceId,
             });
           });
           return;
         }
+        if (traceId) logSessionTrace('chat.init.history.enter', traceId, {
+          mode: 'active', elapsedMs: performance.now() - startedAt,
+          identity: summarizeSessionIdentity(currentSessionRecord?.meta.sessionIdentity),
+          recordKey: summarizeIdentifier(currentConversation.sessionRecordKey),
+        });
         await loadHistory({
           sessionKey: currentConversation.sessionRecordKey,
           mode: 'active',
           scope: 'foreground',
           reason: 'chat_init_cold_start',
+          traceId,
         });
       } finally {
         sessionRuntimeLoadInFlight = false;

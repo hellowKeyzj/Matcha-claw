@@ -8,6 +8,8 @@ use crate::native_config::config_store::{
     OpenClawConfigDocument, OpenClawConfigMutation, OpenClawConfigStore, OpenClawConfigStoreError,
 };
 
+const SKILL_WORKSHOP_TOOL: &str = "skill_workshop";
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Mode {
@@ -69,6 +71,7 @@ impl Mode {
         );
         changed |= exec.remove("security").is_some();
         changed |= exec.remove("ask").is_some();
+        changed |= normalize_deny(&mut tools);
         if !changed {
             return false;
         }
@@ -132,6 +135,28 @@ fn object(value: Option<&Value>) -> Map<String, Value> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default()
+}
+
+fn normalize_deny(tools: &mut Map<String, Value>) -> bool {
+    let existing = tools.get("deny");
+    let mut deny: Vec<Value> = existing
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(|text| Value::String(text.into())))
+        .collect();
+    if !deny
+        .iter()
+        .any(|value| value.as_str() == Some(SKILL_WORKSHOP_TOOL))
+    {
+        deny.push(Value::String(SKILL_WORKSHOP_TOOL.into()));
+    }
+    let next = Value::Array(deny);
+    if existing == Some(&next) {
+        return false;
+    }
+    tools.insert("deny".into(), next);
+    true
 }
 
 fn replace(target: &mut Map<String, Value>, key: &str, value: Value) -> bool {
@@ -244,6 +269,7 @@ mod tests {
                 "profile": "coding",
                 "fs": { "workspaceOnly": true, "keepFs": true },
                 "exec": { "keepExec": true },
+                "deny": ["skill_workshop"],
                 "customToolConfig": true,
             })
         );
@@ -286,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_existing_string_denies_when_changing_mode() {
+    fn preserves_existing_string_denies_and_appends_skill_workshop() {
         let root = TestRoot::new();
         let state_dir = root.state_dir();
         let store = OpenClawConfigStore::new(state_dir.clone());
@@ -294,7 +320,7 @@ mod tests {
             .update(|document| {
                 document.insert(
                     "tools".into(),
-                    json!({ "deny": ["terminal"], "fs": { "workspaceOnly": false } }),
+                    json!({ "deny": ["terminal"], "fs": { "workspaceOnly": true } }),
                 );
                 OpenClawConfigMutation::changed()
             })
@@ -303,12 +329,12 @@ mod tests {
         assert_eq!(Mode::Default.apply(state_dir).unwrap(), Effect::Written);
         assert_eq!(
             store.read().unwrap().as_value()["tools"]["deny"],
-            json!(["terminal"])
+            json!(["terminal", "skill_workshop"])
         );
     }
 
     #[test]
-    fn preserves_existing_deny_values() {
+    fn filters_non_string_denies() {
         let root = TestRoot::new();
         let state_dir = root.state_dir();
         let store = OpenClawConfigStore::new(state_dir.clone());
@@ -325,12 +351,12 @@ mod tests {
         assert_eq!(Mode::Default.apply(state_dir).unwrap(), Effect::Written);
         assert_eq!(
             store.read().unwrap().as_value()["tools"]["deny"],
-            json!(["terminal", false, 1, null, { "tool": "shell" }])
+            json!(["terminal", "skill_workshop"])
         );
     }
 
     #[test]
-    fn full_access_does_not_add_tool_denies() {
+    fn full_access_still_denies_skill_workshop() {
         let root = TestRoot::new();
         let state_dir = root.state_dir();
         let store = OpenClawConfigStore::new(state_dir.clone());
@@ -346,10 +372,9 @@ mod tests {
             Effect::Written
         );
         assert_eq!(Mode::read(state_dir).unwrap(), Mode::FullAccess);
-        assert!(
-            store.read().unwrap().as_value()["tools"]
-                .get("deny")
-                .is_none()
+        assert_eq!(
+            store.read().unwrap().as_value()["tools"]["deny"],
+            json!(["skill_workshop"])
         );
     }
 

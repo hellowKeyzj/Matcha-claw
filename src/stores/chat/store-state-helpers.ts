@@ -58,6 +58,10 @@ import {
   createSessionTraceId,
   logSessionTrace,
   summarizeIdentifier,
+  summarizeSessionIdentity,
+  summarizeSessionChanges,
+  summarizeWireItem,
+  summarizeRenderItem,
 } from '@/lib/session-trace';
 export function toMs(ts: number): number {
   return ts < 1e12 ? ts * 1000 : ts;
@@ -718,6 +722,8 @@ export function createEmptySessionMeta(): ChatSessionMetaState {
     manualLabel: false,
     displayName: null,
     modelState: null,
+    goal: { kind: 'unknown' },
+    goalReadRevision: 0,
     lastActivityAt: null,
     historyStatus: 'idle',
     thinkingLevel: null,
@@ -756,6 +762,8 @@ function areSessionMetaEquivalent(left: ChatSessionMetaState, right: ChatSession
     && (left.manualLabel === true) === (right.manualLabel === true)
     && left.displayName === right.displayName
     && areSessionModelStatesEquivalent(left.modelState, right.modelState)
+    && JSON.stringify(left.goal) === JSON.stringify(right.goal)
+    && left.goalReadRevision === right.goalReadRevision
     && left.lastActivityAt === right.lastActivityAt
     && left.historyStatus === right.historyStatus
     && left.thinkingLevel === right.thinkingLevel;
@@ -1246,6 +1254,8 @@ export function patchPendingApprovalsFromSnapshot(
 
 type SessionProjectionState = Omit<SessionView, 'modelState'> & {
   runtimeNotice?: ChatSessionRuntimeState['runtimeNotice'] | null;
+  retiredItemIds?: ReadonlySet<string>;
+  recordKey?: string;
 };
 type SessionProjectionStore = Map<string, SessionProjectionState>;
 
@@ -1263,17 +1273,36 @@ function projectionStore(get: () => ChatStoreState): SessionProjectionStore {
   return created;
 }
 
-function resolveCronEquivalentProjectionKey(
-  store: SessionProjectionStore,
-  state: Pick<ChatStoreState, 'loadedSessions'>,
-  sessionKey: string,
-): string {
-  const baseKey = getCronSessionBaseKey(sessionKey);
-  if (!baseKey || baseKey === sessionKey) return sessionKey;
-  if (store.has(baseKey) || Object.prototype.hasOwnProperty.call(state.loadedSessions, baseKey)) {
-    return baseKey;
+const sessionWindowsByStore = new WeakMap<() => ChatStoreState, Map<string, SessionProjectionState>>();
+
+function windowStore(get: () => ChatStoreState): Map<string, SessionProjectionState> {
+  let store = sessionWindowsByStore.get(get);
+  if (!store) {
+    store = new Map();
+    sessionWindowsByStore.set(get, store);
+    sessionProjectionStores.add(store);
   }
-  return sessionKey;
+  return store;
+}
+
+function displayRecordKey(state: ChatStoreState, identity: SessionIdentity): string {
+  const baseKey = getCronSessionBaseKey(identity.sessionKey);
+  if (baseKey && baseKey !== identity.sessionKey) {
+    const baseIdentity = { ...identity, sessionKey: baseKey };
+    const key = projectionRecordKey(state, baseIdentity)!;
+    if (state.loadedSessions[key]) return key;
+  }
+  return projectionRecordKey(state, identity)!;
+}
+
+function displayProjectionKey(state: ChatStoreState, identity: SessionIdentity): string {
+  const recordKey = displayRecordKey(state, identity);
+  return buildSessionIdentityKey(state.loadedSessions[recordKey]?.meta.sessionIdentity ?? identity);
+}
+
+function mergeWireItems(current: SessionWireItem[], incoming: SessionWireItem[]): SessionWireItem[] {
+  const incomingIds = new Set(incoming.map((item) => item.itemId));
+  return [...current.filter((item) => !incomingIds.has(item.itemId)), ...incoming];
 }
 
 export type SessionProjectionApplyResult =
@@ -1292,85 +1321,30 @@ function factValue<T>(fact: SessionFact<T>): T | null {
   return fact.incomplete.facts;
 }
 
-function countKinds(items: ReadonlyArray<{ kind: string }>): Record<string, number> {
-  return items.reduce<Record<string, number>>((counts, item) => {
-    counts[item.kind] = (counts[item.kind] ?? 0) + 1;
-    return counts;
-  }, {});
-}
-
 function summarizeWireAssistantTurn(item: SessionWireItem) {
-  const base = {
-    kind: item.kind,
-    itemId: summarizeIdentifier(item.itemId),
-    status: item.status,
-  };
-  if (item.kind !== 'assistantTurn') {
-    return base;
-  }
-  const toolCallIds = item.segments
-    .map((segment) => (segment.kind === 'toolUse' || segment.kind === 'toolResult'
-      ? summarizeIdentifier(segment.toolCallId)
-      : null))
-    .filter((value): value is NonNullable<typeof value> => value !== null);
-  return {
-    ...base,
-    runId: summarizeIdentifier(item.runId),
-    messageId: summarizeIdentifier(item.messageId),
-    segmentCount: item.segments.length,
-    segmentKinds: countKinds(item.segments),
-    toolSegmentCount: toolCallIds.length,
-    toolCallIds,
-    textLength: item.text.length,
-  };
+  return summarizeWireItem(item);
 }
 
 function summarizeWireAssistantTurns(items: SessionWireItem[] | null | undefined) {
   if (!items) return null;
-  return items
-    .filter((item) => item.kind === 'assistantTurn')
-    .map(summarizeWireAssistantTurn);
+  return { itemCount: items.length, summarizedItemCount: Math.min(items.length, 200), truncated: items.length > 200,
+    items: items.slice(0, 200).map((item, itemIndex) => ({ itemIndex, ...summarizeWireAssistantTurn(item) })) };
 }
 
 function summarizeRenderAssistantTurns(items: SessionRenderItem[] | null | undefined) {
   if (!items) return null;
-  return items
-    .filter((item): item is SessionAssistantTurnItem => item.kind === 'assistant-turn')
-    .map((item) => {
-      const messageId = 'messageId' in item && typeof item.messageId === 'string' ? item.messageId : null;
-      return {
-        key: summarizeIdentifier(item.key),
-        runId: summarizeIdentifier(item.runId),
-        messageId: summarizeIdentifier(messageId),
-        status: item.status,
-        segmentCount: item.segments.length,
-        segmentKinds: countKinds(item.segments),
-        toolSegmentCount: item.segments.filter((segment) => segment.kind === 'tool').length,
-        toolCount: item.tools.length,
-        toolCallIds: item.tools.map((tool) => summarizeIdentifier(tool.toolCallId ?? tool.id)),
-        textLength: item.text.length,
-      };
-    });
+  return { itemCount: items.length, summarizedItemCount: Math.min(items.length, 200), truncated: items.length > 200,
+    items: items.slice(0, 200).map((item, itemIndex) => ({ itemIndex, ...summarizeRenderItem(item) })) };
 }
 
 function summarizeDeltaTurnChanges(changes: SessionDelta['changes']) {
-  return {
-    messageUpdates: changes
-      .filter((change): change is Extract<SessionDelta['changes'][number], { kind: 'messageUpdated' }> => change.kind === 'messageUpdated')
-      .map((change) => summarizeWireAssistantTurn(change.item)),
-    toolUpdates: changes
-      .filter((change): change is Extract<SessionDelta['changes'][number], { kind: 'toolUpdated' }> => change.kind === 'toolUpdated')
-      .map((change) => ({
-        toolCallId: summarizeIdentifier(change.tool.toolCallId),
-        runId: summarizeIdentifier(change.tool.runId),
-        name: change.tool.name,
-        phase: change.tool.phase,
-      })),
-  };
+  return summarizeSessionChanges(changes);
 }
 
 function shouldTraceDeltaTurnState(delta: SessionDelta): boolean {
-  return delta.changes.some((change) => change.kind === 'messageUpdated' || change.kind === 'toolUpdated');
+  return delta.changes.some((change) => change.kind === 'messageUpdated' || change.kind === 'messageReplaced'
+    || change.kind === 'messageDelta' || change.kind === 'itemsReplaced' || change.kind === 'toolUpdated'
+    || change.kind === 'windowChanged' || change.kind === 'runtimeChanged' || change.kind === 'runPhaseChanged');
 }
 
 function sessionIdentityForProjection(
@@ -1574,7 +1548,9 @@ function projectionRuntime(
   runtimeNotice: ChatSessionRuntimeState['runtimeNotice'],
 ): ChatSessionRuntimeState {
   const runtime = factValue(fact);
-  if (!runtime) return createEmptySessionRuntime();
+  if (!runtime) return current;
+  if (!isRunActive({ ...current, runPhase: projectionRuntimePhase(runtime.phase) })
+    && isRunActive(current) && current.pendingTurnKey !== null && current.activeRunId === null) return current;
   const issueMessage = runtime.issue === null ? null : `Session runtime ${runtime.issue}`;
   const imageGeneration = deriveSessionImageGenerationPendingStateFromItems(items, current.imageGeneration);
   return reconcileRuntimeProjection(current, {
@@ -1598,7 +1574,7 @@ function projectionRuntime(
 
 function projectionWindow(current: ChatSessionViewportState, fact: SessionFact<SessionWireWindow>): ChatSessionViewportState {
   const window = factValue(fact);
-  if (!window) return createEmptySessionViewportState();
+  if (!window) return current;
   return syncViewportState(current, {
     ...window,
     isLoadingMore: false,
@@ -1639,7 +1615,7 @@ function projectionApprovals(
 ): Record<string, ApprovalItem[]> {
   const fact = factValue(view.approvals);
   if (!fact) {
-    return { ...state.pendingApprovalsBySession, [recordKey]: [] };
+    return state.pendingApprovalsBySession;
   }
   const identity = sessionIdentityForProjection(state, view);
   if (!identity) {
@@ -1688,14 +1664,17 @@ function applyDecodedSessionView(
   input: SessionProjectionApplyInput,
   view: SessionProjectionState,
   modelState?: SessionView['modelState'],
+  display: SessionProjectionState = view,
+  traceId?: string | null,
+  timing?: { projectionElapsedMs: number; reconcileElapsedMs: number; traceEmitElapsedMs: number },
 ): boolean {
   const state = input.get();
   const identity = sessionIdentityForProjection(state, view);
-  const recordKey = projectionRecordKey(state, identity);
+  const recordKey = identity ? displayRecordKey(state, identity) : null;
   if (!recordKey) return false;
   input.set((nextState) => {
     const current = getSessionRecord(nextState, recordKey);
-    const nextIdentity = identity ?? current.meta.sessionIdentity;
+    const nextIdentity = current.meta.sessionIdentity ?? identity;
     const nextMeta = nextIdentity ? {
       ...current.meta,
       runtimeScopeKey: buildRuntimeScopeKey(nextIdentity.endpoint),
@@ -1703,12 +1682,47 @@ function applyDecodedSessionView(
       protocolId: null,
       runtimeEndpointId: view.identity.endpoint.runtimeInstanceId,
       endpointSessionId: view.endpointSessionId,
-      modelState: modelState ?? current.meta.modelState,
+      goal: view.goal,
+      goalReadRevision: current.meta.goalReadRevision + (modelState !== undefined ? 1 : 0),
+      modelState: current.meta.modelState?.overrideSource === 'user' ? current.meta.modelState : modelState ?? current.meta.modelState,
+      ...(modelState !== undefined ? { ownership: view.ownership } : {}),
       sessionIdentity: nextIdentity,
     } : current.meta;
-    const nextItems = reconcileSessionItems(current.items, projectSessionViewItems(view));
+    const windows = windowStore(input.get);
+    const displayKey = displayProjectionKey(nextState, view.identity);
+    const projectionStartedAt = timing ? performance.now() : 0;
+    let projectedItems = factValue(display.items) ? projectSessionViewItems(display) : current.items;
+    if (buildSessionIdentityKey(nextIdentity!) !== buildSessionIdentityKey(view.identity)) {
+      const incomingIds = new Set(projectedItems.map((item) => item.key));
+      const retiredIds = display.retiredItemIds ?? new Set<string>();
+      projectedItems = [...current.items.filter((item) => !incomingIds.has(item.key) && !retiredIds.has(item.key)), ...projectedItems];
+    }
+    const reconcileStartedAt = timing ? performance.now() : 0;
+    if (timing) timing.projectionElapsedMs += reconcileStartedAt - projectionStartedAt;
+    const nextItems = reconcileSessionItems(current.items, projectedItems);
+    const traceStartedAt = timing ? performance.now() : 0;
+    if (timing) timing.reconcileElapsedMs += traceStartedAt - reconcileStartedAt;
+    if (traceId) logSessionTrace('session.assembly.reconcile', traceId, {
+      identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
+      recordKey: summarizeIdentifier(recordKey), displayEpoch: display.epoch, displaySeq: display.seq, displayCursor: display.cursor,
+      display: summarizeWireAssistantTurns(factValue(display.items)),
+      before: summarizeRenderAssistantTurns(current.items), projected: summarizeRenderAssistantTurns(projectedItems),
+      reconciled: summarizeRenderAssistantTurns(nextItems),
+    });
+    if (timing) timing.traceEmitElapsedMs += performance.now() - traceStartedAt;
+    const pendingAssistant = current.items.find((item) => item.kind === 'assistant-turn' && item.key === current.runtime.pendingTurnKey);
+    if (pendingAssistant && !nextItems.some((item) => item.key === pendingAssistant.key
+      || item.kind === 'assistant-turn' && item.runId && item.runId === current.runtime.activeRunId)) nextItems.push(pendingAssistant);
+    const placeholderTraceStartedAt = timing ? performance.now() : 0;
+    if (traceId) logSessionTrace('session.assembly.placeholder.after', traceId, {
+      identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
+      pendingItemHash: summarizeIdentifier(pendingAssistant?.key).hash, pendingTurnHash: summarizeIdentifier(current.runtime.pendingTurnKey).hash,
+      items: summarizeRenderAssistantTurns(nextItems),
+    });
+    if (timing) timing.traceEmitElapsedMs += performance.now() - placeholderTraceStartedAt;
     const nextRuntime = projectionRuntime(current.runtime, view.runtime, nextItems, view.runtimeNotice ?? null);
-    const nextWindow = projectionWindow(current.window, view.window);
+    const nextWindow = projectionWindow(current.window, display.window);
+    windows.set(displayKey, { ...display, recordKey });
     const loadedSessions = patchSessionRecord(nextState, recordKey, {
       meta: nextMeta,
       items: nextItems,
@@ -1719,6 +1733,7 @@ function applyDecodedSessionView(
     return {
       loadedSessions,
       sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+      ...(nextState.sessionRuntimeCatalog ? { sessionRuntimeGraph: buildSessionRuntimeGraph(nextState.sessionRuntimeCatalog, loadedSessions) } : {}),
       pendingApprovalsBySession: nextApprovals,
     };
   });
@@ -1728,46 +1743,212 @@ function applyDecodedSessionView(
 export function applySessionView(
   input: SessionProjectionApplyInput,
   view: SessionView,
+  options: { windowOnly?: boolean; direction?: 'older' | 'newer' | 'latest' } = {},
 ): SessionProjectionApplyResult {
+  const traceId = createSessionTraceId('session.view.apply-boundary');
+  const timing = traceId ? { projectionElapsedMs: 0, reconcileElapsedMs: 0, traceEmitElapsedMs: 0 } : undefined;
+  const beforeTraceStartedAt = traceId ? performance.now() : 0;
+  let applyStartedAt = 0;
+  let beforeTraceEmitElapsedMs = 0;
+  const finish = (result: SessionProjectionApplyResult): SessionProjectionApplyResult => {
+    if (traceId && timing) {
+      const applyElapsedMs = performance.now() - applyStartedAt - timing.traceEmitElapsedMs;
+      const summaryStartedAt = performance.now();
+      const payload = {
+        identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
+        windowOnly: !!options.windowOnly, direction: options.direction ?? null, status: result.status,
+        reason: 'reason' in result ? summarizeIdentifier(result.reason) : result.status === 'stale' ? 'older-watermark' : result.status === 'duplicate' ? 'same-watermark' : null,
+        items: summarizeRenderAssistantTurns(getSessionRecord(input.get(), displayRecordKey(input.get(), view.identity)).items),
+      };
+      logSessionTrace('session.view.apply.result', traceId, {
+        ...payload, applyElapsedMs, projectionElapsedMs: timing.projectionElapsedMs, reconcileElapsedMs: timing.reconcileElapsedMs,
+        traceEmitElapsedMsBeforeResult: beforeTraceEmitElapsedMs + timing.traceEmitElapsedMs,
+        resultSummaryElapsedMs: performance.now() - summaryStartedAt,
+      });
+    }
+    return result;
+  };
+  if (traceId) logSessionTrace('session.view.apply.before', traceId, {
+    identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
+    windowOnly: !!options.windowOnly, direction: options.direction ?? null,
+    incoming: summarizeWireAssistantTurns(factValue(view.items)),
+    before: summarizeRenderAssistantTurns(getSessionRecord(input.get(), displayRecordKey(input.get(), view.identity)).items),
+  });
+  if (traceId) {
+    applyStartedAt = performance.now();
+    beforeTraceEmitElapsedMs = applyStartedAt - beforeTraceStartedAt;
+  }
   if (view.sessionKey !== view.identity.sessionKey) {
-    return { status: 'unavailable', sessionKey: view.sessionKey, reason: 'identity mismatch' };
+    return finish({ status: 'unavailable', sessionKey: view.sessionKey, reason: 'identity mismatch' });
   }
   const identity = sessionIdentityForProjection(input.get(), view);
-  const recordKey = projectionRecordKey(input.get(), identity);
+  const recordKey = identity ? displayRecordKey(input.get(), identity) : null;
   if (!recordKey) {
-    return { status: 'unavailable', sessionKey: view.sessionKey, reason: 'session identity unavailable' };
+    return finish({ status: 'unavailable', sessionKey: view.sessionKey, reason: 'session identity unavailable' });
   }
-  // Ownership is a Host fact, independent of the native timeline cursor; deltas never rewrite it.
-  input.set((state) => {
-    const loadedSessions = patchSessionMeta(state, recordKey, { ownership: view.ownership });
-    return loadedSessions === state.loadedSessions ? state : {
-      loadedSessions,
-      sessionRuntimeGraph: buildSessionRuntimeGraph(state.sessionRuntimeCatalog, loadedSessions),
-    };
-  });
   const store = projectionStore(input.get);
-  const previous = store.get(view.sessionKey);
+  const projectionKey = buildSessionIdentityKey(view.identity);
+  const previous = store.get(projectionKey);
+  if (options.windowOnly) {
+    const items = factValue(view.items);
+    const window = factValue(view.window);
+    if (!items || !window) return finish({ status: 'unavailable', sessionKey: recordKey, reason: 'window unavailable' });
+    if (previous && (view.epoch < previous.epoch || options.direction === 'latest' && view.epoch === previous.epoch
+      && (view.seq < previous.seq || view.cursor < previous.cursor))) {
+      return finish({ status: 'stale', sessionKey: recordKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
+    }
+    const currentItems = new Map((previous ? factValue(previous.items) : [])?.map((item) => [item.itemId, item]) ?? []);
+    const preserveLive = previous && view.epoch === previous.epoch && (view.seq <= previous.seq || view.cursor <= previous.cursor);
+    const display: SessionProjectionState = {
+      ...view,
+      items: { complete: items.filter((item) => !preserveLive || !previous.retiredItemIds?.has(item.itemId))
+        .map((item) => preserveLive ? currentItems.get(item.itemId) ?? item : item) },
+      tools: preserveLive ? { complete: [...new Map([...(factValue(view.tools) ?? []), ...(factValue(previous.tools) ?? [])]
+        .map((tool) => [tool.toolCallId, tool])).values()] } : view.tools,
+      recordKey,
+    };
+    windowStore(input.get).set(displayProjectionKey(input.get(), view.identity), display);
+    input.set((state) => {
+      const current = getSessionRecord(state, recordKey);
+      const projectionStartedAt = timing ? performance.now() : 0;
+      const projectedItems = projectSessionViewItems(display);
+      const reconcileStartedAt = timing ? performance.now() : 0;
+      if (timing) timing.projectionElapsedMs += reconcileStartedAt - projectionStartedAt;
+      const items = reconcileSessionItems(current.items, projectedItems);
+      const traceStartedAt = timing ? performance.now() : 0;
+      if (timing) timing.reconcileElapsedMs += traceStartedAt - reconcileStartedAt;
+      if (traceId) logSessionTrace('session.view.window.assembly', traceId, {
+        identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
+        direction: options.direction ?? null, preserveLive: !!preserveLive,
+        display: summarizeWireAssistantTurns(factValue(display.items)), before: summarizeRenderAssistantTurns(current.items),
+        projected: summarizeRenderAssistantTurns(projectedItems), reconciled: summarizeRenderAssistantTurns(items),
+      });
+      if (timing) timing.traceEmitElapsedMs += performance.now() - traceStartedAt;
+      return { loadedSessions: patchSessionRecord(state, recordKey, {
+        items,
+        window: projectionWindow(current.window, view.window),
+      }) };
+    });
+    return finish({ status: 'applied', sessionKey: recordKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
+  }
   if (previous) {
     if (view.epoch < previous.epoch) {
-      return { status: 'stale', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
+      return finish({ status: 'stale', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
     }
     if (view.epoch === previous.epoch) {
       if (view.cursor < previous.cursor || view.seq < previous.seq) {
-        return { status: 'stale', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
+        return finish({ status: 'stale', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
       }
       if (view.cursor === previous.cursor && view.seq === previous.seq) {
+        input.set((state) => {
+          const current = getSessionRecord(state, recordKey);
+          const loadedSessions = patchSessionMeta(state, recordKey, {
+            ownership: view.ownership,
+            goal: view.goal,
+            goalReadRevision: current.meta.goalReadRevision + 1,
+            modelState: current.meta.modelState?.overrideSource === 'user' ? current.meta.modelState : view.modelState ?? current.meta.modelState,
+          });
+          return loadedSessions === state.loadedSessions ? state : {
+            loadedSessions,
+            ...(state.sessionRuntimeCatalog ? { sessionRuntimeGraph: buildSessionRuntimeGraph(state.sessionRuntimeCatalog, loadedSessions) } : {}),
+          };
+        });
         refreshSessionTasks(input, view, false);
-        return { status: 'duplicate', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
+        return finish({ status: 'duplicate', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
       }
     }
   }
-  const { modelState, ...projection } = view;
-  if (!applyDecodedSessionView(input, projection, modelState)) {
-    return { status: 'unavailable', sessionKey: view.sessionKey, reason: 'session identity unavailable' };
+  const { modelState, ...facts } = view;
+  const retiredItemIds = new Set(view.epoch === previous?.epoch ? previous.retiredItemIds : undefined);
+  factValue(view.items)?.forEach((item) => retiredItemIds.delete(item.itemId));
+  const projection: SessionProjectionState = { ...facts, recordKey, retiredItemIds };
+  const windows = windowStore(input.get);
+  const loaded = windows.get(displayProjectionKey(input.get(), view.identity));
+  const reading = loaded && loaded.epoch === projection.epoch
+    && buildSessionIdentityKey(loaded.identity) === projectionKey
+    && !input.get().loadedSessions[recordKey]?.window.isAtLatest;
+  let display = reading ? reconcileReadingWindow(loaded, projection) : projection;
+  if (loaded && projectionKey !== displayProjectionKey(input.get(), view.identity)) {
+    const previousIds = new Set((previous ? factValue(previous.items) : [])?.map((item) => item.itemId) ?? []);
+    const retained = (factValue(loaded.items) ?? []).filter((item) => !previousIds.has(item.itemId));
+    display = {
+      ...projection,
+      items: factValue(view.items) ? { complete: mergeWireItems(retained, factValue(view.items)!) } : loaded.items,
+      tools: { complete: [...new Map([...(factValue(loaded.tools) ?? []), ...(factValue(view.tools) ?? [])]
+        .map((tool) => [tool.toolCallId, tool])).values()] },
+      window: loaded.window,
+    };
   }
-  store.set(view.sessionKey, projection);
+  if (!reading && projectionKey === displayProjectionKey(input.get(), view.identity)) {
+    for (const [key, run] of store) {
+      if (key === projectionKey || getCronSessionBaseKey(run.identity.sessionKey) !== view.sessionKey
+        || buildSessionIdentityKey({ ...run.identity, sessionKey: view.sessionKey }) !== projectionKey) continue;
+      const retained = (factValue(display.items) ?? []).filter((item) => !run.retiredItemIds?.has(item.itemId));
+      display = {
+        ...display,
+        items: { complete: mergeWireItems(retained, factValue(run.items) ?? []) },
+        tools: { complete: [...new Map([...(factValue(display.tools) ?? []), ...(factValue(run.tools) ?? [])]
+          .map((tool) => [tool.toolCallId, tool])).values()] },
+      };
+    }
+  }
+  store.set(projectionKey, projection);
+  if (!applyDecodedSessionView(input, projection, modelState, display, traceId, timing)) {
+    return finish({ status: 'unavailable', sessionKey: view.sessionKey, reason: 'session identity unavailable' });
+  }
   refreshSessionTasks(input, view, true);
-  return { status: 'applied', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor };
+  return finish({ status: 'applied', sessionKey: view.sessionKey, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
+}
+
+function reconcileReadingWindow(
+  loaded: SessionProjectionState,
+  projected: SessionProjectionState,
+  previous?: SessionProjectionState,
+  change?: SessionDelta['changes'][number],
+): SessionProjectionState {
+  const incoming = new Map((factValue(projected.items) ?? []).map((item) => [item.itemId, item]));
+  const updated = change?.kind === 'messageDelta' && factValue(loaded.items)?.some((item) => item.itemId === change.itemId)
+    ? applyProjectionChange(loaded, change).items : loaded.items;
+  const items = updateProjectionFact<SessionWireItem[]>(updated, () => [], (items) => {
+    if (change?.kind === 'messageDelta') return items;
+    if (change?.kind !== 'itemsReplaced') return items.map((item) => incoming.get(item.itemId) ?? item);
+    const oldIds = new Set(change.oldItemIds);
+    const removedIds = new Set([...oldIds, ...change.items.map((item) => item.itemId)]);
+    const canonical = factValue(previous?.items ?? 'unknown') ?? [];
+    const anchor = change.anchor;
+    const start = anchor.kind === 'start' ? 0 : canonical.findIndex((item) => item.itemId === anchor.itemId) + 1;
+    let end = start;
+    while (end < canonical.length && removedIds.has(canonical[end].itemId)) end += 1;
+    const slot = canonical.slice(start, end);
+    const index = slot.length ? items.findIndex((item) => item.itemId === slot[0].itemId) : -1;
+    const slotIds = new Set(slot.map((item) => item.itemId));
+    // Canonical anchors are not page anchors; only a complete existing slot can change identity.
+    const replaceSlot = index >= 0 && slot.every((item, offset) => items[index + offset]?.itemId === item.itemId)
+      && !items.some((item) => removedIds.has(item.itemId) && !oldIds.has(item.itemId) && !slotIds.has(item.itemId));
+    if (replaceSlot) {
+      const remainingCount = items.filter((item) => !removedIds.has(item.itemId)).length;
+      if (remainingCount + change.items.length > 200) return items;
+      const next = items.filter((item) => !removedIds.has(item.itemId));
+      const position = items.slice(0, index).filter((item) => !removedIds.has(item.itemId)).length;
+      next.splice(position, 0, ...change.items);
+      return next;
+    }
+    return items.filter((item) => !oldIds.has(item.itemId) || incoming.has(item.itemId))
+      .map((item) => incoming.get(item.itemId) ?? item);
+  });
+  const toolIds = new Set((factValue(items) ?? []).flatMap((item) => item.kind === 'assistantTurn'
+    ? item.segments.flatMap((segment) => segment.kind === 'toolUse' || segment.kind === 'toolResult' ? [segment.toolCallId] : []) : []));
+  const incomingTools = new Map((factValue(projected.tools) ?? []).map((tool) => [tool.toolCallId, tool]));
+  const tools = updateProjectionFact<SessionWireTool[]>(loaded.tools, () => [], (tools) => {
+    const next = tools.filter((tool) => toolIds.has(tool.toolCallId)).map((tool) => incomingTools.get(tool.toolCallId) ?? tool);
+    const existing = new Set(next.map((tool) => tool.toolCallId));
+    for (const tool of incomingTools.values()) {
+      if (toolIds.has(tool.toolCallId) && !existing.has(tool.toolCallId)) next.push(tool);
+    }
+    return next;
+  });
+  if ((factValue(tools)?.length ?? 0) > 128) return { ...projected, items: loaded.items, tools: loaded.tools, window: loaded.window };
+  return { ...projected, items, tools, window: loaded.window };
 }
 
 function updateProjectionFact<T>(
@@ -1843,6 +2024,42 @@ function applyProjectionChange(view: SessionProjectionState, change: SessionDelt
         else next.push(change.item);
         return next;
       }) };
+    case 'messageReplaced':
+      return { ...view, items: updateProjectionFact(view.items, () => [], (items) => {
+        const next = [...items];
+        let index = next.findIndex((item) => item.itemId === change.item.itemId);
+        if (index < 0 && change.item.kind === 'assistantTurn' && change.item.runId !== null) {
+          const incoming = change.item;
+          index = next.findIndex((item) => item.kind === 'assistantTurn' && item.runId === incoming.runId
+            && item.messageId === null && item.text.length === 0 && item.segments.length > 0
+            && item.segments.every((segment) => segment.kind === 'toolUse' || segment.kind === 'toolResult'));
+        }
+        if (index < 0) next.push(change.item);
+        else next[index] = change.item;
+        return next;
+      }) };
+    case 'itemsReplaced': {
+      const oldIds = new Set(change.oldItemIds);
+      const incomingIds = new Set(change.items.map((item) => item.itemId));
+      const anchor = change.anchor;
+      if (oldIds.size !== change.oldItemIds.length || incomingIds.size !== change.items.length
+        || change.oldItemIds.length > 200 || change.items.length > 200
+        || anchor.kind === 'after' && (oldIds.has(anchor.itemId) || incomingIds.has(anchor.itemId))) {
+        throw new Error('invalid replacement');
+      }
+      const items = updateProjectionFact(view.items, () => [], (items) => {
+        const remaining = items.filter((item) => !oldIds.has(item.itemId) && !incomingIds.has(item.itemId));
+        const index = anchor.kind === 'start' ? 0 : remaining.findIndex((item) => item.itemId === anchor.itemId) + 1;
+        if (anchor.kind === 'after' && index === 0) throw new Error('replacement anchor missing');
+        if (remaining.length + change.items.length > 200) throw new Error('invalid replacement');
+        remaining.splice(index, 0, ...change.items);
+        return remaining;
+      });
+      const retiredItemIds = new Set(view.retiredItemIds);
+      oldIds.forEach((id) => retiredItemIds.add(id));
+      incomingIds.forEach((id) => retiredItemIds.delete(id));
+      return { ...view, items, retiredItemIds };
+    }
     case 'toolUpdated':
       return { ...view, tools: updateProjectionFact(view.tools, () => [], (tools) => {
         const next = [...tools];
@@ -1859,6 +2076,8 @@ function applyProjectionChange(view: SessionProjectionState, change: SessionDelt
         else next.push(change.approval);
         return next;
       }) };
+    case 'goalChanged':
+      return { ...view, goal: change.goal };
     case 'runtimeChanged':
       return {
         ...view,
@@ -1896,16 +2115,30 @@ export function applySessionDelta(
   delta: SessionDelta,
 ): SessionProjectionApplyResult {
   const traceId = createSessionTraceId('session.delta.apply-boundary');
+  const finish = (result: SessionProjectionApplyResult): SessionProjectionApplyResult => {
+    if (traceId) logSessionTrace('session.delta.apply.result', traceId, {
+      identity: summarizeSessionIdentity(delta.identity), epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor,
+      status: result.status, reason: 'reason' in result ? summarizeIdentifier(result.reason) : result.status === 'stale' ? 'older-watermark' : result.status === 'duplicate' ? 'same-watermark' : null,
+    });
+    return result;
+  };
   const store = projectionStore(input.get);
   const state = input.get();
-  const projectionKey = resolveCronEquivalentProjectionKey(store, state, delta.sessionKey);
-  const previous = store.get(projectionKey);
-  const traceTurnState = shouldTraceDeltaTurnState(delta);
+  if (delta.identity.sessionKey !== delta.sessionKey) return finish({ status: 'unavailable', sessionKey: delta.sessionKey, reason: 'identity mismatch' });
+  const projectionKey = buildSessionIdentityKey(delta.identity);
+  const recordKey = displayRecordKey(state, delta.identity);
+  let previous = store.get(projectionKey);
+  if (!previous && delta.seq === 1 && delta.cursor === 1) {
+    previous = { sessionKey: delta.sessionKey, identity: delta.identity, endpointSessionId: state.loadedSessions[recordKey]?.meta.endpointSessionId ?? null, ownership: state.loadedSessions[recordKey]?.meta.ownership ?? null, goal: { kind: 'unknown' }, epoch: delta.epoch, seq: 0, cursor: 0, items: 'unknown', tools: 'unknown', approvals: 'unknown', runtime: 'unknown', window: 'unknown', completeness: { incomplete: { missing: ['event_only'] } } };
+  }
+  const traceTurnState = !!traceId && shouldTraceDeltaTurnState(delta);
   const traceRuntimeState = traceId && delta.changes.some((change) => (
     change.kind === 'runtimeChanged'
     || (change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase))
   ));
-  logSessionTrace('session.delta.apply.start', traceId, {
+  if (traceId) logSessionTrace('session.delta.apply.start', traceId, {
+    identity: summarizeSessionIdentity(delta.identity),
+    recordKey: summarizeIdentifier(recordKey),
     sessionKey: summarizeIdentifier(delta.sessionKey),
     incomingEpoch: delta.epoch,
     incomingSeq: delta.seq,
@@ -1933,50 +2166,58 @@ export function applySessionDelta(
       cursor: delta.cursor,
       delta: summarizeDeltaTurnChanges(delta.changes),
       projectionTurns: summarizeWireAssistantTurns(previous ? factValue(previous.items) : null),
-      renderTurns: summarizeRenderAssistantTurns(getSessionRecord(state, projectionKey).items),
+      identity: summarizeSessionIdentity(delta.identity), epoch: delta.epoch,
+      displayTurns: summarizeWireAssistantTurns(factValue(windowStore(input.get).get(displayProjectionKey(state, delta.identity))?.items ?? 'unknown')),
+      renderTurns: summarizeRenderAssistantTurns(getSessionRecord(state, recordKey).items),
     });
   }
   if (!previous) {
     const historyReason = 'session_delta_without_view';
-    void input.get().loadHistory({ sessionKey: projectionKey, mode: 'quiet', scope: 'background', reason: historyReason });
-    logSessionTrace('session.delta.history-load', traceId, {
+    if (traceId) logSessionTrace('session.delta.recovery-required', traceId, {
       sessionKey: summarizeIdentifier(delta.sessionKey),
       reason: historyReason,
     });
-    return { status: 'gap', sessionKey: delta.sessionKey, reason: 'missing SessionView' };
+    return finish({ status: 'gap', sessionKey: delta.sessionKey, reason: 'missing SessionView' });
   }
   if (delta.epoch < previous.epoch) {
-    return { status: 'stale', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+    return finish({ status: 'stale', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor });
   }
   const epochChanged = delta.epoch > previous.epoch;
   if (epochChanged && (delta.cursor !== 1 || delta.seq !== 1)) {
     const historyReason = 'session_delta_epoch_gap';
-    void input.get().loadHistory({ sessionKey: projectionKey, mode: 'quiet', scope: 'background', reason: historyReason });
-    logSessionTrace('session.delta.history-load', traceId, {
+    if (traceId) logSessionTrace('session.delta.recovery-required', traceId, {
       sessionKey: summarizeIdentifier(delta.sessionKey),
       reason: historyReason,
     });
-    return { status: 'gap', sessionKey: delta.sessionKey, reason: 'new epoch delta did not start at seq 1, cursor 1' };
+    return finish({ status: 'gap', sessionKey: delta.sessionKey, reason: 'new epoch delta did not start at seq 1, cursor 1' });
   }
   if (!epochChanged) {
     if (delta.cursor < previous.cursor || delta.seq < previous.seq) {
-      return { status: 'stale', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+      return finish({ status: 'stale', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor });
     }
     if (delta.cursor === previous.cursor && delta.seq === previous.seq) {
-      return { status: 'duplicate', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+      return finish({ status: 'duplicate', sessionKey: delta.sessionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor });
     }
     if (delta.cursor !== previous.cursor + 1 || delta.seq !== previous.seq + 1) {
       const historyReason = 'session_delta_gap';
-      void input.get().loadHistory({ sessionKey: projectionKey, mode: 'quiet', scope: 'background', reason: historyReason });
-      logSessionTrace('session.delta.history-load', traceId, {
+      if (traceId) logSessionTrace('session.delta.recovery-required', traceId, {
         sessionKey: summarizeIdentifier(delta.sessionKey),
         reason: historyReason,
       });
-      return { status: 'gap', sessionKey: delta.sessionKey, reason: `expected seq ${previous.seq + 1}, cursor ${previous.cursor + 1}` };
+      return finish({ status: 'gap', sessionKey: delta.sessionKey, reason: `expected seq ${previous.seq + 1}, cursor ${previous.cursor + 1}` });
     }
   }
   let tasksChanged = epochChanged;
-  const nextView = delta.changes.reduce((view, change) => {
+  const windows = windowStore(input.get);
+  const displayKey = displayProjectionKey(state, delta.identity);
+  const loaded = windows.get(displayKey);
+  const reading = loaded && !epochChanged && loaded.epoch === delta.epoch
+    && buildSessionIdentityKey(loaded.identity) === projectionKey
+    && !state.loadedSessions[recordKey]?.window.isAtLatest;
+  let readingDisplay = loaded;
+  let nextView: SessionProjectionState;
+  try {
+    nextView = delta.changes.reduce((view, change) => {
     if (change.kind === 'toolUpdated'
       && (change.tool.phase === 'completed' || change.tool.phase === 'failed')
       && (change.tool.name === null || TASK_SNAPSHOT_TOOLS.has(change.tool.name.trim().toLowerCase()))
@@ -1985,18 +2226,35 @@ export function applySessionDelta(
         factValue(view.tools)?.find((tool) => tool.toolCallId === change.tool.toolCallId),
       )) tasksChanged = true;
     if (change.kind === 'recoveryRequired') tasksChanged = true;
-    return applyProjectionChange(view, change);
-  }, { ...previous, epoch: delta.epoch });
+    const projected = applyProjectionChange(view, change);
+    if (reading && readingDisplay) readingDisplay = reconcileReadingWindow(readingDisplay, projected, view, change);
+    return projected;
+    }, { ...previous, epoch: delta.epoch });
+  } catch (error) {
+    return finish({ status: 'gap', sessionKey: recordKey, reason: error instanceof Error ? error.message : 'invalid replacement' });
+  }
   const projected: SessionProjectionState = {
     ...nextView,
     epoch: delta.epoch,
     seq: delta.seq,
     cursor: delta.cursor,
   };
-  if (!applyDecodedSessionView(input, projected)) {
-    return { status: 'unavailable', sessionKey: delta.sessionKey, reason: 'session identity unavailable' };
+  let display = projected;
+  if (reading && readingDisplay) {
+    display = { ...readingDisplay, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+  } else if (loaded && !epochChanged && buildSessionIdentityKey(loaded.identity) !== projectionKey) {
+    try {
+      display = delta.changes.reduce((view, change) => applyProjectionChange(view, change), loaded);
+      display = { ...display, runtime: projected.runtime, approvals: projected.approvals, runtimeNotice: projected.runtimeNotice };
+      if (!state.loadedSessions[recordKey]?.window.isAtLatest) display = { ...display, window: loaded.window };
+    } catch (error) {
+      return finish({ status: 'gap', sessionKey: recordKey, reason: error instanceof Error ? error.message : 'invalid replacement' });
+    }
   }
-  store.set(projectionKey, projected);
+  store.set(projectionKey, { ...projected, recordKey });
+  if (!applyDecodedSessionView(input, projected, undefined, display, traceId)) {
+    return finish({ status: 'unavailable', sessionKey: delta.sessionKey, reason: 'session identity unavailable' });
+  }
   if (traceRuntimeState) {
     const appliedState = input.get();
     const recordKey = projectionRecordKey(appliedState, sessionIdentityForProjection(appliedState, projected));
@@ -2017,16 +2275,26 @@ export function applySessionDelta(
       seq: delta.seq,
       cursor: delta.cursor,
       projectionTurns: summarizeWireAssistantTurns(factValue(projected.items)),
-      renderTurns: summarizeRenderAssistantTurns(getSessionRecord(input.get(), projectionKey).items),
+      identity: summarizeSessionIdentity(delta.identity), epoch: delta.epoch,
+      displayTurns: summarizeWireAssistantTurns(factValue(display.items)),
+      renderTurns: summarizeRenderAssistantTurns(getSessionRecord(input.get(), recordKey).items),
     });
   }
   if (tasksChanged) refreshSessionTasks(input, projected, true);
-  return { status: 'applied', sessionKey: projectionKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor };
+  return finish({ status: 'applied', sessionKey: recordKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor });
 }
 
 export function resetSessionProjection(sessionKey: string): void {
   for (const store of sessionProjectionStores) {
-    store.delete(sessionKey);
+    const identities = new Set([...store].filter(([key, view]) => key === sessionKey || view.recordKey === sessionKey)
+      .map(([, view]) => buildSessionIdentityKey(view.identity)));
+    for (const [key, view] of store) {
+      const baseKey = getCronSessionBaseKey(view.identity.sessionKey);
+      const baseIdentityKey = baseKey ? buildSessionIdentityKey({ ...view.identity, sessionKey: baseKey }) : null;
+      if (key === sessionKey || view.recordKey === sessionKey || buildSessionIdentityKey(view.identity) === sessionKey
+        || identities.has(buildSessionIdentityKey(view.identity))
+        || baseIdentityKey === sessionKey || baseIdentityKey !== null && identities.has(baseIdentityKey)) store.delete(key);
+    }
   }
 }
 

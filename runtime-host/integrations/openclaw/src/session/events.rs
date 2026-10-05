@@ -21,7 +21,7 @@ pub struct SessionEventProvenance {
     run_id: Option<RunId>,
     source_epoch: Option<u64>,
     source_cursor: Option<u64>,
-    route_key: Option<String>,
+
     message_id: Option<MessageId>,
 }
 
@@ -42,9 +42,6 @@ impl SessionEventProvenance {
         self.source_cursor
     }
 
-    pub fn route_key(&self) -> Option<&str> {
-        self.route_key.as_deref()
-    }
 
     pub fn message_id(&self) -> Option<&MessageId> {
         self.message_id.as_ref()
@@ -53,15 +50,15 @@ impl SessionEventProvenance {
     pub(crate) fn from_event(
         event: &SessionEventEnvelope,
         epoch: Option<GatewayEpoch>,
-        route_key: Option<String>,
+
     ) -> Self {
-        Self::from_native_event(event, epoch.map(GatewayEpoch::as_u64), route_key)
+        Self::from_native_event(event, epoch.map(GatewayEpoch::as_u64))
     }
 
     pub(crate) fn from_native_event(
         event: &SessionEventEnvelope,
         source_epoch: Option<u64>,
-        route_key: Option<String>,
+
     ) -> Self {
         Self {
             session_key: event.session_key.clone(),
@@ -70,7 +67,7 @@ impl SessionEventProvenance {
             source_cursor: event
                 .gateway_sequence
                 .filter(|sequence| *sequence <= MAX_SAFE_SEQUENCE),
-            route_key,
+
             message_id: native_message_id(event).cloned(),
         }
     }
@@ -80,7 +77,7 @@ impl SessionEventProvenance {
         run_id: Option<RunId>,
         source_epoch: Option<u64>,
         source_cursor: Option<u64>,
-        route_key: Option<String>,
+
         message_id: Option<MessageId>,
     ) -> Self {
         Self {
@@ -88,14 +85,14 @@ impl SessionEventProvenance {
             run_id,
             source_epoch: source_epoch.filter(|epoch| *epoch > 0),
             source_cursor: source_cursor.filter(|sequence| *sequence <= MAX_SAFE_SEQUENCE),
-            route_key,
+
             message_id,
         }
     }
 
     pub(crate) fn recovery(
         session_key: SessionKey,
-        route_key: Option<String>,
+
         source_epoch: Option<u64>,
     ) -> Self {
         Self {
@@ -103,7 +100,7 @@ impl SessionEventProvenance {
             run_id: None,
             source_epoch: source_epoch.filter(|epoch| *epoch > 0),
             source_cursor: None,
-            route_key,
+
             message_id: None,
         }
     }
@@ -117,7 +114,7 @@ impl fmt::Debug for SessionEventProvenance {
             .field("has_run_id", &self.run_id.is_some())
             .field("source_epoch", &self.source_epoch)
             .field("source_cursor", &self.source_cursor)
-            .field("has_route_key", &self.route_key.is_some())
+
             .field("has_message_id", &self.message_id.is_some())
             .finish()
     }
@@ -126,12 +123,14 @@ impl fmt::Debug for SessionEventProvenance {
 #[derive(Clone, Eq, PartialEq)]
 pub enum SessionEvent {
     Lifecycle(LifecycleEvent),
+    QuestionsChanged,
 }
 
 impl fmt::Debug for SessionEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Lifecycle(event) => formatter.debug_tuple("Lifecycle").field(event).finish(),
+            Self::QuestionsChanged => formatter.write_str("QuestionsChanged"),
         }
     }
 }
@@ -226,12 +225,14 @@ impl SessionEvent {
     pub fn provenance(&self) -> Option<&SessionEventProvenance> {
         match self {
             Self::Lifecycle(event) => event.provenance(),
+            Self::QuestionsChanged => None,
         }
     }
 
     pub fn lifecycle_event(&self) -> Option<LifecycleEvent> {
         match self {
             Self::Lifecycle(event) => Some(event.clone()),
+            Self::QuestionsChanged => None,
         }
     }
 }
@@ -246,7 +247,7 @@ pub(crate) fn project_lifecycle(
         native_message_id(event).is_some(),
         event.chat.is_some() || event.activity.is_some() || event.approval.is_some(),
     )
-    .with_provenance(SessionEventProvenance::from_event(event, Some(epoch), None))
+    .with_provenance(SessionEventProvenance::from_event(event, Some(epoch)))
 }
 
 pub(crate) fn send_lifecycle(

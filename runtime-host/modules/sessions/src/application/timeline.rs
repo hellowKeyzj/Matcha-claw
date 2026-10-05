@@ -1,4 +1,4 @@
-use crate::state::{MAX_CONTENT_REF_BYTES, SessionProvider, SessionView};
+use crate::state::{MAX_CONTENT_REF_BYTES, SessionIdentity, SessionProvider, SessionView};
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_SESSION_KEY_BYTES: usize = 4096;
@@ -94,9 +94,7 @@ impl WindowRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContentCommand {
-    provider: Provider,
-    session_key: String,
-    agent_id: Option<String>,
+    identity: SessionIdentity,
     endpoint_session_id: Option<String>,
     content_ref: String,
     offset: u64,
@@ -105,16 +103,13 @@ pub struct ContentCommand {
 
 impl ContentCommand {
     pub fn new(
-        provider: Provider,
-        session_key: String,
-        agent_id: Option<String>,
+        identity: SessionIdentity,
         endpoint_session_id: Option<String>,
         content_ref: String,
         offset: u64,
         limit: usize,
     ) -> Option<Self> {
-        if !valid_bounded_text(&session_key, MAX_SESSION_KEY_BYTES)
-            || !valid_optional_bounded_text(agent_id.as_deref(), MAX_ID_BYTES)
+        if SessionIdentity::with_endpoint(identity.session_key.clone(), identity.endpoint.clone(), identity.agent_id.clone()).is_err()
             || !valid_optional_bounded_text(
                 endpoint_session_id.as_deref(),
                 MAX_ENDPOINT_SESSION_ID_BYTES,
@@ -127,9 +122,7 @@ impl ContentCommand {
             return None;
         }
         Some(Self {
-            provider,
-            session_key,
-            agent_id,
+            identity,
             endpoint_session_id,
             content_ref,
             offset,
@@ -137,20 +130,27 @@ impl ContentCommand {
         })
     }
 
-    pub const fn provider(&self) -> Provider {
-        self.provider
+    pub fn identity(&self) -> &SessionIdentity {
+        &self.identity
     }
 
-    pub const fn session_provider(&self) -> SessionProvider {
-        self.provider.session_provider()
+    pub fn provider(&self) -> Provider {
+        match self.identity.provider() {
+            SessionProvider::OpenClaw => Provider::OpenClaw,
+            SessionProvider::MatchaAgent => Provider::Matcha,
+        }
+    }
+
+    pub fn session_provider(&self) -> SessionProvider {
+        self.identity.provider()
     }
 
     pub fn session_key(&self) -> &str {
-        &self.session_key
+        self.identity.session_key()
     }
 
     pub fn agent_id(&self) -> Option<&str> {
-        self.agent_id.as_deref()
+        Some(&self.identity.agent_id)
     }
 
     pub fn endpoint_session_id(&self) -> Option<&str> {
@@ -209,9 +209,7 @@ pub enum Operation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Command {
     operation: Operation,
-    provider: Provider,
-    session_key: String,
-    agent_id: Option<String>,
+    identity: SessionIdentity,
     window: WindowRequest,
     endpoint_session_id: Option<String>,
     include_canonical: bool,
@@ -220,15 +218,12 @@ pub struct Command {
 impl Command {
     pub fn new(
         operation: Operation,
-        provider: Provider,
-        session_key: String,
-        agent_id: Option<String>,
+        identity: SessionIdentity,
         window: WindowRequest,
         endpoint_session_id: Option<String>,
         include_canonical: bool,
     ) -> Option<Self> {
-        if !valid_bounded_text(&session_key, MAX_SESSION_KEY_BYTES)
-            || !valid_optional_bounded_text(agent_id.as_deref(), MAX_ID_BYTES)
+        if SessionIdentity::with_endpoint(identity.session_key.clone(), identity.endpoint.clone(), identity.agent_id.clone()).is_err()
             || !valid_optional_bounded_text(
                 endpoint_session_id.as_deref(),
                 MAX_ENDPOINT_SESSION_ID_BYTES,
@@ -238,9 +233,7 @@ impl Command {
         }
         Some(Self {
             operation,
-            provider,
-            session_key,
-            agent_id,
+            identity,
             window,
             endpoint_session_id,
             include_canonical,
@@ -251,20 +244,27 @@ impl Command {
         self.operation
     }
 
-    pub const fn provider(&self) -> Provider {
-        self.provider
+    pub fn identity(&self) -> &SessionIdentity {
+        &self.identity
     }
 
-    pub const fn session_provider(&self) -> SessionProvider {
-        self.provider.session_provider()
+    pub fn provider(&self) -> Provider {
+        match self.identity.provider() {
+            SessionProvider::OpenClaw => Provider::OpenClaw,
+            SessionProvider::MatchaAgent => Provider::Matcha,
+        }
+    }
+
+    pub fn session_provider(&self) -> SessionProvider {
+        self.identity.provider()
     }
 
     pub fn session_key(&self) -> &str {
-        &self.session_key
+        self.identity.session_key()
     }
 
     pub fn agent_id(&self) -> Option<&str> {
-        self.agent_id.as_deref()
+        Some(&self.identity.agent_id)
     }
 
     pub fn endpoint_session_id(&self) -> Option<&str> {

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::port::OpenClawSessionError;
 use platform::state_dir::CanonicalStateDir;
 use sessions_module::{
@@ -22,10 +24,37 @@ impl OpenClawDriver {
         command: timeline::Command,
         epoch: u64,
     ) -> timeline::Outcome {
-        load_openclaw_session_timeline_from_state(self.state_dir(), command, epoch).await
+        let page = match openclaw_page_request(&command) {
+            Ok(page) => page, Err(_) => return Outcome::unavailable(UnavailableReason::OpenClawBindingInvalid),
+        };
+        let window = match self.session_gateway.history_for_identity(command.identity(), page, None).await {
+            Ok(window) => window,
+            Err(error) => {
+                let failure = openclaw_read_failure(RuntimeSessionError::Client(error));
+                return match failure.diagnostic {
+                    Some(diagnostic) => Outcome::unavailable_with_diagnostic(failure.reason, diagnostic),
+                    None => Outcome::unavailable(failure.reason),
+                };
+            }
+        };
+        let key = match crate::session::protocol::SessionKey::try_new(command.session_key().to_owned()) {
+            Ok(key) => key, Err(_) => return Outcome::unavailable(UnavailableReason::OpenClawSessionKeyInvalid),
+        };
+        let mut actor = crate::session::reducer::SessionReducerActor::new(key);
+        let source_epoch = match crate::gateway::ingress::GatewayEpoch::try_new(1) {
+            Ok(epoch) => epoch, Err(_) => unreachable!(),
+        };
+        if actor.sync_history(&window, page, source_epoch).is_err() {
+            return Outcome::unavailable(UnavailableReason::OpenClawProjectionInvalid);
+        }
+        match actor.snapshot(epoch) {
+            Ok(mut view) => { view.identity = command.identity().clone(); Outcome::Incomplete(view) },
+            Err(_) => Outcome::unavailable(UnavailableReason::OpenClawProjectionInvalid),
+        }
     }
 }
 
+#[cfg(test)]
 async fn load_openclaw_session_timeline_from_state(
     state_dir: &CanonicalStateDir,
     command: timeline::Command,
@@ -62,7 +91,7 @@ async fn load_openclaw_session_timeline_from_state(
     let Some(identity) = SessionIdentity::new(
         command.session_key().to_owned(),
         SessionProvider::OpenClaw,
-        agent_id,
+        agent_id.unwrap_or_default(),
     ) else {
         return Outcome::unavailable(UnavailableReason::OpenClawIdentityInvalid);
     };
@@ -71,6 +100,7 @@ async fn load_openclaw_session_timeline_from_state(
         .unwrap_or_else(|| Outcome::unavailable(UnavailableReason::OpenClawProjectionInvalid))
 }
 
+#[cfg(test)]
 fn load_openclaw_replay_window(
     state_dir: &CanonicalStateDir,
     session_key: crate::session::protocol::SessionKey,
@@ -93,7 +123,6 @@ fn load_openclaw_replay_window(
         source.session_key().clone(),
         source.into_rows(),
         None,
-        None,
     )
     .map_err(|_| RuntimeSessionError::Client(OpenClawSessionError::Protocol(None)))?;
     OpenClawTimelineWindow::new(replay, window).ok_or(RuntimeSessionError::Client(
@@ -101,7 +130,7 @@ fn load_openclaw_replay_window(
     ))
 }
 
-fn openclaw_page_request(
+pub(crate) fn openclaw_page_request(
     command: &timeline::Command,
 ) -> Result<crate::session::window::PageRequest, RuntimeSessionError<OpenClawSessionError>> {
     let direction = match command.direction() {
@@ -328,6 +357,7 @@ fn project_openclaw_replay_view(
         endpoint_session_id: Some(endpoint_session_id),
         ownership: None,
         model_state: None,
+        goal: sessions_module::goal::SessionGoalView::Unknown,
         identity: identity.clone(),
         epoch,
         seq: 0,
@@ -348,30 +378,31 @@ fn project_openclaw_replay_view(
 const OPENCLAW_REPLAY_RECOVERY_ITEM_ID: &str = "openclaw:replay-recovery";
 const OPENCLAW_REPLAY_RECOVERY_TEXT: &str = "部分历史内容无法加载，已省略。";
 
-struct OpenClawReplayProjection {
-    items: Vec<SessionItem>,
-    tools: Vec<ToolView>,
-    approvals: Vec<ApprovalView>,
-    runtime: RuntimeView,
-    partial: bool,
+#[derive(Clone)]
+pub(crate) struct OpenClawReplayProjection {
+    pub(crate) items: Vec<SessionItem>,
+    pub(crate) tools: Vec<ToolView>,
+    tool_sources: HashMap<String, ToolSources>,
+    pub(crate) approvals: Vec<ApprovalView>,
+    pub(crate) runtime: RuntimeView,
+    pub(crate) partial: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ToolSources {
+    call_rank: u8,
+    result_rank: u8,
 }
 
 impl OpenClawReplayProjection {
+    pub(crate) fn empty() -> Self {
+        Self { items: Vec::new(), tools: Vec::new(), tool_sources: HashMap::new(), approvals: Vec::new(),
+            runtime: RuntimeView { phase: RunPhase::Completed, active_run_id: None, issue: None,
+                run_progress: None, runtime_activity: None, error_detail: None }, partial: false }
+    }
+
     fn from_replay(replay: &crate::port::CanonicalSessionReplay) -> Option<Self> {
-        let mut projection = Self {
-            items: Vec::new(),
-            tools: Vec::new(),
-            approvals: Vec::new(),
-            runtime: RuntimeView {
-                phase: RunPhase::Completed,
-                active_run_id: None,
-                issue: None,
-                run_progress: None,
-                runtime_activity: None,
-                error_detail: None,
-            },
-            partial: false,
-        };
+        let mut projection = Self::empty();
         for result in replay.ingress_results() {
             let crate::port::CanonicalIngressResult::Produced(delta) = result else {
                 continue;
@@ -383,7 +414,7 @@ impl OpenClawReplayProjection {
         Some(projection)
     }
 
-    fn apply_change(
+    pub(crate) fn apply_change(
         &mut self,
         change: &crate::session::projection::CanonicalSessionChange,
     ) -> Option<()> {
@@ -392,46 +423,18 @@ impl OpenClawReplayProjection {
                 self.apply_run_started(run_id.as_str())
             }
             crate::session::projection::CanonicalSessionChange::AssistantTurnChunk {
-                run_id,
-                message_id,
-                kind,
-                text,
-                replace,
-                status,
-            } => self.apply_assistant_turn_chunk(
-                run_id.as_str(),
-                message_id.as_ref().map(|id| id.as_str()),
-                *kind,
-                text,
-                *replace,
-                *status,
-            ),
-            crate::session::projection::CanonicalSessionChange::AssistantTurnSnapshot {
-                snapshot,
-            } => self.apply_assistant_turn_snapshot(snapshot),
-            crate::session::projection::CanonicalSessionChange::ToolActivity {
-                run_id,
-                tool_id,
-                tool_name,
-                phase,
-                input,
-                input_text,
-                summary,
-                output,
-                details,
-                is_error,
-            } => self.apply_tool_activity(OpenClawReplayToolActivity {
-                run_id: run_id.as_str(),
-                tool_id: tool_id.as_str(),
-                tool_name: tool_name.as_deref(),
-                phase: *phase,
-                input,
-                input_text: input_text.as_deref(),
-                summary: summary.as_deref(),
-                output,
-                details,
-                is_error: *is_error,
-            }),
+                run_id, status, ..
+            } => {
+                self.observe_assistant_turn_status(run_id.as_str(), *status);
+                Some(())
+            }
+            crate::session::projection::CanonicalSessionChange::AssistantTurnSnapshot { snapshot } => {
+                self.observe_assistant_turn_status(snapshot.run_id.as_str(), snapshot.status);
+                Some(())
+            }
+            crate::session::projection::CanonicalSessionChange::ToolActivity { .. } => {
+                self.apply_tool_observation(change).map(|_| ())
+            }
             crate::session::projection::CanonicalSessionChange::RuntimeActivity {
                 run_id,
                 activity,
@@ -497,10 +500,101 @@ impl OpenClawReplayProjection {
             crate::session::projection::CanonicalSessionChange::RecoveryRequired { .. } => {
                 self.apply_recovery()
             }
+            crate::session::projection::CanonicalSessionChange::ItemsReplaced { old_item_ids, anchor, items } => {
+                self.items.retain(|item| !old_item_ids.iter().any(|id| id == item.item_id()) && !items.iter().any(|incoming| incoming.item_id() == item.item_id()));
+                let index = match anchor {
+                    sessions_module::state::ItemAnchor::Start => 0,
+                    sessions_module::state::ItemAnchor::After { item_id } => self.items.iter().position(|item| item.item_id() == item_id)?.checked_add(1)?,
+                };
+                if self.items.len() + items.len() > 200 { return None; }
+                self.items.splice(index..index, items.iter().cloned());
+                Some(())
+            }
             crate::session::projection::CanonicalSessionChange::TranscriptMessage { message } => {
-                self.apply_transcript_message(message)
+                for content in message.content() { self.apply_transcript_tool_content(message, content)?; }
+                Some(())
             }
         }
+    }
+
+    pub(crate) fn apply_tool_observation(
+        &mut self,
+        change: &crate::session::projection::CanonicalSessionChange,
+    ) -> Option<crate::session::projection::CanonicalSessionChange> {
+        use crate::session::{projection::CanonicalSessionChange, protocol::ToolActivityPhase};
+        let CanonicalSessionChange::ToolActivity {
+            run_id, tool_id, tool_name, phase, input, input_text, summary, output, details, is_error,
+        } = change else { return None; };
+        let result_rank = match phase {
+            ToolActivityPhase::Started => 0,
+            ToolActivityPhase::Updated => 1,
+            ToolActivityPhase::Completed | ToolActivityPhase::Failed => 2,
+        };
+        let tool = self.merge_tool(ToolView {
+            tool_call_id: tool_id.as_str().to_owned(), run_id: Some(run_id.as_str().to_owned()),
+            name: tool_name.clone(), phase: openclaw_replay_tool_phase(*phase),
+            input: input.clone(), input_text: input_text.clone(), summary: summary.clone(),
+            output: output.clone(), details: details.clone(), is_error: *is_error,
+        }, 1, result_rank)?;
+        let merged = canonical_tool_change(tool)?;
+        self.apply_run_started(run_id.as_str())?;
+        Some(merged)
+    }
+
+    pub(crate) fn transcript_tool_changes(
+        &self,
+        message: &crate::session::window::Message,
+    ) -> Vec<crate::session::projection::CanonicalSessionChange> {
+        let mut ids = Vec::new();
+        for content in message.content() {
+            let id = match content {
+                crate::session::window::MessageContent::ToolUse { tool_call_id, .. }
+                | crate::session::window::MessageContent::ToolResult { tool_call_id, .. } => tool_call_id.as_deref(),
+                crate::session::window::MessageContent::MessageToolDelivery { .. } => transcript_message_tool_call_id(message),
+                _ => None,
+            };
+            if let Some(id) = id && !ids.contains(&id) { ids.push(id); }
+        }
+        ids.into_iter().filter_map(|id| self.tools.iter().find(|tool| tool.tool_call_id == id))
+            .filter_map(canonical_tool_change).collect()
+    }
+
+    pub(crate) fn retain_tool_provenance(&mut self) {
+        self.tool_sources.retain(|id, _| self.tools.iter().any(|tool| &tool.tool_call_id == id));
+    }
+
+    fn merge_tool(&mut self, tool: ToolView, call_rank: u8, result_rank: u8) -> Option<&ToolView> {
+        let index = self.tools.iter().position(|existing| existing.tool_call_id == tool.tool_call_id);
+        if index.is_some_and(|index| matches!((&self.tools[index].run_id, &tool.run_id),
+            (Some(owner), Some(incoming)) if owner != incoming))
+        {
+            return None;
+        }
+        let sources = self.tool_sources.entry(tool.tool_call_id.clone()).or_default();
+        let Some(index) = index else {
+            *sources = ToolSources { call_rank, result_rank };
+            self.tools.push(tool);
+            return self.tools.last();
+        };
+        let existing = &mut self.tools[index];
+        let prefer_call = call_rank >= sources.call_rank;
+        let prefer_result = result_rank >= sources.result_rank;
+        merge_tool_field(&mut existing.name, tool.name, prefer_call);
+        merge_tool_field(&mut existing.input, tool.input, prefer_call);
+        merge_tool_field(&mut existing.input_text, tool.input_text, prefer_call);
+        merge_tool_field(&mut existing.summary, tool.summary, prefer_result);
+        merge_tool_field(&mut existing.output, tool.output, prefer_result);
+        merge_tool_details(&mut existing.details, tool.details, prefer_result);
+        merge_tool_field(&mut existing.is_error, tool.is_error, prefer_result);
+        merge_tool_field(&mut existing.run_id, tool.run_id, false);
+        if prefer_result && (!matches!(existing.phase, ToolPhase::Completed | ToolPhase::Failed)
+            || matches!(tool.phase, ToolPhase::Completed | ToolPhase::Failed))
+        {
+            existing.phase = tool.phase;
+        }
+        sources.call_rank = sources.call_rank.max(call_rank);
+        sources.result_rank = sources.result_rank.max(result_rank);
+        Some(existing)
     }
 
     fn apply_run_started(&mut self, run_id: &str) -> Option<()> {
@@ -556,21 +650,12 @@ impl OpenClawReplayProjection {
                 tool_call_id: Some(tool_call_id),
                 input,
                 input_text,
-            } => upsert_replay_tool(
-                &mut self.tools,
-                transcript_tool_view(
-                    tool_call_id,
-                    message.run_id(),
-                    Some(name.as_str()),
-                    ToolPhase::Started,
-                    input.as_ref(),
-                    input_text.as_deref(),
-                    None,
-                    None,
-                    None,
-                    None,
-                )?,
-            ),
+            } => {
+                self.merge_tool(transcript_tool_view(
+                    tool_call_id, message.run_id(), Some(name.as_str()), ToolPhase::Started,
+                    input.as_ref(), input_text.as_deref(), None, None, None, None,
+                )?, 2, 0)?;
+            }
             crate::session::window::MessageContent::ToolResult {
                 tool_name,
                 tool_call_id: Some(tool_call_id),
@@ -578,75 +663,24 @@ impl OpenClawReplayProjection {
                 output,
                 details,
                 is_error,
-            } => upsert_replay_tool(
-                &mut self.tools,
-                transcript_tool_view(
-                    tool_call_id,
-                    message.run_id(),
-                    tool_name.as_deref(),
-                    match is_error {
-                        Some(true) => ToolPhase::Failed,
-                        _ => ToolPhase::Completed,
-                    },
-                    None,
-                    None,
-                    summary.as_deref(),
-                    output.as_ref(),
-                    details.as_ref(),
-                    *is_error,
-                )?,
-            ),
+            } => {
+                self.merge_tool(transcript_tool_view(
+                    tool_call_id, message.run_id(), tool_name.as_deref(),
+                    match is_error { Some(true) => ToolPhase::Failed, _ => ToolPhase::Completed },
+                    None, None, summary.as_deref(), output.as_ref(), details.as_ref(), *is_error,
+                )?, 0, 3)?;
+            }
             crate::session::window::MessageContent::MessageToolDelivery { text, media } => {
                 if let Some(tool_call_id) = transcript_message_tool_call_id(message) {
-                    upsert_replay_tool(
-                        &mut self.tools,
-                        transcript_tool_view(
-                            tool_call_id,
-                            message.run_id(),
-                            None,
-                            ToolPhase::Completed,
-                            None,
-                            None,
-                            text.as_deref(),
-                            transcript_delivery_output(text.as_deref(), media).as_ref(),
-                            None,
-                            None,
-                        )?,
-                    );
+                    self.merge_tool(transcript_tool_view(
+                        tool_call_id, message.run_id(), None, ToolPhase::Completed, None, None,
+                        text.as_deref(), transcript_delivery_output(text.as_deref(), media).as_ref(),
+                        None, None,
+                    )?, 0, 3)?;
                 }
             }
             _ => {}
         }
-        Some(())
-    }
-
-    fn apply_assistant_turn_chunk(
-        &mut self,
-        run_id: &str,
-        message_id: Option<&str>,
-        kind: crate::session::projection::AssistantTurnChunkKind,
-        text: &str,
-        replace: bool,
-        status: crate::session::projection::AssistantTurnStatus,
-    ) -> Option<()> {
-        let mut item = self.assistant_turn_mut(run_id, message_id)?;
-        item.push_chunk(kind, text, replace)?;
-        *item.status = openclaw_assistant_turn_item_status(status);
-        self.observe_assistant_turn_status(run_id, status);
-        Some(())
-    }
-
-    fn apply_assistant_turn_snapshot(
-        &mut self,
-        snapshot: &crate::session::projection::AssistantTurnSnapshot,
-    ) -> Option<()> {
-        let mut item = self.assistant_turn_mut(
-            snapshot.run_id.as_str(),
-            snapshot.message_id.as_ref().map(|id| id.as_str()),
-        )?;
-        item.set_ordered_snapshot(&snapshot.segments, &snapshot.text)?;
-        *item.status = openclaw_assistant_turn_item_status(snapshot.status);
-        self.observe_assistant_turn_status(snapshot.run_id.as_str(), snapshot.status);
         Some(())
     }
 
@@ -655,44 +689,13 @@ impl OpenClawReplayProjection {
         run_id: &str,
         status: crate::session::projection::AssistantTurnStatus,
     ) {
-        self.runtime.phase = openclaw_assistant_turn_run_phase(status);
-        self.runtime.run_progress = None;
-        self.runtime.active_run_id = match status {
-            crate::session::projection::AssistantTurnStatus::Final
-            | crate::session::projection::AssistantTurnStatus::Aborted
-            | crate::session::projection::AssistantTurnStatus::Error => None,
-            crate::session::projection::AssistantTurnStatus::Streaming
-            | crate::session::projection::AssistantTurnStatus::WaitingForTool => {
-                Some(run_id.to_owned())
-            }
-        };
-    }
-
-    fn apply_tool_activity(&mut self, activity: OpenClawReplayToolActivity<'_>) -> Option<()> {
-        let phase = openclaw_replay_tool_phase(activity.phase);
-        let tool = ToolView {
-            tool_call_id: activity.tool_id.to_owned(),
-            run_id: Some(activity.run_id.to_owned()),
-            name: activity.tool_name.map(str::to_owned),
-            phase,
-            input: activity.input.clone(),
-            input_text: activity.input_text.map(str::to_owned),
-            summary: activity.summary.map(str::to_owned),
-            output: activity.output.clone(),
-            details: activity.details.clone(),
-            is_error: activity.is_error,
-        };
-        upsert_replay_tool(&mut self.tools, tool);
-        let mut item = self.assistant_turn_mut(activity.run_id, None)?;
-        item.upsert_tool(activity.tool_id, activity.tool_name)?;
-        *item.status = match phase {
-            ToolPhase::Completed | ToolPhase::Failed => ItemStatus::Streaming,
-            ToolPhase::Started | ToolPhase::Updated => ItemStatus::WaitingForTool,
-        };
-        self.runtime.phase = RunPhase::Started;
-        self.runtime.active_run_id = Some(activity.run_id.to_owned());
-        self.runtime.run_progress = None;
-        Some(())
+        if matches!(status, crate::session::projection::AssistantTurnStatus::Streaming
+            | crate::session::projection::AssistantTurnStatus::WaitingForTool)
+        {
+            self.runtime.phase = RunPhase::Started;
+            self.runtime.active_run_id = Some(run_id.to_owned());
+            self.runtime.run_progress = None;
+        }
     }
 
     fn upsert_approval(
@@ -779,17 +782,13 @@ impl OpenClawReplayProjection {
 
     fn apply_terminal(
         &mut self,
-        run_id: &str,
+        _run_id: &str,
         outcome: crate::port::TerminalOutcome,
         error_detail: &Option<serde_json::Value>,
         error_message: &Option<String>,
         error_kind: &Option<crate::session::protocol::SessionErrorKind>,
         stop_reason: &Option<String>,
     ) -> Option<()> {
-        let status = openclaw_terminal_item_status(outcome);
-        if let Some(item) = self.assistant_turn_by_run_mut(run_id) {
-            *item.status = status;
-        }
         let phase = openclaw_terminal_run_phase(outcome);
         self.runtime.phase = phase;
         self.runtime.active_run_id = None;
@@ -887,19 +886,6 @@ impl OpenClawReplayProjection {
     }
 }
 
-struct OpenClawReplayToolActivity<'a> {
-    run_id: &'a str,
-    tool_id: &'a str,
-    tool_name: Option<&'a str>,
-    phase: crate::session::protocol::ToolActivityPhase,
-    input: &'a Option<serde_json::Value>,
-    input_text: Option<&'a str>,
-    summary: Option<&'a str>,
-    output: &'a Option<serde_json::Value>,
-    details: &'a Option<serde_json::Value>,
-    is_error: Option<bool>,
-}
-
 struct OpenClawReplayAssistantTurn<'a> {
     status: &'a mut ItemStatus,
     segments: &'a mut Vec<SessionContent>,
@@ -978,7 +964,7 @@ impl OpenClawReplayAssistantTurn<'_> {
     }
 }
 
-fn transcript_session_item(
+pub(crate) fn transcript_session_item(
     message: &crate::session::window::Message,
     fallback_index: usize,
 ) -> Option<SessionItem> {
@@ -1012,7 +998,8 @@ fn transcript_session_item(
 
 fn transcript_item_id(message: &crate::session::window::Message, fallback_index: usize) -> String {
     message
-        .message_id()
+        .display_item_id()
+        .or_else(|| message.message_id())
         .or_else(|| message.origin())
         .map(str::to_owned)
         .unwrap_or_else(|| format!("source:{fallback_index}"))
@@ -1325,7 +1312,47 @@ fn openclaw_assistant_turn_segment(
     }
 }
 
-fn upsert_replay_tool(tools: &mut Vec<ToolView>, tool: ToolView) {
+fn canonical_tool_change(tool: &ToolView) -> Option<crate::session::projection::CanonicalSessionChange> {
+    use crate::session::{projection::CanonicalSessionChange, protocol::{RunId, ToolActivityPhase, ToolId}};
+    Some(CanonicalSessionChange::ToolActivity {
+        run_id: RunId::try_new(tool.run_id.clone()?).ok()?,
+        tool_id: ToolId::try_new(tool.tool_call_id.clone()).ok()?, tool_name: tool.name.clone(),
+        phase: match tool.phase {
+            ToolPhase::Started => ToolActivityPhase::Started,
+            ToolPhase::Updated => ToolActivityPhase::Updated,
+            ToolPhase::Completed => ToolActivityPhase::Completed,
+            ToolPhase::Failed => ToolActivityPhase::Failed,
+        },
+        input: tool.input.clone(), input_text: tool.input_text.clone(), summary: tool.summary.clone(),
+        output: tool.output.clone(), details: tool.details.clone(), is_error: tool.is_error,
+    })
+}
+
+fn merge_tool_field<T>(existing: &mut Option<T>, incoming: Option<T>, preferred: bool) {
+    if incoming.is_some() && (preferred || existing.is_none()) {
+        *existing = incoming;
+    }
+}
+
+fn merge_tool_details(
+    existing: &mut Option<serde_json::Value>,
+    incoming: Option<serde_json::Value>,
+    preferred: bool,
+) {
+    if let (Some(serde_json::Value::Object(current)), Some(serde_json::Value::Object(next)))
+        = (existing.as_mut(), incoming.as_ref())
+    {
+        for (key, value) in next {
+            if preferred || !current.contains_key(key) {
+                current.insert(key.clone(), value.clone());
+            }
+        }
+    } else {
+        merge_tool_field(existing, incoming, preferred);
+    }
+}
+
+pub(in crate::session) fn upsert_replay_tool(tools: &mut Vec<ToolView>, tool: ToolView) {
     if let Some(existing) = tools
         .iter_mut()
         .find(|existing| existing.tool_call_id == tool.tool_call_id)

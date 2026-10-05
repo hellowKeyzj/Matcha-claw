@@ -50,6 +50,7 @@ export interface RuntimeAgentProfileSummary {
     approvals: boolean;
     replay: boolean;
     modelSelection: boolean;
+    supportsGoal: boolean;
   };
 }
 
@@ -141,6 +142,7 @@ export interface RuntimeEndpointSummary {
     approvals: boolean;
     replay: boolean;
     modelSelection: boolean;
+    supportsGoal: boolean;
   };
   capabilityFamilies: RuntimeEndpointCapabilityFamilySummary[];
   controlState: RuntimeEndpointControlStateSummary;

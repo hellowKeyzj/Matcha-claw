@@ -4,6 +4,8 @@ import {
   type RuntimeScope,
 } from '../../../src/types/desktop/runtime-address';
 
+import { isTeamDesignPatchOperation, isTeamGraphVersion } from '../../../src/types/team-design';
+
 export const TEAM_RUNTIME_CAPABILITY_ID = 'team.runtime';
 
 const TEAM_RUNTIME_SCOPE: RuntimeScope = {
@@ -25,6 +27,11 @@ const TEAM_RUNTIME_OPERATIONS = [
   ['team.triggerList', 'List TeamRun armed triggers', 'team'],
   ['team.webhookTriggerFire', 'Fire TeamRun webhook trigger by path', 'team'],
   ['team.runSnapshot', 'Read TeamRun snapshot', 'team-run'],
+  ['team.designStart', 'Start TeamRun design', 'team'],
+  ['team.designContinue', 'Continue TeamRun design', 'team'],
+  ['team.designExit', 'Exit TeamRun design', 'team'],
+  ['team.designSnapshot', 'Read TeamRun design snapshot', 'team'],
+  ['team.designGraphPatch', 'Patch TeamRun design graph', 'team'],
   ['team.graphSave', 'Save TeamRun graph config', 'team-run'],
   ['team.graphPatch', 'Submit TeamRun graph patch command', 'team-run'],
   ['team.graphContext', 'Read compact TeamRun graph context', 'team-run'],
@@ -102,6 +109,28 @@ function validateOperation(
         && (input.decision === 'approve' || input.decision === 'deny' || input.decision === 'abort')
         && (input.note === undefined || isText(input.note))
         && isOpaque(input.idempotencyKey);
+    case 'team.designGraphPatch':
+      return isRecord(target) && hasExactKeys(target, ['kind', 'teamId'])
+        && target.kind === 'team' && matchingField(target, 'teamId', input, 'teamId')
+        && hasExactKeys(input, ['teamId', 'runId', 'designEpoch', 'expectedGraphVersion', 'commandId', 'idempotencyKey', 'operations'])
+        && isIdentifier(input.runId) && isOpaque(input.designEpoch) && isTeamGraphVersion(input.expectedGraphVersion)
+        && isOpaque(input.commandId) && isOpaque(input.idempotencyKey)
+        && Array.isArray(input.operations) && input.operations.length > 0 && input.operations.every(isTeamDesignPatchOperation);
+    case 'team.designExit':
+      return isRecord(target) && hasExactKeys(target, ['kind', 'teamId'])
+        && target.kind === 'team' && matchingField(target, 'teamId', input, 'teamId')
+        && hasExactKeys(input, ['teamId', 'runId', 'designEpoch'])
+        && isIdentifier(input.runId) && isOpaque(input.designEpoch);
+    case 'team.designStart':
+    case 'team.designContinue':
+    case 'team.designSnapshot':
+      return isRecord(target) && hasExactKeys(target, ['kind', 'teamId'])
+        && target.kind === 'team' && matchingField(target, 'teamId', input, 'teamId') && isIdentifier(input.runId)
+        && (operation === 'team.designSnapshot'
+          ? hasExactKeys(input, ['teamId', 'runId'])
+          : isOpaque(input.idempotencyKey) && (operation === 'team.designStart'
+            ? hasExactKeys(input, ['teamId', 'runId', 'idempotencyKey'])
+            : hasExactKeys(input, ['teamId', 'runId', 'proposalId', 'idempotencyKey']) && isOpaque(input.proposalId)));
     case 'team.runSnapshot':
     case 'team.graphExportYaml':
     case 'team.runDiagnostics':

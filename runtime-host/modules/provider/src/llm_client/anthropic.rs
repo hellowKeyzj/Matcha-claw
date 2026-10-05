@@ -1,3 +1,6 @@
+use std::time::Instant;
+
+use platform::trace::session_trace;
 use serde_json::{Map, Value, json};
 
 use super::{
@@ -55,7 +58,12 @@ pub async fn stream_generate(
     for (name, value) in &http_request.headers {
         builder = builder.header(*name, value);
     }
+    let started = Instant::now();
     let response = builder.send().await?;
+    session_trace("runtime.team.provider.http.response", json!({
+        "protocol": "anthropic_messages", "statusCode": response.status().as_u16(),
+        "elapsedMs": started.elapsed().as_millis() as u64,
+    }));
     if !response.status().is_success() {
         return Err(LlmClientError::Protocol(format!(
             "Anthropic Messages stream failed with HTTP {}",
@@ -153,8 +161,13 @@ async fn send_json(
     http: &reqwest::Client,
     request: &AnthropicMessagesHttpRequest,
 ) -> Result<Value, LlmClientError> {
+    let started = Instant::now();
     let text = send_text(http, request).await?;
     serde_json::from_str(&text).map_err(|error| {
+        session_trace("runtime.team.provider.http.parse-failed", json!({
+            "protocol": "anthropic_messages", "class": "JsonDecode",
+            "elapsedMs": started.elapsed().as_millis() as u64,
+        }));
         LlmClientError::Protocol(format!("invalid Anthropic Messages JSON response: {error}"))
     })
 }
@@ -168,7 +181,12 @@ async fn send_text(
         builder = builder.header(*name, value);
     }
 
+    let started = Instant::now();
     let response = builder.send().await?;
+    session_trace("runtime.team.provider.http.response", json!({
+        "protocol": "anthropic_messages", "statusCode": response.status().as_u16(),
+        "elapsedMs": started.elapsed().as_millis() as u64,
+    }));
     let status = response.status();
     let text = response.text().await?;
     if status.is_success() {

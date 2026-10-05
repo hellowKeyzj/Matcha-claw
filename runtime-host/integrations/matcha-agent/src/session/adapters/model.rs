@@ -1,5 +1,4 @@
 use crate::{
-    peer::RendererSubscriptionError,
     session::{client::AppServerClientError, model::SessionId},
 };
 
@@ -91,13 +90,6 @@ pub(super) fn matcha_provider_runtime(
     }
 }
 
-pub(super) fn renderer_subscription_error_kind(error: &RendererSubscriptionError) -> &'static str {
-    match error {
-        RendererSubscriptionError::RuntimeUnavailable => "runtime-unavailable",
-        RendererSubscriptionError::Client(error) => app_server_client_error_kind(*error),
-    }
-}
-
 pub(super) fn app_server_client_error_kind(error: AppServerClientError) -> &'static str {
     match error {
         AppServerClientError::InvalidEndpoint => "invalid-endpoint",
@@ -136,28 +128,6 @@ pub(super) fn load_session_failure_outcome(error: AppServerClientError) -> Sessi
         | AppServerClientError::Protocol
         | AppServerClientError::EventRecoveryRequired
         | AppServerClientError::CloseFailed => SessionSendOutcome::Unknown,
-    }
-}
-
-pub(super) fn renderer_subscription_failure_outcome(
-    error: RendererSubscriptionError,
-) -> SessionSendOutcome {
-    match error {
-        RendererSubscriptionError::RuntimeUnavailable => SessionSendOutcome::Unavailable,
-        RendererSubscriptionError::Client(AppServerClientError::SessionNotFound)
-        | RendererSubscriptionError::Client(AppServerClientError::PeerRejected) => {
-            SessionSendOutcome::Rejected
-        }
-        RendererSubscriptionError::Client(AppServerClientError::HealthDeadline)
-        | RendererSubscriptionError::Client(AppServerClientError::HealthFailed)
-        | RendererSubscriptionError::Client(AppServerClientError::UpgradeDeadline)
-        | RendererSubscriptionError::Client(AppServerClientError::UpgradeFailed)
-        | RendererSubscriptionError::Client(AppServerClientError::InitializeFailed)
-        | RendererSubscriptionError::Client(AppServerClientError::ConnectionClosed)
-        | RendererSubscriptionError::Client(AppServerClientError::Transport) => {
-            SessionSendOutcome::Unavailable
-        }
-        RendererSubscriptionError::Client(_) => SessionSendOutcome::Unknown,
     }
 }
 

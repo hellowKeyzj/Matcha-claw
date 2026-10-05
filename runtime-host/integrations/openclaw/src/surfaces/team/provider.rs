@@ -1,10 +1,15 @@
-use platform::state_dir::CanonicalStateDir;
-use std::{fmt, sync::Arc};
+use platform::{
+    state_dir::CanonicalStateDir,
+    trace::{identifier_hash, session_trace},
+};
+use serde_json::json;
+use std::{fmt, sync::Arc, time::Instant};
 
 use organization::{
     ManagedAgentReference, MaterializationOperationOutcome, MaterializationReceipt,
     NativeWorkspaceReceipt, RoleMaterializationAgent, RoleMaterializationOwnership,
     RoleMaterializationReceipt, TeamMaterializationRemoval, TeamMaterializationRequest,
+    TeamProvisionObserver, TeamProvisionStage, TeamProvisionUpdate,
 };
 
 use super::{
@@ -74,6 +79,8 @@ impl TeamProvider {
     }
 
     pub(crate) async fn list_agents(&self) -> Result<TeamAgents, ReadFailure> {
+        let started = Instant::now();
+        session_trace("runtime.team.native-list.request", json!({}));
         OpenClawAgents::new(Arc::clone(&self.gateway))
             .list()
             .await
@@ -87,6 +94,8 @@ impl TeamProvider {
                 )
             })
             .map_err(ReadFailure::from)
+            .inspect(|agents| session_trace("runtime.team.native-list.end", json!({"outcome":"Succeeded","count":agents.as_slice().len(),"elapsedMs":started.elapsed().as_millis()})))
+            .inspect_err(|failure| session_trace("runtime.team.native-list.end", json!({"outcome":format!("{failure:?}"),"elapsedMs":started.elapsed().as_millis()})))
     }
 
     pub(crate) async fn recover(
@@ -102,21 +111,95 @@ impl TeamProvider {
         &self,
         request: TeamMaterializationRequest,
     ) -> MaterializationOperationOutcome {
-        let Ok(Some(undo)) = ConfigUndo::load(&self.config.state_dir(), request.intent().team())
-        else {
-            return MaterializationOperationOutcome::OutcomeUnknown;
+        self.recover_materialization_observed(request, None).await
+    }
+
+    async fn recover_materialization_observed(
+        &self,
+        request: TeamMaterializationRequest,
+        observer: Option<TeamProvisionObserver>,
+    ) -> MaterializationOperationOutcome {
+        let started = Instant::now();
+        let unknown = |reason| {
+            session_trace(
+                "runtime.team.recovery.end",
+                json!({"outcome":"OutcomeUnknown","reason":reason,"elapsedMs":started.elapsed().as_millis()}),
+            );
+            MaterializationOperationOutcome::OutcomeUnknown
+        };
+        session_trace(
+            "runtime.team.recovery.request",
+            json!({"count":request.intent().agents().len()}),
+        );
+        session_trace(
+            "runtime.team.undo.read.request",
+            json!({"operation":"recovery"}),
+        );
+        let undo = match ConfigUndo::load(&self.config.state_dir(), request.intent().team()) {
+            Ok(Some(undo)) => {
+                session_trace(
+                    "runtime.team.undo.read.end",
+                    json!({"outcome":"Succeeded","present":true}),
+                );
+                undo
+            }
+            Ok(None) => return unknown("undo-missing"),
+            Err(()) => return unknown("undo-read"),
         };
         if !undo.matches_request(&request) {
-            return MaterializationOperationOutcome::OutcomeUnknown;
+            return unknown("undo-request-mismatch");
         }
-        let (Ok(facts), Ok(receipt)) = (undo.facts(), undo.receipt()) else {
-            return MaterializationOperationOutcome::OutcomeUnknown;
+        if undo.is_compensated() {
+            let Ok(receipt) = undo.receipt() else {
+                return unknown("undo-receipt-decode");
+            };
+            if let Some(observer) = &observer {
+                observer
+                    .report(TeamProvisionUpdate::Stage(
+                        TeamProvisionStage::VerifyingTeam,
+                    ))
+                    .await;
+            }
+            for role in receipt.roles() {
+                let Some(workspace) = role.native_workspace() else {
+                    return unknown("receipt-workspace-missing");
+                };
+                let present = TeamBuddyMarker::new(receipt.team().clone(), role.role().clone())
+                    .has_marker(std::path::Path::new(workspace.as_str()));
+                session_trace(
+                    "runtime.team.recovery.compensated-marker.end",
+                    json!({"present":present.as_ref().ok(),"reason":if matches!(present, Ok(false)) {"marker-absent"} else {"marker-unresolved"}}),
+                );
+                if !matches!(present, Ok(false)) {
+                    return unknown("compensated-marker-unresolved");
+                }
+            }
+            session_trace(
+                "runtime.team.recovery.end",
+                json!({"outcome":"Rejected","reason":"compensated","elapsedMs":started.elapsed().as_millis()}),
+            );
+            return permanent_rejection();
+        }
+        let (facts, receipt) = (undo.facts(), undo.receipt());
+        session_trace(
+            "runtime.team.undo.decode",
+            json!({"factsValid":facts.is_ok(),"receiptValid":receipt.is_ok()}),
+        );
+        let (Ok(facts), Ok(receipt)) = (facts, receipt) else {
+            return unknown("undo-decode");
         };
+        if let Some(observer) = &observer {
+            observer
+                .report(TeamProvisionUpdate::Stage(
+                    TeamProvisionStage::VerifyingTeam,
+                ))
+                .await;
+        }
         let Ok(snapshot) = self.config_snapshot().await else {
-            return MaterializationOperationOutcome::OutcomeUnknown;
+            return unknown("config-read");
         };
         if !snapshot.0.matches_agents(&facts) {
-            return MaterializationOperationOutcome::OutcomeUnknown;
+            return unknown("config-mismatch");
         }
         let recovery_request = TeamRecoveryRequest::try_new(
             receipt.team().as_str(),
@@ -133,43 +216,92 @@ impl TeamProvider {
                 .expect("validated receipt roles"),
         )
         .expect("validated receipt");
-        let Ok(TeamRecoveryOutcome::Recovered(recovered)) = self.recover(recovery_request).await
-        else {
-            return MaterializationOperationOutcome::OutcomeUnknown;
+        let recovered = match self.recover(recovery_request).await {
+            Ok(TeamRecoveryOutcome::Recovered(recovered)) => recovered,
+            Ok(TeamRecoveryOutcome::Unknown) => return unknown("native-recovery-unknown"),
+            Err(_) => return unknown("native-list"),
         };
-        for role in receipt.roles() {
+        for (index, role) in receipt.roles().iter().enumerate() {
+            session_trace(
+                "runtime.team.recovery.workspace",
+                json!({"index":index,"roleHash":identifier_hash(role.role().as_str()),"agentHash":identifier_hash(role.agent().as_str()),"workspacePresent":role.native_workspace().is_some()}),
+            );
             let Some(workspace) = role.native_workspace() else {
-                return MaterializationOperationOutcome::OutcomeUnknown;
+                return unknown("receipt-workspace-missing");
             };
             if !recovered.roles().iter().any(|native| {
                 native.role().as_str() == role.role().as_str()
                     && native.agent().as_str() == role.agent().as_str()
                     && native.workspace().as_str() == workspace.as_str()
             }) {
-                return MaterializationOperationOutcome::OutcomeUnknown;
+                session_trace(
+                    "runtime.team.recovery.workspace.end",
+                    json!({"index":index,"reason":"native-workspace-mismatch","outcome":"OutcomeUnknown"}),
+                );
+                return unknown("native-workspace-mismatch");
             }
+            session_trace(
+                "runtime.team.recovery.workspace.end",
+                json!({"index":index,"outcome":"Confirmed"}),
+            );
         }
         // Durable expected config and all native identities are verified above.
         // Finish only missing markers after an interrupted materialization.
-        for role in receipt.roles() {
+        for (index, role) in receipt.roles().iter().enumerate() {
+            let marker_started = Instant::now();
+            let role_hash = identifier_hash(role.role().as_str());
+            let agent_hash = identifier_hash(role.agent().as_str());
             let workspace = std::path::Path::new(
                 role.native_workspace()
                     .expect("verified workspace")
                     .as_str(),
             );
-            let marker = TeamBuddyMarker::new(receipt.team().clone(), role.role().clone());
-            match marker.recover(workspace) {
+            let marker = TeamBuddyMarker::new(receipt.team().clone(), role.role().clone())
+                .with_content(role.agents_markdown().unwrap_or(""));
+            session_trace(
+                "runtime.team.marker.recover.request",
+                json!({"index":index,"roleHash":role_hash,"agentHash":agent_hash}),
+            );
+            let recovered = marker.recover(workspace);
+            session_trace(
+                "runtime.team.marker.recover.end",
+                json!({"index":index,"matched":recovered.as_ref().ok(),"ioKind":recovered.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.elapsed().as_millis()}),
+            );
+            match recovered {
                 Ok(true) => {}
                 Ok(false) => {
-                    if marker.write(workspace).is_err()
-                        || !matches!(marker.recover(workspace), Ok(true))
-                    {
-                        return MaterializationOperationOutcome::OutcomeUnknown;
+                    session_trace(
+                        "runtime.team.marker.write.request",
+                        json!({"index":index,"roleHash":role_hash,"agentHash":agent_hash}),
+                    );
+                    let written = marker.write(workspace);
+                    session_trace(
+                        "runtime.team.marker.write.end",
+                        json!({"index":index,"succeeded":written.is_ok(),"ioKind":written.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.elapsed().as_millis()}),
+                    );
+                    if written.is_err() {
+                        return unknown("marker-write");
+                    }
+                    session_trace(
+                        "runtime.team.marker.readback.request",
+                        json!({"index":index}),
+                    );
+                    let readback = marker.recover(workspace);
+                    session_trace(
+                        "runtime.team.marker.readback.end",
+                        json!({"index":index,"matched":readback.as_ref().ok(),"ioKind":readback.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.elapsed().as_millis()}),
+                    );
+                    if !matches!(readback, Ok(true)) {
+                        return unknown("marker-readback");
                     }
                 }
-                Err(_) => return MaterializationOperationOutcome::OutcomeUnknown,
+                Err(_) => return unknown("marker-recover"),
             }
         }
+        session_trace(
+            "runtime.team.recovery.end",
+            json!({"outcome":"Confirmed","elapsedMs":started.elapsed().as_millis()}),
+        );
         MaterializationOperationOutcome::Confirmed { receipt }
     }
 
@@ -177,27 +309,69 @@ impl TeamProvider {
         &self,
         request: TeamMaterializationRequest,
     ) -> MaterializationOperationOutcome {
-        match ConfigUndo::load(&self.config.state_dir(), request.intent().team()) {
-            Ok(Some(_)) => return self.recover_materialization(request).await,
-            Ok(None) => {}
-            Err(()) => return MaterializationOperationOutcome::OutcomeUnknown,
+        self.materialize_observed(request, None).await
+    }
+
+    pub(crate) async fn materialize_observed(
+        &self,
+        request: TeamMaterializationRequest,
+        observer: Option<TeamProvisionObserver>,
+    ) -> MaterializationOperationOutcome {
+        let started = Instant::now();
+        session_trace(
+            "runtime.team.materialize.request",
+            json!({"count":request.intent().agents().len()}),
+        );
+        let outcome = async {
+            session_trace(
+                "runtime.team.undo.read.request",
+                json!({"operation":"materialize"}),
+            );
+            match ConfigUndo::load(&self.config.state_dir(), request.intent().team()) {
+                Ok(Some(_)) => {
+                    session_trace(
+                        "runtime.team.undo.read.end",
+                        json!({"present":true,"outcome":"Succeeded","reason":"recover-existing"}),
+                    );
+                    return self
+                        .recover_materialization_observed(request, observer)
+                        .await;
+                }
+                Ok(None) => session_trace(
+                    "runtime.team.undo.read.end",
+                    json!({"present":false,"outcome":"Succeeded"}),
+                ),
+                Err(()) => {
+                    session_trace(
+                        "runtime.team.undo.read.end",
+                        json!({"outcome":"OutcomeUnknown","reason":"undo-read"}),
+                    );
+                    return MaterializationOperationOutcome::OutcomeUnknown;
+                }
+            }
+            let workspaces = match self.workspace_projection_for_request(&request) {
+                Ok(workspaces) => workspaces,
+                Err(WorkspaceProjectionError::Rejected) => return permanent_rejection(),
+                Err(WorkspaceProjectionError::Unknown) => {
+                    return MaterializationOperationOutcome::OutcomeUnknown;
+                }
+            };
+            let external_workspaces = match self.external_workspaces_for_request(&request).await {
+                Ok(workspaces) => workspaces,
+                Err(WorkspaceProjectionError::Rejected) => return permanent_rejection(),
+                Err(WorkspaceProjectionError::Unknown) => {
+                    return MaterializationOperationOutcome::OutcomeUnknown;
+                }
+            };
+            self.materialize_request(request, workspaces, external_workspaces, observer.as_ref())
+                .await
         }
-        let workspaces = match self.workspace_projection_for_request(&request) {
-            Ok(workspaces) => workspaces,
-            Err(WorkspaceProjectionError::Rejected) => return permanent_rejection(),
-            Err(WorkspaceProjectionError::Unknown) => {
-                return MaterializationOperationOutcome::OutcomeUnknown;
-            }
-        };
-        let external_workspaces = match self.external_workspaces_for_request(&request).await {
-            Ok(workspaces) => workspaces,
-            Err(WorkspaceProjectionError::Rejected) => return permanent_rejection(),
-            Err(WorkspaceProjectionError::Unknown) => {
-                return MaterializationOperationOutcome::OutcomeUnknown;
-            }
-        };
-        self.materialize_request(request, workspaces, external_workspaces)
-            .await
+        .await;
+        session_trace(
+            "runtime.team.materialize.end",
+            json!({"outcome":match &outcome { MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", MaterializationOperationOutcome::Rejected { .. } => "Rejected", _ => "OutcomeUnknown" },"elapsedMs":started.elapsed().as_millis()}),
+        );
+        outcome
     }
 
     async fn materialize_request(
@@ -205,21 +379,43 @@ impl TeamProvider {
         request: TeamMaterializationRequest,
         workspaces: TeamWorkspaceProjection,
         external_workspaces: TeamExternalWorkspaces,
+        observer: Option<&TeamProvisionObserver>,
     ) -> MaterializationOperationOutcome {
         let mut config_agents = Vec::new();
         let mut verified_roles = Vec::with_capacity(request.intent().agents().len());
         let mut progress = MaterializationProgress::default();
-        for role in request.intent().agents() {
+        for (index, role) in request.intent().agents().iter().enumerate() {
+            session_trace(
+                "runtime.team.materialize.role.request",
+                json!({"index":index,"roleHash":identifier_hash(role.role().as_str()),"agentHash":match role.agent() { RoleMaterializationAgent::External { agent } => Some(identifier_hash(agent.as_str())), _ => None },"managed":matches!(role.agent(), RoleMaterializationAgent::Managed { .. })}),
+            );
             match role.agent() {
                 RoleMaterializationAgent::Managed { name } => {
                     let Some(workspace) = workspaces.resolve(role.role()) else {
+                        session_trace(
+                            "runtime.team.materialize.role.end",
+                            json!({"index":index,"reason":"managed-workspace-missing","outcome":"Rejected"}),
+                        );
                         return self
-                            .fail_materialization(&mut progress, permanent_rejection())
+                            .fail_materialization(&mut progress, permanent_rejection(), observer)
                             .await;
                     };
+                    if progress.created_agents.is_empty() {
+                        if let Some(observer) = observer {
+                            observer
+                                .report(TeamProvisionUpdate::Stage(
+                                    TeamProvisionStage::ConfiguringTeam,
+                                ))
+                                .await;
+                        }
+                    }
                     let (outcome, created_agent) = self
                         .materialize_managed_agent(name.clone(), workspace.clone())
                         .await;
+                    session_trace(
+                        "runtime.team.materialize.role.end",
+                        json!({"index":index,"reason":"managed-agent","outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" },"agentHash":created_agent.as_ref().map(|agent| identifier_hash(agent.as_str()))}),
+                    );
                     if let Some(agent_id) = created_agent {
                         progress.created_agents.push(agent_id);
                     }
@@ -241,7 +437,11 @@ impl TeamProvider {
                         }
                         MutationOutcome::Rejected => {
                             return self
-                                .fail_materialization(&mut progress, permanent_rejection())
+                                .fail_materialization(
+                                    &mut progress,
+                                    permanent_rejection(),
+                                    observer,
+                                )
                                 .await;
                         }
                         MutationOutcome::OutcomeUnknown => {
@@ -249,6 +449,7 @@ impl TeamProvider {
                                 .fail_materialization(
                                     &mut progress,
                                     MaterializationOperationOutcome::OutcomeUnknown,
+                                    observer,
                                 )
                                 .await;
                         }
@@ -258,10 +459,18 @@ impl TeamProvider {
                     let agent_id = TeamOwnedAgentId::try_new(agent.as_str())
                         .expect("validated materialization intent must have an external agent");
                     let Some(workspace) = external_workspaces.resolve(&agent_id) else {
+                        session_trace(
+                            "runtime.team.materialize.role.end",
+                            json!({"index":index,"reason":"external-workspace-missing","outcome":"Rejected"}),
+                        );
                         return self
-                            .fail_materialization(&mut progress, permanent_rejection())
+                            .fail_materialization(&mut progress, permanent_rejection(), observer)
                             .await;
                     };
+                    session_trace(
+                        "runtime.team.materialize.role.end",
+                        json!({"index":index,"outcome":"Resolved","workspacePresent":true}),
+                    );
                     config_agents.push(TeamConfigAgent::external(&agent_id, role.tools()));
                     verified_roles.push(VerifiedRole::external(
                         role.role().clone(),
@@ -275,11 +484,12 @@ impl TeamProvider {
             let snapshot = match self.config_snapshot().await {
                 Ok(snapshot) => snapshot,
                 Err(_) => {
+                    session_trace(
+                        "runtime.team.materialize.failed",
+                        json!({"reason":"config-read","outcome":"OutcomeUnknown"}),
+                    );
                     return self
-                        .fail_materialization(
-                            &mut progress,
-                            MaterializationOperationOutcome::OutcomeUnknown,
-                        )
+                        .fail_materialization(&mut progress, permanent_rejection(), observer)
                         .await;
                 }
             };
@@ -288,8 +498,9 @@ impl TeamProvider {
                 request.intent().endpoint().clone(),
                 verified_roles
                     .iter()
-                    .map(|role| {
-                        RoleMaterializationReceipt::with_native_workspace(
+                    .zip(request.intent().agents())
+                    .map(|(role, requested)| {
+                        let receipt = RoleMaterializationReceipt::with_native_workspace(
                             role.role.clone(),
                             ManagedAgentReference::try_new(role.agent_id.as_str())
                                 .expect("validated agent"),
@@ -297,7 +508,11 @@ impl TeamProvider {
                             request.intent().endpoint().clone(),
                             NativeWorkspaceReceipt::try_new(role.workspace.as_str())
                                 .expect("validated workspace"),
-                        )
+                        );
+                        match requested.agents_markdown() {
+                            Some(markdown) => receipt.with_agents_markdown(markdown),
+                            None => receipt,
+                        }
                     })
                     .collect(),
             )
@@ -309,16 +524,25 @@ impl TeamProvider {
                     &request,
                     &planned_receipt,
                     &mut progress,
+                    observer,
                 )
                 .await
             {
                 MutationOutcome::Applied(()) => {}
                 MutationOutcome::Rejected => {
+                    session_trace(
+                        "runtime.team.materialize.failed",
+                        json!({"reason":"config-apply","outcome":"Rejected"}),
+                    );
                     return self
-                        .fail_materialization(&mut progress, permanent_rejection())
+                        .fail_materialization(&mut progress, permanent_rejection(), observer)
                         .await;
                 }
                 MutationOutcome::OutcomeUnknown => {
+                    session_trace(
+                        "runtime.team.materialize.failed",
+                        json!({"reason":"config-apply","outcome":"OutcomeUnknown","undoRetained":true}),
+                    );
                     // A late config write may still arrive; retain its durable undo.
                     return MaterializationOperationOutcome::OutcomeUnknown;
                 }
@@ -327,27 +551,37 @@ impl TeamProvider {
         let agents = match self.list_agents().await {
             Ok(agents) => agents,
             Err(_) => {
+                session_trace(
+                    "runtime.team.materialize.failed",
+                    json!({"reason":"native-readback-list","outcome":"OutcomeUnknown"}),
+                );
                 return self
-                    .fail_materialization(
-                        &mut progress,
-                        MaterializationOperationOutcome::OutcomeUnknown,
-                    )
+                    .fail_materialization(&mut progress, permanent_rejection(), observer)
                     .await;
             }
         };
         let mut confirmed_roles = Vec::with_capacity(verified_roles.len());
-        for verified in verified_roles {
+        for (index, (verified, requested)) in verified_roles
+            .into_iter()
+            .zip(request.intent().agents())
+            .enumerate()
+        {
+            session_trace(
+                "runtime.team.materialize.native-readback.request",
+                json!({"index":index,"roleHash":identifier_hash(verified.role.as_str()),"agentHash":identifier_hash(verified.agent_id.as_str())}),
+            );
             let Some(agent) = agents.as_slice().iter().find(|agent| {
                 agent.id().as_str() == verified.agent_id.0
                     && agent
                         .workspace()
                         .is_some_and(|workspace| workspace == &verified.workspace)
             }) else {
+                session_trace(
+                    "runtime.team.materialize.native-readback.end",
+                    json!({"index":index,"reason":"agent-workspace-mismatch","outcome":"OutcomeUnknown"}),
+                );
                 return self
-                    .fail_materialization(
-                        &mut progress,
-                        MaterializationOperationOutcome::OutcomeUnknown,
-                    )
+                    .fail_materialization(&mut progress, permanent_rejection(), observer)
                     .await;
             };
             if agents
@@ -357,25 +591,34 @@ impl TeamProvider {
                 .count()
                 != 1
             {
+                session_trace(
+                    "runtime.team.materialize.native-readback.end",
+                    json!({"index":index,"reason":"duplicate-agent","outcome":"OutcomeUnknown"}),
+                );
                 return self
-                    .fail_materialization(
-                        &mut progress,
-                        MaterializationOperationOutcome::OutcomeUnknown,
-                    )
+                    .fail_materialization(&mut progress, permanent_rejection(), observer)
                     .await;
             }
+            session_trace(
+                "runtime.team.materialize.native-readback.end",
+                json!({"index":index,"outcome":"Confirmed","workspacePresent":true}),
+            );
             let agent = ManagedAgentReference::try_new(verified.agent_id.0)
                 .expect("native readback agent ID must be a valid materialization reference");
             let workspace_receipt =
                 NativeWorkspaceReceipt::try_new(verified.workspace.as_str().to_owned())
                     .expect("native readback workspace must be a valid workspace receipt");
-            confirmed_roles.push(RoleMaterializationReceipt::with_native_workspace(
+            let receipt = RoleMaterializationReceipt::with_native_workspace(
                 verified.role,
                 agent,
                 verified.ownership,
                 request.intent().endpoint().clone(),
                 workspace_receipt,
-            ));
+            );
+            confirmed_roles.push(match requested.agents_markdown() {
+                Some(markdown) => receipt.with_agents_markdown(markdown),
+                None => receipt,
+            });
             progress.markers.push((
                 TeamBuddyMarker::new(
                     request.intent().team().clone(),
@@ -384,25 +627,52 @@ impl TeamProvider {
                         .expect("role was recorded")
                         .role()
                         .clone(),
-                ),
+                )
+                .with_content(requested.agents_markdown().unwrap_or("")),
                 verified.workspace,
             ));
         }
         while progress.written_markers < progress.markers.len() {
             let index = progress.written_markers;
             let (marker, workspace) = &progress.markers[index];
-            if marker
-                .write(std::path::Path::new(workspace.as_str()))
-                .is_err()
-            {
+            let marker_started = Instant::now();
+            session_trace(
+                "runtime.team.marker.write.request",
+                json!({"index":index,"roleHash":identifier_hash(confirmed_roles[index].role().as_str()),"agentHash":identifier_hash(confirmed_roles[index].agent().as_str())}),
+            );
+            let written = marker.write(std::path::Path::new(workspace.as_str()));
+            session_trace(
+                "runtime.team.marker.write.end",
+                json!({"index":index,"succeeded":written.is_ok(),"ioKind":written.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.elapsed().as_millis()}),
+            );
+            if written.is_err() {
+                session_trace(
+                    "runtime.team.materialize.failed",
+                    json!({"index":index,"reason":"marker-write","outcome":"OutcomeUnknown"}),
+                );
                 return self
-                    .fail_materialization(
-                        &mut progress,
-                        MaterializationOperationOutcome::OutcomeUnknown,
-                    )
+                    .fail_materialization(&mut progress, permanent_rejection(), observer)
                     .await;
             }
             progress.written_markers += 1;
+            session_trace(
+                "runtime.team.marker.readback.request",
+                json!({"index":index}),
+            );
+            let readback = marker.recover(std::path::Path::new(workspace.as_str()));
+            session_trace(
+                "runtime.team.marker.readback.end",
+                json!({"index":index,"matched":readback.as_ref().ok(),"ioKind":readback.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.elapsed().as_millis()}),
+            );
+            if !matches!(readback, Ok(true)) {
+                session_trace(
+                    "runtime.team.materialize.failed",
+                    json!({"index":index,"reason":"marker-readback","outcome":"OutcomeUnknown"}),
+                );
+                return self
+                    .fail_materialization(&mut progress, permanent_rejection(), observer)
+                    .await;
+            }
         }
         let receipt = MaterializationReceipt::try_new(
             request.intent().team().clone(),
@@ -446,12 +716,86 @@ impl TeamProvider {
         &self,
         progress: &mut MaterializationProgress,
         outcome: MaterializationOperationOutcome,
+        observer: Option<&TeamProvisionObserver>,
     ) -> MaterializationOperationOutcome {
-        if progress.compensate(self).await {
+        let effects_known = matches!(outcome, MaterializationOperationOutcome::Rejected { .. });
+        if let Some(observer) = observer {
+            observer
+                .report(TeamProvisionUpdate::Stage(TeamProvisionStage::RollingBack))
+                .await;
+        }
+        let compensated = progress.compensate(self, effects_known).await;
+        session_trace(
+            "runtime.team.materialize.rollback.end",
+            json!({"outcome":if compensated {"Rejected"} else {"OutcomeUnknown"},"reason":if !effects_known {"native-effect-unresolved"} else if compensated {"rollback-confirmed"} else {"rollback-unresolved"}}),
+        );
+        if compensated {
             outcome
         } else {
             MaterializationOperationOutcome::OutcomeUnknown
         }
+    }
+
+    pub(crate) async fn remove_unconfirmed(
+        &self,
+        request: TeamMaterializationRequest,
+    ) -> MaterializationOperationOutcome {
+        let started = Instant::now();
+        let unknown = |reason| {
+            session_trace(
+                "runtime.team.unconfirmed-remove.end",
+                json!({"outcome":"OutcomeUnknown","reason":reason,"elapsedMs":started.elapsed().as_millis()}),
+            );
+            MaterializationOperationOutcome::OutcomeUnknown
+        };
+        session_trace("runtime.team.unconfirmed-remove.request", json!({}));
+        let undo = match ConfigUndo::load(&self.config.state_dir(), request.intent().team()) {
+            Ok(Some(undo)) => undo,
+            Ok(None) => return unknown("undo-missing"),
+            Err(()) => return unknown("undo-read"),
+        };
+        if !undo.matches_request(&request) {
+            return unknown("undo-request-mismatch");
+        }
+        let Ok(receipt) = undo.receipt() else {
+            return unknown("undo-receipt-decode");
+        };
+        if !undo.is_compensated() && !undo.is_removed() {
+            return unknown("active-ownership-unproven");
+        }
+        // Terminal undo proves config/agent cleanup. Do not restore or delete an
+        // agent which a newer Team may now use; only this Team's markers remain ours.
+        for (index, role) in receipt.roles().iter().enumerate().rev() {
+            let Some(workspace) = role.native_workspace() else {
+                return unknown("receipt-workspace-missing");
+            };
+            let workspace = std::path::Path::new(workspace.as_str());
+            let marker = TeamBuddyMarker::new(receipt.team().clone(), role.role().clone());
+            let removed = marker.remove(workspace);
+            session_trace(
+                "runtime.team.unconfirmed-remove.marker.end",
+                json!({"index":index,"succeeded":removed.is_ok(),"reason":if removed.is_ok() {"marker-removed"} else {"marker-remove"},"ioKind":removed.as_ref().err().map(|error| format!("{:?}", error.kind()))}),
+            );
+            if removed.is_err() {
+                return unknown("marker-remove");
+            }
+            let present = marker.has_marker(workspace);
+            session_trace(
+                "runtime.team.unconfirmed-remove.marker-readback.end",
+                json!({"index":index,"present":present.as_ref().ok(),"reason":if matches!(present, Ok(false)) {"marker-absent"} else {"marker-unresolved"}}),
+            );
+            if !matches!(present, Ok(false)) {
+                return unknown("marker-readback");
+            }
+        }
+        if undo.finish_removal(&self.config.state_dir()).is_err() {
+            return unknown("undo-finish-removal");
+        }
+        session_trace(
+            "runtime.team.unconfirmed-remove.end",
+            json!({"outcome":"Confirmed","reason":"cleanup-confirmed","elapsedMs":started.elapsed().as_millis()}),
+        );
+        MaterializationOperationOutcome::Confirmed { receipt }
     }
 
     pub(crate) async fn remove(
@@ -541,24 +885,57 @@ impl TeamProvider {
                 .resolve_external_workspaces(Vec::new())
                 .expect("an empty external agent request is valid"));
         }
+        session_trace(
+            "runtime.team.external-workspaces.request",
+            json!({"count":requested.len()}),
+        );
         self.list_agents()
             .await
-            .map_err(|_| WorkspaceProjectionError::Unknown)?
+            .map_err(|_| {
+                session_trace(
+                    "runtime.team.external-workspaces.end",
+                    json!({"reason":"native-list","outcome":"OutcomeUnknown"}),
+                );
+                WorkspaceProjectionError::Unknown
+            })?
             .resolve_external_workspaces(requested)
-            .map_err(|_| WorkspaceProjectionError::Rejected)
+            .inspect(|_| {
+                session_trace(
+                    "runtime.team.external-workspaces.end",
+                    json!({"outcome":"Resolved"}),
+                )
+            })
+            .map_err(|_| {
+                session_trace(
+                    "runtime.team.external-workspaces.end",
+                    json!({"reason":"native-workspace-invalid","outcome":"Rejected"}),
+                );
+                WorkspaceProjectionError::Rejected
+            })
     }
 
     fn workspace_projection_for_request(
         &self,
         request: &TeamMaterializationRequest,
     ) -> Result<TeamWorkspaceProjection, WorkspaceProjectionError> {
+        let started = Instant::now();
+        session_trace("runtime.team.config-read.request", json!({}));
         let canonical_config = self
             .config
             .read()
-            .map_err(|_| WorkspaceProjectionError::Unknown)?;
+            .inspect(|_| session_trace("runtime.team.config-read.end", json!({"outcome":"Succeeded","elapsedMs":started.elapsed().as_millis()})))
+            .map_err(|_| {
+                session_trace("runtime.team.config-read.end", json!({"reason":"config-store-read","outcome":"OutcomeUnknown","elapsedMs":started.elapsed().as_millis()}));
+                WorkspaceProjectionError::Unknown
+            })?;
         let _ = canonical_config.get("agents");
-        TeamWorkspaceProjection::for_request(self.config.state_dir_path(), request)
-            .map_err(|_| WorkspaceProjectionError::Rejected)
+        TeamWorkspaceProjection::for_request(self.config.state_dir_path(), request).map_err(|_| {
+            session_trace(
+                "runtime.team.workspace-projection.end",
+                json!({"reason":"workspace-projection","outcome":"Rejected"}),
+            );
+            WorkspaceProjectionError::Rejected
+        })
     }
 
     pub(crate) async fn create_agent(
@@ -649,15 +1026,44 @@ impl TeamProvider {
     }
 
     pub(crate) async fn config_snapshot(&self) -> Result<TeamConfigSnapshot, ReadFailure> {
+        let started = Instant::now();
+        session_trace("runtime.team.config-get.request", json!({}));
         let request = wire::team::config_get_request(next_request_id("config-get"))
-            .map_err(|_| ReadFailure::Protocol)?;
-        match self.gateway.rpc_query(request).await {
-            Ok(GatewayResponse::Failure { .. }) => Err(ReadFailure::Rejected),
+            .map_err(|_| {
+                session_trace("runtime.team.config-get.end", json!({"reason":"request-shape","outcome":"Protocol","elapsedMs":started.elapsed().as_millis()}));
+                ReadFailure::Protocol
+            })?;
+        let result = match self.gateway.rpc_query(request).await {
+            Ok(GatewayResponse::Failure { .. }) => {
+                session_trace(
+                    "runtime.team.config-get.rpc-end",
+                    json!({"reason":"target-rejected","outcome":"Rejected"}),
+                );
+                Err(ReadFailure::Rejected)
+            }
             Ok(response) => wire::team::decode_config_get(response)
                 .map(TeamConfigSnapshot)
-                .map_err(|_| ReadFailure::Protocol),
-            Err(error) => Err(map_read_connection_failure(error)),
-        }
+                .map_err(|_| {
+                    session_trace(
+                        "runtime.team.config-get.rpc-end",
+                        json!({"reason":"decode","outcome":"Protocol"}),
+                    );
+                    ReadFailure::Protocol
+                }),
+            Err(error) => {
+                let failure = map_read_connection_failure(error);
+                session_trace(
+                    "runtime.team.config-get.rpc-end",
+                    json!({"reason":"transport","outcome":format!("{failure:?}")}),
+                );
+                Err(failure)
+            }
+        };
+        session_trace(
+            "runtime.team.config-get.end",
+            json!({"outcome":result.as_ref().map_or_else(|failure| format!("{failure:?}"), |_| "Succeeded".to_owned()),"elapsedMs":started.elapsed().as_millis()}),
+        );
+        result
     }
 
     async fn apply_config_agents(
@@ -667,36 +1073,102 @@ impl TeamProvider {
         request: &TeamMaterializationRequest,
         receipt: &MaterializationReceipt,
         progress: &mut MaterializationProgress,
+        observer: Option<&TeamProvisionObserver>,
     ) -> MutationOutcome<()> {
         let patch = match snapshot
             .0
             .patch_agents(agents.into_iter().map(TeamConfigAgent::into_wire).collect())
         {
             Ok(patch) => patch,
-            Err(_) => return MutationOutcome::Rejected,
+            Err(_) => {
+                session_trace(
+                    "runtime.team.config-apply.end",
+                    json!({"reason":"patch-agents","outcome":"Rejected"}),
+                );
+                return MutationOutcome::Rejected;
+            }
         };
         let (raw, base_hash, facts) = patch.into_parts();
         let undo = match ConfigUndo::prepare(request, receipt, &facts) {
             Ok(undo) => undo,
-            Err(()) => return MutationOutcome::Rejected,
+            Err(()) => {
+                session_trace(
+                    "runtime.team.undo.prepare.end",
+                    json!({"reason":"undo-prepare","outcome":"Rejected"}),
+                );
+                return MutationOutcome::Rejected;
+            }
         };
-        if undo.persist(&self.config.state_dir()).is_err() {
+        let started = Instant::now();
+        session_trace(
+            "runtime.team.undo.write.request",
+            json!({"operation":"prepare"}),
+        );
+        let persisted = undo.persist(&self.config.state_dir());
+        session_trace(
+            "runtime.team.undo.write.end",
+            json!({"operation":"prepare","succeeded":persisted.is_ok(),"elapsedMs":started.elapsed().as_millis()}),
+        );
+        if persisted.is_err() {
             return MutationOutcome::OutcomeUnknown;
         }
         progress.config_restore = Some(undo);
         let request =
             match wire::team::config_set_request(next_request_id("config-set"), raw, base_hash) {
                 Ok(request) => request,
-                Err(_) => return MutationOutcome::Rejected,
+                Err(_) => {
+                    session_trace(
+                        "runtime.team.config-apply.end",
+                        json!({"reason":"config-set-shape","outcome":"Rejected"}),
+                    );
+                    return MutationOutcome::Rejected;
+                }
             };
+        if progress.created_agents.is_empty() {
+            if let Some(observer) = observer {
+                observer
+                    .report(TeamProvisionUpdate::Stage(
+                        TeamProvisionStage::ConfiguringTeam,
+                    ))
+                    .await;
+            }
+        }
         match self
             .write_config_request(wire::team::ConfigRestoreRequest::Set(request))
             .await
         {
-            MutationOutcome::Applied(()) => match self.config_snapshot().await {
-                Ok(snapshot) if snapshot.0.matches_agents(&facts) => MutationOutcome::Applied(()),
-                _ => MutationOutcome::OutcomeUnknown,
-            },
+            MutationOutcome::Applied(()) => {
+                if let Some(observer) = observer {
+                    observer
+                        .report(TeamProvisionUpdate::Stage(
+                            TeamProvisionStage::VerifyingTeam,
+                        ))
+                        .await;
+                }
+                match self.config_snapshot().await {
+                    Ok(snapshot) if snapshot.0.matches_agents(&facts) => {
+                        session_trace(
+                            "runtime.team.config-apply.end",
+                            json!({"reason":"readback","outcome":"Applied"}),
+                        );
+                        MutationOutcome::Applied(())
+                    }
+                    Ok(_) => {
+                        session_trace(
+                            "runtime.team.config-apply.end",
+                            json!({"reason":"readback-mismatch","outcome":"OutcomeUnknown"}),
+                        );
+                        MutationOutcome::OutcomeUnknown
+                    }
+                    Err(_) => {
+                        session_trace(
+                            "runtime.team.config-apply.end",
+                            json!({"reason":"readback-unavailable","outcome":"OutcomeUnknown"}),
+                        );
+                        MutationOutcome::OutcomeUnknown
+                    }
+                }
+            }
             outcome => outcome,
         }
     }
@@ -742,12 +1214,20 @@ impl TeamProvider {
         &self,
         request: wire::team::ConfigRestoreRequest,
     ) -> MutationOutcome<()> {
+        let started = Instant::now();
+        let is_set = matches!(&request, wire::team::ConfigRestoreRequest::Set(_));
+        session_trace("runtime.team.config-write.request", json!({"set":is_set}));
         let encoded = match request.encode() {
             Ok(encoded) => encoded,
-            Err(_) => return MutationOutcome::Rejected,
+            Err(_) => {
+                session_trace(
+                    "runtime.team.config-write.end",
+                    json!({"reason":"encode","outcome":"Rejected"}),
+                );
+                return MutationOutcome::Rejected;
+            }
         };
-        let is_set = matches!(&request, wire::team::ConfigRestoreRequest::Set(_));
-        map_write_response(
+        let outcome = map_write_response(
             self.gateway
                 .rpc_encoded_mutation(request.request_id().to_owned(), encoded)
                 .await,
@@ -758,7 +1238,12 @@ impl TeamProvider {
                     wire::team::decode_config_patch(response).map(|_| ())
                 }
             },
-        )
+        );
+        session_trace(
+            "runtime.team.config-write.end",
+            json!({"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" },"elapsedMs":started.elapsed().as_millis()}),
+        );
+        outcome
     }
 
     async fn write_request<T>(
@@ -783,11 +1268,25 @@ impl TeamProvider {
         method: &str,
         decode: impl FnOnce(GatewayResponse) -> Result<T, wire::WireError>,
     ) -> MutationOutcome<T> {
-        let _ = method;
-        map_write_response(
+        let started = Instant::now();
+        let operation = match method {
+            "agents.create" => "create",
+            "agents.update" => "update",
+            _ => "mutation",
+        };
+        session_trace(
+            "runtime.team.agent-write.request",
+            json!({"operation":operation}),
+        );
+        let outcome = map_write_response(
             self.gateway.rpc_encoded_mutation(request_id, encoded).await,
             decode,
-        )
+        );
+        session_trace(
+            "runtime.team.agent-write.end",
+            json!({"operation":operation,"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" },"elapsedMs":started.elapsed().as_millis()}),
+        );
+        outcome
     }
 
     #[cfg(test)]
@@ -818,20 +1317,41 @@ struct MaterializationProgress {
 }
 
 impl MaterializationProgress {
-    async fn compensate(&mut self, provider: &TeamProvider) -> bool {
-        let mut confirmed = true;
+    async fn compensate(&mut self, provider: &TeamProvider, effects_known: bool) -> bool {
+        let started = Instant::now();
+        session_trace(
+            "runtime.team.compensate.request",
+            json!({"markers":self.written_markers,"createdAgents":self.created_agents.len(),"configRestore":self.config_restore.is_some()}),
+        );
+        let mut confirmed = effects_known;
         while self.written_markers > 0 {
             self.written_markers -= 1;
             let (marker, workspace) = &self.markers[self.written_markers];
-            if marker
-                .remove(std::path::Path::new(workspace.as_str()))
-                .is_err()
-            {
+            let removed = marker.remove(std::path::Path::new(workspace.as_str()));
+            session_trace(
+                "runtime.team.compensate.marker.end",
+                json!({"index":self.written_markers,"succeeded":removed.is_ok(),"ioKind":removed.as_ref().err().map(|error| format!("{:?}", error.kind()))}),
+            );
+            if removed.is_err() {
                 confirmed = false;
+            } else {
+                let present = marker.has_marker(std::path::Path::new(workspace.as_str()));
+                session_trace(
+                    "runtime.team.compensate.marker-readback.end",
+                    json!({"index":self.written_markers,"present":present.as_ref().ok(),"reason":if matches!(present, Ok(false)) {"marker-absent"} else {"marker-unresolved"}}),
+                );
+                if !matches!(present, Ok(false)) {
+                    confirmed = false;
+                }
             }
         }
         if let Some(undo) = &self.config_restore {
-            match provider.restore_config(undo, true).await {
+            let outcome = provider.restore_config(undo, true).await;
+            session_trace(
+                "runtime.team.compensate.config.end",
+                json!({"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" }}),
+            );
+            match outcome {
                 MutationOutcome::Applied(()) => {}
                 MutationOutcome::Rejected | MutationOutcome::OutcomeUnknown => {
                     confirmed = false;
@@ -839,7 +1359,13 @@ impl MaterializationProgress {
             }
         }
         while let Some(agent_id) = self.created_agents.pop() {
-            match provider.delete_agent(agent_id).await {
+            let agent_hash = identifier_hash(agent_id.as_str());
+            let outcome = provider.delete_agent(agent_id).await;
+            session_trace(
+                "runtime.team.compensate.agent.end",
+                json!({"agentHash":agent_hash,"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" }}),
+            );
+            match outcome {
                 MutationOutcome::Applied(()) => {}
                 MutationOutcome::Rejected | MutationOutcome::OutcomeUnknown => {
                     confirmed = false;
@@ -848,11 +1374,23 @@ impl MaterializationProgress {
         }
         if confirmed {
             if let Some(undo) = self.config_restore.take() {
+                session_trace(
+                    "runtime.team.undo.write.request",
+                    json!({"operation":"compensate"}),
+                );
                 confirmed = undo
                     .finish_compensation(&provider.config.state_dir())
                     .is_ok();
+                session_trace(
+                    "runtime.team.undo.write.end",
+                    json!({"operation":"compensate","succeeded":confirmed}),
+                );
             }
         }
+        session_trace(
+            "runtime.team.compensate.end",
+            json!({"confirmed":confirmed,"reason":if !effects_known {"native-effect-unresolved"} else if confirmed {"rollback-confirmed"} else {"rollback-unresolved"},"elapsedMs":started.elapsed().as_millis()}),
+        );
         confirmed
     }
 }
@@ -922,13 +1460,43 @@ fn map_write_response<T>(
     decode: impl FnOnce(GatewayResponse) -> Result<T, wire::WireError>,
 ) -> MutationOutcome<T> {
     match response {
-        MutationDelivery::Response(GatewayResponse::Failure { .. }) => MutationOutcome::Rejected,
+        MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
+            session_trace(
+                "runtime.team.mutation.end",
+                json!({"reason":"target-rejected","outcome":"Rejected"}),
+            );
+            MutationOutcome::Rejected
+        }
         MutationDelivery::Response(response) => match decode(response) {
-            Ok(value) => MutationOutcome::Applied(value),
-            Err(_) => MutationOutcome::OutcomeUnknown,
+            Ok(value) => {
+                session_trace(
+                    "runtime.team.mutation.end",
+                    json!({"reason":"decoded","outcome":"Applied"}),
+                );
+                MutationOutcome::Applied(value)
+            }
+            Err(_) => {
+                session_trace(
+                    "runtime.team.mutation.end",
+                    json!({"reason":"decode","outcome":"OutcomeUnknown"}),
+                );
+                MutationOutcome::OutcomeUnknown
+            }
         },
-        MutationDelivery::NotWritten(_) => MutationOutcome::Rejected,
-        MutationDelivery::MayHaveReached(_) => MutationOutcome::OutcomeUnknown,
+        MutationDelivery::NotWritten(_) => {
+            session_trace(
+                "runtime.team.mutation.end",
+                json!({"reason":"not-written","outcome":"Rejected"}),
+            );
+            MutationOutcome::Rejected
+        }
+        MutationDelivery::MayHaveReached(_) => {
+            session_trace(
+                "runtime.team.mutation.end",
+                json!({"reason":"may-have-reached","outcome":"OutcomeUnknown"}),
+            );
+            MutationOutcome::OutcomeUnknown
+        }
     }
 }
 
@@ -947,7 +1515,7 @@ fn map_read_connection_failure(error: GatewayClientError) -> ReadFailure {
     }
 }
 
-fn next_request_id(operation: &str) -> String {
+pub(super) fn next_request_id(operation: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);

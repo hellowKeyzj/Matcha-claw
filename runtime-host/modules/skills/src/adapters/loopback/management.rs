@@ -155,6 +155,7 @@ pub(super) async fn handle_management(
                             platform::loopback::Response::json(status, body)
                         }
                         Err(_) => {
+                            eprintln!("[startup-trace] source=skills-management phase=port detail=unavailable");
                             platform::loopback::Response::json(503, json!({ "outcome": "unknown" }))
                         }
                     }

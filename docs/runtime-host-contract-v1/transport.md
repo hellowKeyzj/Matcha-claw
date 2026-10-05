@@ -4,7 +4,7 @@
 
 当前 Rust child 的 active delivery 面已经切到 `DirectRuntimeHost`：Electron 启动 Rust executable 后，通过 stdin 写入一次 length-prefixed bootstrap，再通过 stdin/stdout private control framed wire 等待 `ready`、发送 host-private commands、接收 safe events。旧 root HTTP endpoints `GET /health`、`POST /dispatch`、`POST /lifecycle/restart`、`POST /lifecycle/stop` 已从 Rust Host compatibility module 删除，不再是必须保留的 child contract。
 
-Host-owned HTTP listener 仍存在，但它只是 loopback substrate：router 只消费 installed `ModuleCatalog` route descriptors，业务 DTO decode 位于具体 owner module adapter/facade；SSE/WS 是 `RouteOutcome::Stream` / `RouteOutcome::Upgrade`，不是独立 Host-owned listener。OpenClaw gateway、Matcha app-server、TeamRun MCP stdio 不属于此 server。
+Host-owned HTTP listener 仍存在，但它只是 loopback substrate：router 只消费 installed `ModuleCatalog` route descriptors，业务 DTO decode 位于具体 owner module adapter/facade；SSE/WS 是 `RouteOutcome::Stream` / `RouteOutcome::Upgrade`，不是独立 Host-owned listener。OpenClaw gateway、Matcha app-server、Matcha MCP stdio 不属于此 server。
 
 Sources: [direct-host.ts](../../electron/main/runtime-host-delivery/direct-host.ts)、[control.ts](../../electron/main/runtime-host-delivery/control.ts)、[host http server](../../runtime-host/host/src/http/server.rs)、[host http router](../../runtime-host/host/src/http/router.rs)、[module install](../../runtime-host/host/src/module_registry/install.rs)、[platform loopback](../../runtime-host/platform/src/loopback.rs)。
 

@@ -662,6 +662,7 @@ mod tests {
             crate::OrganizationOwnerInput {
                 store: crate::OrganizationStore::open(root.path().join("facts.log")).unwrap(),
                 runtime_directory: Arc::new(NoRuntime),
+                member_introductions: None,
                 team_skill_selections: crate::package::TeamSkillSelectionResolver::open(
                     root.path().join("selections.json"),
                 )

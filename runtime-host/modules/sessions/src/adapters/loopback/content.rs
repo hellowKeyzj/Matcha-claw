@@ -74,9 +74,7 @@ impl Request {
 
     fn command(&self) -> Option<ContentCommand> {
         ContentCommand::new(
-            self.scope.identity.endpoint.provider()?,
-            self.input.session_key.clone(),
-            Some(self.scope.identity.agent_id.clone()),
+            crate::state::SessionIdentity::new(self.input.session_key.clone(), self.scope.identity.endpoint.provider()?.session_provider(), self.scope.identity.agent_id.clone())?,
             self.input.endpoint_session_id.clone(),
             self.input.content_ref.clone(),
             self.input.offset,

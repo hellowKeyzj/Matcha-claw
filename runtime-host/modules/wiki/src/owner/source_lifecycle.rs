@@ -29,6 +29,7 @@ use crate::{
 const FILE_SNAPSHOT: &str = ".llm-wiki/file-snapshot.json";
 const FILE_CHANGE_QUEUE: &str = ".llm-wiki/file-change-queue.json";
 pub(super) const SOURCE_TASKS_FILE: &str = ".llm-wiki/source-tasks.json";
+const SOURCE_TASKS_LOCK_FILE: &str = ".llm-wiki/source-tasks.lock";
 pub(super) const SOURCE_CACHE_FILE: &str = ".llm-wiki/source-cache.json";
 pub(super) const RAW_PARSED_DIR: &str = "raw/parsed";
 const SOURCE_WATCH_CONFIG_FILE: &str = ".llm-wiki/source-watch-config.json";
@@ -106,6 +107,8 @@ pub(super) fn staged_raw_source(
         source_identity,
         page_relative_path: format!("{WIKI_SOURCES_DIR}/{slug}.md"),
         task_kind,
+        task_id: String::new(),
+        execution: None,
     })
 }
 
@@ -397,18 +400,33 @@ pub(super) fn move_source_cache_entry(
 pub(super) fn append_source_tasks(
     root: &Path,
     project_id: &str,
-    imports: &[WikiStagedImportSource],
+    imports: &mut [WikiStagedImportSource],
+    execute: bool,
 ) -> Result<(), WikiFailure> {
-    let mut tasks = read_source_tasks(root)?;
-    let now = now_ms();
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
+    recover_source_tasks_unlocked(root, &mut tasks)?;
     for import in imports {
-        upsert_source_task(
-            &mut tasks,
-            project_id,
-            &import.source_relative_path,
+        let lock = super::source_execution::try_source_execution_lock(root, &import.source_relative_path)?
+            .ok_or_else(|| WikiFailure::state("source already has an active execution"))?;
+        let now = now_ms();
+        let task_id = unique_source_task_id(&tasks, project_id, &import.source_relative_path, now);
+        tasks.retain(|task| !(task.project_id() == project_id
+            && task.source_path() == import.source_relative_path && task_is_open(task)));
+        let mut task = WikiSourceTask::new(
+            task_id,
+            project_id.to_owned(),
+            import.source_relative_path.clone(),
             import.task_kind.clone(),
-            now,
+            WikiSourceTaskStatus::Pending,
+            now, now, 0, None,
         );
+        import.task_id = task.id().to_owned();
+        if execute {
+            task.mark_pending(Some("queued".to_owned()));
+            import.execution = Some(super::source_execution::SourceExecution::new(lock, root, import.task_id.clone()));
+        }
+        tasks.push(task);
     }
     write_json(root.join(SOURCE_TASKS_FILE), &tasks)
 }
@@ -422,9 +440,12 @@ pub(super) fn append_source_task_paths(
     if paths.is_empty() {
         return Ok(());
     }
-    let mut tasks = read_source_tasks(root)?;
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
     let now = now_ms();
     for source_path in paths {
+        let _execution_lock = super::source_execution::try_source_execution_lock(root, source_path)?
+            .ok_or_else(|| WikiFailure::state("source already has an active execution"))?;
         upsert_source_task(&mut tasks, project_id, source_path, kind.clone(), now);
     }
     write_json(root.join(SOURCE_TASKS_FILE), &tasks)
@@ -437,27 +458,10 @@ fn upsert_source_task(
     kind: WikiSourceTaskKind,
     now: u64,
 ) {
-    if let Some(existing) = tasks
-        .iter_mut()
-        .find(|task| task.source_path() == source_path)
-    {
-        if task_is_open(existing) {
-            *existing = WikiSourceTask::new(
-                source_task_id(project_id, source_path, now),
-                project_id.to_owned(),
-                source_path.to_owned(),
-                kind,
-                WikiSourceTaskStatus::Pending,
-                now,
-                now,
-                0,
-                None,
-            );
-            return;
-        }
-    }
+    let task_id = unique_source_task_id(tasks, project_id, source_path, now);
+    tasks.retain(|task| !(task.project_id() == project_id && task.source_path() == source_path && task_is_open(task)));
     tasks.push(WikiSourceTask::new(
-        source_task_id(project_id, source_path, now),
+        task_id,
         project_id.to_owned(),
         source_path.to_owned(),
         kind,
@@ -469,62 +473,62 @@ fn upsert_source_task(
     ));
 }
 
-pub(super) fn mark_source_task_running(
+pub(super) fn begin_generated_source_execution(
     root: &Path,
     project_id: &str,
-    source_relative_path: &str,
+    source_path: &str,
+) -> Result<Arc<super::source_execution::SourceExecution>, WikiFailure> {
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
+    recover_source_tasks_unlocked(root, &mut tasks)?;
+    let lock = super::source_execution::try_source_execution_lock(root, source_path)?
+        .ok_or_else(|| WikiFailure::state("source already has an active execution"))?;
+    let task_id = match latest_source_task_mut(&mut tasks, project_id, source_path) {
+        Some(task) if task.is_paused() => return Err(WikiFailure::cancelled()),
+        Some(task) if task_is_open(task) => {
+            task.mark_pending(Some("queued".to_owned()));
+            task.id().to_owned()
+        }
+        _ => {
+            let now = now_ms();
+            let task_id = unique_source_task_id(&tasks, project_id, source_path, now);
+            let mut task = WikiSourceTask::new(task_id.clone(), project_id.to_owned(), source_path.to_owned(),
+                WikiSourceTaskKind::Generated, WikiSourceTaskStatus::Pending, now, now, 0, None);
+            task.mark_pending(Some("queued".to_owned()));
+            tasks.push(task);
+            task_id
+        }
+    };
+    let execution = super::source_execution::SourceExecution::new(lock, root, task_id);
+    write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
+    Ok(execution)
+}
+
+pub(super) fn mark_source_task_running(
+    root: &Path,
+    task_id: &str,
     stage: &str,
-    progress: u8,
+    counts: Option<(usize, usize)>,
 ) -> Result<(), WikiFailure> {
-    let mut tasks = read_source_tasks(root)?;
-    if let Some(task) = latest_source_task_mut(&mut tasks, project_id, source_relative_path)
-        && task_is_open(task)
-        && !task.is_paused()
-    {
-        task.mark_running(stage, progress);
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
+    let task = tasks.iter_mut().find(|task| task.id() == task_id)
+        .ok_or_else(|| WikiFailure::state("source task no longer exists"))?;
+    if !task_is_active(task) || task.is_paused() || task.cancel_requested() {
+        return Err(WikiFailure::cancelled());
     }
+    task.mark_running(stage, counts);
     write_json(root.join(SOURCE_TASKS_FILE), &tasks)
 }
 
 pub(super) fn source_task_cancel_requested(
     root: &Path,
-    project_id: &str,
-    source_relative_path: &str,
+    task_id: &str,
 ) -> Result<bool, WikiFailure> {
-    Ok(read_source_tasks(root)?.iter().rev().any(|task| {
-        task.project_id() == project_id
-            && task.source_path() == source_relative_path
-            && task_is_open(task)
-            && task.cancel_requested()
-    }))
-}
-
-pub(super) fn source_task_paused(
-    root: &Path,
-    project_id: &str,
-    source_relative_path: &str,
-) -> Result<bool, WikiFailure> {
-    Ok(read_source_tasks(root)?.iter().rev().any(|task| {
-        task.project_id() == project_id
-            && task.source_path() == source_relative_path
-            && task.status() == &WikiSourceTaskStatus::Pending
-            && task.is_paused()
-    }))
-}
-
-pub(super) fn mark_source_task_cancelled(
-    root: &Path,
-    project_id: &str,
-    source_relative_path: &str,
-) -> Result<(), WikiFailure> {
-    let mut tasks = read_source_tasks(root)?;
-    if let Some(task) = latest_source_task_mut(&mut tasks, project_id, source_relative_path)
-        && task_is_open(task)
-        && !task.is_paused()
-    {
-        task.mark_cancelled();
-    }
-    write_json(root.join(SOURCE_TASKS_FILE), &tasks)
+    let _tasks_lock = lock_source_tasks(root)?;
+    Ok(read_source_tasks_unlocked(root)?.iter().find(|task| task.id() == task_id)
+        .is_none_or(|task| task.is_paused() || task.cancel_requested()
+            || task.status() == &WikiSourceTaskStatus::Cancelled))
 }
 
 pub(super) fn request_source_task_cancel(
@@ -532,17 +536,19 @@ pub(super) fn request_source_task_cancel(
     project_id: &str,
     source_relative_path: &str,
 ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
-    let mut tasks = read_source_tasks(root)?;
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
     if let Some(task) = latest_source_task_mut(&mut tasks, project_id, source_relative_path)
-        && task_is_open(task)
+        && task_is_active(task)
     {
-        if task.status() == &WikiSourceTaskStatus::Running {
+        if super::source_execution::try_source_execution_lock(root, task.source_path())?.is_none() {
             task.request_cancel();
         } else {
             task.mark_cancelled();
         }
     }
     write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
+    drop(_tasks_lock);
     source_tasks(
         root,
         WikiProjectSelector {
@@ -551,13 +557,26 @@ pub(super) fn request_source_task_cancel(
     )
 }
 
-pub(super) fn mark_source_task_done(
+fn lock_source_mutations(root: &Path, project_id: &str, paths: &[&str]) -> Result<(Vec<std::fs::File>, Option<String>), WikiFailure> {
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
+    let mut locks = Vec::new();
+    for path in paths.iter().copied().collect::<BTreeSet<_>>() {
+        locks.push(super::source_execution::try_source_execution_lock(root, path)?
+            .ok_or_else(|| WikiFailure::state("source already has an active execution"))?);
+    }
+    let task_id = paths.last().and_then(|path| latest_source_task_mut(&mut tasks, project_id, path))
+        .map(|task| task.id().to_owned());
+    Ok((locks, task_id))
+}
+
+fn mark_source_task_done(
     root: &Path,
-    project_id: &str,
-    source_relative_path: &str,
+    task_id: Option<&str>,
 ) -> Result<(), WikiFailure> {
-    let mut tasks = read_source_tasks(root)?;
-    if let Some(task) = latest_source_task_mut(&mut tasks, project_id, source_relative_path)
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
+    if let Some(task) = tasks.iter_mut().find(|task| Some(task.id()) == task_id)
         && task_is_open(task)
         && !task.is_paused()
     {
@@ -566,20 +585,34 @@ pub(super) fn mark_source_task_done(
     write_json(root.join(SOURCE_TASKS_FILE), &tasks)
 }
 
-pub(super) fn mark_source_task_failed(
+pub(super) fn finish_source_execution(
     root: &Path,
-    project_id: &str,
-    source_relative_path: &str,
-    error: String,
+    task_id: &str,
+    error: Option<&WikiFailure>,
 ) -> Result<(), WikiFailure> {
-    let mut tasks = read_source_tasks(root)?;
-    if let Some(task) = latest_source_task_mut(&mut tasks, project_id, source_relative_path)
-        && task_is_open(task)
-        && !task.is_paused()
-    {
-        task.mark_failed(error);
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
+    let task = tasks.iter_mut().find(|task| task.id() == task_id)
+        .ok_or_else(|| WikiFailure::state("source task no longer exists"))?;
+    if !task_is_active(task) {
+        return Ok(());
     }
-    write_json(root.join(SOURCE_TASKS_FILE), &tasks)
+    let cancelled = task.is_paused() || task.cancel_requested()
+        || error.is_some_and(WikiFailure::is_cancelled);
+    if !task.is_paused() {
+        if cancelled {
+            task.mark_cancelled();
+        } else if let Some(error) = error {
+            task.mark_failed(format!("{error:?}"));
+        } else {
+            task.mark_done();
+        }
+    }
+    write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
+    if cancelled && error.is_none() {
+        return Err(WikiFailure::cancelled());
+    }
+    Ok(())
 }
 
 pub(super) fn retry_source_task(
@@ -609,7 +642,8 @@ pub(super) fn pause_source_task(
     source_path: &str,
 ) -> Result<WikiSourceTasksReceipt, WikiFailure> {
     let source_relative_path = source_relative_path(root, source_path)?;
-    let mut tasks = read_source_tasks(root)?;
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
     if let Some(task) = latest_source_task_mut(&mut tasks, project_id, &source_relative_path)
         && matches!(
             task.status(),
@@ -619,6 +653,7 @@ pub(super) fn pause_source_task(
         task.pause();
     }
     write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
+    drop(_tasks_lock);
     source_tasks(
         root,
         WikiProjectSelector {
@@ -641,13 +676,15 @@ pub(super) fn reorder_source_task(
     let after = after_source_path
         .map(|path| source_relative_path(root, path))
         .transpose()?;
-    let mut tasks = read_source_tasks(root)?;
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
     let Some(current_index) = tasks.iter().position(|task| {
         task.project_id() == project_id
             && task.source_path() == relative_source_path
             && task.status() == &WikiSourceTaskStatus::Pending
             && !task.is_paused()
     }) else {
+        drop(_tasks_lock);
         return source_tasks(
             root,
             WikiProjectSelector {
@@ -681,6 +718,7 @@ pub(super) fn reorder_source_task(
     };
     tasks.insert(insert_index.min(tasks.len()), task);
     write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
+    drop(_tasks_lock);
     source_tasks(
         root,
         WikiProjectSelector {
@@ -711,6 +749,7 @@ pub(super) async fn delete_source(
     input: WikiDeleteSourceInput,
 ) -> Result<WikiDeleteSourceReceipt, WikiFailure> {
     let source_relative_path = source_relative_path(root, &input.source_path)?;
+    let (_execution_locks, task_id) = lock_source_mutations(root, project_id, &[&source_relative_path])?;
     let identity = source_identity(&source_relative_path).to_owned();
     if !input.file_already_deleted {
         let path = resolve_project_path(root, &source_relative_path)?;
@@ -778,7 +817,7 @@ pub(super) async fn delete_source(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(WikiFailure::io(path_text(&media), error)),
     }
-    mark_source_task_done(root, project_id, &source_relative_path)?;
+    mark_source_task_done(root, task_id.as_deref())?;
     let mut snapshot_paths = vec![source_relative_path.as_str()];
     if log_updated {
         snapshot_paths.push("wiki/log.md");
@@ -861,6 +900,7 @@ pub(super) fn migrate_source_path(
     old_source_relative_path: &str,
     new_source_relative_path: &str,
 ) -> Result<WikiSourceMoveReceipt, WikiFailure> {
+    let (_execution_locks, task_id) = lock_source_mutations(root, project_id, &[old_source_relative_path, new_source_relative_path])?;
     let old_identity = source_identity(old_source_relative_path).to_owned();
     let new_identity = source_identity(new_source_relative_path).to_owned();
     if old_identity == new_identity {
@@ -1010,7 +1050,7 @@ pub(super) fn migrate_source_path(
         rollback_page_updates(root, &page_updates, &updated_pages);
         return Err(error);
     }
-    if let Err(error) = mark_source_task_done(root, project_id, new_source_relative_path) {
+    if let Err(error) = mark_source_task_done(root, task_id.as_deref()) {
         let _ = move_source_media(root, &new_identity, &old_identity);
         let _ = move_parsed_markdown(root, new_source_relative_path, old_source_relative_path);
         rollback_source_cache_move(
@@ -1081,12 +1121,14 @@ fn rollback_source_cache_move(
 
 pub(super) async fn apply_generated_pages(
     root: &Path,
-    project_id: &str,
+    _project_id: &str,
     input: WikiApplyGeneratedPagesInput,
+    source_summary_fallback: Option<String>,
     source_hash: Option<String>,
     ingest_llm: Option<Arc<dyn WikiIngestLlm>>,
     generation_model_ref: Option<&str>,
     cancellation: Option<CancellationToken>,
+    task_id: &str,
 ) -> Result<WikiApplyGeneratedPagesReceipt, WikiFailure> {
     let source_relative_path = source_relative_path(root, &input.source_path)?;
     let identity = source_identity(&source_relative_path).to_owned();
@@ -1102,11 +1144,33 @@ pub(super) async fn apply_generated_pages(
         warnings.push(warning);
     }
 
+    let mut total = input.files
+        .iter()
+        .filter(|file| {
+            let path = file.path.trim().replace('\\', "/");
+            !is_log_path(&path) && !is_app_managed_path(&path)
+        })
+        .count();
+    let report_write = |processed, total| {
+        if cancellation.as_ref().is_some_and(CancellationToken::is_cancelled)
+            || source_task_cancel_requested(root, task_id)?
+        {
+            return Err(WikiFailure::cancelled());
+        }
+        mark_source_task_running(
+            root,
+            task_id,
+            "write",
+            Some((processed, total)),
+        )
+    };
+    let mut processed = 0;
     let mut written = Vec::new();
     let mut log_entries = Vec::new();
     let mut content_drop = false;
     let mut content_written = false;
     let mut index_candidates = Vec::new();
+    report_write(0, total)?;
     for file in input.files {
         let mut relative_path = normalized_wiki_write_path(&file.path)?;
         if relative_path.starts_with("wiki/sources/") {
@@ -1139,6 +1203,8 @@ pub(super) async fn apply_generated_pages(
         if let Some(message) = validate_schema_routing(&relative_path, &content, &schema_routing) {
             warnings.push(format!("Dropped \"{relative_path}\" — {message}"));
             content_drop = true;
+            processed += 1;
+            report_write(processed, total)?;
             continue;
         }
         if should_drop_for_target_language(&relative_path, &content, target_language.as_deref()) {
@@ -1147,6 +1213,8 @@ pub(super) async fn apply_generated_pages(
                 target_language.as_deref().unwrap_or_default()
             ));
             content_drop = true;
+            processed += 1;
+            report_write(processed, total)?;
             continue;
         }
 
@@ -1188,6 +1256,43 @@ pub(super) async fn apply_generated_pages(
         ));
         content_written = true;
         index_candidates.push(relative_path);
+        processed += 1;
+        report_write(processed, total)?;
+    }
+    if let Some(mut content) = source_summary_fallback.filter(|_| {
+        !written.iter().any(|receipt| receipt.relative_path() == source_summary_path)
+    }) {
+        total += 1;
+        report_write(processed, total)?;
+        if cancellation.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return Err(WikiFailure::cancelled());
+        }
+        let path = resolve_project_path(root, &source_summary_path)?;
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            content = merge_existing_page_content(
+                root,
+                ingest_llm.as_ref(),
+                &source_summary_path,
+                &identity,
+                content,
+                &existing,
+                &today,
+                generation_model_ref,
+                cancellation.clone(),
+            )
+            .await?;
+            content = preserve_embedded_images_block(&content, Some(&existing));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| WikiFailure::io(path_text(parent), error))?;
+        }
+        write_wiki_page(root, &source_summary_path, &source_summary_media_refs(&content))?;
+        written.push(write_receipt_for_path(root, &source_summary_path)?);
+        content_written = true;
+        index_candidates.push(source_summary_path.clone());
+        processed += 1;
+        report_write(processed, total)?;
     }
     let cache_hash = source_hash;
     let deterministic_log = log_entries.is_empty() && (cache_hash.is_some() || content_written);
@@ -1197,6 +1302,7 @@ pub(super) async fn apply_generated_pages(
     if append_log_entries(root, &log_entries, &today, deterministic_log)? {
         written.push(write_receipt_for_path(root, "wiki/log.md")?);
     }
+    mark_source_task_running(root, task_id, "index", None)?;
     match crate::archive::update_recent_wiki_index(root, &index_candidates) {
         Ok(true) => written.push(write_receipt_for_path(root, "wiki/index.md")?),
         Ok(false) => {}
@@ -1224,13 +1330,6 @@ pub(super) async fn apply_generated_pages(
         )?;
     }
     super::review_lifecycle::append_review_items(root, reviews)?;
-    append_source_task_paths(
-        root,
-        project_id,
-        &[source_relative_path.clone()],
-        WikiSourceTaskKind::Generated,
-    )?;
-    mark_source_task_done(root, project_id, &source_relative_path)?;
     let snapshot_paths = written_paths.iter().map(String::as_str).collect::<Vec<_>>();
     refresh_file_snapshot(root, &snapshot_paths)?;
     Ok(WikiApplyGeneratedPagesReceipt::new(written))
@@ -1246,7 +1345,7 @@ fn preserve_embedded_images_block(content: &str, existing: Option<&str>) -> Stri
     format!("{}\n\n{}", content.trim_end(), existing_block.trim())
 }
 
-fn embedded_images_block(content: &str) -> Option<&str> {
+pub(super) fn embedded_images_block(content: &str) -> Option<&str> {
     const START: &str = "<!-- llm-wiki:embedded-images -->";
     const END: &str = "<!-- /llm-wiki:embedded-images -->";
     let start = content.find(START)?;
@@ -1282,15 +1381,15 @@ async fn merge_existing_page_content(
         Some(existing),
         ingest_write::UNION_FRONTMATTER_FIELDS,
     );
+    let array_merged = ingest_write::apply_locked_frontmatter_fields(
+        &array_merged,
+        existing,
+        ingest_write::LOCKED_FRONTMATTER_FIELDS,
+    );
     if is_owned_only_by_source(existing, identity) {
         backup_existing_page(root, relative_path, existing);
-        let replacement = ingest_write::apply_locked_frontmatter_fields(
-            &array_merged,
-            existing,
-            ingest_write::LOCKED_FRONTMATTER_FIELDS,
-        );
         return Ok(canonicalize_sources_field(
-            &ingest_write::set_frontmatter_scalar(&replacement, "updated", today),
+            &ingest_write::set_frontmatter_scalar(&array_merged, "updated", today),
             identity,
         ));
     }
@@ -1778,14 +1877,11 @@ fn wiki_page_stem(relative_path: &str) -> Option<String> {
 pub(super) fn normalize_wiki_ref_key(value: &str) -> String {
     let normalized = value.trim().replace('\\', "/");
     let leaf = normalized.rsplit('/').next().unwrap_or(&normalized);
-    let without_md = leaf
-        .to_ascii_lowercase()
-        .strip_suffix(".md")
-        .map(str::to_owned)
-        .unwrap_or_else(|| leaf.to_ascii_lowercase());
+    let lowercase = leaf.to_lowercase();
+    let without_md = lowercase.strip_suffix(".md").unwrap_or(&lowercase);
     without_md
         .chars()
-        .filter(|character| !matches!(character, ' ' | '-' | '_'))
+        .filter(|character| !character.is_whitespace() && !matches!(character, '-' | '_'))
         .collect()
 }
 
@@ -1798,12 +1894,13 @@ pub(super) fn clean_index_listing(content: &str, deleted_keys: &BTreeSet<String>
         .filter(|line| {
             let trimmed = line.trim_start();
             let Some(rest) = trimmed
-                .strip_prefix("- ")
-                .or_else(|| trimmed.strip_prefix("* "))
+                .strip_prefix('-')
+                .or_else(|| trimmed.strip_prefix('*'))
             else {
                 return true;
             };
             let Some(target) = rest
+                .trim_start()
                 .strip_prefix("[[")
                 .and_then(|rest| rest.split("]]").next())
             else {
@@ -1875,23 +1972,19 @@ fn normalized_wiki_write_path(path: &str) -> Result<String, WikiFailure> {
     Ok(normalized)
 }
 
+pub(super) fn source_summary_markdown(identity: &str, text: &str) -> String {
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let title = format!("Source: {identity}");
+    let title_json = serde_json::to_string(&title).expect("string serialization is infallible");
+    let source_json = serde_json::to_string(identity).expect("string serialization is infallible");
+    format!(
+        "---\ntype: source\ntitle: {title_json}\ncreated: {today}\nupdated: {today}\nsources: [{source_json}]\ntags: []\nrelated: []\n---\n\n# {title}\n\n{text}\n"
+    )
+}
+
 fn stamp_frontmatter_dates(content: &str, today: &str) -> String {
-    let content = ingest_write::set_frontmatter_scalar(content, "updated", today);
-    if ingest_write::parse_frontmatter_array(&content, "sources").is_empty()
-        && !content.starts_with("---\n")
-    {
-        return content;
-    }
-    let has_created = content.split("\n---").next().is_some_and(|frontmatter| {
-        frontmatter
-            .lines()
-            .any(|line| line.trim_start().starts_with("created:"))
-    });
-    if has_created {
-        content
-    } else {
-        ingest_write::set_frontmatter_scalar(&content, "created", today)
-    }
+    let content = ingest_write::set_frontmatter_scalar(content, "created", today);
+    ingest_write::set_frontmatter_scalar(&content, "updated", today)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2748,7 +2841,16 @@ fn dedupe_case_insensitive(values: Vec<String>) -> Vec<String> {
     out
 }
 
-pub(super) fn wiki_markdown_files(root: &Path) -> Result<Vec<PathBuf>, WikiFailure> {
+pub(crate) fn wiki_markdown_files(root: &Path) -> Result<Vec<PathBuf>, WikiFailure> {
+    if root.join("wiki").exists() {
+        let wiki_root = root.join("wiki").canonicalize()
+            .map_err(|error| WikiFailure::io("wiki", error))?;
+        let project_root = root.canonicalize()
+            .map_err(|error| WikiFailure::io("project", error))?;
+        if !wiki_root.starts_with(project_root) {
+            return Err(WikiFailure::invalid_path("wiki"));
+        }
+    }
     let mut files = Vec::new();
     collect_wiki_markdown(root, &root.join("wiki"), &mut files)?;
     Ok(files)
@@ -2785,11 +2887,11 @@ fn collect_wiki_markdown(
             continue;
         }
         let metadata = entry
-            .metadata()
+            .file_type()
             .map_err(|error| WikiFailure::io(path_text(&path), error))?;
         if metadata.is_dir() {
             collect_wiki_markdown(root, &path, out)?;
-        } else if path.extension().and_then(|extension| extension.to_str()) == Some("md") {
+        } else if metadata.is_file() && path.extension().and_then(|extension| extension.to_str()) == Some("md") {
             out.push(path);
         }
     }
@@ -2880,7 +2982,57 @@ fn remove_preprocess_cache(root: &Path, source_relative_path: &str) -> Result<()
     Ok(())
 }
 
+fn lock_source_tasks(root: &Path) -> Result<std::fs::File, WikiFailure> {
+    let path = root.join(SOURCE_TASKS_LOCK_FILE);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| WikiFailure::io(path_text(parent), error))?;
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| WikiFailure::io(path_text(&path), error))?;
+    lock.lock()
+        .map_err(|error| WikiFailure::io(path_text(&path), error))?;
+    Ok(lock)
+}
+
 fn read_source_tasks(root: &Path) -> Result<Vec<WikiSourceTask>, WikiFailure> {
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
+    if recover_source_tasks_unlocked(root, &mut tasks)? {
+        write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
+    }
+    Ok(tasks)
+}
+
+pub(super) fn recover_source_tasks(root: &Path) -> Result<(), WikiFailure> {
+    read_source_tasks(root).map(|_| ())
+}
+
+fn recover_source_tasks_unlocked(root: &Path, tasks: &mut [WikiSourceTask]) -> Result<bool, WikiFailure> {
+    let mut changed = false;
+    for task in tasks {
+        if task.is_paused() || !(task.status() == &WikiSourceTaskStatus::Running
+            || (task.status() == &WikiSourceTaskStatus::Pending && task.is_queued())) {
+            continue;
+        }
+        if let Some(_execution_lock) = super::source_execution::try_source_execution_lock(root, task.source_path())? {
+            if task.cancel_requested() {
+                task.mark_cancelled();
+            } else {
+                task.mark_failed("Source execution interrupted; retry to resume.".to_owned());
+            }
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+fn read_source_tasks_unlocked(root: &Path) -> Result<Vec<WikiSourceTask>, WikiFailure> {
     read_json(root.join(SOURCE_TASKS_FILE))
 }
 
@@ -2891,18 +3043,30 @@ fn update_source_task_for_run(
     predicate: impl Fn(&WikiSourceTask) -> bool,
 ) -> Result<WikiSourceTaskRunPlan, WikiFailure> {
     let source_relative_path = source_relative_path(root, source_path)?;
-    let mut tasks = read_source_tasks(root)?;
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
+    recover_source_tasks_unlocked(root, &mut tasks)?;
     let mut staged = None;
-    if let Some(task) = latest_source_task_mut(&mut tasks, project_id, &source_relative_path)
-        && predicate(task)
-    {
-        task.restart();
-        staged = task_staged_source(root, task)?;
+    let mut task_id = None;
+    if let Some(task) = latest_source_task_mut(&mut tasks, project_id, &source_relative_path) {
+        task_id = Some(task.id().to_owned());
+        if predicate(task) {
+            let lock = super::source_execution::try_source_execution_lock(root, task.source_path())?
+                .ok_or_else(|| WikiFailure::state("source already has an active execution"))?;
+            staged = task_staged_source(root, task)?;
+            task.restart();
+            if let Some(staged) = staged.as_mut() {
+                staged.task_id = task.id().to_owned();
+                staged.execution = Some(super::source_execution::SourceExecution::new(lock, root, staged.task_id.clone()));
+                task.mark_pending(Some("queued".to_owned()));
+            }
+        }
     }
     write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
     Ok(WikiSourceTaskRunPlan {
         project_id: project_id.to_owned(),
         source_relative_path,
+        task_id,
         staged,
     })
 }
@@ -2952,6 +3116,20 @@ fn task_is_open(task: &WikiSourceTask) -> bool {
             | WikiSourceTaskStatus::Running
             | WikiSourceTaskStatus::Failed
     )
+}
+
+fn task_is_active(task: &WikiSourceTask) -> bool {
+    matches!(task.status(), WikiSourceTaskStatus::Pending | WikiSourceTaskStatus::Running)
+}
+
+fn unique_source_task_id(tasks: &[WikiSourceTask], project_id: &str, source_path: &str, mut timestamp: u64) -> String {
+    loop {
+        let id = source_task_id(project_id, source_path, timestamp);
+        if !tasks.iter().any(|task| task.id() == id) {
+            return id;
+        }
+        timestamp += 1;
+    }
 }
 
 fn source_task_id(project_id: &str, source_path: &str, timestamp: u64) -> String {
@@ -3232,29 +3410,25 @@ mod tests {
         ];
         append_source_task_paths(&root, "project", &paths, WikiSourceTaskKind::Modified).unwrap();
 
-        mark_source_task_failed(
-            &root,
-            "project",
-            "raw/sources/docs/a.md",
-            "failed".to_owned(),
-        )
-        .unwrap();
+        let tasks = read_source_tasks(&root).unwrap();
+        let a_id = tasks[0].id().to_owned();
+        let b_id = tasks[1].id().to_owned();
+        finish_source_execution(&root, &a_id, Some(&WikiFailure::state("failed"))).unwrap();
         let retry = retry_source_task(&root, "project", "raw/sources/docs/a.md").unwrap();
         assert_eq!(
-            retry.staged.unwrap().source_relative_path,
+            retry.staged.as_ref().unwrap().source_relative_path,
             "raw/sources/docs/a.md"
         );
-        assert!(!source_task_paused(&root, "project", "raw/sources/docs/a.md").unwrap());
+        assert!(!read_source_tasks(&root).unwrap()[0].is_paused());
 
-        mark_source_task_running(&root, "project", "raw/sources/docs/b.md", "generate", 50)
-            .unwrap();
+        mark_source_task_running(&root, &b_id, "generate", None).unwrap();
         pause_source_task(&root, "project", "raw/sources/docs/b.md").unwrap();
-        assert!(source_task_paused(&root, "project", "raw/sources/docs/b.md").unwrap());
-        mark_source_task_cancelled(&root, "project", "raw/sources/docs/b.md").unwrap();
-        assert!(source_task_paused(&root, "project", "raw/sources/docs/b.md").unwrap());
+        assert!(read_source_tasks(&root).unwrap()[1].is_paused());
+        finish_source_execution(&root, &b_id, Some(&WikiFailure::cancelled())).unwrap();
+        assert!(read_source_tasks(&root).unwrap()[1].is_paused());
         let resume = resume_source_task(&root, "project", "raw/sources/docs/b.md").unwrap();
         assert_eq!(
-            resume.staged.unwrap().source_relative_path,
+            resume.staged.as_ref().unwrap().source_relative_path,
             "raw/sources/docs/b.md"
         );
 
@@ -3295,6 +3469,8 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("wiki/index.md"), "# Wiki Index\n").unwrap();
 
+        let mut staged = staged_raw_source("project", &root, root.join("raw/sources/docs/a.md"), "raw/sources/docs/a.md".to_owned(), WikiSourceTaskKind::Generated).unwrap();
+        append_source_tasks(&root, "project", std::slice::from_mut(&mut staged), true).unwrap();
         let receipt = apply_generated_pages(
             &root,
             "project",
@@ -3314,13 +3490,16 @@ mod tests {
                 ],
                 reviews: Vec::new(),
             },
+            None,
             Some("hash-a".to_owned()),
             None,
             None,
             None,
+            &staged.task_id,
         )
         .await
         .unwrap();
+        staged.execution.as_ref().unwrap().finish(&Ok::<(), WikiFailure>(())).unwrap();
 
         let written = receipt
             .written_pages()

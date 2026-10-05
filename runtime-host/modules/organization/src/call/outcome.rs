@@ -468,6 +468,11 @@ impl AuditOutcome for crate::TeamRuntimeCommandOutcome {
     fn summarize(&self, detail: &mut OrganizationCallDetail) {
         use crate::TeamRuntimeCommandOutcome::*;
         match self {
+            Design { read, result } => detail.set_outcome(match result {
+                Ok(_) if *read => Outcome::Read,
+                Ok(_) => Outcome::CommandCommitted,
+                Err(error) => error.outcome(),
+            }),
             PackageValidate(value) => value.summarize(detail),
             DependencyPlan(value) => value.summarize(detail),
             ProvisionAgents(value) => value.summarize(detail),

@@ -37,6 +37,29 @@ pub(super) fn resolve_review(
     Ok(WikiReviewsReceipt::new(items))
 }
 
+pub(super) fn resolve_pending_reviews(
+    root: &Path,
+    ids: &[String],
+    action: &str,
+) -> Result<(), WikiFailure> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut items = read_review_items(root);
+    let mut changed = false;
+    for item in &mut items {
+        if !item.resolved && ids.contains(&item.id) {
+            item.resolved = true;
+            item.resolved_action = Some(action.to_owned());
+            changed = true;
+        }
+    }
+    if changed {
+        write_review_items(root, items)?;
+    }
+    Ok(())
+}
+
 pub(super) fn dismiss_review(
     root: &Path,
     input: WikiReviewDismissInput,
@@ -114,7 +137,6 @@ fn merge_review_item(existing: &mut WikiReviewItem, incoming: WikiReviewItem) {
         existing.source_path = incoming.source_path;
     }
     extend_unique(&mut existing.affected_pages, incoming.affected_pages);
-    extend_unique(&mut existing.search_queries, incoming.search_queries);
     merge_options(&mut existing.options, incoming.options);
     existing.resolved = existing.resolved || incoming.resolved;
     if existing.resolved_action.is_none() {
@@ -125,7 +147,6 @@ fn merge_review_item(existing: &mut WikiReviewItem, incoming: WikiReviewItem) {
 
 fn normalize_review_item_lists(item: &mut WikiReviewItem) {
     dedupe_strings(&mut item.affected_pages);
-    dedupe_strings(&mut item.search_queries);
     merge_options(&mut item.options, Vec::new());
 }
 
@@ -172,7 +193,7 @@ fn review_id_for(review_type: WikiReviewType, title: &str) -> String {
     format!("review-{hash:08x}")
 }
 
-fn normalize_review_title(title: &str) -> String {
+pub(crate) fn normalize_review_title(title: &str) -> String {
     let mut value = title.trim_start();
     let lower = value.to_lowercase();
     for prefix in [

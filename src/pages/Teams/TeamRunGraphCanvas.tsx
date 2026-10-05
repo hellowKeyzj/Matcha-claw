@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
-import { Bot, CheckCircle2, FileCode2, Flag, GitMerge, Plus, UserCheck, Zap, type LucideIcon } from 'lucide-react';
+import { useEffect, useId, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import { Bot, CheckCircle2, FileCode2, Flag, GitMerge, Maximize2, Minus, Plus, UserCheck, Zap, type LucideIcon } from 'lucide-react';
 import { StableScrollArea } from '@/components/scroll';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import type {
@@ -22,7 +22,13 @@ type TeamGraphScriptReviewRuleId = 'passThrough' | 'assertAllUpstreamCompleted' 
 
 const TEAM_GRAPH_EDGE_ACTIONS: TeamGraphEdgeAction[] = ['activate', 'rework', 'gate', 'finish'];
 
-type TeamRunGraphCanvasLabels = {
+export type TeamRunGraphCanvasLabels = {
+  nodeDetails?: string;
+  nodeDetailsDescription?: string;
+  task?: string;
+  zoomIn?: string;
+  zoomOut?: string;
+  fitToView?: string;
   workflowCanvas: string;
   workflowEdges: string;
   nodePalette: string;
@@ -124,7 +130,10 @@ type TeamRunGraphCanvasLabels = {
   noEdges: string;
 };
 
-type TeamRunGraphCanvasProps = {
+export type TeamRunGraphCanvasProps = {
+  mode?: 'readonly' | 'editable';
+  compact?: boolean;
+  mutationPending?: boolean;
   graph: TeamGraphSnapshotRecord | null | undefined;
   runStatus?: string;
   roles?: TeamRoleBindingRecord[];
@@ -381,11 +390,12 @@ function positionNodes(
   nodes: TeamGraphNodeRecord[],
   draftPositions: Record<string, { x: number; y: number }>,
   layoutPositions: Record<string, { x: number; y: number }>,
+  columns: number,
 ): PositionedNode[] {
   return nodes.map((node, index) => {
     const position = draftPositions[node.nodeId] ?? layoutPositions[node.nodeId] ?? {
-      x: CANVAS_PADDING + (index % 4) * COLUMN_GAP,
-      y: CANVAS_PADDING + Math.floor(index / 4) * ROW_GAP,
+      x: CANVAS_PADDING + (index % columns) * COLUMN_GAP,
+      y: CANVAS_PADDING + Math.floor(index / columns) * ROW_GAP,
     };
     return { ...node, x: position.x, y: position.y };
   });
@@ -529,11 +539,11 @@ function graphPatchNode(node: TeamGraphNodeRecord): Record<string, unknown> {
     kind,
     title: node.title?.trim() || node.nodeId,
     roleId: kind === 'work' || kind === 'review' ? node.roleId : undefined,
-    groupId: kind === 'join' ? node.groupId : undefined,
+    groupId: kind === 'work' || kind === 'join' ? node.groupId : undefined,
     taskId: kind === 'work' ? node.taskId : undefined,
     maxAttempts: node.maxAttempts,
     executor: kind === 'work' || kind === 'review' ? node.executor : undefined,
-    config: kind === 'start' || kind === 'work' || kind === 'review' ? node.config : undefined,
+    config: kind === 'start' || kind === 'work' || kind === 'review' || kind === 'join' ? node.config : undefined,
   });
 }
 
@@ -546,6 +556,7 @@ function graphPatchEdge(edge: TeamGraphEdgeRecord): Record<string, unknown> {
     targetPort: edge.targetPort,
     action: edge.action,
     payload: edge.payload,
+    dependency: edge.dependency,
   });
 }
 
@@ -902,7 +913,14 @@ export function TeamRunGraphCanvas({
   webhookAuth,
   labels,
   onPatchGraph,
+  mode = onPatchGraph ? 'editable' : 'readonly',
+  compact = false,
+  mutationPending = false,
 }: TeamRunGraphCanvasProps) {
+  const canEdit = mode === 'editable' && Boolean(onPatchGraph);
+  const canvasId = useId();
+  const [zoom, setZoom] = useState<number | null>(null);
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [configurationSheet, setConfigurationSheet] = useState<ConfigurationSheet>(null);
   const [nodeTitle, setNodeTitle] = useState('');
@@ -943,21 +961,19 @@ export function TeamRunGraphCanvas({
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [nodeSizes, setNodeSizes] = useState<Record<string, NodeSize>>({});
   const canvasScrollerRef = useRef<HTMLDivElement | null>(null);
-  const getCanvasScroller = useCallback(() => {
-    if (canvasScrollerRef.current?.isConnected) return canvasScrollerRef.current;
-    const element = document.querySelector<HTMLDivElement>('[data-team-graph-canvas="true"]');
-    canvasScrollerRef.current = element;
-    return element;
-  }, []);
   const nodeElementsRef = useRef<Record<string, HTMLDivElement | null>>({});
   const suppressClickNodeIdRef = useRef<string | null>(null);
 
   const effectiveGraph = useMemo<TeamGraphSnapshotRecord>(() => graph ?? EMPTY_TEAM_GRAPH, [graph]);
   const graphRunId = effectiveGraph.runId ?? '';
   const layoutRunIdRef = useRef(graphRunId);
-  const activeDraftPositions = layoutRunIdRef.current === graphRunId ? draftPositions : {};
-  const layoutPositions = effectiveGraph.layout?.nodePositions ?? {};
-  const positionedNodes = useMemo(() => positionNodes(effectiveGraph.nodes, activeDraftPositions, layoutPositions), [effectiveGraph.nodes, activeDraftPositions, layoutPositions]);
+  const draftRunId = layoutRunIdRef.current;
+  const positionedNodes = useMemo(() => positionNodes(
+    effectiveGraph.nodes,
+    canEdit && draftRunId === graphRunId ? draftPositions : {},
+    effectiveGraph.layout?.nodePositions ?? {},
+    compact ? 1 : 4,
+  ), [effectiveGraph.nodes, effectiveGraph.layout?.nodePositions, canEdit, draftRunId, graphRunId, draftPositions, compact]);
   const nodeById = useMemo(
     () => new Map(positionedNodes.map((node) => [node.nodeId, node])),
     [positionedNodes],
@@ -978,9 +994,33 @@ export function TeamRunGraphCanvas({
   const selectedEdgeTargetHasMultipleInboundEdges = useMemo(() => (
     selectedEdge ? effectiveGraph.edges.filter((edge) => edge.targetNodeId === selectedEdge.targetNodeId).length > 1 : false
   ), [effectiveGraph.edges, selectedEdge]);
-  const canvasWidth = Math.max(820, ...positionedNodes.map((node) => node.x + (nodeSizes[node.nodeId]?.width ?? NODE_WIDTH) + CANVAS_PADDING));
-  const canvasHeight = Math.max(440, ...positionedNodes.map((node) => node.y + (nodeSizes[node.nodeId]?.height ?? NODE_HEIGHT) + CANVAS_PADDING));
+  const selectedRole = roles.find((role) => role.roleId === readNodeRoleId(selectedNode) && (!graphRunId || role.runId === graphRunId));
+  const canvasWidth = Math.max(compact ? NODE_WIDTH + CANVAS_PADDING * 2 : 820, ...positionedNodes.map((node) => node.x + (nodeSizes[node.nodeId]?.width ?? NODE_WIDTH) + CANVAS_PADDING));
+  const canvasHeight = Math.max(compact ? NODE_HEIGHT + CANVAS_PADDING * 2 : 440, ...positionedNodes.map((node) => node.y + (nodeSizes[node.nodeId]?.height ?? NODE_HEIGHT) + CANVAS_PADDING));
+  const widthScale = viewportSize.width > 0 ? Math.min(1, viewportSize.width / canvasWidth) : 1;
+  const canvasScale = compact ? zoom ?? widthScale : 1;
+  const fitScale = Math.min(widthScale, viewportSize.height > 0 ? viewportSize.height / canvasHeight : 1);
   const webhookPublicUrl = buildWebhookPublicUrl(startWebhookPublicBaseUrl, startWebhookPath);
+
+  useEffect(() => {
+    if (!compact || !canvasScrollerRef.current || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) setViewportSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    observer.observe(canvasScrollerRef.current);
+    return () => observer.disconnect();
+  }, [compact]);
+
+  useEffect(() => {
+    setZoom(null);
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    setConfigurationSheet(null);
+    setConnectionDraft(null);
+    setDragState(null);
+    setNodePaletteOpen(false);
+    setFormError(null);
+  }, [graphRunId, compact, canEdit]);
 
   useEffect(() => {
     if (layoutRunIdRef.current !== graphRunId) {
@@ -1017,8 +1057,7 @@ export function TeamRunGraphCanvas({
         const next = { ...current };
         for (const [nodeId, element] of Object.entries(nodeElementsRef.current)) {
           if (!element) continue;
-          const rect = element.getBoundingClientRect();
-          const size = { width: Math.ceil(rect.width || NODE_WIDTH), height: Math.ceil(rect.height || NODE_HEIGHT) };
+          const size = { width: element.offsetWidth || NODE_WIDTH, height: element.offsetHeight || NODE_HEIGHT };
           if (next[nodeId]?.width !== size.width || next[nodeId]?.height !== size.height) {
             next[nodeId] = size;
             changed = true;
@@ -1117,10 +1156,7 @@ export function TeamRunGraphCanvas({
   }, [selectedEdge, selectedEdgeSourceNode]);
 
   const submitGraphPatch = async (operations: TeamGraphPatchOperation[]): Promise<boolean> => {
-    if (!onPatchGraph) {
-      setFormError(labels.saveGraphUnavailable);
-      return false;
-    }
+    if (!canEdit || !onPatchGraph || isSaving || mutationPending) return false;
     setIsSaving(true);
     setFormError(null);
     try {
@@ -1341,7 +1377,13 @@ export function TeamRunGraphCanvas({
   const handleAddNode = async (kind: TeamGraphCanvasNodeKind): Promise<void> => {
     const paletteItem = NODE_PALETTE.find((item) => item.kind === kind)!;
     const nodeId = createProjectionNodeId(kind);
-    const rawPosition = nextNodePosition(positionedNodes, nodeSizes, readCanvasViewport(getCanvasScroller()));
+    const viewport = readCanvasViewport(canvasScrollerRef.current);
+    const rawPosition = nextNodePosition(positionedNodes, nodeSizes, viewport ? {
+      scrollLeft: viewport.scrollLeft / canvasScale,
+      scrollTop: viewport.scrollTop / canvasScale,
+      clientWidth: viewport.clientWidth / canvasScale,
+      clientHeight: viewport.clientHeight / canvasScale,
+    } : null);
     const position = { x: Math.round(rawPosition.x), y: Math.round(rawPosition.y) };
     const node: TeamGraphNodeRecord = {
       nodeId,
@@ -1366,7 +1408,7 @@ export function TeamRunGraphCanvas({
 
 
   const handleNodePointerDown = (event: PointerEvent<HTMLDivElement>, node: PositionedNode): void => {
-    if (event.button !== 0) return;
+    if (!canEdit || isSaving || event.button !== 0) return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
     setDragState({
       nodeId: node.nodeId,
@@ -1385,8 +1427,8 @@ export function TeamRunGraphCanvas({
     if (!dragState || dragState.pointerId !== event.pointerId) return;
     const dx = event.clientX - dragState.pointerStartX;
     const dy = event.clientY - dragState.pointerStartY;
-    const nextX = Math.max(CANVAS_PADDING / 2, dragState.nodeStartX + dx);
-    const nextY = Math.max(CANVAS_PADDING / 2, dragState.nodeStartY + dy);
+    const nextX = Math.max(CANVAS_PADDING / 2, dragState.nodeStartX + dx / canvasScale);
+    const nextY = Math.max(CANVAS_PADDING / 2, dragState.nodeStartY + dy / canvasScale);
     const moved = dragState.moved || Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD;
     setDraftPositions((current) => ({ ...current, [dragState.nodeId]: { x: nextX, y: nextY } }));
     setDragState({ ...dragState, currentX: nextX, currentY: nextY, moved });
@@ -1425,7 +1467,7 @@ export function TeamRunGraphCanvas({
   };
 
   return (
-    <div className="space-y-3">
+    <div className={compact ? 'flex min-h-0 min-w-0 flex-1 flex-col gap-3' : 'min-w-0 space-y-3'}>
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/80 bg-card p-3 shadow-sm">
         <div>
           <div className="text-sm font-medium">{titleLabel}</div>
@@ -1464,8 +1506,26 @@ export function TeamRunGraphCanvas({
 
       {formError ? <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{formError}</div> : null}
 
-      <div className="relative">
-        <StableScrollArea data-team-graph-canvas="true" className="relative min-h-[520px] overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner">
+      <div className={compact ? 'relative flex min-h-0 flex-1 flex-col gap-2' : 'relative'}>
+        {compact ? (
+          <div className="flex items-center justify-end gap-1 text-xs">
+            <button type="button" className="rounded border p-1.5 hover:bg-muted" aria-label={labels.zoomOut ?? '−'} title={labels.zoomOut} onClick={() => setZoom(canvasScale / 1.2)}>
+              <Minus className="h-3.5 w-3.5" />
+            </button>
+            <span className="min-w-10 text-center tabular-nums text-muted-foreground">{Math.round(canvasScale * 100)}%</span>
+            <button type="button" className="rounded border p-1.5 hover:bg-muted" aria-label={labels.zoomIn ?? '+'} title={labels.zoomIn} onClick={() => setZoom(Math.min(2, canvasScale * 1.2))}>
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+            <button type="button" className="rounded border p-1.5 hover:bg-muted" aria-label={labels.fitToView ?? labels.workflowCanvas} title={labels.fitToView} onClick={() => {
+              setZoom(fitScale);
+              canvasScrollerRef.current?.scrollTo({ left: 0, top: 0 });
+            }}>
+              <Maximize2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        ) : null}
+        <StableScrollArea ref={canvasScrollerRef} data-team-graph-canvas="true" className={`relative overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner ${compact ? 'min-h-[240px] max-h-[60vh] flex-1' : 'min-h-[520px]'}`}>
+          <div className="overflow-hidden" style={{ width: canvasWidth * canvasScale, height: canvasHeight * canvasScale }}>
           <div
             aria-label={labels.workflowCanvas}
             className="relative rounded-xl"
@@ -1478,6 +1538,8 @@ export function TeamRunGraphCanvas({
             style={{
               width: canvasWidth,
               height: canvasHeight,
+              transform: `scale(${canvasScale})`,
+              transformOrigin: 'top left',
               backgroundImage: 'radial-gradient(circle at 1px 1px, hsl(var(--border)) 1px, transparent 0)',
               backgroundSize: '22px 22px',
             }}
@@ -1485,7 +1547,7 @@ export function TeamRunGraphCanvas({
             <svg className="absolute inset-0" width={canvasWidth} height={canvasHeight} role="img" aria-label={labels.workflowEdges}>
               <defs>
                 {[...Object.values(EDGE_VISUALS), FALLBACK_EDGE_VISUAL].map((visual) => (
-                  <marker key={visual.markerId} id={visual.markerId} markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                  <marker key={visual.markerId} id={`${canvasId}-${visual.markerId}`} markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
                     <path d="M0,0 L0,6 L9,3 z" fill={visual.stroke} />
                   </marker>
                 ))}
@@ -1518,6 +1580,18 @@ export function TeamRunGraphCanvas({
                       strokeWidth="14"
                       strokeLinecap="round"
                       className="cursor-pointer"
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`${source.title ?? source.nodeId} → ${target.title ?? target.nodeId}: ${edge.sourcePort ?? edge.action ?? ''}`}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' && event.key !== ' ') return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setSelectedEdgeId(edge.edgeId);
+                        setConfigurationSheet({ kind: 'edge', edgeId: edge.edgeId });
+                      }}
+                      onFocus={() => setHoveredEdgeId(edge.edgeId)}
+                      onBlur={() => setHoveredEdgeId(null)}
                       onClick={(event) => {
                         event.stopPropagation();
                         setSelectedEdgeId(edge.edgeId);
@@ -1531,7 +1605,7 @@ export function TeamRunGraphCanvas({
                       strokeWidth={isSelectedEdge ? '3.5' : '2.5'}
                       strokeLinecap="round"
                       strokeDasharray={edgeVisual.dashArray}
-                      markerEnd={`url(#${edgeVisual.markerId})`}
+                      markerEnd={`url(#${canvasId}-${edgeVisual.markerId})`}
                       className="pointer-events-none"
                     />
                     {shouldShowEdgeLabel ? (
@@ -1582,6 +1656,7 @@ export function TeamRunGraphCanvas({
                   }}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
                       event.stopPropagation();
                       setSelectedNodeId(node.nodeId);
                       setConfigurationSheet({ kind: 'node', nodeId: node.nodeId });
@@ -1590,10 +1665,11 @@ export function TeamRunGraphCanvas({
                   onPointerDown={(event) => handleNodePointerDown(event, node)}
                   onPointerMove={handleNodePointerMove}
                   onPointerUp={(event) => { void handleNodePointerUp(event); }}
-                  className={`absolute cursor-grab overflow-hidden rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 active:cursor-grabbing ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
+                  className={`absolute ${canEdit ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} overflow-hidden rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
                   style={{ left: node.x, top: node.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT }}
                 >
                   <div className={`h-1 w-full ${visual.accentClassName}`} />
+                  {canEdit ? <>
                   <button
                     type="button"
                     aria-label={formatTemplate(labels.connectToNode, { title: node.title ?? node.nodeId })}
@@ -1618,6 +1694,7 @@ export function TeamRunGraphCanvas({
                       </button>
                     ))}
                   </div>
+                  </> : null}
                   <div className="space-y-3 p-3">
                     <div className="flex items-start gap-3">
                       <div className={`grid h-10 w-10 shrink-0 place-items-center border border-border/90 ${visual.iconClassName} ${visual.iconShape}`}>
@@ -1627,14 +1704,14 @@ export function TeamRunGraphCanvas({
                         <div className="truncate text-sm font-semibold tracking-tight text-foreground">{node.title ?? node.nodeId}</div>
                         <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] uppercase tracking-wide opacity-80">
                           <span className="rounded-full border border-border/80 bg-muted/70 px-1.5 py-0.5 text-muted-foreground">{node.kind ?? 'node'}</span>
-                          <span className="rounded-full border border-border/80 bg-muted/70 px-1.5 py-0.5 text-muted-foreground">{node.status ?? 'pending'}</span>
+                          <span className="rounded-full border border-border/80 bg-muted/70 px-1.5 py-0.5 text-muted-foreground">{statusLabel(node.status, labels)}</span>
                         </div>
                       </div>
                     </div>
-                    {node.roleId ? (
+                    {readNodeRoleId(node) ? (
                       <div className="flex items-center justify-between rounded-xl border border-border/80 bg-muted/50 px-2 py-1.5 text-[11px]">
                         <span className="truncate text-muted-foreground">{executorLabel}</span>
-                        <span className="ml-2 truncate font-medium text-foreground">{node.roleId}</span>
+                        <span className="ml-2 truncate font-medium text-foreground">{readNodeRoleId(node)}</span>
                       </div>
                     ) : null}
                   </div>
@@ -1642,26 +1719,38 @@ export function TeamRunGraphCanvas({
               );
             })}
           </div>
+          </div>
         </StableScrollArea>
 
-        <NodePaletteControl
+        {canEdit ? <NodePaletteControl
           labels={labels}
           isOpen={isNodePaletteOpen}
-          isSaving={isSaving}
+          isSaving={isSaving || mutationPending}
           onToggle={() => setNodePaletteOpen((open) => !open)}
           onClose={() => setNodePaletteOpen(false)}
           onAddNode={(kind) => { void handleAddNode(kind); }}
-        />
+        /> : null}
       </div>
 
       <Sheet open={configurationSheet !== null} onOpenChange={(open) => { if (!open) setConfigurationSheet(null); }}>
-        <SheetContent side="right" className="w-[28rem] overflow-y-auto sm:max-w-xl">
+        <SheetContent side="right" className="w-[28rem] max-w-full overflow-y-auto sm:max-w-xl">
           <SheetHeader>
-            <SheetTitle>{configurationSheet?.kind === 'edge' ? labels.edgeConfiguration : labels.nodeConfiguration}</SheetTitle>
-            <SheetDescription>{configurationSheet?.kind === 'edge' ? labels.edgeConfigurationDescription : labels.nodeConfigurationDescription}</SheetDescription>
+            <SheetTitle>{!canEdit && configurationSheet?.kind === 'node' ? labels.nodeDetails ?? labels.nodeTitle : configurationSheet?.kind === 'edge' ? labels.edgeConfiguration : labels.nodeConfiguration}</SheetTitle>
+            <SheetDescription>{!canEdit && configurationSheet?.kind === 'node' ? labels.nodeDetailsDescription ?? labels.workflowCanvas : configurationSheet?.kind === 'edge' ? labels.edgeConfigurationDescription : labels.nodeConfigurationDescription}</SheetDescription>
           </SheetHeader>
 
           {configurationSheet?.kind === 'node' && selectedNode ? (
+            <dl className="mt-4 grid gap-3 text-sm">
+              <div><dt className="text-xs text-muted-foreground">{labels.nodeTitle}</dt><dd className="mt-1 break-words">{selectedNode.title ?? selectedNode.nodeId}</dd></div>
+              <div><dt className="text-xs text-muted-foreground">{labels.graphStatusLabel}</dt><dd className={`mt-1 ${statusTextTone(selectedNode.status)}`}>{statusLabel(selectedNode.status, labels)}{selectedNode.statusReason === 'rework_limit_exceeded' ? <span className="ml-2 text-muted-foreground">{labels.reworkLimitExceeded}</span> : null}</dd></div>
+              {readNodeRoleId(selectedNode) ? <div><dt className="text-xs text-muted-foreground">{executorLabel}</dt><dd className="mt-1 break-all">{readNodeRoleId(selectedNode)}{selectedRole ? ` · ${selectedRole.agentId}` : ''}</dd></div> : null}
+              {selectedNode.taskId ? <div><dt className="text-xs text-muted-foreground">{labels.task ?? 'taskId'}</dt><dd className="mt-1 break-all font-mono text-xs">{selectedNode.taskId}</dd></div> : null}
+              {readNodePrompt(selectedNode) ? <div><dt className="text-xs text-muted-foreground">{selectedNode.kind === 'review' ? labels.reviewPrompt : labels.workPrompt}</dt><dd className="mt-1 whitespace-pre-wrap break-words">{readNodePrompt(selectedNode)}</dd></div> : null}
+              {!canEdit && selectedNode.maxAttempts !== undefined ? <div><dt className="text-xs text-muted-foreground">{labels.nodeMaxAttempts}</dt><dd className="mt-1">{selectedNode.maxAttempts}</dd></div> : null}
+            </dl>
+          ) : null}
+
+          {canEdit && configurationSheet?.kind === 'node' && selectedNode ? (
             <div className="mt-4 space-y-1">
               {selectedNode.statusReason === 'rework_limit_exceeded' ? (
                 <div role="status" className="mb-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{labels.reworkLimitExceeded}</div>
@@ -1674,16 +1763,16 @@ export function TeamRunGraphCanvas({
                   min={1}
                   max={NODE_MAX_ATTEMPTS_LIMIT}
                   step={1}
-                  aria-describedby="team-node-max-attempts-hint"
+                  aria-describedby={`${canvasId}-max-attempts-hint`}
                   value={nodeMaxAttempts}
                   onChange={(event) => setNodeMaxAttempts(event.target.value)}
                 />
               </label>
-              <div id="team-node-max-attempts-hint" className="text-xs text-muted-foreground">{labels.nodeMaxAttemptsHint}</div>
+              <div id={`${canvasId}-max-attempts-hint`} className="text-xs text-muted-foreground">{labels.nodeMaxAttemptsHint}</div>
             </div>
           ) : null}
 
-          {configurationSheet?.kind === 'node' && selectedNode && selectedNodeKind === 'start' ? (
+          {canEdit && configurationSheet?.kind === 'node' && selectedNode && selectedNodeKind === 'start' ? (
             <div className="mt-4 space-y-3 text-sm">
               <label className="grid gap-1 text-xs text-muted-foreground">
                 {labels.nodeTitle}
@@ -1819,17 +1908,17 @@ export function TeamRunGraphCanvas({
               ) : null}
               <div className="rounded border border-border/60 bg-muted/30 p-2 text-[11px] text-muted-foreground">{labels.startTriggerHint}</div>
               <div className="flex gap-2">
-                <button type="button" className="rounded border px-3 py-1.5 text-xs font-medium" onClick={() => void handleSaveNode()} disabled={isSaving}>
+                <button type="button" className="rounded border px-3 py-1.5 text-xs font-medium" onClick={() => void handleSaveNode()} disabled={isSaving || mutationPending}>
                   {labels.saveNode}
                 </button>
-                <button type="button" className="rounded border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive" onClick={() => void handleDeleteNode()} disabled={isSaving}>
+                <button type="button" className="rounded border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive" onClick={() => void handleDeleteNode()} disabled={isSaving || mutationPending}>
                   {labels.deleteNode}
                 </button>
               </div>
             </div>
           ) : null}
 
-          {configurationSheet?.kind === 'node' && selectedNode && selectedNodeKind && selectedNodeKind !== 'start' ? (
+          {canEdit && configurationSheet?.kind === 'node' && selectedNode && selectedNodeKind && selectedNodeKind !== 'start' ? (
             <div className="mt-4 space-y-3 text-sm">
               <NodeBasicsEditor label={labels.nodeTitle} value={nodeTitle} onChange={setNodeTitle} />
 
@@ -1920,17 +2009,28 @@ export function TeamRunGraphCanvas({
               </details>
 
               <div className="flex gap-2">
-                <button type="button" className="rounded border px-3 py-1.5 text-xs font-medium" onClick={() => void handleSaveNode()} disabled={isSaving}>
+                <button type="button" className="rounded border px-3 py-1.5 text-xs font-medium" onClick={() => void handleSaveNode()} disabled={isSaving || mutationPending}>
                   {labels.saveNode}
                 </button>
-                <button type="button" className="rounded border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive" onClick={() => void handleDeleteNode()} disabled={isSaving}>
+                <button type="button" className="rounded border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive" onClick={() => void handleDeleteNode()} disabled={isSaving || mutationPending}>
                   {labels.deleteNode}
                 </button>
               </div>
             </div>
           ) : null}
 
-          {configurationSheet?.kind === 'edge' && selectedEdge ? (
+          {!canEdit && configurationSheet?.kind === 'edge' && selectedEdge ? (
+            <dl className="mt-4 grid gap-3 text-sm">
+              <div><dt className="text-xs text-muted-foreground">{labels.edgeConnection}</dt><dd className="mt-1 break-words">{selectedEdgeSourceNode?.title ?? selectedEdge.sourceNodeId} → {selectedEdgeTargetNode?.title ?? selectedEdge.targetNodeId}</dd></div>
+              {selectedEdge.sourcePort ? <div><dt className="text-xs text-muted-foreground">{labels.sourcePort}</dt><dd className="mt-1">{selectedEdge.sourcePort}</dd></div> : null}
+              {selectedEdge.targetPort ? <div><dt className="text-xs text-muted-foreground">{labels.targetPort}</dt><dd className="mt-1">{selectedEdge.targetPort}</dd></div> : null}
+              {selectedEdge.action ? <div><dt className="text-xs text-muted-foreground">{labels.edgeAction}</dt><dd className="mt-1">{labels.edgeActionOptions[selectedEdge.action]}</dd></div> : null}
+              {selectedEdge.status ? <div><dt className="text-xs text-muted-foreground">{labels.graphStatusLabel}</dt><dd className="mt-1">{statusLabel(selectedEdge.status, labels)}</dd></div> : null}
+              {selectedEdge.label ? <div><dt className="text-xs text-muted-foreground">{labels.edgeLabel}</dt><dd className="mt-1 break-words">{selectedEdge.label}</dd></div> : null}
+            </dl>
+          ) : null}
+
+          {canEdit && configurationSheet?.kind === 'edge' && selectedEdge ? (
             <div className="mt-4 space-y-3 text-sm">
               <div className="rounded border bg-muted/30 p-2 text-xs text-muted-foreground">
                 <div className="mb-1 font-medium text-foreground">{labels.edgeConnection}</div>
@@ -1996,10 +2096,10 @@ export function TeamRunGraphCanvas({
                 </div>
               </details>
               <div className="flex gap-2">
-                <button type="button" className="rounded border px-3 py-1.5 text-xs font-medium" onClick={() => void handleSaveEdge()} disabled={isSaving}>
+                <button type="button" className="rounded border px-3 py-1.5 text-xs font-medium" onClick={() => void handleSaveEdge()} disabled={isSaving || mutationPending}>
                   {labels.saveEdge}
                 </button>
-                <button type="button" className="rounded border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive" onClick={() => void handleDeleteEdge()} disabled={isSaving}>
+                <button type="button" className="rounded border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive" onClick={() => void handleDeleteEdge()} disabled={isSaving || mutationPending}>
                   {labels.deleteEdge}
                 </button>
               </div>

@@ -6,8 +6,11 @@ mod call;
 mod call_result;
 pub mod capability;
 mod domain;
+mod dedup;
+mod page_links;
+mod sweep;
+mod selection;
 pub mod embedding;
-mod external_search;
 pub mod history;
 pub mod index;
 mod ingest;
@@ -18,7 +21,6 @@ pub mod ports;
 pub mod preprocess;
 mod qa;
 pub mod reindex;
-pub mod research;
 pub mod search_config;
 pub mod vector;
 
@@ -32,7 +34,6 @@ use platform::{
 use tokio::sync::Mutex;
 
 pub use api::WikiHandle;
-pub use external_search::SearchProviderTest;
 use owner::actor::WikiOwner;
 
 const MODULE_ID: ModuleId = ModuleId::new("wiki");
@@ -66,6 +67,21 @@ pub use domain::{
     WikiSourceTask, WikiSourceTaskKind, WikiSourceTaskStatus, WikiSourceTasksReceipt,
     WikiSourceWatchConfig, WikiSourceWatchConfigInput, WikiSourceWatchConfigReceipt,
     WikiStatusReceipt, WikiWriteInput, WikiWriteReceipt,
+};
+pub use domain::{
+    WikiDeletePageFailure, WikiDeletePageInput, WikiDeletePageReceipt, WikiDeletePageStage,
+    WikiNavigation, WikiNavigationPage,
+};
+pub use domain::{
+    WikiDedupDetectInput, WikiDedupDetection, WikiDedupExcludeInput, WikiDedupMergeInput,
+    WikiDedupState, WikiDedupTask, WikiDedupTaskInput, WikiDedupTaskStatus, WikiDuplicateGroup,
+    WikiMissingPageCancelInput, WikiMissingPageInput, WikiMissingPageReceipt, WikiPageLink,
+    WikiPageLinks,
+};
+pub use domain::{
+    WikiSelectionApplyInput, WikiSelectionApplyReceipt, WikiSelectionInput,
+    WikiSelectionIntent, WikiSelectionReference, WikiSelectionSnapshot, WikiSelectionStatus,
+    WikiSelectionTask, WikiSelectionTaskInput, WikiSelectionTurn,
 };
 pub use owner::actor::WikiOwnerInput;
 pub use ports::{
@@ -134,11 +150,12 @@ pub fn spawn_owner(
     let (source_watch_control, source_watch_receiver) =
         owner::source_watcher::SourceWatchControl::channel();
     let owner = WikiOwner::new(input, source_watch_control.clone())?;
+    let shared = owner.shared();
     let (handle, mut owner_task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(32, WikiOwner::lane_retention()),
     );
-    let handle = WikiHandle::new(handle);
+    let handle = WikiHandle::new(handle, shared.clone());
     let mut source_watch_task =
         owner::source_watcher::spawn(handle.clone(), source_watch_control, source_watch_receiver);
     let workflow_handle = handle.clone();
@@ -146,6 +163,10 @@ pub fn spawn_owner(
         let failed = tokio::select! {
             _ = cancellation.cancelled() => {
                 source_watch_task.cancel();
+                shared.missing_pages.cancel_all();
+                shared.review_sweeps.close();
+                shared.selection.close();
+                shared.dedup.shutdown().await;
                 workflow_handle.drain_call_workflows().await;
                 let watcher_failed = call::report_task_exit(source_watch_task.join().await);
                 let owner_failed = call::report_task_exit(owner_task.drain_and_join().await);
@@ -153,6 +174,10 @@ pub fn spawn_owner(
             }
             result = &mut source_watch_task => {
                 let watcher_failed = call::report_task_exit(result);
+                shared.missing_pages.cancel_all();
+                shared.review_sweeps.close();
+                shared.selection.close();
+                shared.dedup.shutdown().await;
                 workflow_handle.drain_call_workflows().await;
                 let owner_failed = call::report_task_exit(owner_task.drain_and_join().await);
                 watcher_failed || owner_failed
@@ -160,6 +185,10 @@ pub fn spawn_owner(
             result = &mut owner_task => {
                 let owner_failed = call::report_task_exit(result);
                 source_watch_task.cancel();
+                shared.missing_pages.cancel_all();
+                shared.review_sweeps.close();
+                shared.selection.close();
+                shared.dedup.shutdown().await;
                 workflow_handle.drain_call_workflows().await;
                 let watcher_failed = call::report_task_exit(source_watch_task.join().await);
                 watcher_failed || owner_failed

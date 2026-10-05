@@ -8,7 +8,6 @@ use sessions_module::{
         PendingApproval, PendingApprovals, PendingApprovalsCommand, PendingApprovalsOutcome,
         SessionApprovalCommand, SessionApprovalOutcome,
     },
-    command::SessionIngressEvent,
     create::{SessionAdmission, SessionCreateCommand, SessionCreateOutcome, project_matcha_create},
     model_selection::{
         MatchaSessionModelRuntimeCommand, ResolvedSessionModelSelection,
@@ -25,7 +24,6 @@ use sessions_module::{
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
     timeline as session_timeline,
 };
-use tokio::sync::mpsc;
 
 use crate::{
     driver::MatchaRuntimeDriver,
@@ -36,10 +34,11 @@ use crate::{
         hydration::{
             HydratedMessageRole, HydrationSnapshot, HydrationWindowMode, HydrationWindowRequest,
         },
-        model::{RunId, SessionId},
+        model::SessionId,
     },
 };
 
 mod model;
+mod observation;
 mod runtime;
 mod timeline;

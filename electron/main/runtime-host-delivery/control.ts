@@ -62,6 +62,7 @@ export type RuntimeHostControlOutcome =
 export type RuntimeHostSafeEvent =
   | { readonly type: 'call.changed'; readonly callId: string; readonly revision: number }
   | { readonly type: 'calls.resync' }
+  | { readonly type: 'organization.changed' }
   | {
       readonly type: 'openclaw.lifecycle';
       readonly sequence: number | null;
@@ -70,6 +71,7 @@ export type RuntimeHostSafeEvent =
       readonly hasSessionActivity: boolean;
     }
   | { readonly type: 'openclaw.runtime' }
+  | { readonly type: 'openclaw.questions.changed' }
   | {
       readonly type: 'matcha.lifecycle';
       readonly lifecycle: RuntimeHostPeerLifecycle;
@@ -81,71 +83,6 @@ export type RuntimeHostSafeEvent =
       readonly jobId: string;
       readonly runId: string;
       readonly status: 'succeeded' | 'failed' | 'skipped' | 'cancelled' | 'outcome-unknown';
-    }
-  | {
-      readonly type: 'matcha.session.activity';
-      readonly routeKey: string;
-      readonly sequence: number;
-      readonly activity: MatchaSessionActivity;
-    }
-  | {
-      readonly type: 'openclaw.session.activity';
-      readonly routeKey: string;
-      readonly sequence: number;
-      readonly activity: OpenClawSessionActivity;
-    }
-  | {
-      readonly type: 'openclaw.session.update';
-      readonly routeKey: string;
-      readonly kind: 'delta' | 'snapshot' | 'terminal';
-      readonly sequence: number;
-      readonly text?: string;
-      readonly replace: boolean;
-      readonly terminal?: 'completed' | 'aborted' | 'error';
-      readonly errorKind?: 'refusal' | 'timeout' | 'rate_limit' | 'context_length' | 'unknown';
-      readonly stopReason?: string;
-    };
-
-type OpenClawSessionActivity =
-  | {
-      readonly kind: 'message';
-      readonly messageId: string;
-      readonly lifecycle: 'started' | 'delta' | 'completed';
-      readonly textDelta?: string;
-    }
-  | {
-      readonly kind: 'tool';
-      readonly toolId: string;
-      readonly phase: 'started' | 'updated' | 'completed' | 'failed';
-      readonly summary?: string;
-    };
-
-type MatchaSessionActivity =
-  | {
-      readonly kind: 'run';
-      readonly phase: 'started' | 'waiting_for_approval' | 'completed' | 'cancelled' | 'failed' | 'interrupted';
-    }
-  | {
-      readonly kind: 'message';
-      readonly messageId: string;
-      readonly lifecycle: 'started' | 'delta' | 'completed';
-      readonly textDelta?: string;
-    }
-  | {
-      readonly kind: 'tool';
-      readonly toolCallId: string;
-      readonly phase: 'started' | 'updated' | 'completed' | 'failed';
-    }
-  | {
-      readonly kind: 'approval';
-      readonly approvalId: string;
-      readonly phase: 'requested';
-      readonly optionIds: readonly string[];
-    }
-  | {
-      readonly kind: 'approval';
-      readonly approvalId: string;
-      readonly phase: 'resolved';
     };
 
 export type RuntimeHostControlDelivery = 'not-delivered' | 'unknown-delivery';
@@ -502,12 +439,7 @@ function decodeEvent(raw: Record<string, unknown>): IncomingMessage | undefined 
   if (!hasExactKeys(raw, ['version', 'type', 'event']) || !isRuntimeHostSafeEvent(raw.event)) {
     return undefined;
   }
-  return { kind: 'event', event: normalizeSafeEvent(raw.event) };
-}
-
-function normalizeSafeEvent(event: RuntimeHostSafeEvent): RuntimeHostSafeEvent {
-  if (event.type !== 'openclaw.session.update') return event;
-  return { ...event, replace: event.replace ?? false };
+  return { kind: 'event', event: raw.event };
 }
 
 function isRuntimeHostControlCommand(value: RuntimeHostControlCommand): boolean {
@@ -541,7 +473,9 @@ function isRuntimeHostSafeEvent(value: unknown): value is RuntimeHostSafeEvent {
         && typeof value.hasMessage === 'boolean'
         && typeof value.hasSessionActivity === 'boolean';
     case 'calls.resync':
+    case 'organization.changed':
     case 'openclaw.runtime':
+    case 'openclaw.questions.changed':
       return hasExactKeys(value, ['type']);
     case 'matcha.lifecycle':
       return hasExactKeys(value, ['type', 'lifecycle', 'ready', 'observedAtMs'])
@@ -553,12 +487,6 @@ function isRuntimeHostSafeEvent(value: unknown): value is RuntimeHostSafeEvent {
         && isCronExecutionId(value.jobId)
         && isCronExecutionId(value.runId)
         && isCronExecutionStatus(value.status);
-    case 'matcha.session.activity':
-      return isMatchaSessionActivity(value);
-    case 'openclaw.session.activity':
-      return isOpenClawSessionActivity(value);
-    case 'openclaw.session.update':
-      return isOpenClawSessionUpdate(value);
     default:
       return false;
   }
@@ -589,171 +517,6 @@ function isCronExecutionStatus(
     || value === 'skipped'
     || value === 'cancelled'
     || value === 'outcome-unknown';
-}
-
-function isRendererRouteKey(value: unknown): value is string {
-  return typeof value === 'string'
-    && /^renderer-route:[A-Za-z0-9_-]+$/.test(value)
-    && value.length <= 128;
-}
-
-function isOpenClawSessionActivity(value: Record<string, unknown>): value is RuntimeHostSafeEvent & { readonly type: 'openclaw.session.activity' } {
-  if (!hasExactKeys(value, ['type', 'routeKey', 'sequence', 'activity'])
-    || !isRendererRouteKey(value.routeKey)
-    || !isNonNegativeSafeInteger(value.sequence)
-    || !isRecord(value.activity)) {
-    return false;
-  }
-  return isOpenClawActivity(value.activity);
-}
-
-function isOpenClawActivity(value: Record<string, unknown>): value is OpenClawSessionActivity {
-  if (typeof value.kind !== 'string') return false;
-  switch (value.kind) {
-    case 'message':
-      if (!hasExactKeys(value, ['kind', 'messageId', 'lifecycle', ...(hasOwn(value, 'textDelta') ? ['textDelta'] : [])])
-        || !isOpaqueActivityId(value.messageId)
-        || !isMessageLifecycle(value.lifecycle)) {
-        return false;
-      }
-      if (value.lifecycle === 'delta' && !hasOwn(value, 'textDelta')) return false;
-      if (value.lifecycle !== 'delta' && hasOwn(value, 'textDelta')) return false;
-      return !hasOwn(value, 'textDelta') || isBoundedActivityText(value.textDelta);
-    case 'tool':
-      if (!hasExactKeys(value, ['kind', 'toolId', 'phase', ...(hasOwn(value, 'summary') ? ['summary'] : [])])
-        || !isOpaqueActivityId(value.toolId)
-        || !isToolActivityPhase(value.phase)) {
-        return false;
-      }
-      return !hasOwn(value, 'summary') || isBoundedActivitySummary(value.summary);
-    default:
-      return false;
-  }
-}
-
-function isBoundedActivitySummary(value: unknown): value is string {
-  return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= 256;
-}
-
-function isMatchaSessionActivity(value: Record<string, unknown>): value is RuntimeHostSafeEvent & { readonly type: 'matcha.session.activity' } {
-  if (!hasExactKeys(value, ['type', 'routeKey', 'sequence', 'activity'])
-    || !isRendererRouteKey(value.routeKey)
-    || !isNonNegativeSafeInteger(value.sequence)
-    || !isRecord(value.activity)) {
-    return false;
-  }
-  return isMatchaActivity(value.activity);
-}
-
-function isMatchaActivity(value: Record<string, unknown>): value is MatchaSessionActivity {
-  if (typeof value.kind !== 'string') return false;
-  switch (value.kind) {
-    case 'run':
-      return hasExactKeys(value, ['kind', 'phase']) && isMatchaRunPhase(value.phase);
-    case 'message':
-      if (!hasExactKeys(value, ['kind', 'messageId', 'lifecycle', ...(hasOwn(value, 'textDelta') ? ['textDelta'] : [])])
-        || !isOpaqueActivityId(value.messageId)
-        || !isMessageLifecycle(value.lifecycle)) {
-        return false;
-      }
-      if (value.lifecycle === 'delta' && !hasOwn(value, 'textDelta')) return false;
-      if (value.lifecycle !== 'delta' && hasOwn(value, 'textDelta')) return false;
-      return !hasOwn(value, 'textDelta') || isBoundedActivityText(value.textDelta);
-    case 'tool':
-      return hasExactKeys(value, ['kind', 'toolCallId', 'phase'])
-        && isOpaqueActivityId(value.toolCallId)
-        && isToolActivityPhase(value.phase);
-    case 'approval':
-      if (!hasExactKeys(value, ['kind', 'approvalId', 'phase', ...(hasOwn(value, 'optionIds') ? ['optionIds'] : [])])
-        || !isOpaqueActivityId(value.approvalId)
-        || !isApprovalPhase(value.phase)) {
-        return false;
-      }
-      if (value.phase === 'resolved') return !hasOwn(value, 'optionIds');
-      return hasOwn(value, 'optionIds') && isApprovalOptionIds(value.optionIds);
-    default:
-      return false;
-  }
-}
-
-function isOpaqueActivityId(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && Buffer.byteLength(value, 'utf8') <= 128;
-}
-
-function isBoundedActivityText(value: unknown): value is string {
-  return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= 16 * 1024;
-}
-
-function isMessageLifecycle(value: unknown): value is 'started' | 'delta' | 'completed' {
-  return value === 'started' || value === 'delta' || value === 'completed';
-}
-
-function isToolActivityPhase(value: unknown): value is 'started' | 'updated' | 'completed' | 'failed' {
-  return value === 'started' || value === 'updated' || value === 'completed' || value === 'failed';
-}
-
-function isApprovalPhase(value: unknown): value is 'requested' | 'resolved' {
-  return value === 'requested' || value === 'resolved';
-}
-
-function isApprovalOptionIds(value: unknown): value is readonly string[] {
-  if (!Array.isArray(value) || value.length > 32) return false;
-  const uniqueOptionIds = new Set<string>();
-  for (const optionId of value) {
-    if (!isOpaqueActivityId(optionId) || uniqueOptionIds.has(optionId)) return false;
-    uniqueOptionIds.add(optionId);
-  }
-  return true;
-}
-
-function isMatchaRunPhase(value: unknown): boolean {
-  return value === 'started'
-    || value === 'waiting_for_approval'
-    || value === 'completed'
-    || value === 'cancelled'
-    || value === 'failed'
-    || value === 'interrupted';
-}
-
-const MAX_SESSION_UPDATE_TEXT_BYTES = 128 * 1024;
-const MAX_SESSION_UPDATE_STOP_REASON_BYTES = 256;
-
-function isOpenClawSessionUpdate(value: Record<string, unknown>): value is RuntimeHostSafeEvent & { readonly type: 'openclaw.session.update' } {
-  const keys = Object.keys(value);
-  const allowedKeys = ['type', 'routeKey', 'kind', 'sequence', 'text', 'replace', 'terminal', 'errorKind', 'stopReason'];
-  if (!keys.every((key) => allowedKeys.includes(key))
-    || !hasOwn(value, 'type')
-    || !hasOwn(value, 'routeKey')
-    || !hasOwn(value, 'kind')
-    || !hasOwn(value, 'sequence')) {
-    return false;
-  }
-  if (!isRendererRouteKey(value.routeKey)
-    || !isOpenClawSessionUpdateKind(value.kind)
-    || !isNonNegativeSafeInteger(value.sequence)) {
-    return false;
-  }
-  if (hasOwn(value, 'text') && (typeof value.text !== 'string' || Buffer.byteLength(value.text, 'utf8') > MAX_SESSION_UPDATE_TEXT_BYTES)) {
-    return false;
-  }
-  if (hasOwn(value, 'replace') && typeof value.replace !== 'boolean') return false;
-  if (hasOwn(value, 'terminal') && !isOpenClawSessionTerminal(value.terminal)) return false;
-  if (hasOwn(value, 'errorKind') && !isSafeSessionErrorKind(value.errorKind)) return false;
-  if (hasOwn(value, 'stopReason') && (typeof value.stopReason !== 'string' || Buffer.byteLength(value.stopReason, 'utf8') > MAX_SESSION_UPDATE_STOP_REASON_BYTES)) return false;
-  if (value.kind === 'terminal') return isOpenClawSessionTerminal(value.terminal);
-  return !hasOwn(value, 'terminal');
-}
-
-function isOpenClawSessionUpdateKind(value: unknown): value is 'delta' | 'snapshot' | 'terminal' {
-  return value === 'delta' || value === 'snapshot' || value === 'terminal';
-}
-
-function isOpenClawSessionTerminal(value: unknown): value is 'completed' | 'aborted' | 'error' {
-  return value === 'completed' || value === 'aborted' || value === 'error';
-}
-
-function isSafeSessionErrorKind(value: unknown): value is 'refusal' | 'timeout' | 'rate_limit' | 'context_length' | 'unknown' {
-  return value === 'refusal' || value === 'timeout' || value === 'rate_limit' || value === 'context_length' || value === 'unknown';
 }
 
 function isRejection(value: unknown): value is Extract<RuntimeHostControlOutcome, { readonly kind: 'rejected' }>['error'] {

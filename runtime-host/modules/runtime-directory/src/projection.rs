@@ -86,6 +86,7 @@ fn project_capabilities(capabilities: &crate::Capabilities) -> Value {
         "approvals": capabilities.approvals(),
         "replay": capabilities.replay(),
         "modelSelection": capabilities.model_selection(),
+        "supportsGoal": capabilities.supports_goal(),
     })
 }
 
@@ -143,9 +144,9 @@ mod tests {
                         "displayName": "OpenClaw",
                         "agentIds": ["main"],
                         "defaultAgentId": "main",
-                        "agents": [{ "agentId": "main", "source": "discovered", "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true } }],
+                        "agents": [{ "agentId": "main", "source": "discovered", "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true, "supportsGoal": false } }],
                         "acceptsDynamicAgents": true,
-                        "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true },
+                        "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true, "supportsGoal": false },
                         "capabilityFamilies": [
                             { "family": "session", "availability": "supported" },
                             { "family": "task", "availability": "supported" },
@@ -171,9 +172,9 @@ mod tests {
                         "displayName": "Matcha Agent",
                         "agentIds": ["matcha"],
                         "defaultAgentId": "matcha",
-                        "agents": [{ "agentId": "matcha", "source": "discovered", "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true } }],
+                        "agents": [{ "agentId": "matcha", "source": "discovered", "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true, "supportsGoal": false } }],
                         "acceptsDynamicAgents": true,
-                        "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true },
+                        "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true, "supportsGoal": false },
                         "capabilityFamilies": [
                             { "family": "session", "availability": "supported" },
                             { "family": "task", "availability": "unsupported" },

@@ -48,6 +48,7 @@ impl RunningHandler {
             crate::OrganizationOwnerInput {
                 store,
                 runtime_directory: Arc::new(EmptyRuntimeDirectory),
+                member_introductions: None,
                 team_skill_selections: crate::package::TeamSkillSelectionResolver::open(
                     root.path().join("team-skill-selections.json"),
                 )

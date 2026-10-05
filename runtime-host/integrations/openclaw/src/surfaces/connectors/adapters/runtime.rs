@@ -5,7 +5,7 @@ use crate::driver::OpenClawDriver;
 impl ConnectorOps for OpenClawDriver {
     fn apply_runtime_mcp_projection<'a>(
         &'a self,
-        preset: Option<::connectors::ports::TeamRunMcpPreset<'a>>,
+        preset: Option<::connectors::ports::McpPreset<'a>>,
         catalog: ::connectors::ConnectorCatalog,
         secrets: &'a dyn ::connectors::ConnectorSecretResolverPort,
     ) -> ::connectors::ports::ConnectorFuture<'a, ::connectors::ports::ConnectorProjectionEffect>

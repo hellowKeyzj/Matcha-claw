@@ -6,7 +6,7 @@ Renderer receives one IPC channel:
 
 ```json
 {
-  "eventName": "session:update",
+  "eventName": "session.delta",
   "payload": {}
 }
 ```
@@ -30,7 +30,8 @@ These are existing observable recovery semantics. Rust must not assume events ar
 | --- | --- | --- |
 | `gateway:status` | Electron transforms child `gateway:lifecycle` into public gateway snapshot. | `GatewayStatus`: process/transport state, port, pid?, readiness, errors/issue, diagnostics, `updatedAt`; consumed by [gateway.ts](../../src/stores/gateway.ts#L217-L228)。 |
 | `gateway:error` | child bridge or Electron gateway manager. | `{ message, issue? }`; consumer prioritizes `issue.message`. [gateway.ts](../../src/stores/gateway.ts#L229-L240) |
-| `session:update` | legacy child session/gateway ingress sends parent gateway event; current Rust session canonical path additionally emits safe `session.delta` through private control and Electron bridge. | legacy union includes `session_info_update`, `session_item_chunk`, `session_item`, `plan`; Rust `session.delta` is strictly decoded and mechanically applied by Renderer store. [session-adapter-types.ts](../../runtime-host/shared/session-adapter-types.ts#L470-L512)、[control.ts](../../electron/main/runtime-host-delivery/control.ts)、[gateway.ts](../../src/stores/gateway.ts) |
+| `session.delta` | Integration → Sessions owner/state → signed `/api/sessions/events` SSE → Electron strict decode → authorized complete identity page IPC；不走 private control/legacy callback。 | `{sessionKey,identity,epoch,seq,cursor,runId?,changes}`；top key 必须匹配 identity，routeKey/native cursor/generation 禁止公开。`itemsReplaced` 按 exact IDs/anchor 原子应用。[VERIFY: electron/main/host-event-bridge.ts:98-105] [VERIFY: src/types/session/snapshot.ts:873-897] |
+| `session.resync` | Sessions successful sync commit 与 Main authorized-only reconnect recovery 沿同一既有链投递。 | strict `{identity,epoch,seq}`，Renderer 同 identity 再 observe；不是假 delta、不含 reason-only/native cut/run/message。[VERIFY: runtime-host/modules/sessions/src/owner/observation.rs:821-825] [VERIFY: electron/main/renderer-event-routes.ts:173-198] [VERIFY: src/stores/chat/store.ts:291-304] |
 | `task:snapshot` | task runtime projection; OpenClaw task manager operations now have a Rust RuntimeDriver/Owner path, but this event remains a Renderer-visible projection, not a Task durable owner. | `{ sessionKey, scope?, tasks, todos?, source, enableEdit?, uri? }`; task center consumer. |
 | `gateway:channel-status` | child channel / gateway projection. | Renderer expects root `channelId` / `status`; see `OPEN` shape discrepancy below. |
 | `runtime-host:status` | Electron-generated observed child status. | `{ status, hostLifecycle, runtimeLifecycle, activePluginCount, pid?, error?, updatedAt }`. |
@@ -38,9 +39,11 @@ These are existing observable recovery semantics. Rust must not assume events ar
 | `runtime-host:restart` | Electron detects child recovery. | `{ previousPid?, pid?, status, recoveredAt }`; active Call observers re-read the same callId. |
 | `call:changed` | Rust CallLog transaction commit → private control → Electron bridge. | `{callId, revision}`; safe hint only, observers query the same identity. |
 | `calls:resync` | Rust CallLog broadcast lag → `calls.resync` → Electron bridge. | `{}`; active Call observers and Calls store re-read, no periodic fallback. |
+| `team:changed` | Organization 既有 schedule watch → Host `OrganizationChanged` → private control `organization.changed` → Electron bridge。 | strict `{}`；只提示已观察的 exact teamId/runId 回读，不携 prompt、runId 或 graph，不恢复旧 rich `team:event`。watch 可合并通知，事件不是 durable 数据源。[VERIFY: runtime-host/host/src/composition/events.rs:40-67] [VERIFY: runtime-host/host/src/composition/host/mod.rs:342] [VERIFY: runtime-host/host/src/control/wire.rs:373-374] [VERIFY: electron/main/runtime-host-delivery/control.ts:475-479] [VERIFY: electron/main/host-event-bridge.ts:135-137] [VERIFY: src/stores/teams.ts:976-998] |
 | `runtime-host:disconnected` | Main observes loss of the active control channel, including replacement. | `{}`; ends observation as unconfirmed, not business failure or execution cancellation. |
 | `package:changed` | Main CloudAccountService stores terminal result/TTL, or invalidates an old account epoch. | `{operationId}`; Renderer re-reads the specific Main package result, without bytes/token/epoch. |
 | `matcha-agent:status` | Electron bridges Rust `matcha.lifecycle` safe events. | `{ processState, ready, port: null, pid: null, lastError: null, updatedAt }`; Settings consumes it as a best-effort hint and `/api/matcha-agent/app-server/status` remains the recovery query. |
+| `openclaw:questions-changed` | OpenClaw native `question.requested/resolved` → Integration unit hint → 原 private control `openclaw.questions.changed` → Electron bridge。 | `{}`；不含问题、答案、identifier 或 secret。当前 OpenClaw local 会话回读 typed `question.list`；提示不是待答事实或终态，丢失后沿连接恢复/页面恢复回读，不轮询。[VERIFY: runtime-host/integrations/openclaw/src/session/ingest.rs:238-241] [VERIFY: runtime-host/host/src/control/event_projection.rs:54-60] [VERIFY: electron/main/runtime-host-delivery/control.ts:474-477] |
 | owner/facade operation event | typed owner-local operation projection. | optional fast-path hint; query remains the recovery path. |
 | `oauth:code`, `oauth:success`, `oauth:error` | Electron/OAuth path, not child gateway-event allowlist. | Providers Settings consumes them; child callback does not define these names. |
 
@@ -49,20 +52,19 @@ These are existing observable recovery semantics. Rust must not assume events ar
 ```text
 gateway:lifecycle
 gateway:notification
-session:update
 task:snapshot
 gateway:channel-status
 gateway:error
 team:event
 ```
 
-Source: [parent-transport-contracts.ts](../../runtime-host/shared/parent-transport-contracts.ts#L9-L21)。
+`session:update` 已从 Rust parent callback enum/parser 移除，不能经通用出口发送；Session 使用上节专用 SSE 链。[VERIFY: runtime-host/host/src/parent_callback.rs:51-70] [VERIFY: runtime-host/host/src/parent_callback.rs:130-149]
 
 ### Confirmed transformations
 
 - `gateway:lifecycle` → Electron publishes `gateway:status`, not the raw child payload.
-- `gateway:error`, `session:update`, `task:snapshot`, `gateway:channel-status`, `team:event` are forwarded by host event bridge.
-- Rust `session.delta` is a safe event produced by Host canonical session apply path and bridged separately from legacy rich `session:update`; it does not carry raw peer transcript state.
+- `gateway:error`, `task:snapshot`, `gateway:channel-status`, `team:event` are forwarded by host event bridge；legacy `session:update` 不再是 Session 生产出口。
+- Rust `session.delta/session.resync` 属于 Sessions-owned SSE 链，Main 完整 identity + 页面授权过滤后定向 `host:event`；不进入 control SafeEvent、通用 HostEventBus 或 legacy rich `session:update`。native transcript/history authority 留在 peer/Integration。[VERIFY: electron/main/host-event-bridge.ts:98-105] [VERIFY: electron/main/renderer-event-routes.ts:122-152]
 - Rust `matcha.lifecycle` is a safe lifecycle hint produced from Matcha peer supervisor state and bridged as `matcha-agent:status`; it does not carry app-server port, pid, path, token, stderr or peer-private payloads.
 - `team:event` is produced only from Organization-owned durable TeamRun events after projection through `TeamRunPublicEvent`; native/runtime-private TeamRun payloads are unsupported and must not be emitted.
 - `gateway:notification` is `ALLOWLISTED-UNCONFIRMED`: current source walk found bridge/allowlist but no confirmed child producer or Renderer consumer.
@@ -71,9 +73,9 @@ Bridge evidence: [host-event-bridge.ts](../../electron/main/host-event-bridge.ts
 
 ## 5. session ordering and recovery
 
-Child gateway ingress serializes conversation processing per session, but different sessions may run in parallel. Parent forwarding is fire-and-forget, so HTTP completion and Renderer delivery are not a global ordered log. The child may buffer ingress while runtime is unavailable; this buffer is bounded and does not provide durable replay.
+Sessions 以完整 identity lane 归并 ingress；public epoch/seq/cursor 是 owner 提交水位，不是 native history opaque cursor 或 Gateway replay frontier。sync 在 OwnedTask 读取，baseline 三方归并保留并发已接受 facts/明确删除，成功 commit 单次推进公开 seq/cursor 并发 resync，不造 delta。空 changes native event 可只推进私有 frontier。[VERIFY: runtime-host/modules/sessions/src/domain/model.rs:1606-1794] [VERIFY: runtime-host/modules/sessions/src/owner/observation.rs:262-316]
 
-Renderer chat event-routing uses session identity/run behavior to filter and to trigger recovery polling for terminal/update kinds; it is not the `host:event` envelope definition. See [event-routing.ts](../../src/stores/chat/event-routing.ts)。
+Renderer 按完整 identity recordKey 与 epoch/seq 判断 stale/duplicate/gap；gap/resync 回读确切 identity，无 global ordering 或 durable Renderer replay 承诺。SSE lag 结束 stream，Main 重连只恢复已授权 identities。OpenClaw history cut 为 Snapshot，Matcha 只有实际 events.replay 到 snapshot cut 后才报告 EventFrontier；事实完整性独立于 cut，非原子 seam 保留。当前七切片及未授权 live 均见 Session / Chat dev OPEN，不沿用旧 polling/test 结果。[VERIFY: src/stores/chat/store-state-helpers.ts:1951-2045] [VERIFY: electron/main/renderer-event-routes.ts:155-169] [VERIFY: runtime-host/integrations/openclaw/src/session/event_router.rs:52-62] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/observation.rs:257-287]
 
 ## 6. `gateway:channel-status` shape risk — `OPEN`
 

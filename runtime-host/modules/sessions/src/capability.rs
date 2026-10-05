@@ -20,6 +20,12 @@ pub fn describe(id: &str, scope: &Value) -> Option<Value> {
         ("session.management", Some("session")) => {
             Some(management_session_descriptor(scope.clone()))
         }
+        ("session.goal", Some("session")) => Some(scoped_descriptor(
+            "session.goal", "session-goal", scope.clone(), vec![
+                operation("sessions.goal.update", "Update session Goal", "session"),
+                operation("sessions.goal.clear", "Clear session Goal", "session"),
+            ],
+        )),
         ("session.approval", Some("session")) => Some(approval_descriptor(scope.clone())),
         ("session.modelSelection", Some("session")) => {
             Some(model_selection_descriptor(scope.clone()))
@@ -51,6 +57,8 @@ pub fn prompt_session_descriptor(scope: Value) -> Value {
             ),
             operation("sessions.abort", "Abort session", "session"),
             operation("sessions.load", "Load session", "session"),
+            operation("sessions.observe", "Observe session", "session"),
+            operation("sessions.release", "Release session observation", "session"),
         ],
     )
 }
@@ -85,6 +93,8 @@ pub fn management_session_descriptor(scope: Value) -> Value {
             operation("sessions.resume", "Resume session", "session"),
             operation("sessions.state", "Get session state", "session"),
             operation("sessions.load", "Load session", "session"),
+            operation("sessions.observe", "Observe session", "session"),
+            operation("sessions.release", "Release session observation", "session"),
         ],
     )
 }
@@ -115,20 +125,23 @@ pub fn model_selection_descriptor(scope: Value) -> Value {
 }
 
 fn scoped_descriptor(id: &str, kind: &str, scope: Value, operations: Vec<Value>) -> Value {
+    let endpoint = scope.get("identity").and_then(|identity| identity.get("endpoint")).or_else(|| scope.get("endpoint"));
+    let adapter = endpoint.and_then(|endpoint| endpoint.get("runtimeAdapterId")).and_then(Value::as_str);
+    let instance = endpoint.and_then(|endpoint| endpoint.get("runtimeInstanceId")).and_then(Value::as_str);
     json!({
         "id": id,
         "kind": kind,
         "scopeKind": scope.get("kind").and_then(Value::as_str).unwrap_or("unknown"),
         "scope": scope,
         "targetKinds": target_kinds(&operations),
-        "runtimeAdapterId": "openclaw",
-        "runtimeInstanceId": "local",
+        "runtimeAdapterId": adapter,
+        "runtimeInstanceId": instance,
         "supportLevel": "native",
         "availability": "available",
         "operations": operations,
         "policyScope": id,
         "ownerModuleId": kind,
-        "routeOwnerId": "openclaw",
+        "routeOwnerId": adapter,
     })
 }
 
@@ -137,7 +150,7 @@ fn runtime_identity_for_scope(
     scope: &Value,
 ) -> Option<runtime_directory::RuntimeDriverIdentity> {
     match (id, scope.get("kind").and_then(Value::as_str)?) {
-        ("session.prompt" | "session.approval" | "session.modelSelection", "agent" | "session")
+        ("session.prompt" | "session.approval" | "session.modelSelection" | "session.goal", "agent" | "session")
         | ("session.management", "session") => {
             runtime_identity_for_endpoint(scope.get("identity")?.get("endpoint")?)
         }

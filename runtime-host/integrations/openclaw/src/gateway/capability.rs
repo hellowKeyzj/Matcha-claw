@@ -72,6 +72,7 @@ pub fn question_descriptor() -> Value {
         "supportLevel": "native",
         "availability": "available",
         "operations": [
+            operation("question.list", "List pending OpenClaw questions", "none"),
             operation("question.resolve", "Resolve OpenClaw question", "none"),
         ],
         "policyScope": "openclaw.question",

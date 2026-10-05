@@ -118,7 +118,8 @@ impl OrganizationHandle {
                 return workflows.capability(self.clone(), request, resolver).await;
             }
         }
-        self.execute_runtime_capability_inline(resolver.as_ref(), request).await
+        self.execute_runtime_capability_inline(resolver, request)
+            .await
     }
 
     pub(crate) async fn admit_team_capability(
@@ -149,7 +150,7 @@ impl OrganizationHandle {
 
     pub(crate) async fn execute_runtime_capability_inline(
         &self,
-        resolver: &dyn crate::RoleSessionIdentityResolver,
+        resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
         request: crate::TeamRuntimeCapabilityRequest,
     ) -> Result<(String, crate::TeamRuntimeControlOutcome), crate::TeamRuntimeDecodeError> {
         let outcome = crate::application::team_runtime_control::execute_inline(self, resolver, request).await;
@@ -171,6 +172,10 @@ impl OrganizationHandle {
             }
             // The next exclusive command follows all settlements sent by the joined producers.
         }
+    }
+
+    pub(crate) fn call_trace_id(&self) -> Option<String> {
+        self.call.as_ref().map(crate::call::CallScope::trace_id)
     }
 
     pub(crate) async fn call_admitted(&self) {
@@ -314,6 +319,7 @@ impl OrganizationHandle {
         idempotency_key: IdempotencyKey,
     ) -> Result<TeamMaterializationCommandOutcome, RequestAdmissionClosed> {
         let (reply, reply_rx) = self.reply_channel();
+        platform::trace::session_trace("runtime.team.owner.enqueue.start", serde_json::json!({}));
         self.inner
             .send_command(OrganizationCommand::ManualTeamMaterialize {
                 team_id,
@@ -324,9 +330,25 @@ impl OrganizationHandle {
                 reply,
             })
             .await
-            .map_err(closed)?;
+            .map_err(|error| {
+                platform::trace::session_trace(
+                    "runtime.team.owner.enqueue.end",
+                    serde_json::json!({"reason": "admission_closed"}),
+                );
+                closed(error)
+            })?;
+        platform::trace::session_trace(
+            "runtime.team.owner.enqueue.end",
+            serde_json::json!({"reason": "queued"}),
+        );
         self.call_admitted().await;
-        reply_rx.await.map_err(|_| closed_error())
+        reply_rx.await.map_err(|_| {
+            platform::trace::session_trace(
+                "runtime.team.owner.reply",
+                serde_json::json!({"reason": "sender_closed"}),
+            );
+            closed_error()
+        })
     }
 
     pub async fn manual_team_create(
@@ -341,6 +363,7 @@ impl OrganizationHandle {
     ) -> Result<ManualTeamCreateOutcome, RequestAdmissionClosed> {
         if let Some(call) = &self.call { call.references(Some(team_id.as_str()), Some(run.run_id().as_str()), None).await; }
         let (reply, reply_rx) = self.reply_channel();
+        platform::trace::session_trace("runtime.team.owner.enqueue.start", serde_json::json!({}));
         self.inner
             .send_command(OrganizationCommand::ManualTeamCreate {
                 team_id,
@@ -353,9 +376,25 @@ impl OrganizationHandle {
                 reply,
             })
             .await
-            .map_err(closed)?;
+            .map_err(|error| {
+                platform::trace::session_trace(
+                    "runtime.team.owner.enqueue.end",
+                    serde_json::json!({"reason": "admission_closed"}),
+                );
+                closed(error)
+            })?;
+        platform::trace::session_trace(
+            "runtime.team.owner.enqueue.end",
+            serde_json::json!({"reason": "queued"}),
+        );
         self.call_admitted().await;
-        reply_rx.await.map_err(|_| closed_error())
+        reply_rx.await.map_err(|_| {
+            platform::trace::session_trace(
+                "runtime.team.owner.reply",
+                serde_json::json!({"reason": "sender_closed"}),
+            );
+            closed_error()
+        })
     }
 
     pub async fn team_delete(
@@ -546,6 +585,55 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
+    pub(crate) async fn design_operation(
+        &self,
+        operation: crate::application::design::DesignOperation,
+        resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
+    ) -> Result<Result<serde_json::Value, StoreFault>, RequestAdmissionClosed> {
+        let changed = !matches!(
+            operation,
+            crate::application::design::DesignOperation::Snapshot { .. }
+                | crate::application::design::DesignOperation::Context { .. }
+        );
+        let run_id = operation.run_id().clone();
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_command(OrganizationCommand::Design {
+                operation,
+                resolver,
+                reply,
+            })
+            .await
+            .map_err(closed)?;
+        let outcome = rx.await.map_err(|_| closed_error())?;
+        if changed && outcome.is_ok() {
+            self.publish_team_run_wake(TeamRunWakeReason::StartGateChanged, Some(run_id));
+        }
+        Ok(outcome)
+    }
+
+    pub async fn record_evidence(
+        &self,
+        record: crate::run::evidence::EvidenceRecord,
+    ) -> Result<Result<crate::run::evidence::RecordOutcome, StoreFault>, RequestAdmissionClosed>
+    {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_command(OrganizationCommand::RecordEvidence { record, reply })
+            .await
+            .map_err(closed)?;
+        rx.await.map_err(|_| closed_error())
+    }
+
+    pub async fn execute_team_mcp(
+        &self,
+        name: String,
+        args: serde_json::Value,
+        resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
+    ) -> Result<serde_json::Value, RequestAdmissionClosed> {
+        crate::application::team_mcp::execute(self, &name, args, resolver).await
+    }
+
     pub async fn start_gate_prompt_plan(
         &self,
         lookup: StartGateRuntimeBindingLookup,
@@ -562,7 +650,19 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx
+            .await
+            .map_err(|_| closed_error())?
+            .map_err(|_| closed_error())?;
+        if let Some(plan) = &outcome {
+            if plan.design {
+                self.publish_team_run_wake(
+                    TeamRunWakeReason::StartGateChanged,
+                    Some(plan.run_id().clone()),
+                );
+            }
+        }
+        Ok(outcome)
     }
 
     pub async fn start_gate_terminal_proposal_set(
@@ -571,6 +671,8 @@ impl OrganizationHandle {
         proposal_id: String,
         source_delivery_id: String,
         final_assistant_text: String,
+        generation: String,
+        design: bool,
     ) -> Result<
         Result<Option<organization::SetRunStartProposalOutcome>, StoreFault>,
         RequestAdmissionClosed,
@@ -582,11 +684,20 @@ impl OrganizationHandle {
                 proposal_id,
                 source_delivery_id,
                 final_assistant_text,
+                generation,
+                design,
                 reply,
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if matches!(
+            outcome,
+            Ok(Some(crate::SetRunStartProposalOutcome::Recorded))
+        ) {
+            self.publish_team_run_wake(TeamRunWakeReason::StartGateChanged, None);
+        }
+        Ok(outcome)
     }
 
     pub async fn run_start_confirm(
@@ -631,7 +742,11 @@ impl OrganizationHandle {
             .await
             .map_err(closed)?;
         self.call_admitted().await;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if matches!(outcome, Ok(crate::ContinueRunDiscussionOutcome::Intake)) {
+            self.publish_team_run_wake(TeamRunWakeReason::StartGateChanged, None);
+        }
+        Ok(outcome)
     }
 
     pub async fn run_cancel(
@@ -1307,6 +1422,10 @@ async fn execute_team_runtime(
     command: TeamRuntimeCommand,
 ) -> Option<TeamRuntimeCommandOutcome> {
     Some(match command {
+        TeamRuntimeCommand::Design { .. } => TeamRuntimeCommandOutcome::Design {
+            read: false,
+            result: Err(StoreFault::InvalidFacts),
+        },
         TeamRuntimeCommand::PackageValidate { package_root } => {
             TeamRuntimeCommandOutcome::PackageValidate(
                 owner.team_skill_validate(package_root).await.ok()?,

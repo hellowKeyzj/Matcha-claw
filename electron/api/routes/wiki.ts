@@ -13,16 +13,13 @@ const WIKI_ROUTES = {
   '/api/wiki/project/open': { method: 'POST', action: 'openProject' },
   '/api/wiki/project/current': { method: 'GET', action: 'currentProject' },
   '/api/wiki/files': { method: 'GET', action: 'files' },
+  '/api/wiki/navigation': { method: 'GET', action: 'navigation' },
+  '/api/wiki/delete-page': { method: 'POST', action: 'deletePage' },
   '/api/wiki/read-file': { method: 'POST', action: 'readFile' },
   '/api/wiki/read-binary-file': { method: 'POST', action: 'readBinaryFile' },
   '/api/wiki/read-source-preview': { method: 'POST', action: 'readSourcePreview' },
   '/api/wiki/write-file': { method: 'POST', action: 'writeFile' },
   '/api/wiki/search': { method: 'POST', action: 'search' },
-  '/api/wiki/search-provider/test': { method: 'POST', action: 'testSearchProvider' },
-  '/api/wiki/research-tasks': { method: 'GET', action: 'researchTasks' },
-  '/api/wiki/research/start': { method: 'POST', action: 'startResearch' },
-  '/api/wiki/research-task/rerun': { method: 'POST', action: 'rerunResearchTask' },
-  '/api/wiki/research-task/remove': { method: 'POST', action: 'removeResearchTask' },
   '/api/wiki/graph': { method: 'GET', action: 'graph' },
   '/api/wiki/rescan-sources': { method: 'POST', action: 'rescanSources' },
   '/api/wiki/import-source': { method: 'POST', action: 'importSource' },
@@ -47,6 +44,20 @@ const WIKI_ROUTES = {
   '/api/wiki/project/export-archive': { method: 'POST', action: 'exportArchive' },
   '/api/wiki/project/import-archive': { method: 'POST', action: 'importArchive' },
   '/api/wiki/rebuild-index': { method: 'POST', action: 'rebuildIndex' },
+  '/api/wiki/dedup/detect': { method: 'POST', action: 'detectDuplicates' },
+  '/api/wiki/dedup/merge': { method: 'POST', action: 'mergeDuplicates' },
+  '/api/wiki/dedup/state': { method: 'GET', action: 'dedupState' },
+  '/api/wiki/dedup/cancel': { method: 'POST', action: 'cancelDedup' },
+  '/api/wiki/dedup/retry': { method: 'POST', action: 'retryDedup' },
+  '/api/wiki/dedup/resume': { method: 'POST', action: 'resumeDedup' },
+  '/api/wiki/dedup/exclude': { method: 'POST', action: 'excludeDuplicates' },
+  '/api/wiki/page-links': { method: 'GET', action: 'pageLinks' },
+  '/api/wiki/missing-page/create': { method: 'POST', action: 'createMissingPage' },
+  '/api/wiki/missing-page/cancel': { method: 'POST', action: 'cancelMissingPage' },
+  '/api/wiki/selection/generate': { method: 'POST', action: 'generateSelection' },
+  '/api/wiki/selection/task': { method: 'GET', action: 'selectionTask' },
+  '/api/wiki/selection/cancel': { method: 'POST', action: 'cancelSelection' },
+  '/api/wiki/selection/apply': { method: 'POST', action: 'applySelection' },
   '/api/wiki/qa/ask': { method: 'POST', action: 'askQuestion' },
   '/api/wiki/qa/task': { method: 'GET', action: 'questionTask' },
   '/api/wiki/qa/cancel': { method: 'POST', action: 'cancelQuestion' },
@@ -60,7 +71,6 @@ const WIKI_ROUTES = {
   '/api/wiki/lint/dismiss': { method: 'POST', action: 'dismissLint' },
   '/api/wiki/graph/insights': { method: 'GET', action: 'graphInsights' },
   '/api/wiki/graph/insights/dismiss': { method: 'POST', action: 'dismissGraphInsight' },
-  '/api/wiki/graph/insights/research-input': { method: 'POST', action: 'prepareInsightResearch' },
 } as const satisfies Record<string, { method: 'GET' | 'POST'; action: keyof WikiTransport }>;
 
 export async function handleWikiRoutes(
@@ -124,21 +134,21 @@ export async function handleWikiRoutes(
       const projectId = url.searchParams.get('projectId')?.trim() || undefined;
       const response = route.action === 'files'
         ? await transport.files(projectId, url.searchParams.get('directory') ?? undefined)
-        : route.action === 'graph' || route.action === 'graphInsights'
+        : route.action === 'graph' || route.action === 'graphInsights' || route.action === 'navigation'
           ? await transport[route.action](projectId)
           : route.action === 'sourceFiles'
             ? await transport.sourceFiles(projectId)
             : route.action === 'reviews'
               ? await transport.reviews(projectId)
-              : route.action === 'researchTasks'
-                ? await transport.researchTasks(projectId)
-                : route.action === 'historyStats'
-                  ? await transport.historyStats(projectId)
-                  : route.action === 'lintState'
-                    ? await transport.lintState(projectId)
-                    : route.action === 'questionTask'
-                      ? await transport.questionTask(projectId, url.searchParams.get('taskId') ?? undefined)
-                      : await (transport[route.action] as () => Promise<{ status: number; body: unknown }>)();
+              : route.action === 'historyStats'
+                ? await transport.historyStats(projectId)
+                : route.action === 'pageLinks'
+                  ? await transport.pageLinks(projectId, url.searchParams.get('relativePath') ?? undefined)
+                  : route.action === 'lintState' || route.action === 'dedupState'
+                  ? await transport[route.action](projectId)
+                  : route.action === 'questionTask' || route.action === 'selectionTask'
+                    ? await transport[route.action](projectId, url.searchParams.get('taskId') ?? undefined)
+                    : await (transport[route.action] as () => Promise<{ status: number; body: unknown }>)();
       sendJson(res, response.status, response.body);
       return true;
     }

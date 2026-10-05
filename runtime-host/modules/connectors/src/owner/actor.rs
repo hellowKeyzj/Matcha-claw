@@ -29,7 +29,7 @@ use crate::{
     },
     ports::{
         ConnectorObservation, ConnectorProjectionEffect, ConnectorRuntimeDirectory,
-        ConnectorSecretResolverPort, TeamRunMcpPreset, unavailable_connector_secret_authority,
+        ConnectorSecretResolverPort, McpPreset, unavailable_connector_secret_authority,
     },
     projection,
 };
@@ -40,7 +40,7 @@ pub struct ConnectorOwnerInput {
     pub state_dir: PathBuf,
     pub runtime_directory: Arc<dyn ConnectorRuntimeDirectory>,
     pub runtime_host_mcp_executable: PathBuf,
-    pub team_run_mcp_state_dir: PathBuf,
+    pub runtime_host_mcp_state_dir: PathBuf,
 }
 
 #[derive(Clone)]
@@ -48,7 +48,7 @@ pub(crate) struct ConnectorShared {
     observations: Arc<ObservationResults>,
     runtime_directory: Arc<dyn ConnectorRuntimeDirectory>,
     runtime_host_mcp_executable: PathBuf,
-    team_run_mcp_state_dir: PathBuf,
+    runtime_host_mcp_state_dir: PathBuf,
 }
 
 pub(crate) struct ConnectorGlobalState {
@@ -72,7 +72,7 @@ impl ConnectorOwner {
                 observations: Arc::new(ObservationResults::default()),
                 runtime_directory: input.runtime_directory,
                 runtime_host_mcp_executable: input.runtime_host_mcp_executable,
-                team_run_mcp_state_dir: input.team_run_mcp_state_dir,
+                runtime_host_mcp_state_dir: input.runtime_host_mcp_state_dir,
             },
             global: ConnectorGlobalState {
                 store,
@@ -528,9 +528,9 @@ async fn apply_connector_projection(
         return ConnectorProjectionEffect::Unavailable;
     };
     ops.apply_runtime_mcp_projection(
-        Some(TeamRunMcpPreset::new(
+        Some(McpPreset::new(
             &shared.runtime_host_mcp_executable,
-            &shared.team_run_mcp_state_dir,
+            &shared.runtime_host_mcp_state_dir,
         )),
         catalog(global),
         global.private_resolver.as_ref(),

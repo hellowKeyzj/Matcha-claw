@@ -284,15 +284,10 @@ pub mod run {
     };
 }
 
-pub use adapters::mcp::{
-    TeamGraphContextOutcome, TeamGraphContextRequest, TeamGraphContextRequestView,
-    TeamGraphPatchCommand, TeamNodeEventCommand, TeamNodeEventCommandKind, TeamRunMcpError,
-    TeamRunMcpFacade,
-};
+pub use adapters::mcp::TeamRunMcpFacade;
 pub use adapters::session_terminal::{
-    OrganizationRunPhase, OrganizationRunTerminalSnapshot, OrganizationSessionProvider,
-    OrganizationSessionTerminal, TeamMessageRepairSessionOutcome, TeamMessageRepairSessionPort,
-    TeamMessageRepairSessionRequest,
+    OrganizationRunPhase, OrganizationRunTerminalSnapshot, OrganizationSessionTerminal,
+    TeamMessageRepairSessionOutcome, TeamMessageRepairSessionPort, TeamMessageRepairSessionRequest,
 };
 pub use adapters::start_gate_send_hook::{
     PreparedStartGateSend, StartGateNativeEndpoint, StartGateRegistry, StartGateSendHook,
@@ -332,7 +327,8 @@ pub use ports::{
     InvalidRoleAgentMaterialization, InvalidRoleSessionRef, InvalidRunRuntimeReceipt,
     InvalidTeamMaterializationIntent, ManagedAgentReference, MaterializationOperationOutcome,
     MaterializationOperationReceipt, MaterializationReceipt, MaterializationRejection,
-    MaterializationSource, NativeEffectFailure, NativeRunSettled, NativeWorkspaceReceipt,
+    MaterializationSource, MemberIntroductionError, MemberIntroductionRequest, MemberProfile,
+    NativeEffectFailure, NativeRunSettled, NativeWorkspaceReceipt,
     OrganizationNativeRuntime, OrganizationRuntimeDirectory, ROLE_SESSION_REF_INITIAL,
     RoleAgentMaterialization, RoleMaterializationAgent, RoleMaterializationOwnership,
     RoleMaterializationReceipt, RoleSessionAbortOutcome, RoleSessionAbortReceipt,
@@ -341,7 +337,9 @@ pub use ports::{
     RoleSessionRef, RoleSessionSlot, RoleSessionWindow, RunRuntimeReceipt,
     RuntimeEndpointReference, RuntimeReceiptOutcome, SessionWindowReference, TeamActivityExecutor,
     TeamMaterializationIntent, TeamMaterializationPort, TeamMaterializationRemoval,
-    TeamMaterializationRequest, TeamNativeEffectsPort,
+    TeamMaterializationRequest, TeamMemberIntroductions, TeamNativeEffectsPort,
+    TeamProvisionMemberStatus, TeamProvisionObserver, TeamProvisionProgress,
+    TeamProvisionReporter, TeamProvisionStage, TeamProvisionUpdate,
 };
 pub use run::delivery::{NativeRunReceiptReference, NativeTerminalStatus};
 pub use run::event::ApprovalAction;
@@ -434,10 +432,6 @@ pub fn open_organization_store(
     state_dir: &std::path::Path,
 ) -> Result<OrganizationStore, StoreFault> {
     OrganizationStore::open(state_dir.join(ORGANIZATION_FACTS_FILE))
-}
-
-pub fn team_run_mcp_provider(state_dir: &std::path::Path) -> Result<TeamRunMcpFacade, StoreFault> {
-    open_organization_store(state_dir).map(TeamRunMcpFacade::from_canonical_store)
 }
 
 pub use team::{

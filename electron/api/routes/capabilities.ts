@@ -6,7 +6,9 @@ import {
 import type { RuntimeHostJsonValue } from '../../main/runtime-host-delivery/control';
 import type { RuntimeHostTransportContext } from '../context';
 import { dispatchSessionCapability, type SessionCapabilityRouteDeps } from './sessions';
+import { SESSION_PAGE_HEADER } from '../../main/renderer-event-routes';
 import {
+  isSessionTraceEnabled,
   logSessionTrace,
   readTraceHeader,
   summarizeIdentifier,
@@ -15,6 +17,11 @@ import { isTeamRuntimeCapabilityRequest } from './team-runtime-capability';
 import { parseJsonBody, sendJson } from '../route-utils';
 import type { TaskManagerTransport } from '../../main/runtime-host-delivery/transport/task-manager';
 import { decodeCallReceipt } from '../../../src/types/call-log/receipt';
+import {
+  isOpenClawQuestionListInput,
+  isOpenClawQuestionResolveInput,
+} from '../../../src/types/openclaw-question';
+import type { SessionPage } from '../../main/renderer-event-routes';
 
 const CAPABILITY_NOT_AVAILABLE = {
   success: false,
@@ -160,10 +167,21 @@ export async function handleCapabilityRoutes(
     return false;
   }
 
+  const traceId = readTraceHeader(req.headers);
+  const traceStartedAt = traceId && isSessionTraceEnabled() ? Date.now() : 0;
+  const trace = (stage: string, payload: Record<string, unknown> = {}): void => {
+    if (!traceStartedAt) return;
+    logSessionTrace(`electron.hostapi.capability.${stage}`, traceId, {
+      path: '/api/capabilities/execute', elapsedMs: Date.now() - traceStartedAt, ...payload,
+    });
+  };
   let body: unknown;
+  trace('parse.start');
   try {
     body = await parseJsonBody<unknown>(req);
+    trace('parse.end', { outcome: 'parsed' });
   } catch {
+    trace('parse.end', { outcome: 'failed', status: 500 });
     sendJson(res, 500, CAPABILITY_REQUEST_FAILED);
     return true;
   }
@@ -195,15 +213,33 @@ export async function handleCapabilityRoutes(
     return true;
   }
 
+  const sessionController = new AbortController();
+  const cancelSessionObservation = (): void => {
+    if (res.closed && !res.writableFinished) sessionController.abort();
+  };
+  res.once('close', cancelSessionObservation);
+  cancelSessionObservation();
   try {
-    const sessionResponse = await dispatchSessionCapability(body, deps, readTraceHeader(req.headers));
+    trace('session-dispatch.start');
+    const sessionResponse = await dispatchSessionCapability(body, deps, readTraceHeader(req.headers),
+      deps.sessionObservers.resolve(req.headers[SESSION_PAGE_HEADER.toLowerCase()]), sessionController.signal);
+    trace('session-dispatch.end', {
+      outcome: sessionController.signal.aborted ? 'aborted' : sessionResponse ? 'handled' : 'unhandled',
+      status: sessionResponse?.status ?? null,
+    });
     if (sessionResponse) {
-      sendJson(res, sessionResponse.status, sessionResponse.body);
+      if (!sessionController.signal.aborted) sendJson(res, sessionResponse.status, sessionResponse.body);
       return true;
     }
   } catch {
-    sendJson(res, 500, CAPABILITY_REQUEST_FAILED);
+    trace('session-dispatch.end', {
+      outcome: sessionController.signal.aborted ? 'aborted' : 'failed',
+      status: sessionController.signal.aborted ? null : 500,
+    });
+    if (!sessionController.signal.aborted) sendJson(res, 500, CAPABILITY_REQUEST_FAILED);
     return true;
+  } finally {
+    res.removeListener('close', cancelSessionObservation);
   }
 
   if (isRecord(body) && body.id === 'scheduler.cron') {
@@ -247,7 +283,8 @@ export async function handleCapabilityRoutes(
   }
 
   if (body.id === 'openclaw.question') {
-    const response = await executeOpenClawQuestionCapability(body, deps);
+    const response = await executeOpenClawQuestionCapability(body, deps,
+      deps.sessionObservers.resolve(req.headers[SESSION_PAGE_HEADER.toLowerCase()]));
     sendJson(res, response.status, response.body);
     return true;
   }
@@ -454,12 +491,14 @@ async function executeOpenClawMcpAppCapability(
 async function executeOpenClawQuestionCapability(
   body: Record<string, unknown>,
   deps: CapabilityRouteContext,
+  page: SessionPage | undefined,
 ): Promise<{ status: number; body: unknown }> {
-  if (!isOpenClawQuestionRequest(body)) {
+  if (!deps.sessionObservers.isCurrent(page) || !isOpenClawQuestionRequest(body)) {
     return { status: 400, body: OPENCLAW_QUESTION_REQUEST_INVALID };
   }
   try {
     const response = await deps.runtimeHostTransports.openClawGatewayTransport.execute(body);
+    if (!deps.sessionObservers.isCurrent(page)) return { status: 400, body: OPENCLAW_QUESTION_REQUEST_INVALID };
     return projectOpenClawGatewayResponse(response, OPENCLAW_QUESTION_REQUEST_INVALID, OPENCLAW_QUESTION_UNAVAILABLE);
   } catch {
     return { status: 503, body: OPENCLAW_QUESTION_UNAVAILABLE };
@@ -558,38 +597,10 @@ function isOpenClawMcpAppInput(value: unknown): boolean {
 function isOpenClawQuestionRequest(value: Record<string, unknown>): boolean {
   return hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'openclaw.question'
-    && value.operationId === 'question.resolve'
     && isNativeRuntimeScope(value.scope)
     && value.target === null
-    && isOpenClawQuestionInput(value.input);
-}
-
-function isOpenClawQuestionInput(value: unknown): boolean {
-  return isRecord(value)
-    && hasOnlyKeys(value, ['id', 'answers', 'resolvedBy', 'resolutionId'])
-    && Object.hasOwn(value, 'id')
-    && Object.hasOwn(value, 'answers')
-    && isNonEmptyText(value.id)
-    && isQuestionAnswers(value.answers)
-    && (value.resolvedBy === undefined || isNonEmptyText(value.resolvedBy))
-    && (value.resolutionId === undefined || isNonEmptyText(value.resolutionId));
-}
-
-function isQuestionAnswers(value: unknown): boolean {
-  if (!isRecord(value) || !hasExactKeys(value, ['answers']) || !isRecord(value.answers)) {
-    return false;
-  }
-  return Object.entries(value.answers).every(([key, answer]) => isQuestionKey(key)
-    && Array.isArray(answer)
-    && answer.every(isAnswerText));
-}
-
-function isQuestionKey(value: string): boolean {
-  return /^[a-z][a-z0-9_]*$/.test(value);
-}
-
-function isAnswerText(value: unknown): value is string {
-  return typeof value === 'string' && value.length <= 4096 && !value.includes('\0');
+    && ((value.operationId === 'question.list' && isOpenClawQuestionListInput(value.input))
+      || (value.operationId === 'question.resolve' && isOpenClawQuestionResolveInput(value.input)));
 }
 
 function isMcpAppOperationId(value: unknown): value is string {

@@ -81,8 +81,8 @@ impl Bootstrap {
                 },
                 matcha_secret,
                 open_claw: OpenClawInput {
-                    team_run_mcp_executable: self.runtime_host_mcp_executable,
-                    team_run_mcp_state_dir: runtime_host_state_dir.clone(),
+                    runtime_host_mcp_executable: self.runtime_host_mcp_executable,
+                    runtime_host_mcp_state_dir: runtime_host_state_dir.clone(),
                     electron_image: self.open_claw.electron_image,
                     working_directory: self.open_claw.working_directory,
                     openclaw_dir: self.open_claw.openclaw_dir,

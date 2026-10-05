@@ -24,6 +24,21 @@ use crate::{
     },
 };
 
+const DEDUP_DETECT_PATH: &str = "/api/wiki/dedup/detect";
+const DEDUP_MERGE_PATH: &str = "/api/wiki/dedup/merge";
+const DEDUP_STATE_PATH: &str = "/api/wiki/dedup/state";
+const CANCEL_DEDUP_PATH: &str = "/api/wiki/dedup/cancel";
+const RETRY_DEDUP_PATH: &str = "/api/wiki/dedup/retry";
+const RESUME_DEDUP_PATH: &str = "/api/wiki/dedup/resume";
+const EXCLUDE_DUPLICATES_PATH: &str = "/api/wiki/dedup/exclude";
+const PAGE_LINKS_PATH: &str = "/api/wiki/page-links";
+const CREATE_MISSING_PAGE_PATH: &str = "/api/wiki/missing-page/create";
+const CANCEL_MISSING_PAGE_PATH: &str = "/api/wiki/missing-page/cancel";
+const GENERATE_SELECTION_PATH: &str = "/api/wiki/selection/generate";
+const SELECTION_TASK_PATH: &str = "/api/wiki/selection/task";
+const CANCEL_SELECTION_PATH: &str = "/api/wiki/selection/cancel";
+const APPLY_SELECTION_PATH: &str = "/api/wiki/selection/apply";
+
 const MODULE_ID: ModuleId = ModuleId::new("wiki");
 const ROUTE_ID: &str = "wiki.loopback";
 const AUTHORIZATION_SCOPE_READ: &str = "wiki:read";
@@ -41,16 +56,13 @@ const CREATE_PROJECT_PATH: &str = "/api/wiki/project/create";
 const OPEN_PROJECT_PATH: &str = "/api/wiki/project/open";
 const CURRENT_PROJECT_PATH: &str = "/api/wiki/project/current";
 const FILES_PATH: &str = "/api/wiki/files";
+const NAVIGATION_PATH: &str = "/api/wiki/navigation";
+const DELETE_PAGE_PATH: &str = "/api/wiki/delete-page";
 const READ_FILE_PATH: &str = "/api/wiki/read-file";
 const READ_BINARY_FILE_PATH: &str = "/api/wiki/read-binary-file";
 const READ_SOURCE_PREVIEW_PATH: &str = "/api/wiki/read-source-preview";
 const WRITE_FILE_PATH: &str = "/api/wiki/write-file";
 const SEARCH_CONFIG_PATH: &str = "/api/wiki/search-config";
-const SEARCH_PROVIDER_TEST_PATH: &str = "/api/wiki/search-provider/test";
-const RESEARCH_TASKS_PATH: &str = "/api/wiki/research-tasks";
-const RESEARCH_START_PATH: &str = "/api/wiki/research/start";
-const RESEARCH_RERUN_PATH: &str = "/api/wiki/research-task/rerun";
-const RESEARCH_REMOVE_PATH: &str = "/api/wiki/research-task/remove";
 const SEARCH_PATH: &str = "/api/wiki/search";
 const GRAPH_PATH: &str = "/api/wiki/graph";
 const RESCAN_SOURCES_PATH: &str = "/api/wiki/rescan-sources";
@@ -97,7 +109,6 @@ const DISMISS_LINT_PATH: &str = "/api/wiki/lint/dismiss";
 const REINDEX_PATH: &str = "/api/wiki/embedding/reindex";
 const GRAPH_INSIGHTS_PATH: &str = "/api/wiki/graph/insights";
 const DISMISS_GRAPH_INSIGHT_PATH: &str = "/api/wiki/graph/insights/dismiss";
-const GRAPH_INSIGHT_RESEARCH_PATH: &str = "/api/wiki/graph/insights/research-input";
 
 #[derive(Clone)]
 pub struct Dependencies {
@@ -127,7 +138,7 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     if !is_wiki_path(path) {
         return None;
     }
-    let max_bytes = if matches!(path, WRITE_FILE_PATH | APPLY_GENERATED_PAGES_PATH) {
+    let max_bytes = if matches!(path, WRITE_FILE_PATH | APPLY_GENERATED_PAGES_PATH | GENERATE_SELECTION_PATH | APPLY_SELECTION_PATH) {
         WRITE_REQUEST_BYTES
     } else {
         DEFAULT_REQUEST_BYTES
@@ -165,33 +176,110 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
 
     let query = query(request.path());
     match route {
-        Route::ResearchTasks => deliver(
+        Route::GenerateSelection => {
+            let Some(input) = decode_body::<crate::WikiSelectionInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_selection_generate(input).await)
+        }
+        Route::SelectionTask => {
+            let Some(task_id) = query_value(query, "taskId") else {
+                return invalid();
+            };
+            deliver(
+                dependencies.wiki.selection_task(crate::WikiSelectionTaskInput {
+                    project_id: query_value(query, "projectId"),
+                    task_id,
+                }).await,
+            )
+        }
+        Route::CancelSelection => {
+            let Some(input) = decode_body::<crate::WikiSelectionTaskInput>(&request) else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.cancel_selection(input).await)
+        }
+        Route::ApplySelection => {
+            let Some(input) = decode_body::<crate::WikiSelectionApplyInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_selection_apply(input).await)
+        }
+        Route::DedupDetect => {
+            let Some(input) = decode_body::<crate::WikiDedupDetectInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_dedup_detect(input).await)
+        }
+        Route::DedupMerge => {
+            let Some(input) = decode_body::<crate::WikiDedupMergeInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_dedup_merge(input).await)
+        }
+        Route::CancelDedup => {
+            let Some(input) = decode_body::<crate::WikiDedupTaskInput>(&request) else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.cancel_dedup(input).await)
+        }
+        Route::RetryDedup => {
+            let Some(input) = decode_body::<crate::WikiDedupTaskInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_dedup_retry(input).await)
+        }
+        Route::ResumeDedup => {
+            let Some(input) = decode_body::<crate::WikiDedupTaskInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_dedup_resume(input).await)
+        }
+        Route::ExcludeDuplicates => {
+            let Some(input) = decode_body::<crate::WikiDedupExcludeInput>(&request) else {
+                return invalid();
+            };
+            deliver(dependencies.wiki.exclude_duplicates(input).await)
+        }
+        Route::CreateMissingPage => {
+            let Some(input) = decode_body::<crate::WikiMissingPageInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_create_missing_page(input).await)
+        }
+        Route::CancelMissingPage => {
+            let Some(input) = decode_body::<crate::WikiMissingPageCancelInput>(&request) else {
+                return invalid();
+            };
+            deliver(
+                dependencies
+                    .wiki
+                    .cancel_missing_page(input)
+                    .await
+                    .map(|cancelled| json!({ "cancelled": cancelled })),
+            )
+        }
+        Route::DedupState => deliver(
             dependencies
                 .wiki
-                .research_tasks(WikiProjectSelector {
+                .dedup_state(WikiProjectSelector {
                     project_id: query_value(query, "projectId"),
                 })
                 .await,
         ),
-        Route::StartResearch => {
-            let Some(input) = decode_body::<crate::research::WikiResearchInput>(&request) else {
+        Route::PageLinks => {
+            let Some(relative_path) = query_value(query, "relativePath") else {
                 return invalid();
             };
-            admit(dependencies.wiki.start_research(input).await)
-        }
-        Route::RerunResearch => {
-            let Some(input) = decode_body::<crate::research::WikiResearchTaskActionInput>(&request)
-            else {
-                return invalid();
-            };
-            admit(dependencies.wiki.rerun_research(input).await)
-        }
-        Route::RemoveResearchTask => {
-            let Some(input) = decode_body::<crate::research::WikiResearchRemoveInput>(&request)
-            else {
-                return invalid();
-            };
-            deliver(dependencies.wiki.remove_research_task(input).await)
+            deliver(
+                dependencies
+                    .wiki
+                    .page_links(WikiPathSelector {
+                        project_id: query_value(query, "projectId"),
+                        relative_path,
+                    })
+                    .await,
+            )
         }
         Route::SearchConfig => {
             let project_id = match selected_project_id(
@@ -233,27 +321,6 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             {
                 Ok(config) => {
                     Response::json(200, json!({ "projectId": project_id, "config": config }))
-                }
-                Err(error) => failure(error),
-            }
-        }
-        Route::TestSearchProvider => {
-            let Some((project_id, input)) =
-                decode_project_body::<crate::external_search::SearchProviderTest>(&request)
-            else {
-                return invalid();
-            };
-            let project_id = match selected_project_id(&dependencies.wiki, project_id).await {
-                Ok(id) => id,
-                Err(error) => return failure(error),
-            };
-            match dependencies
-                .wiki
-                .test_search_provider(Some(project_id.clone()), input)
-                .await
-            {
-                Ok(results) => {
-                    Response::json(200, json!({ "projectId": project_id, "results": results }))
                 }
                 Err(error) => failure(error),
             }
@@ -448,19 +515,6 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             };
             deliver(dependencies.wiki.dismiss_graph_insight(input).await)
         }
-        Route::GraphInsightResearchInput => {
-            let Some(input) =
-                decode_body::<crate::insights::WikiGraphInsightResearchInput>(&request)
-            else {
-                return invalid();
-            };
-            admit(
-                dependencies
-                    .wiki
-                    .admit_graph_insight_research_input(input)
-                    .await,
-            )
-        }
         Route::Status => deliver(dependencies.wiki.status().await),
         Route::Projects => deliver(dependencies.wiki.projects().await),
         Route::ProjectTemplates => deliver(dependencies.wiki.project_templates().await),
@@ -474,6 +528,20 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
                 directory: query_value(query, "directory").unwrap_or_default(),
             };
             deliver(dependencies.wiki.files(input).await)
+        }
+        Route::Navigation => deliver(
+            dependencies
+                .wiki
+                .navigation(WikiProjectSelector {
+                    project_id: query_value(query, "projectId"),
+                })
+                .await,
+        ),
+        Route::DeletePage => {
+            let Some(input) = decode_body::<crate::WikiDeletePageInput>(&request) else {
+                return invalid();
+            };
+            admit(dependencies.wiki.admit_delete_page(input).await)
         }
         Route::Graph => deliver(
             dependencies
@@ -683,13 +751,22 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
 
 #[derive(Clone, Copy)]
 enum Route {
-    ResearchTasks,
-    StartResearch,
-    RerunResearch,
-    RemoveResearchTask,
+    GenerateSelection,
+    SelectionTask,
+    CancelSelection,
+    ApplySelection,
+    DedupDetect,
+    DedupMerge,
+    DedupState,
+    CancelDedup,
+    RetryDedup,
+    ResumeDedup,
+    ExcludeDuplicates,
+    PageLinks,
+    CreateMissingPage,
+    CancelMissingPage,
     SearchConfig,
     UpdateSearchConfig,
-    TestSearchProvider,
     Status,
     Projects,
     ProjectTemplates,
@@ -709,6 +786,8 @@ enum Route {
     ImportFolder,
     ApplyGeneratedPages,
     DeleteSource,
+    DeletePage,
+    Navigation,
     CallResult,
     SourceFiles,
     SourceTasks,
@@ -751,19 +830,27 @@ enum Route {
     StartReindex,
     GraphInsights,
     DismissGraphInsight,
-    GraphInsightResearchInput,
 }
 
 impl Route {
     fn match_request(method: &str, path: &str) -> Option<Self> {
         Some(match (method, path) {
+            ("POST", GENERATE_SELECTION_PATH) => Self::GenerateSelection,
+            ("GET", SELECTION_TASK_PATH) => Self::SelectionTask,
+            ("POST", CANCEL_SELECTION_PATH) => Self::CancelSelection,
+            ("POST", APPLY_SELECTION_PATH) => Self::ApplySelection,
+            ("POST", DEDUP_DETECT_PATH) => Self::DedupDetect,
+            ("POST", DEDUP_MERGE_PATH) => Self::DedupMerge,
+            ("GET", DEDUP_STATE_PATH) => Self::DedupState,
+            ("POST", CANCEL_DEDUP_PATH) => Self::CancelDedup,
+            ("POST", RETRY_DEDUP_PATH) => Self::RetryDedup,
+            ("POST", RESUME_DEDUP_PATH) => Self::ResumeDedup,
+            ("POST", EXCLUDE_DUPLICATES_PATH) => Self::ExcludeDuplicates,
+            ("GET", PAGE_LINKS_PATH) => Self::PageLinks,
+            ("POST", CREATE_MISSING_PAGE_PATH) => Self::CreateMissingPage,
+            ("POST", CANCEL_MISSING_PAGE_PATH) => Self::CancelMissingPage,
             ("GET", SEARCH_CONFIG_PATH) => Self::SearchConfig,
             ("POST", SEARCH_CONFIG_PATH) => Self::UpdateSearchConfig,
-            ("POST", SEARCH_PROVIDER_TEST_PATH) => Self::TestSearchProvider,
-            ("GET", RESEARCH_TASKS_PATH) => Self::ResearchTasks,
-            ("POST", RESEARCH_START_PATH) => Self::StartResearch,
-            ("POST", RESEARCH_RERUN_PATH) => Self::RerunResearch,
-            ("POST", RESEARCH_REMOVE_PATH) => Self::RemoveResearchTask,
             ("GET", STATUS_PATH) => Self::Status,
             ("GET", PROJECTS_PATH) => Self::Projects,
             ("GET", PROJECT_TEMPLATES_PATH) => Self::ProjectTemplates,
@@ -771,6 +858,8 @@ impl Route {
             ("POST", OPEN_PROJECT_PATH) => Self::OpenProject,
             ("GET", CURRENT_PROJECT_PATH) => Self::CurrentProject,
             ("GET", FILES_PATH) => Self::Files,
+            ("GET", NAVIGATION_PATH) => Self::Navigation,
+            ("POST", DELETE_PAGE_PATH) => Self::DeletePage,
             ("POST", READ_FILE_PATH) => Self::ReadFile,
             ("POST", READ_BINARY_FILE_PATH) => Self::ReadBinaryFile,
             ("POST", READ_SOURCE_PREVIEW_PATH) => Self::ReadSourcePreview,
@@ -825,18 +914,24 @@ impl Route {
             ("POST", REINDEX_PATH) => Self::StartReindex,
             ("GET", GRAPH_INSIGHTS_PATH) => Self::GraphInsights,
             ("POST", DISMISS_GRAPH_INSIGHT_PATH) => Self::DismissGraphInsight,
-            ("POST", GRAPH_INSIGHT_RESEARCH_PATH) => Self::GraphInsightResearchInput,
             _ => return None,
         })
     }
 
     const fn scope(self) -> &'static str {
         match self {
-            Self::StartResearch
-            | Self::RerunResearch
-            | Self::RemoveResearchTask
+            Self::GenerateSelection
+            | Self::CancelSelection
+            | Self::ApplySelection
+            | Self::DedupDetect
+            | Self::DedupMerge
+            | Self::CancelDedup
+            | Self::RetryDedup
+            | Self::ResumeDedup
+            | Self::ExcludeDuplicates
+            | Self::CreateMissingPage
+            | Self::CancelMissingPage
             | Self::UpdateSearchConfig
-            | Self::TestSearchProvider
             | Self::CreateProject
             | Self::OpenProject
             | Self::WriteFile
@@ -846,6 +941,7 @@ impl Route {
             | Self::ImportFolder
             | Self::ApplyGeneratedPages
             | Self::DeleteSource
+            | Self::DeletePage
             | Self::CallResult
             | Self::UpdateSourceWatchConfig
             | Self::CancelSourceTask
@@ -874,15 +970,17 @@ impl Route {
             | Self::DeleteLint
             | Self::DismissLint
             | Self::StartReindex
-            | Self::DismissGraphInsight
-            | Self::GraphInsightResearchInput => AUTHORIZATION_SCOPE_WRITE,
-            Self::ResearchTasks
+            | Self::DismissGraphInsight => AUTHORIZATION_SCOPE_WRITE,
+            Self::SelectionTask
+            | Self::DedupState
+            | Self::PageLinks
             | Self::SearchConfig
             | Self::Status
             | Self::Projects
             | Self::ProjectTemplates
             | Self::CurrentProject
             | Self::Files
+            | Self::Navigation
             | Self::ReadFile
             | Self::ReadBinaryFile
             | Self::ReadSourcePreview
@@ -1120,9 +1218,16 @@ async fn authorize(
                 endpoint,
                 APPLY_GENERATED_PAGES_PATH
                     | DELETE_SOURCE_PATH
+                    | DELETE_PAGE_PATH
                     | CALL_RESULT_PATH
                     | EXPORT_ARCHIVE_PATH
                     | IMPORT_ARCHIVE_PATH
+                    | DEDUP_DETECT_PATH
+                    | CREATE_MISSING_PAGE_PATH
+                    | GENERATE_SELECTION_PATH
+                    | SELECTION_TASK_PATH
+                    | CANCEL_SELECTION_PATH
+                    | APPLY_SELECTION_PATH
             ) || decision.principal() == "electron-main-local"
         })
 }
@@ -1233,12 +1338,21 @@ fn error_message(error: &WikiFailure) -> String {
 fn is_wiki_path(path: &str) -> bool {
     matches!(
         path,
-        SEARCH_CONFIG_PATH
-            | SEARCH_PROVIDER_TEST_PATH
-            | RESEARCH_TASKS_PATH
-            | RESEARCH_START_PATH
-            | RESEARCH_RERUN_PATH
-            | RESEARCH_REMOVE_PATH
+        GENERATE_SELECTION_PATH
+            | SELECTION_TASK_PATH
+            | CANCEL_SELECTION_PATH
+            | APPLY_SELECTION_PATH
+            | DEDUP_DETECT_PATH
+            | DEDUP_MERGE_PATH
+            | DEDUP_STATE_PATH
+            | CANCEL_DEDUP_PATH
+            | RETRY_DEDUP_PATH
+            | RESUME_DEDUP_PATH
+            | EXCLUDE_DUPLICATES_PATH
+            | PAGE_LINKS_PATH
+            | CREATE_MISSING_PAGE_PATH
+            | CANCEL_MISSING_PAGE_PATH
+            | SEARCH_CONFIG_PATH
             | STATUS_PATH
             | PROJECTS_PATH
             | PROJECT_TEMPLATES_PATH
@@ -1246,6 +1360,8 @@ fn is_wiki_path(path: &str) -> bool {
             | OPEN_PROJECT_PATH
             | CURRENT_PROJECT_PATH
             | FILES_PATH
+            | NAVIGATION_PATH
+            | DELETE_PAGE_PATH
             | READ_FILE_PATH
             | READ_BINARY_FILE_PATH
             | READ_SOURCE_PREVIEW_PATH
@@ -1296,7 +1412,6 @@ fn is_wiki_path(path: &str) -> bool {
             | REINDEX_PATH
             | GRAPH_INSIGHTS_PATH
             | DISMISS_GRAPH_INSIGHT_PATH
-            | GRAPH_INSIGHT_RESEARCH_PATH
     )
 }
 

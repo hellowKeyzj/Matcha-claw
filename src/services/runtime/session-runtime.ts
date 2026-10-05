@@ -6,6 +6,8 @@ import {
   hostSessionList,
   hostSessionNew,
   hostSessionPrompt,
+  hostSessionObserve,
+  hostSessionRelease,
   hostSessionWindowFetch,
 } from '@/lib/host-api';
 import {
@@ -65,6 +67,16 @@ export async function createSessionTarget(input: CreateSessionInput): Promise<Se
     agentId: view.identity.agentId ?? input.agentId,
     sessionKey: view.identity.sessionKey,
   }, view.endpointSessionId);
+}
+
+export async function observeChatSession(input: { sessionIdentity: SessionIdentity; leaseId: string; limit?: number }, options?: { timeoutMs?: number; traceId?: string | null }) {
+  const result = await hostSessionObserve(input, options);
+  if ('view' in result && buildSessionIdentityKey(result.view.identity) !== buildSessionIdentityKey(input.sessionIdentity)) throw new Error('Session observation identity mismatch');
+  return result;
+}
+
+export async function releaseChatSession(input: { sessionIdentity: SessionIdentity; leaseId: string }) {
+  return hostSessionRelease(input);
 }
 
 export async function fetchChatTimeline(

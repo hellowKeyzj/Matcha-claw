@@ -5,7 +5,8 @@ use serde_json::Value;
 
 use crate::{
     adapters::loopback::key::is_cron_session_key,
-    send::{Attachment, NativeEndpoint, SessionSendCommand, SessionSendOutcome},
+    send::{Attachment, SessionSendCommand, SessionSendOutcome},
+    state::{SessionIdentity, SessionProvider},
 };
 
 pub(crate) mod handler;
@@ -33,33 +34,25 @@ pub(crate) enum DecodeError {
 pub(crate) struct SessionSendRequest {
     id: String,
     operation_id: String,
-    scope: Scope,
+    scope: Target,
     target: Target,
     input: Input,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Scope {
-    kind: String,
-    endpoint: Endpoint,
-    session_key: String,
-    route_key: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Target {
     kind: String,
+    identity: SessionIdentity,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Input {
-    endpoint: Endpoint,
-    session_key: String,
+    identity: SessionIdentity,
     endpoint_session_id: Option<String>,
     message: String,
+    intent: Option<crate::goal::SessionSendIntent>,
     run_id: Option<String>,
     idempotency_key: Option<String>,
     deliver: Option<bool>,
@@ -74,33 +67,6 @@ struct AttachmentRequest {
     content: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Endpoint {
-    kind: String,
-    runtime_adapter_id: String,
-    runtime_instance_id: String,
-}
-
-impl Endpoint {
-    fn parse(&self) -> Option<NativeEndpoint> {
-        NativeEndpoint::parse(
-            &self.kind,
-            &self.runtime_adapter_id,
-            &self.runtime_instance_id,
-        )
-    }
-}
-
-fn valid_route_key(value: &str) -> bool {
-    value.starts_with("renderer-route:")
-        && value.len() <= 128
-        && value
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b':' | b'-' | b'_'))
-}
-
 fn valid_endpoint_session_id(value: Option<&str>) -> bool {
     value.is_none_or(|value| {
         !value.is_empty()
@@ -110,8 +76,8 @@ fn valid_endpoint_session_id(value: Option<&str>) -> bool {
     })
 }
 
-fn is_openclaw_cron_session_key(endpoint: &Endpoint, session_key: &str) -> bool {
-    endpoint.parse() == Some(NativeEndpoint::OpenClawLocal) && is_cron_session_key(session_key)
+fn is_openclaw_cron_session_key(identity: &SessionIdentity) -> bool {
+    identity.provider() == SessionProvider::OpenClaw && is_cron_session_key(identity.session_key())
 }
 
 impl SessionSendRequest {
@@ -145,12 +111,11 @@ impl SessionSendRequest {
             && self.operation_id == OPERATION_ID
             && self.scope.kind == "session"
             && self.target.kind == "session"
-            && self.scope.endpoint == self.input.endpoint
-            && self.scope.endpoint.parse().is_some()
-            && !is_openclaw_cron_session_key(&self.scope.endpoint, &self.scope.session_key)
-            && self.scope.session_key == self.input.session_key
-            && valid_endpoint_session_id(self.input.endpoint_session_id.as_deref())
-            && valid_route_key(&self.scope.route_key))
+            && self.scope.identity == self.target.identity
+            && self.scope.identity == self.input.identity
+            && self.scope.identity.validate().is_ok()
+            && !is_openclaw_cron_session_key(&self.scope.identity)
+            && valid_endpoint_session_id(self.input.endpoint_session_id.as_deref()))
         .then_some(())
         .ok_or(RequestError::Invalid)
     }
@@ -159,7 +124,6 @@ impl SessionSendRequest {
         self,
         trace_id: Option<String>,
     ) -> Result<SessionSendCommand, RequestError> {
-        let endpoint = self.scope.endpoint.parse().ok_or(RequestError::Invalid)?;
         let attachments = self
             .input
             .attachments
@@ -170,11 +134,9 @@ impl SessionSendRequest {
                 content: attachment.content,
             })
             .collect();
-        SessionSendCommand::try_new(
-            endpoint,
-            self.input.session_key,
+        let command = SessionSendCommand::try_new(
+            self.input.identity,
             self.input.endpoint_session_id,
-            self.scope.route_key,
             self.input.message,
             self.input.run_id,
             self.input.idempotency_key,
@@ -182,7 +144,11 @@ impl SessionSendRequest {
             attachments,
             trace_id,
         )
-        .map_err(|_| RequestError::Invalid)
+        .map_err(|_| RequestError::Invalid)?;
+        match self.input.intent {
+            Some(intent) => command.with_intent(intent).map_err(|_| RequestError::Invalid),
+            None => Ok(command),
+        }
     }
 }
 

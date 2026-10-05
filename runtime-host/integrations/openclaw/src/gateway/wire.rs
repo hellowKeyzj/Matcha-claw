@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 pub mod agents;
 pub(crate) mod channel;
@@ -43,7 +43,6 @@ pub(crate) const GATEWAY_TEAM_READ_SCOPE: &str = "operator.read";
 #[cfg(test)]
 pub(crate) const GATEWAY_TEAM_WRITE_SCOPE: &str = "operator.write";
 pub(crate) const GATEWAY_CRON_ADMIN_SCOPE: &str = "operator.admin";
-#[cfg(test)]
 pub const SESSIONS_SUBSCRIBE_METHOD: &str = "sessions.subscribe";
 pub(crate) const SESSIONS_MESSAGES_SUBSCRIBE_METHOD: &str = "sessions.messages.subscribe";
 #[cfg(test)]
@@ -412,7 +411,6 @@ pub fn gateway_logs_tail_request(
     )
 }
 
-#[cfg(test)]
 pub(crate) fn sessions_subscribe_request(request_id: String) -> Result<RpcRequest, WireError> {
     rpc_request(
         request_id,
@@ -424,15 +422,30 @@ pub(crate) fn sessions_subscribe_request(request_id: String) -> Result<RpcReques
 pub(crate) fn sessions_messages_subscribe_request(
     request_id: String,
     session_key: String,
+    agent_id: String,
 ) -> Result<RpcRequest, WireError> {
-    if !valid_native_string(&session_key, MAX_NATIVE_SESSION_KEY_BYTES) {
+    if !valid_native_string(&session_key, MAX_NATIVE_SESSION_KEY_BYTES)
+        || !valid_native_string(&agent_id, 256) {
         return Err(WireError::InvalidRequest);
     }
     rpc_request(
         request_id,
         SESSIONS_MESSAGES_SUBSCRIBE_METHOD,
-        Some(serde_json::json!({ "key": session_key })),
+        Some(serde_json::json!({ "key": session_key, "agentId": agent_id, "includeApprovals": true })),
     )
+}
+
+pub(crate) fn sessions_messages_unsubscribe_request(
+    request_id: String,
+    session_key: String,
+    agent_id: String,
+) -> Result<RpcRequest, WireError> {
+    if !valid_native_string(&session_key, MAX_NATIVE_SESSION_KEY_BYTES)
+        || !valid_native_string(&agent_id, 256) {
+        return Err(WireError::InvalidRequest);
+    }
+    rpc_request(request_id, "sessions.messages.unsubscribe",
+        Some(serde_json::json!({ "key": session_key, "agentId": agent_id })))
 }
 
 pub(crate) fn mcp_server_status_list_request(
@@ -574,6 +587,17 @@ pub(crate) fn mcp_app_request(
         params.insert("standalone".into(), Value::Bool(standalone));
     }
     rpc_request(request_id, operation_id, Some(Value::Object(params)))
+}
+
+pub(crate) fn question_list_request(request_id: String) -> Result<RpcRequest, WireError> {
+    rpc_request(request_id, "question.list", Some(json!({})))
+}
+
+pub(crate) fn question_get_request(request_id: String, id: String) -> Result<RpcRequest, WireError> {
+    if !valid_native_string(&id, 4_096) {
+        return Err(WireError::InvalidRequest);
+    }
+    rpc_request(request_id, "question.get", Some(json!({ "id": id })))
 }
 
 pub(crate) fn question_resolve_request(
@@ -779,6 +803,7 @@ impl fmt::Debug for GatewayServer {
 pub struct GatewayFeatures {
     pub methods: Vec<String>,
     pub events: Vec<String>,
+    pub capabilities: Vec<String>,
 }
 
 impl fmt::Debug for GatewayFeatures {
@@ -1053,7 +1078,6 @@ pub struct GatewayLogsTail {
     pub reset: bool,
 }
 
-#[cfg(test)]
 pub(crate) fn decode_sessions_subscribe(response: GatewayResponse) -> Result<(), WireError> {
     let payload = success_payload(response, WireError::InvalidSessionSubscription)?;
     let payload: SessionSubscriptionWire =
@@ -1066,14 +1090,30 @@ pub(crate) fn decode_sessions_subscribe(response: GatewayResponse) -> Result<(),
 
 pub(crate) fn decode_sessions_messages_subscribe(
     response: GatewayResponse,
-) -> Result<(), WireError> {
+) -> Result<SessionMessagesSubscription, WireError> {
     let payload = success_payload(response, WireError::InvalidSessionSubscription)?;
     let payload: SessionMessagesSubscriptionWire =
         serde_json::from_value(payload).map_err(|_| WireError::InvalidSessionSubscription)?;
     if !payload.subscribed || !valid_native_string(&payload.key, MAX_NATIVE_SESSION_KEY_BYTES) {
         return Err(WireError::InvalidSessionSubscription);
     }
-    Ok(())
+    let replay = payload.approval_replay;
+    if replay.truncated || replay.session_key != payload.key || replay.approvals.len() > 1000
+        || replay.updated_at_ms > 9_007_199_254_740_991 {
+        return Err(WireError::InvalidSessionSubscription);
+    }
+    let key = crate::session::protocol::SessionKey::try_new(payload.key.clone())
+        .map_err(|_| WireError::InvalidSessionSubscription)?;
+    let approvals = replay.approvals.into_iter().map(|approval|
+        crate::session::protocol::decode_session_approval(approval, key.clone())
+            .map_err(|_| WireError::InvalidSessionSubscription))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SessionMessagesSubscription { key: payload.key, approvals })
+}
+
+pub(crate) struct SessionMessagesSubscription {
+    pub(crate) key: String,
+    pub(crate) approvals: Vec<crate::session::protocol::SessionApprovalEvent>,
 }
 
 fn success_payload(response: GatewayResponse, error: WireError) -> Result<Value, WireError> {
@@ -1346,6 +1386,7 @@ impl HelloWire {
             features: GatewayFeatures {
                 methods: self.features.methods,
                 events: self.features.events,
+                capabilities: self.features.capabilities.unwrap_or_default(),
             },
             snapshot: self.snapshot.into_public(),
             auth: GatewayAuth {
@@ -1859,16 +1900,26 @@ impl McpServerStatusEntryWire {
     }
 }
 
-#[cfg(test)]
 #[derive(Deserialize)]
 struct SessionSubscriptionWire {
     subscribed: bool,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SessionMessagesSubscriptionWire {
     subscribed: bool,
     key: String,
+    approval_replay: SessionApprovalReplayWire,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionApprovalReplayWire {
+    session_key: String,
+    updated_at_ms: u64,
+    approvals: Vec<Value>,
+    truncated: bool,
 }
 
 fn valid_string(value: &str) -> bool {

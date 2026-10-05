@@ -69,6 +69,9 @@ impl StartGateBinding {
 pub struct StartGatePromptPlan {
     run_id: organization::GraphRunId,
     proposal_id: String,
+    protocol: String,
+    pub(crate) generation: String,
+    pub(crate) design: bool,
 }
 
 impl StartGatePromptPlan {
@@ -80,13 +83,69 @@ impl StartGatePromptPlan {
         &self.proposal_id
     }
 
-    pub fn system_provenance_receipt(&self) -> &'static str {
-        TEAM_CONTROL_PROTOCOL
+    pub fn system_provenance_receipt(&self) -> &str {
+        &self.protocol
     }
 
     pub fn into_registry_parts(self) -> (organization::GraphRunId, String) {
         (self.run_id, self.proposal_id)
     }
+}
+
+pub(crate) fn prepare_prompt(
+    store: &mut crate::OrganizationStore,
+    lookup: &StartGateRuntimeBindingLookup,
+    seed: Option<&str>,
+    at: u64,
+) -> Result<Option<StartGatePromptPlan>, crate::StoreFault> {
+    let Some(binding) = resolve_runtime_binding(store.facts(), lookup) else {
+        return Ok(None);
+    };
+    if binding.role_id.as_str() != LEADER_ROLE_ID
+        || matches!(binding.start_gate, crate::RunStartGate::Started)
+    {
+        return Ok(None);
+    }
+    let mut entropy = [0u8; 32];
+    getrandom::fill(&mut entropy).map_err(|_| crate::StoreFault::InvalidFacts)?;
+    let generation = format!("sgg-{:x}", Sha256::digest(entropy));
+    let design = matches!(
+        binding.start_gate,
+        crate::RunStartGate::Designing { .. } | crate::RunStartGate::DesignProposalPending { .. }
+    );
+    if design {
+        store.register_design_prompt(&binding.run_id, generation.clone())?;
+        let run = store
+            .facts()
+            .run(&binding.run_id)
+            .ok_or(crate::StoreFault::InvalidFacts)?;
+        Ok(Some(StartGatePromptPlan {
+            run_id: binding.run_id.clone(),
+            proposal_id: generation.clone(),
+            protocol: super::design_prompt::compose(store.facts(), run, &generation),
+            generation,
+            design: true,
+        }))
+    } else {
+        let Some(mut plan) = prompt_plan(&binding, seed, at) else {
+            return Ok(None);
+        };
+        plan.generation = generation;
+        Ok(Some(plan))
+    }
+}
+
+pub(crate) fn design_ready(text: &str) -> Option<String> {
+    let text = text.trim_end();
+    let body = text.strip_suffix("</team_control>")?;
+    let open = "<team_control mode=\"design_ready\">";
+    let index = body.rfind(open)?;
+    if body[..index].contains("<team_control") || body[..index].matches("```").count() % 2 != 0 {
+        return None;
+    }
+    let summary = body[index + open.len()..].trim();
+    (!summary.is_empty() && summary.lines().count() == 1 && !summary.contains(['<', '>']))
+        .then(|| summary.to_owned())
 }
 
 enum TeamControl {
@@ -150,6 +209,9 @@ pub(crate) fn prompt_plan(
     binding.is_leader_intake().then(|| StartGatePromptPlan {
         run_id: binding.run_id().clone(),
         proposal_id: proposal_id(binding, proposal_id_seed, requested_at),
+        protocol: TEAM_CONTROL_PROTOCOL.to_owned(),
+        generation: String::new(),
+        design: false,
     })
 }
 

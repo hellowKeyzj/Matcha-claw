@@ -676,10 +676,10 @@ impl<'facts> CanonicalSessionView<'facts> {
 
     /// Maps the actual live event into the existing integration-local delta
     /// producer. The returned source epoch/cursor remain optional native facts.
-    pub fn live_delta(self, route_key: Option<String>) -> Option<CanonicalSessionDelta> {
+    pub fn live_delta(self) -> Option<CanonicalSessionDelta> {
         self.live_event()
             .facts()
-            .and_then(|facts| CanonicalSessionDeltaProducer::from_facts(facts, route_key))
+            .and_then(|facts| CanonicalSessionDeltaProducer::from_facts(facts))
     }
 
     /// OpenClaw currently has no native approval event or snapshot producer.

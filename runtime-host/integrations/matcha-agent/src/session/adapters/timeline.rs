@@ -2,7 +2,7 @@ use super::*;
 use sessions_module::state::{
     ApprovalPhase, ApprovalView, ItemStatus, MissingFact, OmissionReason, RunPhase, RuntimeView,
     SessionCompleteness, SessionContent, SessionFact, SessionIdentity, SessionItem,
-    SessionProvider, SessionView, SessionWindow, ToolPhase, ToolView,
+    SessionView, SessionWindow, ToolPhase, ToolView,
 };
 
 pub(super) async fn load_matcha_timeline(
@@ -26,11 +26,8 @@ pub(super) async fn load_matcha_timeline(
         .await;
     match local_history {
         HistoryResult::Complete(snapshot) => {
-            let Some(identity) = SessionIdentity::new(
-                command.session_key().to_owned(),
-                SessionProvider::MatchaAgent,
-                command.agent_id().map(str::to_owned),
-            ) else {
+            let identity = command.identity().clone();
+            if identity.validate().is_err() {
                 return session_timeline::Outcome::unavailable(
                     session_timeline::UnavailableReason::MatchaIdentityInvalid,
                 );
@@ -85,11 +82,8 @@ pub(super) async fn load_matcha_timeline(
             );
         }
     };
-    let Some(identity) = SessionIdentity::new(
-        command.session_key().to_owned(),
-        SessionProvider::MatchaAgent,
-        command.agent_id().map(str::to_owned),
-    ) else {
+    let identity = command.identity().clone();
+    if identity.validate().is_err() {
         return session_timeline::Outcome::unavailable(
             session_timeline::UnavailableReason::MatchaIdentityInvalid,
         );
@@ -269,6 +263,7 @@ fn project_matcha_view(
         endpoint_session_id,
         ownership: None,
         model_state: None,
+        goal: sessions_module::goal::SessionGoalView::Unsupported,
         identity: identity.clone(),
         epoch,
         seq: 0,
@@ -293,7 +288,7 @@ fn project_matcha_view(
     view.validate().ok().map(|_| view)
 }
 
-fn project_matcha_hydration_view(
+pub(super) fn project_matcha_hydration_view(
     identity: &SessionIdentity,
     endpoint_session_id: Option<String>,
     snapshot: &HydrationSnapshot,
@@ -305,6 +300,7 @@ fn project_matcha_hydration_view(
         endpoint_session_id,
         ownership: None,
         model_state: None,
+        goal: sessions_module::goal::SessionGoalView::Unsupported,
         identity: identity.clone(),
         epoch,
         seq: 0,
@@ -359,7 +355,7 @@ fn matcha_items(messages: &[crate::session::hydration::HydratedMessage]) -> Vec<
                 .id()
                 .or(message.origin_message_id())
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!("source:{index}"));
+                .unwrap_or_else(|| format!("source:{}", message.source_index().unwrap_or(index)));
             let text = message.text();
             let content = matcha_content(message);
             match message.role() {
@@ -538,7 +534,7 @@ fn matcha_approvals(
         .iter()
         .map(|approval| ApprovalView {
             approval_id: approval.approval_id().as_str().to_owned(),
-            run_id: None,
+            run_id: approval.run_id().map(|id| id.as_str().to_owned()),
             phase: ApprovalPhase::Requested,
             option_ids: approval
                 .option_ids()

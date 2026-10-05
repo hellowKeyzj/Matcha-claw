@@ -33,5 +33,5 @@ export const CHAT_LAYOUT_TOKENS = {
   stageBottomFade: 'pointer-events-none absolute bottom-0 left-0 right-[var(--chat-scrollbar-gutter)] z-10 h-16 bg-[linear-gradient(180deg,hsl(var(--card)/0)_0%,hsl(var(--card)/0.76)_72%,hsl(var(--card))_100%)]',
   assistantSurface: 'w-full rounded-[18px] bg-transparent px-0.5 py-0.5 max-md:px-0 max-md:py-0',
   composerOverlay: 'pointer-events-none absolute inset-x-0 bottom-0 z-20 px-3 pb-2.5 md:px-4 md:pb-3',
-  composerOverlayStack: 'flex flex-col gap-2',
+  composerOverlayStack: 'mx-auto flex w-full min-w-0 max-w-[56rem] flex-col gap-2',
 } as const;

@@ -1,5 +1,7 @@
 #[path = "../src/ingest/long_source.rs"]
 mod long_source;
+#[path = "../src/ingest/text.rs"]
+mod text;
 
 use long_source::{
     LongSourceCheckpoint, LongSourceCheckpointParams, extract_marked_section, hash_text_hex,

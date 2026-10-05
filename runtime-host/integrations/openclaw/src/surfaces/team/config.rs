@@ -30,6 +30,7 @@ struct UndoRole {
     agent: String,
     workspace: String,
     managed: bool,
+    agents_markdown: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,6 +61,7 @@ impl ConfigUndo {
                             agent: role.agent().as_str().to_owned(),
                             workspace: role.native_workspace().ok_or(())?.as_str().to_owned(),
                             managed: role.ownership() == RoleMaterializationOwnership::Managed,
+                            agents_markdown: role.agents_markdown().map(str::to_owned),
                         })
                     })
                     .collect::<Result<_, ()>>()?,
@@ -105,6 +107,7 @@ impl ConfigUndo {
             && request.intent().agents().iter().all(|requested| {
                 self.record.roles.iter().any(|role| {
                     role.role == requested.role().as_str()
+                        && role.agents_markdown.as_deref() == requested.agents_markdown()
                         && match requested.agent() {
                             organization::RoleMaterializationAgent::Managed { .. } => role.managed,
                             organization::RoleMaterializationAgent::External { agent } => {
@@ -127,21 +130,22 @@ impl ConfigUndo {
             .roles
             .iter()
             .map(|role| {
-                Ok(
-                    organization::RoleMaterializationReceipt::with_native_workspace(
-                        organization::RoleId::try_new(&role.role).map_err(|_| ())?,
-                        organization::ManagedAgentReference::try_new(&role.agent)
-                            .map_err(|_| ())?,
-                        if role.managed {
-                            RoleMaterializationOwnership::Managed
-                        } else {
-                            RoleMaterializationOwnership::External
-                        },
-                        endpoint.clone(),
-                        organization::NativeWorkspaceReceipt::try_new(&role.workspace)
-                            .map_err(|_| ())?,
-                    ),
-                )
+                let receipt = organization::RoleMaterializationReceipt::with_native_workspace(
+                    organization::RoleId::try_new(&role.role).map_err(|_| ())?,
+                    organization::ManagedAgentReference::try_new(&role.agent).map_err(|_| ())?,
+                    if role.managed {
+                        RoleMaterializationOwnership::Managed
+                    } else {
+                        RoleMaterializationOwnership::External
+                    },
+                    endpoint.clone(),
+                    organization::NativeWorkspaceReceipt::try_new(&role.workspace)
+                        .map_err(|_| ())?,
+                );
+                Ok(match &role.agents_markdown {
+                    Some(markdown) => receipt.with_agents_markdown(markdown.clone()),
+                    None => receipt,
+                })
             })
             .collect::<Result<_, ()>>()?;
         MaterializationReceipt::try_new(
@@ -158,6 +162,10 @@ impl ConfigUndo {
 
     pub(super) fn is_removed(&self) -> bool {
         matches!(self.record.state, UndoState::Removed)
+    }
+
+    pub(super) fn is_compensated(&self) -> bool {
+        matches!(self.record.state, UndoState::Compensated)
     }
 
     pub(super) fn finish_removal(mut self, state_dir: &CanonicalStateDir) -> Result<(), ()> {

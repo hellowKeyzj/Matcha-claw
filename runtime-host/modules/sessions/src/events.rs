@@ -8,11 +8,17 @@ use tokio::{
     time::{Instant, MissedTickBehavior, interval_at},
 };
 
-use super::state::SessionDelta;
+use super::state::{SessionDelta, SessionIdentity};
+
+#[derive(Clone)]
+pub enum SessionEvent {
+    Delta(SessionDelta),
+    Resync { identity: SessionIdentity, epoch: u64, seq: u64 },
+}
 
 #[derive(Clone)]
 pub struct SessionDeltaSource {
-    sender: broadcast::Sender<SessionDelta>,
+    sender: broadcast::Sender<SessionEvent>,
 }
 
 impl SessionDeltaSource {
@@ -22,23 +28,46 @@ impl SessionDeltaSource {
     }
 
     pub fn publish(&self, delta: SessionDelta) -> bool {
-        let _ = self.sender.send(delta);
+        if crate::trace::enabled() {
+            crate::trace::log_unscoped("sessions.delta.publish", serde_json::json!({
+                "identity": crate::trace::identity_shape(&delta.identity), "epoch": delta.epoch,
+                "seq": delta.seq, "cursor": delta.cursor, "runHash": delta.run_id.as_deref().map(crate::trace::fingerprint),
+                "changes": crate::trace::changes_shape(&delta.changes), "receivers": self.sender.receiver_count(),
+            }));
+        }
+        let sent = self.sender.send(SessionEvent::Delta(delta));
+        if crate::trace::enabled() {
+            crate::trace::log_unscoped("sessions.delta.publish_outcome", serde_json::json!({ "hasReceiver": sent.is_ok() }));
+        }
         true
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<SessionDelta> {
+    pub fn resync(&self, identity: SessionIdentity, epoch: u64, seq: u64) {
+        if crate::trace::enabled() {
+            crate::trace::log_unscoped("sessions.resync.publish", serde_json::json!({
+                "identity": crate::trace::identity_shape(&identity), "epoch": epoch, "seq": seq,
+                "receivers": self.sender.receiver_count(),
+            }));
+        }
+        let sent = self.sender.send(SessionEvent::Resync { identity, epoch, seq });
+        if crate::trace::enabled() {
+            crate::trace::log_unscoped("sessions.resync.publish_outcome", serde_json::json!({ "hasReceiver": sent.is_ok() }));
+        }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.sender.subscribe()
     }
 }
 
 pub struct SessionDeltaStream {
-    receiver: broadcast::Receiver<SessionDelta>,
+    receiver: broadcast::Receiver<SessionEvent>,
     keepalive_interval: std::time::Duration,
 }
 
 impl SessionDeltaStream {
     pub fn new(
-        receiver: broadcast::Receiver<SessionDelta>,
+        receiver: broadcast::Receiver<SessionEvent>,
         keepalive_interval: std::time::Duration,
     ) -> Self {
         Self {
@@ -66,21 +95,82 @@ impl StreamHandler for SessionDeltaStream {
             );
             keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
+                let mut frame_context = None;
                 tokio::select! {
                     delta = self.receiver.recv() => match delta {
-                        Ok(delta) => stream.write_all(&session_delta_frame(&delta)).await?,
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                        Ok(SessionEvent::Delta(delta)) => {
+                            let written = stream.write_all(&session_delta_frame(&delta)).await;
+                            if crate::trace::enabled() {
+                                frame_context = Some(serde_json::json!({
+                                    "kind": "delta", "identity": crate::trace::identity_shape(&delta.identity),
+                                    "epoch": delta.epoch, "seq": delta.seq, "cursor": delta.cursor,
+                                }));
+                                crate::trace::log_unscoped("sessions.sse.write", serde_json::json!({
+                                    "frame": frame_context, "outcome": if written.is_ok() { "succeeded" } else { "failed" },
+                                }));
+                            }
+                            written?;
+                        },
+                        Ok(SessionEvent::Resync { identity, epoch, seq }) => {
+                            if crate::trace::enabled() {
+                                crate::trace::log_unscoped("sessions.sse.resync_frame", serde_json::json!({
+                                    "identity": crate::trace::identity_shape(&identity), "epoch": epoch, "seq": seq,
+                                }));
+                            }
+                            let data = serde_json::json!({ "identity": identity, "epoch": epoch, "seq": seq });
+                            let written = stream.write_all(format!("event: session.resync\ndata: {data}\n\n").as_bytes()).await;
+                            if crate::trace::enabled() {
+                                frame_context = Some(serde_json::json!({
+                                    "kind": "resync", "identity": crate::trace::identity_shape(&identity), "epoch": epoch, "seq": seq,
+                                }));
+                                crate::trace::log_unscoped("sessions.sse.write", serde_json::json!({
+                                    "frame": frame_context, "outcome": if written.is_ok() { "succeeded" } else { "failed" },
+                                }));
+                            }
+                            written?;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(missed)) => {
+                            if crate::trace::enabled() {
+                                crate::trace::log_unscoped("sessions.sse.closed", serde_json::json!({ "reason": "lagged", "missedCount": missed }));
+                            }
+                            return Ok(());
+                        },
+                        Err(broadcast::error::RecvError::Closed) => {
+                            if crate::trace::enabled() {
+                                crate::trace::log_unscoped("sessions.sse.closed", serde_json::json!({ "reason": "source_closed" }));
+                            }
+                            return Ok(());
+                        },
                     },
-                    _ = keepalive.tick() => stream.write_all(b":keepalive\n\n").await?,
+                    _ = keepalive.tick() => {
+                        let written = stream.write_all(b":keepalive\n\n").await;
+                        if crate::trace::enabled() && written.is_err() {
+                            crate::trace::log_unscoped("sessions.sse.write", serde_json::json!({ "kind": "keepalive", "outcome": "failed" }));
+                        }
+                        written?;
+                    },
                 }
-                stream.flush().await?;
+                let flushed = stream.flush().await;
+                if crate::trace::enabled() && (frame_context.is_some() || flushed.is_err()) {
+                    crate::trace::log_unscoped("sessions.sse.flush", serde_json::json!({
+                        "frame": frame_context, "outcome": if flushed.is_ok() { "succeeded" } else { "failed" },
+                    }));
+                }
+                flushed?;
             }
         })
     }
 }
 
 fn session_delta_frame(delta: &SessionDelta) -> Vec<u8> {
+    if crate::trace::enabled() {
+        crate::trace::log_unscoped("sessions.sse.delta_frame", serde_json::json!({
+            "identity": crate::trace::identity_shape(&delta.identity), "epoch": delta.epoch,
+            "seq": delta.seq, "cursor": delta.cursor, "sseId": delta.seq(),
+            "runHash": delta.run_id.as_deref().map(crate::trace::fingerprint),
+            "changes": crate::trace::changes_shape(&delta.changes),
+        }));
+    }
     let data = serde_json::to_string(delta).expect("session delta SSE data is serializable");
     format!(
         "event: session.delta\nid: {}\ndata: {data}\n\n",

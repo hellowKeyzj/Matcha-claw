@@ -67,7 +67,8 @@ export function findSessionRecordKey(
 ): string | null {
   const identityKey = buildSessionIdentityKey(identity);
   const indexedRecordKey = state.sessionRecordKeyByIdentityKey?.[identityKey];
-  if (indexedRecordKey && state.loadedSessions[indexedRecordKey]?.meta.sessionIdentity) {
+  const indexedIdentity = indexedRecordKey && state.loadedSessions[indexedRecordKey]?.meta.sessionIdentity;
+  if (indexedRecordKey && indexedIdentity && sessionIdentitiesEqual(indexedIdentity, identity)) {
     return indexedRecordKey;
   }
   for (const [recordKey, record] of Object.entries(state.loadedSessions)) {

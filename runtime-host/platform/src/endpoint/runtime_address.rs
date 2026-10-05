@@ -102,6 +102,10 @@ impl SessionIdentity {
         &self.agent_id
     }
 
+    pub fn session_key(&self) -> &str {
+        &self.session_key
+    }
+
     pub fn canonical_key(&self) -> String {
         #[derive(Serialize)]
         struct Endpoint<'a> {

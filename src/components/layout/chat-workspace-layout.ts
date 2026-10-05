@@ -6,7 +6,7 @@ export const CHAT_WORKSPACE_LAYOUT = {
   sidePanelLightMaxWidth: 520,
   sidePanelArtifactMaxWidth: 1600,
   sidePanelLightDefaultWidth: 360,
-  sidePanelArtifactDefaultWidth: 520,
+  sidePanelArtifactDefaultWidth: 640,
   paneResizerWidth: 6,
   chatMainLightMinWidth: 360,
   chatMainArtifactMinWidth: 180,

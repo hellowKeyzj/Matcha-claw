@@ -133,6 +133,17 @@ impl TeamMaterializationLifecycle {
                 Self::Tombstoned(_),
             ) => true,
             (
+                Self::OutcomeUnknown(previous_request),
+                Self::Rejected {
+                    request: current_request,
+                    ..
+                },
+            )
+            | (
+                Self::Tombstoned(TombstonedMaterialization::OutcomeUnknown(previous_request)),
+                Self::Tombstoned(TombstonedMaterialization::None(current_request)),
+            ) => previous_request == current_request,
+            (
                 Self::Tombstoned(TombstonedMaterialization::Confirmed {
                     receipt: previous_receipt,
                     cleanup: TeamMaterializationCleanup::Pending(previous_removal),
@@ -166,8 +177,14 @@ impl TeamMaterializationLifecycle {
         &mut self,
         outcome: MaterializationOperationOutcome,
     ) -> Result<MaterializationRecordOutcome, MaterializationLifecycleError> {
-        let Self::Requested(request) = self else {
-            return Err(MaterializationLifecycleError::InvalidTransition);
+        let request = match self {
+            Self::Requested(request) => request,
+            Self::OutcomeUnknown(request)
+                if matches!(&outcome, MaterializationOperationOutcome::Rejected { .. }) =>
+            {
+                request
+            }
+            _ => return Err(MaterializationLifecycleError::InvalidTransition),
         };
         let next = match outcome {
             MaterializationOperationOutcome::Confirmed { receipt } => {
@@ -241,6 +258,27 @@ impl TeamMaterializationLifecycle {
         &mut self,
         outcome: MaterializationOperationOutcome,
     ) -> Result<MaterializationRecordOutcome, MaterializationLifecycleError> {
+        if let Self::Tombstoned(TombstonedMaterialization::OutcomeUnknown(request)) = self {
+            return match outcome {
+                MaterializationOperationOutcome::Confirmed { receipt } => {
+                    if !receipt_matches_request(&receipt, request) {
+                        return Err(MaterializationLifecycleError::ReceiptDoesNotMatchIntent);
+                    }
+                    *self = Self::Tombstoned(TombstonedMaterialization::None(request.clone()));
+                    Ok(MaterializationRecordOutcome::Recorded)
+                }
+                MaterializationOperationOutcome::Accepted { receipt }
+                    if receipt.idempotency_key() != request.idempotency_key() =>
+                {
+                    Err(MaterializationLifecycleError::OperationReceiptMismatch)
+                }
+                MaterializationOperationOutcome::Accepted { .. }
+                | MaterializationOperationOutcome::Rejected { .. }
+                | MaterializationOperationOutcome::OutcomeUnknown => {
+                    Ok(MaterializationRecordOutcome::Replayed)
+                }
+            };
+        }
         let Self::Tombstoned(TombstonedMaterialization::Confirmed { cleanup, .. }) = self else {
             return Err(MaterializationLifecycleError::InvalidTransition);
         };
@@ -318,6 +356,9 @@ fn receipt_matches_request(
         else {
             return false;
         };
+        if materialized.agents_markdown() != requested.agents_markdown() {
+            return false;
+        }
         match requested.agent() {
             RoleMaterializationAgent::Managed { .. } => {
                 materialized.ownership() == RoleMaterializationOwnership::Managed

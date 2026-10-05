@@ -106,15 +106,6 @@ export function deriveChatSendGate(source: CurrentChatSendGateSource): ChatSendG
   if (!source.sessionKey) {
     return { canSend: false, reason: 'missing-session' };
   }
-  if (!source.historyStatus) {
-    return { canSend: false, reason: 'missing-session', sessionKey: source.sessionKey };
-  }
-  if (source.historyStatus === 'loading') {
-    return { canSend: false, reason: 'loading-history', sessionKey: source.sessionKey };
-  }
-  if (source.historyStatus === 'error') {
-    return { canSend: false, reason: 'history-error', sessionKey: source.sessionKey };
-  }
   if (!source.sessionIdentity) {
     return { canSend: false, reason: 'missing-session-identity', sessionKey: source.sessionKey };
   }

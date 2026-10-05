@@ -9,7 +9,7 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, timeout, timeout_at},
 };
@@ -28,7 +28,12 @@ const MAX_QUEUED_REQUESTS: usize = 64;
 const CLOSE_DEADLINE: Duration = Duration::from_secs(1);
 const MIN_REQUEST_DEADLINE: Duration = Duration::from_secs(1);
 
-type Reply = oneshot::Sender<Result<GatewayResponse, ExchangeFailure>>;
+pub(crate) type Reply = oneshot::Sender<Result<GatewayResponse, ExchangeFailure>>;
+
+pub(crate) enum GatewayFrame {
+    Event(wire::GatewayEvent),
+    Response { response: GatewayResponse, reply: Reply },
+}
 
 type Pending = HashMap<String, PendingRequest>;
 
@@ -36,6 +41,7 @@ struct PendingRequest {
     request: Option<OutboundRequest>,
     reply: Reply,
     sent: Arc<AtomicBool>,
+    ordered: bool,
 }
 
 struct OutboundRequest {
@@ -86,6 +92,7 @@ enum Command {
         request: OutboundRequest,
         sent: Arc<AtomicBool>,
         reply: Reply,
+        ordered: bool,
     },
     Cancel {
         request_id: String,
@@ -115,15 +122,18 @@ impl Drop for ExchangeGuard<'_> {
 pub(crate) struct GatewayConnection {
     commands: mpsc::Sender<Command>,
     actor: Option<JoinHandle<()>>,
+    failure: watch::Receiver<Option<DispatcherError>>,
 }
 
 impl GatewayConnection {
-    pub(crate) fn spawn(socket: GatewaySocket, events: mpsc::Sender<wire::GatewayEvent>) -> Self {
+    pub(crate) fn spawn(socket: GatewaySocket, events: mpsc::Sender<GatewayFrame>) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
-        let actor = tokio::spawn(run_actor(socket, receiver, events));
+        let (failure, failure_receiver) = watch::channel(None);
+        let actor = tokio::spawn(run_actor(socket, receiver, events, failure));
         Self {
             commands,
             actor: Some(actor),
+            failure: failure_receiver,
         }
     }
 
@@ -132,7 +142,7 @@ impl GatewayConnection {
         request: RpcRequest,
         deadline: Duration,
     ) -> Result<GatewayResponse, ExchangeFailure> {
-        self.exchange(OutboundRequest::rpc(request), deadline).await
+        self.exchange(OutboundRequest::rpc(request), deadline, false).await
     }
 
     pub(crate) async fn encoded_request(
@@ -141,14 +151,23 @@ impl GatewayConnection {
         encoded: String,
         deadline: Duration,
     ) -> Result<GatewayResponse, ExchangeFailure> {
-        self.exchange(OutboundRequest::encoded(request_id, encoded), deadline)
+        self.exchange(OutboundRequest::encoded(request_id, encoded), deadline, false)
             .await
+    }
+
+    pub(crate) async fn ordered_request(
+        &self,
+        request: RpcRequest,
+        deadline: Duration,
+    ) -> Result<GatewayResponse, ExchangeFailure> {
+        self.exchange(OutboundRequest::rpc(request), deadline, true).await
     }
 
     async fn exchange(
         &self,
         request: OutboundRequest,
         deadline: Duration,
+        ordered: bool,
     ) -> Result<GatewayResponse, ExchangeFailure> {
         let request_id = request.request_id().to_owned();
         let sent = Arc::new(AtomicBool::new(false));
@@ -160,6 +179,7 @@ impl GatewayConnection {
                 request,
                 sent: Arc::clone(&sent),
                 reply,
+                ordered,
             }),
         )
         .await
@@ -202,6 +222,18 @@ impl GatewayConnection {
         }
     }
 
+    pub(crate) fn failure(&self) -> watch::Receiver<Option<DispatcherError>> {
+        self.failure.clone()
+    }
+
+    pub(crate) async fn closed(&self) {
+        self.commands.closed().await;
+    }
+
+    pub(crate) async fn disconnect(&self) {
+        let _ = self.commands.send(Command::Close).await;
+    }
+
     pub(crate) async fn close(mut self) {
         let _ = self.commands.send(Command::Close).await;
         if let Some(mut actor) = self.actor.take() {
@@ -224,7 +256,8 @@ impl Drop for GatewayConnection {
 async fn run_actor(
     mut socket: GatewaySocket,
     mut commands: mpsc::Receiver<Command>,
-    events: mpsc::Sender<wire::GatewayEvent>,
+    events: mpsc::Sender<GatewayFrame>,
+    terminal_failure: watch::Sender<Option<DispatcherError>>,
 ) {
     let mut closing = false;
     let mut pending = Pending::new();
@@ -241,7 +274,7 @@ async fn run_actor(
         }
         tokio::select! {
             command = commands.recv() => match command {
-                Some(Command::Request { request, sent, reply }) => {
+                Some(Command::Request { request, sent, reply, ordered }) => {
                     if reply.is_closed() {
                         continue;
                     }
@@ -261,6 +294,7 @@ async fn run_actor(
                         request: Some(request),
                         reply,
                         sent: Arc::clone(&sent),
+                        ordered,
                     });
                     if active_count(&pending) >= MAX_ACTIVE_REQUESTS {
                         if queued.len() >= MAX_QUEUED_REQUESTS {
@@ -315,6 +349,7 @@ async fn run_actor(
         }
     };
 
+    terminal_failure.send_replace(Some(failure));
     fail_pending(&mut pending, failure);
     if closing {
         let _ = timeout(CLOSE_DEADLINE, socket.close(None)).await;
@@ -370,7 +405,7 @@ fn active_count(pending: &Pending) -> usize {
 async fn route_text(
     text: &str,
     pending: &mut Pending,
-    events: &mpsc::Sender<wire::GatewayEvent>,
+    events: &mpsc::Sender<GatewayFrame>,
 ) -> Result<bool, DispatcherError> {
     let frame: serde_json::Value =
         serde_json::from_str(text).map_err(|_| DispatcherError::Protocol)?;
@@ -390,13 +425,18 @@ async fn route_text(
             let response = wire::decode_response(text, request_id)
                 .map_err(|_| DispatcherError::Protocol)?
                 .ok_or(DispatcherError::Protocol)?;
-            let _ = pending_request.reply.send(Ok(response));
+            if pending_request.ordered {
+                events.try_send(GatewayFrame::Response { response, reply: pending_request.reply })
+                    .map_err(|_| DispatcherError::EventBackpressure)?;
+            } else {
+                let _ = pending_request.reply.send(Ok(response));
+            }
             Ok(true)
         }
         "event" => {
             let event = wire::decode_event(text).map_err(|_| DispatcherError::Protocol)?;
             events
-                .try_send(event)
+                .try_send(GatewayFrame::Event(event))
                 .map(|_| false)
                 .map_err(|_| DispatcherError::EventBackpressure)
         }

@@ -93,7 +93,7 @@ fn view_query(view: &SessionView) -> Option<SessionOwnershipQuery> {
             identity.endpoint.runtime_instance_id.clone(),
         )
         .ok()?,
-        identity.agent_id.as_deref()?,
+        &identity.agent_id,
         identity.session_key(),
         view.endpoint_session_id.as_deref()?,
     )

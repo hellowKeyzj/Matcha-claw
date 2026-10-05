@@ -26,13 +26,14 @@ use tokio_tungstenite::{
 
 use crate::{
     gateway::device_identity::{DeviceConnectPayloadContext, load_or_create_device_identity},
-    session::{ingest::SessionEventIngest, protocol::SessionKey},
+    session::{ingest::SessionEventIngest, protocol::SessionKey, trace},
 };
 
 use super::{
     auth::GatewaySecret,
     delivery::{DispatcherError, MutationDelivery},
     dispatcher::Dispatcher,
+    observation::{Observations, OrderedContext, identity_key},
     wire,
 };
 
@@ -63,6 +64,10 @@ impl GatewayControlSupervisor {
 
 struct ControlDispatcher {
     dispatcher: Dispatcher,
+    epoch: Option<super::ingress::GatewayEpoch>,
+    receive_task: StdMutex<Option<OwnedTask<()>>>,
+    supports_goal: bool,
+    metadata_subscription: StdMutex<Option<Result<(), sessions_module::ports::RuntimeOperationFailure>>>,
 }
 
 impl ControlDispatcher {
@@ -332,8 +337,10 @@ pub struct GatewayClient {
     control_supervisor: Arc<StdMutex<Option<GatewayControlSupervisor>>>,
     control_supervisor_started: Arc<AtomicBool>,
     control_ready_trace_emitted: Arc<AtomicBool>,
+    live_goal_capability: Arc<AtomicBool>,
     state_dir: Option<CanonicalStateDir>,
     event_ingest: Option<Arc<SessionEventIngest>>,
+    pub(crate) observations: Arc<Observations>,
 }
 
 impl GatewayClient {
@@ -385,8 +392,24 @@ impl GatewayClient {
             control_supervisor: Arc::new(StdMutex::new(None)),
             control_supervisor_started: Arc::new(AtomicBool::new(false)),
             control_ready_trace_emitted: Arc::new(AtomicBool::new(false)),
+            live_goal_capability: Arc::new(AtomicBool::new(false)),
             state_dir,
             event_ingest: None,
+            observations: Observations::new(),
+        }
+    }
+
+    pub(crate) fn supports_goal(&self) -> bool {
+        self.live_goal_capability.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn goal_availability(&self) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        let state = self.control_state.lock().await;
+        match &*state {
+            GatewayControlConnectionState::Ready { control, .. } if control.supports_goal => Ok(()),
+            GatewayControlConnectionState::Ready { .. } => Err(RuntimeOperationFailure::Unsupported),
+            _ => Err(RuntimeOperationFailure::Unavailable),
         }
     }
 
@@ -395,15 +418,354 @@ impl GatewayClient {
         self
     }
 
-    pub(crate) fn register_session_route(&self, session_key: &SessionKey, route_key: String) {
-        if let Some(ingest) = self.event_ingest.as_ref() {
-            ingest.register_route(session_key.clone(), route_key);
+    pub(crate) fn prepare_observation(&self, request: sessions_module::ports::SessionObservationRequest) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
+        if trace::enabled() {
+            trace::log_unscoped("runtime.openclaw.observation.prepare.request", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(&request.identity), "generation": request.generation,
+                "ingestPresent": self.event_ingest.is_some() }));
         }
+        if self.event_ingest.is_none() {
+            if trace::enabled() {
+                trace::log_unscoped("runtime.openclaw.observation.prepare.rejected", serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(&request.identity), "generation": request.generation, "reason": "ingest_missing" }));
+            }
+            return Err(sessions_module::ports::RuntimeOperationFailure::Unavailable);
+        }
+        self.observations.prepare(request)
     }
 
-    pub(crate) fn unregister_session_route(&self, session_key: &SessionKey) {
-        if let Some(ingest) = self.event_ingest.as_ref() {
-            ingest.unregister_route(session_key);
+    async fn subscribe_observation(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        if trace::enabled() {
+            trace::log_unscoped("runtime.openclaw.observation.subscribe.request", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
+                "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()) }));
+        }
+        let epoch = control.epoch.ok_or(RuntimeOperationFailure::Unavailable)?.as_u64();
+        {
+            let mut entries = self.observations.entries.lock().expect("observation registry lock poisoned");
+            if trace::enabled() {
+                let entry = entries.get(&identity_key(identity));
+                trace::log_unscoped("runtime.openclaw.observation.subscribe.binding", serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "sourceEpoch": epoch,
+                    "entryPresent": entry.is_some(), "entryGeneration": entry.map(|entry| entry.generation),
+                    "entrySourceEpoch": entry.and_then(|entry| entry.source_epoch), "subscribedEpoch": entry.and_then(|entry| entry.subscribed_epoch),
+                    "paused": entry.map(|entry| entry.paused), "cursorPresent": entry.is_some_and(|entry| entry.cursor.is_some()) }));
+            }
+            let entry = entries.get_mut(&identity_key(identity)).filter(|entry| entry.generation == generation && entry.source_epoch.is_none_or(|source| source == epoch)).ok_or(RuntimeOperationFailure::Unavailable)?;
+            if entry.subscribed_epoch == Some(epoch) {
+                if trace::enabled() {
+                    trace::log_unscoped("runtime.openclaw.observation.subscribe.reused", serde_json::json!({
+                        "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "sourceEpoch": epoch, "paused": entry.paused }));
+                }
+                return Ok(());
+            }
+            entry.source_epoch = Some(epoch);
+            entry.paused = false;
+            if trace::enabled() {
+                trace::log_unscoped("runtime.openclaw.observation.subscribe.admitted", serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
+                    "sourceEpoch": entry.source_epoch, "subscribedEpoch": entry.subscribed_epoch, "paused": entry.paused }));
+            }
+        }
+        let id = next_request_id("sessions-messages-subscribe");
+        let request = wire::sessions_messages_subscribe_request(id.clone(), identity.session_key.clone(), identity.agent_id.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.observations.pending.lock().expect("observation pending lock poisoned").insert(id.clone(), OrderedContext::Subscribe { identity: identity.clone(), generation, reply });
+        // ordered_query returns only after ordered ingress has decoded/projected the response; not pure socket IO.
+        let ordered_started = trace::enabled().then(std::time::Instant::now);
+        let response = control.dispatcher.ordered_query(request).await;
+        let ordered_elapsed_ms = ordered_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+        self.observations.pending.lock().expect("observation pending lock poisoned").remove(&id);
+        if trace::enabled() {
+            trace::log_unscoped("runtime.openclaw.observation.subscribe.transport", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "sourceEpoch": epoch,
+                "requestHash": sessions_module::trace::fingerprint(&id), "received": response.is_ok(),
+                "orderedQueryElapsedMs": ordered_elapsed_ms, "timingScope": "dispatcher_queue_socket_and_ordered_ingress_including_trace" }));
+        }
+        response.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        let reply_started = trace::enabled().then(std::time::Instant::now);
+        let result = result.await.map_err(|_| RuntimeOperationFailure::Unavailable);
+        let reply_elapsed_ms = reply_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+        if trace::enabled() {
+            let entries = self.observations.entries.lock().expect("observation registry lock poisoned");
+            let entry = entries.get(&identity_key(identity));
+            trace::log_unscoped("runtime.openclaw.observation.subscribe.result", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "sourceEpoch": epoch,
+                "requestHash": sessions_module::trace::fingerprint(&id), "replyReceived": result.is_ok(),
+                "routerReplyWaitElapsedMs": reply_elapsed_ms, "timingScope": "router_reply_wait_after_ordered_query_excluding_outer_trace",
+                "entryGeneration": entry.map(|entry| entry.generation), "entrySourceEpoch": entry.and_then(|entry| entry.source_epoch),
+                "subscribedEpoch": entry.and_then(|entry| entry.subscribed_epoch), "paused": entry.map(|entry| entry.paused),
+                "outcome": match &result { Ok(Ok(())) => "ok", Ok(Err(_)) => "native_failed", Err(_) => "reply_unavailable" },
+                "failure": match &result { Ok(Err(failure)) | Err(failure) => Some(observation_failure_kind(failure)), _ => None } }));
+        }
+        result?
+    }
+
+    async fn describe_observation(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        if control.supports_goal {
+            let previous = *control.metadata_subscription.lock().expect("metadata subscription lock poisoned");
+            let result = match previous {
+                Some(result) => result,
+                None => {
+                    let result = async {
+                        let request = wire::sessions_subscribe_request(next_request_id("sessions-subscribe")).map_err(|_| RuntimeOperationFailure::Unknown)?;
+                        let response = control.dispatcher.ordered_query(request).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+                        wire::decode_sessions_subscribe(response).map_err(|_| RuntimeOperationFailure::Unknown)
+                    }.await;
+                    *control.metadata_subscription.lock().expect("metadata subscription lock poisoned") = Some(result);
+                    result
+                }
+            };
+            result?;
+        }
+        let id = next_request_id("sessions-describe");
+        let key = SessionKey::try_new(identity.session_key.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+        let params = crate::session::protocol::SessionDescribeParams::new(key, Some(&identity.agent_id));
+        let request = wire::session_request(id.clone(), crate::session::protocol::SESSIONS_DESCRIBE_METHOD, serde_json::to_value(params).map_err(|_| RuntimeOperationFailure::Unknown)?).map_err(|_| RuntimeOperationFailure::Unknown)?;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.observations.pending.lock().expect("observation pending lock poisoned").insert(id.clone(), OrderedContext::Describe { identity: identity.clone(), generation, supported: control.supports_goal, reply });
+        let response = control.dispatcher.ordered_query(request).await;
+        self.observations.pending.lock().expect("observation pending lock poisoned").remove(&id);
+        response.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        result.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
+    }
+
+    async fn history_observation(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64, page: crate::session::window::PageRequest, host_epoch: u64) -> Result<sessions_module::ports::SessionSync, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        for attempt in 0..3 {
+            let mut cursor_reuse_reason = None;
+            let cursor = self.observations.entries.lock().expect("observation registry lock poisoned")
+                .get(&identity_key(identity)).filter(|entry| entry.generation == generation).ok_or(RuntimeOperationFailure::Unavailable)
+                .map(|entry| {
+                    if trace::enabled() {
+                        cursor_reuse_reason = Some(if !matches!(page.direction(), crate::session::window::Direction::Latest) { "not_latest" }
+                            else if entry.cursor.is_none() { "no_cursor" } else if entry.cursor_page != Some(page) { "page_mismatch" } else { "same_page" });
+                    }
+                    if entry.cursor_page == Some(page) { entry.cursor.clone() } else { None }
+                })?;
+            let request_trace = trace::enabled().then(|| serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
+                    "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempt": attempt + 1,
+                    "direction": match page.direction() { crate::session::window::Direction::Latest => "latest", crate::session::window::Direction::Older => "older", crate::session::window::Direction::Newer => "newer" }, "limit": page.limit().max(1), "offset": page.offset(),
+                    "cursorPresent": cursor.is_some(), "cursorHash": cursor.as_deref().map(sessions_module::trace::fingerprint),
+                    "cursorSent": matches!(page.direction(), crate::session::window::Direction::Latest) && cursor.is_some(),
+                    "cursorReuseReason": cursor_reuse_reason }));
+            let key = SessionKey::try_new(identity.session_key.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+            let mut params = crate::session::protocol::ChatHistoryParams::new(key).try_for_agent(identity.agent_id.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+            if let Some(offset) = page.offset() { params = params.try_with_offset(offset as u64).map_err(|_| RuntimeOperationFailure::TargetRejected)?; }
+            params = params.try_with_limit(page.limit().max(1) as u64).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+            if matches!(page.direction(), crate::session::window::Direction::Latest) && let Some(cursor) = cursor { params = params.try_with_cursor(cursor).map_err(|_| RuntimeOperationFailure::TargetRejected)?; }
+            let id = next_request_id("chat-history");
+            if let Some(mut payload) = request_trace {
+                payload["requestHash"] = serde_json::json!(sessions_module::trace::fingerprint(&id));
+                trace::log_unscoped("runtime.openclaw.observation.history.request", payload);
+            }
+            let request = wire::session_request(id.clone(), crate::session::protocol::CHAT_HISTORY_METHOD, serde_json::to_value(params).map_err(|_| RuntimeOperationFailure::Unknown)?).map_err(|_| RuntimeOperationFailure::Unknown)?;
+            let (reply, result) = tokio::sync::oneshot::channel();
+            self.observations.pending.lock().expect("observation pending lock poisoned").insert(id.clone(), OrderedContext::History { identity: identity.clone(), generation, page, host_epoch, reply });
+            // ordered_query returns only after ordered ingress has decoded/projected the response; not pure socket IO.
+            let ordered_started = trace::enabled().then(std::time::Instant::now);
+            let response = control.dispatcher.ordered_query(request).await;
+            let ordered_elapsed_ms = ordered_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+            self.observations.pending.lock().expect("observation pending lock poisoned").remove(&id);
+            if trace::enabled() {
+                trace::log_unscoped("runtime.openclaw.observation.history.transport", serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
+                    "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempt": attempt + 1,
+                    "requestHash": sessions_module::trace::fingerprint(&id), "received": response.is_ok(),
+                    "orderedQueryElapsedMs": ordered_elapsed_ms, "timingScope": "dispatcher_queue_socket_and_ordered_ingress_including_trace" }));
+            }
+            response.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+            let reply_started = trace::enabled().then(std::time::Instant::now);
+            let result = result.await.map_err(|_| RuntimeOperationFailure::Unavailable);
+            let reply_elapsed_ms = reply_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+            if trace::enabled() {
+                let entries = self.observations.entries.lock().expect("observation registry lock poisoned");
+                let entry = entries.get(&identity_key(identity));
+                trace::log_unscoped("runtime.openclaw.observation.history.result", serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
+                    "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempt": attempt + 1,
+                    "requestHash": sessions_module::trace::fingerprint(&id),
+                    "routerReplyWaitElapsedMs": reply_elapsed_ms, "timingScope": "router_reply_wait_after_ordered_query_excluding_outer_trace",
+                    "outcome": match &result { Ok(Ok(Some(_))) => "ok", Ok(Ok(None)) => "reset", Ok(Err(_)) => "native_failed", Err(_) => "reply_unavailable" },
+                    "failure": match &result { Ok(Err(failure)) | Err(failure) => Some(observation_failure_kind(failure)), _ => None },
+                    "entryGeneration": entry.map(|entry| entry.generation), "entrySourceEpoch": entry.and_then(|entry| entry.source_epoch),
+                    "paused": entry.map(|entry| entry.paused), "cursorPresent": entry.is_some_and(|entry| entry.cursor.is_some()),
+                    "cursorHash": entry.and_then(|entry| entry.cursor.as_deref()).map(sessions_module::trace::fingerprint),
+                    "sync": match &result { Ok(Ok(Some(sync))) => Some(sessions_module::trace::view_shape(&sync.view)), _ => None } }));
+            }
+            if let Some(sync) = result?? { return Ok(sync); }
+            if trace::enabled() {
+                trace::log_unscoped("runtime.openclaw.observation.history.reset", serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
+                    "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempt": attempt + 1,
+                    "retry": attempt < 2 }));
+            }
+        }
+        if trace::enabled() {
+            trace::log_unscoped("runtime.openclaw.observation.history.exhausted", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
+                "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempts": 3 }));
+        }
+        Err(RuntimeOperationFailure::Unknown)
+    }
+
+    pub(crate) async fn sync_observation(&self, identity: &sessions_module::state::SessionIdentity, generation: u64, page: crate::session::window::PageRequest, host_epoch: u64) -> Result<sessions_module::ports::SessionSync, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        if trace::enabled() {
+            trace::log_unscoped("runtime.openclaw.observation.sync.request", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "hostEpoch": host_epoch,
+                "direction": match page.direction() { crate::session::window::Direction::Latest => "latest", crate::session::window::Direction::Older => "older", crate::session::window::Direction::Newer => "newer" }, "limit": page.limit(), "offset": page.offset() }));
+        }
+        let control = self.control_dispatcher().await.map_err(|_| {
+            if trace::enabled() {
+                trace::log_unscoped("runtime.openclaw.observation.sync.unavailable", serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "hostEpoch": host_epoch, "reason": "control_unavailable" }));
+            }
+            RuntimeOperationFailure::Unavailable
+        })?;
+        let native_wait_started = trace::enabled().then(std::time::Instant::now);
+        let _native = self.observations.native.lock().await;
+        let native_wait_elapsed_ms = native_wait_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+        if trace::enabled() {
+            trace::log_unscoped("runtime.openclaw.observation.sync.native_acquired", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "hostEpoch": host_epoch,
+                "nativeMutexWaitElapsedMs": native_wait_elapsed_ms, "lockScope": "all_openclaw_observations",
+                "timingScope": "native_mutex_lock_await_only" }));
+        }
+        let mut subscribe_elapsed_ms = None;
+        let mut history_elapsed_ms = None;
+        let result = async {
+            let started = trace::enabled().then(std::time::Instant::now);
+            let subscribed = self.subscribe_observation(&control, identity, generation).await;
+            subscribe_elapsed_ms = started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+            subscribed?;
+            self.describe_observation(&control, identity, generation).await?;
+            let started = trace::enabled().then(std::time::Instant::now);
+            let history = self.history_observation(&control, identity, generation, page, host_epoch).await;
+            history_elapsed_ms = started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+            history
+        }.await;
+        if trace::enabled() {
+            trace::log_unscoped("runtime.openclaw.observation.sync.result", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "hostEpoch": host_epoch,
+                "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "succeeded": result.is_ok(),
+                "nativeMutexWaitElapsedMs": native_wait_elapsed_ms, "subscribeWithTraceElapsedMs": subscribe_elapsed_ms,
+                "historyWithTraceElapsedMs": history_elapsed_ms, "timingScope": "subscribe_and_history_calls_including_internal_trace_excluding_sync_result_trace",
+                "failure": result.as_ref().err().map(observation_failure_kind),
+                "syncSourceEpoch": result.as_ref().ok().and_then(|sync| sync.source_epoch),
+                "cut": result.as_ref().ok().map(|sync| match sync.cut { sessions_module::ports::SessionSyncCut::Snapshot => "snapshot", sessions_module::ports::SessionSyncCut::EventFrontier { .. } => "event_frontier" }),
+                "terminalRunCount": result.as_ref().ok().map(|sync| sync.terminal_runs.len()),
+                "retiredItemCount": result.as_ref().ok().map(|sync| sync.retired_item_ids.len()) }));
+        }
+        result
+    }
+
+    pub(crate) async fn restart_observation(&self, identity: &sessions_module::state::SessionIdentity, generation: u64, next_generation: u64) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        if trace::enabled() {
+            trace::log_unscoped("runtime.openclaw.observation.restart.request", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "nextGeneration": next_generation }));
+        }
+        let _native = self.observations.native.lock().await;
+        if !self.observations.contains(identity, generation, None) {
+            if trace::enabled() {
+                trace::log_unscoped("runtime.openclaw.observation.restart.rejected", serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "nextGeneration": next_generation, "reason": "binding_unavailable" }));
+            }
+            return Err(RuntimeOperationFailure::Unavailable);
+        }
+        if next_generation <= generation || next_generation > 9_007_199_254_740_991 {
+            if trace::enabled() {
+                trace::log_unscoped("runtime.openclaw.observation.restart.rejected", serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "nextGeneration": next_generation, "reason": "invalid_generation" }));
+            }
+            self.close_observation_locked(identity.clone(), generation).await;
+            return Err(RuntimeOperationFailure::TargetRejected);
+        }
+        self.observations.restart(identity, generation, next_generation)?;
+        self.observations.pending.lock().expect("observation pending lock poisoned").retain(|_, context| {
+            let (target, target_generation) = match context {
+                OrderedContext::Subscribe { identity, generation, .. } | OrderedContext::History { identity, generation, .. } | OrderedContext::Describe { identity, generation, .. } => (identity, generation),
+            };
+            target != identity || *target_generation != generation
+        });
+        let result = match &self.event_ingest {
+            Some(ingest) => ingest.restart_observation(identity.clone(), generation, next_generation, Arc::clone(&self.observations)).await,
+            None => Err(RuntimeOperationFailure::Unavailable),
+        };
+        if trace::enabled() {
+            trace::log_unscoped("runtime.openclaw.observation.restart.handoff", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "nextGeneration": next_generation,
+                "completed": result.is_ok(), "failure": result.as_ref().err().map(observation_failure_kind) }));
+        }
+        if result.is_err() {
+            self.close_observation_locked(identity.clone(), next_generation).await;
+            if let Some(ingest) = &self.event_ingest { ingest.close_observation(identity.clone(), generation).await; }
+        }
+        result
+    }
+
+    pub(crate) async fn close_observation(&self, identity: sessions_module::state::SessionIdentity, generation: u64) {
+        let _native = self.observations.native.lock().await;
+        self.close_observation_locked(identity, generation).await;
+    }
+
+    async fn close_observation_locked(&self, identity: sessions_module::state::SessionIdentity, generation: u64) {
+        {
+            let mut entries = self.observations.entries.lock().expect("observation registry lock poisoned");
+            if trace::enabled() {
+                let entry = entries.get(&identity_key(&identity));
+                trace::log_unscoped("runtime.openclaw.observation.close.request", serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
+                    "entryPresent": entry.is_some(), "entryGeneration": entry.map(|entry| entry.generation),
+                    "sourceEpoch": entry.and_then(|entry| entry.source_epoch), "subscribedEpoch": entry.and_then(|entry| entry.subscribed_epoch),
+                    "paused": entry.map(|entry| entry.paused), "cursorPresent": entry.is_some_and(|entry| entry.cursor.is_some()),
+                    "cursorHash": entry.and_then(|entry| entry.cursor.as_deref()).map(sessions_module::trace::fingerprint),
+                    "matchesGeneration": entry.is_some_and(|entry| entry.generation == generation) }));
+            }
+            if !entries.get(&identity_key(&identity)).is_some_and(|entry| entry.generation == generation) { return; }
+            entries.remove(&identity_key(&identity));
+        }
+        self.observations.pending.lock().expect("observation pending lock poisoned").retain(|_, context| {
+            let (target, target_generation) = match context {
+                OrderedContext::Subscribe { identity, generation, .. } | OrderedContext::History { identity, generation, .. } | OrderedContext::Describe { identity, generation, .. } => (identity, generation),
+            };
+            *target != identity || *target_generation != generation
+        });
+        if let Some(ingest) = &self.event_ingest { ingest.close_observation(identity.clone(), generation).await; }
+        if trace::enabled() {
+            trace::log_unscoped("runtime.openclaw.observation.close.ingress_returned", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(&identity), "generation": generation, "ingestPresent": self.event_ingest.is_some() }));
+        }
+        if self.observations.entries.lock().expect("observation registry lock poisoned").contains_key(&identity_key(&identity)) {
+            if trace::enabled() {
+                trace::log_unscoped("runtime.openclaw.observation.close.unsubscribe_skipped", serde_json::json!({
+                    "identity": sessions_module::trace::identity_shape(&identity), "generation": generation, "reason": "binding_replaced" }));
+            }
+            return;
+        }
+        let control = {
+            let state = self.control_state.lock().await;
+            match &*state { GatewayControlConnectionState::Ready { control, .. } => Some(Arc::clone(control)), _ => None }
+        };
+        if trace::enabled() {
+            trace::log_unscoped("runtime.openclaw.observation.close.unsubscribe", serde_json::json!({
+                "identity": sessions_module::trace::identity_shape(&identity), "generation": generation, "controlReady": control.is_some(),
+                "sourceEpoch": control.as_ref().and_then(|control| control.epoch.map(|epoch| epoch.as_u64())) }));
+        }
+        if let Some(control) = control {
+            if let Ok(request) = wire::sessions_messages_unsubscribe_request(next_request_id("sessions-messages-unsubscribe"), identity.session_key.clone(), identity.agent_id.clone()) {
+                let result = control.dispatcher.query(request).await;
+                if trace::enabled() {
+                    trace::log_unscoped("runtime.openclaw.observation.close.result", serde_json::json!({
+                        "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
+                        "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()),
+                        "outcome": match &result { Ok(wire::GatewayResponse::Success { .. }) => "ok", Ok(wire::GatewayResponse::Failure { .. }) => "native_failed", Err(_) => "transport_failed" } }));
+                }
+            }
         }
     }
 
@@ -450,6 +812,7 @@ impl GatewayClient {
     pub async fn close_control_connection(&self) {
         let control = {
             let mut state = self.control_state.lock().await;
+            self.live_goal_capability.store(false, Ordering::Release);
             let instance_id = state.instance_id().to_owned();
             let previous = std::mem::replace(
                 &mut *state,
@@ -466,7 +829,9 @@ impl GatewayClient {
         };
         if let Some(control) = control {
             if let Ok(control) = Arc::try_unwrap(control) {
+                let task = control.receive_task.lock().expect("control receive task lock poisoned").take();
                 control.dispatcher.close().await;
+                if let Some(mut task) = task { let _ = task.cancel_and_join().await; }
             }
         }
     }
@@ -541,7 +906,19 @@ impl GatewayClient {
         let (task, _) = OwnedTask::spawn(|cancellation| async move {
             let cancelled = tokio::select! {
                 _ = cancellation.cancelled() => true,
-                _ = client.connect_control_until_ready() => false,
+                _ = async {
+                    loop {
+                        client.connect_control_until_ready().await;
+                        let control = {
+                            let state = client.control_state.lock().await;
+                            match &*state { GatewayControlConnectionState::Ready { control, .. } => Arc::clone(control), _ => break }
+                        };
+                        control.dispatcher.closed().await;
+                        let receive_task = control.receive_task.lock().expect("control receive task lock poisoned").take();
+                        if let Some(mut task) = receive_task { let _ = task.join().await; }
+                        client.mark_control_reconnecting_if_current(&control).await;
+                    }
+                } => false,
             };
             if cancelled {
                 client.close_control_connection().await;
@@ -624,14 +1001,33 @@ impl GatewayClient {
                         hello.policy.tick_interval_ms,
                     );
                     let (dispatcher, mut events) = Dispatcher::new(socket);
-                    if let Some(ingest) = self.event_ingest.as_ref() {
-                        ingest.forward(events);
+                    let (epoch, receive_task) = if let Some(ingest) = self.event_ingest.as_ref() {
+                        let (epoch, task) = ingest.forward(events, Arc::clone(&self.observations), dispatcher.failure());
+                        (Some(epoch), task)
                     } else {
-                        tokio::spawn(async move { while events.recv().await.is_some() {} });
-                    }
-                    *self.control_state.lock().await = GatewayControlConnectionState::Ready {
-                        instance_id: self.control_profile.instance_id().to_owned(),
-                        control: Arc::new(ControlDispatcher { dispatcher }),
+                        let (task, _) = OwnedTask::spawn(|cancel| async move {
+                            loop {
+                                tokio::select! {
+                                    _ = cancel.cancelled() => break,
+                                    frame = events.recv() => match frame {
+                                        Some(super::connection::GatewayFrame::Response { response, reply }) => { let _ = reply.send(Ok(response)); },
+                                        Some(super::connection::GatewayFrame::Event(_)) => {},
+                                        None => break,
+                                    }
+                                }
+                            }
+                        });
+                        (None, task)
+                    };
+                    let supports_goal = hello.features.capabilities.iter().any(|capability| capability == crate::session::goal::START_CAPABILITY);
+                    let control = Arc::new(ControlDispatcher { dispatcher, epoch, receive_task: StdMutex::new(Some(receive_task)), supports_goal, metadata_subscription: StdMutex::new(None) });
+                    {
+                        let mut state = self.control_state.lock().await;
+                        self.live_goal_capability.store(supports_goal, Ordering::Release);
+                        *state = GatewayControlConnectionState::Ready {
+                            instance_id: self.control_profile.instance_id().to_owned(),
+                            control,
+                        };
                     };
                     self.trace_first_control_ready(attempt_number);
                     self.bump_control_readiness();
@@ -675,15 +1071,9 @@ impl GatewayClient {
         eprintln!(
             "[startup-trace] source=openclaw-control phase=unavailable detail=control-connect-exhausted error={last_error}"
         );
-        let terminal_state = if is_retryable_control_connection_error(last_error) {
-            GatewayControlConnectionState::Reconnecting {
-                instance_id: self.control_profile.instance_id().to_owned(),
-            }
-        } else {
-            GatewayControlConnectionState::Unavailable {
-                instance_id: self.control_profile.instance_id().to_owned(),
-                error: last_error,
-            }
+        let terminal_state = GatewayControlConnectionState::Unavailable {
+            instance_id: self.control_profile.instance_id().to_owned(),
+            error: last_error,
         };
         *self.control_state.lock().await = terminal_state;
         self.bump_control_readiness();
@@ -867,10 +1257,14 @@ impl GatewayClient {
     }
 
     async fn mark_control_reconnecting_if_current(&self, current: &Arc<ControlDispatcher>) {
+        current.dispatcher.disconnect().await;
+        let receive_task = current.receive_task.lock().expect("control receive task lock poisoned").take();
+        if let Some(mut task) = receive_task { let _ = task.join().await; }
         let mut state = self.control_state.lock().await;
         let instance_id = state.instance_id().to_owned();
         if let GatewayControlConnectionState::Ready { control, .. } = &*state {
             if Arc::ptr_eq(control, current) {
+                self.live_goal_capability.store(false, Ordering::Release);
                 *state = GatewayControlConnectionState::Reconnecting { instance_id };
             }
         }
@@ -937,6 +1331,22 @@ impl GatewayClient {
         }
     }
 
+    pub(crate) async fn question_list(&self) -> Result<wire::GatewayResponse, GatewayClientError> {
+        let request = wire::question_list_request(next_request_id("question-list"))
+            .map_err(|_| GatewayClientError::RpcFailed)?;
+        self.rpc_query(request).await
+    }
+
+    pub(crate) async fn question_get(&self, id: String) -> Result<wire::GatewayResponse, GatewayClientError> {
+        let request = wire::question_get_request(next_request_id("question-get"), id)
+            .map_err(|_| GatewayClientError::RpcFailed)?;
+        self.rpc_query(request).await
+    }
+
+    pub(crate) async fn rpc_ordered_query(&self, request: wire::RpcRequest) -> Result<wire::GatewayResponse, GatewayClientError> {
+        self.control_dispatcher().await?.dispatcher.ordered_query(request).await.map_err(dispatcher_error)
+    }
+
     pub(crate) async fn rpc_query(
         &self,
         request: wire::RpcRequest,
@@ -993,6 +1403,25 @@ impl GatewayClient {
             }
         }
         delivery
+    }
+
+    pub(crate) async fn rpc_goal_mutation(&self, request: wire::RpcRequest) -> Result<MutationDelivery, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        for attempt in 0..2 {
+            let control = self.control_dispatcher().await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+            if !control.supports_goal { return Err(RuntimeOperationFailure::Unsupported); }
+            let delivery = control.dispatcher.mutate(request.clone()).await;
+            if attempt == 0 {
+                if let MutationDelivery::NotWritten(error) = delivery {
+                    if is_retryable_control_connection_error(dispatcher_error(error)) {
+                        self.mark_control_reconnecting_if_current(&control).await;
+                        continue;
+                    }
+                }
+            }
+            return Ok(delivery);
+        }
+        unreachable!("Goal mutation attempts are bounded")
     }
 
     pub(crate) async fn rpc_encoded_mutation(
@@ -1171,7 +1600,7 @@ impl GatewayClient {
     }
 }
 
-const CONTROL_METHODS: [&str; 11] = [
+const CONTROL_METHODS: [&str; 13] = [
     "status",
     "config.get",
     "config.patch",
@@ -1181,6 +1610,8 @@ const CONTROL_METHODS: [&str; 11] = [
     "skills.status",
     "channels.pairing.list",
     "sessions.describe",
+    "question.list",
+    "question.get",
     wire::QUESTION_RESOLVE_METHOD,
     wire::SYSTEM_PRESENCE_METHOD,
 ];
@@ -1212,6 +1643,16 @@ impl GatewayControlReadiness {
             | GatewayClientError::Protocol
             | GatewayClientError::SecretCleanupFailed => Self::Unavailable,
         }
+    }
+}
+
+fn observation_failure_kind(failure: &sessions_module::ports::RuntimeOperationFailure) -> &'static str {
+    use sessions_module::ports::RuntimeOperationFailure;
+    match failure {
+        RuntimeOperationFailure::Unsupported => "unsupported",
+        RuntimeOperationFailure::Unavailable => "unavailable",
+        RuntimeOperationFailure::TargetRejected => "target_rejected",
+        RuntimeOperationFailure::Unknown => "unknown",
     }
 }
 

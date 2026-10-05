@@ -309,8 +309,8 @@ function isSupportedCapabilities(value: unknown): boolean {
 
 function isCapabilities(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['chat', 'streaming', 'tools', 'approvals', 'replay', 'modelSelection'])
-    && ['chat', 'streaming', 'tools', 'approvals', 'replay', 'modelSelection']
+    && hasExactKeys(value, ['chat', 'streaming', 'tools', 'approvals', 'replay', 'modelSelection', 'supportsGoal'])
+    && ['chat', 'streaming', 'tools', 'approvals', 'replay', 'modelSelection', 'supportsGoal']
       .every((key) => typeof value[key] === 'boolean');
 }
 

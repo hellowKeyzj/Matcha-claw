@@ -271,13 +271,13 @@ export function ChatShell({
                       </div>
                     ) : null}
 
-                    <div className="relative">
-                      {approvalDock ? (
-                        <div className="pointer-events-auto absolute inset-x-0 bottom-full mb-2">
-                          {approvalDock}
-                        </div>
-                      ) : null}
+                    {approvalDock ? (
+                      <div className="pointer-events-auto min-w-0">
+                        {approvalDock}
+                      </div>
+                    ) : null}
 
+                    <div className="relative">
                       <div
                         className="pointer-events-auto chat-scroll-sync-input"
                         onWheelCapture={handleComposerWheelCapture}

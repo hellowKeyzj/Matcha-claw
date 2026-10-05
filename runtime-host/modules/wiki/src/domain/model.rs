@@ -1052,8 +1052,6 @@ pub struct WikiReviewItem {
     #[serde(default)]
     pub affected_pages: Vec<String>,
     #[serde(default)]
-    pub search_queries: Vec<String>,
-    #[serde(default)]
     pub options: Vec<WikiReviewOption>,
     #[serde(default)]
     pub resolved: bool,
@@ -1165,6 +1163,12 @@ pub struct WikiSourceTask {
     #[serde(default)]
     progress: Option<u8>,
     #[serde(default)]
+    completed: Option<usize>,
+    #[serde(default)]
+    total: Option<usize>,
+    #[serde(default)]
+    stage_started_at_ms: Option<u64>,
+    #[serde(default)]
     cancel_requested_at_ms: Option<u64>,
 }
 
@@ -1193,8 +1197,15 @@ impl WikiSourceTask {
             error,
             stage: None,
             progress: None,
+            completed: None,
+            total: None,
+            stage_started_at_ms: None,
             cancel_requested_at_ms: None,
         }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn project_id(&self) -> &str {
@@ -1217,21 +1228,37 @@ impl WikiSourceTask {
         self.stage.as_deref() == Some("paused")
     }
 
+    pub(crate) fn is_queued(&self) -> bool {
+        self.stage.as_deref() == Some("queued")
+    }
+
     pub const fn cancel_requested(&self) -> bool {
         self.cancel_requested_at_ms.is_some()
     }
 
-    pub fn mark_running(&mut self, stage: impl Into<String>, progress: u8) {
+    pub fn mark_running(&mut self, stage: impl Into<String>, counts: Option<(usize, usize)>) {
+        let stage = stage.into();
+        let now = crate::domain::now_ms();
+        if self.stage.as_deref() != Some(stage.as_str()) {
+            self.stage_started_at_ms = Some(now);
+        }
         self.status = WikiSourceTaskStatus::Running;
-        self.stage = Some(stage.into());
-        self.progress = Some(progress.min(100));
-        self.updated_at_ms = crate::domain::now_ms();
+        self.stage = Some(stage);
+        self.completed = counts.map(|(completed, _)| completed);
+        self.total = counts.map(|(_, total)| total);
+        self.progress = counts.and_then(|(completed, total)| {
+            (total > 0).then(|| ((completed.min(total) as u128 * 100) / total as u128) as u8)
+        });
+        self.updated_at_ms = now;
     }
 
     pub fn mark_pending(&mut self, stage: Option<String>) {
         self.status = WikiSourceTaskStatus::Pending;
         self.stage = stage;
         self.progress = None;
+        self.completed = None;
+        self.total = None;
+        self.stage_started_at_ms = None;
         self.updated_at_ms = crate::domain::now_ms();
         self.error = None;
         self.cancel_requested_at_ms = None;
@@ -1246,6 +1273,9 @@ impl WikiSourceTask {
         self.status = WikiSourceTaskStatus::Pending;
         self.stage = Some("paused".to_owned());
         self.progress = None;
+        self.completed = None;
+        self.total = None;
+        self.stage_started_at_ms = None;
         self.updated_at_ms = crate::domain::now_ms();
         self.error = None;
         self.cancel_requested_at_ms = Some(self.updated_at_ms);
@@ -1259,7 +1289,10 @@ impl WikiSourceTask {
     pub fn mark_cancelled(&mut self) {
         self.status = WikiSourceTaskStatus::Cancelled;
         self.stage = Some("cancelled".to_owned());
-        self.progress = Some(100);
+        self.progress = None;
+        self.completed = None;
+        self.total = None;
+        self.stage_started_at_ms = None;
         self.updated_at_ms = crate::domain::now_ms();
         self.error = None;
     }
@@ -1268,6 +1301,9 @@ impl WikiSourceTask {
         self.status = WikiSourceTaskStatus::Done;
         self.stage = Some("done".to_owned());
         self.progress = Some(100);
+        self.completed = None;
+        self.total = None;
+        self.stage_started_at_ms = None;
         self.updated_at_ms = crate::domain::now_ms();
         self.error = None;
     }

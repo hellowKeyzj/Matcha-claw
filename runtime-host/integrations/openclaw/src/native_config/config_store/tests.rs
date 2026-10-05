@@ -96,6 +96,7 @@ fn canonical_initialization_writes_required_owner_defaults() {
             "profile": "full",
             "sessions": { "visibility": "all" },
             "deny": [
+                "skill_workshop",
                 "gateway",
                 "nodes",
                 "progress_card",
@@ -120,8 +121,7 @@ fn canonical_initialization_preserves_existing_agent_owner() {
                 "entries": { "ops": { "default": true } },
                 "defaults": { "temperature": 0.2 }
             },
-            "messages": { "locale": "zh" },
-            "tools": { "deny": ["skill_workshop", "terminal"] }
+            "messages": { "locale": "zh" }
         }))
         .expect("serialize config"),
     )
@@ -157,7 +157,6 @@ fn canonical_initialization_preserves_existing_agent_owner() {
             "sessions": { "visibility": "all" },
             "deny": [
                 "skill_workshop",
-                "terminal",
                 "gateway",
                 "nodes",
                 "progress_card",

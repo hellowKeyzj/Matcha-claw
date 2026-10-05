@@ -9,6 +9,8 @@ use organization::{GraphRunId, RoleId, RoleSessionRef, TeamId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use serde_json::Value;
 
+use super::goal::SessionGoalView;
+
 pub const MAX_SESSION_KEY_BYTES: usize = 4096;
 pub const MAX_ID_BYTES: usize = 256;
 pub const MAX_CONTENT_REF_BYTES: usize = 512;
@@ -20,11 +22,9 @@ pub const MAX_APPROVALS: usize = 32;
 pub const MAX_CHANGE_COUNT: usize = 16;
 pub const MAX_MISSING_FACTS: usize = 16;
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-pub const MAX_RENDERER_ROUTE_KEY_BYTES: usize = 128;
 const MAX_ACCEPTED_EVENT_IDENTITIES: usize = 1024;
 const OUTGOING_MEDIA_PREFIX: &str = "/api/chat/media/outgoing/";
 const OUTGOING_MEDIA_PREFIX_WITHOUT_SLASH: &str = "api/chat/media/outgoing/";
-const UNKNOWN_TOOL_ANCHOR_NAME: &str = "tool";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionStateError {
@@ -173,15 +173,14 @@ impl SessionEndpoint {
 pub struct SessionIdentity {
     pub session_key: String,
     pub endpoint: SessionEndpoint,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
+    pub agent_id: String,
 }
 
 impl SessionIdentity {
     pub fn new(
         session_key: impl Into<String>,
         provider: SessionProvider,
-        agent_id: Option<String>,
+        agent_id: String,
     ) -> Option<Self> {
         Self::with_endpoint(session_key, SessionEndpoint::local(provider), agent_id).ok()
     }
@@ -189,7 +188,7 @@ impl SessionIdentity {
     pub fn try_new(
         session_key: impl Into<String>,
         provider: SessionProvider,
-        agent_id: Option<String>,
+        agent_id: String,
     ) -> Result<Self, SessionStateError> {
         Self::with_endpoint(session_key, SessionEndpoint::local(provider), agent_id)
     }
@@ -197,7 +196,7 @@ impl SessionIdentity {
     pub fn with_endpoint(
         session_key: impl Into<String>,
         endpoint: SessionEndpoint,
-        agent_id: Option<String>,
+        agent_id: String,
     ) -> Result<Self, SessionStateError> {
         let identity = Self {
             session_key: session_key.into(),
@@ -206,6 +205,12 @@ impl SessionIdentity {
         };
         valid_identity(&identity)
             .then_some(identity)
+            .ok_or(SessionStateError::InvalidIdentity)
+    }
+
+    pub fn validate(&self) -> Result<(), SessionStateError> {
+        valid_identity(self)
+            .then_some(())
             .ok_or(SessionStateError::InvalidIdentity)
     }
 
@@ -579,6 +584,7 @@ pub struct SessionView {
     pub endpoint_session_id: Option<String>,
     pub ownership: Option<SessionSourceBinding>,
     pub model_state: Option<SessionModelState>,
+    pub goal: SessionGoalView,
     pub identity: SessionIdentity,
     pub epoch: u64,
     pub seq: u64,
@@ -603,6 +609,7 @@ impl Serialize for SessionView {
             endpoint_session_id: Option<&'a str>,
             ownership: Option<&'a SessionSourceBinding>,
             model_state: Option<&'a SessionModelState>,
+            goal: &'a SessionGoalView,
             identity: &'a SessionIdentity,
             epoch: u64,
             seq: u64,
@@ -620,6 +627,7 @@ impl Serialize for SessionView {
             endpoint_session_id: self.endpoint_session_id.as_deref(),
             ownership: self.ownership.as_ref(),
             model_state: self.model_state.as_ref(),
+            goal: &self.goal,
             identity: &self.identity,
             epoch: self.epoch,
             seq: self.seq,
@@ -647,6 +655,7 @@ impl<'de> Deserialize<'de> for SessionView {
             endpoint_session_id: Option<String>,
             ownership: Option<SessionSourceBinding>,
             model_state: Option<SessionModelState>,
+            goal: SessionGoalView,
             identity: SessionIdentity,
             epoch: u64,
             seq: u64,
@@ -665,6 +674,7 @@ impl<'de> Deserialize<'de> for SessionView {
             endpoint_session_id: wire.endpoint_session_id,
             ownership: wire.ownership,
             model_state: wire.model_state,
+            goal: wire.goal,
             identity: wire.identity,
             epoch: wire.epoch,
             seq: wire.seq,
@@ -708,6 +718,7 @@ impl SessionView {
                 .model_state
                 .as_ref()
                 .is_some_and(|model_state| !valid_session_model_state(model_state))
+            || self.goal.validate().is_err()
             || !valid_identity(&self.identity)
             || !valid_epoch(self.epoch)
             || self.seq > MAX_SAFE_INTEGER
@@ -753,11 +764,21 @@ pub enum SessionChange {
     MessageReplaced {
         item: SessionItem,
     },
+    /// Authoritative display splice. Only the named item IDs are removed; incoming
+    /// IDs are also removed from their previous positions before insertion.
+    ItemsReplaced {
+        old_item_ids: Vec<String>,
+        anchor: ItemAnchor,
+        items: Vec<SessionItem>,
+    },
     ToolUpdated {
         tool: ToolView,
     },
     ApprovalUpdated {
         approval: ApprovalView,
+    },
+    GoalChanged {
+        goal: SessionGoalView,
     },
     RuntimeChanged {
         runtime: RuntimeView,
@@ -771,6 +792,19 @@ pub enum SessionChange {
     RecoveryRequired {
         reason: RecoveryReason,
     },
+}
+
+/// Position in the remaining display list, after removing old and incoming IDs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ItemAnchor {
+    Start,
+    After { item_id: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -791,7 +825,7 @@ pub enum RecoveryReason {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionDelta {
     pub session_key: String,
-    pub route_key: Option<String>,
+    pub identity: SessionIdentity,
     pub epoch: u64,
     pub seq: u64,
     pub cursor: u64,
@@ -808,8 +842,7 @@ impl Serialize for SessionDelta {
         #[serde(rename_all = "camelCase")]
         struct Wire<'a> {
             session_key: &'a str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            route_key: Option<&'a str>,
+            identity: &'a SessionIdentity,
             epoch: u64,
             seq: u64,
             cursor: u64,
@@ -820,7 +853,7 @@ impl Serialize for SessionDelta {
 
         Wire {
             session_key: &self.session_key,
-            route_key: self.route_key.as_deref(),
+            identity: &self.identity,
             epoch: self.epoch,
             seq: self.seq,
             cursor: self.cursor,
@@ -880,7 +913,7 @@ impl<'de> Deserialize<'de> for SessionDelta {
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Wire {
             session_key: String,
-            route_key: Option<String>,
+            identity: SessionIdentity,
             epoch: u64,
             seq: u64,
             cursor: u64,
@@ -891,7 +924,7 @@ impl<'de> Deserialize<'de> for SessionDelta {
         let wire = Wire::deserialize(deserializer)?;
         let delta = Self {
             session_key: wire.session_key,
-            route_key: wire.route_key,
+            identity: wire.identity,
             epoch: wire.epoch,
             seq: wire.seq,
             cursor: wire.cursor,
@@ -911,6 +944,15 @@ fn public_delta_change(change: &SessionChange) -> SessionChange {
         SessionChange::MessageReplaced { item } => SessionChange::MessageReplaced {
             item: public_delta_item(item),
         },
+        SessionChange::ItemsReplaced {
+            old_item_ids,
+            anchor,
+            items,
+        } => SessionChange::ItemsReplaced {
+            old_item_ids: old_item_ids.clone(),
+            anchor: anchor.clone(),
+            items: items.iter().map(public_delta_item).collect(),
+        },
         SessionChange::ToolUpdated { tool } => SessionChange::ToolUpdated {
             tool: public_delta_tool(tool),
         },
@@ -923,6 +965,7 @@ fn public_delta_change(change: &SessionChange) -> SessionChange {
         SessionChange::RunPhaseChanged { .. }
         | SessionChange::MessageDelta { .. }
         | SessionChange::ApprovalUpdated { .. }
+        | SessionChange::GoalChanged { .. }
         | SessionChange::WindowChanged { .. }
         | SessionChange::RecoveryRequired { .. } => change.clone(),
     }
@@ -1038,10 +1081,8 @@ impl SessionDelta {
             || self.seq > MAX_SAFE_INTEGER
             || self.cursor == 0
             || self.cursor > MAX_SAFE_INTEGER
-            || self
-                .route_key
-                .as_deref()
-                .is_some_and(|value| !valid_route_key(value))
+            || self.session_key != self.identity.session_key
+            || !valid_identity(&self.identity)
             || self.run_id.as_deref().is_some_and(|value| !valid_id(value))
             || self.changes.is_empty()
             || self.changes.len() > MAX_CHANGE_COUNT
@@ -1066,10 +1107,24 @@ pub enum SessionApplyRejection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionApplyResult {
     Applied(SessionDelta),
-    Duplicate { cursor: u64 },
-    Stale { cursor: u64, received: u64 },
-    Gap { expected: u64, received: u64 },
-    Rejected { reason: SessionApplyRejection },
+    /// Native envelope consumed without any public display/runtime change.
+    Consumed {
+        cursor: u64,
+    },
+    Duplicate {
+        cursor: u64,
+    },
+    Stale {
+        cursor: u64,
+        received: u64,
+    },
+    Gap {
+        expected: u64,
+        received: u64,
+    },
+    Rejected {
+        reason: SessionApplyRejection,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1099,64 +1154,70 @@ fn canonical_change_fingerprint(changes: &[SessionChange]) -> u64 {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionEventBinding {
-    session_key: String,
-    route_key: Option<String>,
+    identity: SessionIdentity,
+    generation: Option<u64>,
     source_epoch: Option<u64>,
     source_cursor_contiguous: bool,
+    replay: bool,
 }
 
 impl SessionEventBinding {
-    pub fn new(
-        session_key: impl Into<String>,
-        route_key: Option<String>,
-        source_epoch: Option<u64>,
-    ) -> Option<Self> {
-        Self::with_source_cursor_continuity(session_key, route_key, source_epoch, false)
+    pub fn new(identity: SessionIdentity, source_epoch: Option<u64>) -> Option<Self> {
+        Self::with_source_cursor_continuity(identity, None, source_epoch, false)
     }
 
-    /// Creates a binding only when the caller has a session-scoped contiguous
-    /// source cursor. Gateway-wide cursors must use `new`, because their
-    /// per-session values can legitimately jump over other sessions' frames.
-    pub fn new_contiguous(
-        session_key: impl Into<String>,
-        route_key: Option<String>,
+    pub fn new_contiguous(identity: SessionIdentity, source_epoch: Option<u64>) -> Option<Self> {
+        Self::with_source_cursor_continuity(identity, None, source_epoch, true)
+    }
+
+    /// The generation binds ingress to an internal observation, not to a UI lease.
+    pub fn observed(
+        identity: SessionIdentity,
+        generation: u64,
         source_epoch: Option<u64>,
+        contiguous: bool,
     ) -> Option<Self> {
-        Self::with_source_cursor_continuity(session_key, route_key, source_epoch, true)
+        Self::with_source_cursor_continuity(identity, Some(generation), source_epoch, contiguous)
     }
 
     fn with_source_cursor_continuity(
-        session_key: impl Into<String>,
-        route_key: Option<String>,
+        identity: SessionIdentity,
+        generation: Option<u64>,
         source_epoch: Option<u64>,
         source_cursor_contiguous: bool,
     ) -> Option<Self> {
-        let binding = Self {
-            session_key: session_key.into(),
-            route_key,
+        (valid_identity(&identity)
+            && generation.is_none_or(valid_epoch)
+            && source_epoch.is_none_or(valid_epoch))
+        .then_some(Self {
+            identity,
+            generation,
             source_epoch,
             source_cursor_contiguous,
-        };
-        (valid_id_with_limit(&binding.session_key, MAX_SESSION_KEY_BYTES)
-            && binding.route_key.as_deref().is_none_or(valid_route_key)
-            && binding.source_epoch.is_none_or(valid_epoch))
-        .then_some(binding)
+            replay: false,
+        })
     }
 
+    pub fn identity(&self) -> &SessionIdentity {
+        &self.identity
+    }
     pub fn session_key(&self) -> &str {
-        &self.session_key
+        self.identity.session_key()
     }
-
-    pub fn route_key(&self) -> Option<&str> {
-        self.route_key.as_deref()
+    pub const fn generation(&self) -> Option<u64> {
+        self.generation
     }
-
     pub const fn source_epoch(&self) -> Option<u64> {
         self.source_epoch
     }
-
     pub const fn source_cursor_contiguous(&self) -> bool {
         self.source_cursor_contiguous
+    }
+
+    /// Set only for events returned by the native replay operation.
+    pub fn with_replay(mut self) -> Self {
+        self.replay = true;
+        self
     }
 }
 
@@ -1264,6 +1325,7 @@ pub struct SessionState {
     identity: SessionIdentity,
     source_binding: SessionSourceBinding,
     endpoint_session_id: Option<String>,
+    goal: SessionGoalView,
     epoch: u64,
     seq: u64,
     cursor: u64,
@@ -1277,6 +1339,7 @@ pub struct SessionState {
     pub(crate) run_delivery_contexts: HashMap<String, SessionDeliveryContext>,
     host_source_epoch: Option<u64>,
     native_source_epoch: Option<u64>,
+    source_branch: Option<String>,
     native_cursor: Option<u64>,
     native_recovery_cursor: Option<u64>,
     accepted_event_identities: HashSet<AcceptedEventIdentity>,
@@ -1285,11 +1348,7 @@ pub struct SessionState {
 
 impl SessionState {
     pub fn new(identity: SessionIdentity, epoch: u64) -> Result<Self, SessionStateError> {
-        let mut facts = SessionFacts::unknown();
-        if identity.agent_id.is_none() {
-            facts.completeness = add_missing(&facts.completeness, &[MissingFact::SessionIdentity]);
-        }
-        Self::from_facts(identity, epoch, 0, facts)
+        Self::from_facts(identity, epoch, 0, SessionFacts::unknown())
     }
 
     pub fn from_facts(
@@ -1323,6 +1382,7 @@ impl SessionState {
             identity,
             source_binding: SessionSourceBinding::ordinary(),
             endpoint_session_id: None,
+            goal: SessionGoalView::Unknown,
             epoch,
             seq,
             cursor,
@@ -1336,6 +1396,7 @@ impl SessionState {
             run_delivery_contexts: HashMap::new(),
             host_source_epoch: None,
             native_source_epoch: None,
+            source_branch: None,
             native_cursor: None,
             native_recovery_cursor: None,
             accepted_event_identities: HashSet::new(),
@@ -1345,6 +1406,12 @@ impl SessionState {
 
     pub fn identity(&self) -> &SessionIdentity {
         &self.identity
+    }
+
+    pub fn with_goal(mut self, goal: SessionGoalView) -> Result<Self, SessionStateError> {
+        goal.validate()?;
+        self.goal = goal;
+        Ok(self)
     }
 
     pub fn source_binding(&self) -> &SessionSourceBinding {
@@ -1434,6 +1501,7 @@ impl SessionState {
             endpoint_session_id: self.endpoint_session_id.clone(),
             ownership: None,
             model_state: None,
+            goal: self.goal.clone(),
             identity: self.identity.clone(),
             epoch: self.epoch,
             seq: self.seq,
@@ -1447,16 +1515,417 @@ impl SessionState {
         }
     }
 
+    pub fn has_terminal_run(&self, run_id: &str) -> bool {
+        self.terminal_run_ids.contains(run_id)
+    }
+
+    pub fn observation_changes(
+        &self,
+        binding: &SessionEventBinding,
+        run_id: Option<&str>,
+        changes: &[SessionChange],
+    ) -> Vec<SessionChange> {
+        changes.iter().filter(|change| {
+            !binding.replay || !change_run_id(change).or(run_id)
+                .is_some_and(|run_id| self.terminal_run_ids.contains(run_id))
+        }).cloned().collect()
+    }
+
+    /// Reserves bounded observation cache space without retiring native messages.
+    /// Returns whether facts were evicted; Host publishes a resync on eviction.
+    /// Call on the candidate state before projecting an observation event.
+    pub fn reserve_observation_capacity(&mut self, changes: &[SessionChange]) -> Result<bool, SessionStateError> {
+        let mut item_ids = HashSet::new();
+        let mut tool_ids = HashSet::new();
+        let mut approval_ids = HashSet::new();
+        let mut protected_items = HashSet::new();
+        let mut removed_items = HashSet::new();
+        let mut replacement_items = HashSet::new();
+        let current_items = list_values(&self.items);
+        for change in changes {
+            match change {
+                SessionChange::MessageDelta { item_id, run_id, message_id, .. } => {
+                    if let Some(index) = message_delta_target_index(
+                        current_items, item_id, message_id.as_deref(), run_id.as_deref(),
+                    ) {
+                        protected_items.insert(current_items[index].item_id());
+                    } else {
+                        item_ids.insert(item_id.as_str());
+                    }
+                }
+                SessionChange::MessageUpdated { item } | SessionChange::MessageReplaced { item } => {
+                    protected_items.insert(item.item_id());
+                    if !current_items.iter().any(|old| old.item_id() == item.item_id())
+                        && tool_anchor_only_turn_index(current_items, item).is_none()
+                    {
+                        item_ids.insert(item.item_id());
+                    }
+                }
+                SessionChange::ItemsReplaced { old_item_ids, anchor, items } => {
+                    protected_items.extend(old_item_ids.iter().map(String::as_str));
+                    removed_items.extend(old_item_ids.iter().map(String::as_str).filter(|id|
+                        current_items.iter().any(|item| item.item_id() == *id)
+                    ));
+                    if let ItemAnchor::After { item_id } = anchor {
+                        protected_items.insert(item_id.as_str());
+                    }
+                    for item in items {
+                        replacement_items.insert(item.item_id());
+                        protected_items.insert(item.item_id());
+                        if !current_items.iter().any(|old| old.item_id() == item.item_id()) {
+                            item_ids.insert(item.item_id());
+                        }
+                    }
+                }
+                SessionChange::ToolUpdated { tool } => {
+                    tool_ids.insert(tool.tool_call_id.as_str());
+                }
+                SessionChange::ApprovalUpdated { approval } => {
+                    approval_ids.insert(approval.approval_id.as_str());
+                }
+                _ => {}
+            }
+        }
+        let new_tools = tool_ids.iter().filter(|id|
+            !list_values(&self.tools).iter().any(|tool| tool.tool_call_id == **id)
+        ).count();
+        let new_approvals = approval_ids.iter().filter(|id|
+            !list_values(&self.approvals).iter().any(|approval| approval.approval_id == **id)
+        ).count();
+        removed_items.retain(|id| !replacement_items.contains(id));
+        let item_capacity = MAX_ITEMS + removed_items.len();
+        if current_items.len() + item_ids.len() <= item_capacity
+            && list_values(&self.tools).len() + new_tools <= MAX_TOOLS
+            && list_values(&self.approvals).len() + new_approvals <= MAX_APPROVALS
+        {
+            return Ok(false);
+        }
+        let mut items = self.items.clone();
+        if !reserve_list_capacity(&mut items, item_ids.len(), item_capacity, |item|
+            !protected_items.contains(item.item_id()) && self.evictable_observation_item(item)
+        ) {
+            return Err(SessionStateError::InvalidFacts);
+        }
+        let tool_excess = list_values(&self.tools).len().saturating_add(new_tools).saturating_sub(MAX_TOOLS);
+        if tool_excess > 0 {
+            let removable_tools: HashSet<_> = list_values(&self.tools).iter().filter(|tool| {
+                !tool_ids.contains(tool.tool_call_id.as_str())
+                    && self.evictable_observation_tool(tool, &[])
+                    && list_values(&items).iter().all(|item| match item {
+                        SessionItem::AssistantTurn { segments, .. } if segments.iter().any(|segment|
+                            tool_segment_call_id(segment) == Some(tool.tool_call_id.as_str())
+                        ) => !protected_items.contains(item.item_id()) && self.evictable_observation_item(item),
+                        _ => true,
+                    })
+            }).take(tool_excess).map(|tool| tool.tool_call_id.as_str()).collect();
+            if removable_tools.len() < tool_excess {
+                return Err(SessionStateError::InvalidFacts);
+            }
+            if let SessionFact::Complete(values) | SessionFact::Incomplete { facts: values, .. } = &mut items {
+                values.retain(|item| !matches!(item,
+                    SessionItem::AssistantTurn { segments, .. } if segments.iter().any(|segment|
+                        tool_segment_call_id(segment).is_some_and(|id| removable_tools.contains(id))
+                    )
+                ));
+            }
+        }
+        let mut tools = self.tools.clone();
+        if !reserve_list_capacity(&mut tools, new_tools, MAX_TOOLS, |tool|
+            !tool_ids.contains(tool.tool_call_id.as_str())
+                && self.evictable_observation_tool(tool, list_values(&items))
+        ) {
+            return Err(SessionStateError::InvalidFacts);
+        }
+        let mut approvals = self.approvals.clone();
+        if !reserve_list_capacity(&mut approvals, new_approvals, MAX_APPROVALS, |approval|
+            approval.phase == ApprovalPhase::Resolved
+                && !approval_ids.contains(approval.approval_id.as_str())
+        ) {
+            return Err(SessionStateError::InvalidFacts);
+        }
+        if list_values(&items).len() < current_items.len() {
+            self.window = incomplete_window(&self.window);
+            let current = mem::replace(&mut items, SessionFact::Unknown);
+            items = match current {
+                SessionFact::Complete(facts) => SessionFact::Incomplete {
+                    facts, gaps: vec![MissingFact::BoundedHistory],
+                },
+                SessionFact::Incomplete { facts, gaps } => SessionFact::Incomplete {
+                    facts, gaps: with_gap(gaps, MissingFact::BoundedHistory),
+                },
+                other => other,
+            };
+        }
+        self.items = items;
+        self.tools = tools;
+        self.approvals = approvals;
+        self.completeness = add_missing(&self.completeness, &[MissingFact::BoundedHistory]);
+        Ok(true)
+    }
+
+    fn evictable_observation_item(&self, item: &SessionItem) -> bool {
+        terminal_item(item)
+            && item.run_id().is_none_or(|run_id| self.terminal_run_ids.contains(run_id))
+    }
+
+    fn evictable_observation_tool(&self, tool: &ToolView, items: &[SessionItem]) -> bool {
+        matches!(tool.phase, ToolPhase::Completed | ToolPhase::Failed)
+            && tool.run_id.as_deref().is_none_or(|run_id| self.terminal_run_ids.contains(run_id))
+            && !items.iter().any(|item| match item {
+                SessionItem::AssistantTurn { segments, .. } => segments.iter().any(|segment|
+                    tool_segment_call_id(segment) == Some(tool.tool_call_id.as_str())
+                ),
+                _ => false,
+            })
+    }
+
+    /// Commits a synchronized native view without replaying already-applied text
+    /// deltas. Baseline is the state at sync start, used only to preserve facts
+    /// accepted concurrently. Retirement evidence always wins over absent rows.
+    pub fn reconcile_sync(
+        &mut self,
+        sync: &crate::ports::SessionSync,
+        baseline: &SessionState,
+    ) -> Result<SessionView, SessionStateError> {
+        use crate::ports::SessionSyncCut;
+        sync.view.validate()?;
+        if sync.view.identity != self.identity
+            || baseline.identity != self.identity
+            || sync.source_epoch.is_some_and(|epoch| !valid_epoch(epoch))
+            || (self.native_source_epoch != baseline.native_source_epoch
+                && self.native_source_epoch != sync.source_epoch)
+            || sync.retired_item_ids.len() > MAX_ITEMS
+            || !sync
+                .retired_item_ids
+                .iter()
+                .enumerate()
+                .all(|(index, id)| valid_id(id) && !sync.retired_item_ids[..index].contains(id))
+            || sync
+                .terminal_runs
+                .iter()
+                .any(|run| !valid_id(&run.run_id) || !terminal_run_phase(run.phase))
+            || matches!(sync.cut, SessionSyncCut::EventFrontier { cursor, .. } if cursor > MAX_SAFE_INTEGER)
+        {
+            return Err(SessionStateError::InvalidFacts);
+        }
+        if let Some(replay) = &sync.replay_baseline {
+            replay.validate()?;
+            if replay.identity != self.identity
+                || !matches!(sync.cut, SessionSyncCut::EventFrontier { cursor, .. }
+                    if cursor == 0 || (self.native_source_epoch == sync.source_epoch
+                        && self.native_cursor.is_some_and(|consumed| consumed >= cursor)))
+            {
+                return Err(SessionStateError::InvalidFacts);
+            }
+        }
+        let mut next = self.clone();
+        let bounded_latest = matches!(
+            &sync.view.window,
+            SessionFact::Complete(window) | SessionFact::Incomplete { facts: window, .. }
+                if window.is_at_latest && window.has_more
+        );
+        next.items = reconcile_list(
+            &self.items,
+            &baseline.items,
+            sync.replay_baseline.as_ref().map(|view| &view.items),
+            &sync.view.items,
+            SessionItem::item_id,
+            &sync.retired_item_ids,
+            MAX_ITEMS,
+            |item| !bounded_latest || !self.evictable_observation_item(item),
+        );
+        next.tools = reconcile_list(
+            &self.tools,
+            &baseline.tools,
+            sync.replay_baseline.as_ref().map(|view| &view.tools),
+            &sync.view.tools,
+            |tool| tool.tool_call_id.as_str(),
+            &[],
+            MAX_TOOLS,
+            |tool| !bounded_latest || !self.evictable_observation_tool(tool, list_values(&next.items)),
+        );
+        next.approvals = reconcile_list(
+            &self.approvals,
+            &baseline.approvals,
+            sync.replay_baseline.as_ref().map(|view| &view.approvals),
+            &sync.view.approvals,
+            |approval| approval.approval_id.as_str(),
+            &[],
+            MAX_APPROVALS,
+            |approval| !bounded_latest || approval.phase == ApprovalPhase::Requested,
+        );
+        let goal_baseline = sync.replay_baseline.as_ref()
+            .map(|view| &view.goal)
+            .filter(|goal| !matches!(goal, SessionGoalView::Unknown))
+            .unwrap_or(&baseline.goal);
+        if &self.goal == goal_baseline && !matches!(sync.view.goal, SessionGoalView::Unknown) {
+            next.goal = sync.view.goal.clone();
+        }
+        // A snapshot cannot roll back an accepted runtime/approval transition.
+        let runtime_baseline = sync.replay_baseline.as_ref()
+            .map(|view| &view.runtime)
+            .filter(|runtime| !matches!(runtime, SessionFact::Unknown | SessionFact::Unavailable))
+            .unwrap_or(&baseline.runtime);
+        if &self.runtime == runtime_baseline
+            && !matches!(
+                sync.view.runtime,
+                SessionFact::Unknown | SessionFact::Unavailable
+            )
+        {
+            next.runtime = sync.view.runtime.clone();
+        }
+        if self.window == baseline.window
+            || (window_value(&self.window).is_some()
+                && window_value(&self.window) == window_value(&baseline.window))
+        {
+            next.window = reconcile_window(self, baseline, sync, &next.items);
+        } else if self.native_source_epoch != sync.source_epoch
+            || self.endpoint_session_id != sync.view.endpoint_session_id
+            || self.source_branch != sync.source_branch
+            || list_values(&self.items).iter().any(|old|
+                !list_values(&next.items).iter().any(|item| item.item_id() == old.item_id())
+            )
+        {
+            next.window = incomplete_window(&next.window);
+        }
+        next.source_branch = sync.source_branch.clone();
+        next.completeness = sync.view.completeness.clone();
+        next.endpoint_session_id = sync
+            .view
+            .endpoint_session_id
+            .clone()
+            .or_else(|| self.endpoint_session_id.clone());
+        for run in &sync.terminal_runs {
+            next.terminal_run_ids.insert(run.run_id.clone());
+            update_assistant_turn_status_for_run(
+                &mut next.items,
+                &run.run_id,
+                item_status_for_terminal_run_phase(run.phase),
+            );
+        }
+        if let SessionFact::Complete(runtime) | SessionFact::Incomplete { facts: runtime, .. } =
+            &mut next.runtime
+            && let Some(run_id) = runtime.active_run_id.as_ref()
+            && next.terminal_run_ids.contains(run_id)
+        {
+            if let Some(terminal) = sync
+                .terminal_runs
+                .iter()
+                .find(|terminal| terminal.run_id == *run_id)
+            {
+                runtime.phase = terminal.phase;
+                runtime.active_run_id = None;
+                runtime.run_progress = None;
+            } else {
+                // Late history may describe a previously terminal run as active.
+                next.runtime = self.runtime.clone();
+            }
+        }
+        if let SessionFact::Complete(items) | SessionFact::Incomplete { facts: items, .. } =
+            &mut next.items
+        {
+            for item in items {
+                let item_id = item.item_id().to_owned();
+                if let SessionItem::AssistantTurn {
+                    run_id: Some(run_id),
+                    status,
+                    ..
+                } = item
+                    && next.terminal_run_ids.contains(run_id)
+                    && !matches!(
+                        status,
+                        ItemStatus::Final | ItemStatus::Error | ItemStatus::Aborted
+                    )
+                {
+                    *status = items_fact_slice(&self.items)
+                        .and_then(|items| items.iter().find(|old| old.item_id() == item_id))
+                        .and_then(|old| match old {
+                            SessionItem::AssistantTurn { status, .. } => Some(*status),
+                            _ => None,
+                        })
+                        .filter(|status| {
+                            matches!(
+                                status,
+                                ItemStatus::Final | ItemStatus::Error | ItemStatus::Aborted
+                            )
+                        })
+                        .ok_or(SessionStateError::InvalidFacts)?;
+                }
+            }
+        }
+        if !next.items.is_complete()
+            || !next.tools.is_complete()
+            || !next.approvals.is_complete()
+            || !next.runtime.is_complete()
+            || !next.window.is_complete()
+        {
+            next.completeness = add_missing(&next.completeness, &[MissingFact::EventOnly]);
+        }
+        match sync.cut {
+            SessionSyncCut::Snapshot => {
+                if crate::trace::enabled() {
+                    crate::trace::log_unscoped("sessions.reconcile_sync.cut", serde_json::json!({
+                        "cut": "snapshot", "sourceEpochChanged": next.native_source_epoch != sync.source_epoch,
+                        "decision": if next.native_source_epoch != sync.source_epoch { "reset_frontier" } else { "preserve_frontier" },
+                        "reason": "snapshot_not_consumed_frontier", "nativeCursorBefore": next.native_cursor,
+                    }));
+                }
+                if next.native_source_epoch != sync.source_epoch {
+                    next.native_source_epoch = sync.source_epoch;
+                    next.native_cursor = None;
+                    next.native_recovery_cursor = None;
+                    next.accepted_event_identities
+                        .retain(|id| id.source != AcceptedEventSource::Native);
+                    next.accepted_event_identity_order
+                        .retain(|id| id.source != AcceptedEventSource::Native);
+                }
+            }
+            SessionSyncCut::EventFrontier { cursor, .. } => {
+                if crate::trace::enabled() {
+                    crate::trace::log_unscoped("sessions.reconcile_sync.cut", serde_json::json!({
+                        "cut": "event_frontier", "sourceEpochChanged": next.native_source_epoch != sync.source_epoch,
+                        "decision": if next.native_source_epoch != sync.source_epoch { "replace_frontier" } else { "advance_frontier" },
+                        "reason": "consumed_frontier", "nativeCursorBefore": next.native_cursor, "incomingCursor": cursor,
+                    }));
+                }
+                if next.native_source_epoch != sync.source_epoch {
+                    next.accepted_event_identities
+                        .retain(|id| id.source != AcceptedEventSource::Native);
+                    next.accepted_event_identity_order
+                        .retain(|id| id.source != AcceptedEventSource::Native);
+                    next.native_cursor = Some(cursor);
+                } else {
+                    next.native_cursor = Some(next.native_cursor.unwrap_or(0).max(cursor));
+                }
+                next.native_source_epoch = sync.source_epoch;
+                next.native_recovery_cursor = None;
+            }
+        }
+        next.seq = self
+            .seq
+            .checked_add(1)
+            .filter(|seq| *seq <= MAX_SAFE_INTEGER)
+            .ok_or(SessionStateError::InvalidCursor)?;
+        next.cursor = self
+            .cursor
+            .checked_add(1)
+            .filter(|cursor| *cursor <= MAX_SAFE_INTEGER)
+            .ok_or(SessionStateError::InvalidCursor)?;
+        let mut view = next.view();
+        view.ownership = sync.view.ownership.clone();
+        view.model_state = sync.view.model_state.clone();
+        view.validate()?;
+        *self = next;
+        Ok(view)
+    }
+
     pub fn apply(
         &mut self,
-        route_key: Option<String>,
         run_id: Option<String>,
         cursor: u64,
         changes: Vec<SessionChange>,
     ) -> SessionApplyResult {
-        let Some(binding) =
-            SessionEventBinding::new(self.identity.session_key.clone(), route_key, None)
-        else {
+        let Some(binding) = SessionEventBinding::new(self.identity.clone(), None) else {
             return SessionApplyResult::Rejected {
                 reason: SessionApplyRejection::InvalidInput,
             };
@@ -1471,7 +1940,7 @@ impl SessionState {
         cursor: u64,
         changes: Vec<SessionChange>,
     ) -> SessionApplyResult {
-        if binding.session_key() != self.identity.session_key
+        if binding.identity() != &self.identity
             || binding
                 .source_epoch()
                 .zip(self.host_source_epoch)
@@ -1545,10 +2014,26 @@ impl SessionState {
         }
 
         let mut next = self.clone();
-        if !changes.iter().all(|change| next.apply_change(change)) {
-            return SessionApplyResult::Rejected {
-                reason: SessionApplyRejection::InvalidChange,
+        let mut delta_changes = Vec::with_capacity(changes.len());
+        for change in &changes {
+            if !next.apply_change(change) {
+                return SessionApplyResult::Rejected {
+                    reason: SessionApplyRejection::InvalidChange,
+                };
+            }
+            let Some(projected) =
+                project_delta_changes(std::slice::from_ref(change), &next, run_id.as_deref())
+            else {
+                return SessionApplyResult::Rejected {
+                    reason: SessionApplyRejection::InvalidChange,
+                };
             };
+            delta_changes.extend(projected);
+            if delta_changes.len() > MAX_CHANGE_COUNT {
+                return SessionApplyResult::Rejected {
+                    reason: SessionApplyRejection::InvalidChange,
+                };
+            }
         }
         next.cursor = cursor;
         next.seq = next_seq;
@@ -1564,14 +2049,9 @@ impl SessionState {
             };
             next.accepted_event_identities.remove(&evicted);
         }
-        let Some(delta_changes) = project_delta_changes(&changes, &next, run_id.as_deref()) else {
-            return SessionApplyResult::Rejected {
-                reason: SessionApplyRejection::InvalidChange,
-            };
-        };
         let delta = SessionDelta {
             session_key: next.identity.session_key.clone(),
-            route_key: binding.route_key().map(str::to_owned),
+            identity: next.identity.clone(),
             epoch: next.epoch,
             seq: next.seq,
             cursor,
@@ -1596,9 +2076,7 @@ impl SessionState {
         changes: Vec<SessionChange>,
     ) -> SessionApplyResult {
         let run_id = run_id.or_else(|| sole_change_run_id(&changes).map(str::to_owned));
-        if binding.session_key() != self.identity.session_key
-            || self.native_source_epoch_changed(&binding)
-        {
+        if binding.identity() != &self.identity || self.native_source_epoch_changed(&binding) {
             // A changed or newly discovered native epoch is a source boundary,
             // not a Host cursor gap. The caller must issue explicit
             // RecoveryRequired(EpochChanged) and rehydrate before accepting the
@@ -1608,7 +2086,6 @@ impl SessionState {
             };
         }
         if native_cursor.is_some_and(|cursor| cursor == 0 || cursor > MAX_SAFE_INTEGER)
-            || changes.is_empty()
             || changes.len() > MAX_CHANGE_COUNT
             || run_id.as_deref().is_some_and(|value| !valid_id(value))
             || !valid_changes(&changes, run_id.as_deref())
@@ -1618,8 +2095,8 @@ impl SessionState {
             };
         }
 
+        let change_fingerprint = canonical_change_fingerprint(&changes);
         if let Some(native_cursor) = native_cursor {
-            let change_fingerprint = canonical_change_fingerprint(&changes);
             let event_identity = AcceptedEventIdentity {
                 source: AcceptedEventSource::Native,
                 source_epoch: binding.source_epoch(),
@@ -1672,6 +2149,35 @@ impl SessionState {
             }
         }
 
+        let changes = if binding.replay {
+            self.observation_changes(&binding, run_id.as_deref(), &changes)
+        } else {
+            changes
+        };
+        if changes.is_empty() {
+            let Some(cursor) = native_cursor else {
+                return SessionApplyResult::Rejected {
+                    reason: SessionApplyRejection::InvalidInput,
+                };
+            };
+            self.native_cursor = Some(cursor);
+            self.native_source_epoch = binding.source_epoch();
+            let identity = AcceptedEventIdentity {
+                source: AcceptedEventSource::Native,
+                source_epoch: binding.source_epoch(),
+                source_cursor: cursor,
+                change_fingerprint,
+            };
+            self.accepted_event_identities.insert(identity.clone());
+            self.accepted_event_identity_order.push_back(identity);
+            while self.accepted_event_identity_order.len() > MAX_ACCEPTED_EVENT_IDENTITIES {
+                if let Some(evicted) = self.accepted_event_identity_order.pop_front() {
+                    self.accepted_event_identities.remove(&evicted);
+                }
+            }
+            return SessionApplyResult::Consumed { cursor };
+        }
+
         let Some(next_seq) = self.seq.checked_add(1) else {
             return SessionApplyResult::Rejected {
                 reason: SessionApplyRejection::SequenceExhausted,
@@ -1689,10 +2195,26 @@ impl SessionState {
         }
 
         let mut next = self.clone();
-        if !changes.iter().all(|change| next.apply_change(change)) {
-            return SessionApplyResult::Rejected {
-                reason: SessionApplyRejection::InvalidChange,
+        let mut delta_changes = Vec::with_capacity(changes.len());
+        for change in &changes {
+            if !next.apply_change(change) {
+                return SessionApplyResult::Rejected {
+                    reason: SessionApplyRejection::InvalidChange,
+                };
+            }
+            let Some(projected) =
+                project_delta_changes(std::slice::from_ref(change), &next, run_id.as_deref())
+            else {
+                return SessionApplyResult::Rejected {
+                    reason: SessionApplyRejection::InvalidChange,
+                };
             };
+            delta_changes.extend(projected);
+            if delta_changes.len() > MAX_CHANGE_COUNT {
+                return SessionApplyResult::Rejected {
+                    reason: SessionApplyRejection::InvalidChange,
+                };
+            }
         }
         next.cursor = next_cursor;
         next.seq = next_seq;
@@ -1703,7 +2225,7 @@ impl SessionState {
                 source: AcceptedEventSource::Native,
                 source_epoch: binding.source_epoch(),
                 source_cursor: native_cursor.expect("native cursor is present"),
-                change_fingerprint: canonical_change_fingerprint(&changes),
+                change_fingerprint,
             };
             next.accepted_event_identities
                 .insert(event_identity.clone());
@@ -1717,14 +2239,9 @@ impl SessionState {
         } else if binding.source_epoch().is_some() {
             next.native_source_epoch = binding.source_epoch();
         }
-        let Some(delta_changes) = project_delta_changes(&changes, &next, run_id.as_deref()) else {
-            return SessionApplyResult::Rejected {
-                reason: SessionApplyRejection::InvalidChange,
-            };
-        };
         let delta = SessionDelta {
             session_key: next.identity.session_key.clone(),
-            route_key: binding.route_key().map(str::to_owned),
+            identity: next.identity.clone(),
             epoch: next.epoch,
             seq: next.seq,
             cursor: next_cursor,
@@ -1743,7 +2260,7 @@ impl SessionState {
         native_cursor: Option<u64>,
         reason: RecoveryReason,
     ) -> SessionApplyResult {
-        if binding.session_key() != self.identity.session_key
+        if binding.identity() != &self.identity
             || native_cursor.is_some_and(|cursor| cursor > MAX_SAFE_INTEGER)
             || run_id.as_deref().is_some_and(|value| !valid_id(value))
         {
@@ -1789,6 +2306,9 @@ impl SessionState {
         next.seq = next_seq;
         next.native_recovery_cursor = native_cursor;
         next.native_cursor = None;
+        if next.native_source_epoch != binding.source_epoch() {
+            next.window = incomplete_window(&next.window);
+        }
         next.native_source_epoch = binding.source_epoch();
         next.accepted_event_identities
             .retain(|identity| identity.source != AcceptedEventSource::Native);
@@ -1796,7 +2316,7 @@ impl SessionState {
             .retain(|identity| identity.source != AcceptedEventSource::Native);
         let delta = SessionDelta {
             session_key: next.identity.session_key.clone(),
-            route_key: binding.route_key().map(str::to_owned),
+            identity: next.identity.clone(),
             epoch: next.epoch,
             seq: next.seq,
             cursor: next_cursor,
@@ -1809,6 +2329,18 @@ impl SessionState {
     }
 
     fn apply_change(&mut self, change: &SessionChange) -> bool {
+        let removes_item = match change {
+            SessionChange::ItemsReplaced { old_item_ids, items, .. } => old_item_ids.iter().any(|id|
+                list_values(&self.items).iter().any(|item| item.item_id() == id)
+                    && !items.iter().any(|item| item.item_id() == id)
+            ),
+            SessionChange::MessageUpdated { item } | SessionChange::MessageReplaced { item } => {
+                let current = list_values(&self.items);
+                !current.iter().any(|old| old.item_id() == item.item_id())
+                    && tool_anchor_only_turn_index(current, item).is_some()
+            }
+            _ => false,
+        };
         let applied = match change {
             SessionChange::RunPhaseChanged { run_id, phase } => {
                 if self.terminal_run_ids.contains(run_id) {
@@ -1873,6 +2405,22 @@ impl SessionState {
                 }
                 replace_items(&mut self.items, item)
             }
+            SessionChange::ItemsReplaced {
+                old_item_ids,
+                anchor,
+                items,
+            } => {
+                // Display authority may arrive after terminal; it never changes runtime
+                // facts or clears the terminal fence for ordinary streaming changes.
+                if items.iter().any(|item| {
+                    item.run_id()
+                        .is_some_and(|id| self.terminal_run_ids.contains(id))
+                        && !terminal_item(item)
+                }) {
+                    return false;
+                }
+                splice_items(&mut self.items, old_item_ids, anchor, items)
+            }
             SessionChange::ToolUpdated { tool } => {
                 let tool = tool_update_for_state(&self.tools, tool);
                 if tool
@@ -1882,7 +2430,7 @@ impl SessionState {
                 {
                     return false;
                 }
-                update_tools(&mut self.tools, &tool) && update_tool_anchor(&mut self.items, &tool)
+                update_tools(&mut self.tools, &tool)
             }
             SessionChange::ApprovalUpdated { approval } => {
                 if approval
@@ -1893,6 +2441,11 @@ impl SessionState {
                     return false;
                 }
                 update_approvals(&mut self.approvals, approval)
+            }
+            SessionChange::GoalChanged { goal } => {
+                if matches!(goal, SessionGoalView::Unknown) { return true; }
+                self.goal = goal.clone();
+                true
             }
             SessionChange::RuntimeChanged { runtime } => {
                 if !valid_runtime(runtime) {
@@ -1934,6 +2487,9 @@ impl SessionState {
                 true
             }
         };
+        if applied && removes_item {
+            self.window = incomplete_window(&self.window);
+        }
         if applied && !matches!(change, SessionChange::RecoveryRequired { .. }) {
             self.completeness = add_missing(&self.completeness, &[MissingFact::EventOnly]);
         }
@@ -2056,6 +2612,376 @@ fn event_runtime(runtime: RuntimeView) -> SessionFact<RuntimeView> {
         facts: runtime,
         gaps: vec![MissingFact::EventOnly, MissingFact::PartialRuntime],
     }
+}
+
+fn reserve_list_capacity<T>(
+    fact: &mut SessionFact<Vec<T>>,
+    additional: usize,
+    limit: usize,
+    evictable: impl Fn(&T) -> bool,
+) -> bool {
+    let excess = list_values(fact).len().saturating_add(additional).saturating_sub(limit);
+    if excess == 0 {
+        return true;
+    }
+    if list_values(fact).iter().filter(|item| evictable(item)).count() < excess {
+        return false;
+    }
+    let mut remaining = excess;
+    let current = mem::replace(fact, SessionFact::Unknown);
+    let (mut values, gaps) = match current {
+        SessionFact::Complete(values) => (values, Vec::new()),
+        SessionFact::Incomplete { facts, gaps } => (facts, gaps),
+        _ => return false,
+    };
+    values.retain(|item| {
+        if remaining > 0 && evictable(item) {
+            remaining -= 1;
+            false
+        } else {
+            true
+        }
+    });
+    *fact = SessionFact::Incomplete {
+        facts: values,
+        gaps: with_gap(gaps, MissingFact::BoundedHistory),
+    };
+    true
+}
+
+fn reconcile_list<T: Clone + Eq>(
+    current: &SessionFact<Vec<T>>,
+    baseline: &SessionFact<Vec<T>>,
+    replay_baseline: Option<&SessionFact<Vec<T>>>,
+    incoming: &SessionFact<Vec<T>>,
+    id: impl Fn(&T) -> &str,
+    retired: &[String],
+    limit: usize,
+    retain_outside_window: impl Fn(&T) -> bool,
+) -> SessionFact<Vec<T>> {
+    let trace_enabled = crate::trace::enabled();
+    let collection = if limit == MAX_ITEMS {
+        "items"
+    } else if limit == MAX_TOOLS {
+        "tools"
+    } else {
+        "approvals"
+    };
+    if matches!(incoming, SessionFact::Unknown | SessionFact::Unavailable) {
+        return match current {
+            SessionFact::Complete(values) => SessionFact::Complete(
+                values
+                    .iter()
+                    .filter(|item| {
+                        let keep = !retired.iter().any(|key| key == id(item));
+                        if trace_enabled {
+                            crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                                "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
+                                "decision": if keep { "preserve_missing" } else { "retire" },
+                                "reason": if keep { "incoming_unknown_or_unavailable" } else { "explicit_retirement" },
+                                "incomingPresent": false, "currentPresent": true,
+                                "baselinePresent": list_values(baseline).iter().any(|old| id(old) == id(item))
+                                    || replay_baseline.is_some_and(|baseline| list_values(baseline).iter().any(|old| id(old) == id(item))),
+                                "explicitRetired": !keep,
+                            }));
+                        }
+                        keep
+                    })
+                    .cloned()
+                    .collect(),
+            ),
+            SessionFact::Incomplete { facts, gaps } => SessionFact::Incomplete {
+                facts: facts
+                    .iter()
+                    .filter(|item| {
+                        let keep = !retired.iter().any(|key| key == id(item));
+                        if trace_enabled {
+                            crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                                "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
+                                "decision": if keep { "preserve_missing" } else { "retire" },
+                                "reason": if keep { "incoming_unknown_or_unavailable" } else { "explicit_retirement" },
+                                "incomingPresent": false, "currentPresent": true,
+                                "baselinePresent": list_values(baseline).iter().any(|old| id(old) == id(item))
+                                    || replay_baseline.is_some_and(|baseline| list_values(baseline).iter().any(|old| id(old) == id(item))),
+                                "explicitRetired": !keep,
+                            }));
+                        }
+                        keep
+                    })
+                    .cloned()
+                    .collect(),
+                gaps: gaps.clone(),
+            },
+            _ => incoming.clone(),
+        };
+    }
+    let current_values = list_values(current);
+    let baseline_values = list_values(baseline);
+    let replay_values = replay_baseline.map(list_values).unwrap_or(&[]);
+    let baseline_item = |item: &T| replay_values.iter().find(|old| id(old) == id(item))
+        .or_else(|| baseline_values.iter().find(|old| id(old) == id(item)));
+    let mut result = list_values(incoming).to_vec();
+    result.retain(|item| {
+        let keep = !retired.iter().any(|key| key == id(item))
+            && !(baseline_item(item).is_some()
+                && !current_values.iter().any(|current| id(current) == id(item)));
+        if trace_enabled {
+            let explicit_retired = retired.iter().any(|key| key == id(item));
+            crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
+                "decision": if keep { "keep_incoming" } else { "retire" },
+                "reason": if keep { "incoming_candidate" } else if explicit_retired { "explicit_retirement" } else { "concurrent_removal" },
+                "incomingPresent": true, "currentPresent": current_values.iter().any(|current| id(current) == id(item)),
+                "baselinePresent": baseline_item(item).is_some(), "explicitRetired": explicit_retired,
+            }));
+        }
+        keep
+    });
+    let mut previous = None;
+    for item in current_values {
+        if retired.iter().any(|key| key == id(item)) {
+            if trace_enabled {
+                crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                    "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
+                    "decision": "retire", "reason": "explicit_retirement",
+                    "incomingPresent": list_values(incoming).iter().any(|new| id(new) == id(item)),
+                    "currentPresent": true, "baselinePresent": baseline_item(item).is_some(), "explicitRetired": true,
+                }));
+            }
+            continue;
+        }
+        let old = baseline_item(item);
+        let changed = old != Some(item);
+        if let Some(index) = result.iter().position(|new| id(new) == id(item)) {
+            if changed {
+                result[index] = item.clone();
+            }
+            if trace_enabled {
+                crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                    "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
+                    "decision": if changed { "keep_concurrent" } else { "update" },
+                    "reason": if changed { "current_changed_since_baseline" } else { "incoming_update" },
+                    "incomingPresent": true, "currentPresent": true, "baselinePresent": old.is_some(),
+                    "currentChanged": changed, "explicitRetired": false, "resultIndex": index,
+                }));
+            }
+            previous = Some(index);
+        } else {
+            // Missing history rows are not retirement evidence.
+            // Preserve current relative order using the nearest surviving predecessor.
+            let index = previous.map_or(0, |index| index + 1);
+            if trace_enabled {
+                crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                    "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
+                    "decision": "preserve_missing", "reason": "missing_is_not_retirement",
+                    "incomingPresent": false, "currentPresent": true, "baselinePresent": old.is_some(),
+                    "currentChanged": changed, "explicitRetired": false, "resultIndex": index,
+                    "predecessorHash": previous.map(|index| crate::trace::fingerprint(id(&result[index]))),
+                }));
+            }
+            result.insert(index, item.clone());
+            previous = Some(index);
+        }
+    }
+    // Bounded history may evict unchanged terminal display facts, not retire messages.
+    if result.len() > limit {
+        let mut excess = result.len() - limit;
+        result.retain(|item| {
+            if excess > 0
+                && !retain_outside_window(item)
+                && !list_values(incoming).iter().any(|new| id(new) == id(item))
+                && baseline_item(item) == Some(item)
+            {
+                if trace_enabled {
+                    crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                        "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
+                        "decision": "evict_window", "reason": "unchanged_outside_window",
+                        "incomingPresent": false, "currentPresent": true, "baselinePresent": true,
+                        "currentChanged": false, "explicitRetired": false, "excessBefore": excess,
+                    }));
+                }
+                excess -= 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+    match incoming {
+        SessionFact::Complete(_) if current == baseline => SessionFact::Complete(result),
+        SessionFact::Incomplete { gaps, .. } => SessionFact::Incomplete {
+            facts: result,
+            gaps: with_gap(gaps.clone(), MissingFact::EventOnly),
+        },
+        _ => SessionFact::Incomplete {
+            facts: result,
+            gaps: vec![MissingFact::EventOnly],
+        },
+    }
+}
+
+fn window_value(fact: &SessionFact<SessionWindow>) -> Option<&SessionWindow> {
+    match fact {
+        SessionFact::Complete(window) | SessionFact::Incomplete { facts: window, .. } => Some(window),
+        SessionFact::Unknown | SessionFact::Unavailable => None,
+    }
+}
+
+fn incomplete_window(fact: &SessionFact<SessionWindow>) -> SessionFact<SessionWindow> {
+    match fact {
+        SessionFact::Complete(window) => SessionFact::Incomplete {
+            facts: *window,
+            gaps: vec![MissingFact::BoundedHistory],
+        },
+        SessionFact::Incomplete { facts, gaps } => SessionFact::Incomplete {
+            facts: *facts,
+            gaps: with_gap(gaps.clone(), MissingFact::BoundedHistory),
+        },
+        other => other.clone(),
+    }
+}
+
+fn reconcile_window(
+    current: &SessionState,
+    baseline: &SessionState,
+    sync: &crate::ports::SessionSync,
+    items: &SessionFact<Vec<SessionItem>>,
+) -> SessionFact<SessionWindow> {
+    let incoming = &sync.view.window;
+    let retained = list_values(items);
+    let has_item = |id: &str| retained.iter().any(|item| item.item_id() == id);
+    let current_retained = list_values(&current.items).iter().all(|item| has_item(item.item_id()));
+    if matches!(incoming, SessionFact::Unknown | SessionFact::Unavailable) {
+        return if current_retained
+            && current.native_source_epoch == sync.source_epoch
+            && current.endpoint_session_id == sync.view.endpoint_session_id
+            && current.source_branch == sync.source_branch
+        {
+            current.window.clone()
+        } else {
+            incomplete_window(&current.window)
+        };
+    }
+    let incoming_retained = list_values(&sync.view.items).iter().all(|item| has_item(item.item_id()));
+    if let (SessionFact::Complete(previous), SessionFact::Complete(next)) = (&current.window, incoming)
+        && baseline.window.is_complete()
+        && current.native_source_epoch.is_some()
+        && current.native_source_epoch == baseline.native_source_epoch
+        && current.native_source_epoch == sync.source_epoch
+        && current.endpoint_session_id.is_some()
+        && current.endpoint_session_id == baseline.endpoint_session_id
+        && current.endpoint_session_id == sync.view.endpoint_session_id
+        && current.source_branch == baseline.source_branch
+        && current.source_branch == sync.source_branch
+        && next.total_item_count >= previous.total_item_count
+        && next.window_start_offset <= previous.window_end_offset
+        && previous.window_start_offset <= next.window_end_offset
+        && current_retained
+        && incoming_retained
+    {
+        let start = previous.window_start_offset.min(next.window_start_offset);
+        let end = previous.window_end_offset.max(next.window_end_offset);
+        if end - start <= MAX_ITEMS as u64 && retained.len() <= MAX_ITEMS {
+            return SessionFact::Complete(SessionWindow {
+                total_item_count: next.total_item_count,
+                window_start_offset: start,
+                window_end_offset: end,
+                has_more: start > 0,
+                has_newer: end < next.total_item_count,
+                is_at_latest: next.is_at_latest && end == next.total_item_count,
+            });
+        }
+    }
+    // A partial native range cannot describe retained facts outside that range.
+    // Keep its authoritative read coordinates, without inventing item offsets.
+    if incoming_retained && retained.iter().all(|item|
+        list_values(&sync.view.items).iter().any(|incoming| incoming.item_id() == item.item_id())
+    ) {
+        incoming.clone()
+    } else {
+        incomplete_window(incoming)
+    }
+}
+
+fn list_values<T>(fact: &SessionFact<Vec<T>>) -> &[T] {
+    match fact {
+        SessionFact::Complete(items) | SessionFact::Incomplete { facts: items, .. } => items,
+        SessionFact::Unknown | SessionFact::Unavailable => &[],
+    }
+}
+
+fn terminal_item(item: &SessionItem) -> bool {
+    match item {
+        SessionItem::UserMessage { status, .. }
+        | SessionItem::AssistantTurn { status, .. }
+        | SessionItem::System { status, .. } => {
+            matches!(
+                status,
+                ItemStatus::Final | ItemStatus::Error | ItemStatus::Aborted
+            )
+        }
+    }
+}
+
+fn valid_splice(old_item_ids: &[String], anchor: &ItemAnchor, items: &[SessionItem]) -> bool {
+    old_item_ids.len() <= MAX_ITEMS
+        && old_item_ids
+            .iter()
+            .enumerate()
+            .all(|(index, id)| valid_id(id) && !old_item_ids[..index].contains(id))
+        && items.len() <= MAX_ITEMS
+        && items.iter().enumerate().all(|(index, item)| {
+            valid_item(item)
+                && !items[..index]
+                    .iter()
+                    .any(|other| other.item_id() == item.item_id())
+        })
+        && match anchor {
+            ItemAnchor::Start => true,
+            ItemAnchor::After { item_id } => {
+                valid_id(item_id)
+                    && !old_item_ids.contains(item_id)
+                    && !items.iter().any(|item| item.item_id() == item_id)
+            }
+        }
+}
+
+fn splice_items(
+    fact: &mut SessionFact<Vec<SessionItem>>,
+    old_item_ids: &[String],
+    anchor: &ItemAnchor,
+    incoming: &[SessionItem],
+) -> bool {
+    if !valid_splice(old_item_ids, anchor, incoming) {
+        return false;
+    }
+    let (mut items, gaps) = match fact {
+        SessionFact::Complete(items) => (items.clone(), Vec::new()),
+        SessionFact::Incomplete { facts, gaps } => (facts.clone(), gaps.clone()),
+        SessionFact::Unavailable | SessionFact::Unknown => (Vec::new(), Vec::new()),
+    };
+    items.retain(|item| {
+        !old_item_ids.iter().any(|id| id == item.item_id())
+            && !incoming.iter().any(|new| new.item_id() == item.item_id())
+    });
+    let index = match anchor {
+        ItemAnchor::Start => 0,
+        ItemAnchor::After { item_id } => {
+            match items.iter().position(|item| item.item_id() == item_id) {
+                Some(index) => index + 1,
+                None => return false,
+            }
+        }
+    };
+    if items.len() + incoming.len() > MAX_ITEMS {
+        return false;
+    }
+    items.splice(index..index, incoming.iter().cloned());
+    *fact = SessionFact::Incomplete {
+        facts: items,
+        gaps: with_gap(gaps, MissingFact::EventOnly),
+    };
+    true
 }
 
 fn update_items(fact: &mut SessionFact<Vec<SessionItem>>, item: &SessionItem) -> bool {
@@ -2194,13 +3120,6 @@ fn tool_anchor_only_message_delta_index(
     })
 }
 
-fn assistant_turn_index_by_run_id(items: &[SessionItem], run_id: Option<&str>) -> Option<usize> {
-    let run_id = run_id?;
-    items.iter().position(|item| {
-        matches!(item, SessionItem::AssistantTurn { run_id: Some(existing), .. } if existing == run_id)
-    })
-}
-
 fn message_ids_can_merge(current: Option<&str>, incoming: Option<&str>) -> bool {
     match (current, incoming) {
         (Some(current), Some(incoming)) => current == incoming,
@@ -2272,71 +3191,6 @@ fn tool_update_for_state(fact: &SessionFact<Vec<ToolView>>, tool: &ToolView) -> 
         output: tool.output.clone().or_else(|| existing.output.clone()),
         details: tool.details.clone().or_else(|| existing.details.clone()),
         is_error: tool.is_error.or(existing.is_error),
-    }
-}
-
-fn update_tool_anchor(fact: &mut SessionFact<Vec<SessionItem>>, tool: &ToolView) -> bool {
-    if !valid_tool(tool) {
-        return false;
-    }
-    let Some(run_id) = tool.run_id.as_deref() else {
-        return true;
-    };
-    let current = mem::replace(fact, SessionFact::Unknown);
-    let (mut items, gaps) = match current {
-        SessionFact::Complete(items) => (items, Vec::new()),
-        SessionFact::Incomplete { facts, gaps } => (facts, gaps),
-        SessionFact::Unavailable | SessionFact::Unknown => (Vec::new(), Vec::new()),
-    };
-    if let Some(item_index) = assistant_turn_index_by_run_id(&items, Some(run_id)) {
-        let SessionItem::AssistantTurn { segments, .. } = &mut items[item_index] else {
-            return false;
-        };
-        if !upsert_tool_anchor_segment(segments, tool) {
-            return false;
-        }
-    } else {
-        if items.len() >= MAX_ITEMS {
-            return false;
-        }
-        items.push(SessionItem::AssistantTurn {
-            item_id: run_id.to_owned(),
-            run_id: Some(run_id.to_owned()),
-            message_id: None,
-            status: ItemStatus::Streaming,
-            segments: vec![tool_anchor_segment(tool)],
-            text: String::new(),
-        });
-    }
-    *fact = SessionFact::Incomplete {
-        facts: items,
-        gaps: with_gap(gaps, MissingFact::EventOnly),
-    };
-    true
-}
-
-fn upsert_tool_anchor_segment(segments: &mut Vec<SessionContent>, tool: &ToolView) -> bool {
-    if let Some(existing) = segments
-        .iter_mut()
-        .find(|segment| tool_segment_call_id(segment) == Some(tool.tool_call_id.as_str()))
-    {
-        *existing = tool_anchor_segment(tool);
-        return true;
-    }
-    if segments.len() >= MAX_SEGMENTS {
-        return false;
-    }
-    segments.push(tool_anchor_segment(tool));
-    true
-}
-
-fn tool_anchor_segment(tool: &ToolView) -> SessionContent {
-    SessionContent::ToolUse {
-        name: tool
-            .name
-            .clone()
-            .unwrap_or_else(|| UNKNOWN_TOOL_ANCHOR_NAME.to_owned()),
-        tool_call_id: tool.tool_call_id.clone(),
     }
 }
 
@@ -2425,12 +3279,7 @@ fn project_delta_changes(
             }
             SessionChange::ToolUpdated { tool } => {
                 let tool = state_tool_for_change(&state.tools, tool);
-                projected.push(SessionChange::ToolUpdated { tool: tool.clone() });
-                if let Some(run_id) = tool.run_id.as_deref()
-                    && let Some(item) = assistant_turn_for_run_id(&state.items, run_id)
-                {
-                    push_message_updated_change(&mut projected, item.clone());
-                }
+                projected.push(SessionChange::ToolUpdated { tool });
             }
             SessionChange::RunPhaseChanged { run_id, phase } => {
                 projected.push(change.clone());
@@ -2440,7 +3289,9 @@ fn project_delta_changes(
                     push_message_updated_change(&mut projected, item.clone());
                 }
             }
-            SessionChange::ApprovalUpdated { .. }
+            SessionChange::GoalChanged { .. } => projected.push(SessionChange::GoalChanged { goal: state.goal.clone() }),
+            SessionChange::ItemsReplaced { .. }
+            | SessionChange::ApprovalUpdated { .. }
             | SessionChange::RuntimeChanged { .. }
             | SessionChange::RuntimeNoticeUpdated { .. }
             | SessionChange::WindowChanged { .. }
@@ -2715,24 +3566,6 @@ fn replace_items(fact: &mut SessionFact<Vec<SessionItem>>, item: &SessionItem) -
 
 fn terminal_run_ids_from_facts(facts: &SessionFacts) -> HashSet<String> {
     let mut terminal_run_ids = HashSet::new();
-    if let SessionFact::Complete(items) | SessionFact::Incomplete { facts: items, .. } =
-        &facts.items
-    {
-        for item in items {
-            if let SessionItem::AssistantTurn {
-                run_id: Some(run_id),
-                status,
-                ..
-            } = item
-                && matches!(
-                    status,
-                    ItemStatus::Final | ItemStatus::Error | ItemStatus::Aborted
-                )
-            {
-                terminal_run_ids.insert(run_id.clone());
-            }
-        }
-    }
     if let SessionFact::Complete(runtime) | SessionFact::Incomplete { facts: runtime, .. } =
         &facts.runtime
         && terminal_run_phase(runtime.phase)
@@ -2837,7 +3670,7 @@ fn valid_completeness(completeness: &SessionCompleteness) -> bool {
 fn valid_identity(identity: &SessionIdentity) -> bool {
     valid_id_with_limit(&identity.session_key, MAX_SESSION_KEY_BYTES)
         && valid_endpoint(&identity.endpoint)
-        && identity.agent_id.as_deref().is_none_or(valid_id)
+        && valid_id(&identity.agent_id)
 }
 
 fn valid_session_model_state(model_state: &SessionModelState) -> bool {
@@ -3031,15 +3864,6 @@ fn valid_window(window: &SessionWindow) -> bool {
         && window.window_end_offset - window.window_start_offset <= MAX_ITEMS as u64
 }
 
-fn valid_route_key(value: &str) -> bool {
-    value.starts_with("renderer-route:")
-        && value.len() <= MAX_RENDERER_ROUTE_KEY_BYTES
-        && value
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b':' | b'-' | b'_'))
-}
-
 pub fn public_media_reference(reference: &str) -> Option<String> {
     let value = reference.trim();
     if !valid_id_with_limit(value, MAX_CONTENT_REF_BYTES) {
@@ -3109,13 +3933,19 @@ fn valid_changes(changes: &[SessionChange], outer_run_id: Option<&str>) -> bool 
 fn sole_change_run_id(changes: &[SessionChange]) -> Option<&str> {
     let mut run_id = None;
     for change in changes {
-        let Some(change_run_id) = change_run_id(change) else {
-            continue;
+        let items = match change {
+            SessionChange::ItemsReplaced { items, .. } => items.as_slice(),
+            _ => &[],
         };
-        match run_id {
-            Some(current) if current != change_run_id => return None,
-            Some(_) => {}
-            None => run_id = Some(change_run_id),
+        for owner in change_run_id(change)
+            .into_iter()
+            .chain(items.iter().filter_map(SessionItem::run_id))
+        {
+            match run_id {
+                Some(current) if current != owner => return None,
+                Some(_) => {}
+                None => run_id = Some(owner),
+            }
         }
     }
     run_id
@@ -3131,7 +3961,10 @@ fn change_run_id(change: &SessionChange) -> Option<&str> {
         SessionChange::ApprovalUpdated { approval } => approval.run_id.as_deref(),
         SessionChange::RuntimeChanged { runtime } => runtime.active_run_id.as_deref(),
         SessionChange::RuntimeNoticeUpdated { notice } => Some(notice.run_id.as_str()),
-        SessionChange::WindowChanged { .. } | SessionChange::RecoveryRequired { .. } => None,
+        SessionChange::ItemsReplaced { .. }
+        | SessionChange::GoalChanged { .. }
+        | SessionChange::WindowChanged { .. }
+        | SessionChange::RecoveryRequired { .. } => None,
     }
 }
 
@@ -3157,6 +3990,18 @@ fn valid_change(change: &SessionChange, outer_run_id: Option<&str>) -> bool {
         }
         SessionChange::MessageUpdated { item } => valid_item(item),
         SessionChange::MessageReplaced { item } => valid_item(item),
+        SessionChange::ItemsReplaced {
+            old_item_ids,
+            anchor,
+            items,
+        } => {
+            valid_splice(old_item_ids, anchor, items)
+                && items.iter().all(|item| {
+                    outer_run_id
+                        .zip(item.run_id())
+                        .is_none_or(|(outer, inner)| outer == inner)
+                })
+        }
         SessionChange::ToolUpdated { tool } => valid_tool(tool),
         SessionChange::ApprovalUpdated { approval } => valid_approval(approval),
         SessionChange::RuntimeChanged { runtime } => {
@@ -3164,6 +4009,7 @@ fn valid_change(change: &SessionChange, outer_run_id: Option<&str>) -> bool {
                 && valid_runtime(runtime)
         }
         SessionChange::RuntimeNoticeUpdated { notice } => valid_runtime_notice(notice),
+        SessionChange::GoalChanged { goal } => goal.validate().is_ok(),
         SessionChange::WindowChanged { window } => valid_window(window),
         SessionChange::RecoveryRequired { .. } => true,
     }
@@ -3214,7 +4060,6 @@ fn incomplete_without_native_facts() -> SessionCompleteness {
         ],
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3367,6 +4212,7 @@ mod tests {
             endpoint_session_id: Some("endpoint-session-1".to_owned()),
             ownership: None,
             model_state: None,
+            goal: SessionGoalView::Unknown,
             identity: identity(),
             epoch: 1,
             seq: 1,

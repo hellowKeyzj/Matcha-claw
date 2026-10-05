@@ -75,7 +75,7 @@
     {
       "slug": "llm-wiki",
       "localDir": "resources/skills/preinstalled-skill-sources/llm-wiki",
-      "version": "3.6.2-openclaw.1",
+      "version": "matcha-mcp-current-library-v1",
       "autoEnable": false
     },
     {

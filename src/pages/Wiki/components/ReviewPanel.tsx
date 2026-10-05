@@ -1,11 +1,10 @@
 import { type JSX } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Check, CheckCircle2, Copy, FileQuestion, Lightbulb, MessageSquare, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { AlertTriangle, Check, CheckCircle2, Copy, FileQuestion, Lightbulb, MessageSquare, RefreshCw, Trash2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import type { WikiReviewItem } from '../wiki-model';
 import { formatDateTime } from '../wiki-model';
-import { isResearchReviewAction } from '../research-model';
 import { WikiEmpty, WikiIconButton, WikiPanel, WikiPanelHeader, WikiSurface } from './WikiChrome';
 
 export type ReviewPanelProps = Readonly<{
@@ -16,10 +15,13 @@ export type ReviewPanelProps = Readonly<{
   onDismiss(id: string): void;
   onClearResolved(): void;
   onCreatePage(item: WikiReviewItem): void;
-  onResearch(item: WikiReviewItem): void;
 }>;
 
 type ReviewTypeConfig = Readonly<{ icon: typeof AlertTriangle; className: string }>;
+
+function isResearchReviewAction(action: string): boolean {
+  return action === '__deep_research__' || (!action.startsWith('__') && /research|investigate|explore|look into|研究|调研|探索/i.test(action));
+}
 
 const TYPE_CONFIG: Record<WikiReviewItem['type'], ReviewTypeConfig> = {
   contradiction: { icon: AlertTriangle, className: 'text-amber-500' },
@@ -31,7 +33,7 @@ const TYPE_CONFIG: Record<WikiReviewItem['type'], ReviewTypeConfig> = {
 
 export function ReviewPanel(props: ReviewPanelProps): JSX.Element {
   const { t } = useTranslation('wiki');
-  const { items, busy, onRefresh, onResolve, onDismiss, onClearResolved, onCreatePage, onResearch } = props;
+  const { items, busy, onRefresh, onResolve, onDismiss, onClearResolved, onCreatePage } = props;
   const pending = items.filter((item) => !item.resolved);
   const resolved = items.filter((item) => item.resolved);
   const isBusy = busy !== null;
@@ -66,7 +68,6 @@ export function ReviewPanel(props: ReviewPanelProps): JSX.Element {
                 onResolve={onResolve}
                 onDismiss={onDismiss}
                 onCreatePage={onCreatePage}
-                onResearch={onResearch}
               />
             ))}
           </div>
@@ -84,14 +85,13 @@ function ReviewCard(props: Readonly<{
   onResolve(id: string, action: string): void;
   onDismiss(id: string): void;
   onCreatePage(item: WikiReviewItem): void;
-  onResearch(item: WikiReviewItem): void;
 }>): JSX.Element {
   const { t } = useTranslation('wiki');
-  const { item, busy, onResolve, onDismiss, onCreatePage, onResearch } = props;
+  const { item, busy, onResolve, onDismiss, onCreatePage } = props;
   const config = TYPE_CONFIG[item.type];
   const Icon = config.icon;
   const createAction = item.options.find((option) => !isResearchReviewAction(option.action) && (option.action === 'Create Page' || option.label === 'Create Page'));
-  const otherOptions = item.options.filter((option) => option !== createAction);
+  const otherOptions = item.options.filter((option) => option !== createAction && !isResearchReviewAction(option.action));
 
   return (
     <WikiSurface className="p-4">
@@ -109,18 +109,11 @@ function ReviewCard(props: Readonly<{
           <h3 className="mt-2 text-sm font-semibold">{item.title}</h3>
           {item.description ? <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{item.description}</p> : null}
           <ReviewMeta label={t('review.pages')} values={item.affectedPages} />
-          <ReviewMeta label={t('review.search')} values={item.searchQueries} />
           {item.resolvedAction ? <div className="mt-2 text-xs text-muted-foreground">{item.resolvedAction}</div> : null}
         </div>
       </div>
 
       <div className="mt-4 flex flex-wrap justify-end gap-2">
-        {item.type === 'suggestion' || item.type === 'missing-page' ? (
-          <Button size="sm" onClick={() => onResearch(item)} disabled={busy || item.resolved} className="h-8 rounded-full">
-            <Search className="h-4 w-4" />
-            {t('research.title', { defaultValue: '深度研究' })}
-          </Button>
-        ) : null}
         {createAction ? (
           <Button size="sm" onClick={() => onCreatePage(item)} disabled={busy || item.resolved} className="h-8 rounded-full">
             <FileQuestion className="h-4 w-4" />
@@ -128,7 +121,7 @@ function ReviewCard(props: Readonly<{
           </Button>
         ) : null}
         {otherOptions.map((option) => (
-          <Button key={option.action} size="sm" variant="outline" onClick={() => isResearchReviewAction(option.action) ? onResearch(item) : onResolve(item.id, option.action)} disabled={busy || item.resolved} className="h-8 rounded-full bg-card">
+          <Button key={option.action} size="sm" variant="outline" onClick={() => onResolve(item.id, option.action)} disabled={busy || item.resolved} className="h-8 rounded-full bg-card">
             <Check className="h-4 w-4" />
             {option.label}
           </Button>

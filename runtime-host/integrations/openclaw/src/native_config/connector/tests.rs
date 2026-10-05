@@ -25,7 +25,7 @@ use super::external::{
     observe_external_connector, probe_external_connector, project_external_connectors,
     projection_effect,
 };
-use super::preset::{PRESET_TEAM_RUN_MCP_SERVER_ID, project_preset_team_run_mcp_server};
+use super::preset::{PRESET_MCP_SERVER_ID, project_preset_mcp_server};
 
 static NEXT_PROJECTION_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -135,11 +135,11 @@ fn connector_projection_is_idempotent_and_preserves_unmanaged_servers() {
 }
 
 #[test]
-fn preset_team_run_mcp_projection_is_idempotent_and_preserves_other_servers() {
+fn preset_mcp_projection_is_idempotent_and_preserves_other_servers() {
     let root = projection_root();
     let state_dir = canonical_state_dir(&root);
     let config_path = state_dir.as_path().join("openclaw.json");
-    let team_run_state_dir = root.join("runtime-host");
+    let runtime_host_state_dir = root.join("runtime-host");
     let executable = root.join(if cfg!(windows) {
         "runtime-host-mcp.exe"
     } else {
@@ -151,7 +151,8 @@ fn preset_team_run_mcp_projection_is_idempotent_and_preserves_other_servers() {
             "mcp": {
                 "servers": {
                     "user-owned": { "command": "user-mcp", "args": ["--raw"] },
-                    "matcha-external.current": { "command": "managed-mcp", "args": ["--serve"] }
+                    "matcha-external.current": { "command": "managed-mcp", "args": ["--serve"] },
+                    "matcha-teamrun": { "command": "old-mcp", "enabled": false, "cwd": "custom-workspace" }
                 }
             },
             "commands": { "custom": true }
@@ -161,21 +162,24 @@ fn preset_team_run_mcp_projection_is_idempotent_and_preserves_other_servers() {
     .unwrap();
 
     let effect =
-        project_preset_team_run_mcp_server(state_dir.clone(), &executable, &team_run_state_dir);
+        project_preset_mcp_server(state_dir.clone(), &executable, &runtime_host_state_dir);
 
     assert_eq!(effect, ConnectorProjectionEffect::Written { changed: true });
     let first_bytes = fs::read(&config_path).unwrap();
     let first_document = config_document(&config_path);
     let expected = json!({
         "command": executable.to_str().unwrap(),
-        "args": ["--state-dir", team_run_state_dir.to_str().unwrap()],
+        "args": ["--state-dir", runtime_host_state_dir.to_str().unwrap()],
         "transport": "stdio",
-        "enabled": true
+        "enabled": false,
+        "cwd": "custom-workspace"
     });
+    assert_eq!(PRESET_MCP_SERVER_ID, "matcha");
     assert_eq!(
-        first_document["mcp"]["servers"][PRESET_TEAM_RUN_MCP_SERVER_ID],
+        first_document["mcp"]["servers"][PRESET_MCP_SERVER_ID],
         expected
     );
+    assert!(first_document["mcp"]["servers"].get("matcha-teamrun").is_none());
     assert_eq!(
         first_document["mcp"]["servers"]["user-owned"],
         json!({ "command": "user-mcp", "args": ["--raw"] })
@@ -188,7 +192,7 @@ fn preset_team_run_mcp_projection_is_idempotent_and_preserves_other_servers() {
         first_document["commands"],
         json!({ "custom": true, "restart": true })
     );
-    let preset_server = first_document["mcp"]["servers"][PRESET_TEAM_RUN_MCP_SERVER_ID]
+    let preset_server = first_document["mcp"]["servers"][PRESET_MCP_SERVER_ID]
         .as_object()
         .unwrap();
     for private_field in [
@@ -203,7 +207,7 @@ fn preset_team_run_mcp_projection_is_idempotent_and_preserves_other_servers() {
     }
 
     let effect =
-        project_preset_team_run_mcp_server(state_dir.clone(), &executable, &team_run_state_dir);
+        project_preset_mcp_server(state_dir.clone(), &executable, &runtime_host_state_dir);
 
     assert_eq!(
         effect,

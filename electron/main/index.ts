@@ -99,6 +99,7 @@ let mainWindow: BrowserWindow | null = null;
 let hostEventBus!: HostEventBus;
 let directRuntimeHost: RuntimeHostLifecycleOwner | null = null;
 let closeRuntimeHostDelivery: (() => Promise<void>) | null = null;
+let closeSessionObservations: (() => Promise<void>) | null = null;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
 
@@ -189,6 +190,7 @@ if (gotTheLock) {
       bindPendingSecondInstanceFocus(result.mainWindow);
       directRuntimeHost = result.directRuntimeHost;
       closeRuntimeHostDelivery = result.closeRuntimeHostDelivery;
+      closeSessionObservations = result.closeSessionObservations;
     }).catch((error) => {
       if (isE2EMode) {
         logger.error('Failed to bootstrap main application');
@@ -220,7 +222,7 @@ if (gotTheLock) {
     }
   });
 
-  app.on('before-quit', (event) => {
+  app.on('before-quit', async (event) => {
     setQuitting();
     const action = requestQuitLifecycleAction(quitLifecycleState);
 
@@ -242,6 +244,10 @@ if (gotTheLock) {
       app.quit();
       return;
     }
+    await closeSessionObservations?.().catch((error) => {
+      logger.warn('Failed to release session observations during quit:', error);
+    });
+    closeSessionObservations = null;
     const stopPromise = runtimeHost.stop()
       .then(() => 'stopped' as const)
       .catch((error) => {

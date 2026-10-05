@@ -5,10 +5,35 @@ import {
   summarizeError,
   summarizeIdentifier,
 } from '@/lib/session-trace';
-import type { RuntimeEndpointRef, SessionIdentity } from '../../types/desktop/runtime-address';
 import type { CapabilityTarget } from '../../types/desktop/capability-target';
 import type { CallReceipt } from '../../types/call-log';
 import { decodeCallReceipt } from '../../types/call-log/receipt';
+import {
+  decodeTeamDesignMutation,
+  decodeTeamDesignSnapshot,
+  type TeamDesignSnapshot,
+  type TeamDesignTarget,
+  type TeamGraphEdgeAction,
+  type TeamGraphEdgePayloadPolicyRecord,
+  type TeamGraphPatchOperation,
+  type TeamGraphSnapshotRecord,
+  type TeamRoleBindingRecord,
+  type TeamRunStartGateProjection,
+} from '../../types/team-design';
+export type {
+  TeamGraphEdgeAction,
+  TeamGraphEdgePayloadPolicyRecord,
+  TeamGraphEdgeRecord,
+  TeamGraphLayoutRecord,
+  TeamGraphNodePositionRecord,
+  TeamGraphNodeRecord,
+  TeamGraphPatchOperation,
+  TeamGraphSnapshotRecord,
+  TeamRoleBindingRecord,
+  TeamRunProposalProjection,
+  TeamRunStartGateProjection,
+  TeamStartGateStatus,
+} from '../../types/team-design';
 
 export type TeamRunStatus = 'created' | 'provisioning' | 'waiting_for_user' | 'running' | 'paused' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
 
@@ -22,6 +47,11 @@ export type TeamRuntimeOperationId =
   | 'team.triggerList'
   | 'team.webhookTriggerFire'
   | 'team.runSnapshot'
+  | 'team.designStart'
+  | 'team.designContinue'
+  | 'team.designExit'
+  | 'team.designSnapshot'
+  | 'team.designGraphPatch'
   | 'team.runDiagnostics'
   | 'team.runDecisionSubmit'
   | 'team.resume'
@@ -111,16 +141,16 @@ export interface TeamDependencyPlanItem extends TeamSkillDependencyEntry {
 }
 
 export interface TeamDependencyPreparationPlan {
+  selectionId: TeamSkillSelectionId;
   packageName: string;
   packageVersion: string;
-  sourcePath: string;
   items: TeamDependencyPlanItem[];
-  missingRequiredSkills: TeamSkillDependencyEntry[];
-  missingOptionalSkills: TeamSkillDependencyEntry[];
-  missingRequiredTools: TeamSkillDependencyEntry[];
-  missingOptionalTools: TeamSkillDependencyEntry[];
   canProceed: boolean;
 }
+
+export type TeamDependencyPreparationPlanResult =
+  | { status: 'available'; plan: TeamDependencyPreparationPlan }
+  | { status: 'invalid' | 'unavailable' };
 
 export type TeamStageStatus = 'pending' | 'running' | 'waiting_for_user' | 'passed' | 'failed' | 'skipped' | 'cancelled';
 export type TeamApprovalStatus = 'pending' | 'approved' | 'denied' | 'aborted';
@@ -216,17 +246,6 @@ export interface TeamStageRecord {
   outputArtifactIds: string[];
   createdAt: number;
   updatedAt: number;
-}
-
-export interface TeamRoleBindingRecord {
-  teamId?: string;
-  runId: string;
-  roleId: string;
-  agentId: string;
-  endpointRef: RuntimeEndpointRef;
-  localSessionId: string;
-  endpointSessionId: string;
-  sessionIdentity: SessionIdentity;
 }
 
 export interface TeamApprovalRecord {
@@ -425,69 +444,6 @@ export interface TeamRunDiagnostics {
   counts: Record<string, number>;
 }
 
-export interface TeamGraphNodeRecord {
-  nodeId: string;
-  kind?: string;
-  title?: string;
-  roleId?: string;
-  groupId?: string;
-  taskId?: string;
-  stageId?: string;
-  status?: string;
-  statusReason?: string;
-  maxAttempts?: number;
-  createdAt?: number;
-  completedAt?: number;
-  artifactId?: string;
-  executor?: Record<string, unknown>;
-  config?: Record<string, unknown>;
-  metadata?: Record<string, unknown>;
-}
-
-export type TeamGraphEdgeAction = 'activate' | 'rework' | 'gate' | 'finish';
-
-export interface TeamGraphEdgePayloadPolicyRecord {
-  includeUpstreamResult: boolean;
-}
-
-export interface TeamGraphEdgeRecord {
-  edgeId: string;
-  sourceNodeId: string;
-  targetNodeId: string;
-  fromNodeId?: string;
-  toNodeId?: string;
-  sourcePort?: string;
-  targetPort?: string;
-  edgeType?: string;
-  kind?: string;
-  action?: TeamGraphEdgeAction;
-  payload?: TeamGraphEdgePayloadPolicyRecord;
-  status?: string;
-  label?: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface TeamGraphNodePositionRecord {
-  x: number;
-  y: number;
-}
-
-export interface TeamGraphLayoutRecord {
-  nodePositions?: Record<string, TeamGraphNodePositionRecord>;
-}
-
-export interface TeamGraphSnapshotRecord {
-  runId?: string;
-  graphId?: string;
-  workflowPlanId?: string;
-  layout?: TeamGraphLayoutRecord;
-  nodes: TeamGraphNodeRecord[];
-  edges: TeamGraphEdgeRecord[];
-  status: string;
-  updatedAt?: number;
-  metadata?: Record<string, unknown>;
-}
-
 export interface TeamGraphInboundEdgeStateRecord {
   edgeId: string;
   sourceNodeId: string;
@@ -561,20 +517,6 @@ export interface TeamNodeDeliveryRecord {
   inputContexts: TeamGraphAttemptInputContextRecord[];
   status: 'queued';
   createdAt: number;
-}
-
-export type TeamStartGateStatus = 'intake' | 'proposal_pending' | 'started';
-
-export interface TeamRunProposalProjection {
-  proposalId?: string;
-  taskSummary: string;
-  detail?: string;
-  createdAt?: number;
-}
-
-export interface TeamRunStartGateProjection {
-  status: TeamStartGateStatus;
-  proposal?: TeamRunProposalProjection | null;
 }
 
 export interface TeamRunSnapshot {
@@ -673,14 +615,6 @@ export interface TeamGraphSaveResult extends TeamRuntimeOperationReceipt {
 }
 
 export type TeamNodeEventKind = 'progress' | 'request_input' | 'request_approval' | 'reject' | 'complete';
-
-export type TeamGraphPatchOperation =
-  | { op: 'add_node' | 'replace_node'; node: Record<string, unknown> }
-  | { op: 'remove_node'; nodeId: string }
-  | { op: 'add_edge' | 'replace_edge'; edge: Record<string, unknown> }
-  | { op: 'remove_edge'; edgeId: string }
-  | { op: 'set_node_position'; nodeId: string; position: TeamGraphNodePositionRecord }
-  | { op: 'set_metadata'; metadata: Record<string, unknown> };
 
 export interface TeamGraphPatchInput {
   baseGraphId?: string;
@@ -812,6 +746,10 @@ async function teamRuntimeApi<T>(payload: {
     logSessionTrace('renderer.team.runtime.response', traceId, {
       operationId: payload.operationId,
       contract: decode ? 'decoded' : 'raw',
+      ...(isRecord(result) && result.accepted === true && typeof result.callId === 'string'
+        && /^[0-9a-f]{32}$/.test(result.callId)
+        ? { callId: result.callId, callTraceId: `session-trace:team-call:${result.callId.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5')}` }
+        : {}),
     });
     return result;
   } catch (error) {
@@ -863,12 +801,12 @@ export async function validateTeamSkillPackage(payload: {
 
 export async function planTeamDependencies(payload: {
   packagePath: string;
-}): Promise<TeamDependencyPreparationPlan> {
+}): Promise<TeamDependencyPreparationPlanResult> {
   return await teamRuntimeApi({
     operationId: 'team.dependencyPlan',
     target: { kind: 'team', packagePath: payload.packagePath },
     input: { packagePath: payload.packagePath },
-  });
+  }, decodeTeamDependencyPreparationPlan);
 }
 
 export async function provisionTeamAgents(payload: {
@@ -1014,6 +952,60 @@ export async function resolveTeamApproval(payload: {
       idempotencyKey: payload.idempotencyKey,
     },
   }, decodeTeamApprovalResolve);
+}
+
+export async function startTeamDesign(payload: TeamDesignTarget & { idempotencyKey: string }): Promise<{ success: true; outcome: 'designing' }> {
+  return await teamRuntimeApi({
+    operationId: 'team.designStart',
+    target: { kind: 'team', teamId: payload.teamId },
+    input: { teamId: payload.teamId, runId: payload.runId, idempotencyKey: payload.idempotencyKey },
+  }, (value) => decodeTeamDesignMutation(value, 'designing'));
+}
+
+export async function continueTeamDesign(payload: TeamDesignTarget & { proposalId: string; idempotencyKey: string }): Promise<{ success: true; outcome: 'designing' }> {
+  return await teamRuntimeApi({
+    operationId: 'team.designContinue',
+    target: { kind: 'team', teamId: payload.teamId },
+    input: { teamId: payload.teamId, runId: payload.runId, proposalId: payload.proposalId, idempotencyKey: payload.idempotencyKey },
+  }, (value) => decodeTeamDesignMutation(value, 'designing'));
+}
+
+export async function exitTeamDesign(payload: TeamDesignTarget & { designEpoch: string }): Promise<{ success: true; outcome: 'intake' }> {
+  return await teamRuntimeApi({
+    operationId: 'team.designExit',
+    target: { kind: 'team', teamId: payload.teamId },
+    input: { teamId: payload.teamId, runId: payload.runId, designEpoch: payload.designEpoch },
+  }, (value) => decodeTeamDesignMutation(value, 'intake'));
+}
+
+export async function readTeamDesignSnapshot(target: TeamDesignTarget): Promise<TeamDesignSnapshot> {
+  return await teamRuntimeApi({
+    operationId: 'team.designSnapshot',
+    target: { kind: 'team', teamId: target.teamId },
+    input: { teamId: target.teamId, runId: target.runId },
+  }, (value) => decodeTeamDesignSnapshot(value, target));
+}
+
+export async function patchTeamDesignGraph(payload: TeamDesignTarget & {
+  designEpoch: string;
+  expectedGraphVersion: string;
+  commandId: string;
+  idempotencyKey: string;
+  operations: TeamGraphPatchOperation[];
+}): Promise<TeamDesignSnapshot> {
+  return await teamRuntimeApi({
+    operationId: 'team.designGraphPatch',
+    target: { kind: 'team', teamId: payload.teamId },
+    input: {
+      teamId: payload.teamId,
+      runId: payload.runId,
+      designEpoch: payload.designEpoch,
+      expectedGraphVersion: payload.expectedGraphVersion,
+      commandId: payload.commandId,
+      idempotencyKey: payload.idempotencyKey,
+      operations: payload.operations,
+    },
+  }, (value) => decodeTeamDesignSnapshot(value, payload));
 }
 
 export async function readTeamRunSnapshot(payload: {
@@ -1295,6 +1287,32 @@ function decodeTeamSkillPackageValidation(payload: unknown): TeamSkillPackageVal
     return payload as TeamSkillPackageValidationResult;
   }
   return teamRuntimeDecodeFailure();
+}
+
+function decodeTeamDependencyPreparationPlan(payload: unknown): TeamDependencyPreparationPlanResult {
+  if (!isRecord(payload)) return teamRuntimeDecodeFailure();
+  if ((payload.status === 'invalid' || payload.status === 'unavailable') && hasExactKeys(payload, ['status'])) {
+    return { status: payload.status };
+  }
+  const plan = payload.plan;
+  if (payload.status === 'available' && hasExactKeys(payload, ['status', 'plan'])
+    && isRecord(plan) && hasExactKeys(plan, ['selectionId', 'packageName', 'packageVersion', 'items', 'canProceed'])
+    && isTeamSkillSelectionId(plan.selectionId) && isText(plan.packageName) && isText(plan.packageVersion)
+    && Array.isArray(plan.items) && plan.items.every(isTeamDependencyPlanItem)
+    && typeof plan.canProceed === 'boolean') {
+    return payload as unknown as TeamDependencyPreparationPlanResult;
+  }
+  return teamRuntimeDecodeFailure();
+}
+
+function isTeamDependencyPlanItem(payload: unknown): payload is TeamDependencyPlanItem {
+  return isRecord(payload)
+    && hasExactKeys(payload, ['kind', 'name', 'required', 'purpose', 'status', 'severity', 'installable'])
+    && (payload.kind === 'skill' || payload.kind === 'tool')
+    && isText(payload.name) && typeof payload.required === 'boolean' && typeof payload.purpose === 'string'
+    && (payload.status === 'available' || payload.status === 'missing')
+    && (payload.severity === 'ok' || payload.severity === 'warning' || payload.severity === 'blocker')
+    && typeof payload.installable === 'boolean';
 }
 
 function decodeTeamRunSummary(payload: unknown): TeamRunSummary {

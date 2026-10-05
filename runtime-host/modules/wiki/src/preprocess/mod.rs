@@ -33,13 +33,13 @@ static PDFIUM_LOCK: Mutex<()> = Mutex::new(());
 static RESOURCE_DIR_HINT: OnceLock<PathBuf> = OnceLock::new();
 
 pub async fn read_source_text(path: PathBuf, include_images: bool) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || {
-        run_guarded("read_source_text", || {
-            read_source_text_blocking(&path, include_images)
-        })
-    })
-    .await
-    .map_err(|error| format!("read_source_text blocking task join error: {error}"))?
+    tokio::task::spawn_blocking(move || read_source_text_guarded(&path, include_images))
+        .await
+        .map_err(|error| format!("read_source_text blocking task join error: {error}"))?
+}
+
+pub(crate) fn read_source_text_guarded(path: &Path, include_images: bool) -> Result<String, String> {
+    run_guarded("read_source_text", || read_source_text_blocking(path, include_images))
 }
 
 pub async fn preprocess_source(path: PathBuf) -> Result<String, String> {

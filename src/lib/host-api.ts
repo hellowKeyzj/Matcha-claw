@@ -2,6 +2,15 @@ import { invokeIpc } from '@/lib/api-client';
 import type { CallReceipt } from '@/types/call-log';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
 import { decodeWikiCallResult, type WikiCallResult } from '@/types/wiki-call-result';
+import { decodeWikiNavigation, type WikiNavigation } from '@/types/wiki-navigation';
+import { decodeWikiSelectionTask, type WikiSelectionInput, type WikiSelectionSnapshot, type WikiSelectionTask } from '@/types/wiki-selection';
+import {
+  decodeWikiDedupState,
+  decodeWikiPageLinks,
+  type WikiDedupState,
+  type WikiDuplicateGroup,
+  type WikiPageLinks,
+} from '@/types/wiki-capabilities';
 import type {
   WikiGraphInsightsReceipt,
   WikiHistoryConfig,
@@ -30,23 +39,36 @@ import {
   type RuntimeScope,
   type SessionIdentity,
 } from '../types/desktop/runtime-address';
+import {
+  decodeOpenClawQuestionListResult,
+  decodeOpenClawQuestionResolveResult,
+  type OpenClawQuestionListInput,
+  type OpenClawQuestionListResult,
+  type OpenClawQuestionResolveInput,
+  type OpenClawQuestionResolveResult,
+} from '../types/openclaw-question';
+import type { SessionSendIntent, SessionGoalUpdateInput, SessionGoalClearInput, SessionGoalOutcome, SessionGoalReceipt } from '../types/session-goal';
 import type { CapabilityTarget } from '../types/desktop/capability-target';
 import type { CapabilityDescriptor } from '../types/desktop/capability-descriptor';
 import type { RuntimeAdapterInstanceSummary, RuntimeAdapterSummary, RuntimeConnectorEndpointLifecycleResult, RuntimeConnectorSummary, RuntimeEndpointSummary } from '../types/runtime-topology';
 import {
   logSessionTrace,
+  isSessionTraceEnabled,
+  createSessionTraceId,
   summarizeError,
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from './session-trace';
 import {
   decodeSessionContentLoadResult,
+  decodeSessionView,
   type SessionApprovalDecision,
   type SessionApprovalRequestItem,
   type SessionCatalogItem,
   type SessionContentLoadResult,
   type SessionListResult,
   type SessionModelState,
+  type SessionObservationResult,
   type SessionView,
   type SessionWireIdentity,
 } from '../types/session/snapshot';
@@ -194,12 +216,12 @@ export type HostSessionAbortResult = Readonly<{ outcome?: string; projection?: u
 
 export type HostSessionPromptResult = Readonly<{
   success?: boolean;
-  outcome?: 'queued' | 'succeeded' | 'target_rejected' | 'unavailable' | 'unknown';
-  routeKey?: string;
+  outcome?: 'queued' | 'succeeded' | 'target_rejected' | 'unavailable' | 'unknown' | 'unsupported';
   runId?: string;
   status?: 'started' | 'in_flight' | 'ok';
   projection?: unknown;
   snapshot?: unknown;
+  goal?: SessionGoalReceipt;
   error?: string;
 }>;
 
@@ -312,6 +334,8 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
     });
   }
   const requestId = crypto.randomUUID();
+  const tracing = !!init?.traceId && isSessionTraceEnabled();
+  const requestIdHash = tracing ? summarizeIdentifier(requestId).hash : null;
   let abortListener: (() => void) | null = null;
   if (signal) {
     abortListener = () => {
@@ -322,6 +346,9 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
     signal.addEventListener('abort', abortListener, { once: true });
   }
   try {
+    if (tracing) logSessionTrace('hostapi.ipc.invoke', init?.traceId, {
+      requestIdHash, method, elapsedMs: Date.now() - startedAt,
+    });
     const responsePromise = invokeIpc<unknown>('hostapi:fetch', {
       requestId,
       path,
@@ -340,9 +367,20 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
         }),
       ])
       : await responsePromise;
+    if (tracing) logSessionTrace('hostapi.ipc.response', init?.traceId, {
+      requestIdHash, elapsedMs: Date.now() - startedAt,
+    });
+    const decodeStartedAt = tracing ? performance.now() : 0;
     const envelope = decodeHostApiProxyEnvelope(response);
+    if (tracing) logSessionTrace('hostapi.ipc.decoded', init?.traceId, {
+      requestIdHash, decodeElapsedMs: performance.now() - decodeStartedAt,
+      status: envelope.ok ? envelope.data.status : null, outcome: envelope.ok ? 'received' : 'proxy-failed',
+    });
     return parseUnifiedProxyResponse<T>(envelope, path, method, startedAt);
   } catch (error) {
+    if (tracing) logSessionTrace('hostapi.ipc.error', init?.traceId, {
+      requestIdHash, elapsedMs: Date.now() - startedAt, ...summarizeError(error),
+    });
     const normalized = normalizeAppError(error, { source: 'ipc-proxy', path, method });
     trackUiEvent('hostapi.fetch_error', {
       path,
@@ -431,63 +469,9 @@ export async function hostUvCheck(): Promise<boolean> {
 
 export type HostWikiRequest = Record<string, unknown>;
 
-export type HostWikiResearchInput = Readonly<{
-  topic: string;
-  searchQueries?: readonly string[];
-  sourceReviewId?: string;
-  rerunOfTaskId?: string;
-}>;
-
-export type HostWikiResearchTask = Readonly<{
-  id: string;
-  projectId: string;
-  topic: string;
-  searchQueries: readonly string[];
-  sourceReviewId: string | null;
-  rerunOfTaskId: string | null;
-  status: 'queued' | 'searching' | 'synthesizing' | 'saving' | 'done' | 'error';
-  webResults: readonly HostWikiResearchSource[];
-  synthesis: string;
-  savedPath: string | null;
-  error: string | null;
-  createdAt: number;
-}>;
-
-export type HostWikiResearchSource = Readonly<{
-  title: string;
-  url: string;
-  snippet: string;
-  source: string;
-}>;
-
-export type HostWikiResearchTasksReceipt = Readonly<{
-  projectId: string;
-  tasks: readonly HostWikiResearchTask[];
-}>;
-
-export type HostWikiSearchProvider = 'none' | 'tavily' | 'serpapi' | 'searxng' | 'ollama' | 'brave' | 'bocha' | 'firecrawl';
-
-export type HostWikiSearchProviderConfig = Readonly<{
-  baseUrl: string | null;
-  serpApiEngine: string | null;
-  searXngUrl: string | null;
-  searXngCategories: readonly string[] | null;
-  ollamaUrl: string | null;
-  apiKeyConfigured: boolean;
-}>;
-
-export type HostWikiSearchProviderConfigUpdate = Partial<Omit<HostWikiSearchProviderConfig, 'apiKeyConfigured'>> & Readonly<{ apiKey?: string }>;
-
-export type HostWikiAnyTxtConfig = Readonly<{
-  enabled: boolean;
-  endpoint: string;
-  filterDir: string;
-  filterExt: string;
-  limit: number;
-}>;
-
 export type HostWikiEmbeddingConfig = Readonly<{
   enabled: boolean;
+  source: 'local-minilm' | 'remote';
   endpoint: string;
   model: string;
   outputDimensionality: number | null;
@@ -500,23 +484,14 @@ export type HostWikiEmbeddingConfig = Readonly<{
 }>;
 
 export type HostWikiSearchConfig = Readonly<{
-  provider: HostWikiSearchProvider;
-  providerConfigs: Readonly<Partial<Record<Exclude<HostWikiSearchProvider, 'none'>, HostWikiSearchProviderConfig>>>;
-  deepResearchSource: 'web' | 'anytxt' | 'both';
-  anyTxt: HostWikiAnyTxtConfig;
   embedding: HostWikiEmbeddingConfig;
 }>;
 
 export type HostWikiSearchConfigUpdate = Readonly<{
-  provider?: HostWikiSearchProvider;
-  providerConfigs?: Partial<Record<Exclude<HostWikiSearchProvider, 'none'>, HostWikiSearchProviderConfigUpdate>>;
-  deepResearchSource?: HostWikiSearchConfig['deepResearchSource'];
-  anyTxt?: Partial<HostWikiAnyTxtConfig>;
   embedding?: Partial<Omit<HostWikiEmbeddingConfig, 'apiKeyConfigured'>> & Readonly<{ apiKey?: string }>;
 }>;
 
 export type HostWikiSearchConfigReceipt = Readonly<{ projectId: string; config: HostWikiSearchConfig }>;
-export type HostWikiSearchProviderTestResult = Readonly<{ projectId: string; results: readonly HostWikiResearchSource[] }>;
 
 export type HostWikiGeneratedPageInput = Readonly<{
   path: string;
@@ -535,7 +510,6 @@ export type HostWikiReviewItem = Readonly<{
   description: string;
   sourcePath?: string;
   affectedPages?: readonly string[];
-  searchQueries?: readonly string[];
   options: readonly HostWikiReviewOption[];
   resolved: boolean;
   resolvedAction?: string;
@@ -623,6 +597,17 @@ export async function hostWikiFiles(payload: { projectId?: string; directory?: s
   return hostApiFetch(`/api/wiki/files${queryText ? `?${queryText}` : ''}`);
 }
 
+export async function hostWikiNavigation(payload: { projectId?: string } = {}): Promise<WikiNavigation> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  const queryText = query.toString();
+  return hostApiFetchDecoded(`/api/wiki/navigation${queryText ? `?${queryText}` : ''}`, decodeWikiNavigation);
+}
+
+export async function hostWikiDeletePage(payload: { projectId: string; path: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/delete-page', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
 export async function hostWikiReadFile(payload: HostWikiRequest): Promise<unknown> {
   return hostApiFetch('/api/wiki/read-file', { method: 'POST', body: JSON.stringify(payload) });
 }
@@ -650,25 +635,6 @@ export async function hostWikiSearch(payload: HostWikiRequest): Promise<unknown>
   return hostApiFetch('/api/wiki/search', { method: 'POST', body: JSON.stringify(payload) });
 }
 
-export async function hostWikiResearchTasks(payload: { projectId?: string } = {}): Promise<HostWikiResearchTasksReceipt> {
-  const query = new URLSearchParams();
-  if (payload.projectId) query.set('projectId', payload.projectId);
-  const queryText = query.toString();
-  return hostApiFetch(`/api/wiki/research-tasks${queryText ? `?${queryText}` : ''}`);
-}
-
-export async function hostWikiStartResearch(payload: { projectId?: string; inputs: readonly HostWikiResearchInput[]; modelRef?: string }): Promise<CallReceipt> {
-  return hostApiFetchDecoded('/api/wiki/research/start', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
-}
-
-export async function hostWikiRerunResearchTask(payload: { projectId?: string; taskId: string; modelRef?: string }): Promise<CallReceipt> {
-  return hostApiFetchDecoded('/api/wiki/research-task/rerun', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
-}
-
-export async function hostWikiRemoveResearchTask(payload: { projectId?: string; taskId: string }): Promise<HostWikiResearchTasksReceipt> {
-  return hostApiFetch('/api/wiki/research-task/remove', { method: 'POST', body: JSON.stringify(payload) });
-}
-
 export async function hostWikiSearchConfig(payload: { projectId?: string } = {}): Promise<HostWikiSearchConfigReceipt> {
   const query = new URLSearchParams();
   if (payload.projectId) query.set('projectId', payload.projectId);
@@ -678,10 +644,6 @@ export async function hostWikiSearchConfig(payload: { projectId?: string } = {})
 
 export async function hostWikiUpdateSearchConfig(payload: HostWikiSearchConfigUpdate & { projectId?: string }): Promise<HostWikiSearchConfigReceipt> {
   return hostApiFetch('/api/wiki/search-config', { method: 'POST', body: JSON.stringify(payload) });
-}
-
-export async function hostWikiTestSearchProvider(payload: { projectId?: string; config: HostWikiSearchConfigUpdate; query?: string; maxResults?: number }): Promise<HostWikiSearchProviderTestResult> {
-  return hostApiFetch('/api/wiki/search-provider/test', { method: 'POST', body: JSON.stringify({ ...payload, query: payload.query ?? 'wikipedia', maxResults: payload.maxResults ?? 1 }) });
 }
 
 export async function hostWikiGraph(payload: { projectId?: string } = {}): Promise<unknown> {
@@ -772,6 +734,54 @@ export async function hostWikiRetrieveContext(payload: HostWikiRequest): Promise
   return hostApiFetch('/api/wiki/retrieve-context', { method: 'POST', body: JSON.stringify(payload) });
 }
 
+export async function hostWikiDetectDuplicates(payload: { projectId?: string; taskId: string; modelRef?: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/dedup/detect', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiDedupState(payload: { projectId?: string } = {}): Promise<WikiDedupState> {
+  const query = new URLSearchParams();
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  return hostApiFetchDecoded(`/api/wiki/dedup/state${query.size ? `?${query}` : ''}`, decodeWikiDedupState);
+}
+
+export async function hostWikiMergeDuplicates(payload: { projectId?: string; group: WikiDuplicateGroup; canonicalSlug: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/dedup/merge', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiCancelDedup(payload: { projectId?: string; taskId: string }): Promise<WikiDedupState> {
+  return hostApiFetchDecoded('/api/wiki/dedup/cancel', decodeWikiDedupState, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiRetryDedup(payload: { projectId?: string; taskId: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/dedup/retry', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiResumeDedup(payload: { projectId?: string; taskId: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/dedup/resume', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiExcludeDuplicates(payload: { projectId?: string; slugs: string[] }): Promise<WikiDedupState> {
+  return hostApiFetchDecoded('/api/wiki/dedup/exclude', decodeWikiDedupState, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiPageLinks(payload: { projectId?: string; relativePath: string }): Promise<WikiPageLinks> {
+  const query = new URLSearchParams({ relativePath: payload.relativePath });
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  return hostApiFetchDecoded(`/api/wiki/page-links?${query}`, decodeWikiPageLinks);
+}
+
+export async function hostWikiCreateMissingPage(payload: { projectId?: string; taskId: string; title: string; linkingPath: string; draft: boolean }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/missing-page/create', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiCancelMissingPage(payload: { projectId?: string; taskId: string }): Promise<{ cancelled: boolean }> {
+  return hostApiFetchDecoded('/api/wiki/missing-page/cancel', (value) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).length !== 1 || !('cancelled' in value) || typeof value.cancelled !== 'boolean') throw new Error('Invalid Wiki missing-page cancellation');
+    return { cancelled: value.cancelled };
+  }, { method: 'POST', body: JSON.stringify(payload) });
+}
+
 export async function hostWikiHistoryList(payload: { projectId?: string; path: string }): Promise<WikiHistoryReceipt> {
   return hostApiFetch('/api/wiki/history/list', { method: 'POST', body: JSON.stringify(payload) });
 }
@@ -812,6 +822,24 @@ export async function hostWikiImportArchive(payload: { archivePath: string; dest
 
 export async function hostWikiRebuildIndex(payload: { projectId?: string } = {}): Promise<CallReceipt> {
   return hostApiFetchDecoded('/api/wiki/rebuild-index', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiGenerateSelection(payload: WikiSelectionInput): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/selection/generate', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiSelectionTask(payload: { projectId?: string; taskId: string }): Promise<WikiSelectionTask> {
+  const query = new URLSearchParams({ taskId: payload.taskId });
+  if (payload.projectId) query.set('projectId', payload.projectId);
+  return hostApiFetchDecoded(`/api/wiki/selection/task?${query}`, decodeWikiSelectionTask);
+}
+
+export async function hostWikiCancelSelection(payload: { projectId?: string; taskId: string }): Promise<WikiSelectionTask> {
+  return hostApiFetchDecoded('/api/wiki/selection/cancel', decodeWikiSelectionTask, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function hostWikiApplySelection(payload: { projectId?: string; relativePath: string; selection: WikiSelectionSnapshot; replacement: string }): Promise<CallReceipt> {
+  return hostApiFetchDecoded('/api/wiki/selection/apply', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
 export async function hostWikiAskQuestion(payload: WikiQuestionInput): Promise<CallReceipt> {
@@ -894,10 +922,6 @@ export async function hostWikiGraphInsights(payload: { projectId?: string } = {}
 
 export async function hostWikiDismissGraphInsight(payload: { projectId?: string; insightKey: string }): Promise<WikiGraphInsightsReceipt> {
   return hostApiFetch('/api/wiki/graph/insights/dismiss', { method: 'POST', body: JSON.stringify(payload) });
-}
-
-export async function hostWikiPrepareInsightResearch(payload: { projectId?: string; insightKey: string; modelRef?: string }): Promise<CallReceipt> {
-  return hostApiFetchDecoded('/api/wiki/graph/insights/research-input', decodeCallReceipt, { method: 'POST', body: JSON.stringify(payload) });
 }
 
 type WorkspaceFileRequest = {
@@ -1437,7 +1461,7 @@ function sessionIdentityCapabilityExecute<TResult>(input: {
 
 export async function hostSessionList(
   payload: { endpoint: RuntimeEndpointRef },
-  options?: { timeoutMs?: number },
+  options?: SessionCapabilityOptions,
 ): Promise<SessionListResult> {
   return sessionCapabilityExecute<SessionListResult>({
     capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
@@ -1526,9 +1550,15 @@ async function hostCapabilityExecute<TResult = unknown>(
   },
   options?: SessionCapabilityOptions,
 ): Promise<TResult> {
+  const tracing = !!options?.traceId && isSessionTraceEnabled();
+  const serializeStartedAt = tracing ? performance.now() : 0;
+  const body = JSON.stringify(payload);
+  if (tracing) logSessionTrace('hostapi.capability.serialized', options?.traceId, {
+    serializeElapsedMs: performance.now() - serializeStartedAt, requestLength: body.length,
+  });
   return hostApiFetch('/api/capabilities/execute', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body,
     timeoutMs: options?.timeoutMs,
     traceId: options?.traceId,
   });
@@ -1569,17 +1599,34 @@ export async function hostOpenClawMcpAppRequest<TResult = unknown>(
   }, options);
 }
 
-export async function hostOpenClawQuestionResolve<TResult = unknown>(
-  input: { id: string; answers: { answers: Record<string, string[]> }; resolvedBy?: string; resolutionId?: string },
+export async function hostOpenClawQuestionList(
+  input: OpenClawQuestionListInput,
   options?: SessionCapabilityOptions,
-): Promise<TResult> {
-  return hostCapabilityExecute<TResult>({
+): Promise<OpenClawQuestionListResult> {
+  const result = decodeOpenClawQuestionListResult(await hostCapabilityExecute({
+    id: OPENCLAW_QUESTION_CAPABILITY_ID,
+    operationId: 'question.list',
+    scope: runtimeInstanceScope(OPENCLAW_LOCAL_ENDPOINT),
+    target: null,
+    input,
+  }, options));
+  if (!result) throw new Error('Invalid OpenClaw question list result');
+  return result;
+}
+
+export async function hostOpenClawQuestionResolve(
+  input: OpenClawQuestionResolveInput,
+  options?: SessionCapabilityOptions,
+): Promise<OpenClawQuestionResolveResult> {
+  const result = decodeOpenClawQuestionResolveResult(await hostCapabilityExecute({
     id: OPENCLAW_QUESTION_CAPABILITY_ID,
     operationId: 'question.resolve',
     scope: runtimeInstanceScope(OPENCLAW_LOCAL_ENDPOINT),
     target: null,
     input,
-  }, options);
+  }, options));
+  if (!result) throw new Error('Invalid OpenClaw question resolve result');
+  return result;
 }
 
 function bindSessionIdentityInput<T extends { sessionIdentity: SessionIdentity }>(
@@ -1656,6 +1703,29 @@ function decodeHostSessionPermissionSetResult(value: unknown): HostSessionPermis
   };
 }
 
+export async function hostSessionObserve(payload: { sessionIdentity: SessionIdentity; leaseId: string; limit?: number }, options?: SessionCapabilityOptions): Promise<SessionObservationResult> {
+  const traceId = options?.traceId ?? createSessionTraceId('session.observe');
+  const result = await sessionIdentityCapabilityExecute<unknown>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.observe',
+    payload: bindSessionIdentityInput(payload),
+  }, { ...options, traceId });
+  if (!isRecord(result) || typeof result.leaseId !== 'string' || result.leaseId !== payload.leaseId) throw new Error('Invalid session observation result');
+  if (hasExactKeys(result, ['leaseId', 'outcome']) && result.outcome === 'released') return { leaseId: result.leaseId, outcome: 'released' };
+  if (!hasExactKeys(result, ['leaseId', 'view'])) throw new Error('Invalid session observation result');
+  return { leaseId: result.leaseId, view: decodeSessionView(result.view) };
+}
+
+export async function hostSessionRelease(payload: { sessionIdentity: SessionIdentity; leaseId: string }): Promise<{ outcome: 'released' | 'not-found' }> {
+  const result = await sessionIdentityCapabilityExecute<unknown>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.release',
+    payload: bindSessionIdentityInput(payload),
+  });
+  if (!isRecord(result) || !hasAllowedKeys(result, ['outcome'], []) || result.outcome !== 'released' && result.outcome !== 'not-found') throw new Error('Invalid session release result');
+  return { outcome: result.outcome };
+}
+
 export async function hostSessionWindowFetch(
   payload: {
     endpointSessionId?: string;
@@ -1670,7 +1740,7 @@ export async function hostSessionWindowFetch(
     capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
     operationId: 'sessions.window',
     payload: bindSessionIdentityInput(payload),
-  });
+  }, { traceId: createSessionTraceId('session.window') });
 }
 
 export async function hostSessionPermissionGet(
@@ -1814,6 +1884,7 @@ export async function hostSessionLoad(
   options?: SessionCapabilityOptions,
 ): Promise<HostSessionLoadResult> {
   const input = bindSessionIdentityInput(payload);
+  const startedAt = options?.traceId && isSessionTraceEnabled() ? performance.now() : null;
   logSessionTrace('history.host-api.request', options?.traceId, {
     sessionKey: summarizeIdentifier(input.sessionKey),
     endpointSessionId: summarizeIdentifier(input.endpointSessionId),
@@ -1829,6 +1900,7 @@ export async function hostSessionLoad(
     }, options);
     logSessionTrace('history.host-api.response', options?.traceId, {
       rawType: result && typeof result === 'object' ? 'object' : typeof result,
+      elapsedMs: startedAt === null ? null : performance.now() - startedAt,
     });
     return result;
   } catch (error) {
@@ -1954,6 +2026,22 @@ export async function hostSessionPatch(
   }
 }
 
+export async function hostSessionGoalUpdate(payload: SessionGoalUpdateInput): Promise<SessionGoalOutcome> {
+  return sessionIdentityCapabilityExecute<SessionGoalOutcome>({
+    capabilityId: 'session.goal',
+    operationId: 'sessions.goal.update',
+    payload: { ...payload },
+  });
+}
+
+export async function hostSessionGoalClear(payload: SessionGoalClearInput): Promise<SessionGoalOutcome> {
+  return sessionIdentityCapabilityExecute<SessionGoalOutcome>({
+    capabilityId: 'session.goal',
+    operationId: 'sessions.goal.clear',
+    payload: { ...payload },
+  });
+}
+
 export async function hostSessionPrompt(
   payload: {
     endpointSessionId?: string;
@@ -1961,6 +2049,7 @@ export async function hostSessionPrompt(
     message: string;
     idempotencyKey?: string;
     deliver?: boolean;
+    intent?: SessionSendIntent;
     attachments?: Array<{
       stagedAttachmentId: string;
       fileName: string;

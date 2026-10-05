@@ -18,6 +18,7 @@ pub struct TeamRunWake {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TeamRunWakeReason {
     GraphChanged,
+    StartGateChanged,
     TerminalSettled,
     RepairRejected,
     NativeRunSettled,

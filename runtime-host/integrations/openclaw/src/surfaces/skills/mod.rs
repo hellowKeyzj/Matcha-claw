@@ -96,7 +96,25 @@ impl skills_module::ports::SkillsPort for OpenClawSkillsPort {
     ) -> skills_module::ports::SkillsFuture<'a, Result<skills_module::management::Outcome, ()>>
     {
         Box::pin(async move {
-            if !self.admission.admit_openclaw_skills_request() || !self.open_claw_is_running() {
+            let importing = matches!(
+                &command,
+                skills_module::management::Command::ImportMarkdown { .. }
+                    | skills_module::management::Command::ImportBundle { .. }
+            );
+            if !self.admission.admit_openclaw_skills_request() {
+                if importing {
+                    eprintln!(
+                        "[startup-trace] source=skills-import phase=admission detail=unavailable"
+                    );
+                }
+                return Ok(skills_module::management::Outcome::Unavailable);
+            }
+            if !self.open_claw_is_running() {
+                if importing {
+                    eprintln!(
+                        "[startup-trace] source=skills-import phase=runtime detail=not-ready"
+                    );
+                }
                 return Ok(skills_module::management::Outcome::Unavailable);
             }
             Ok(self.driver.manage_skills(command).await)

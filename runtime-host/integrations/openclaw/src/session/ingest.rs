@@ -1,6 +1,4 @@
 use std::{
-    collections::HashMap,
-    num::NonZeroUsize,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -11,7 +9,7 @@ use sessions_module::command::SessionIngressEvent;
 use tokio::sync::mpsc;
 
 use crate::gateway::{
-    ingress::{GatewayEpoch, Ingress, IngressError, IngressEvent},
+    ingress::GatewayEpoch,
     wire::GatewayEvent,
 };
 
@@ -20,7 +18,7 @@ use super::{
     events::{SessionEvent, send_lifecycle},
     projection::CanonicalRecoveryReason,
     protocol::{
-        ChatState, SessionEventEnvelope, SessionEventKind, SessionKey, decode_session_event,
+        SessionEventEnvelope, decode_session_event,
     },
 };
 
@@ -35,15 +33,22 @@ fn gateway_event_trace_payload(event: &GatewayEvent, epoch: GatewayEpoch) -> ser
     let data = payload
         .and_then(|payload| payload.get("data"))
         .and_then(serde_json::Value::as_object);
+    let message_content = message.and_then(|message| message.get("content")).and_then(serde_json::Value::as_array).map(|content| content.iter().take(64).map(|block| {
+        match block.get("type").and_then(serde_json::Value::as_str) {
+            Some("text") => serde_json::json!({ "kind": "text", "text": block.get("text").and_then(serde_json::Value::as_str).map(sessions_module::trace::text_shape) }),
+            Some("thinking") => serde_json::json!({ "kind": "thinking", "text": block.get("thinking").and_then(serde_json::Value::as_str).map(sessions_module::trace::text_shape) }),
+            _ => serde_json::json!({ "kind": "other" }),
+        }
+    }).collect::<Vec<_>>());
     serde_json::json!({
         "sourceEpoch": epoch.as_u64(),
-        "eventName": &event.name,
+        "eventName": match event.name.as_str() { "chat" | "session.message" | "session.tool" | "agent" | "exec.approval.requested" | "exec.approval.resolved" | "plugin.approval.requested" | "plugin.approval.resolved" | "session.approval" | "sessions.changed" => event.name.as_str(), _ => "other" },
         "gatewaySequence": event.sequence,
         "hasPayload": event.payload.is_some(),
-        "state": payload.and_then(|payload| payload.get("state")).and_then(serde_json::Value::as_str),
-        "stream": payload.and_then(|payload| payload.get("stream")).and_then(serde_json::Value::as_str),
-        "dataKind": data.and_then(|data| data.get("kind")).and_then(serde_json::Value::as_str),
-        "dataPhase": data.and_then(|data| data.get("phase")).and_then(serde_json::Value::as_str),
+        "stateHash": payload.and_then(|payload| payload.get("state")).and_then(serde_json::Value::as_str).map(sessions_module::trace::fingerprint),
+        "streamHash": payload.and_then(|payload| payload.get("stream")).and_then(serde_json::Value::as_str).map(sessions_module::trace::fingerprint),
+        "dataKindHash": data.and_then(|data| data.get("kind")).and_then(serde_json::Value::as_str).map(sessions_module::trace::fingerprint),
+        "dataPhaseHash": data.and_then(|data| data.get("phase")).and_then(serde_json::Value::as_str).map(sessions_module::trace::fingerprint),
         "hasData": data.is_some(),
         "hasDataItemId": data.and_then(|data| data.get("itemId")).is_some(),
         "hasDataText": data.and_then(|data| data.get("text")).is_some(),
@@ -74,6 +79,23 @@ fn gateway_event_trace_payload(event: &GatewayEvent, epoch: GatewayEpoch) -> ser
         "messageThinkingLength": message.and_then(message_thinking_length).unwrap_or(0),
         "hasRunId": payload.and_then(|payload| payload.get("runId")).is_some(),
         "hasSessionKey": payload.and_then(|payload| payload.get("sessionKey")).is_some(),
+        "sessionHash": payload.and_then(|payload| payload.get("sessionKey")).and_then(serde_json::Value::as_str).map(sessions_module::trace::fingerprint),
+        "runHash": payload.and_then(|payload| payload.get("runId")).and_then(serde_json::Value::as_str).map(sessions_module::trace::fingerprint),
+        "messageHash": payload.and_then(|payload| payload.get("messageId")).and_then(serde_json::Value::as_str).map(sessions_module::trace::fingerprint),
+        "embeddedMessageHash": message.and_then(|message| message.pointer("/__openclaw/id").or_else(|| message.get("id"))).and_then(serde_json::Value::as_str).map(sessions_module::trace::fingerprint),
+        "itemHash": data.and_then(|data| data.get("itemId").or_else(|| data.get("id"))).and_then(serde_json::Value::as_str).map(sessions_module::trace::fingerprint),
+        "nativeSequence": payload.and_then(|payload| payload.get("seq")).and_then(serde_json::Value::as_u64),
+        "messageSequence": message.and_then(|message| message.pointer("/__openclaw/seq").or_else(|| message.get("seq")).or_else(|| message.get("sequence"))).or_else(|| payload.and_then(|payload| payload.get("messageSeq"))).and_then(serde_json::Value::as_u64),
+        "persistedRunHash": message.and_then(|message| message.pointer("/__openclaw/runId").or_else(|| message.get("runId"))).and_then(serde_json::Value::as_str).map(sessions_module::trace::fingerprint),
+        "displayItemHash": message.and_then(|message| message.pointer("/openclawStreamFallback/itemId")).and_then(serde_json::Value::as_str).map(sessions_module::trace::fingerprint),
+        "deltaText": payload.and_then(|payload| payload.get("deltaText")).and_then(serde_json::Value::as_str).map(sessions_module::trace::text_shape),
+        "dataText": data.and_then(|data| data.get("text")).and_then(serde_json::Value::as_str).map(sessions_module::trace::text_shape),
+        "dataDelta": data.and_then(|data| data.get("delta")).and_then(serde_json::Value::as_str).map(sessions_module::trace::text_shape),
+        "dataProgressText": data.and_then(|data| data.get("progressText")).and_then(serde_json::Value::as_str).map(sessions_module::trace::text_shape),
+        "messageContentCount": message.and_then(|message| message.get("content")).and_then(serde_json::Value::as_array).map(Vec::len),
+        "messageContentSummarizedCount": message.and_then(|message| message.get("content")).and_then(serde_json::Value::as_array).map(|content| content.len().min(64)),
+        "messageContentTruncated": message.and_then(|message| message.get("content")).and_then(serde_json::Value::as_array).is_some_and(|content| content.len() > 64),
+        "messageContent": message_content,
     })
 }
 
@@ -119,6 +141,25 @@ fn trace_decoded_event(stage: &'static str, envelope: &SessionEventEnvelope, epo
             "messageThinkingLength": chat.and_then(|chat| chat.message_thinking.as_ref()).map_or(0, String::len),
             "hasActivity": envelope.activity.is_some(),
             "hasApproval": envelope.approval.is_some(),
+            "sessionHash": sessions_module::trace::fingerprint(envelope.session_key.as_str()),
+            "runHash": envelope.run_id.as_ref().map(|id| sessions_module::trace::fingerprint(id.as_str())),
+            "messageHash": envelope.message_id.as_ref().map(|id| sessions_module::trace::fingerprint(id.as_str())),
+            "embeddedMessageHash": envelope.embedded_message_id.as_ref().map(|id| sessions_module::trace::fingerprint(id.as_str())),
+            "chatSequence": chat.map(|chat| chat.sequence),
+            "deltaText": chat.and_then(|chat| chat.delta_text.as_deref()).map(sessions_module::trace::text_shape),
+            "messageText": chat.and_then(|chat| chat.message_text.as_deref()).map(sessions_module::trace::text_shape),
+            "messageThinking": chat.and_then(|chat| chat.message_thinking.as_deref()).map(sessions_module::trace::text_shape),
+            "activity": envelope.activity.as_ref().map(|activity| match activity.kind() {
+                super::protocol::SessionActivityKind::Message { message_id, lifecycle, text } => serde_json::json!({ "kind": "message", "messageHash": sessions_module::trace::fingerprint(message_id.as_str()), "lifecycle": format!("{:?}", lifecycle), "text": text.as_deref().map(sessions_module::trace::text_shape) }),
+                super::protocol::SessionActivityKind::Thinking { text } => serde_json::json!({ "kind": "thinking", "text": sessions_module::trace::text_shape(text) }),
+                super::protocol::SessionActivityKind::Tool { tool_id, phase, .. } => serde_json::json!({ "kind": "tool", "toolHash": sessions_module::trace::fingerprint(tool_id.as_str()), "phase": format!("{:?}", phase) }),
+                _ => serde_json::json!({ "kind": "other" }),
+            }),
+            "persistedMessage": envelope.transcript_message.as_ref().map(|message| serde_json::json!({
+                "role": format!("{:?}", message.role()), "runHash": message.run_id().map(sessions_module::trace::fingerprint),
+                "messageHash": message.message_id().map(sessions_module::trace::fingerprint), "displayItemHash": message.display_item_id().map(sessions_module::trace::fingerprint),
+                "sequence": message.sequence(), "text": sessions_module::trace::text_shape(message.text()) })),
+            "commentary": envelope.commentary.as_ref().map(|(id, text)| serde_json::json!({ "itemHash": sessions_module::trace::fingerprint(id), "text": sessions_module::trace::text_shape(text) })),
         }),
     );
 }
@@ -155,10 +196,16 @@ fn message_content_length(
 /// shared [`Ingress`], and fans each verified event out to the lifecycle sink
 /// and the sessions module ingress.
 pub(crate) struct SessionEventIngest {
-    ingress: Arc<Ingress>,
-    recovery: mpsc::Sender<IngressRecovery>,
+    sender: mpsc::Sender<IngestFrame>,
     next_epoch: AtomicU64,
-    route_keys: Arc<Mutex<HashMap<SessionKey, String>>>,
+    task: Mutex<Option<foundation::execution::OwnedTask<()>>>,
+    session_events: mpsc::Sender<SessionIngressEvent>,
+}
+
+pub(crate) enum IngestFrame {
+    Socket { epoch: GatewayEpoch, frame: crate::gateway::connection::GatewayFrame, observations: Arc<crate::gateway::observation::Observations> },
+    Close { identity: sessions_module::state::SessionIdentity, generation: u64, reply: tokio::sync::oneshot::Sender<()> },
+    Restart { identity: sessions_module::state::SessionIdentity, generation: u64, next_generation: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<(), sessions_module::ports::RuntimeOperationFailure>> },
 }
 
 impl SessionEventIngest {
@@ -166,175 +213,319 @@ impl SessionEventIngest {
         events: mpsc::Sender<SessionEvent>,
         session_events: mpsc::Sender<SessionIngressEvent>,
     ) -> Self {
-        let (ingress, receiver) = Ingress::new(NonZeroUsize::new(INGRESS_CAPACITY).unwrap());
-        let (recovery, recoveries) = mpsc::channel(INGRESS_CAPACITY);
-        let route_keys = Arc::new(Mutex::new(HashMap::new()));
-        tokio::spawn(project_ingress(
-            receiver,
-            recoveries,
-            events,
-            session_events,
-            Arc::clone(&route_keys),
-        ));
-        Self {
-            ingress: Arc::new(ingress),
-            recovery,
-            next_epoch: AtomicU64::new(0),
-            route_keys,
+        let (sender, receiver) = mpsc::channel(INGRESS_CAPACITY);
+        let session_sink = session_events.clone();
+        let (task, _) = foundation::execution::OwnedTask::spawn(|cancel| async move {
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = project_ingress(receiver, events, session_events) => {},
+            }
+        });
+        Self { sender, next_epoch: AtomicU64::new(0), task: Mutex::new(Some(task)), session_events: session_sink }
+    }
+
+    pub(crate) fn forward(self: &Arc<Self>, mut events: mpsc::Receiver<crate::gateway::connection::GatewayFrame>, observations: Arc<crate::gateway::observation::Observations>, failure: tokio::sync::watch::Receiver<Option<crate::gateway::delivery::DispatcherError>>) -> (GatewayEpoch, foundation::execution::OwnedTask<()>) {
+        let value = self.next_epoch.fetch_add(1, Ordering::Relaxed).checked_add(1).expect("gateway epoch exhausted");
+        let epoch = GatewayEpoch::try_new(value).expect("gateway epoch never zero");
+        observations.activate(value);
+        let sender = self.sender.clone();
+        let session_events = self.session_events.clone();
+        let (task, _) = foundation::execution::OwnedTask::spawn(move |cancel| async move {
+            loop {
+                let frame = tokio::select! { _ = cancel.cancelled() => return, frame = events.recv() => frame };
+                let Some(frame) = frame else { break };
+                if sender.send(IngestFrame::Socket { epoch, frame, observations: Arc::clone(&observations) }).await.is_err() { break; }
+            }
+            observations.deactivate(value);
+            let reason = match *failure.borrow() {
+                Some(crate::gateway::delivery::DispatcherError::EventBackpressure) => sessions_module::state::RecoveryReason::EventOverflow,
+                Some(crate::gateway::delivery::DispatcherError::Protocol) => sessions_module::state::RecoveryReason::NativeUnknown,
+                _ => sessions_module::state::RecoveryReason::NativeUnavailable,
+            };
+            for (identity, generation) in observation_targets(&observations, value, None) {
+                let binding = sessions_module::state::SessionEventBinding::observed(identity.clone(), generation, Some(value), false).expect("validated observation binding");
+                let event = SessionIngressEvent::new(identity, sessions_module::command::SessionEvent { binding, run_id: None, cursor: None, changes: vec![sessions_module::state::SessionChange::RecoveryRequired { reason }] });
+                if session_events.send(event).await.is_err() { break; }
+            }
+        });
+        (epoch, task)
+    }
+
+    pub(crate) async fn restart_observation(&self, identity: sessions_module::state::SessionIdentity, generation: u64, next_generation: u64, observations: Arc<crate::gateway::observation::Observations>) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.sender.send(IngestFrame::Restart { identity, generation, next_generation, observations, reply }).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
+    }
+
+    pub(crate) async fn close_observation(&self, identity: sessions_module::state::SessionIdentity, generation: u64) {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        if self.sender.send(IngestFrame::Close { identity, generation, reply }).await.is_ok() { let _ = receiver.await; }
+    }
+}
+
+async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc::Sender<SessionEvent>, session_events: mpsc::Sender<SessionIngressEvent>) {
+    use crate::gateway::{connection::GatewayFrame, observation::{OrderedContext, identity_key}};
+    use sessions_module::ports::RuntimeOperationFailure;
+    let mut router = EventRouter::new(session_events);
+    let mut active_epoch = 0;
+    let mut last_sequence = None;
+    while let Some(frame) = receiver.recv().await {
+        let (epoch, frame, observations) = match frame {
+            IngestFrame::Socket { epoch, frame, observations } => (epoch, frame, observations),
+            IngestFrame::Close { identity, generation, reply } => { router.close(&identity, generation); let _ = reply.send(()); continue; }
+            IngestFrame::Restart { identity, generation, next_generation, observations, reply } => {
+                let result = if observations.contains(&identity, next_generation, None) {
+                    router.restart(&identity, generation, next_generation)
+                } else { Err(RuntimeOperationFailure::Unavailable) };
+                if super::trace::enabled() {
+                    super::trace::log_unscoped("runtime.openclaw.ingress.restart_ordered", serde_json::json!({
+                        "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
+                        "nextGeneration": next_generation, "activeSourceEpoch": active_epoch, "nativeCursor": last_sequence,
+                        "accepted": result.is_ok(), "failure": result.as_ref().err().map(|failure| format!("{:?}", failure)) }));
+                }
+                let _ = reply.send(result);
+                continue;
+            }
+        };
+        if epoch.as_u64() > active_epoch {
+            if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.ingress.source_epoch", serde_json::json!({
+                "previousSourceEpoch": active_epoch, "sourceEpoch": epoch.as_u64(), "previousNativeCursor": last_sequence })); }
+            active_epoch = epoch.as_u64(); last_sequence = None;
         }
-    }
-
-    pub(crate) fn register_route(&self, session_key: SessionKey, route_key: String) {
-        self.route_keys
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(session_key, route_key);
-    }
-
-    pub(crate) fn unregister_route(&self, session_key: &SessionKey) {
-        self.route_keys
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(session_key);
-    }
-
-    /// Drives one socket's event stream through the ingress. Each call is a new
-    /// connection epoch, so a reconnect advances the shared cursor instead of
-    /// replaying the previous socket's tail.
-    pub(crate) fn forward(self: &Arc<Self>, events: mpsc::Receiver<GatewayEvent>) {
-        let ingest = Arc::clone(self);
-        tokio::spawn(async move {
-            let epoch = ingest.begin_next_epoch();
-            let mut events = events;
-            while let Some(event) = events.recv().await {
-                let trace_payload =
-                    super::trace::enabled().then(|| gateway_event_trace_payload(&event, epoch));
+        match frame {
+            GatewayFrame::Event(event) => {
+                let trace_payload = super::trace::enabled().then(|| gateway_event_trace_payload(&event, epoch));
+                if let Some(payload) = trace_payload.as_ref() {
+                    super::trace::log_unscoped("runtime.openclaw.ingress.raw", payload.clone());
+                }
+                if epoch.as_u64() < active_epoch {
+                    trace_gateway_drop("runtime.openclaw.ingress.dropped", trace_payload, "source_epoch_stale");
+                    continue;
+                }
+                let monotonic = event.sequence.is_none_or(|seq| last_sequence.is_none_or(|last| seq > last));
+                if !monotonic {
+                    trace_gateway_drop("runtime.openclaw.ingress.dropped", trace_payload, "non_monotonic_gateway_sequence");
+                    let targets = observation_targets(&observations, active_epoch, None);
+                    for (identity, generation) in targets { router.recover(identity, generation, epoch, CanonicalRecoveryReason::CursorStale).await; }
+                    continue;
+                }
+                if event.sequence.is_some() { last_sequence = event.sequence; }
+                if matches!(event.name.as_str(), "question.requested" | "question.resolved") {
+                    let _ = events.send(SessionEvent::QuestionsChanged).await;
+                    continue;
+                }
+                match super::goal::changed(&event) {
+                    Ok(Some((key, agent, session, goal))) => {
+                        for (identity, generation) in observation_targets(&observations, active_epoch, Some(key)) {
+                            if identity.agent_id != agent { continue; }
+                            if router.goal(&identity, generation, session, goal.clone(), epoch, None).await.is_err() {
+                                router.recover(identity, generation, epoch, CanonicalRecoveryReason::NativeUnknown).await;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        for (identity, generation) in observation_targets(&observations, active_epoch, event.payload.as_ref().and_then(|payload| payload.get("sessionKey")).and_then(serde_json::Value::as_str)) {
+                            router.recover(identity, generation, epoch, CanonicalRecoveryReason::NativeUnknown).await;
+                        }
+                        continue;
+                    }
+                    Ok(None) => {}
+                }
                 let envelope = match decode_session_event(event) {
-                    Ok(Some(envelope)) => envelope,
-                    Ok(None) => continue,
-                    Err(error) => {
-                        trace_gateway_drop(
-                            "runtime.openclaw.ingress.dropped",
-                            trace_payload,
-                            error.to_string(),
-                        );
+                    Ok(Some(event)) => event,
+                    Ok(None) => {
+                        trace_gateway_drop("runtime.openclaw.ingress.dropped", trace_payload, "not_session_event");
+                        continue;
+                    }
+                    Err(_) => {
+                        trace_gateway_drop("runtime.openclaw.ingress.dropped", trace_payload, "decode_failed");
+                        for (identity, generation) in observation_targets(&observations, active_epoch, None) { router.recover(identity, generation, epoch, CanonicalRecoveryReason::NativeUnknown).await; }
                         continue;
                     }
                 };
-                trace_decoded_event("runtime.openclaw.ingress.decoded", &envelope, epoch);
-                let session_key = envelope.session_key.clone();
-                match ingest.ingress.try_ingest(epoch, envelope) {
-                    Ok(()) | Err(IngressError::StaleEpoch) => {}
-                    Err(error) => {
-                        ingest
-                            .publish_recovery(session_key, Some(epoch), error)
-                            .await
+                let _ = send_lifecycle(&events, &envelope, epoch);
+                trace_decoded_event("runtime.openclaw.ingress.routed", &envelope, epoch);
+                let targets = observation_targets(&observations, active_epoch, Some(envelope.session_key.as_str()));
+                if super::trace::enabled() {
+                    let entries = observations.entries.lock().expect("observation registry lock poisoned");
+                    super::trace::log_unscoped("runtime.openclaw.ingress.targets", serde_json::json!({
+                        "sourceEpoch": epoch.as_u64(), "activeSourceEpoch": active_epoch, "nativeCursor": envelope.gateway_sequence,
+                        "sessionHash": sessions_module::trace::fingerprint(envelope.session_key.as_str()), "targetCount": targets.len(),
+                        "candidateCount": entries.values().filter(|entry| entry.identity.session_key == envelope.session_key.as_str()).count(),
+                        "candidatesTruncated": entries.values().filter(|entry| entry.identity.session_key == envelope.session_key.as_str()).count() > 200,
+                        "candidates": entries.values().filter(|entry| entry.identity.session_key == envelope.session_key.as_str()).take(200).map(|entry| serde_json::json!({
+                            "identity": sessions_module::trace::identity_shape(&entry.identity), "generation": entry.generation,
+                            "sourceEpoch": entry.source_epoch, "subscribedEpoch": entry.subscribed_epoch, "paused": entry.paused,
+                            "decision": if entry.paused { "paused" } else if entry.source_epoch != Some(active_epoch) { "source_epoch_mismatch" } else { "admitted" }
+                        })).collect::<Vec<_>>() }));
+                }
+                for (identity, generation) in targets {
+                    if observations.contains(&identity, generation, Some(active_epoch)) { router.route(envelope.clone(), epoch, identity, generation).await; }
+                    else if super::trace::enabled() {
+                        super::trace::log_unscoped("runtime.openclaw.ingress.target_dropped", serde_json::json!({
+                            "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
+                            "sourceEpoch": active_epoch, "nativeCursor": envelope.gateway_sequence, "reason": "binding_changed" }));
                     }
                 }
             }
-        });
-    }
-
-    fn begin_next_epoch(&self) -> GatewayEpoch {
-        let value = self.next_epoch.fetch_add(1, Ordering::Relaxed) + 1;
-        let epoch = GatewayEpoch::try_new(value).expect("epoch counter never yields zero");
-        self.ingress
-            .begin_epoch(epoch)
-            .expect("epoch counter is monotonic");
-        epoch
-    }
-
-    async fn publish_recovery(
-        &self,
-        session_key: SessionKey,
-        epoch: Option<GatewayEpoch>,
-        error: IngressError,
-    ) {
-        let _ = self
-            .recovery
-            .send(IngressRecovery {
-                session_key,
-                epoch,
-                reason: CanonicalRecoveryReason::from_ingress_error(error),
-            })
-            .await;
-    }
-}
-
-struct IngressRecovery {
-    session_key: SessionKey,
-    epoch: Option<GatewayEpoch>,
-    reason: CanonicalRecoveryReason,
-}
-
-async fn project_ingress(
-    mut receiver: mpsc::Receiver<IngressEvent>,
-    mut recoveries: mpsc::Receiver<IngressRecovery>,
-    events: mpsc::Sender<SessionEvent>,
-    session_events: mpsc::Sender<SessionIngressEvent>,
-    route_keys: Arc<Mutex<HashMap<SessionKey, String>>>,
-) {
-    let mut router = EventRouter::new(session_events);
-    loop {
-        tokio::select! {
-            Some(ingress_event) = receiver.recv() => {
-                let epoch = ingress_event.epoch();
-                let envelope = ingress_event.event();
-                let _ = send_lifecycle(&events, envelope, epoch);
-                let route_key = route_key_for(envelope, &route_keys);
-                trace_decoded_event("runtime.openclaw.ingress.routed", envelope, epoch);
-                router.route(envelope.clone(), epoch, route_key).await;
-                if should_clear_route_key(envelope) {
-                    clear_route_key(envelope, &route_keys);
-                }
+            GatewayFrame::Response { response, reply } => {
+                let context = observations.pending.lock().expect("observation pending lock poisoned").remove(response.request_id());
+                let _result = match context {
+                    Some(OrderedContext::Subscribe { identity, generation, reply: subscribe_reply }) => {
+                        let result = if epoch.as_u64() != active_epoch || !observations.contains(&identity, generation, Some(active_epoch)) {
+                            Err(RuntimeOperationFailure::Unavailable)
+                        } else if let crate::gateway::wire::GatewayResponse::Failure { error, .. } = &response {
+                            Err(observation_failure(error))
+                        } else {
+                            match crate::gateway::wire::decode_sessions_messages_subscribe(match &response {
+                                crate::gateway::wire::GatewayResponse::Success { request_id, payload } => crate::gateway::wire::GatewayResponse::Success { request_id: request_id.clone(), payload: payload.clone() },
+                                crate::gateway::wire::GatewayResponse::Failure { .. } => unreachable!("native failure handled above"),
+                            }) {
+                                Ok(subscription) if subscription.key == identity.session_key => {
+                                    let result = router.approvals(&identity, generation, subscription.approvals, epoch);
+                                    if result.is_ok() { if let Some(entry) = observations.entries.lock().expect("observation registry lock poisoned").get_mut(&identity_key(&identity)) { if entry.generation == generation { entry.subscribed_epoch = Some(active_epoch); } } }
+                                    result
+                                }
+                                _ => Err(RuntimeOperationFailure::Unknown),
+                            }
+                        };
+                        if super::trace::enabled() {
+                            super::trace::log_unscoped("runtime.openclaw.ingress.subscribe_result", serde_json::json!({
+                                "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
+                                "sourceEpoch": epoch.as_u64(), "activeSourceEpoch": active_epoch, "accepted": result.is_ok(),
+                                "failure": result.as_ref().err().map(|failure| format!("{:?}", failure)) }));
+                        }
+                        let _ = subscribe_reply.send(result);
+                        result
+                    }
+                    Some(OrderedContext::Describe { identity, generation, supported, reply: describe_reply }) => {
+                        let result = async {
+                            if epoch.as_u64() != active_epoch || !observations.contains(&identity, generation, Some(active_epoch)) {
+                                return Err(RuntimeOperationFailure::Unavailable);
+                            }
+                            if let crate::gateway::wire::GatewayResponse::Failure { error, .. } = &response { return Err(observation_failure(error)); }
+                            if super::trace::enabled()
+                                && let crate::gateway::wire::GatewayResponse::Success { payload: Some(payload), .. } = &response
+                                && let Some(session) = payload.get("session").and_then(serde_json::Value::as_object)
+                            {
+                                super::trace::log_unscoped("runtime.openclaw.ingress.goal_session", serde_json::json!({
+                                    "identity": sessions_module::trace::identity_shape(&identity),
+                                    "generation": generation, "sourceEpoch": epoch.as_u64(),
+                                    "sessionId": sessions_module::trace::id_shape(session.get("sessionId").and_then(serde_json::Value::as_str)),
+                                    "running": session.get("status").and_then(serde_json::Value::as_str).map(|status| status == "running"),
+                                    "abortedLastRun": session.get("abortedLastRun").and_then(serde_json::Value::as_bool),
+                                    "archived": session.get("archived").and_then(serde_json::Value::as_bool),
+                                    "archivedAtPresent": session.get("archivedAt").is_some_and(|value| !value.is_null()),
+                                    "spawnedByPresent": session.get("spawnedBy").is_some_and(|value| !value.is_null()),
+                                    "spawnDepth": session.get("spawnDepth").and_then(serde_json::Value::as_u64),
+                                    "subagentRolePresent": session.get("subagentRole").is_some_and(|value| !value.is_null()),
+                                    "hasActiveSubagentRun": session.get("hasActiveSubagentRun").and_then(serde_json::Value::as_bool),
+                                }));
+                            }
+                            let row = super::protocol::decode_session_describe_result(response.request_id(), match &response {
+                                crate::gateway::wire::GatewayResponse::Success { request_id, payload } => crate::gateway::wire::GatewayResponse::Success { request_id: request_id.clone(), payload: payload.clone() },
+                                crate::gateway::wire::GatewayResponse::Failure { .. } => unreachable!("native failure handled above"),
+                            }).map_err(|_| RuntimeOperationFailure::Unknown)?.ok_or(RuntimeOperationFailure::Unknown)?;
+                            if row.agent_id.as_ref().map(|agent| agent.as_str()) != Some(identity.agent_id.as_str()) || row.key.as_deref() != Some(identity.session_key.as_str()) { return Err(RuntimeOperationFailure::Unknown); }
+                            let session_id = row.session_id.ok_or(RuntimeOperationFailure::Unknown)?;
+                            let goal = if supported { row.goal } else { sessions_module::goal::SessionGoalView::Unsupported };
+                            router.goal(&identity, generation, &session_id, goal, epoch, None).await
+                        }.await;
+                        let _ = describe_reply.send(result);
+                        result
+                    }
+                    Some(OrderedContext::History { identity, generation, page, host_epoch, reply: history_reply }) => {
+                        let request_hash = super::trace::enabled().then(|| sessions_module::trace::fingerprint(response.request_id()));
+                        if super::trace::enabled() {
+                            super::trace::log_unscoped("runtime.openclaw.ingress.history_response", serde_json::json!({
+                                "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
+                                "requestHash": &request_hash, "sourceEpoch": epoch.as_u64(), "activeSourceEpoch": active_epoch,
+                                "direction": format!("{:?}", page.direction()), "limit": page.limit(), "offset": page.offset(),
+                                "timingScope": "ordered_ingress_processing_start_after_socket_and_ingress_queue" }));
+                        }
+                        let result = if epoch.as_u64() == active_epoch && observations.contains(&identity, generation, Some(active_epoch)) {
+                            match &response {
+                                crate::gateway::wire::GatewayResponse::Success { payload: Some(payload), .. } => {
+                                    let decode_started = super::trace::enabled().then(std::time::Instant::now);
+                                    let decoded = super::window::decode_window(payload.clone(), page);
+                                    let decode_elapsed_ms = decode_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+                                    if super::trace::enabled() {
+                                        super::trace::log_unscoped("runtime.openclaw.ingress.history_decoded", serde_json::json!({
+                                            "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
+                                            "requestHash": &request_hash, "sourceEpoch": epoch.as_u64(), "decoded": decoded.is_ok(),
+                                            "decodeElapsedMs": decode_elapsed_ms, "timingScope": "payload_clone_and_decode_window_excluding_outer_trace",
+                                            "messageCount": decoded.as_ref().ok().map(|window| window.messages().len()),
+                                        }));
+                                    }
+                                    match decoded {
+                                        Ok(window) => {
+                                            let cursor = window.state().delta_cursor().map(str::to_owned);
+                                            let projection_started = super::trace::enabled().then(std::time::Instant::now);
+                                            let result = if super::trace::enabled() {
+                                                sessions_module::trace::with_context(serde_json::json!({ "requestHash": &request_hash }), ||
+                                                    router.history(identity.clone(), generation, window, page, epoch, host_epoch))
+                                            } else { router.history(identity.clone(), generation, window, page, epoch, host_epoch) };
+                                            let projection_elapsed_ms = projection_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+                                            if super::trace::enabled() {
+                                                super::trace::log_unscoped("runtime.openclaw.ingress.history_projected", serde_json::json!({
+                                                    "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
+                                                    "requestHash": &request_hash, "sourceEpoch": epoch.as_u64(), "accepted": result.is_ok(),
+                                                    "projectionElapsedMs": projection_elapsed_ms, "timingScope": "router_history_with_context_including_internal_trace_excluding_outer_trace",
+                                                }));
+                                            }
+                                            if result.is_ok() && matches!(page.direction(), super::window::Direction::Latest) { if let Some(entry) = observations.entries.lock().expect("observation registry lock poisoned").get_mut(&identity_key(&identity)) { if entry.generation == generation { entry.cursor = if matches!(result, Ok(Some(_))) { cursor } else { None }; entry.cursor_page = entry.cursor.as_ref().map(|_| page); } } }
+                                            result
+                                        }
+                                        Err(_) => {
+                                            if super::trace::enabled() {
+                                                super::trace::log_unscoped("runtime.openclaw.ingress.history_decode_failed", serde_json::json!({
+                                                    "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
+                                                    "sourceEpoch": epoch.as_u64(), "activeSourceEpoch": active_epoch, "requestHash": &request_hash,
+                                                    "decodeElapsedMs": decode_elapsed_ms, "reason": "decode_failed" }));
+                                            }
+                                            Err(RuntimeOperationFailure::Unknown)
+                                        },
+                                    }
+                                },
+                                crate::gateway::wire::GatewayResponse::Failure { error, .. } => Err(observation_failure(error)),
+                                _ => Err(RuntimeOperationFailure::Unknown),
+                            }
+                        } else { Err(RuntimeOperationFailure::Unavailable) };
+                        if super::trace::enabled() {
+                            super::trace::log_unscoped("runtime.openclaw.ingress.history_result", serde_json::json!({
+                                "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
+                                "sourceEpoch": epoch.as_u64(), "activeSourceEpoch": active_epoch, "direction": format!("{:?}", page.direction()),
+                                "requestHash": &request_hash, "limit": page.limit(), "offset": page.offset(),
+                                "accepted": result.is_ok(), "hasSnapshot": result.as_ref().is_ok_and(Option::is_some),
+                                "failure": result.as_ref().err().map(|failure| format!("{:?}", failure)) }));
+                        }
+                        let status = result.as_ref().map(|_| ()).map_err(|error| *error);
+                        let _ = history_reply.send(result);
+                        status
+                    }
+                    _ => Err(RuntimeOperationFailure::Unavailable),
+                };
+                let _ = reply.send(Ok(response));
             }
-            Some(recovery) = recoveries.recv() => {
-                let route_key = route_key_for_session(&recovery.session_key, &route_keys);
-                router
-                    .recover(recovery.session_key, recovery.epoch, route_key, recovery.reason)
-                    .await;
-            }
-            else => break,
         }
     }
 }
 
-fn route_key_for(
-    envelope: &SessionEventEnvelope,
-    route_keys: &Mutex<HashMap<SessionKey, String>>,
-) -> Option<String> {
-    route_key_for_session(&envelope.session_key, route_keys)
+fn observation_failure(error: &crate::gateway::wire::GatewayError) -> sessions_module::ports::RuntimeOperationFailure {
+    use sessions_module::ports::RuntimeOperationFailure;
+    match error.code() {
+        "UNAVAILABLE" => RuntimeOperationFailure::Unavailable,
+        "INVALID_REQUEST" if error.message().starts_with("unknown method:") => RuntimeOperationFailure::Unsupported,
+        "INVALID_REQUEST" => RuntimeOperationFailure::TargetRejected,
+        _ => RuntimeOperationFailure::Unknown,
+    }
 }
 
-fn route_key_for_session(
-    session_key: &SessionKey,
-    route_keys: &Mutex<HashMap<SessionKey, String>>,
-) -> Option<String> {
-    route_keys
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(session_key)
-        .cloned()
-}
-
-fn should_clear_route_key(envelope: &SessionEventEnvelope) -> bool {
-    matches!(envelope.kind, SessionEventKind::Chat)
-        && envelope.chat.as_ref().is_some_and(|chat| {
-            matches!(
-                chat.state,
-                ChatState::Final | ChatState::Aborted | ChatState::Error
-            )
-        })
-}
-
-fn clear_route_key(
-    envelope: &SessionEventEnvelope,
-    route_keys: &Mutex<HashMap<SessionKey, String>>,
-) {
-    route_keys
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&envelope.session_key);
+fn observation_targets(observations: &crate::gateway::observation::Observations, epoch: u64, key: Option<&str>) -> Vec<(sessions_module::state::SessionIdentity, u64)> {
+    observations.entries.lock().expect("observation registry lock poisoned").values()
+        .filter(|entry| !entry.paused && entry.source_epoch == Some(epoch) && key.is_none_or(|key| entry.identity.session_key == key))
+        .map(|entry| (entry.identity.clone(), entry.generation)).collect()
 }
 
 #[cfg(test)]

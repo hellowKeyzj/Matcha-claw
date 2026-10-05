@@ -1,7 +1,7 @@
-import { useCallback, useMemo, useRef, useState, memo, type FormEvent, type MouseEvent, type PointerEvent } from 'react';
-import { Copy, Check, ChevronDown, ChevronRight, SquareTerminal, Code2, FileText, Film, Music, FileArchive, File, ZoomIn, Loader2 } from 'lucide-react';
+import { useCallback, useMemo, useRef, useState, memo, type MouseEvent, type PointerEvent } from 'react';
+import { Copy, Check, ChevronDown, ChevronRight, CornerDownLeft, SquareTerminal, Code2, FileText, Film, Music, FileArchive, File, ZoomIn, Loader2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { invokeIpc } from '@/lib/api-client';
-import { hostOpenClawQuestionResolve } from '@/lib/host-api';
 import type { AttachedFileMeta } from '@/stores/chat';
 import type {
   SessionRenderAssistantBubbleToolResult,
@@ -391,7 +391,6 @@ function ToolActivityStructuredContent({ activity }: { activity: ToolActivityVie
 export const ToolCardList = memo(function ToolCardList({
   tools,
   collapseVersion,
-  sessionIdentity,
 }: {
   tools: ReadonlyArray<SessionRenderToolCard>;
   collapseVersion: number;
@@ -408,7 +407,6 @@ export const ToolCardList = memo(function ToolCardList({
           key={tool.toolCallId || tool.id || `${tool.name}-${index}`}
           tool={tool}
           collapseVersion={collapseVersion}
-          sessionIdentity={sessionIdentity}
         />
       ))}
     </div>
@@ -606,16 +604,40 @@ export function AssistantMessageMedia({
   );
 }
 
-export const UserMessageMetaBar = memo(function UserMessageMetaBar({ timestamp }: { timestamp?: number }) {
-  if (!timestamp) {
+export const UserMessageMetaBar = memo(function UserMessageMetaBar({
+  timestamp,
+  onReuse,
+  loading = false,
+}: {
+  timestamp?: number;
+  onReuse?: () => void;
+  loading?: boolean;
+}) {
+  const { t } = useTranslation('chat');
+  if (!timestamp && !onReuse) {
     return null;
   }
 
   return (
-    <div className="mt-0.5 flex w-full justify-end opacity-0 transition-opacity duration-200 select-none group-hover:opacity-100">
-      <span className="px-1 text-[11px] leading-5 text-muted-foreground/80">
-        {formatTimestamp(timestamp)}
-      </span>
+    <div className={`mt-0.5 flex w-full items-center justify-end ${loading ? 'opacity-100' : 'opacity-0'} transition-opacity duration-200 select-none group-hover:opacity-100 group-focus-within:opacity-100 motion-reduce:transition-none`}>
+      {timestamp ? (
+        <span className="px-1 text-[11px] leading-5 text-muted-foreground/80">
+          {formatTimestamp(timestamp)}
+        </span>
+      ) : null}
+      {onReuse ? (
+        <button
+          type="button"
+          aria-label={t('reuseMessage')}
+          title={t('reuseMessage')}
+          aria-busy={loading}
+          disabled={loading}
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/75 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20 disabled:cursor-wait motion-reduce:transition-none"
+          onClick={onReuse}
+        >
+          {loading ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <CornerDownLeft aria-hidden="true" className="h-4 w-4" />}
+        </button>
+      ) : null}
     </div>
   );
 });
@@ -756,335 +778,14 @@ function ToolActivityRail({
   );
 }
 
-type AskUserQuestionOption = {
-  label: string;
-  description?: string;
-};
-
-type AskUserQuestionItem = {
-  questionId: string;
-  header: string;
-  question: string;
-  options: AskUserQuestionOption[];
-  multiSelect: boolean;
-  isOther: boolean;
-};
-
-type AskUserQuestionPayload = {
-  questions: AskUserQuestionItem[];
-};
-
-function readAskUserQuestion(tool: SessionRenderToolCard): AskUserQuestionPayload | null {
-  if (tool.name !== 'ask_user') {
-    return null;
-  }
-  const input = isJsonRecord(tool.input) ? tool.input : parseJsonRecord(tool.inputText);
-  const questions = Array.isArray(input?.questions)
-    ? input.questions.map(readAskUserQuestionItem)
-    : [];
-  if (questions.length === 0 || questions.some((question) => question == null)) {
-    return null;
-  }
-  return { questions: questions as AskUserQuestionItem[] };
-}
-
-function readAskUserQuestionItem(value: unknown): AskUserQuestionItem | null {
-  if (!isJsonRecord(value)) {
-    return null;
-  }
-  const questionId = readTrimmedString(value.questionId) ?? readTrimmedString(value.id);
-  const header = readTrimmedString(value.header);
-  const question = readTrimmedString(value.question);
-  const options = Array.isArray(value.options)
-    ? value.options.map(readAskUserQuestionOption)
-    : [];
-  if (!questionId || !header || !question || options.length < 2 || options.some((option) => option == null)) {
-    return null;
-  }
-  return {
-    questionId,
-    header,
-    question,
-    options: options as AskUserQuestionOption[],
-    multiSelect: value.multiSelect === true,
-    isOther: value.isOther !== false,
-  };
-}
-
-function readAskUserQuestionOption(value: unknown): AskUserQuestionOption | null {
-  if (!isJsonRecord(value)) {
-    return null;
-  }
-  const label = readTrimmedString(value.label);
-  if (!label) {
-    return null;
-  }
-  const description = readTrimmedString(value.description);
-  return { label, ...(description ? { description } : {}) };
-}
-
-function isJsonRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function parseJsonRecord(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== 'string' || !value.trim()) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return isJsonRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function readTrimmedString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function selectedAnswerValues(
-  question: AskUserQuestionItem,
-  selected: readonly string[] | undefined,
-  other: string | undefined,
-): string[] {
-  const otherAnswer = other?.trim();
-  if (!question.multiSelect && otherAnswer) {
-    return [otherAnswer];
-  }
-  const answers = [...(selected ?? [])];
-  if (otherAnswer) {
-    answers.push(otherAnswer);
-  }
-  return answers;
-}
-
-function parseAgentSessionKey(sessionKey: string | undefined): { agentId: string; rest: string } | null {
-  const raw = sessionKey?.trim();
-  if (!raw || raw.slice(0, 6).toLowerCase() !== 'agent:') {
-    return null;
-  }
-  const agentIdEnd = raw.indexOf(':', 6);
-  if (agentIdEnd === -1) {
-    return null;
-  }
-  const agentId = raw.slice(6, agentIdEnd).trim();
-  const rest = raw.slice(agentIdEnd + 1);
-  return agentId && rest && !rest.startsWith(':') ? { agentId, rest } : null;
-}
-
-function askUserSessionKey(sessionIdentity?: SessionIdentity): string {
-  const sessionKey = sessionIdentity?.sessionKey.trim();
-  if (sessionKey && parseAgentSessionKey(sessionKey)) {
-    return sessionKey;
-  }
-  return `${sessionIdentity?.agentId.trim() || 'unknown'}\0${sessionKey || 'session:unknown'}`;
-}
-
-async function buildAskUserQuestionId(tool: SessionRenderToolCard, sessionIdentity?: SessionIdentity): Promise<string> {
-  const toolCallId = tool.toolCallId || tool.id;
-  const owner = tool.runId?.trim() || askUserSessionKey(sessionIdentity);
-  const bytes = new TextEncoder().encode(`${owner}\0${toolCallId}`);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  const hex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-  return `ask_${hex.slice(0, 32)}`;
-}
-
-function AskUserToolCard({
-  tool,
-  question,
-  sessionIdentity,
-}: {
-  tool: SessionRenderToolCard;
-  question: AskUserQuestionPayload;
-  sessionIdentity?: SessionIdentity;
-}) {
-  const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string[]>>({});
-  const [otherAnswers, setOtherAnswers] = useState<Record<string, string>>({});
-  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
-  const [submitState, setSubmitState] = useState<'idle' | 'submitting' | 'submitted'>('idle');
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const isTerminal = tool.status === 'completed' || tool.status === 'error' || tool.status === 'missing_result';
-  const isDisabled = isTerminal || submitState === 'submitting' || submitState === 'submitted';
-  const currentQuestion = question.questions[Math.min(currentQuestionIndex, question.questions.length - 1)]!;
-  const isLastQuestion = currentQuestionIndex >= question.questions.length - 1;
-  const answers = useMemo(() => {
-    const next: Record<string, string[]> = {};
-    for (const item of question.questions) {
-      next[item.questionId] = selectedAnswerValues(item, selectedAnswers[item.questionId], otherAnswers[item.questionId]);
-    }
-    return next;
-  }, [otherAnswers, question, selectedAnswers]);
-  const currentAnswers = answers[currentQuestion.questionId] ?? [];
-  const canAdvance = currentAnswers.length > 0;
-  const canSubmit = question.questions.every((item) => (answers[item.questionId]?.length ?? 0) > 0);
-
-  const goNext = useCallback(() => {
-    if (!canAdvance || isLastQuestion) {
-      return;
-    }
-    setCurrentQuestionIndex((current) => Math.min(current + 1, question.questions.length - 1));
-  }, [canAdvance, isLastQuestion, question.questions.length]);
-
-  const goBack = useCallback(() => {
-    setCurrentQuestionIndex((current) => Math.max(0, current - 1));
-  }, []);
-
-  const toggleOption = useCallback((item: AskUserQuestionItem, label: string) => {
-    setSubmitError(null);
-    setSelectedAnswers((current) => {
-      const currentAnswers = current[item.questionId] ?? [];
-      const nextAnswers = item.multiSelect
-        ? currentAnswers.includes(label)
-          ? currentAnswers.filter((value) => value !== label)
-          : [...currentAnswers, label]
-        : [label];
-      return { ...current, [item.questionId]: nextAnswers };
-    });
-    if (!item.multiSelect) {
-      setOtherAnswers((current) => ({ ...current, [item.questionId]: '' }));
-      if (!isLastQuestion) {
-        setCurrentQuestionIndex((current) => Math.min(current + 1, question.questions.length - 1));
-      }
-    }
-  }, [isLastQuestion, question.questions.length]);
-
-  const updateOtherAnswer = useCallback((item: AskUserQuestionItem, value: string) => {
-    setSubmitError(null);
-    setOtherAnswers((current) => ({ ...current, [item.questionId]: value }));
-    if (!item.multiSelect && value.trim()) {
-      setSelectedAnswers((current) => ({ ...current, [item.questionId]: [] }));
-    }
-  }, []);
-
-  const submitAnswer = useCallback(async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (!canSubmit || isDisabled) {
-      return;
-    }
-    setSubmitState('submitting');
-    setSubmitError(null);
-    try {
-      await hostOpenClawQuestionResolve({
-        id: await buildAskUserQuestionId(tool, sessionIdentity),
-        answers: { answers },
-        resolvedBy: 'matchaclaw',
-      });
-      setSubmitState('submitted');
-    } catch {
-      setSubmitState('idle');
-      setSubmitError('提交失败，请重试');
-    }
-  }, [answers, canSubmit, isDisabled, sessionIdentity, tool]);
-
-  return (
-    <form
-      className={`${COMPACT_SIDE_RAIL_EXPANDED_WIDTH} max-w-full rounded-[18px] border border-border/45 bg-card p-3.5 text-sm shadow-sm`}
-      onSubmit={submitAnswer}
-      onClick={(event) => event.stopPropagation()}
-    >
-      <div className="flex items-center gap-2 text-[13px] font-medium text-foreground">
-        <SquareTerminal className={`h-3.5 w-3.5 ${isTerminal ? 'text-muted-foreground' : 'text-sky-500'}`} />
-        <span>需要你确认</span>
-      </div>
-      <div className="mt-3 space-y-3">
-        <div className="space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className={COMPACT_META_CHIP}>{currentQuestion.header}</span>
-            {currentQuestion.multiSelect ? <span className="text-[11px] text-muted-foreground">可多选</span> : null}
-            <span className="ml-auto text-[11px] text-muted-foreground">{currentQuestionIndex + 1}/{question.questions.length}</span>
-          </div>
-          <div className="text-[13px] font-medium leading-5 text-foreground">{currentQuestion.question}</div>
-          <div className="grid gap-1.5">
-            {currentQuestion.options.map((option, index) => {
-              const isSelected = currentAnswers.includes(option.label);
-              return (
-                <button
-                  key={option.label}
-                  type="button"
-                  role={currentQuestion.multiSelect ? 'checkbox' : 'radio'}
-                  aria-checked={isSelected}
-                  disabled={isDisabled}
-                  className={`grid w-full grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 rounded-[12px] border px-3 py-2 text-left text-[12px] transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${isSelected ? 'border-sky-500/70 bg-sky-500/10 text-foreground' : 'border-border/50 bg-muted/45 text-foreground hover:bg-muted'}`}
-                  title={option.description}
-                  onClick={() => toggleOption(currentQuestion, option.label)}
-                >
-                  <span className={`inline-flex h-4 w-4 items-center justify-center border text-[10px] font-bold ${currentQuestion.multiSelect ? 'rounded-[4px]' : 'rounded-full'} ${isSelected ? 'border-sky-500 text-sky-500' : 'border-border text-transparent'}`}>✓</span>
-                  <span className="min-w-0">
-                    <strong className="block truncate font-medium">{option.label}</strong>
-                    {option.description ? <small className="mt-0.5 block truncate text-muted-foreground">{option.description}</small> : null}
-                  </span>
-                  <kbd className="font-mono text-[11px] text-muted-foreground">{index + 1}</kbd>
-                </button>
-              );
-            })}
-            {currentQuestion.isOther ? (
-              <label className={`grid w-full grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 rounded-[12px] border px-3 py-2 text-left text-[12px] transition-colors ${otherAnswers[currentQuestion.questionId]?.trim() ? 'border-sky-500/70 bg-sky-500/10' : 'border-border/50 bg-muted/45'}`}>
-                <span className="inline-flex h-4 w-4 items-center justify-center rounded-[4px] border border-border" />
-                <input
-                  type="text"
-                  value={otherAnswers[currentQuestion.questionId] ?? ''}
-                  disabled={isDisabled}
-                  placeholder="其他回答"
-                  className="min-w-0 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted-foreground/70 disabled:cursor-not-allowed"
-                  onChange={(event) => updateOtherAnswer(currentQuestion, event.target.value)}
-                />
-                <kbd className="font-mono text-[11px] text-muted-foreground">{currentQuestion.options.length + 1}</kbd>
-              </label>
-            ) : null}
-          </div>
-        </div>
-      </div>
-      <div className="mt-3 flex items-center gap-2">
-        {currentQuestionIndex > 0 ? (
-          <button
-            type="button"
-            disabled={isDisabled}
-            className="inline-flex h-8 items-center justify-center rounded-full px-3 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-45"
-            onClick={goBack}
-          >
-            上一步
-          </button>
-        ) : null}
-        {!isLastQuestion ? (
-          <button
-            type="button"
-            disabled={isDisabled || !canAdvance}
-            className="ml-auto inline-flex h-8 items-center justify-center rounded-full bg-[hsl(var(--shell-icon-active))] px-3 text-[12px] font-medium text-[hsl(var(--shell-window))] transition-colors hover:bg-[hsl(var(--shell-icon-active))]/92 disabled:pointer-events-none disabled:opacity-45"
-            onClick={goNext}
-          >
-            下一步
-          </button>
-        ) : (
-          <button
-            type="submit"
-            disabled={isDisabled || !canSubmit}
-            className="ml-auto inline-flex h-8 items-center justify-center rounded-full bg-[hsl(var(--shell-icon-active))] px-3 text-[12px] font-medium text-[hsl(var(--shell-window))] transition-colors hover:bg-[hsl(var(--shell-icon-active))]/92 disabled:pointer-events-none disabled:opacity-45"
-          >
-            {isTerminal ? '已回答' : submitState === 'submitting' ? '提交中…' : submitState === 'submitted' ? '已提交' : '提交回答'}
-          </button>
-        )}
-        {submitError ? <span className="text-[12px] text-destructive">{submitError}</span> : null}
-      </div>
-    </form>
-  );
-}
-
 function ToolCard({
   tool,
   collapseVersion,
-  sessionIdentity,
 }: {
   tool: SessionRenderToolCard;
   collapseVersion: number;
-  sessionIdentity?: SessionIdentity;
 }) {
-  const question = useMemo(() => readAskUserQuestion(tool), [tool]);
   const activity = useMemo(() => buildToolActivityViewModel(tool), [tool]);
-  if (question) {
-    return <AskUserToolCard tool={tool} question={question} sessionIdentity={sessionIdentity} />;
-  }
   return <ToolActivityRail activity={activity} collapseVersion={collapseVersion} railKind="tool" />;
 }
 

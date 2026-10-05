@@ -330,6 +330,10 @@ impl RuntimeDriverDirectory {
         self.drivers.lookup(endpoint)
     }
 
+    pub(crate) fn supports_goal(&self, endpoint: &RuntimeEndpoint) -> bool {
+        self.driver_ref(endpoint).and_then(|driver| driver.session_ops()).is_some_and(|ops| ops.supports_goal())
+    }
+
     pub(crate) fn security_driver(&self) -> Option<Arc<dyn RuntimeDriver>> {
         self.openclaw_driver_with(|driver| driver.security_ops().is_some())
     }
@@ -396,6 +400,16 @@ impl openclaw::gateway::loopback::OpenClawGatewayCapabilityPort for PeerHandle {
                 .await
                 .map_err(|_| ())
         })
+    }
+
+    fn question_list(
+        &self,
+        request: openclaw::gateway::request::OpenClawQuestionListGatewayRequest,
+    ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
+        Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
+    > {
+        let peer = self.clone();
+        Box::pin(async move { peer.open_claw_question_list(request).await.map_err(|_| ()) })
     }
 
     fn question_resolve(

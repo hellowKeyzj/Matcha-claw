@@ -40,14 +40,11 @@ pub(crate) enum WikiCallOperation {
     RescanSources,
     ApplyGeneratedPages,
     DeleteSource,
+    DeletePage,
     #[serde(rename = "source-task.retry")]
     RetrySourceTask,
     #[serde(rename = "source-task.resume")]
     ResumeSourceTask,
-    #[serde(rename = "research.start")]
-    StartResearch,
-    #[serde(rename = "research-task.rerun")]
-    RerunResearch,
     #[serde(rename = "history.restore")]
     RestoreHistory,
     #[serde(rename = "history.clear")]
@@ -71,8 +68,20 @@ pub(crate) enum WikiCallOperation {
     DeleteLint,
     #[serde(rename = "embedding.reindex")]
     Reindex,
-    #[serde(rename = "graph.insights.research-input")]
-    GraphInsightResearchInput,
+    #[serde(rename = "dedup.detect")]
+    DedupDetect,
+    #[serde(rename = "dedup.merge")]
+    DedupMerge,
+    #[serde(rename = "dedup.retry")]
+    DedupRetry,
+    #[serde(rename = "dedup.resume")]
+    DedupResume,
+    #[serde(rename = "missing-page.create")]
+    CreateMissingPage,
+    #[serde(rename = "selection.generate")]
+    SelectionGenerate,
+    #[serde(rename = "selection.apply")]
+    SelectionApply,
 }
 
 impl WikiCallOperation {
@@ -85,10 +94,9 @@ impl WikiCallOperation {
             Self::RescanSources => "rescan-sources",
             Self::ApplyGeneratedPages => "apply-generated-pages",
             Self::DeleteSource => "delete-source",
+            Self::DeletePage => "delete-page",
             Self::RetrySourceTask => "source-task.retry",
             Self::ResumeSourceTask => "source-task.resume",
-            Self::StartResearch => "research.start",
-            Self::RerunResearch => "research-task.rerun",
             Self::RestoreHistory => "history.restore",
             Self::ClearHistory => "history.clear",
             Self::ExportArchive => "project.export-archive",
@@ -101,7 +109,13 @@ impl WikiCallOperation {
             Self::ReviewLint => "lint.review",
             Self::DeleteLint => "lint.delete",
             Self::Reindex => "embedding.reindex",
-            Self::GraphInsightResearchInput => "graph.insights.research-input",
+            Self::DedupDetect => "dedup.detect",
+            Self::DedupMerge => "dedup.merge",
+            Self::DedupRetry => "dedup.retry",
+            Self::DedupResume => "dedup.resume",
+            Self::CreateMissingPage => "missing-page.create",
+            Self::SelectionGenerate => "selection.generate",
+            Self::SelectionApply => "selection.apply",
         }
     }
 
@@ -117,8 +131,7 @@ impl WikiCallOperation {
                 | Self::RefreshSources
                 | Self::ApplyGeneratedPages
                 | Self::DeleteSource
-                | Self::StartResearch
-                | Self::RerunResearch
+                | Self::DeletePage
         )
     }
 }
@@ -127,11 +140,6 @@ impl WikiCallOperation {
 #[serde(untagged)]
 enum WikiCallCounts {
     Sources(WikiSourceCallCounts),
-    Research {
-        done: usize,
-        error: usize,
-        saved: usize,
-    },
     Written {
         #[serde(rename = "writtenPages")]
         written_pages: usize,
@@ -213,11 +221,10 @@ pub(crate) enum WikiCallTaskState {
 
 #[derive(Clone)]
 pub(crate) enum WikiWorkflowSummary {
+    Selection,
     Question,
     Lint,
     Reindex,
-    GraphInsightResearchInput,
-    Research(crate::research::ResearchCounts),
     Sources(WikiSourceCallCounts),
     SourceTask {
         state: Option<WikiCallTaskState>,
@@ -270,6 +277,22 @@ impl<T> CallReply<T> {
     }
 }
 
+impl CallReply<()> {
+    pub(crate) async fn send_embedded(self, result: Result<(), WikiFailure>, project_id: String) {
+        if let Some(reservation) = &self.result {
+            let result = match &result {
+                Ok(()) => crate::call_result::WikiEmbedResult::Completed { project_id },
+                Err(failure) => crate::call_result::WikiEmbedResult::Failed {
+                    project_id,
+                    code: crate::call_result::WikiEmbedFailureCode::from_failure(failure),
+                },
+            };
+            reservation.complete(crate::call_result::WikiCallResult::EmbedPage(result));
+        }
+        let _ = self.send(result).await;
+    }
+}
+
 impl CallReply<crate::WikiApplyGeneratedPagesReceipt> {
     pub(crate) async fn send_generated(
         self,
@@ -290,6 +313,39 @@ impl CallReply<crate::WikiApplyGeneratedPagesReceipt> {
             counts,
         )
         .await;
+        let _ = self.sender.send(result);
+    }
+}
+
+impl CallReply<crate::WikiDeletePageReceipt> {
+    pub(crate) async fn send_page_deleted(
+        self,
+        result: Result<crate::WikiDeletePageReceipt, WikiFailure>,
+    ) {
+        if let Ok(receipt) = &result {
+            if let Some(reservation) = &self.result {
+                reservation.complete(crate::call_result::WikiCallResult::DeletePage(
+                    receipt.clone(),
+                ));
+            }
+            let incomplete = !receipt.failures.is_empty();
+            finish_terminal(
+                self.call.as_ref(),
+                if incomplete { CallStatus::Failed } else { CallStatus::Succeeded },
+                WikiCallDetail {
+                    operation: self.operation,
+                    outcome: Some(if incomplete { WikiCallOutcome::Incomplete } else { WikiCallOutcome::Completed }),
+                    counts: Some(Some(WikiCallCounts::Deleted {
+                        deleted_pages: receipt.deleted_pages.len(),
+                        updated_pages: receipt.updated_pages.len(),
+                        deleted_media: receipt.deleted_media.len(),
+                    })),
+                    task_state: None,
+                },
+            ).await;
+        } else {
+            finish_detail(self.call.as_ref(), result.as_ref().err(), self.operation).await;
+        }
         let _ = self.sender.send(result);
     }
 }
@@ -330,6 +386,42 @@ impl<T> CallReply<T> {
             reservation.complete(project(value));
         }
         let _ = self.send(result).await;
+    }
+}
+
+impl CallReply<crate::WikiDedupDetection> {
+    pub(crate) async fn send_duplicates_detected(
+        self,
+        result: Result<crate::WikiDedupDetection, WikiFailure>,
+    ) {
+        self.send_result(result, |value| {
+            crate::call_result::WikiCallResult::DedupDetect(value.clone())
+        })
+        .await;
+    }
+}
+
+impl CallReply<crate::WikiSelectionApplyReceipt> {
+    pub(crate) async fn send_selection_applied(
+        self,
+        result: Result<crate::WikiSelectionApplyReceipt, WikiFailure>,
+    ) {
+        self.send_result(result, |value| {
+            crate::call_result::WikiCallResult::SelectionApply(value.clone())
+        })
+        .await;
+    }
+}
+
+impl CallReply<crate::WikiMissingPageReceipt> {
+    pub(crate) async fn send_missing_page_created(
+        self,
+        result: Result<crate::WikiMissingPageReceipt, WikiFailure>,
+    ) {
+        self.send_result(result, |value| {
+            crate::call_result::WikiCallResult::MissingPageCreate(value.clone())
+        })
+        .await;
     }
 }
 
@@ -496,29 +588,6 @@ async fn finish_workflow(
     operation: Option<WikiCallOperation>,
     summary: Option<WikiWorkflowSummary>,
 ) {
-    if let Some(WikiWorkflowSummary::Research(counts)) = summary.as_ref() {
-        let (status, outcome) = if counts.error > 0 {
-            (CallStatus::Failed, WikiCallOutcome::Failed)
-        } else {
-            completion(failure)
-        };
-        finish_terminal(
-            call,
-            status,
-            WikiCallDetail {
-                operation,
-                outcome: Some(outcome),
-                counts: Some(Some(WikiCallCounts::Research {
-                    done: counts.done,
-                    error: counts.error,
-                    saved: counts.saved,
-                })),
-                task_state: None,
-            },
-        )
-        .await;
-        return;
-    }
     let Some(WikiWorkflowSummary::SourceTask {
         state,
         failure: task_failure,
@@ -526,11 +595,6 @@ async fn finish_workflow(
     else {
         let counts = match summary {
             Some(WikiWorkflowSummary::Sources(counts)) => Some(WikiCallCounts::Sources(counts)),
-            Some(WikiWorkflowSummary::Research(counts)) => Some(WikiCallCounts::Research {
-                done: counts.done,
-                error: counts.error,
-                saved: counts.saved,
-            }),
             _ => None,
         };
         finish_summary(call, failure, operation, counts).await;

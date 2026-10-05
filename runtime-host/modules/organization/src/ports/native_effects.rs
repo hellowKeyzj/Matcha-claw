@@ -6,7 +6,8 @@ use crate::{GraphRunId, NativeDeletionEvidence, RoleAbortOutcome};
 
 use super::{
     ActivityExecutionOutcome, ActivityExecutionRequest, DeliveryReceiptReference,
-    EndpointSessionId, MaterializationOperationOutcome, RoleSessionReceipt, RunRuntimeReceipt,
+    EndpointSessionId, ManagedAgentReference, MaterializationOperationOutcome,
+    MemberIntroductionError, MemberProfile, RoleSessionReceipt, RunRuntimeReceipt,
     SessionWindowReference, TeamMaterializationRemoval, TeamMaterializationRequest,
 };
 
@@ -27,15 +28,42 @@ pub enum RuntimeReceiptOutcome {
 }
 
 pub trait OrganizationNativeRuntime: Send + Sync {
+    /// Reads native description, AGENTS.md and SOUL.md without modifying agents or files.
+    /// A successful result contains one profile per input agent, in the same order.
+    fn read_team_member_profiles(
+        &self,
+        _agents: Vec<ManagedAgentReference>,
+    ) -> OwnedRuntimeFuture<Result<Vec<MemberProfile>, MemberIntroductionError>> {
+        Box::pin(async { Err(MemberIntroductionError::Unsupported) })
+    }
+
     fn materialize_team(
         &self,
         request: TeamMaterializationRequest,
     ) -> OwnedRuntimeFuture<MaterializationOperationOutcome>;
 
+    /// Optional observation of the same native materialization execution.
+    fn materialize_team_observed(
+        &self,
+        request: TeamMaterializationRequest,
+        _observer: Option<super::TeamProvisionObserver>,
+    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome> {
+        self.materialize_team(request)
+    }
+
     fn remove_team(
         &self,
         removal: TeamMaterializationRemoval,
     ) -> OwnedRuntimeFuture<MaterializationOperationOutcome>;
+
+    /// Removes only native remnants verified against the original unconfirmed intent.
+    /// `Confirmed` is cleanup evidence, not a materialization receipt to install.
+    fn remove_unconfirmed_team(
+        &self,
+        _request: TeamMaterializationRequest,
+    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome> {
+        Box::pin(async { MaterializationOperationOutcome::OutcomeUnknown })
+    }
 
     fn recover_team_materialization(
         &self,
@@ -175,6 +203,15 @@ pub trait TeamNativeEffectsPort {
         request: TeamMaterializationRequest,
     ) -> Pin<Box<dyn Future<Output = MaterializationOperationOutcome> + Send + '_>>;
 
+    /// Optional observation of the same materialization execution.
+    fn materialize_observed(
+        &mut self,
+        request: TeamMaterializationRequest,
+        _observer: Option<super::TeamProvisionObserver>,
+    ) -> Pin<Box<dyn Future<Output = MaterializationOperationOutcome> + Send + '_>> {
+        self.materialize(request)
+    }
+
     fn recover_materialization(
         &mut self,
         request: TeamMaterializationRequest,
@@ -184,6 +221,13 @@ pub trait TeamNativeEffectsPort {
         &mut self,
         removal: TeamMaterializationRemoval,
     ) -> Pin<Box<dyn Future<Output = MaterializationOperationOutcome> + Send + '_>>;
+
+    fn remove_unconfirmed(
+        &mut self,
+        _request: TeamMaterializationRequest,
+    ) -> Pin<Box<dyn Future<Output = MaterializationOperationOutcome> + Send + '_>> {
+        Box::pin(async { MaterializationOperationOutcome::OutcomeUnknown })
+    }
 
     fn abort(
         &mut self,

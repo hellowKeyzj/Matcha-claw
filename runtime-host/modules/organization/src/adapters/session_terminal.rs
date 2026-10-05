@@ -8,6 +8,7 @@ use foundation::execution::{
     EventObservation, EventReason, EventStage, ObservationRecord, ObservationSink,
     OperationObservation, OperationReason, OperationStage, TraceContext,
 };
+use platform::endpoint::runtime_address::SessionIdentity;
 use tokio::{sync::mpsc, task::JoinError};
 
 use super::start_gate_send_hook::StartGateRegistry;
@@ -26,12 +27,6 @@ pub trait TeamMessageRepairSessionPort<SourceBinding>: Send + Sync {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OrganizationSessionProvider {
-    OpenClaw,
-    MatchaAgent,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrganizationRunPhase {
     Queued,
     Started,
@@ -44,9 +39,7 @@ pub enum OrganizationRunPhase {
 }
 
 pub struct OrganizationRunTerminalSnapshot<SourceBinding> {
-    pub provider: OrganizationSessionProvider,
-    pub session_key: String,
-    pub route_key: Option<String>,
+    pub identity: SessionIdentity,
     pub source_binding: SourceBinding,
     pub native_run_id: String,
     pub delivery_context: Option<(crate::DeliveryId, crate::EndpointSessionId)>,
@@ -55,9 +48,7 @@ pub struct OrganizationRunTerminalSnapshot<SourceBinding> {
 }
 
 pub struct TeamMessageRepairSessionRequest<SourceBinding> {
-    pub provider: OrganizationSessionProvider,
-    pub session_key: String,
-    pub route_key: Option<String>,
+    pub identity: SessionIdentity,
     pub source_binding: SourceBinding,
     pub endpoint_session_id: crate::EndpointSessionId,
     pub requested_run_id: String,
@@ -84,9 +75,7 @@ pub struct OrganizationSessionTerminal<SourceBinding> {
 
 #[derive(Clone)]
 struct TeamMessageRepairSession<SourceBinding> {
-    provider: OrganizationSessionProvider,
-    session_key: String,
-    route_key: Option<String>,
+    identity: SessionIdentity,
     source_binding: SourceBinding,
     endpoint_session_id: crate::EndpointSessionId,
 }
@@ -226,9 +215,7 @@ async fn settle<SourceBinding>(
     SourceBinding: Clone + Send + 'static,
 {
     let OrganizationRunTerminalSnapshot {
-        provider,
-        session_key,
-        route_key,
+        identity,
         source_binding,
         native_run_id,
         delivery_context,
@@ -273,9 +260,7 @@ async fn settle<SourceBinding>(
     };
     if let TeamMessageTerminalObservation::Repair(dispatch) = observation_outcome {
         let session = TeamMessageRepairSession {
-            provider,
-            session_key,
-            route_key,
+            identity,
             source_binding,
             endpoint_session_id: dispatch.endpoint_session_id().clone(),
         };
@@ -302,9 +287,7 @@ async fn schedule_repair<SourceBinding>(
     };
     let native_run_id = match session
         .send_repair(TeamMessageRepairSessionRequest {
-            provider: repair.provider,
-            session_key: repair.session_key,
-            route_key: repair.route_key,
+            identity: repair.identity,
             source_binding: repair.source_binding,
             endpoint_session_id: dispatch.endpoint_session_id().clone(),
             requested_run_id: dispatch.requested_run_id().to_owned(),
@@ -351,7 +334,7 @@ async fn settle_start_gate_proposal(
     final_assistant_text: Option<&str>,
     observation: &ObservationSink,
 ) {
-    let Some((run_id, proposal_id)) = start_gate.take(native_run_id) else {
+    let Some((run_id, proposal_id, generation, design)) = start_gate.take(native_run_id) else {
         return;
     };
     if phase != OrganizationRunPhase::Completed {
@@ -366,6 +349,8 @@ async fn settle_start_gate_proposal(
             proposal_id,
             native_run_id.to_owned(),
             text.to_owned(),
+            generation,
+            design,
         )
         .await
     {

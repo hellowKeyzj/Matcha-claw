@@ -1,15 +1,15 @@
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
-use organization::{ActivityExecutionOutcome, ActivityExecutionRequest};
+use organization::{ActivityExecutionOutcome, ActivityExecutionRequest, RoleSessionIdentityResolver};
 use runtime_directory::RuntimeDriverIdentity;
 use sessions_module::{
     SessionHandle, SessionRunTerminalSnapshot, SessionTerminalHook,
-    command::{SessionEnsureOutcome, role_session_route_key},
-    send::{NativeEndpoint, SessionDeliveryContext, SessionSendCommand, SessionSendOutcome},
+    command::SessionEnsureOutcome,
+    send::{SessionDeliveryContext, SessionSendCommand, SessionSendOutcome},
     send_hook::{
         SessionSendHook, SessionSendHookFuture, SessionSendHookPrepared, SessionSendHookState,
     },
-    state::{RunPhase, SessionIdentity, SessionProvider, SessionSourceBinding},
+    state::{RunPhase, SessionEndpoint, SessionIdentity, SessionProvider, SessionSourceBinding},
 };
 
 use crate::{
@@ -19,11 +19,18 @@ use crate::{
 
 pub(crate) struct OrganizationSessionOwnership {
     organization: organization::OrganizationHandle,
+    runtime_directory: Arc<RuntimeDriverDirectory>,
 }
 
 impl OrganizationSessionOwnership {
-    pub(crate) fn new(organization: organization::OrganizationHandle) -> Self {
-        Self { organization }
+    pub(crate) fn new(
+        organization: organization::OrganizationHandle,
+        runtime_directory: Arc<RuntimeDriverDirectory>,
+    ) -> Self {
+        Self {
+            organization,
+            runtime_directory,
+        }
     }
 }
 
@@ -41,33 +48,29 @@ impl sessions_module::ports::SessionOwnershipReader for OrganizationSessionOwner
             for receipt in &receipts {
                 let runtime = RuntimeDriverIdentity::from_reference(receipt.endpoint().as_str())?;
                 // Matcha addresses native sessions globally; its catalog's default agent is not ownership.
-                let agent = if runtime == RuntimeDriverIdentity::matcha_agent() {
-                    None
+                let (agent, session_key) = if runtime == RuntimeDriverIdentity::matcha_agent() {
+                    (None, receipt.endpoint_session_id().as_str().to_owned())
                 } else {
-                    Some(receipt.agent().as_str())
-                };
-                bindings.insert(
                     (
-                        runtime.endpoint(),
-                        agent,
-                        receipt.endpoint_session_id().as_str(),
-                    ),
-                    receipt,
-                );
+                        Some(receipt.agent().as_str()),
+                        self.runtime_directory.session_key(receipt)?,
+                    )
+                };
+                bindings.insert((runtime.endpoint(), agent, session_key), receipt);
             }
             let mut ownership = HashMap::new();
             for query in queries {
-                let agent = if query.identity.endpoint()
+                let (agent, session_key) = if query.identity.endpoint()
                     == &RuntimeDriverIdentity::matcha_agent().endpoint()
                 {
-                    None
+                    (None, query.endpoint_session_id.as_str())
                 } else {
-                    Some(query.identity.agent_id())
+                    (Some(query.identity.agent_id()), query.identity.session_key())
                 };
                 if let Some(receipt) = bindings.get(&(
                     query.identity.endpoint().clone(),
                     agent,
-                    query.endpoint_session_id.as_str(),
+                    session_key.to_owned(),
                 )) {
                     let binding = SessionSourceBinding::team_from_receipt(receipt);
                     ownership.insert(query.identity, binding);
@@ -112,9 +115,16 @@ impl SessionTerminalHook for OrganizationSessionTerminal {
     fn run_terminal(&self, snapshot: SessionRunTerminalSnapshot) {
         self.inner
             .run_terminal(organization::OrganizationRunTerminalSnapshot {
-                provider: organization_session_provider(snapshot.provider),
-                session_key: snapshot.session_key,
-                route_key: snapshot.route_key,
+                identity: platform::endpoint::runtime_address::SessionIdentity::try_new(
+                    platform::endpoint::runtime_address::RuntimeEndpoint::try_new(
+                        snapshot.identity.provider().as_str(),
+                        snapshot.identity.endpoint.runtime_instance_id,
+                    )
+                    .expect("validated session endpoint"),
+                    snapshot.identity.agent_id,
+                    snapshot.identity.session_key,
+                )
+                .expect("validated session identity"),
                 source_binding: snapshot.source_binding,
                 native_run_id: snapshot.native_run_id,
                 delivery_context: snapshot
@@ -191,8 +201,8 @@ impl SessionSendHook for StartGateSessionSendHook {
     ) -> SessionSendHookFuture<'a> {
         Box::pin(async move {
             let request = organization::StartGateSendRequest::new(
-                start_gate_native_endpoint(command.endpoint),
-                command.session_key.clone(),
+                start_gate_native_endpoint(command.identity.provider()),
+                command.identity.session_key.clone(),
                 command.endpoint_session_id.clone(),
                 command.run_id.clone(),
                 command.idempotency_key.clone(),
@@ -250,14 +260,24 @@ impl organization::TeamRunAdmission for HostAdmission {
 fn repair_send_command(
     request: organization::TeamMessageRepairSessionRequest<SessionSourceBinding>,
 ) -> Option<SessionSendCommand> {
-    let route_key = request
-        .route_key
-        .unwrap_or_else(|| role_session_route_key(&request.session_key));
+    let provider = match request.identity.endpoint().runtime_adapter_id() {
+        "openclaw" => SessionProvider::OpenClaw,
+        "matcha-agent" => SessionProvider::MatchaAgent,
+        _ => return None,
+    };
+    let identity = SessionIdentity::with_endpoint(
+        request.identity.session_key(),
+        SessionEndpoint {
+            kind: "native-runtime".to_owned(),
+            runtime_adapter_id: provider,
+            runtime_instance_id: request.identity.endpoint().runtime_instance_id().to_owned(),
+        },
+        request.identity.agent_id().to_owned(),
+    )
+    .ok()?;
     SessionSendCommand::try_new(
-        native_endpoint(request.provider),
-        request.session_key,
+        identity,
         Some(request.endpoint_session_id.as_str().to_owned()),
-        route_key,
         request.prompt,
         Some(request.requested_run_id),
         None,
@@ -267,22 +287,6 @@ fn repair_send_command(
     )
     .ok()
     .map(|command| command.with_source_binding(request.source_binding))
-}
-
-const fn native_endpoint(provider: organization::OrganizationSessionProvider) -> NativeEndpoint {
-    match provider {
-        organization::OrganizationSessionProvider::OpenClaw => NativeEndpoint::OpenClawLocal,
-        organization::OrganizationSessionProvider::MatchaAgent => NativeEndpoint::MatchaAgentLocal,
-    }
-}
-
-const fn organization_session_provider(
-    provider: SessionProvider,
-) -> organization::OrganizationSessionProvider {
-    match provider {
-        SessionProvider::OpenClaw => organization::OrganizationSessionProvider::OpenClaw,
-        SessionProvider::MatchaAgent => organization::OrganizationSessionProvider::MatchaAgent,
-    }
 }
 
 const fn run_phase(phase: RunPhase) -> organization::OrganizationRunPhase {
@@ -301,12 +305,11 @@ const fn run_phase(phase: RunPhase) -> organization::OrganizationRunPhase {
 }
 
 const fn start_gate_native_endpoint(
-    endpoint: NativeEndpoint,
+    provider: SessionProvider,
 ) -> organization::StartGateNativeEndpoint {
-    match endpoint {
-        NativeEndpoint::OpenClawLocal => organization::StartGateNativeEndpoint::OpenClawLocal,
-        NativeEndpoint::MatchaAgentLocal => organization::StartGateNativeEndpoint::MatchaAgentLocal,
-        NativeEndpoint::Unsupported => organization::StartGateNativeEndpoint::Unsupported,
+    match provider {
+        SessionProvider::OpenClaw => organization::StartGateNativeEndpoint::OpenClawLocal,
+        SessionProvider::MatchaAgent => organization::StartGateNativeEndpoint::MatchaAgentLocal,
     }
 }
 
@@ -347,13 +350,13 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
             let Some(session_identity) = SessionIdentity::new(
                 session_key.clone(),
                 session_provider_from_identity(identity),
-                Some(binding.agent().as_str().to_owned()),
+                binding.agent().as_str().to_owned(),
             ) else {
                 return ActivityExecutionOutcome::Unknown;
             };
             let source_binding = SessionSourceBinding::team_from_receipt(&binding);
             match session
-                .ensure_bound_session(session_identity, source_binding.clone())
+                .ensure_bound_session(session_identity.clone(), source_binding.clone())
                 .await
             {
                 Ok(SessionEnsureOutcome::Created(_)) | Ok(SessionEnsureOutcome::Existing(_)) => {}
@@ -367,12 +370,9 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
                     return ActivityExecutionOutcome::Unknown;
                 }
             }
-            let route_key = role_session_route_key(&session_key);
             let command = match SessionSendCommand::try_new(
-                NativeEndpoint::from_runtime_endpoint(identity.endpoint()),
-                session_key,
+                session_identity,
                 Some(binding.endpoint_session_id().as_str().to_owned()),
-                route_key,
                 delivery.message,
                 None,
                 Some(delivery.idempotency_key),

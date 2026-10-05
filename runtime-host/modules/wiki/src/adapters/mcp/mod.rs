@@ -35,7 +35,7 @@ impl WikiMcpFacade {
             let _guard = runtime.enter();
             let owner_runtime_system = OwnerRuntimeSystem::spawn(OwnerRuntimeConfig::default());
             let vector_index = Arc::new(
-                index::RemoteWikiVectorIndex::new()
+                index::LanceWikiVectorIndex::new()
                     .map_err(|_| WikiFailure::state("wiki embedding client unavailable"))?,
             ) as Arc<dyn index::WikiVectorIndex>;
             let (module, owner_task) = spawn_owner(
@@ -58,14 +58,20 @@ impl WikiMcpFacade {
         T: Serialize,
     {
         self.runtime
-            .block_on(future)
+            .block_on(async {
+                self.wiki.reload_mcp_projects().await?;
+                future.await
+            })
             .map_err(map_wiki_error)
             .and_then(|value| serde_json::to_value(value).map_err(|_| ToolCallError::Internal))
     }
 
     fn run_unit(&self, future: impl Future<Output = Result<(), WikiFailure>>) -> ToolCallOutcome {
         self.runtime
-            .block_on(future)
+            .block_on(async {
+                self.wiki.reload_mcp_projects().await?;
+                future.await
+            })
             .map(|()| json!({ "success": true }))
             .map_err(map_wiki_error)
     }
@@ -76,7 +82,6 @@ impl ToolProvider for WikiMcpFacade {
         vec![
             wiki_status_tool(),
             wiki_projects_tool(),
-            wiki_set_project_tool(),
             wiki_files_tool(),
             wiki_read_file_tool(),
             wiki_search_tool(),
@@ -107,9 +112,6 @@ impl ToolProvider for WikiMcpFacade {
                 }
                 self.run(self.wiki.projects())
             }
-            "wiki_set_project" => parse_set_project(arguments)
-                .map(|input| self.run(self.wiki.set_current_project(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
             "wiki_files" => parse_files(arguments)
                 .map(|input| self.run(self.wiki.files(input)))
                 .unwrap_or(Err(ToolCallError::InvalidParams)),
@@ -157,30 +159,14 @@ impl ToolProvider for WikiMcpFacade {
 fn parse_project_selector(
     arguments: &Map<String, Value>,
 ) -> Result<WikiProjectSelector, ToolCallError> {
-    require_exact_keys(arguments, &["projectId"]).map_err(|_| ToolCallError::InvalidParams)?;
-    Ok(WikiProjectSelector {
-        project_id: optional_string(arguments, "projectId")
-            .map_err(|_| ToolCallError::InvalidParams)?,
-    })
-}
-
-fn parse_set_project(arguments: &Map<String, Value>) -> Result<WikiProjectSelector, ToolCallError> {
-    require_exact_keys(arguments, &["projectId"]).map_err(|_| ToolCallError::InvalidParams)?;
-    Ok(WikiProjectSelector {
-        project_id: Some(
-            required_string(arguments, "projectId")
-                .map_err(|_| ToolCallError::InvalidParams)?
-                .to_owned(),
-        ),
-    })
+    require_exact_keys(arguments, &[]).map_err(|_| ToolCallError::InvalidParams)?;
+    Ok(WikiProjectSelector { project_id: None })
 }
 
 fn parse_files(arguments: &Map<String, Value>) -> Result<WikiFilesInput, ToolCallError> {
-    require_exact_keys(arguments, &["projectId", "directory"])
-        .map_err(|_| ToolCallError::InvalidParams)?;
+    require_exact_keys(arguments, &["directory"]).map_err(|_| ToolCallError::InvalidParams)?;
     Ok(WikiFilesInput {
-        project_id: optional_string(arguments, "projectId")
-            .map_err(|_| ToolCallError::InvalidParams)?,
+        project_id: None,
         directory: optional_string(arguments, "directory")
             .map_err(|_| ToolCallError::InvalidParams)?
             .unwrap_or_default(),
@@ -188,11 +174,10 @@ fn parse_files(arguments: &Map<String, Value>) -> Result<WikiFilesInput, ToolCal
 }
 
 fn parse_read(arguments: &Map<String, Value>) -> Result<WikiReadInput, ToolCallError> {
-    require_exact_keys(arguments, &["projectId", "relativePath", "limit"])
+    require_exact_keys(arguments, &["relativePath", "limit"])
         .map_err(|_| ToolCallError::InvalidParams)?;
     Ok(WikiReadInput {
-        project_id: optional_string(arguments, "projectId")
-            .map_err(|_| ToolCallError::InvalidParams)?,
+        project_id: None,
         relative_path: required_string(arguments, "relativePath")
             .map_err(|_| ToolCallError::InvalidParams)?
             .to_owned(),
@@ -201,11 +186,9 @@ fn parse_read(arguments: &Map<String, Value>) -> Result<WikiReadInput, ToolCallE
 }
 
 fn parse_path_selector(arguments: &Map<String, Value>) -> Result<WikiPathSelector, ToolCallError> {
-    require_exact_keys(arguments, &["projectId", "relativePath"])
-        .map_err(|_| ToolCallError::InvalidParams)?;
+    require_exact_keys(arguments, &["relativePath"]).map_err(|_| ToolCallError::InvalidParams)?;
     Ok(WikiPathSelector {
-        project_id: optional_string(arguments, "projectId")
-            .map_err(|_| ToolCallError::InvalidParams)?,
+        project_id: None,
         relative_path: required_string(arguments, "relativePath")
             .map_err(|_| ToolCallError::InvalidParams)?
             .to_owned(),
@@ -215,11 +198,9 @@ fn parse_path_selector(arguments: &Map<String, Value>) -> Result<WikiPathSelecto
 fn parse_import_source(
     arguments: &Map<String, Value>,
 ) -> Result<WikiImportSourceInput, ToolCallError> {
-    require_exact_keys(arguments, &["projectId", "sourcePath"])
-        .map_err(|_| ToolCallError::InvalidParams)?;
+    require_exact_keys(arguments, &["sourcePath"]).map_err(|_| ToolCallError::InvalidParams)?;
     Ok(WikiImportSourceInput {
-        project_id: optional_string(arguments, "projectId")
-            .map_err(|_| ToolCallError::InvalidParams)?,
+        project_id: None,
         source_path: required_string(arguments, "sourcePath")
             .map_err(|_| ToolCallError::InvalidParams)?
             .to_owned(),
@@ -229,11 +210,9 @@ fn parse_import_source(
 fn parse_import_folder(
     arguments: &Map<String, Value>,
 ) -> Result<WikiImportFolderInput, ToolCallError> {
-    require_exact_keys(arguments, &["projectId", "folderPath"])
-        .map_err(|_| ToolCallError::InvalidParams)?;
+    require_exact_keys(arguments, &["folderPath"]).map_err(|_| ToolCallError::InvalidParams)?;
     Ok(WikiImportFolderInput {
-        project_id: optional_string(arguments, "projectId")
-            .map_err(|_| ToolCallError::InvalidParams)?,
+        project_id: None,
         folder_path: required_string(arguments, "folderPath")
             .map_err(|_| ToolCallError::InvalidParams)?
             .to_owned(),
@@ -243,14 +222,10 @@ fn parse_import_folder(
 fn parse_delete_source(
     arguments: &Map<String, Value>,
 ) -> Result<WikiDeleteSourceInput, ToolCallError> {
-    require_exact_keys(
-        arguments,
-        &["projectId", "sourcePath", "fileAlreadyDeleted"],
-    )
-    .map_err(|_| ToolCallError::InvalidParams)?;
+    require_exact_keys(arguments, &["sourcePath", "fileAlreadyDeleted"])
+        .map_err(|_| ToolCallError::InvalidParams)?;
     Ok(WikiDeleteSourceInput {
-        project_id: optional_string(arguments, "projectId")
-            .map_err(|_| ToolCallError::InvalidParams)?,
+        project_id: None,
         source_path: required_string(arguments, "sourcePath")
             .map_err(|_| ToolCallError::InvalidParams)?
             .to_owned(),
@@ -261,7 +236,7 @@ fn parse_delete_source(
 fn parse_apply_generated_pages(
     arguments: &Map<String, Value>,
 ) -> Result<WikiApplyGeneratedPagesInput, ToolCallError> {
-    require_exact_keys(arguments, &["projectId", "sourcePath", "files"])
+    require_exact_keys(arguments, &["sourcePath", "files"])
         .map_err(|_| ToolCallError::InvalidParams)?;
     let files = arguments
         .get("files")
@@ -271,8 +246,7 @@ fn parse_apply_generated_pages(
         .map(parse_generated_page)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(WikiApplyGeneratedPagesInput {
-        project_id: optional_string(arguments, "projectId")
-            .map_err(|_| ToolCallError::InvalidParams)?,
+        project_id: None,
         source_path: required_string(arguments, "sourcePath")
             .map_err(|_| ToolCallError::InvalidParams)?
             .to_owned(),
@@ -314,12 +288,10 @@ fn parse_search(
     arguments: &Map<String, Value>,
     default_limit: usize,
 ) -> Result<WikiSearchInput, ToolCallError> {
-    require_exact_keys(arguments, &["projectId", "query", "limit"])
-        .map_err(|_| ToolCallError::InvalidParams)?;
+    require_exact_keys(arguments, &["query", "limit"]).map_err(|_| ToolCallError::InvalidParams)?;
     let query = required_query(arguments)?;
     Ok(WikiSearchInput {
-        project_id: optional_string(arguments, "projectId")
-            .map_err(|_| ToolCallError::InvalidParams)?,
+        project_id: None,
         query,
         limit: optional_limit(arguments, "limit", default_limit)?,
     })
@@ -329,12 +301,10 @@ fn parse_retrieve(
     arguments: &Map<String, Value>,
     default_limit: usize,
 ) -> Result<WikiRetrieveContextInput, ToolCallError> {
-    require_exact_keys(arguments, &["projectId", "query", "limit"])
-        .map_err(|_| ToolCallError::InvalidParams)?;
+    require_exact_keys(arguments, &["query", "limit"]).map_err(|_| ToolCallError::InvalidParams)?;
     let query = required_query(arguments)?;
     Ok(WikiRetrieveContextInput {
-        project_id: optional_string(arguments, "projectId")
-            .map_err(|_| ToolCallError::InvalidParams)?,
+        project_id: None,
         query,
         limit: optional_limit(arguments, "limit", default_limit)?,
     })
@@ -389,10 +359,6 @@ fn schema(properties: Value, required: &[&str]) -> Value {
     })
 }
 
-fn project_id_property() -> Value {
-    json!({ "type": ["string", "null"], "minLength": 1 })
-}
-
 fn limit_property(default: usize) -> Value {
     json!({ "type": ["integer", "null"], "minimum": 0, "default": default })
 }
@@ -413,22 +379,11 @@ fn wiki_projects_tool() -> Value {
     })
 }
 
-fn wiki_set_project_tool() -> Value {
-    json!({
-        "name": "wiki_set_project",
-        "description": "Set the current wiki project by project id.",
-        "inputSchema": schema(json!({
-            "projectId": { "type": "string", "minLength": 1 }
-        }), &["projectId"]),
-    })
-}
-
 fn wiki_files_tool() -> Value {
     json!({
         "name": "wiki_files",
         "description": "List files under a wiki project directory.",
         "inputSchema": schema(json!({
-            "projectId": project_id_property(),
             "directory": { "type": ["string", "null"], "default": "" }
         }), &[]),
     })
@@ -437,9 +392,8 @@ fn wiki_files_tool() -> Value {
 fn wiki_read_file_tool() -> Value {
     json!({
         "name": "wiki_read_file",
-        "description": "Read a text file from the current or selected wiki project.",
+        "description": "Read a text file from the current wiki project.",
         "inputSchema": schema(json!({
-            "projectId": project_id_property(),
             "relativePath": { "type": "string", "minLength": 1 },
             "limit": limit_property(0)
         }), &["relativePath"]),
@@ -451,7 +405,6 @@ fn wiki_search_tool() -> Value {
         "name": "wiki_search",
         "description": "Run keyword search over wiki project markdown.",
         "inputSchema": schema(json!({
-            "projectId": project_id_property(),
             "query": { "type": "string", "minLength": 1 },
             "limit": limit_property(20)
         }), &["query"]),
@@ -461,10 +414,8 @@ fn wiki_search_tool() -> Value {
 fn wiki_graph_tool() -> Value {
     json!({
         "name": "wiki_graph",
-        "description": "Return the wiki link graph for the current or selected project.",
-        "inputSchema": schema(json!({
-            "projectId": project_id_property()
-        }), &[]),
+        "description": "Return the wiki link graph for the current project.",
+        "inputSchema": schema(json!({}), &[]),
     })
 }
 
@@ -472,18 +423,15 @@ fn wiki_rescan_sources_tool() -> Value {
     json!({
         "name": "wiki_rescan_sources",
         "description": "Rescan wiki project files and update the change queue.",
-        "inputSchema": schema(json!({
-            "projectId": project_id_property()
-        }), &[]),
+        "inputSchema": schema(json!({}), &[]),
     })
 }
 
 fn wiki_import_source_tool() -> Value {
     json!({
         "name": "wiki_import_source",
-        "description": "Import a source file into the current or selected wiki project.",
+        "description": "Import a source file into the current wiki project.",
         "inputSchema": schema(json!({
-            "projectId": project_id_property(),
             "sourcePath": { "type": "string", "minLength": 1 }
         }), &["sourcePath"]),
     })
@@ -492,9 +440,8 @@ fn wiki_import_source_tool() -> Value {
 fn wiki_import_folder_tool() -> Value {
     json!({
         "name": "wiki_import_folder",
-        "description": "Import source files from a folder into the current or selected wiki project.",
+        "description": "Import source files from a folder into the current wiki project.",
         "inputSchema": schema(json!({
-            "projectId": project_id_property(),
             "folderPath": { "type": "string", "minLength": 1 }
         }), &["folderPath"]),
     })
@@ -503,10 +450,8 @@ fn wiki_import_folder_tool() -> Value {
 fn wiki_refresh_sources_tool() -> Value {
     json!({
         "name": "wiki_refresh_sources",
-        "description": "Refresh imported wiki sources for the current or selected project.",
-        "inputSchema": schema(json!({
-            "projectId": project_id_property()
-        }), &[]),
+        "description": "Refresh imported wiki sources for the current project.",
+        "inputSchema": schema(json!({}), &[]),
     })
 }
 
@@ -515,7 +460,6 @@ fn wiki_apply_generated_pages_tool() -> Value {
         "name": "wiki_apply_generated_pages",
         "description": "Apply generated wiki pages for a source file.",
         "inputSchema": schema(json!({
-            "projectId": project_id_property(),
             "sourcePath": { "type": "string", "minLength": 1 },
             "files": {
                 "type": "array",
@@ -538,7 +482,6 @@ fn wiki_delete_source_tool() -> Value {
         "name": "wiki_delete_source",
         "description": "Delete an imported wiki source and its generated pages.",
         "inputSchema": schema(json!({
-            "projectId": project_id_property(),
             "sourcePath": { "type": "string", "minLength": 1 },
             "fileAlreadyDeleted": { "type": ["boolean", "null"], "default": false }
         }), &["sourcePath"]),
@@ -549,9 +492,7 @@ fn wiki_source_tasks_tool() -> Value {
     json!({
         "name": "wiki_source_tasks",
         "description": "List wiki source import and generation tasks.",
-        "inputSchema": schema(json!({
-            "projectId": project_id_property()
-        }), &[]),
+        "inputSchema": schema(json!({}), &[]),
     })
 }
 
@@ -560,7 +501,6 @@ fn wiki_embed_page_tool() -> Value {
         "name": "wiki_embed_page",
         "description": "Embed one wiki page into the local vector index.",
         "inputSchema": schema(json!({
-            "projectId": project_id_property(),
             "relativePath": { "type": "string", "minLength": 1 }
         }), &["relativePath"]),
     })
@@ -571,7 +511,6 @@ fn wiki_retrieve_context_tool() -> Value {
         "name": "wiki_retrieve_context",
         "description": "Retrieve relevant wiki context for a query.",
         "inputSchema": schema(json!({
-            "projectId": project_id_property(),
             "query": { "type": "string", "minLength": 1 },
             "limit": limit_property(8)
         }), &["query"]),

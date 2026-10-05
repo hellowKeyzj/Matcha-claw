@@ -4,7 +4,7 @@ use crate::call::{CallReply, WikiCallAcceptance, WikiCallDetail};
 use platform::call::CallContext;
 
 use crate::domain::{
-    WikiApplyGeneratedPagesInput, WikiApplyGeneratedPagesReceipt, WikiCancelSourceTaskInput,
+    WikiApplyGeneratedPagesInput, WikiApplyGeneratedPagesReceipt,
     WikiCreateProjectInput, WikiDeleteSourceInput, WikiDeleteSourceReceipt, WikiFailure,
     WikiFilesInput, WikiFilesReceipt, WikiGraphReceipt, WikiImportFolderInput,
     WikiImportSourceInput, WikiImportSourceReceipt, WikiOpenProjectInput, WikiPathSelector,
@@ -18,6 +18,64 @@ use crate::domain::{
 };
 
 pub(crate) enum WikiCommand {
+    ApplySelection {
+        input: crate::WikiSelectionApplyInput,
+        reply: CallReply<crate::WikiSelectionApplyReceipt>,
+    },
+    BeginSourceWork {
+        project_id: String,
+        reply: CallReply<crate::sweep::SourceWork>,
+    },
+    StageReviewSweep {
+        project_id: String,
+        reply: CallReply<Option<crate::sweep::ReviewSweepPlan>>,
+    },
+    CompleteReviewSweep {
+        plan: crate::sweep::ReviewSweepPlan,
+        resolved_ids: Vec<String>,
+        reply: CallReply<()>,
+    },
+    DetectDuplicates {
+        plan: crate::dedup::DedupDetectionPlan,
+        reply: CallReply<crate::WikiDedupDetection>,
+    },
+    EnqueueDedup {
+        input: crate::WikiDedupMergeInput,
+        task_id: String,
+        reply: CallReply<crate::WikiDedupTaskInput>,
+    },
+    PrepareDedup {
+        input: crate::WikiDedupTaskInput,
+        reply: CallReply<crate::dedup::DedupMergePlan>,
+    },
+    CompleteDedup {
+        plan: crate::dedup::DedupMergePlan,
+        reply: CallReply<crate::WikiDedupState>,
+    },
+    FailDedup {
+        input: crate::WikiDedupTaskInput,
+        error: WikiFailure,
+        reply: CallReply<crate::WikiDedupState>,
+    },
+    RetryDedup {
+        input: crate::WikiDedupTaskInput,
+        reply: CallReply<crate::WikiDedupTaskInput>,
+    },
+    ResumeDedup {
+        input: crate::WikiDedupTaskInput,
+        reply: CallReply<crate::WikiDedupTaskInput>,
+    },
+    ExcludeDuplicates {
+        input: crate::WikiDedupExcludeInput,
+        reply: CallReply<crate::WikiDedupState>,
+    },
+    CreateMissingPage {
+        plan: crate::page_links::MissingPagePlan,
+        reply: CallReply<crate::WikiMissingPageReceipt>,
+    },
+    ReloadProjects {
+        reply: CallReply<()>,
+    },
     RestoreHistory {
         input: crate::history::WikiRestoreFileHistoryInput,
         reply: CallReply<WikiReadReceipt>,
@@ -134,12 +192,17 @@ pub(crate) enum WikiCommand {
     StageRefreshSourcePaths {
         project_id: String,
         paths: Vec<PathBuf>,
+        auto_ingest: bool,
         reply: CallReply<WikiRefreshSourcesPlan>,
     },
     CleanupDeletedWikiPages {
         project_id: String,
         paths: Vec<String>,
         reply: CallReply<()>,
+    },
+    DeletePage {
+        input: crate::WikiDeletePageInput,
+        reply: CallReply<crate::WikiDeletePageReceipt>,
     },
     DeleteSource {
         input: WikiDeleteSourceInput,
@@ -167,16 +230,6 @@ pub(crate) enum WikiCommand {
         input: WikiReviewClearResolvedInput,
         reply: CallReply<WikiReviewsReceipt>,
     },
-    MarkSourceTaskFailed {
-        project_id: String,
-        source_relative_path: String,
-        error: String,
-        reply: CallReply<()>,
-    },
-    CancelSourceTask {
-        input: WikiCancelSourceTaskInput,
-        reply: CallReply<WikiSourceTasksReceipt>,
-    },
     RetrySourceTask {
         input: WikiSourceTaskActionInput,
         reply: CallReply<WikiSourceTaskRunPlan>,
@@ -197,20 +250,6 @@ pub(crate) enum WikiCommand {
         input: WikiProjectSelector,
         reply: CallReply<WikiStatusReceipt>,
     },
-    StageResearch {
-        input: crate::research::WikiResearchInput,
-        reply: CallReply<crate::research::ResearchPlan>,
-    },
-    CommitResearch {
-        project_id: String,
-        task: crate::research::WikiResearchTask,
-        cited: Vec<usize>,
-        reply: CallReply<crate::research::WikiResearchTask>,
-    },
-    RemoveResearchTask {
-        input: crate::research::WikiResearchRemoveInput,
-        reply: CallReply<crate::research::WikiResearchTasksReceipt>,
-    },
     UpdateSearchConfig {
         project_id: Option<String>,
         input: crate::search_config::SearchConfigUpdate,
@@ -222,8 +261,10 @@ pub(crate) enum WikiCommand {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct WikiStagedImportSource {
+    pub task_id: String,
+    pub execution: Option<std::sync::Arc<crate::owner::source_execution::SourceExecution>>,
     pub project_id: String,
     pub project_root: PathBuf,
     pub import_id: String,
@@ -234,7 +275,7 @@ pub(crate) struct WikiStagedImportSource {
     pub task_kind: WikiSourceTaskKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct WikiParsedImportSource {
     pub staged: WikiStagedImportSource,
     pub text: String,
@@ -268,12 +309,49 @@ pub(crate) struct WikiRefreshSourcesPlan {
 }
 
 pub(crate) struct WikiSourceTaskRunPlan {
+    pub task_id: Option<String>,
     pub project_id: String,
     pub source_relative_path: String,
     pub staged: Option<WikiStagedImportSource>,
 }
 
 pub(crate) enum WikiQuery {
+    StageSelection {
+        input: crate::WikiSelectionInput,
+        reply: CallReply<crate::selection::SelectionPlan>,
+    },
+    SelectionTask {
+        input: crate::WikiSelectionTaskInput,
+        reply: CallReply<crate::WikiSelectionTask>,
+    },
+    CancelSelection {
+        input: crate::WikiSelectionTaskInput,
+        reply: CallReply<crate::WikiSelectionTask>,
+    },
+    StageDedupDetection {
+        input: crate::WikiDedupDetectInput,
+        reply: CallReply<crate::dedup::DedupDetectionPlan>,
+    },
+    DedupState {
+        input: WikiProjectSelector,
+        reply: CallReply<crate::WikiDedupState>,
+    },
+    CancelDedup {
+        input: crate::WikiDedupTaskInput,
+        reply: CallReply<crate::WikiDedupState>,
+    },
+    PageLinks {
+        input: WikiPathSelector,
+        reply: CallReply<crate::WikiPageLinks>,
+    },
+    StageMissingPage {
+        input: crate::WikiMissingPageInput,
+        reply: CallReply<crate::page_links::MissingPagePlan>,
+    },
+    CancelMissingPage {
+        input: crate::WikiMissingPageCancelInput,
+        reply: CallReply<bool>,
+    },
     HistoryList {
         input: crate::history::WikiFileHistoryInput,
         reply: CallReply<crate::history::WikiFileHistoryReceipt>,
@@ -310,10 +388,6 @@ pub(crate) enum WikiQuery {
         input: WikiProjectSelector,
         reply: CallReply<crate::insights::WikiGraphInsightsReceipt>,
     },
-    StageGraphInsightResearch {
-        input: crate::insights::WikiGraphInsightResearchInput,
-        reply: CallReply<crate::owner::insights::InsightResearchPlan>,
-    },
     Status {
         reply: CallReply<WikiStatusReceipt>,
     },
@@ -343,6 +417,10 @@ pub(crate) enum WikiQuery {
         input: WikiSearchInput,
         reply: CallReply<WikiSearchReceipt>,
     },
+    Navigation {
+        input: WikiProjectSelector,
+        reply: CallReply<crate::WikiNavigation>,
+    },
     Graph {
         input: WikiProjectSelector,
         reply: CallReply<WikiGraphReceipt>,
@@ -355,27 +433,13 @@ pub(crate) enum WikiQuery {
         input: WikiProjectSelector,
         reply: CallReply<WikiReviewsReceipt>,
     },
-    SourceTasks {
-        input: WikiProjectSelector,
-        reply: CallReply<WikiSourceTasksReceipt>,
-    },
     SourceFiles {
         input: WikiProjectSelector,
         reply: CallReply<WikiSourceFilesReceipt>,
     },
-    ResearchTasks {
-        input: WikiProjectSelector,
-        reply: CallReply<crate::research::WikiResearchTasksReceipt>,
-    },
     SearchConfig {
         input: WikiProjectSelector,
         reply: CallReply<crate::search_config::SearchConfig>,
-    },
-    TestSearchProvider {
-        project_id: Option<String>,
-        input: crate::external_search::SearchProviderTest,
-        cancellation: tokio_util::sync::CancellationToken,
-        reply: CallReply<Vec<crate::research::ResearchSource>>,
     },
     SourceWatchConfig {
         input: WikiProjectSelector,
@@ -385,6 +449,7 @@ pub(crate) enum WikiQuery {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum WikiOwnerKey {
+    Dedup(String),
     #[allow(dead_code)]
     Import(String),
     Embed(String),
@@ -394,6 +459,45 @@ pub(crate) enum WikiOwnerKey {
 impl WikiCommand {
     pub(crate) async fn reject(self, error: WikiFailure) {
         match self {
+            Self::BeginSourceWork { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::StageReviewSweep { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CompleteReviewSweep { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::DetectDuplicates { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::EnqueueDedup { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CompleteDedup { reply, .. } | Self::FailDedup { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::PrepareDedup { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::RetryDedup { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ResumeDedup { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ExcludeDuplicates { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ApplySelection { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CreateMissingPage { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::ReloadProjects { reply } => {
+                let _ = reply.send(Err(error)).await;
+            }
             Self::RestoreHistory { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
@@ -481,6 +585,9 @@ impl WikiCommand {
             Self::CleanupDeletedWikiPages { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
+            Self::DeletePage { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
             Self::DeleteSource { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
@@ -499,12 +606,6 @@ impl WikiCommand {
             Self::ClearResolvedReviews { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
-            Self::MarkSourceTaskFailed { reply, .. } => {
-                let _ = reply.send(Err(error)).await;
-            }
-            Self::CancelSourceTask { reply, .. } => {
-                let _ = reply.send(Err(error)).await;
-            }
             Self::RetrySourceTask { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
@@ -520,15 +621,6 @@ impl WikiCommand {
             Self::Rescan { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
-            Self::StageResearch { reply, .. } => {
-                let _ = reply.send(Err(error)).await;
-            }
-            Self::CommitResearch { reply, .. } => {
-                let _ = reply.send(Err(error)).await;
-            }
-            Self::RemoveResearchTask { reply, .. } => {
-                let _ = reply.send(Err(error)).await;
-            }
             Self::UpdateSearchConfig { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
@@ -540,6 +632,9 @@ impl WikiCommand {
 
     pub(crate) fn acceptance(&self) -> Option<&WikiCallAcceptance> {
         match self {
+            Self::DetectDuplicates { reply, .. } => reply.acceptance.as_ref(),
+            Self::ApplySelection { reply, .. } => reply.acceptance.as_ref(),
+            Self::CreateMissingPage { reply, .. } => reply.acceptance.as_ref(),
             Self::RestoreHistory { reply, .. } => reply.acceptance.as_ref(),
             Self::ClearHistory { reply, .. } => reply.acceptance.as_ref(),
             Self::ExportArchive { reply, .. } => reply.acceptance.as_ref(),
@@ -550,6 +645,7 @@ impl WikiCommand {
             Self::Rescan { reply, .. } => reply.acceptance.as_ref(),
             Self::EmbedPage { reply, .. } => reply.acceptance.as_ref(),
             Self::ApplyGeneratedPages { reply, .. } => reply.acceptance.as_ref(),
+            Self::DeletePage { reply, .. } => reply.acceptance.as_ref(),
             Self::DeleteSource { reply, .. } => reply.acceptance.as_ref(),
             _ => None,
         }
@@ -557,6 +653,21 @@ impl WikiCommand {
 
     pub(crate) fn call(&self) -> Option<&CallContext<WikiCallDetail>> {
         match self {
+            Self::BeginSourceWork { reply, .. } => reply.call.as_ref(),
+            Self::StageReviewSweep { reply, .. } => reply.call.as_ref(),
+            Self::CompleteReviewSweep { reply, .. } => reply.call.as_ref(),
+            Self::DetectDuplicates { reply, .. } => reply.call.as_ref(),
+            Self::EnqueueDedup { reply, .. } => reply.call.as_ref(),
+            Self::CompleteDedup { reply, .. } | Self::FailDedup { reply, .. } => {
+                reply.call.as_ref()
+            }
+            Self::PrepareDedup { reply, .. } => reply.call.as_ref(),
+            Self::RetryDedup { reply, .. } => reply.call.as_ref(),
+            Self::ResumeDedup { reply, .. } => reply.call.as_ref(),
+            Self::ExcludeDuplicates { reply, .. } => reply.call.as_ref(),
+            Self::ApplySelection { reply, .. } => reply.call.as_ref(),
+            Self::CreateMissingPage { reply, .. } => reply.call.as_ref(),
+            Self::ReloadProjects { reply } => reply.call.as_ref(),
             Self::RestoreHistory { reply, .. } => reply.call.as_ref(),
             Self::UpdateHistoryConfig { reply, .. } => reply.call.as_ref(),
             Self::ClearHistory { reply, .. } => reply.call.as_ref(),
@@ -586,22 +697,18 @@ impl WikiCommand {
             Self::StageRefreshSources { reply, .. } => reply.call.as_ref(),
             Self::StageRefreshSourcePaths { reply, .. } => reply.call.as_ref(),
             Self::CleanupDeletedWikiPages { reply, .. } => reply.call.as_ref(),
+            Self::DeletePage { reply, .. } => reply.call.as_ref(),
             Self::DeleteSource { reply, .. } => reply.call.as_ref(),
             Self::MigrateSourcePath { reply, .. } => reply.call.as_ref(),
             Self::ApplyGeneratedPages { reply, .. } => reply.call.as_ref(),
             Self::ResolveReview { reply, .. } => reply.call.as_ref(),
             Self::DismissReview { reply, .. } => reply.call.as_ref(),
             Self::ClearResolvedReviews { reply, .. } => reply.call.as_ref(),
-            Self::MarkSourceTaskFailed { reply, .. } => reply.call.as_ref(),
-            Self::CancelSourceTask { reply, .. } => reply.call.as_ref(),
             Self::RetrySourceTask { reply, .. } => reply.call.as_ref(),
             Self::PauseSourceTask { reply, .. } => reply.call.as_ref(),
             Self::ResumeSourceTask { reply, .. } => reply.call.as_ref(),
             Self::ReorderSourceTask { reply, .. } => reply.call.as_ref(),
             Self::Rescan { reply, .. } => reply.call.as_ref(),
-            Self::StageResearch { reply, .. } => reply.call.as_ref(),
-            Self::CommitResearch { reply, .. } => reply.call.as_ref(),
-            Self::RemoveResearchTask { reply, .. } => reply.call.as_ref(),
             Self::UpdateSearchConfig { reply, .. } => reply.call.as_ref(),
             Self::EmbedPage { reply, .. } => reply.call.as_ref(),
         }
@@ -609,6 +716,19 @@ impl WikiCommand {
 
     pub(crate) fn set_call(&mut self, call: Option<CallContext<WikiCallDetail>>) {
         match self {
+            Self::BeginSourceWork { reply, .. } => reply.call = call,
+            Self::StageReviewSweep { reply, .. } => reply.call = call,
+            Self::CompleteReviewSweep { reply, .. } => reply.call = call,
+            Self::DetectDuplicates { reply, .. } => reply.call = call,
+            Self::EnqueueDedup { reply, .. } => reply.call = call,
+            Self::CompleteDedup { reply, .. } | Self::FailDedup { reply, .. } => reply.call = call,
+            Self::PrepareDedup { reply, .. } => reply.call = call,
+            Self::RetryDedup { reply, .. } => reply.call = call,
+            Self::ResumeDedup { reply, .. } => reply.call = call,
+            Self::ExcludeDuplicates { reply, .. } => reply.call = call,
+            Self::ApplySelection { reply, .. } => reply.call = call,
+            Self::CreateMissingPage { reply, .. } => reply.call = call,
+            Self::ReloadProjects { reply } => reply.call = call,
             Self::RestoreHistory { reply, .. } => reply.call = call,
             Self::UpdateHistoryConfig { reply, .. } => reply.call = call,
             Self::ClearHistory { reply, .. } => reply.call = call,
@@ -638,22 +758,18 @@ impl WikiCommand {
             Self::StageRefreshSources { reply, .. } => reply.call = call,
             Self::StageRefreshSourcePaths { reply, .. } => reply.call = call,
             Self::CleanupDeletedWikiPages { reply, .. } => reply.call = call,
+            Self::DeletePage { reply, .. } => reply.call = call,
             Self::DeleteSource { reply, .. } => reply.call = call,
             Self::MigrateSourcePath { reply, .. } => reply.call = call,
             Self::ApplyGeneratedPages { reply, .. } => reply.call = call,
             Self::ResolveReview { reply, .. } => reply.call = call,
             Self::DismissReview { reply, .. } => reply.call = call,
             Self::ClearResolvedReviews { reply, .. } => reply.call = call,
-            Self::MarkSourceTaskFailed { reply, .. } => reply.call = call,
-            Self::CancelSourceTask { reply, .. } => reply.call = call,
             Self::RetrySourceTask { reply, .. } => reply.call = call,
             Self::PauseSourceTask { reply, .. } => reply.call = call,
             Self::ResumeSourceTask { reply, .. } => reply.call = call,
             Self::ReorderSourceTask { reply, .. } => reply.call = call,
             Self::Rescan { reply, .. } => reply.call = call,
-            Self::StageResearch { reply, .. } => reply.call = call,
-            Self::CommitResearch { reply, .. } => reply.call = call,
-            Self::RemoveResearchTask { reply, .. } => reply.call = call,
             Self::UpdateSearchConfig { reply, .. } => reply.call = call,
             Self::EmbedPage { reply, .. } => reply.call = call,
         }
@@ -661,6 +777,15 @@ impl WikiCommand {
 
     pub(crate) fn project_id_mut(&mut self) -> Option<&mut Option<String>> {
         match self {
+            Self::ApplySelection { input, .. } => Some(&mut input.project_id),
+
+            Self::EnqueueDedup { input, .. } => Some(&mut input.project_id),
+            Self::FailDedup { input, .. } => Some(&mut input.project_id),
+            Self::PrepareDedup { input, .. } => Some(&mut input.project_id),
+            Self::RetryDedup { input, .. } => Some(&mut input.project_id),
+            Self::ResumeDedup { input, .. } => Some(&mut input.project_id),
+            Self::ExcludeDuplicates { input, .. } => Some(&mut input.project_id),
+
             Self::RestoreHistory { input, .. } => Some(&mut input.project_id),
             Self::UpdateHistoryConfig { input, .. } => Some(&mut input.project_id),
             Self::ClearHistory { input, .. } => Some(&mut input.project_id),
@@ -680,19 +805,17 @@ impl WikiCommand {
             Self::StageImportSource { input, .. } => Some(&mut input.project_id),
             Self::StageImportFolder { input, .. } => Some(&mut input.project_id),
             Self::StageRefreshSources { input, .. } => Some(&mut input.project_id),
+            Self::DeletePage { input, .. } => Some(&mut input.project_id),
             Self::DeleteSource { input, .. } => Some(&mut input.project_id),
             Self::ApplyGeneratedPages { input, .. } => Some(&mut input.project_id),
             Self::ResolveReview { input, .. } => Some(&mut input.project_id),
             Self::DismissReview { input, .. } => Some(&mut input.project_id),
             Self::ClearResolvedReviews { input, .. } => Some(&mut input.project_id),
-            Self::CancelSourceTask { input, .. } => Some(&mut input.project_id),
             Self::RetrySourceTask { input, .. } => Some(&mut input.project_id),
             Self::PauseSourceTask { input, .. } => Some(&mut input.project_id),
             Self::ResumeSourceTask { input, .. } => Some(&mut input.project_id),
             Self::ReorderSourceTask { input, .. } => Some(&mut input.project_id),
             Self::Rescan { input, .. } => Some(&mut input.project_id),
-            Self::StageResearch { input, .. } => Some(&mut input.project_id),
-            Self::RemoveResearchTask { input, .. } => Some(&mut input.project_id),
             Self::UpdateSearchConfig { project_id, .. } => Some(project_id),
             Self::EmbedPage { input, .. } => Some(&mut input.project_id),
             _ => None,
@@ -702,6 +825,46 @@ impl WikiCommand {
     pub(crate) fn route(&self) -> foundation::execution::CommandRoute<WikiOwnerKey> {
         use foundation::execution::CommandRoute;
         match self {
+            Self::BeginSourceWork { project_id, .. }
+            | Self::StageReviewSweep { project_id, .. } => {
+                CommandRoute::Keyed(WikiOwnerKey::Commit(project_id.clone()))
+            }
+            Self::CompleteReviewSweep { plan, .. } => {
+                CommandRoute::Keyed(WikiOwnerKey::Commit(plan.project_id.clone()))
+            }
+            Self::DetectDuplicates { plan, .. } => CommandRoute::Keyed(WikiOwnerKey::Dedup(plan.project_id.clone())),
+            Self::EnqueueDedup { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::CompleteDedup { plan, .. } => {
+                CommandRoute::Keyed(WikiOwnerKey::Commit(plan.project_id.clone()))
+            }
+            Self::FailDedup { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::PrepareDedup { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Dedup(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::RetryDedup { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::ResumeDedup { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::ExcludeDuplicates { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::ApplySelection { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::CreateMissingPage { plan, .. } => CommandRoute::Keyed(WikiOwnerKey::Commit(plan.project_id.clone())),
             Self::ImportArchive { .. } | Self::StageReindex { .. } => CommandRoute::Global,
             Self::BeginLint { plan, .. } | Self::CompleteLint { plan, .. } => {
                 CommandRoute::Keyed(WikiOwnerKey::Commit(plan.project_id.clone()))
@@ -758,7 +921,8 @@ impl WikiCommand {
                 Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
                 None => CommandRoute::Global,
             },
-            Self::CreateProject { .. }
+            Self::ReloadProjects { .. }
+            | Self::CreateProject { .. }
             | Self::OpenProject { .. }
             | Self::SetCurrentProject { .. } => CommandRoute::Global,
             Self::UpdateSourceWatchConfig { input, .. } => match input.project_id.as_deref() {
@@ -801,6 +965,10 @@ impl WikiCommand {
             Self::CommitImportSource { input, .. } => CommandRoute::Keyed(WikiOwnerKey::Commit(
                 project_lane(Some(&input.staged.project_id)),
             )),
+            Self::DeletePage { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
             Self::DeleteSource { input, .. } => match input.project_id.as_deref() {
                 Some(project_id) => {
                     CommandRoute::Keyed(WikiOwnerKey::Commit(project_lane(Some(project_id))))
@@ -834,15 +1002,6 @@ impl WikiCommand {
                 }
                 None => CommandRoute::Global,
             },
-            Self::MarkSourceTaskFailed { project_id, .. } => {
-                CommandRoute::Keyed(WikiOwnerKey::Commit(project_lane(Some(project_id))))
-            }
-            Self::CancelSourceTask { input, .. } => match input.project_id.as_deref() {
-                Some(project_id) => {
-                    CommandRoute::Keyed(WikiOwnerKey::Commit(project_lane(Some(project_id))))
-                }
-                None => CommandRoute::Global,
-            },
             Self::RetrySourceTask { input, .. }
             | Self::PauseSourceTask { input, .. }
             | Self::ResumeSourceTask { input, .. } => match input.project_id.as_deref() {
@@ -863,17 +1022,6 @@ impl WikiCommand {
                 }
                 None => CommandRoute::Global,
             },
-            Self::StageResearch { input, .. } => match input.project_id.as_deref() {
-                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
-                None => CommandRoute::Global,
-            },
-            Self::CommitResearch { project_id, .. } => {
-                CommandRoute::Keyed(WikiOwnerKey::Commit(project_id.clone()))
-            }
-            Self::RemoveResearchTask { input, .. } => match input.project_id.as_deref() {
-                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
-                None => CommandRoute::Global,
-            },
             Self::UpdateSearchConfig { project_id, .. } => match project_id {
                 Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.clone())),
                 None => CommandRoute::Global,
@@ -892,6 +1040,22 @@ impl WikiCommand {
 impl WikiQuery {
     pub(crate) async fn reject(self, error: WikiFailure) {
         match self {
+            Self::StageSelection { reply, .. } => { let _ = reply.send(Err(error)).await; }
+            Self::SelectionTask { reply, .. } | Self::CancelSelection { reply, .. } => { let _ = reply.send(Err(error)).await; }
+            Self::StageDedupDetection { reply, .. } => { let _ = reply.send(Err(error)).await; }
+            Self::DedupState { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::CancelDedup { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::PageLinks { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
+            Self::StageMissingPage { reply, .. } => { let _ = reply.send(Err(error)).await; }
+            Self::CancelMissingPage { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
             Self::HistoryList { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
@@ -919,9 +1083,6 @@ impl WikiQuery {
             Self::GraphInsights { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
-            Self::StageGraphInsightResearch { reply, .. } => {
-                let _ = reply.send(Err(error)).await;
-            }
             Self::Status { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
@@ -946,6 +1107,9 @@ impl WikiQuery {
             Self::Search { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
+            Self::Navigation { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
             Self::Graph { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
@@ -955,19 +1119,10 @@ impl WikiQuery {
             Self::Reviews { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
-            Self::SourceTasks { reply, .. } => {
-                let _ = reply.send(Err(error)).await;
-            }
             Self::SourceFiles { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
-            Self::ResearchTasks { reply, .. } => {
-                let _ = reply.send(Err(error)).await;
-            }
             Self::SearchConfig { reply, .. } => {
-                let _ = reply.send(Err(error)).await;
-            }
-            Self::TestSearchProvider { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
             Self::SourceWatchConfig { reply, .. } => {
@@ -978,6 +1133,14 @@ impl WikiQuery {
 
     pub(crate) fn call(&self) -> Option<&CallContext<WikiCallDetail>> {
         match self {
+            Self::StageSelection { reply, .. } => reply.call.as_ref(),
+            Self::SelectionTask { reply, .. } | Self::CancelSelection { reply, .. } => reply.call.as_ref(),
+            Self::StageDedupDetection { reply, .. } => reply.call.as_ref(),
+            Self::DedupState { reply, .. } => reply.call.as_ref(),
+            Self::CancelDedup { reply, .. } => reply.call.as_ref(),
+            Self::PageLinks { reply, .. } => reply.call.as_ref(),
+            Self::StageMissingPage { reply, .. } => reply.call.as_ref(),
+            Self::CancelMissingPage { reply, .. } => reply.call.as_ref(),
             Self::HistoryList { reply, .. } => reply.call.as_ref(),
             Self::HistoryConfig { reply, .. } => reply.call.as_ref(),
             Self::HistoryStats { reply, .. } => reply.call.as_ref(),
@@ -987,7 +1150,6 @@ impl WikiQuery {
             Self::LintState { reply, .. } => reply.call.as_ref(),
             Self::CancelLint { reply, .. } => reply.call.as_ref(),
             Self::GraphInsights { reply, .. } => reply.call.as_ref(),
-            Self::StageGraphInsightResearch { reply, .. } => reply.call.as_ref(),
             Self::Status { reply, .. } => reply.call.as_ref(),
             Self::Projects { reply, .. } => reply.call.as_ref(),
             Self::ProjectTemplates { reply, .. } => reply.call.as_ref(),
@@ -996,20 +1158,26 @@ impl WikiQuery {
             Self::ReadBinaryFile { reply, .. } => reply.call.as_ref(),
             Self::ReadSourcePreview { reply, .. } => reply.call.as_ref(),
             Self::Search { reply, .. } => reply.call.as_ref(),
+            Self::Navigation { reply, .. } => reply.call.as_ref(),
             Self::Graph { reply, .. } => reply.call.as_ref(),
             Self::RetrieveContext { reply, .. } => reply.call.as_ref(),
             Self::Reviews { reply, .. } => reply.call.as_ref(),
-            Self::SourceTasks { reply, .. } => reply.call.as_ref(),
             Self::SourceFiles { reply, .. } => reply.call.as_ref(),
-            Self::ResearchTasks { reply, .. } => reply.call.as_ref(),
             Self::SearchConfig { reply, .. } => reply.call.as_ref(),
-            Self::TestSearchProvider { reply, .. } => reply.call.as_ref(),
             Self::SourceWatchConfig { reply, .. } => reply.call.as_ref(),
         }
     }
 
     pub(crate) fn set_call(&mut self, call: Option<CallContext<WikiCallDetail>>) {
         match self {
+            Self::StageSelection { reply, .. } => reply.call = call,
+            Self::SelectionTask { reply, .. } | Self::CancelSelection { reply, .. } => reply.call = call,
+            Self::StageDedupDetection { reply, .. } => reply.call = call,
+            Self::DedupState { reply, .. } => reply.call = call,
+            Self::CancelDedup { reply, .. } => reply.call = call,
+            Self::PageLinks { reply, .. } => reply.call = call,
+            Self::StageMissingPage { reply, .. } => reply.call = call,
+            Self::CancelMissingPage { reply, .. } => reply.call = call,
             Self::HistoryList { reply, .. } => reply.call = call,
             Self::HistoryConfig { reply, .. } => reply.call = call,
             Self::HistoryStats { reply, .. } => reply.call = call,
@@ -1019,7 +1187,6 @@ impl WikiQuery {
             Self::LintState { reply, .. } => reply.call = call,
             Self::CancelLint { reply, .. } => reply.call = call,
             Self::GraphInsights { reply, .. } => reply.call = call,
-            Self::StageGraphInsightResearch { reply, .. } => reply.call = call,
             Self::Status { reply, .. } => reply.call = call,
             Self::Projects { reply, .. } => reply.call = call,
             Self::ProjectTemplates { reply, .. } => reply.call = call,
@@ -1028,14 +1195,12 @@ impl WikiQuery {
             Self::ReadBinaryFile { reply, .. } => reply.call = call,
             Self::ReadSourcePreview { reply, .. } => reply.call = call,
             Self::Search { reply, .. } => reply.call = call,
+            Self::Navigation { reply, .. } => reply.call = call,
             Self::Graph { reply, .. } => reply.call = call,
             Self::RetrieveContext { reply, .. } => reply.call = call,
             Self::Reviews { reply, .. } => reply.call = call,
-            Self::SourceTasks { reply, .. } => reply.call = call,
             Self::SourceFiles { reply, .. } => reply.call = call,
-            Self::ResearchTasks { reply, .. } => reply.call = call,
             Self::SearchConfig { reply, .. } => reply.call = call,
-            Self::TestSearchProvider { reply, .. } => reply.call = call,
             Self::SourceWatchConfig { reply, .. } => reply.call = call,
         }
     }
@@ -1137,6 +1302,8 @@ mod tests {
             CommandRoute::Keyed(WikiOwnerKey::Commit("project-a".to_owned())),
         );
         let staged = WikiStagedImportSource {
+            task_id: "task-a".to_owned(),
+            execution: None,
             project_id: "project-a".to_owned(),
             project_root: PathBuf::from("project"),
             import_id: "import-a".to_owned(),

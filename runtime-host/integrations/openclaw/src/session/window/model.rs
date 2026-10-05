@@ -126,10 +126,7 @@ pub fn window_range(total: usize, request: PageRequest) -> WindowRange {
         Direction::Latest => WindowRange::new(total.saturating_sub(request.limit), total),
         Direction::Older => {
             let anchor = request.offset.unwrap_or(total).min(total);
-            WindowRange::new(
-                anchor.saturating_sub(request.limit),
-                anchor.saturating_add(request.limit).min(total),
-            )
+            WindowRange::new(anchor.saturating_sub(request.limit), anchor)
         }
         Direction::Newer => {
             let start = request.offset.unwrap_or(total).min(total);
@@ -225,6 +222,7 @@ pub struct Message {
     sequence: Option<u64>,
     created_at: Option<u64>,
     updated_at: Option<u64>,
+    display_item_id: Option<String>,
 }
 
 impl Message {
@@ -254,7 +252,17 @@ impl Message {
             sequence,
             created_at,
             updated_at,
+            display_item_id: None,
         }
+    }
+
+    pub(crate) fn with_display_item_id(mut self, item_id: Option<String>) -> Self {
+        self.display_item_id = item_id;
+        self
+    }
+
+    pub fn display_item_id(&self) -> Option<&str> {
+        self.display_item_id.as_deref()
     }
 
     pub const fn role(&self) -> MessageRole {
@@ -318,11 +326,21 @@ pub enum RunState {
 pub struct InFlightRun {
     run_id: String,
     state: RunState,
+    text: String,
 }
 
 impl InFlightRun {
     pub(crate) fn new(run_id: String, state: RunState) -> Self {
-        Self { run_id, state }
+        Self { run_id, state, text: String::new() }
+    }
+
+    pub(crate) fn with_text(mut self, text: String) -> Self {
+        self.text = text;
+        self
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
     }
 
     pub fn run_id(&self) -> &str {
@@ -410,6 +428,15 @@ pub struct SessionState {
     in_flight_run: Option<InFlightRun>,
     delta_cursor: Option<String>,
     complete_snapshot: Option<bool>,
+    kind: HistoryKind,
+    active_leaf_entry_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HistoryKind {
+    Full,
+    Delta,
+    Reset,
 }
 
 impl SessionState {
@@ -426,8 +453,20 @@ impl SessionState {
             in_flight_run,
             delta_cursor,
             complete_snapshot,
+            kind: HistoryKind::Full,
+            active_leaf_entry_id: None,
         }
     }
+
+    pub(crate) fn with_history(mut self, kind: HistoryKind, active_leaf_entry_id: Option<String>) -> Self {
+        self.kind = kind;
+        self.active_leaf_entry_id = active_leaf_entry_id;
+        self
+    }
+
+    pub const fn kind(&self) -> HistoryKind { self.kind }
+
+    pub fn active_leaf_entry_id(&self) -> Option<&str> { self.active_leaf_entry_id.as_deref() }
 
     pub fn pending_inputs(&self) -> &[PendingInput] {
         &self.pending_inputs

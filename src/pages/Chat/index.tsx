@@ -17,15 +17,20 @@ import {
 } from '@/stores/chat/abort-handlers';
 import { isRunActive } from '@/stores/chat/types';
 import { buildCurrentConversationFromSessionRecord, resolveCurrentConversationRuntimeState } from '@/stores/chat/session-runtime-graph';
-import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { supportsSessionGoal, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
+import { useTeamsStore } from '@/stores/teams';
+import { TeamDesignDialog } from '@/pages/Teams/TeamDesignDialog';
 import { useComposerDraftStore, clampComposerDraftSelection, type ComposerDraftSelection } from '@/stores/composer-drafts';
 import type { GatewayTransportIssue } from '../../types/session/runtime-state';
-import type {
-  SessionIdentity,
+import {
+  buildSessionIdentityKey,
+  runtimeEndpointsEqual,
+  type SessionIdentity,
 } from '../../types/desktop/runtime-address';
+import { getCronSessionBaseKey, parseCronSessionKey } from '@/stores/chat/cron-session-utils';
 import type {
   SessionRenderItem,
 } from '../../types/session/render-item';
@@ -49,7 +54,7 @@ import {
 import { ChatShell } from './components/ChatShell';
 import { ChatSidePanel } from './components/ChatSidePanel';
 import { ChatOffline } from './components/ChatOffline';
-import { ChatInput } from './ChatInput';
+import { ChatInput, type ChatInputHandle } from './ChatInput';
 import { Button } from '@/components/ui/button';
 import { AssistantPendingLabelProvider } from './components/AssistantPendingIndicator';
 import { ChatList, type ChatListHandle } from './components/ChatList';
@@ -58,10 +63,14 @@ import { ChatApprovalDock, ChatErrorBanner, ChatRuntimeStatusDock } from './comp
 import { SessionTodoPanel } from './components/SessionTodoPanel';
 import { WelcomeScreen } from './components/ChatStates';
 import { useChatInit } from './useChatInit';
-import { useChatSidePanelController } from './useChatSidePanelController';
+import { openChatRuntimeSurface, useChatSidePanelController, type ChatRuntimeSurfaceDescriptor } from './useChatSidePanelController';
 import { useChatWindowDockController } from './useChatWindowDockController';
 import { useAgentSkillConfig } from './useAgentSkillConfig';
 import { useChatView } from './useChatView';
+import { useChatQuestions } from './useChatQuestions';
+import { useChatGoals } from './useChatGoals';
+import { ChatGoalDock } from './ChatGoalDock';
+import { ChatQuestionDock } from './components/ChatQuestionDock';
 import { useWorkspaceAvailability } from '@/hooks/use-workspace-availability';
 import {
   applyAssistantPresentationToItems,
@@ -87,6 +96,8 @@ import {
   summarizeError,
   summarizeIdentifier,
   summarizeSessionIdentity,
+  isSessionTraceEnabled,
+  summarizeRenderItems,
 } from '@/lib/session-trace';
 import { collectChatArtifactGroups } from './artifacts';
 import { buildChatSessionMarkdownExport, downloadMarkdownFile } from './session-markdown-export';
@@ -573,6 +584,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const questionRecoveryKey = useGatewayStore((state) => `${state.status.connectedAt ?? ''}:${state.runtimeHost.restartCount}`);
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const localizedGatewayIssue = useMemo(() => {
     return localizeGatewayIssue(gatewayStatus.lastIssue, t)
@@ -644,6 +656,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const previousRenderedItemsRef = useRef<ChatRenderItem[] | null>(null);
   const chatLayoutRef = useRef<HTMLDivElement>(null);
   const viewportPaneRef = useRef<ChatListHandle>(null);
+  const composerRef = useRef<ChatInputHandle>(null);
   const workspaceActive = isActive;
   const runtimeEndpointDirectory = useRuntimeEndpointsStore(useShallow((state) => ({
     status: state.status,
@@ -665,6 +678,23 @@ export function Chat({ isActive = true }: ChatProps) {
     || (currentConversationRuntime.state === 'starting' && currentSession.items.length === 0);
   const currentRuntimeReconnecting = currentConversationRuntime.state === 'starting';
   const currentWorkspaceIdentity = currentSessionConversation?.sessionIdentity ?? currentSession.meta.sessionIdentity;
+  const teamOwnership = currentSession.meta.ownership;
+  const designTeamId = teamOwnership?.kind === 'team' && teamOwnership.roleId === 'leader' ? teamOwnership.teamId : null;
+  const designRunId = teamOwnership?.kind === 'team' && teamOwnership.roleId === 'leader' ? teamOwnership.teamRunId : null;
+  const designTeamKnown = useTeamsStore((state) => Boolean(designTeamId && state.teams.some((team) => team.id === designTeamId)));
+  const designRecord = useTeamsStore((state) => designRunId ? state.designByRunId[designRunId] : undefined);
+  const observeTeamDesign = useTeamsStore((state) => state.observeTeamDesign);
+  const startDesign = useTeamsStore((state) => state.startDesign);
+  const continueDesign = useTeamsStore((state) => state.continueDesign);
+  const confirmDesign = useTeamsStore((state) => state.confirmDesign);
+  const continueDesignDiscussion = useTeamsStore((state) => state.continueDesignDiscussion);
+  const designActionPending = Boolean(designRecord?.mutationPending);
+  const designSnapshot = designRecord?.snapshot && designRecord.snapshot.teamId === designTeamId && designRecord.snapshot.runId === designRunId ? designRecord.snapshot : null;
+  const designActive = designSnapshot?.startGate.status === 'designing' || designSnapshot?.startGate.status === 'design_proposal_pending';
+  const designProposal = designSnapshot?.startGate.status === 'design_proposal_pending' ? designSnapshot.startGate.proposal : null;
+  const designContextKey = JSON.stringify([designTeamId, designRunId, currentWorkspaceIdentity ? buildSessionIdentityKey(currentWorkspaceIdentity) : null]);
+  const currentDesignContextRef = useRef(designContextKey);
+  currentDesignContextRef.current = designContextKey;
   const currentWorkspaceAvailabilityKey = workspaceAvailabilityKey(currentWorkspaceIdentity);
   const currentWorkspacePath = currentAgent?.workspace?.trim() ?? '';
   const workspaceAvailabilityTargets = useMemo(() => (
@@ -691,6 +721,93 @@ export function Chat({ isActive = true }: ChatProps) {
     ? 'ready'
     : (currentConversationRuntime.state === 'unavailable' ? 'unavailable' : 'starting');
   const chatSideEffectsActive = workspaceActive && currentChatRuntimeAvailable;
+  const goalSupported = supportsSessionGoal(runtimeEndpointDirectory.endpoints, currentConversationEndpoint, currentAgentId ?? '');
+  const chatGoals = useChatGoals(currentWorkspaceIdentity, currentSessionRecordKey, currentSession.meta.endpointSessionId, currentComposerDraftKey, goalSupported && chatSideEffectsActive);
+  const beginTypedGoal = (goalId?: string, objective?: string) => {
+    if (chatGoals.begin(goalId, objective)) composerRef.current?.focus();
+  };
+  const submitTypedGoal = (text: string, attachments?: Parameters<typeof sendMessage>[1]) => {
+    if (!chatGoals.mode?.goalId) viewportPaneRef.current?.prepareCurrentLatestBottomAlign();
+    return chatGoals.submit(text, attachments);
+  };
+  const chatQuestions = useChatQuestions(
+    currentWorkspaceIdentity,
+    workspaceActive,
+    currentChatRuntimeAvailable && isGatewayRunning,
+    questionRecoveryKey,
+  );
+  const observedIdentitiesKey = useMemo(() => {
+    if (!connectorSessionIdentity) return '[]';
+    const identities = new Map([[buildSessionIdentityKey(connectorSessionIdentity), connectorSessionIdentity]]);
+    const cron = parseCronSessionKey(connectorSessionIdentity.sessionKey);
+    if (cron && !cron.runSessionId) {
+      for (const record of Object.values(loadedSessionsForDraftCleanup)) {
+        const identity = record.meta.sessionIdentity;
+        if (identity && identity.agentId === connectorSessionIdentity.agentId
+          && getCronSessionBaseKey(identity.sessionKey) === getCronSessionBaseKey(connectorSessionIdentity.sessionKey)
+          && runtimeEndpointsEqual(identity.endpoint, connectorSessionIdentity.endpoint)) {
+          identities.set(buildSessionIdentityKey(identity), identity);
+        }
+      }
+    }
+    return JSON.stringify([...identities].sort(([left], [right]) => left.localeCompare(right)).map(([, identity]) => identity));
+  }, [connectorSessionIdentity, loadedSessionsForDraftCleanup]);
+  useEffect(() => {
+    if (!chatSideEffectsActive) return;
+    const observations = (JSON.parse(observedIdentitiesKey) as SessionIdentity[])
+      .filter((identity) => identity.endpoint.kind !== 'native-runtime' || identity.endpoint.runtimeAdapterId !== 'openclaw')
+      .map((identity) => ({ identity, leaseId: crypto.randomUUID() }));
+    for (const { identity, leaseId } of observations) {
+      void useChatStore.getState().observeSession(identity, leaseId).ready.catch((error) => {
+        console.warn('[session.observe]', summarizeError(error));
+        if (isSessionTraceEnabled()) logSessionTrace('session.observe.failed', 'session-observation-boundary', summarizeError(error));
+      });
+    }
+    return () => {
+      for (const { identity, leaseId } of observations) {
+        void useChatStore.getState().releaseSession(identity, leaseId).catch((error) => {
+          console.warn('[session.release]', summarizeError(error));
+          if (isSessionTraceEnabled()) logSessionTrace('session.release.failed', 'session-observation-boundary', summarizeError(error));
+        });
+      }
+    };
+  }, [chatSideEffectsActive, observedIdentitiesKey]);
+  const openClawObservationsRef = useRef(new Map<string, { identity: SessionIdentity; leaseId: string }>());
+  useEffect(() => {
+    const desired = new Map((chatSideEffectsActive ? JSON.parse(observedIdentitiesKey) as SessionIdentity[] : [])
+      .filter((identity) => identity.endpoint.kind === 'native-runtime' && identity.endpoint.runtimeAdapterId === 'openclaw')
+      .map((identity) => [buildSessionIdentityKey(identity), identity]));
+    const observations = openClawObservationsRef.current;
+    const release = (identity: SessionIdentity, leaseId: string) => {
+      void useChatStore.getState().releaseSession(identity, leaseId).catch((error) => {
+        console.warn('[session.release]', summarizeError(error));
+        if (isSessionTraceEnabled()) logSessionTrace('session.release.failed', 'session-observation-boundary', summarizeError(error));
+      });
+    };
+    for (const [key, observation] of observations) {
+      if (desired.has(key)) continue;
+      observations.delete(key);
+      release(observation.identity, observation.leaseId);
+    }
+    for (const [key, identity] of desired) {
+      if (observations.has(key)) continue;
+      const { leaseId, ready } = useChatStore.getState().observeSession(identity);
+      observations.set(key, { identity, leaseId });
+      void ready.catch((error) => {
+        console.warn('[session.observe]', summarizeError(error));
+        if (isSessionTraceEnabled()) logSessionTrace('session.observe.failed', 'session-observation-boundary', summarizeError(error));
+      });
+    }
+  }, [chatSideEffectsActive, observedIdentitiesKey]);
+  useEffect(() => () => {
+    for (const { identity, leaseId } of openClawObservationsRef.current.values()) {
+      void useChatStore.getState().releaseSession(identity, leaseId).catch((error) => {
+        console.warn('[session.release]', summarizeError(error));
+        if (isSessionTraceEnabled()) logSessionTrace('session.release.failed', 'session-observation-boundary', summarizeError(error));
+      });
+    }
+    openClawObservationsRef.current.clear();
+  }, []);
   useEffect(() => {
     console.info(JSON.stringify({
       prefix: STARTUP_TRACE_PREFIX,
@@ -736,7 +853,31 @@ export function Chat({ isActive = true }: ChatProps) {
     closeSidePanel: closeSidePanelDomain,
     setSidePanelWidth,
     toggleArtifactWorkbenchFullscreen,
-  } = useChatSidePanelController(chatSideEffectsActive, chatLayoutRef);
+    teamGraphSurface,
+  } = useChatSidePanelController(chatSideEffectsActive, chatLayoutRef, currentWorkspaceIdentity ?? undefined);
+  useEffect(() => {
+    if (!chatSideEffectsActive || !isGatewayRunning || !designTeamKnown || !designTeamId || !designRunId) return;
+    return observeTeamDesign({ teamId: designTeamId, runId: designRunId });
+  }, [chatSideEffectsActive, isGatewayRunning, designTeamKnown, designTeamId, designRunId, observeTeamDesign]);
+  const openedDesignNavigationRef = useRef<string | null>(null);
+  useEffect(() => {
+    const surface = (location.state as { teamDesignSurface?: Extract<ChatRuntimeSurfaceDescriptor, { kind: 'team-graph' }> } | null)?.teamDesignSurface;
+    if (!surface || openedDesignNavigationRef.current === location.key || !chatSideEffectsActive || !currentWorkspaceIdentity
+      || surface.teamId !== designTeamId || surface.runId !== designRunId
+      || buildSessionIdentityKey(surface.sourceSessionIdentity) !== buildSessionIdentityKey(currentWorkspaceIdentity)) return;
+    openedDesignNavigationRef.current = location.key;
+    openChatRuntimeSurface(surface);
+  }, [location.key, location.state, chatSideEffectsActive, currentWorkspaceIdentity, designTeamId, designRunId]);
+  const runDesignAction = async (action: (target: { teamId: string; runId: string }) => Promise<void>, focusComposer = false): Promise<void> => {
+    if (!designTeamId || !designRunId || designActionPending) return;
+    const contextKey = designContextKey;
+    try {
+      await action({ teamId: designTeamId, runId: designRunId });
+      if (focusComposer && currentDesignContextRef.current === contextKey) composerRef.current?.focus();
+    } catch (error) {
+      toast.error(t('teams:design.actionFailed', { error: error instanceof Error ? error.message : String(error) }));
+    }
+  };
   const chatWindowDock = useChatWindowDockController({
     enabled: workspaceActive && currentChatRuntimeAvailable,
     panelOpen: sidePanelIntentOpen,
@@ -863,6 +1004,18 @@ export function Chat({ isActive = true }: ChatProps) {
     previousRenderedItemsRef.current = nextItems;
     return nextItems;
   }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.runtime, currentSessionRecordKey, imageGenerationActive, imageGenerationLabel, pendingRunProgressLabel, viewportItems]);
+  useEffect(() => {
+    if (!isSessionTraceEnabled()) return;
+    logSessionTrace('session.presentation.committed', 'session-presentation-boundary', {
+      identity: summarizeSessionIdentity(connectorSessionIdentity), recordKey: summarizeIdentifier(currentSessionRecordKey),
+      runtimePhase: currentSession.runtime.runPhase, activeRunHash: summarizeIdentifier(currentSession.runtime.activeRunId).hash,
+      pendingTurnHash: summarizeIdentifier(currentSession.runtime.pendingTurnKey).hash,
+      viewport: summarizeRenderItems(viewportItems), presentation: summarizeRenderItems(renderItems),
+      placeholderHashes: renderItems.slice(0, 200).filter((item) => !viewportItems.some((original) => original.key === item.key))
+        .map((item) => summarizeIdentifier(item.key).hash),
+      placeholderCount: renderItems.length - viewportItems.length,
+    });
+  }, [connectorSessionIdentity, currentSession.runtime, currentSessionRecordKey, renderItems, viewportItems]);
   const artifactGroups = useMemo(() => collectChatArtifactGroups(renderItems), [renderItems]);
   const artifactFiles = useMemo(
     () => artifactGroups.flatMap((group) => group.files),
@@ -1236,6 +1389,9 @@ export function Chat({ isActive = true }: ChatProps) {
       }
     })();
   }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.meta.displayName, currentSession.meta.label, currentSession.window, currentSessionConversation, currentSessionRecordKey, exportingMarkdown, t, viewportItems]);
+  const handleReuseMessage = useCallback((text: string) => {
+    composerRef.current?.replaceText(text);
+  }, []);
   const handleComposerWheel = useCallback((deltaY: number) => {
     viewportPaneRef.current?.scrollByWheelDelta(deltaY);
   }, []);
@@ -1392,12 +1548,36 @@ export function Chat({ isActive = true }: ChatProps) {
   }, [t]);
   const inputNode = (
     <ChatInput
+      ref={composerRef}
       draft={composerDraft}
       draftKey={currentComposerDraftKey}
       onDraftChange={handleComposerDraftChange}
       onDraftSelectionChange={handleComposerSelectionChange}
       draftSelection={composerSelection}
       onSend={handleSendMessage}
+      goal={{
+        supported: goalSupported,
+        mode: chatGoals.mode,
+        busy: chatGoals.busy,
+        unknown: chatGoals.unknown,
+        canDiscard: chatGoals.canDiscard ?? false,
+        error: chatGoals.error,
+        onRefresh: () => { void chatGoals.refresh(); },
+        onStart: () => beginTypedGoal(),
+        onCancel: chatGoals.cancel,
+        onSubmit: submitTypedGoal,
+      }}
+      goalDock={goalSupported ? <ChatGoalDock
+        key={currentComposerDraftKey}
+        view={currentSession.meta.goal}
+        busy={chatGoals.busy}
+        runActive={activeRun}
+        disabled={!chatSideEffectsActive || chatGoals.unknown || Boolean(chatGoals.mode)}
+        error={chatGoals.error}
+        onEdit={() => { const goal = currentSession.meta.goal; if (goal.kind === 'known' && goal.goal) beginTypedGoal(goal.goal.id, goal.goal.objective); }}
+        onAction={(update) => { const goal = currentSession.meta.goal; if (goal.kind === 'known' && goal.goal) void chatGoals.act(goal.goal.id, update); }}
+        onRefresh={() => { void chatGoals.refresh(); }}
+      /> : null}
       onStop={abortRun}
       skillManager={{
         label: t('toolbar.skillConfig'),
@@ -1425,6 +1605,15 @@ export function Chat({ isActive = true }: ChatProps) {
         },
       }}
       contextUsage={contextUsage}
+      teamDesign={designTeamId && designRunId && currentWorkspaceIdentity && designSnapshot?.startGate.status !== 'started' ? {
+        active: designActive,
+        disabled: !designTeamKnown || !designSnapshot || Boolean(designRecord?.loading) || designActionPending || !isGatewayRunning,
+        onStart: () => {
+          openChatRuntimeSurface({ kind: 'team-graph', sourceSessionIdentity: currentWorkspaceIdentity, teamId: designTeamId, runId: designRunId });
+          void runDesignAction(startDesign, true);
+        },
+        onExit: () => { void runDesignAction(continueDesignDiscussion, true); },
+      } : null}
       disabled={!currentChatRuntimeAvailable || currentWorkspaceUnavailable}
       reconnecting={currentRuntimeReconnecting}
       sending={isRunActive(currentSession.runtime)}
@@ -1467,6 +1656,22 @@ export function Chat({ isActive = true }: ChatProps) {
 
   return (
     <AssistantPendingLabelProvider label={pendingRunProgressLabel}>
+      {workspaceActive && designTeamId && !designTeamKnown ? (
+        <div role="alert" className="flex items-center gap-2 p-3 text-sm text-destructive">
+          {t('teams:chat.teamNotFound')}
+          <Button variant="outline" size="sm" onClick={() => navigate('/teams')}>{t('teams:chat.backToList')}</Button>
+        </div>
+      ) : null}
+      {workspaceActive && designTeamKnown && designProposal ? (
+        <TeamDesignDialog
+          summary={designProposal.taskSummary}
+          busy={designActionPending || Boolean(designRecord?.loading)}
+          error={designRecord?.error ?? undefined}
+          onConfirm={() => { void runDesignAction(confirmDesign); }}
+          onReturnDiscussion={() => { void runDesignAction(continueDesignDiscussion, true); }}
+          onContinueDesign={() => { void runDesignAction(continueDesign, true); }}
+        />
+      ) : null}
       <ChatShell
         chatLayoutRef={chatLayoutRef}
         sidePanelPhase={chatWindowDock.phase}
@@ -1479,13 +1684,14 @@ export function Chat({ isActive = true }: ChatProps) {
         onSidePanelResizeCommit={chatWindowDock.commitSidePanelWidth}
         onComposerWheel={handleComposerWheel}
         onComposerGeometryChange={handleComposerGeometryChange}
-        isEmptyState={liveView.isEmptyState}
+        isEmptyState={liveView.isEmptyState && chatQuestions.questions.length === 0 && !chatQuestions.error}
         emptyState={<WelcomeScreen input={welcomeInputNode} />}
         sidePanel={(
           <ChatSidePanel
             mode={sidePanelMode}
             width={sidePanelWidth}
             activeTab={activeSidePanelTab}
+            teamGraphSurface={teamGraphSurface}
             artifactWorkbenchFullscreen={artifactWorkbenchFullscreen}
             onTabChange={setActiveSidePanelTab}
             onClose={chatWindowDock.closeSidePanel}
@@ -1534,6 +1740,7 @@ export function Chat({ isActive = true }: ChatProps) {
             runtime={currentSession.runtime}
             viewport={currentSession.window}
             items={renderItems}
+            onReuseMessage={handleReuseMessage}
             liveView={liveView}
             errorMessage={localizedRuntimeError}
             showThinking={showThinking}
@@ -1573,14 +1780,27 @@ export function Chat({ isActive = true }: ChatProps) {
             onDismiss={clearError}
           />
         ) : runtimeStatusDock)}
-        approvalDock={approvalStatus === 'awaiting_approval' ? (
-          <ChatApprovalDock
-            waitingLabel={t('approval.waitingLabel')}
-            approvals={currentPendingApprovals}
-            onResolve={(approval, decision) => {
-              void resolveApproval(approval, decision);
-            }}
-          />
+        approvalDock={approvalStatus === 'awaiting_approval' || chatQuestions.questions.length > 0 || chatQuestions.error ? (
+          <>
+            {approvalStatus === 'awaiting_approval' ? (
+              <ChatApprovalDock
+                waitingLabel={t('approval.waitingLabel')}
+                approvals={currentPendingApprovals}
+                onResolve={(approval, decision) => {
+                  void resolveApproval(approval, decision);
+                }}
+              />
+            ) : null}
+            <ChatQuestionDock
+              key={chatQuestions.scopeKey}
+              questions={chatQuestions.questions}
+              confirmed={chatQuestions.confirmed}
+              error={chatQuestions.error}
+              submittingId={chatQuestions.submittingId}
+              onRefresh={chatQuestions.refresh}
+              onResolve={chatQuestions.resolve}
+            />
+          </>
         ) : null}
         input={inputNode}
       />

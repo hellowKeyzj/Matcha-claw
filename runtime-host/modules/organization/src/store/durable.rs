@@ -377,6 +377,33 @@ impl OrganizationStore {
         Ok(outcome)
     }
 
+    pub(crate) fn exit_design(
+        &mut self,
+        team_id: &TeamId,
+        run_id: &GraphRunId,
+        epoch: &str,
+    ) -> Result<(), StoreFault> {
+        self.ensure_writable()?;
+        let lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        let mut candidate = self.facts.clone();
+        let run = candidate
+            .design_run_mut(run_id)
+            .filter(|run| run.team() == team_id)
+            .ok_or(StoreFault::InvalidFacts)?;
+        let outcome = run
+            .start_gate
+            .exit_design(epoch)
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        if matches!(outcome, ContinueRunDiscussionOutcome::Intake) {
+            candidate
+                .validate_transition_from(&self.facts)
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            self.commit_locked(&lock, candidate)?;
+        }
+        Ok(())
+    }
+
     pub fn continue_run_discussion(
         &mut self,
         run_id: &GraphRunId,
@@ -651,6 +678,14 @@ impl OrganizationStore {
         team_id: &TeamId,
     ) -> Option<crate::TeamMaterializationRemoval> {
         self.facts.team_materialization_removal(team_id)
+    }
+
+    pub fn team_unconfirmed_materialization_cleanup_request(
+        &self,
+        team_id: &TeamId,
+    ) -> Option<crate::TeamMaterializationRequest> {
+        self.facts
+            .team_unconfirmed_materialization_cleanup_request(team_id)
     }
 
     pub fn team_materialization_cleanup_confirmed(&self, team_id: &TeamId) -> bool {
@@ -1279,7 +1314,7 @@ impl OrganizationStore {
         Ok(outcome)
     }
 
-    fn transact<T>(
+    pub(super) fn transact<T>(
         &mut self,
         mutation: impl FnOnce(&mut OrganizationFacts) -> Result<T, StoreFault>,
     ) -> Result<T, StoreFault> {

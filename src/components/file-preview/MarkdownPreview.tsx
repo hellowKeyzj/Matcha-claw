@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { annotateMarkdownSource, isMarkdownBodySelection } from '@/lib/wiki-selection';
 import { handleMarkdownCodeBlockCopy } from '@/pages/Chat/markdown-code-blocks';
 import { getOrBuildMarkdownBody } from '@/pages/Chat/md-pipeline';
 
@@ -8,6 +9,8 @@ interface MarkdownPreviewProps {
   filePath: string;
   markdown: string;
   resolveImageSrc?: MarkdownImageResolver;
+  sourceMapping?: boolean;
+  onTextSelection?(selection: Selection | null, root: HTMLDivElement): void;
 }
 
 const EMPTY_IMAGE_MAP = new Map<string, string>();
@@ -57,17 +60,34 @@ function useResolvedMarkdownImages(filePath: string, markdown: string, resolveIm
   return rewriteImageSources(markdown, resolved.key === key ? resolved.images : EMPTY_IMAGE_MAP);
 }
 
-export function MarkdownPreview({
+export const MarkdownPreview = memo(function MarkdownPreview({
   filePath,
   markdown,
   resolveImageSrc,
+  sourceMapping = false,
+  onTextSelection,
 }: MarkdownPreviewProps) {
+  const bodyRef = useRef<HTMLDivElement>(null);
   const resolvedMarkdown = useResolvedMarkdownImages(filePath, markdown, resolveImageSrc);
   const previewHtml = useMemo(() => {
     return getOrBuildMarkdownBody(`artifact-markdown:${filePath}:${resolvedMarkdown}`, {
       markdown: resolvedMarkdown,
     }).fullHtml;
   }, [filePath, resolvedMarkdown]);
+  const mappedHtml = useMemo(() => {
+    if (!sourceMapping) return previewHtml;
+    const body = document.createElement('div');
+    body.innerHTML = previewHtml;
+    annotateMarkdownSource(body, markdown);
+    return body.innerHTML;
+  }, [markdown, previewHtml, sourceMapping]);
+  const html = useMemo(() => ({ __html: mappedHtml }), [mappedHtml]);
+  const captureSelection = useCallback(() => {
+    const root = bodyRef.current;
+    if (!root || !onTextSelection) return;
+    const selection = window.getSelection();
+    onTextSelection(selection && isMarkdownBodySelection(selection, root) ? selection : null, root);
+  }, [onTextSelection]);
   const handlePreviewClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     handleMarkdownCodeBlockCopy(event);
   }, []);
@@ -75,10 +95,14 @@ export function MarkdownPreview({
   return (
     <div className="h-full min-h-0 overflow-auto p-4">
       <div
+        ref={bodyRef}
         className="chat-markdown max-w-none break-words"
+        tabIndex={onTextSelection ? 0 : undefined}
         onClick={handlePreviewClick}
-        dangerouslySetInnerHTML={{ __html: previewHtml }}
+        onMouseUp={onTextSelection ? captureSelection : undefined}
+        onKeyUp={onTextSelection ? captureSelection : undefined}
+        dangerouslySetInnerHTML={html}
       />
     </div>
   );
-}
+});

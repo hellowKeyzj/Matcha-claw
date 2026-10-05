@@ -26,6 +26,9 @@ pub mod delete {
 pub mod endpoint {
     pub use crate::domain::endpoint::*;
 }
+pub mod goal {
+    pub use crate::domain::goal::*;
+}
 pub mod model_selection {
     pub use crate::application::model_selection::*;
 }
@@ -79,6 +82,7 @@ const PROVIDES: &[CapabilityKey] = &[
     CapabilityKey::new("sessions"),
     CapabilityKey::new("session.prompt"),
     CapabilityKey::new("session.management"),
+    CapabilityKey::new("session.goal"),
     CapabilityKey::new("session.approval"),
     CapabilityKey::new("session.modelSelection"),
 ];
@@ -102,8 +106,10 @@ pub use events::SessionDeltaSource;
 pub use owner::actor::{SessionOwnerInput, SessionSnapshot};
 pub use ports::{
     LifecycleOps, RuntimeDriver, RuntimeDriverIdentity, RuntimeOperationFailure, SessionFuture,
+    SessionObservation, SessionObservationRequest, SessionObserveCommand, SessionObserveOutcome,
     SessionOpenOps, SessionOps, SessionOwnershipQuery, SessionOwnershipReader,
-    SessionRuntimeDirectory,
+    SessionReleaseOutcome, SessionRuntimeDirectory, SessionSync, SessionSyncCut,
+    SessionTerminalRun,
 };
 pub use runtime_error::{RequestAdmissionClosed, RuntimeSessionError};
 pub use send_hook::{
@@ -179,9 +185,14 @@ pub fn spawn_owner(
         input.session_delta,
         input.terminal_hook,
     );
+    let completion_handle = owner.completion_handle_slot();
     let (handle, task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(64, SessionOwner::lane_retention()),
+    );
+    assert!(
+        completion_handle.set(handle.clone()).is_ok(),
+        "session completion handle already set"
     );
     (
         SessionModule::new(SessionHandle::new(handle, runtime_directory)),

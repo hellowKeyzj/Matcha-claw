@@ -12,6 +12,7 @@ import {
 import {
   decodeHistorySessionView,
   fetchHistoryWindow,
+  resolveSessionViewError,
   type HistoryWindowResult,
 } from './history-fetch-helpers';
 import { finishChatRunTelemetry } from './telemetry';
@@ -26,7 +27,7 @@ import {
   patchSessionViewportState,
   projectSessionViewItems,
 } from './store-state-helpers';
-import { readSessionsFromState } from './session-helpers';
+import { readSessionsFromState, resolveSessionThinkingLevelFromList } from './session-helpers';
 import {
   createSessionTraceId,
   logSessionTrace,
@@ -36,7 +37,8 @@ import {
 } from '@/lib/session-trace';
 import { buildSessionIdentityRecordIndex, resolveSessionOperationTarget, sameRuntimeEndpointScope } from './session-identity';
 import { isSessionRuntimeEndpointStarting, useRuntimeEndpointsStore } from '../runtime-endpoints';
-import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
+import { createHistoryLoadAbortError, isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
+import { sessionIdentitiesEqual, type SessionIdentity } from '../../types/desktop/runtime-address';
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
 
@@ -52,6 +54,9 @@ export interface HistoryLoadExecutionDeps {
   get: ChatStoreGetFn;
   historyRuntime: StoreHistoryCache;
   loadingTimeoutMs: number;
+  observeHistory?: (identity: SessionIdentity, options: { timeoutMs?: number; traceId?: string | null }) => Promise<HistoryWindowResult['view'] | null>;
+  onObservedViewApplied?: (view: HistoryWindowResult['view']) => void;
+  isObservationCurrent?: () => boolean;
 }
 
 export interface ViewportWindowLoadRequest {
@@ -65,6 +70,7 @@ interface CreateApplyLoadedMessagesInput {
   historyRuntime: StoreHistoryCache;
   requestedSessionKey: string;
   scope: ChatHistoryLoadRequest['scope'];
+  onObservedViewApplied?: HistoryLoadExecutionDeps['onObservedViewApplied'];
   abortSignal: AbortSignal;
   shouldAbortHistoryProcessing: () => boolean;
 }
@@ -155,6 +161,7 @@ async function fetchHistoryWindowWithStartupRetry(input: {
   get: ChatStoreGetFn;
   abortSignal: AbortSignal;
   shouldAbortHistoryProcessing: () => boolean;
+  observeHistory: HistoryLoadExecutionDeps['observeHistory'];
   traceId?: string | null;
 }): Promise<HistoryWindowResult> {
   const {
@@ -166,6 +173,7 @@ async function fetchHistoryWindowWithStartupRetry(input: {
     traceId,
   } = input;
   const startupColdLoad = isStartupColdHistoryLoad(request);
+  const options = { traceId, ...(startupColdLoad ? { timeoutMs: CHAT_HISTORY_STARTUP_REQUEST_TIMEOUT_MS } : {}) };
   let lastError: unknown = null;
 
   for (let attempt = 0; attempt <= CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS.length; attempt += 1) {
@@ -179,6 +187,11 @@ async function fetchHistoryWindowWithStartupRetry(input: {
         sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
         attempt,
       });
+      if (input.observeHistory && target.sessionIdentity.endpoint.kind === 'native-runtime' && target.sessionIdentity.endpoint.runtimeAdapterId === 'openclaw') {
+        const view = await input.observeHistory(target.sessionIdentity, options);
+        if (!view) throw createHistoryLoadAbortError('observation_released');
+        return { view, thinkingLevel: resolveSessionThinkingLevelFromList(readSessionsFromState(get()), requestedSessionKey) };
+      }
       return await fetchHistoryWindow({
         recordKey: requestedSessionKey,
         endpointSessionId: target.endpointSessionId,
@@ -212,18 +225,16 @@ function resolveViewportFetchLimit(itemCount: number): number {
   return Math.min(Math.max(itemCount || 80, 40), 200);
 }
 
-function isViewportWindowRequestCurrent(input: {
-  state: ChatStoreState;
-  sessionKey: string;
-  mode: ViewportWindowLoadRequest['mode'];
-  requestedStartOffset: number;
-}): boolean {
-  const viewport = getSessionViewportState(input.state, input.sessionKey);
-  if (input.mode === 'older') {
-    return viewport.isLoadingMore && viewport.windowStartOffset === input.requestedStartOffset;
-  }
-  return viewport.isLoadingNewer;
+function isHistorySessionIdentityCurrent(
+  state: ChatStoreState,
+  recordKey: string,
+  identity: SessionIdentity | null | undefined,
+): boolean {
+  const currentIdentity = state.loadedSessions[recordKey]?.meta.sessionIdentity;
+  return !!identity && currentIdentity === identity && sessionIdentitiesEqual(currentIdentity, identity);
 }
+
+const viewportRequestsByStore = new WeakMap<ChatStoreGetFn, Map<string, symbol>>();
 
 function setViewportLoadingState(input: {
   set: ChatStoreSetFn;
@@ -254,15 +265,29 @@ export async function executeViewportWindowLoad(
     return;
   }
 
-  const beforeViewport = getSessionViewportState(deps.get(), sessionKey);
+  const currentState = deps.get();
+  const identity = currentState.loadedSessions[sessionKey]?.meta.sessionIdentity;
+  if (!identity) return;
+  const beforeViewport = getSessionViewportState(currentState, sessionKey);
   if (request.mode === 'older') {
     if (!beforeViewport.hasMore || beforeViewport.isLoadingMore) {
       return;
     }
-  } else if (beforeViewport.isLoadingNewer && beforeViewport.isAtLatest) {
+  } else if (beforeViewport.isLoadingNewer) {
     return;
   }
 
+  let requests = viewportRequestsByStore.get(deps.get);
+  if (!requests) {
+    requests = new Map();
+    viewportRequestsByStore.set(deps.get, requests);
+  }
+  const requestId = Symbol();
+  requests.set(sessionKey, requestId);
+  const isCurrent = (state: ChatStoreState) => (
+    requests.get(sessionKey) === requestId
+    && isHistorySessionIdentityCurrent(state, sessionKey, identity)
+  );
   setViewportLoadingState({
     set: deps.set,
     sessionKey,
@@ -270,47 +295,105 @@ export async function executeViewportWindowLoad(
     value: true,
   });
 
+  const traceId = createSessionTraceId('session.window.readback');
+  const traceContext = traceId ? {
+    recordKey: summarizeIdentifier(sessionKey),
+    sessionIdentity: summarizeSessionIdentity(identity),
+    mode: request.mode,
+    requestedOffset: request.mode === 'older' ? beforeViewport.windowStartOffset : null,
+    pendingTurnHash: summarizeIdentifier(currentState.loadedSessions[sessionKey].runtime.pendingTurnKey).hash,
+  } : null;
+  let readbackStage = 'target';
   try {
-    const currentState = deps.get();
     const target = resolveSessionOperationTarget(currentState, sessionKey);
-    const currentItems = getSessionItems(currentState, sessionKey);
+    const limit = request.mode === 'latest'
+      ? CHAT_HISTORY_FULL_LIMIT
+      : resolveViewportFetchLimit(getSessionItems(currentState, sessionKey).length);
+    if (traceId) logSessionTrace('session.window.readback.request', traceId, {
+      ...traceContext,
+      targetIdentity: summarizeSessionIdentity(target.sessionIdentity),
+      limit,
+    });
+    readbackStage = 'request';
     const rawView = await hostSessionWindowFetch({
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
       mode: request.mode,
-      limit: resolveViewportFetchLimit(currentItems.length),
+      limit,
       ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
       includeCanonical: true,
     });
-    const view = decodeHistorySessionView(rawView);
-    if (!isViewportWindowRequestCurrent({
-      state: deps.get(),
-      sessionKey,
-      mode: request.mode,
-      requestedStartOffset: beforeViewport.windowStartOffset,
-    })) {
+    readbackStage = 'response';
+    if (traceId) logSessionTrace('session.window.readback.response', traceId, {
+      ...traceContext,
+      rawType: rawView && typeof rawView === 'object' ? 'object' : typeof rawView,
+    });
+    const responseState = deps.get();
+    if (!isCurrent(responseState)
+      || (request.mode === 'older' && getSessionViewportState(responseState, sessionKey).windowStartOffset !== beforeViewport.windowStartOffset)
+      || (request.mode === 'latest' && responseState.loadedSessions[sessionKey].runtime.pendingTurnKey
+        && responseState.loadedSessions[sessionKey].runtime.pendingTurnKey !== currentState.loadedSessions[sessionKey].runtime.pendingTurnKey)) {
+      if (traceId) logSessionTrace('session.window.readback.drop', traceId, {
+        ...traceContext,
+        reason: requests.get(sessionKey) !== requestId ? 'request-superseded'
+          : !isHistorySessionIdentityCurrent(responseState, sessionKey, identity) ? 'identity-changed'
+            : request.mode === 'older' ? 'offset-changed' : 'pending-turn-changed',
+        requestCurrent: requests.get(sessionKey) === requestId,
+        currentIdentity: summarizeSessionIdentity(responseState.loadedSessions[sessionKey]?.meta.sessionIdentity),
+        currentOffset: getSessionViewportState(responseState, sessionKey).windowStartOffset,
+        currentPendingTurnHash: summarizeIdentifier(responseState.loadedSessions[sessionKey]?.runtime.pendingTurnKey).hash,
+      });
       return;
     }
+    readbackStage = 'decode';
+    const view = decodeHistorySessionView(rawView);
+    if (traceId) logSessionTrace('session.window.readback.decoded', traceId, {
+      ...traceContext,
+      responseIdentity: summarizeSessionIdentity(view.identity),
+      epoch: view.epoch, seq: view.seq, cursor: view.cursor,
+      identityMatches: sessionIdentitiesEqual(view.identity, identity),
+    });
+    readbackStage = 'identity';
+    if (!sessionIdentitiesEqual(view.identity, identity)) {
+      throw new Error('Session view identity mismatch');
+    }
+    readbackStage = 'apply';
     const projectionResult = applySessionView({
       set: deps.set,
       get: deps.get,
-    }, view);
-    if (projectionResult.status === 'unavailable' || projectionResult.status === 'epoch-mismatch') {
-      throw new Error('Session view is unavailable');
-    }
-    const hydratedItems = hydrateAttachedFilesFromItems(projectSessionViewItems(view));
-    deps.set((state) => buildHydratedAttachmentItemsPatch(
+    }, view, { windowOnly: true, direction: request.mode });
+    if (traceId) logSessionTrace('session.window.readback.apply', traceId, {
+      ...traceContext,
+      epoch: view.epoch, seq: view.seq, cursor: view.cursor,
+      outcome: projectionResult.status,
+      ...('reason' in projectionResult ? { reason: summarizeIdentifier(projectionResult.reason) } : {}),
+    });
+    if (projectionResult.status !== 'applied') return;
+    readbackStage = 'hydrate';
+    deps.set((state) => isCurrent(state) ? buildHydratedAttachmentItemsPatch(
       state,
       sessionKey,
-      hydratedItems,
-    ));
-  } catch {
-    setViewportLoadingState({
-      set: deps.set,
-      sessionKey,
-      mode: request.mode,
-      value: false,
+      hydrateAttachedFilesFromItems(getSessionItems(state, sessionKey)),
+    ) : state);
+  } catch (error) {
+    if (traceId) logSessionTrace('session.window.readback.error', traceId, {
+      ...traceContext,
+      readbackStage,
+      requestCurrent: requests.get(sessionKey) === requestId,
+      ...summarizeError(error),
     });
+    // Keep the current window when its read fails.
+  } finally {
+    if (isCurrent(deps.get())) {
+      deps.set((state) => isCurrent(state) ? {
+        loadedSessions: patchSessionViewportState(state, sessionKey, {
+          ...getSessionViewportState(state, sessionKey),
+          isLoadingMore: false,
+          isLoadingNewer: false,
+        }),
+      } : state);
+    }
+    if (requests.get(sessionKey) === requestId) requests.delete(sessionKey);
   }
 }
 
@@ -353,7 +436,7 @@ function isSessionEndpointStarting(state: ChatStoreState, recordKey: string): bo
 
 export function createApplyLoadedMessagesPipeline(
   input: CreateApplyLoadedMessagesInput,
-): (window: HistoryWindowResult) => Promise<void> {
+): (window: HistoryWindowResult) => Promise<'applied' | 'ignored'> {
   const {
     set,
     get,
@@ -364,10 +447,18 @@ export function createApplyLoadedMessagesPipeline(
     shouldAbortHistoryProcessing,
   } = input;
   const isForeground = scope === 'foreground';
+  const requestedRecord = get().loadedSessions[requestedSessionKey];
+  const requestedIdentity = requestedRecord?.meta.sessionIdentity;
+  const isCurrent = (state: ChatStoreState) => (
+    !abortSignal.aborted && !shouldAbortHistoryProcessing()
+    && isHistorySessionIdentityCurrent(state, requestedSessionKey, requestedIdentity)
+    && (!state.loadedSessions[requestedSessionKey]?.runtime.pendingTurnKey
+      || state.loadedSessions[requestedSessionKey].runtime.pendingTurnKey === requestedRecord?.runtime.pendingTurnKey)
+  );
 
   return async (window: HistoryWindowResult) => {
-    if (shouldAbortHistoryProcessing()) {
-      return;
+    if (!isCurrent(get())) {
+      return 'ignored';
     }
     throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
     const view = window.view;
@@ -377,20 +468,20 @@ export function createApplyLoadedMessagesPipeline(
     if (view.completeness === 'unavailable' || view.completeness === 'unknown') {
       throw new Error('Session view is unavailable');
     }
-    const sourceItems = projectSessionViewItems(view);
-    const hydratedItems = hydrateAttachedFilesFromItems(sourceItems);
-    const renderFingerprint = buildItemRenderFingerprint(hydratedItems);
-    const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
-    const didMessageListChange = previousRenderFingerprint !== renderFingerprint;
+    if (!requestedIdentity || !sessionIdentitiesEqual(view.identity, requestedIdentity)) {
+      throw new Error('Session view identity mismatch');
+    }
     const projectionResult = applySessionView({ set, get }, view);
-    if (projectionResult.status !== 'applied') {
+    if (projectionResult.status !== 'applied'
+      && !(projectionResult.status === 'duplicate' && typeof view.items === 'object' && typeof view.window === 'object')) {
       if (projectionResult.status === 'unavailable' || projectionResult.status === 'epoch-mismatch') {
         throw new Error('Session view is unavailable');
       }
-      return;
+      return 'ignored';
     }
 
     set((state) => {
+      if (!isCurrent(state)) return state;
       const loadedSessions = patchSessionMeta(state, requestedSessionKey, {
         historyStatus: 'ready',
         thinkingLevel: window.thinkingLevel,
@@ -400,6 +491,18 @@ export function createApplyLoadedMessagesPipeline(
         sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       };
     });
+    if (!isCurrent(get())) return 'ignored';
+    input.onObservedViewApplied?.(view);
+    if (projectionResult.status === 'duplicate') return 'ignored';
+    const sourceItems = projectSessionViewItems(view);
+    const hydratedItems = hydrateAttachedFilesFromItems(sourceItems);
+    const renderFingerprint = buildItemRenderFingerprint(hydratedItems);
+    const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
+    const didMessageListChange = previousRenderFingerprint !== renderFingerprint;
+    historyRuntime.historyFingerprintBySession.set(
+      requestedSessionKey,
+      buildItemHistoryFingerprint(sourceItems, window.thinkingLevel),
+    );
     historyRuntime.historyRenderFingerprintBySession.set(requestedSessionKey, renderFingerprint);
 
     if (
@@ -413,26 +516,19 @@ export function createApplyLoadedMessagesPipeline(
 
     if ((didMessageListChange || scope === 'background') && hasPendingItemPreviewLoads(hydratedItems)) {
       void loadMissingItemPreviews(hydratedItems, {
-        sessionIdentity: {
-          endpoint: {
-            kind: 'native-runtime',
-            runtimeAdapterId: view.identity.endpoint.runtimeAdapterId,
-            runtimeInstanceId: view.identity.endpoint.runtimeInstanceId,
-          },
-          agentId: view.identity.agentId ?? '',
-          sessionKey: view.identity.sessionKey,
-        },
+        sessionIdentity: requestedIdentity,
       }, abortSignal).then((updatedItems) => {
-        if (!updatedItems || abortSignal.aborted || shouldAbortHistoryProcessing()) {
+        if (!updatedItems || !isCurrent(get())) {
           return;
         }
-        set((state) => buildHydratedAttachmentItemsPatch(
+        set((state) => isCurrent(state) ? buildHydratedAttachmentItemsPatch(
           state,
           requestedSessionKey,
           updatedItems,
-        ));
+        ) : state);
       });
     }
+    return 'applied';
   };
 }
 
@@ -447,6 +543,9 @@ export async function executeHistoryLoad(
     loadingTimeoutMs,
   } = deps;
   const requestedSessionKey = request.sessionKey;
+  const requestedRecord = get().loadedSessions[requestedSessionKey];
+  const requestedIdentity = requestedRecord?.meta.sessionIdentity;
+  if (!requestedIdentity) return;
   const mode = request.mode;
   const scope = request.scope;
   const traceId = request.traceId ?? createSessionTraceId(`history:${request.reason ?? mode}`);
@@ -484,7 +583,8 @@ export async function executeHistoryLoad(
     loadingSafetyTimer = setTimeout(() => {
       set((state) => {
         if (
-          historyLoadRunId !== historyRuntime.getHistoryLoadRunId()
+          !isHistorySessionIdentityCurrent(state, requestedSessionKey, requestedIdentity)
+          || historyLoadRunId !== historyRuntime.getHistoryLoadRunId()
           || state.foregroundHistorySessionKey !== requestedSessionKey
         ) {
           return state;
@@ -495,6 +595,10 @@ export async function executeHistoryLoad(
   }
   const shouldAbortHistoryProcessing = () => (
     abortController.signal.aborted
+    || (deps.isObservationCurrent !== undefined && !deps.isObservationCurrent())
+    || !isHistorySessionIdentityCurrent(get(), requestedSessionKey, requestedIdentity)
+    || (!!get().loadedSessions[requestedSessionKey]?.runtime.pendingTurnKey
+      && get().loadedSessions[requestedSessionKey].runtime.pendingTurnKey !== requestedRecord?.runtime.pendingTurnKey)
     || (scope === 'foreground' && get().currentSessionKey !== requestedSessionKey)
     || (scope === 'foreground' && historyLoadRunId !== historyRuntime.getHistoryLoadRunId())
   );
@@ -504,6 +608,7 @@ export async function executeHistoryLoad(
     historyRuntime,
     requestedSessionKey,
     scope,
+    onObservedViewApplied: deps.onObservedViewApplied,
     abortSignal: abortController.signal,
     shouldAbortHistoryProcessing,
   });
@@ -516,24 +621,21 @@ export async function executeHistoryLoad(
       get,
       abortSignal: abortController.signal,
       shouldAbortHistoryProcessing,
+      observeHistory: deps.observeHistory,
       traceId,
     });
     throwIfHistoryLoadAborted(abortController.signal, shouldAbortHistoryProcessing);
     if (shouldSkipForegroundApply(get, scope, requestedSessionKey)) {
       return;
     }
-    historyRuntime.historyFingerprintBySession.set(
-      requestedSessionKey,
-      buildItemHistoryFingerprint(projectSessionViewItems(window.view), window.thinkingLevel),
-    );
-    await applyLoadedMessages(window);
-    logSessionTrace('history.applied', traceId, {
+    const applyStatus = await applyLoadedMessages(window);
+    logSessionTrace(applyStatus === 'applied' ? 'history.applied' : 'history.ignored', traceId, {
       requestedSessionKey: summarizeIdentifier(requestedSessionKey),
       itemCount: projectSessionViewItems(window.view).length,
       thinkingLevel: window.thinkingLevel,
     });
   } catch (err) {
-    if (isHistoryLoadAbortError(err)) {
+    if (isHistoryLoadAbortError(err) || shouldAbortHistoryProcessing()) {
       aborted = true;
       logSessionTrace('history.aborted', traceId, {
         requestedSessionKey: summarizeIdentifier(requestedSessionKey),
@@ -573,13 +675,14 @@ export async function executeHistoryLoad(
           return;
         }
         set((state) => {
+          const switching = request.reason === 'same_session_refresh';
           const loadedSessions = patchSessionMeta(state, requestedSessionKey, {
-            historyStatus: 'error',
+            historyStatus: switching && (requestedRecord?.meta.historyStatus === 'ready' || requestedRecord?.items.length) ? 'ready' : 'error',
           });
           return {
             loadedSessions,
             sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-            error: resolveHistoryLoadErrorMessage(err),
+            error: switching ? resolveSessionViewError(err).message : resolveHistoryLoadErrorMessage(err),
           };
         });
       }
@@ -593,7 +696,8 @@ export async function executeHistoryLoad(
     if (scope === 'foreground') {
       set((state) => {
         if (
-          historyLoadRunId !== historyRuntime.getHistoryLoadRunId()
+          !isHistorySessionIdentityCurrent(state, requestedSessionKey, requestedIdentity)
+          || historyLoadRunId !== historyRuntime.getHistoryLoadRunId()
           || state.foregroundHistorySessionKey !== requestedSessionKey
         ) {
           return state;

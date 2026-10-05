@@ -4,6 +4,10 @@ import { isCallModule } from './modules';
 
 export type CallObservationEvent = CallChanged | 'resync' | 'disconnected';
 export type SubscribeCalls = (listener: (event: CallObservationEvent) => void) => () => void;
+export interface WaitForCallOptions<M extends CallModule> {
+  signal?: AbortSignal;
+  onUpdate?: (call: CallRecord<M>) => void | Promise<void>;
+}
 
 const terminalStatuses = new Set(['succeeded', 'failed', 'rejected', 'unknown']);
 
@@ -12,7 +16,7 @@ export function waitForCallRecord<M extends CallModule>(
   receipt: CallReceipt,
   module: M,
   read: (callId: string) => Promise<CallRecord>,
-  options: { signal?: AbortSignal } | undefined,
+  options: WaitForCallOptions<M> | undefined,
   subscribe: SubscribeCalls,
 ): Promise<CallRecord<M>> {
   if (!isCallId(receipt.callId) || receipt.accepted !== true || !isCallModule(module)) {
@@ -55,7 +59,10 @@ export function waitForCallRecord<M extends CallModule>(
         if (call.callId !== receipt.callId || call.module !== module) {
           throw new Error('Call record does not match the requested call identity and module');
         }
-        revision = Math.max(revision, call.revision);
+        if (call.revision <= revision) return;
+        revision = call.revision;
+        await options?.onUpdate?.(call as CallRecord<M>);
+        if (stopped) return;
         if (terminalStatuses.has(call.status)) {
           cleanup();
           resolve(call as CallRecord<M>);

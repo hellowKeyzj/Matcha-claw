@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::text;
+
 const LONG_SOURCE_CHUNK_MIN: usize = 12_000;
 const LONG_SOURCE_CHUNK_MAX: usize = 60_000;
 const LONG_SOURCE_DIGEST_MAX: usize = 15_000;
@@ -89,7 +91,7 @@ pub fn split_source_into_semantic_chunks(
     let mut current_heading = blocks[0].heading_path.clone();
 
     for block in blocks {
-        let block_len = char_count(&block.text);
+        let block_len = text::len(&block.text);
         let next_length = current_length + block_len + usize::from(!current.is_empty()) * 2;
         if !current.is_empty() && next_length > target {
             push_raw_chunk(&mut raw_chunks, &mut current, &current_heading);
@@ -204,7 +206,7 @@ pub fn long_source_checkpoint_params(
     LongSourceCheckpointParams {
         source_identity: source_identity.into(),
         source_hash: hash_text_hex(source_content),
-        source_length: char_count(source_content),
+        source_length: text::len(source_content),
         source_budget,
         target_chars,
         overlap_chars,
@@ -414,80 +416,76 @@ fn flush_paragraph(
 }
 
 fn split_oversized_block(block: &str, target_chars: usize) -> Vec<String> {
-    if char_count(block) * 4 <= target_chars * 5 {
+    if text::len(block) * 4 <= target_chars * 5 {
         return vec![block.to_owned()];
     }
 
-    let pieces = sentence_like_pieces(block);
     let mut out = Vec::new();
     let mut current = String::new();
-    for piece in pieces {
-        if !current.is_empty() && char_count(&current) + char_count(&piece) > target_chars {
+    let mut current_length = 0;
+    for piece in sentence_like_pieces(block) {
+        let piece_length = text::len(piece);
+        if !current.is_empty() && current_length + piece_length > target_chars {
             push_trimmed(&mut out, &current);
             current.clear();
+            current_length = 0;
         }
-        if char_count(&piece) > target_chars {
-            for slice in char_slices(&piece, target_chars) {
+        if piece_length > target_chars {
+            let mut rest = piece;
+            while !rest.is_empty() {
+                let slice = text::prefix(rest, target_chars);
                 push_trimmed(&mut out, slice);
+                rest = &rest[slice.len()..];
             }
         } else {
-            current.push_str(&piece);
+            current.push_str(piece);
+            current_length += piece_length;
         }
     }
     push_trimmed(&mut out, &current);
     out
 }
 
-fn sentence_like_pieces(block: &str) -> Vec<String> {
-    let chars = block.chars().collect::<Vec<_>>();
+fn sentence_like_pieces(block: &str) -> Vec<&str> {
     let mut pieces = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '\n' {
-            let start = i;
-            while i < chars.len() && chars[i] == '\n' {
-                i += 1;
+    let mut chars = block.char_indices().peekable();
+    let mut start = 0;
+    while let Some((index, character)) = chars.next() {
+        if character == '\n' {
+            if start < index {
+                pieces.push(&block[start..index]);
             }
-            pieces.push(chars[start..i].iter().collect());
-            continue;
-        }
-        let start = i;
-        while i < chars.len() && chars[i] != '\n' && !is_sentence_punctuation(chars[i]) {
-            i += 1;
-        }
-        if i < chars.len() && is_sentence_punctuation(chars[i]) {
-            i += 1;
-        }
-        if start < i {
-            pieces.push(chars[start..i].iter().collect());
-        } else {
-            i += 1;
+            let mut end = index + 1;
+            while chars.peek().is_some_and(|(_, character)| *character == '\n') {
+                end = chars.next().unwrap().0 + 1;
+            }
+            pieces.push(&block[index..end]);
+            start = end;
+        } else if is_sentence_punctuation(character) {
+            let end = index + character.len_utf8();
+            pieces.push(&block[start..end]);
+            start = end;
         }
     }
-    if pieces.is_empty() {
-        pieces.push(block.to_owned());
+    if start < block.len() {
+        pieces.push(&block[start..]);
     }
     pieces
 }
 
 fn overlap_suffix(text: &str, max_chars: usize) -> String {
-    if text.is_empty() || max_chars == 0 {
-        return String::new();
-    }
-    if char_count(text) <= max_chars {
+    let raw = text::suffix(text, max_chars);
+    if raw.len() == text.len() {
         return text.to_owned();
     }
-
-    let raw = suffix_chars(text, max_chars);
-    let raw_len = char_count(&raw);
-    if let Some(paragraph_break) = first_paragraph_break(&raw) {
-        if paragraph_break > 0 && raw_len - paragraph_break > max_chars * 4 / 10 {
-            return char_slice_from(&raw, paragraph_break).trim().to_owned();
+    if let Some(paragraph_break) = first_paragraph_break(raw) {
+        if paragraph_break > 0 && text::len(&raw[paragraph_break..]) > max_chars * 4 / 10 {
+            return raw[paragraph_break..].trim().to_owned();
         }
     }
-    if let Some(sentence_break) = first_sentence_break(&raw) {
-        if sentence_break > 0 && raw_len - sentence_break > max_chars * 4 / 10 {
-            return char_slice_from(&raw, sentence_break + 1).trim().to_owned();
+    if let Some((sentence_break, sentence_end)) = first_sentence_break(raw) {
+        if sentence_break > 0 && text::len(&raw[sentence_break..]) > max_chars * 4 / 10 {
+            return raw[sentence_end..].trim().to_owned();
         }
     }
     raw.trim().to_owned()
@@ -505,12 +503,13 @@ fn push_raw_chunk(raw_chunks: &mut Vec<RawChunk>, current: &mut Vec<String>, hea
 }
 
 fn trim_long_text(text: &str, max_chars: usize) -> String {
-    if char_count(text) <= max_chars {
+    let prefix = text::prefix(text, max_chars);
+    if prefix.len() == text.len() {
         return text.to_owned();
     }
     format!(
         "{}\n\n[...trimmed for prompt budget...]",
-        prefix_chars(text, max_chars).trim_end()
+        prefix.trim_end()
     )
 }
 
@@ -599,77 +598,34 @@ fn clamp(value: usize, min: usize, max: usize) -> usize {
     value.max(min).min(max)
 }
 
-fn char_count(text: &str) -> usize {
-    text.chars().count()
-}
-
-fn char_slices(text: &str, max_chars: usize) -> Vec<&str> {
-    let mut slices = Vec::new();
-    let mut start = 0;
-    let mut count = 0;
-    for (idx, _) in text.char_indices() {
-        if count == max_chars {
-            slices.push(&text[start..idx]);
-            start = idx;
-            count = 0;
-        }
-        count += 1;
-    }
-    if start < text.len() {
-        slices.push(&text[start..]);
-    }
-    slices
-}
-
-fn prefix_chars(text: &str, max_chars: usize) -> &str {
-    if max_chars == 0 {
-        return "";
-    }
-    text.char_indices()
-        .nth(max_chars)
-        .map_or(text, |(idx, _)| &text[..idx])
-}
-
-fn suffix_chars(text: &str, max_chars: usize) -> String {
-    let total = char_count(text);
-    if total <= max_chars {
-        return text.to_owned();
-    }
-    let skip = total - max_chars;
-    text.chars().skip(skip).collect()
-}
-
-fn char_slice_from(text: &str, start: usize) -> &str {
-    if start == 0 {
-        return text;
-    }
-    text.char_indices()
-        .nth(start)
-        .map_or("", |(idx, _)| &text[idx..])
-}
-
 fn first_paragraph_break(text: &str) -> Option<usize> {
-    let chars = text.chars().collect::<Vec<_>>();
-    for index in 0..chars.len() {
-        if chars[index] != '\n' {
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        if character != '\n' {
             continue;
         }
-        let mut cursor = index + 1;
-        while cursor < chars.len() && chars[cursor].is_whitespace() && chars[cursor] != '\n' {
-            cursor += 1;
+        while chars.peek().is_some_and(|(_, character)| {
+            character.is_whitespace() && *character != '\n'
+        }) {
+            chars.next();
         }
-        if cursor < chars.len() && chars[cursor] == '\n' {
+        if chars.peek().is_some_and(|(_, character)| *character == '\n') {
             return Some(index);
         }
     }
     None
 }
 
-fn first_sentence_break(text: &str) -> Option<usize> {
-    let chars = text.chars().collect::<Vec<_>>();
-    chars.windows(2).enumerate().find_map(|(index, pair)| {
-        (is_sentence_punctuation(pair[0]) && pair[1].is_whitespace()).then_some(index)
-    })
+fn first_sentence_break(text: &str) -> Option<(usize, usize)> {
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        if is_sentence_punctuation(character)
+            && chars.peek().is_some_and(|(_, next)| next.is_whitespace())
+        {
+            return Some((index, index + character.len_utf8()));
+        }
+    }
+    None
 }
 
 fn is_sentence_punctuation(char: char) -> bool {

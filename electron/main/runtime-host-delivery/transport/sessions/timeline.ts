@@ -1,7 +1,7 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 import { decodeSessionView } from './session-contract';
-import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 const UNAVAILABLE = { success: false, error: 'Session timeline is unavailable' } as const;
 
 type Endpoint = Readonly<{
@@ -79,12 +79,15 @@ export function createSessionTimelineTransport(
       return { status: 503, body: UNAVAILABLE };
     }
     const body = response.body;
+    const decodeStartedAt = traceId && isSessionTraceEnabled() ? performance.now() : null;
     const view = response.status === 200 ? decodeSessionView(body) : null;
+    const decodeElapsedMs = decodeStartedAt === null ? null : performance.now() - decodeStartedAt;
     logSessionTrace('electron.timeline.response', traceId, {
       operation,
       status: response.status,
       contract: view ? 'valid' : isUnavailable(body) ? 'unavailable' : 'invalid',
       elapsedMs: Date.now() - startedAt,
+      decodeElapsedMs,
     });
     if (response.status === 200 && view && view.sessionKey === request.input.sessionKey) {
       return { status: 200, body: view };

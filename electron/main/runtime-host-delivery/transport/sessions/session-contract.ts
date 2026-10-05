@@ -1,4 +1,6 @@
 import { isSessionOwnership, type SessionOwnership } from '../../../../../src/types/desktop/session-ownership';
+import type { SessionGoalView } from '../../../../../src/types/session-goal';
+import { tryDecodeSessionGoalView } from '../../../../../src/types/session/snapshot';
 
 const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_ID_BYTES = 256;
@@ -10,7 +12,17 @@ const MAX_SEGMENTS = 64;
 const MAX_APPROVALS = 32;
 const MAX_CHANGE_COUNT = 16;
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
-const MAX_RENDERER_ROUTE_KEY_BYTES = 128;
+export type SessionIdentity = Readonly<{
+  endpoint: Readonly<{
+    kind: 'native-runtime';
+    runtimeAdapterId: 'openclaw' | 'matcha-agent';
+    runtimeInstanceId: 'local';
+  }>;
+  agentId: string;
+  sessionKey: string;
+}>;
+
+export type SessionResync = Readonly<{ identity: SessionIdentity; epoch: number; seq: number }>;
 
 export type SessionModelIdentity = Readonly<{
   provider?: string;
@@ -30,15 +42,8 @@ export type SessionView = Readonly<{
   ownership: SessionOwnership | null;
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
-  identity: Readonly<{
-    sessionKey: string;
-    endpoint: Readonly<{
-      kind: string;
-      runtimeAdapterId: 'openclaw' | 'matcha-agent';
-      runtimeInstanceId: string;
-    }>;
-    agentId?: string;
-  }>;
+  goal: SessionGoalView;
+  identity: SessionIdentity;
   epoch: number;
   seq: number;
   cursor: number;
@@ -126,16 +131,19 @@ export type SessionChange =
   | Readonly<{ kind: 'runPhaseChanged'; runId: string; phase: SessionRunPhase }>
   | Readonly<{ kind: 'messageDelta'; itemId: string; runId: string | null; messageId: string | null; text: string; replace: boolean; status: SessionItemStatus }>
   | Readonly<{ kind: 'messageUpdated'; item: SessionItem }>
+  | Readonly<{ kind: 'messageReplaced'; item: SessionItem }>
+  | Readonly<{ kind: 'itemsReplaced'; oldItemIds: readonly string[]; anchor: Readonly<{ kind: 'start' } | { kind: 'after'; itemId: string }>; items: readonly SessionItem[] }>
   | Readonly<{ kind: 'toolUpdated'; tool: ToolView }>
   | Readonly<{ kind: 'approvalUpdated'; approval: ApprovalView }>
   | Readonly<{ kind: 'runtimeChanged'; runtime: RuntimeView }>
   | Readonly<{ kind: 'runtimeNoticeUpdated'; notice: RuntimeNotice }>
+  | Readonly<{ kind: 'goalChanged'; goal: SessionGoalView }>
   | Readonly<{ kind: 'windowChanged'; window: SessionWindow }>
   | Readonly<{ kind: 'recoveryRequired'; reason: SessionRecoveryReason }>;
 
 export type SessionDelta = Readonly<{
   sessionKey: string;
-  routeKey?: string;
+  identity: SessionIdentity;
   epoch: number;
   seq: number;
   cursor: number;
@@ -190,7 +198,7 @@ export function decodeSessionContentLoadResponse(value: unknown): SessionContent
 export function decodeSessionView(value: unknown): SessionView | null {
   if (!isRecord(value)
     || !hasExactKeys(value, [
-      'sessionKey', 'ownership', 'endpointSessionId', 'modelState', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
+      'sessionKey', 'ownership', 'endpointSessionId', 'modelState', 'goal', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
       'runtime', 'window', 'completeness',
     ])
     || typeof value.sessionKey !== 'string'
@@ -198,6 +206,7 @@ export function decodeSessionView(value: unknown): SessionView | null {
     || (value.ownership !== null && !isSessionOwnership(value.ownership))
     || !isNullableSessionKey(value.endpointSessionId)
     || !isNullableSessionModelState(value.modelState)
+    || !tryDecodeSessionGoalView(value.goal)
     || !isSessionIdentity(value.identity)
     || value.identity.sessionKey !== value.sessionKey
     || !isEpoch(value.epoch)
@@ -222,21 +231,22 @@ export function decodeSessionDelta(value: unknown): SessionDelta | null {
   return decodeCanonicalSessionDelta(value);
 }
 
-export function decodeLegacySessionUpdateDelta(value: unknown): SessionDelta | null {
-  if (isRecord(value) && value.kind === 'delta' && Object.prototype.hasOwnProperty.call(value, 'delta')) {
-    return decodeCanonicalSessionDelta(value.delta);
-  }
-  return decodeCanonicalSessionDelta(value);
+export function decodeSessionResync(value: unknown): SessionResync | null {
+  return isRecord(value) && hasExactKeys(value, ['identity', 'epoch', 'seq'])
+    && isSessionIdentity(value.identity) && isEpoch(value.epoch)
+    && isSafeNonNegativeInteger(value.seq)
+    ? value as SessionResync : null;
 }
 
 function decodeCanonicalSessionDelta(value: unknown): SessionDelta | null {
   if (!isRecord(value)
-    || !hasAllowedKeys(value, ['sessionKey', 'epoch', 'seq', 'cursor', 'changes'], ['routeKey', 'runId'])
+    || !hasAllowedKeys(value, ['sessionKey', 'identity', 'epoch', 'seq', 'cursor', 'changes'], ['runId'])
     || !isSessionKey(value.sessionKey)
+    || !isSessionIdentity(value.identity)
+    || value.sessionKey !== value.identity.sessionKey
     || !isEpoch(value.epoch)
     || !isPositiveSafeInteger(value.seq)
     || !isPositiveSafeInteger(value.cursor)
-    || (value.routeKey !== undefined && !isRouteKey(value.routeKey))
     || (value.runId !== undefined && !isId(value.runId))
     || !Array.isArray(value.changes)
     || value.changes.length === 0
@@ -263,12 +273,28 @@ function isChange(value: unknown, outerRunId: string | undefined): boolean {
         || !isText(value.text)
         || typeof value.replace !== 'boolean'
         || !isItemStatus(value.status)) return false;
-      changeRunId = value.runId ?? undefined;
+      changeRunId = value.runId as string | null ?? undefined;
       break;
     case 'messageUpdated':
+    case 'messageReplaced':
       if (!hasExactKeys(value, ['kind', 'item']) || !isItem(value.item)) return false;
       changeRunId = itemRunId(value.item);
       break;
+    case 'itemsReplaced': {
+      if (!hasExactKeys(value, ['kind', 'oldItemIds', 'anchor', 'items'])
+        || !Array.isArray(value.oldItemIds) || value.oldItemIds.length > MAX_ITEMS
+        || !value.oldItemIds.every(isId) || new Set(value.oldItemIds).size !== value.oldItemIds.length
+        || !isItems(value.items) || !isRecord(value.anchor)) return false;
+      const items = value.items as SessionItem[];
+      const incomingIds = items.map((item) => item.itemId);
+      if (new Set(incomingIds).size !== incomingIds.length
+        || !items.every((item) => outerRunId === undefined || itemRunId(item) === undefined || itemRunId(item) === outerRunId)) return false;
+      return value.anchor.kind === 'start'
+        ? hasExactKeys(value.anchor, ['kind'])
+        : value.anchor.kind === 'after' && hasExactKeys(value.anchor, ['kind', 'itemId'])
+          && isId(value.anchor.itemId) && !value.oldItemIds.includes(value.anchor.itemId)
+          && !incomingIds.includes(value.anchor.itemId);
+    }
     case 'toolUpdated':
       if (!hasExactKeys(value, ['kind', 'tool']) || !isTool(value.tool)) return false;
       changeRunId = value.tool.runId ?? undefined;
@@ -285,6 +311,8 @@ function isChange(value: unknown, outerRunId: string | undefined): boolean {
       if (!hasExactKeys(value, ['kind', 'notice']) || !isRuntimeNotice(value.notice)) return false;
       changeRunId = value.notice.runId;
       break;
+    case 'goalChanged':
+      return hasExactKeys(value, ['kind', 'goal']) && tryDecodeSessionGoalView(value.goal) !== null;
     case 'windowChanged':
       return hasExactKeys(value, ['kind', 'window']) && isWindow(value.window);
     case 'recoveryRequired':
@@ -387,7 +415,7 @@ function isContent(value: unknown): boolean {
   }
 }
 
-function isTool(value: unknown): boolean {
+function isTool(value: unknown): value is ToolView {
   return isRecord(value)
     && hasExactKeys(value, ['toolCallId', 'runId', 'name', 'phase', 'input', 'inputText', 'summary', 'output', 'details', 'isError'])
     && isId(value.toolCallId)
@@ -402,7 +430,7 @@ function isTool(value: unknown): boolean {
     && (value.isError === null || typeof value.isError === 'boolean');
 }
 
-function isApproval(value: unknown): boolean {
+function isApproval(value: unknown): value is ApprovalView {
   return isRecord(value)
     && hasExactKeys(value, ['approvalId', 'runId', 'phase', 'optionIds'])
     && isId(value.approvalId)
@@ -413,7 +441,7 @@ function isApproval(value: unknown): boolean {
     && value.optionIds.every(isId);
 }
 
-function isRuntimeNotice(value: unknown): boolean {
+function isRuntimeNotice(value: unknown): value is RuntimeNotice {
   return isRecord(value)
     && hasExactKeys(value, ['runId', 'kind', 'command', 'riskLevel', 'rationale', 'message'])
     && isId(value.runId)
@@ -428,7 +456,7 @@ function isRuntimeNotice(value: unknown): boolean {
     && isNullableShortText(value.message);
 }
 
-function isRuntime(value: unknown): boolean {
+function isRuntime(value: unknown): value is RuntimeView {
   return isRecord(value)
     && hasExactKeys(value, ['phase', 'activeRunId', 'issue', 'runProgress', 'runtimeActivity', 'errorDetail'])
     && isRunPhase(value.phase)
@@ -507,22 +535,27 @@ function isNullableSessionModelState(value: unknown): boolean {
   );
 }
 
-function isSessionIdentity(value: unknown): boolean {
+export function isSessionIdentity(value: unknown): value is SessionIdentity {
   return isRecord(value)
-    && hasAllowedKeys(value, ['sessionKey', 'endpoint'], ['agentId'])
+    && hasExactKeys(value, ['sessionKey', 'endpoint', 'agentId'])
     && isSessionKey(value.sessionKey)
     && isEndpoint(value.endpoint)
-    && (value.agentId === undefined || isId(value.agentId));
+    && isId(value.agentId);
+}
+
+export function sameSessionIdentity(left: SessionIdentity, right: SessionIdentity): boolean {
+  return left.agentId === right.agentId && left.sessionKey === right.sessionKey
+    && left.endpoint.kind === right.endpoint.kind
+    && left.endpoint.runtimeAdapterId === right.endpoint.runtimeAdapterId
+    && left.endpoint.runtimeInstanceId === right.endpoint.runtimeInstanceId;
 }
 
 function isEndpoint(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && typeof value.kind === 'string'
-    && isId(value.kind)
+    && value.kind === 'native-runtime'
     && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
-    && typeof value.runtimeInstanceId === 'string'
-    && isId(value.runtimeInstanceId);
+    && value.runtimeInstanceId === 'local';
 }
 
 function isCompleteness(value: unknown): boolean {
@@ -634,12 +667,6 @@ function isBoundedString(value: string, maxBytes: number, rejectControl: boolean
     && Buffer.byteLength(value, 'utf8') <= maxBytes
     && value.trim() === value
     && (!rejectControl || ![...value].some((character) => (character.codePointAt(0) ?? 0) < 32 || (character.codePointAt(0) ?? 0) === 127));
-}
-
-function isRouteKey(value: unknown): value is string {
-  return typeof value === 'string'
-    && Buffer.byteLength(value, 'utf8') <= MAX_RENDERER_ROUTE_KEY_BYTES
-    && /^renderer-route:[A-Za-z0-9_-]+$/.test(value);
 }
 
 function isEpoch(value: unknown): value is number {

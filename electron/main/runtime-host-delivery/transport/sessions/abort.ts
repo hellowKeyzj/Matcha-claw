@@ -3,7 +3,6 @@ import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 
 const ROUTE = '/api/sessions/abort';
-const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_RUN_ID_BYTES = 4096;
 const MAX_ENDPOINT_SESSION_ID_BYTES = 4096;
 const MAX_APPROVAL_IDS = 32;
@@ -11,24 +10,18 @@ const MAX_APPROVAL_ID_BYTES = 4096;
 
 export type SessionAbortOutcome = 'succeeded' | 'target_rejected' | 'unknown';
 
-type Endpoint = Readonly<{
-  kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw' | 'matcha-agent';
-  runtimeInstanceId: 'local';
-}>;
+import { isSessionIdentity, sameSessionIdentity, type SessionIdentity } from './session-contract';
 
 export type SessionAbortRequest = Readonly<{
   id: 'session.abort';
   operationId: 'sessions.abort';
   scope: Readonly<{
     kind: 'session';
-    endpoint: Endpoint;
-    sessionKey: string;
+    identity: SessionIdentity;
   }>;
-  target: Readonly<{ kind: 'session' }>;
+  target: Readonly<{ kind: 'session'; identity: SessionIdentity }>;
   input: Readonly<{
-    endpoint: Endpoint;
-    sessionKey: string;
+    identity: SessionIdentity;
     endpointSessionId?: string;
     runId?: string;
     approvalIds?: readonly string[];
@@ -64,8 +57,8 @@ export function createSessionAbortTransport(
         return unknownOutcome();
       }
       logSessionTrace('electron.abort.request', traceId, {
-        adapter: request.input.endpoint.runtimeAdapterId,
-        sessionKey: summarizeIdentifier(request.input.sessionKey),
+        adapter: request.input.identity.endpoint.runtimeAdapterId,
+        sessionKey: summarizeIdentifier(request.input.identity.sessionKey),
         endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
         runId: summarizeIdentifier(request.input.runId),
         approvalIdsCount: request.input.approvalIds?.length ?? null,
@@ -119,12 +112,11 @@ function isSessionAbortRequest(value: unknown): value is SessionAbortRequest {
     || value.operationId !== 'sessions.abort'
     || !isSessionScope(value.scope)
     || !isRecord(value.target)
-    || !hasExactKeys(value.target, ['kind'])
-    || value.target.kind !== 'session'
+    || !hasExactKeys(value.target, ['kind', 'identity'])
+    || value.target.kind !== 'session' || !isSessionIdentity(value.target.identity)
     || !isSessionAbortInput(value.input)
-    || value.scope.endpoint.runtimeAdapterId !== value.input.endpoint.runtimeAdapterId
-    || value.scope.endpoint.runtimeInstanceId !== value.input.endpoint.runtimeInstanceId
-    || value.scope.sessionKey !== value.input.sessionKey) {
+    || !sameSessionIdentity(value.scope.identity, value.input.identity)
+    || !sameSessionIdentity(value.scope.identity, value.target.identity)) {
     return false;
   }
   return true;
@@ -132,26 +124,22 @@ function isSessionAbortRequest(value: unknown): value is SessionAbortRequest {
 
 function isSessionScope(value: unknown): value is SessionAbortRequest['scope'] {
   return isRecord(value)
-    && hasExactKeys(value, ['kind', 'endpoint', 'sessionKey'])
+    && hasExactKeys(value, ['kind', 'identity'])
     && value.kind === 'session'
-    && isEndpoint(value.endpoint)
-    && typeof value.sessionKey === 'string'
-    && value.sessionKey.length > 0;
+    && isSessionIdentity(value.identity);
 }
 
 function isSessionAbortInput(value: unknown): value is SessionAbortRequest['input'] {
   return isRecord(value)
-    && Object.hasOwn(value, 'endpoint')
-    && Object.hasOwn(value, 'sessionKey')
-    && Object.keys(value).every((key) => ['endpoint', 'sessionKey', 'endpointSessionId', 'runId', 'approvalIds'].includes(key))
-    && isEndpoint(value.endpoint)
-    && isIdentity(value.sessionKey, MAX_SESSION_KEY_BYTES)
+    && Object.hasOwn(value, 'identity')
+    && Object.keys(value).every((key) => ['identity', 'endpointSessionId', 'runId', 'approvalIds'].includes(key))
+    && isSessionIdentity(value.identity)
     && (value.endpointSessionId === undefined
       || isIdentity(value.endpointSessionId, MAX_ENDPOINT_SESSION_ID_BYTES))
     && (value.runId === undefined || isIdentity(value.runId, MAX_RUN_ID_BYTES))
     && (value.approvalIds === undefined
       || (Array.isArray(value.approvalIds)
-        && value.approvalIds.length <= MAX_APPROVAL_IDS
+        && value.approvalIds.length > 0 && value.approvalIds.length <= MAX_APPROVAL_IDS
         && value.approvalIds.every(isApprovalId)));
 }
 
@@ -168,12 +156,4 @@ function isIdentity(value: unknown, maxBytes: number): value is string {
       const codePoint = character.codePointAt(0) ?? 0;
       return codePoint < 32 || (codePoint >= 127 && codePoint <= 159);
     });
-}
-
-function isEndpoint(value: unknown): value is Endpoint {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime'
-    && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
-    && value.runtimeInstanceId === 'local';
 }

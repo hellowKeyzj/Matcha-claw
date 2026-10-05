@@ -1,5 +1,3 @@
-mod research;
-
 use crate::{WikiFailure, domain::WikiGraphReceipt};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -7,30 +5,11 @@ use std::{
     path::Path,
 };
 
-pub(crate) use research::{parse_research_input, research_request};
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WikiGraphInsightInput {
     pub project_id: Option<String>,
     pub insight_key: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WikiGraphInsightResearchInput {
-    pub project_id: Option<String>,
-    pub insight_key: String,
-    pub model_ref: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WikiGraphInsightResearchReceipt {
-    pub project_id: String,
-    pub insight_key: String,
-    pub topic: String,
-    pub search_queries: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

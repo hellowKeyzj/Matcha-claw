@@ -3,6 +3,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useLayoutStore } from '@/stores/layout';
 import { useChatStore } from '@/stores/chat';
 import { isGatewayOperational } from '@/lib/gateway-status';
+import { buildSessionIdentityKey, sessionIdentitiesEqual, validateSessionIdentity, type SessionIdentity } from '@/types/desktop/runtime-address';
 import {
   clampChatSidePanelWidth,
   getDefaultChatSidePanelWidth,
@@ -16,6 +17,13 @@ export type ChatSidePanelTab = 'artifacts' | 'runtime';
 export const CHAT_RUNTIME_SURFACE_OPEN_EVENT = 'chat:open-runtime-surface';
 
 export type ChatRuntimeSurfaceDescriptor =
+  | {
+    readonly kind: 'team-graph';
+    readonly sourceSessionIdentity: SessionIdentity;
+    readonly teamId: string;
+    readonly runId: string;
+    readonly title?: string;
+  }
   | {
     readonly kind: 'browser-tab';
     readonly targetId: string;
@@ -49,10 +57,12 @@ export type ChatRuntimeSurfaceDescriptor =
     };
   };
 
-let chatRuntimeSurfaceSnapshot: ChatRuntimeSurfaceDescriptor | null = null;
+type SharedChatRuntimeSurface = Exclude<ChatRuntimeSurfaceDescriptor, { kind: 'team-graph' }>;
+
+let chatRuntimeSurfaceSnapshot: SharedChatRuntimeSurface | null = null;
 const chatRuntimeSurfaceListeners = new Set<() => void>();
 
-export function getChatRuntimeSurfaceSnapshot(): ChatRuntimeSurfaceDescriptor | null {
+export function getChatRuntimeSurfaceSnapshot(): SharedChatRuntimeSurface | null {
   return chatRuntimeSurfaceSnapshot;
 }
 
@@ -67,7 +77,7 @@ export function openChatRuntimeSurface(surface: ChatRuntimeSurfaceDescriptor): v
   window.dispatchEvent(new CustomEvent<ChatRuntimeSurfaceDescriptor>(CHAT_RUNTIME_SURFACE_OPEN_EVENT, { detail: surface }));
 }
 
-function publishChatRuntimeSurface(surface: ChatRuntimeSurfaceDescriptor): void {
+function publishChatRuntimeSurface(surface: SharedChatRuntimeSurface): void {
   chatRuntimeSurfaceSnapshot = surface;
   for (const listener of chatRuntimeSurfaceListeners) {
     listener();
@@ -93,7 +103,7 @@ function readStoredPanelState(): ChatSidePanelState {
   try {
     const storedTab = window.localStorage.getItem('chat:side-panel-tab');
     const storedLightWidth = Number(window.localStorage.getItem('chat:side-panel-light-width'));
-    const storedArtifactWidth = Number(window.localStorage.getItem('chat:side-panel-artifact-width'));
+    const storedArtifactWidth = Number(window.sessionStorage.getItem('chat:side-panel-artifact-width'));
     return {
       open: false,
       activeTab: isStoredSidePanelTab(storedTab) ? storedTab : 'artifacts',
@@ -121,6 +131,7 @@ function readContainerWidth(chatLayoutRef: RefObject<HTMLDivElement | null>): nu
 export function useChatSidePanelController(
   enabled: boolean,
   chatLayoutRef: RefObject<HTMLDivElement | null>,
+  sessionIdentity?: SessionIdentity,
 ) {
   const gatewayStatus = useGatewayStore((state) => state.status);
   const chatTakeoverMode = useLayoutStore((state) => state.chatTakeoverMode);
@@ -130,6 +141,17 @@ export function useChatSidePanelController(
   const loadSessions = useChatStore((state) => state.loadSessions);
   const resizeRafRef = useRef<number | null>(null);
   const [panelState, setPanelState] = useState<ChatSidePanelState>(() => readStoredPanelState());
+  const [selectedTeamGraphSurface, setTeamGraphSurface] = useState<Extract<ChatRuntimeSurfaceDescriptor, { kind: 'team-graph' }> | null>(null);
+  const sessionIdentityKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
+  const [selectedSessionIdentityKey, setSelectedSessionIdentityKey] = useState(sessionIdentityKey);
+  if (selectedSessionIdentityKey !== sessionIdentityKey) {
+    setSelectedSessionIdentityKey(sessionIdentityKey);
+    setTeamGraphSurface(null);
+  }
+  const teamGraphSurface = selectedTeamGraphSurface && sessionIdentity
+    && sessionIdentitiesEqual(selectedTeamGraphSurface.sourceSessionIdentity, sessionIdentity)
+    ? selectedTeamGraphSurface
+    : null;
   const [containerWidth, setContainerWidth] = useState<number>(() => (
     typeof window === 'undefined' ? 0 : window.innerWidth
   ));
@@ -157,7 +179,7 @@ export function useChatSidePanelController(
     try {
       window.localStorage.setItem('chat:side-panel-tab', panelState.activeTab);
       window.localStorage.setItem('chat:side-panel-light-width', String(panelState.lightWidth));
-      window.localStorage.setItem('chat:side-panel-artifact-width', String(panelState.artifactWidth));
+      window.sessionStorage.setItem('chat:side-panel-artifact-width', String(panelState.artifactWidth));
     } catch {
       // ignore localStorage errors
     }
@@ -172,10 +194,23 @@ export function useChatSidePanelController(
   useEffect(() => {
     const openRuntimeSurface = (event: Event) => {
       const surface = (event as CustomEvent<ChatRuntimeSurfaceDescriptor>).detail;
-      if (!surface || (surface.kind !== 'browser-tab' && surface.kind !== 'mcp-app')) {
+      if (!surface) {
         return;
       }
-      publishChatRuntimeSurface(surface);
+      if (surface.kind === 'team-graph') {
+        if (!enabled || !sessionIdentity || validateSessionIdentity(surface.sourceSessionIdentity)
+          || !sessionIdentitiesEqual(surface.sourceSessionIdentity, sessionIdentity)
+          || typeof surface.teamId !== 'string' || !surface.teamId.trim()
+          || typeof surface.runId !== 'string' || !surface.runId.trim()) {
+          return;
+        }
+        setTeamGraphSurface(surface);
+      } else if (surface.kind === 'browser-tab' || surface.kind === 'mcp-app') {
+        setTeamGraphSurface(null);
+        publishChatRuntimeSurface(surface);
+      } else {
+        return;
+      }
       setPanelState((prev) => ({
         ...prev,
         open: true,
@@ -187,7 +222,7 @@ export function useChatSidePanelController(
     return () => {
       window.removeEventListener(CHAT_RUNTIME_SURFACE_OPEN_EVENT, openRuntimeSurface);
     };
-  }, [clearChatTakeoverMode]);
+  }, [clearChatTakeoverMode, enabled, sessionIdentity]);
 
   useEffect(() => {
     if (!panelState.open || panelState.activeTab !== 'artifacts') {
@@ -324,6 +359,7 @@ export function useChatSidePanelController(
     sidePanelPreferredWidth: activePreferredWidth,
     sidePanelWidthPolicy: activeWidthPolicy,
     activeSidePanelTab: panelState.activeTab,
+    teamGraphSurface,
     artifactWorkbenchFullscreen,
     openSidePanel,
     setActiveSidePanelTab,

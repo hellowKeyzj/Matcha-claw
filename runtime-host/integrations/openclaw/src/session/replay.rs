@@ -210,7 +210,7 @@ impl fmt::Debug for SessionReplaySourceRow {
 #[derive(Clone, Eq, PartialEq)]
 pub struct CanonicalSessionReplay {
     session_key: SessionKey,
-    route_key: Option<String>,
+
     source_epoch: Option<u64>,
     ingress_results: Vec<CanonicalIngressResult>,
 }
@@ -220,9 +220,6 @@ impl CanonicalSessionReplay {
         &self.session_key
     }
 
-    pub fn route_key(&self) -> Option<&str> {
-        self.route_key.as_deref()
-    }
 
     pub const fn source_epoch(&self) -> Option<u64> {
         self.source_epoch
@@ -246,7 +243,7 @@ impl fmt::Debug for CanonicalSessionReplay {
         formatter
             .debug_struct("CanonicalSessionReplay")
             .field("has_session_key", &true)
-            .field("has_route_key", &self.route_key.is_some())
+
             .field("source_epoch", &self.source_epoch)
             .field("ingress_result_count", &self.ingress_results.len())
             .finish()
@@ -304,13 +301,13 @@ pub fn materialize_session_replay(
     session_key: SessionKey,
     events: impl IntoIterator<Item = SessionEventEnvelope>,
     source_epoch: Option<u64>,
-    route_key: Option<String>,
+
 ) -> Result<CanonicalSessionReplay, SessionReplayError> {
     materialize_session_replay_rows(
         session_key,
         events.into_iter().map(SessionReplaySourceRow::Event),
         source_epoch,
-        route_key,
+
     )
 }
 
@@ -318,7 +315,7 @@ pub fn materialize_session_replay_rows(
     session_key: SessionKey,
     rows: impl IntoIterator<Item = SessionReplaySourceRow>,
     source_epoch: Option<u64>,
-    route_key: Option<String>,
+
 ) -> Result<CanonicalSessionReplay, SessionReplayError> {
     let gateway_epoch = source_epoch
         .map(|epoch| {
@@ -331,17 +328,12 @@ pub fn materialize_session_replay_rows(
     for row in rows {
         match row {
             SessionReplaySourceRow::Event(event) => {
-                if let Some(result) = reducer.reduce(event, gateway_epoch, route_key.clone()) {
+                if let Some(result) = reducer.reduce(event, gateway_epoch) {
                     ingress_results.push(result);
                 }
             }
             SessionReplaySourceRow::TranscriptMessage(message) => {
-                let Some(result) = CanonicalIngressResult::from_transcript_message(
-                    session_key.clone(),
-                    source_epoch,
-                    route_key.clone(),
-                    message,
-                ) else {
+                let Some(result) = reducer.reduce_transcript_message(message, source_epoch) else {
                     continue;
                 };
                 ingress_results.push(result);
@@ -350,7 +342,7 @@ pub fn materialize_session_replay_rows(
                 ingress_results.push(reducer.recover_replay(
                     source_epoch,
                     source_sequence,
-                    route_key.clone(),
+
                 ));
             }
         }
@@ -358,7 +350,7 @@ pub fn materialize_session_replay_rows(
 
     Ok(CanonicalSessionReplay {
         session_key,
-        route_key,
+
         source_epoch,
         ingress_results,
     })

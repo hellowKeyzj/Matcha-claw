@@ -1,9 +1,7 @@
-use super::state::{RunPhase, SessionProvider, SessionSourceBinding};
+use super::state::{RunPhase, SessionSourceBinding};
 
 pub struct SessionRunTerminalSnapshot {
-    pub provider: SessionProvider,
-    pub session_key: String,
-    pub route_key: Option<String>,
+    pub identity: crate::state::SessionIdentity,
     pub source_binding: SessionSourceBinding,
     pub native_run_id: String,
     pub delivery_context: Option<super::state::SessionDeliveryContext>,

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { safeRmSync } from './lib/safe-delete.mjs';
 import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
 
-const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string']);
+const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string']);
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -938,6 +938,23 @@ async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) 
   );
     changed = true;
   }
+  const sourceSelectionPatch = replaceOptionalOnce(
+    source,
+    `function matchaSealedAgentPackageKeys(dir) {
+  let entries;`,
+    `function matchaSealedAgentPackageKeys(dir) {
+  try {
+    const agentsStat = fs.lstatSync(path.join(dir, DEFAULT_AGENTS_FILENAME));
+    if (!agentsStat.isFile() || agentsStat.isSymbolicLink()) throw new Error("Invalid agent source: AGENTS.md must be a regular, non-symlink file");
+    return [];
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  let entries;`,
+    patchId,
+  );
+  source = sourceSelectionPatch.source;
+  changed ||= sourceSelectionPatch.changed;
   const signaturePatch = replaceOptionalOnce(
     source,
     'async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) {',
@@ -1152,6 +1169,35 @@ function patchOpencodeGoSessionHeader(openclawDir) {
   for (const [file, , after] of changed) writeText(file, after);
   return changed.length > 0
     ? { status: 'applied', detail: changed.map(([file]) => path.basename(file)).join(', ') }
+    : { status: 'clean', detail: 'already patched' };
+}
+
+function patchMatchaMcpSessionServerId(openclawDir) {
+  const patchId = 'matcha-mcp-session-server-id';
+  const filePath = locateSingleJavaScriptFile(path.join(openclawDir, 'dist'), patchId, {
+    fileNamePrefix: 'store-writer-state-',
+    markers: [
+      'function projectCanonicalSessionEntryShape(value) {',
+      'const icon = typeof canonicalValue.icon',
+      'function normalizePersistedSessionEntryShape(value, options = {})',
+    ],
+  });
+  const source = readText(filePath);
+  const needle = '\tconst icon = typeof canonicalValue.icon';
+  const replacement = `\tconst serverOverrides = canonicalValue.toolOverrides?.mcpServers;
+\tif (serverOverrides && Object.hasOwn(serverOverrides, "matcha-teamrun")) {
+\t\tconst mcpServers = { ...serverOverrides };
+\t\tif (!Object.hasOwn(mcpServers, "matcha")) mcpServers.matcha = mcpServers["matcha-teamrun"];
+\t\tdelete mcpServers["matcha-teamrun"];
+\t\tcanonicalValue.toolOverrides = { ...canonicalValue.toolOverrides, mcpServers };
+\t}
+${needle}`;
+  const patch = source.includes(replacement)
+    ? { source, changed: false }
+    : { source: replaceOnce(source, needle, replacement, patchId), changed: true };
+  if (patch.changed) writeText(filePath, patch.source);
+  return patch.changed
+    ? { status: 'applied', detail: path.basename(filePath) }
     : { status: 'clean', detail: 'already patched' };
 }
 
@@ -2330,6 +2376,10 @@ const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'opencode-go-session-header',
     apply: patchOpencodeGoSessionHeader,
+  },
+  {
+    id: 'matcha-mcp-session-server-id',
+    apply: patchMatchaMcpSessionServerId,
   },
   {
     id: 'mcp-server-status-method',

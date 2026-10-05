@@ -37,6 +37,7 @@ enum State {
         live: Vec<EventEnvelope>,
         closed: bool,
     },
+    Raw(SessionId),
     Active(SessionEventCursor),
     Recovery(SessionEventCursor),
     Closed(Option<Sequence>),
@@ -216,14 +217,26 @@ async fn settle(
         *state = State::Recovery(cursor);
         return Err(IngressError::MismatchedSession);
     }
+    if subscription && updates.is_none() {
+        for event in live {
+            if event.session_id != session_id {
+                *state = State::Recovery(cursor);
+                return Err(IngressError::MismatchedSession);
+            }
+            let _ = raw_events.send(RawEvent::Envelope(event));
+        }
+        *state = if closed { State::Closed(None) } else { State::Raw(session_id) };
+        return Ok(EventReplayPayload::new(EventReplay::new(0, cursor.sequence()), Vec::new()));
+    }
     if let Some(confirmed_cursor) = confirmed_cursor {
         if confirmed_cursor.get() < cursor.sequence().get() {
             *state = State::Recovery(cursor);
             return Err(IngressError::MismatchedSession);
         }
-        cursor = SessionEventCursor::resume_after(session_id.clone(), confirmed_cursor);
+        // Subscribe acknowledges the producer head; it consumed no historical events.
     }
     let event_count = replayed.len();
+    let replay_cursor = replayed.last().map(|event| event.seq).unwrap_or(cursor.sequence());
     for event in &replayed {
         if let Err(error) = apply(&mut cursor, event.clone(), updates).await {
             let _ = raw_events.send(RawEvent::Overflow);
@@ -249,7 +262,7 @@ async fn settle(
         let _ = raw_events.send(RawEvent::Envelope(event));
     }
     let result =
-        EventReplayPayload::new(EventReplay::new(event_count, cursor.sequence()), replayed);
+        EventReplayPayload::new(EventReplay::new(event_count, replay_cursor), replayed);
     *state = if closed {
         State::Closed(Some(cursor.sequence()))
     } else if restore_subscription {
@@ -293,6 +306,10 @@ async fn observe(
 ) {
     let previous = std::mem::replace(state, State::Idle);
     *state = match previous {
+        State::Raw(session_id) if event.session_id == session_id => {
+            let _ = raw_events.send(RawEvent::Envelope(event));
+            State::Raw(session_id)
+        }
         State::Active(mut cursor) => match apply(&mut cursor, event.clone(), updates).await {
             Ok(()) => {
                 let _ = raw_events.send(RawEvent::Envelope(event));
@@ -318,7 +335,7 @@ async fn close(state: &mut State, updates: Option<&mpsc::Sender<SessionEventUpda
     }
     let previous = std::mem::replace(state, State::Idle);
     let cursor = match &previous {
-        State::Idle => None,
+        State::Idle | State::Raw(_) => None,
         State::Pending { cursor, .. } | State::Active(cursor) | State::Recovery(cursor) => {
             Some(cursor.sequence())
         }

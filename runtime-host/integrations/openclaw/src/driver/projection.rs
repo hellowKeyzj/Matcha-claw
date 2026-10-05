@@ -13,27 +13,26 @@ use sessions_module::{
         ApprovalPhase, ApprovalView, ItemStatus, RecoveryReason, RunPhase, RunProgress,
         RunStartupPhase, RuntimeActivity, RuntimeErrorDetail, RuntimeErrorKind, RuntimeNotice,
         RuntimeNoticeKind, RuntimeView, SessionChange, SessionContent, SessionEventBinding,
-        SessionIdentity, SessionItem, SessionProvider, ToolPhase, ToolView,
+        SessionItem, ToolPhase, ToolView,
     },
 };
 
 pub fn openclaw_session_event(
     ingress: &crate::port::CanonicalIngressResult,
+    binding: SessionEventBinding,
 ) -> Option<SessionIngressEvent> {
     match ingress {
         crate::port::CanonicalIngressResult::Produced(delta) => {
             let session_key = delta.session_key().as_str().to_owned();
-            let binding = SessionEventBinding::new(
-                session_key.clone(),
-                delta.route_key().map(str::to_owned),
-                delta.source_epoch(),
-            )?;
-            let identity = SessionIdentity::new(session_key, SessionProvider::OpenClaw, None)?;
+            if binding.session_key() != session_key || binding.source_epoch() != delta.source_epoch() {
+                return None;
+            }
+            let identity = binding.identity().clone();
             Some(SessionIngressEvent::new(
                 identity,
                 SessionEvent {
                     binding,
-                    run_id: delta.run_id().map(|id| id.as_str().to_owned()),
+                    run_id: None,
                     cursor: delta.source_cursor(),
                     changes: openclaw_canonical_changes(delta.changes()),
                 },
@@ -41,12 +40,10 @@ pub fn openclaw_session_event(
         }
         crate::port::CanonicalIngressResult::Unknown { provenance } => {
             let session_key = provenance.session_key().as_str().to_owned();
-            let binding = SessionEventBinding::new(
-                session_key.clone(),
-                provenance.route_key().map(str::to_owned),
-                provenance.source_epoch(),
-            )?;
-            let identity = SessionIdentity::new(session_key, SessionProvider::OpenClaw, None)?;
+            if binding.session_key() != session_key || binding.source_epoch() != provenance.source_epoch() {
+                return None;
+            }
+            let identity = binding.identity().clone();
             Some(SessionIngressEvent::new(
                 identity,
                 SessionEvent {
@@ -310,6 +307,11 @@ pub fn openclaw_canonical_changes(changes: &[CanonicalSessionChange]) -> Vec<Ses
                             RecoveryReason::NativeUnknown
                         }
                     },
+                });
+            }
+            CanonicalSessionChange::ItemsReplaced { old_item_ids, anchor, items } => {
+                projected.push(SessionChange::ItemsReplaced {
+                    old_item_ids: old_item_ids.clone(), anchor: anchor.clone(), items: items.clone(),
                 });
             }
             CanonicalSessionChange::TranscriptMessage { .. } => {}

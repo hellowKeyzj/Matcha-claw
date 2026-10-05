@@ -109,6 +109,13 @@ impl OpenClawDriver {
         self.gateway.lock().await.mcp_app_request(request).await
     }
 
+    pub async fn question_list(
+        &self,
+        request: crate::gateway::request::OpenClawQuestionListGatewayRequest,
+    ) -> crate::port::OpenClawGatewayRequestOutcome {
+        self.gateway.lock().await.question_list(request).await
+    }
+
     pub async fn question_resolve(
         &self,
         request: crate::gateway::request::OpenClawQuestionResolveGatewayRequest,

@@ -1,15 +1,18 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    time::Instant,
 };
 
 use foundation::execution::OwnedTask;
 use platform::{
     call::{CallContext, CallDetail, CallReceipt, CallRecorder, CallStatus},
     loopback::{Request, Response},
+    trace::{identifier_hash, session_trace, with_session_trace},
 };
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -22,6 +25,7 @@ pub(crate) struct CallScope {
     context: CallContext<OrganizationCallDetail>,
     detail: Arc<Mutex<OrganizationCallDetail>>,
     terminal_in_owner: bool,
+    provision_progress_enabled: bool,
     finished: Arc<AtomicBool>,
     workflow_owned: Arc<AtomicBool>,
     state: Arc<Mutex<CallStatus>>,
@@ -40,18 +44,30 @@ impl<T> CallReply<T> {
 }
 
 impl<T> CallReply<T> {
+    pub(crate) fn trace_id(&self) -> Option<String> {
+        self.call.as_ref().map(CallScope::trace_id)
+    }
+
+    pub(crate) fn provision_observer(&self) -> Option<crate::TeamProvisionObserver> {
+        let call = self.call.as_ref().filter(|call| call.provision_progress_enabled)?;
+        Some(Arc::new(call.clone()))
+    }
+
     pub(crate) async fn running(&self) -> bool {
-        match &self.call {
-            Some(call) => {
-                if call.running().await {
-                    true
-                } else {
-                    call.finish(true).await;
-                    false
+        with_session_trace(self.trace_id(), async {
+            match &self.call {
+                Some(call) => {
+                    if call.running().await {
+                        true
+                    } else {
+                        call.finish(true).await;
+                        false
+                    }
                 }
+                None => true,
             }
-            None => true,
-        }
+        })
+        .await
     }
 
     pub(crate) async fn materialization(
@@ -125,20 +141,32 @@ impl<T> CallReply<T> {
     where
         T: outcome::AuditOutcome,
     {
-        if let Some(call) = &self.call {
-            let mut detail = call.detail.lock().await;
-            value.summarize(&mut detail);
-            if call.terminal_in_owner {
-                if call.context.finish(detail.status(), &detail).await.is_ok() {
-                    call.finished.store(true, Ordering::Release);
-                } else {
+        with_session_trace(self.trace_id(), async {
+            if let Some(call) = &self.call {
+                let mut detail = call.detail.lock().await;
+                value.summarize(&mut detail);
+                if call.terminal_in_owner {
+                    if call.context.finish(detail.status(), &detail).await.is_ok() {
+                        call.finished.store(true, Ordering::Release);
+                        session_trace(
+                            "runtime.team.call.terminal",
+                            json!({"status": detail.status()}),
+                        );
+                    } else {
+                        audit_failure();
+                    }
+                } else if call.context.update(&detail).await.is_err() {
                     audit_failure();
                 }
-            } else if call.context.update(&detail).await.is_err() {
-                audit_failure();
             }
-        }
-        self.sender.send(value)
+            let sent = self.sender.send(value);
+            session_trace(
+                "runtime.team.owner.reply",
+                json!({"reason": if sent.is_ok() { "sent" } else { "receiver_closed" }}),
+            );
+            sent
+        })
+        .await
     }
 }
 
@@ -161,6 +189,8 @@ pub struct OrganizationCallDetail {
 struct ProvisionSummary {
     native_installed: Option<bool>,
     commit: Option<ProvisionCommit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress: Option<crate::TeamProvisionProgress>,
 }
 
 #[derive(Clone, Serialize)]
@@ -287,49 +317,63 @@ impl CallWorkflows {
                 };
                 match workflow {
                     Some(CallWorkflow::Team { owner, request }) => {
-                        let failed = if owner.call_running().await {
-                            match request {
-                                TeamWorkflow::Skill(request) => {
-                                    matches!(
-                                        loopback::skill::dispatch(&owner, request).await,
-                                        loopback::skill::Delivery::Unavailable
-                                    )
-                                }
-                                TeamWorkflow::Manual(request) => {
-                                    let outcome = loopback::manual::dispatch(&owner, request).await;
-                                    if matches!(outcome, loopback::manual::Delivery::Rejected) {
-                                        owner
-                                            .summarize_call(&crate::TeamRuntimeStatus::Rejected)
-                                            .await;
+                        with_session_trace(owner.call_trace_id(), async {
+                            session_trace("runtime.team.workflow.start", json!({}));
+                            let failed = if owner.call_running().await {
+                                match request {
+                                    TeamWorkflow::Skill(request) => {
+                                        matches!(
+                                            loopback::skill::dispatch(&owner, request).await,
+                                            loopback::skill::Delivery::Unavailable
+                                        )
                                     }
-                                    matches!(outcome, loopback::manual::Delivery::Unavailable)
+                                    TeamWorkflow::Manual(request) => {
+                                        let outcome =
+                                            loopback::manual::dispatch(&owner, request).await;
+                                        if matches!(outcome, loopback::manual::Delivery::Rejected) {
+                                            owner
+                                                .summarize_call(&crate::TeamRuntimeStatus::Rejected)
+                                                .await;
+                                        }
+                                        matches!(outcome, loopback::manual::Delivery::Unavailable)
+                                    }
+                                    TeamWorkflow::RunDelete {
+                                        run_id,
+                                        idempotency_key,
+                                        observed_at,
+                                    } => owner
+                                        .run_delete_and_purge(run_id, idempotency_key, observed_at)
+                                        .await
+                                        .is_err(),
                                 }
-                                TeamWorkflow::RunDelete {
-                                    run_id,
-                                    idempotency_key,
-                                    observed_at,
-                                } => owner
-                                    .run_delete_and_purge(run_id, idempotency_key, observed_at)
-                                    .await
-                                    .is_err(),
-                            }
-                        } else {
-                            true
-                        };
-                        owner.finish_workflow(failed).await;
+                            } else {
+                                true
+                            };
+                            owner.finish_workflow(failed).await;
+                            session_trace("runtime.team.workflow.end", json!({}));
+                        })
+                        .await;
                     }
                     Some(CallWorkflow::Runtime {
                         owner,
                         command,
                         reply,
                     }) => {
-                        let outcome = if owner.call_running().await {
-                            owner.execute_team_runtime_inline(command).await
-                        } else {
-                            Err(crate::owner::handle::closed_error())
-                        };
-                        owner.finish_workflow(outcome.is_err()).await;
-                        let _ = reply.send(outcome);
+                        with_session_trace(owner.call_trace_id(), async {
+                            session_trace("runtime.team.workflow.start", json!({}));
+                            let outcome = if owner.call_running().await {
+                                owner.execute_team_runtime_inline(command).await
+                            } else {
+                                Err(crate::owner::handle::closed_error())
+                            };
+                            owner.finish_workflow(outcome.is_err()).await;
+                            session_trace(
+                                "runtime.team.workflow.reply",
+                                json!({"sent": reply.send(outcome).is_ok()}),
+                            );
+                            session_trace("runtime.team.workflow.end", json!({}));
+                        })
+                        .await;
                     }
                     Some(CallWorkflow::Graph {
                         owner,
@@ -351,17 +395,25 @@ impl CallWorkflows {
                         resolver,
                         reply,
                     }) => {
-                        let outcome = if owner.call_running().await {
-                            owner
-                                .execute_runtime_capability_inline(resolver.as_ref(), request)
-                                .await
-                        } else {
-                            Err(crate::TeamRuntimeDecodeError::Unavailable)
-                        };
-                        owner.finish_workflow(outcome.is_err()).await;
-                        if let Some(reply) = reply {
-                            let _ = reply.send(outcome);
-                        }
+                        with_session_trace(owner.call_trace_id(), async {
+                            session_trace("runtime.team.workflow.start", json!({}));
+                            let outcome = if owner.call_running().await {
+                                owner
+                                    .execute_runtime_capability_inline(resolver, request)
+                                    .await
+                            } else {
+                                Err(crate::TeamRuntimeDecodeError::Unavailable)
+                            };
+                            owner.finish_workflow(outcome.is_err()).await;
+                            if let Some(reply) = reply {
+                                session_trace(
+                                    "runtime.team.workflow.reply",
+                                    json!({"sent": reply.send(outcome).is_ok()}),
+                                );
+                            }
+                            session_trace("runtime.team.workflow.end", json!({}));
+                        })
+                        .await;
                     }
                     None => break,
                 }
@@ -387,7 +439,14 @@ impl CallWorkflows {
                 command,
                 reply,
             })
-            .map_err(|_| crate::owner::handle::closed_error())?;
+            .map_err(|_| {
+                session_trace(
+                    "runtime.team.workflow.enqueue",
+                    json!({"reason": "admission_closed"}),
+                );
+                crate::owner::handle::closed_error()
+            })?;
+        session_trace("runtime.team.workflow.enqueue", json!({"reason": "queued"}));
         owner.call_admitted().await;
         outcome
             .await
@@ -436,7 +495,14 @@ impl CallWorkflows {
                 resolver,
                 reply: Some(reply),
             })
-            .map_err(|_| crate::TeamRuntimeDecodeError::Unavailable)?;
+            .map_err(|_| {
+                session_trace(
+                    "runtime.team.workflow.enqueue",
+                    json!({"reason": "admission_closed"}),
+                );
+                crate::TeamRuntimeDecodeError::Unavailable
+            })?;
+        session_trace("runtime.team.workflow.enqueue", json!({"reason": "queued"}));
         owner.call_admitted().await;
         outcome
             .await
@@ -471,18 +537,28 @@ impl CallWorkflows {
         workflow: CallWorkflow,
     ) -> Result<CallReceipt, crate::TeamRuntimeDecodeError> {
         let mut state = call.state.lock().await;
-        self.sender
-            .try_send(workflow)
-            .map_err(|_| crate::TeamRuntimeDecodeError::Unavailable)?;
+        self.sender.try_send(workflow).map_err(|_| {
+            session_trace(
+                "runtime.team.workflow.enqueue",
+                json!({"reason": "admission_closed"}),
+            );
+            crate::TeamRuntimeDecodeError::Unavailable
+        })?;
+        session_trace("runtime.team.workflow.enqueue", json!({"reason": "queued"}));
         call.workflow_owned.store(true, Ordering::Release);
         match call.context.accepted().await {
             Ok(receipt) => {
                 *state = CallStatus::Accepted;
+                session_trace("runtime.team.call.admission", json!({"reason": "accepted"}));
                 Ok(receipt)
             }
             Err(_) => {
                 audit_failure();
                 *state = CallStatus::Failed;
+                session_trace(
+                    "runtime.team.call.admission",
+                    json!({"reason": "audit_failed"}),
+                );
                 Err(crate::TeamRuntimeDecodeError::Unavailable)
             }
         }
@@ -506,6 +582,12 @@ impl CallWorkflows {
             context: context.clone(),
             detail: Arc::new(Mutex::new(detail.clone())),
             terminal_in_owner: single_stage(&request, runtime_route),
+            provision_progress_enabled: runtime_route
+                && serde_json::from_slice::<Value>(&request.body).ok().is_some_and(|body| {
+                    body.get("operationId").and_then(Value::as_str) == Some("team.provisionAgents")
+                        && body.get("input").and_then(|input| input.get("sourceType"))
+                            .and_then(Value::as_str) == Some("manual")
+                }),
             finished: Arc::new(AtomicBool::new(false)),
             workflow_owned: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(CallStatus::Received)),
@@ -514,20 +596,40 @@ impl CallWorkflows {
         if let Some(scope) = &scope {
             dependencies = dependencies.with_call(scope.clone());
         }
-        let response = if runtime_route {
-            loopback::dispatch_team_runtime(dependencies, request).await
-        } else {
-            loopback::dispatch_team(dependencies, request).await
-        };
-        if let (Some(context), Some(scope)) = (context, scope) {
-            detail = scope.detail.lock().await.clone();
-            if !scope.finished.load(Ordering::Acquire)
-                && !scope.workflow_owned.load(Ordering::Acquire)
-            {
-                finish(&context, &mut detail, &response).await;
+        let trace_id = scope.as_ref().map(CallScope::trace_id);
+        with_session_trace(trace_id, async {
+            let started = Instant::now();
+            let request_trace_hash = serde_json::from_slice::<Value>(&request.body)
+                .ok()
+                .and_then(|body| {
+                    body.get("traceId")
+                        .and_then(Value::as_str)
+                        .map(identifier_hash)
+                });
+            session_trace(
+                "runtime.team.call.received",
+                json!({"requestTraceIdHash": request_trace_hash}),
+            );
+            let response = if runtime_route {
+                loopback::dispatch_team_runtime(dependencies, request).await
+            } else {
+                loopback::dispatch_team(dependencies, request).await
+            };
+            if let (Some(context), Some(scope)) = (context, scope) {
+                detail = scope.detail.lock().await.clone();
+                if !scope.finished.load(Ordering::Acquire)
+                    && !scope.workflow_owned.load(Ordering::Acquire)
+                {
+                    finish(&context, &mut detail, &response).await;
+                }
             }
-        }
-        response
+            session_trace(
+                "runtime.team.call.response",
+                json!({"status": response.status(), "elapsedMs": started.elapsed().as_millis()}),
+            );
+            response
+        })
+        .await
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -542,6 +644,18 @@ impl CallWorkflows {
 }
 
 impl CallScope {
+    pub(crate) fn trace_id(&self) -> String {
+        let id = self.context.id().as_str();
+        format!(
+            "session-trace:team-call:{}-{}-{}-{}-{}",
+            &id[..8],
+            &id[8..12],
+            &id[12..16],
+            &id[16..20],
+            &id[20..]
+        )
+    }
+
     pub(crate) async fn references(
         &self,
         team: Option<&str>,
@@ -576,6 +690,7 @@ impl CallScope {
         if *state == CallStatus::Received {
             if self.context.accepted().await.is_ok() {
                 *state = CallStatus::Accepted;
+                session_trace("runtime.team.call.admission", json!({"reason": "accepted"}));
             } else {
                 audit_failure();
                 *state = CallStatus::Failed;
@@ -589,6 +704,7 @@ impl CallScope {
         if *state == CallStatus::Accepted {
             if self.context.running().await.is_ok() {
                 *state = CallStatus::Running;
+                session_trace("runtime.team.call.running", json!({"reason": "running"}));
             } else {
                 audit_failure();
                 *state = CallStatus::Failed;
@@ -616,9 +732,60 @@ impl CallScope {
         }
         if self.context.finish(detail.status(), &detail).await.is_ok() {
             self.finished.store(true, Ordering::Release);
+            session_trace(
+                "runtime.team.call.terminal",
+                json!({"status": detail.status()}),
+            );
         } else {
             audit_failure();
         }
+    }
+}
+
+impl crate::TeamProvisionReporter for CallScope {
+    fn report(
+        &self,
+        update: crate::TeamProvisionUpdate,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let mut detail = self.detail.lock().await;
+            if self.finished.load(Ordering::Acquire) {
+                return;
+            }
+            let Some(provision) = &mut detail.provision else {
+                return;
+            };
+            match update {
+                crate::TeamProvisionUpdate::Started(progress) => {
+                    if provision.progress.as_ref() == Some(&progress) {
+                        return;
+                    }
+                    provision.progress = Some(progress);
+                }
+                crate::TeamProvisionUpdate::Stage(stage) => {
+                    let Some(progress) = &mut provision.progress else {
+                        return;
+                    };
+                    if progress.stage == stage {
+                        return;
+                    }
+                    progress.stage = stage;
+                }
+                crate::TeamProvisionUpdate::Member { index, status } => {
+                    let Some(member) = provision.progress.as_mut()
+                        .and_then(|progress| progress.members.get_mut(index)) else {
+                        return;
+                    };
+                    if *member == status {
+                        return;
+                    }
+                    *member = status;
+                }
+            }
+            if self.context.update(&detail).await.is_err() {
+                audit_failure();
+            }
+        })
     }
 }
 
@@ -650,10 +817,16 @@ async fn finish(
     };
     if context.finish(status, detail).await.is_err() {
         audit_failure();
+    } else {
+        session_trace("runtime.team.call.terminal", json!({"status": status}));
     }
 }
 
 fn audit_failure() {
+    session_trace(
+        "runtime.team.call.audit",
+        json!({"reason": "persistence_failed"}),
+    );
     eprintln!("Organization call audit persistence failed");
 }
 

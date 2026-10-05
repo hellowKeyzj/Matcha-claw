@@ -66,10 +66,11 @@ import { isSessionOwnership } from '../../types/desktop/session-ownership';
 import { useComposerDraftStore } from '../composer-drafts';
 import { isSessionRuntimeEndpointStarting, useRuntimeEndpointsStore } from '../runtime-endpoints';
 import type { StoreHistoryCache } from './history-cache';
-import type {
-  AgentScope,
-  RuntimeEndpointRef,
-  SessionIdentity,
+import {
+  sessionIdentitiesEqual,
+  type AgentScope,
+  type RuntimeEndpointRef,
+  type SessionIdentity,
 } from '../../types/desktop/runtime-address';
 import type {
   ChatCurrentConversation,
@@ -248,6 +249,11 @@ function normalizeCatalogSession(session: ChatSession): ChatSession | null {
 }
 
 async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarget): Promise<SessionCatalogLoadResult> {
+  const traceId = createSessionTraceId('session.catalog.endpoint');
+  const endpoint = traceId ? summarizeEndpoint(target.defaultSessionPromptScope.endpoint) : null;
+  if (traceId) logSessionTrace('session.catalog.endpoint.request', traceId, { endpoint, status: 'started' });
+  const startedAt = traceId ? performance.now() : 0;
+  let requestElapsedMs: number | null = null;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   try {
     const timeout = new Promise<never>((_resolve, reject) => {
@@ -256,15 +262,16 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
     const data = await Promise.race([
       hostSessionList(
         { endpoint: target.defaultSessionPromptScope.endpoint },
-        { timeoutMs: SESSION_CATALOG_ENDPOINT_TIMEOUT_MS },
+        { timeoutMs: SESSION_CATALOG_ENDPOINT_TIMEOUT_MS, traceId },
       ),
       timeout,
     ]);
+    requestElapsedMs = traceId ? performance.now() - startedAt : null;
     const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
     if (rawSessions.some((session) => session.ownership !== null && !isSessionOwnership(session.ownership))) {
       throw new Error('Invalid session catalog ownership');
     }
-    return {
+    const result: SessionCatalogLoadResult = {
       target,
       sessions: rawSessions.map((session) => normalizeCatalogSession({
         key: session.key || '',
@@ -290,7 +297,17 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
       ready: data.ready !== false,
       error: typeof data.error === 'string' ? data.error : null,
     };
+    if (traceId) logSessionTrace('session.catalog.endpoint.response', traceId, {
+      endpoint, status: result.ready ? 'ready' : 'not-ready', requestElapsedMs,
+      elapsedMs: performance.now() - startedAt, rawCount: rawSessions.length, count: result.sessions.length,
+      error: summarizeIdentifier(result.error),
+    });
+    return result;
   } catch (error) {
+    if (traceId) logSessionTrace('session.catalog.endpoint.response', traceId, {
+      endpoint, status: 'error', elapsedMs: performance.now() - startedAt,
+      requestElapsedMs: requestElapsedMs ?? performance.now() - startedAt, count: 0, ...summarizeError(error),
+    });
     return {
       target,
       sessions: [],
@@ -573,6 +590,7 @@ async function requestSessionLifecycleView(
       sessionIdentity: target.sessionIdentity,
       limit: 200,
     }, { traceId }));
+    if (!sessionIdentitiesEqual(view.identity, target.sessionIdentity)) throw new Error('Session view identity mismatch');
     logSessionTrace('session.lifecycle.response', traceId, {
       sessionKey: summarizeIdentifier(view.sessionKey),
       identity: summarizeSessionIdentity(view.identity),
@@ -599,6 +617,7 @@ function applyBackendSessionView(
   if (result.status === 'unavailable' || result.status === 'epoch-mismatch') {
     throw new Error('Session view is unavailable');
   }
+  if (result.status !== 'applied' && result.status !== 'duplicate') return;
   input.set((state) => {
     const loadedSessions = patchSessionMeta(state, input.sessionKey, { historyStatus: 'ready' });
     return {
@@ -659,7 +678,16 @@ async function executeLoadSessionsNow(
     sessionCatalogStatus: createLoadingResourceStatusState(previousResource),
   });
   const targets = readSessionRuntimeTargets(stateBeforeLoad);
+  const traceId = createSessionTraceId('session.catalog.load');
+  if (traceId) logSessionTrace('session.catalog.request', traceId, {
+    requestSequence, endpointCount: targets.length, status: 'started',
+    selectedEndpoint: summarizeEndpoint(currentConversationBeforeLoad?.endpoint),
+  });
+  const startedAt = traceId ? performance.now() : 0;
   if (targets.length === 0) {
+    if (traceId) logSessionTrace('session.catalog.response', traceId, {
+      requestSequence, elapsedMs: performance.now() - startedAt, status: 'runtime-not-ready', endpointCount: 0, count: 0,
+    });
     if (sessionCatalogLoadSequence !== requestSequence) {
       return;
     }
@@ -674,6 +702,12 @@ async function executeLoadSessionsNow(
     SESSION_CATALOG_LIST_CONCURRENCY,
     loadEndpointSessionCatalog,
   );
+  if (traceId) logSessionTrace('session.catalog.response', traceId, {
+    requestSequence, elapsedMs: performance.now() - startedAt,
+    status: sessionCatalogLoadSequence !== requestSequence ? 'superseded' : results.every((result) => result.ready) ? 'ready' : 'partial-or-unavailable',
+    endpointCount: results.length, readyEndpointCount: results.filter((result) => result.ready).length,
+    count: results.reduce((count, result) => count + result.sessions.length, 0),
+  });
   if (sessionCatalogLoadSequence !== requestSequence) {
     return;
   }
@@ -794,7 +828,8 @@ async function executeLoadSessionsNow(
         agentId: normalizeCatalogString(session.agentId) ?? currentMeta.agentId,
         protocolId: normalizeCatalogString(session.protocolId) ?? currentMeta.protocolId,
         runtimeEndpointId: normalizeCatalogString(session.runtimeEndpointId) ?? currentMeta.runtimeEndpointId,
-        sessionIdentity: session.sessionIdentity,
+        sessionIdentity: currentMeta.sessionIdentity && sessionIdentitiesEqual(currentMeta.sessionIdentity, session.sessionIdentity)
+          ? currentMeta.sessionIdentity : session.sessionIdentity,
         ownership: session.ownership,
         kind: session.kind ?? currentMeta.kind,
         preferred: session.preferred ?? currentMeta.preferred,
@@ -949,7 +984,8 @@ export function executeOpenSessionIdentity(
       endpointSessionId: endpointSessionId ?? currentMeta.endpointSessionId,
       runtimeScopeKey: buildRuntimeScopeKey(identity.endpoint),
       agentId: identity.agentId,
-      sessionIdentity: identity,
+      sessionIdentity: currentMeta.sessionIdentity && sessionIdentitiesEqual(currentMeta.sessionIdentity, identity)
+        ? currentMeta.sessionIdentity : identity,
       kind: currentMeta.kind ?? 'session',
       preferred: currentMeta.preferred,
       historyStatus: existing ? currentMeta.historyStatus : 'loading',
@@ -978,6 +1014,7 @@ export function executeOpenSessionIdentity(
     get().switchSession(recordKey, traceId);
     return;
   }
+  if (identity.endpoint.kind === 'native-runtime' && identity.endpoint.runtimeAdapterId === 'openclaw') return;
   void get().loadHistory({
     sessionKey: recordKey,
     mode: 'active',
@@ -1048,6 +1085,12 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   const traceId = inheritedTraceId ?? createSessionTraceId('switch-session');
   const currentState = get();
   const requestedRecord = currentState.loadedSessions[key];
+  const requestedIdentity = requestedRecord?.meta.sessionIdentity;
+  const pendingTurnKey = requestedRecord?.runtime.pendingTurnKey;
+  const isCurrent = () => get().currentSessionKey === key
+    && get().loadedSessions[key]?.meta.sessionIdentity === requestedIdentity
+    && (!get().loadedSessions[key]?.runtime.pendingTurnKey
+      || get().loadedSessions[key]?.runtime.pendingTurnKey === pendingTurnKey);
   logSessionTrace('switch-session.request', traceId, {
     requestedSessionKey: summarizeIdentifier(key),
     currentSessionKey: summarizeIdentifier(currentState.currentSessionKey),
@@ -1063,6 +1106,10 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
         currentConversation: buildCurrentConversationForSessionKey(stateValue.loadedSessions, key),
       }));
     }
+    if (requestedIdentity?.endpoint.kind === 'native-runtime' && requestedIdentity.endpoint.runtimeAdapterId === 'openclaw') {
+      void get().loadHistory({ sessionKey: key, mode: 'active', scope: 'foreground', reason: 'same_session_refresh', traceId });
+      return;
+    }
     void (async () => {
       try {
         const target = resolveOperationTarget(get(), key);
@@ -1072,7 +1119,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
           sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
         });
         const result = await requestSessionLifecycleView(target, traceId);
-        if (get().currentSessionKey !== key) {
+        if (!isCurrent()) {
           logSessionTrace('switch-session.lifecycle-stale', traceId, {
             requestedSessionKey: summarizeIdentifier(key),
             currentSessionKey: summarizeIdentifier(get().currentSessionKey),
@@ -1090,6 +1137,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
           targetRecord: summarizeSwitchSessionRecord(resolveSessionRecord(get().loadedSessions[key])),
         });
       } catch (error) {
+        if (!isCurrent()) return;
         const starting = isSessionEndpointStarting(get(), key);
         logSessionTrace('switch-session.lifecycle-error', traceId, {
           requestedSessionKey: summarizeIdentifier(key),
@@ -1165,6 +1213,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   });
 
   resumeActiveStoreSend({ set, get, sessionKey: key });
+  if (requestedIdentity?.endpoint.kind === 'native-runtime' && requestedIdentity.endpoint.runtimeAdapterId === 'openclaw') return;
 
   void (async () => {
     try {
@@ -1175,7 +1224,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
         sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
       });
       const result = await requestSessionLifecycleView(target, traceId);
-      if (get().currentSessionKey !== key) {
+      if (!isCurrent()) {
         logSessionTrace('switch-session.lifecycle-stale', traceId, {
           requestedSessionKey: summarizeIdentifier(key),
           currentSessionKey: summarizeIdentifier(get().currentSessionKey),
@@ -1193,7 +1242,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
         targetRecord: summarizeSwitchSessionRecord(resolveSessionRecord(get().loadedSessions[key])),
       });
     } catch (error) {
-      if (get().currentSessionKey !== key) {
+      if (!isCurrent()) {
         logSessionTrace('switch-session.lifecycle-error-stale', traceId, {
           requestedSessionKey: summarizeIdentifier(key),
           currentSessionKey: summarizeIdentifier(get().currentSessionKey),
@@ -1429,14 +1478,16 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
       if (next) {
         try {
           const nextTarget = resolveOperationTarget(get(), next.key);
-          const result = await requestSessionLifecycleView(nextTarget);
-          if (get().currentSessionKey === next.key) {
-            applyBackendSessionView({
-              set,
-              get,
-              sessionKey: next.key,
-              view: result,
-            });
+          if (nextTarget.sessionIdentity.endpoint.kind !== 'native-runtime' || nextTarget.sessionIdentity.endpoint.runtimeAdapterId !== 'openclaw') {
+            const result = await requestSessionLifecycleView(nextTarget);
+            if (get().currentSessionKey === next.key) {
+              applyBackendSessionView({
+                set,
+                get,
+                sessionKey: next.key,
+                view: result,
+              });
+            }
           }
         } catch (error) {
           if (get().currentSessionKey === next.key) {
@@ -1526,7 +1577,8 @@ async function executeNewSessionWithScopeResolver(
   input: CreateStoreSessionActionsInput,
   resolveAgentScope: NewSessionAgentScopeResolver,
   inheritedTraceId?: string | null,
-): Promise<void> {
+  composerDraft?: { key: string; modeId: string },
+): Promise<{ sessionRecordKey: string; sessionIdentity: SessionIdentity } | null> {
   const {
     set,
     get,
@@ -1583,7 +1635,9 @@ async function executeNewSessionWithScopeResolver(
       sessionKey: created.sessionKey,
     });
     const stateBeforeProjection = get();
-    const ownsSelection = isLatestNewSessionRequest(requestSequence);
+    const ownsSelection = isLatestNewSessionRequest(requestSequence)
+      && get().currentConversation === state.currentConversation
+      && get().currentSessionKey === currentSessionKey;
     const baseLoadedSessions = ownsSelection && leavingEmpty
       ? removeSessionRecord(stateBeforeProjection, currentSessionKey)
       : stateBeforeProjection.loadedSessions;
@@ -1596,6 +1650,7 @@ async function executeNewSessionWithScopeResolver(
     if (projection.status !== 'applied') {
       throw new Error(`Session create projection ${projection.status}`);
     }
+    if (composerDraft) useComposerDraftStore.getState().moveDraft(composerDraft.key, newKey, composerDraft.modeId);
     set((stateValue) => {
       const loadedSessions = patchSessionMeta(
         { loadedSessions: stateValue.loadedSessions },
@@ -1626,6 +1681,7 @@ async function executeNewSessionWithScopeResolver(
         error: ownsSelection ? null : stateValue.error,
       };
     });
+    return { sessionRecordKey: newKey, sessionIdentity: created.identity };
   } catch (error) {
     logSessionTrace('new-session.error', traceId, {
       ...summarizeError(error),
@@ -1635,13 +1691,14 @@ async function executeNewSessionWithScopeResolver(
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    return null;
   } finally {
     finishMutating();
   }
 }
 
-export async function executeNewSession(input: CreateStoreSessionActionsInput, agentId?: string, traceId?: string | null): Promise<void> {
-  await executeNewSessionWithScopeResolver(input, (state) => resolveNewSessionAgentScope(state, agentId), traceId);
+export async function executeNewSession(input: CreateStoreSessionActionsInput, agentId?: string, traceId?: string | null, composerDraft?: { key: string; modeId: string }) {
+  return executeNewSessionWithScopeResolver(input, (state) => resolveNewSessionAgentScope(state, agentId), traceId, composerDraft);
 }
 
 export async function executeNewSessionForScope(

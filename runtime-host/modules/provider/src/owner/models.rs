@@ -10,13 +10,15 @@ use connectors::{
     ConnectorSecretValue, InvalidConnectorSecretRef,
 };
 use sha2::{Digest, Sha256};
+use platform::trace::{identifier_hash, session_trace};
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     InvalidProviderModel, ProviderAccount, ProviderAccountAuthMode, ProviderAccountId,
     ProviderApiProtocol, ProviderCascade, ProviderCascadeFault, ProviderEndpoint, ProviderModel,
-    ProviderModelCapability, ProviderModelReference, ProviderModelStoreFault,
-    ProviderRoutingCapability, ProviderTextGenerationModelLimits,
+    ProviderModelCapability, ProviderModelCatalog, ProviderModelReference, ProviderModelStoreFault,
+    ProviderRouting, ProviderRoutingCapability, ProviderTextGenerationModelLimits,
     ProviderTextGenerationModelLimitsOutcome, ProviderTextGenerationModelLimitsRequest,
     ProviderTextGenerationOutcome, ProviderTextGenerationRequest, Resolver,
     application::{model_reference, receipts::*},
@@ -40,6 +42,7 @@ const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
 const MAX_DISCOVERY_RESPONSE_BYTES: u64 = 256 * 1024;
 
+#[derive(Clone)]
 pub(crate) struct ProviderModelOwner {
     private_resolver: Resolver,
     llm_client: LlmClient,
@@ -65,7 +68,9 @@ impl ProviderModelOwner {
     ) -> ProviderTextGenerationModelLimitsOutcome {
         let candidates = match self.resolve_text_generation_candidates(
             runtime,
-            cascade,
+            cascade.accounts(),
+            cascade.catalog(),
+            cascade.routing(),
             ProviderRoutingCapability::Chat,
             request.model_ref.as_deref(),
         ) {
@@ -83,45 +88,98 @@ impl ProviderModelOwner {
     pub(super) async fn generate_text(
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &ProviderCascade,
+        accounts: &[ProviderAccount],
+        catalog: &ProviderModelCatalog,
+        routing: Option<&ProviderRouting>,
         request: ProviderTextGenerationRequest,
         cancellation: CancellationToken,
+        provider_call_hash: Option<&str>,
         stream: Option<&mut dyn crate::llm_client::LlmStreamSink>,
     ) -> Result<ProviderTextGenerationOutcome, LlmClientError> {
+        let started = std::time::Instant::now();
+        let trace = |stage, mut payload: serde_json::Value| {
+            if let Some(fields) = payload.as_object_mut() {
+                fields.insert("providerCallHash".into(), json!(provider_call_hash));
+                fields.insert("elapsedMs".into(), json!(started.elapsed().as_millis() as u64));
+            }
+            session_trace(stage, payload);
+        };
         let capability = if request.messages.iter().any(|message| message.has_image()) {
             ProviderRoutingCapability::ImageUnderstand
         } else {
             ProviderRoutingCapability::Chat
         };
+        trace("provider-generation.candidates-resolving", json!({
+            "selection": if request.model_ref.is_some() { "model_ref" } else { "routing" },
+            "capability": if capability == ProviderRoutingCapability::Chat { "Chat" } else { "ImageUnderstand" },
+            "routingPresent": routing.is_some(),
+            "routePresent": routing.is_some_and(|routing| routing.route(capability).is_some()),
+            "accountCount": accounts.len(), "modelCount": catalog.models().len(),
+        }));
         let candidates = match self.resolve_text_generation_candidates(
             runtime,
-            cascade,
+            accounts,
+            catalog,
+            routing,
             capability,
             request.model_ref.as_deref(),
         ) {
             Ok(Some(candidates)) => candidates,
-            Ok(None) => return Ok(ProviderTextGenerationOutcome::Rejected),
-            Err(()) => return Ok(ProviderTextGenerationOutcome::Unavailable),
+            Ok(None) => {
+                trace("provider-generation.candidates-failed", json!({ "reason": "no_candidate" }));
+                return Ok(ProviderTextGenerationOutcome::Rejected);
+            }
+            Err(()) => {
+                trace("provider-generation.candidates-failed", json!({ "reason": "identity_unavailable" }));
+                return Ok(ProviderTextGenerationOutcome::Unavailable);
+            }
         };
+        trace("provider-generation.candidates-resolved", json!({ "candidateCount": candidates.len() }));
         let mut unavailable = false;
         let mut stream_error = None;
         let mut response_sink = GenerationStreamSink::new(stream);
         let is_streaming = response_sink.sink.is_some();
-        for (account, model, timeout_ms) in candidates {
+        for (candidate_index, (account, model, timeout_ms)) in candidates.into_iter().enumerate() {
+            let candidate_started = std::time::Instant::now();
+            let candidate_trace = |stage, mut payload: serde_json::Value| {
+                if let Some(fields) = payload.as_object_mut() {
+                    fields.insert("candidateIndex".into(), json!(candidate_index));
+                    fields.insert("accountHash".into(), json!(identifier_hash(account.id().as_str())));
+                    fields.insert("modelHash".into(), json!(identifier_hash(model.model_id())));
+                    fields.insert("candidateElapsedMs".into(), json!(candidate_started.elapsed().as_millis() as u64));
+                }
+                trace(stage, payload);
+            };
+            candidate_trace("provider-generation.candidate-started", json!({
+                "streaming": is_streaming, "timeoutMs": timeout_ms,
+            }));
             let Some(protocol) = provider_generation_protocol(account) else {
+                candidate_trace("provider-generation.candidate-skipped", json!({ "reason": "protocol_invalid" }));
                 continue;
             };
             let Ok(endpoint) = provider_generation_endpoint(account) else {
+                candidate_trace("provider-generation.candidate-skipped", json!({ "reason": "endpoint_invalid" }));
                 continue;
             };
             let credential = match provider_generation_credential(account, &self.private_resolver) {
                 Ok(Some(credential)) => credential,
-                Ok(None) => continue,
+                Ok(None) => {
+                    candidate_trace("provider-generation.candidate-skipped", json!({ "reason": "credential_missing" }));
+                    continue;
+                }
                 Err(()) => {
+                    candidate_trace("provider-generation.candidate-failed", json!({
+                        "reason": if account.configuration().credential().is_none() {
+                            "credential_missing"
+                        } else { "private_resolver_unavailable" },
+                    }));
                     unavailable = true;
                     continue;
                 }
             };
+            candidate_trace("provider-generation.network-requested", json!({
+                "protocol": provider_api_protocol_label(protocol), "streaming": is_streaming,
+            }));
             let request = LlmRequest {
                 endpoint: LlmEndpoint::new(endpoint, protocol),
                 credential,
@@ -146,24 +204,63 @@ impl ProviderModelOwner {
             };
             let response = tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => return Ok(ProviderTextGenerationOutcome::Cancelled),
+                _ = cancellation.cancelled() => {
+                    candidate_trace("provider-generation.cancelled", json!({ "category": "Cancelled" }));
+                    return Ok(ProviderTextGenerationOutcome::Cancelled);
+                }
                 response = async {
                     match timeout_ms {
                         Some(timeout_ms) => tokio::time::timeout(Duration::from_millis(timeout_ms), generation)
-                            .await.unwrap_or_else(|_| Err(LlmClientError::Protocol("provider generation timed out".into()))),
+                            .await.unwrap_or_else(|_| {
+                                candidate_trace("provider-generation.timeout", json!({
+                                    "reason": "provider_timeout", "timeoutMs": timeout_ms,
+                                }));
+                                Err(LlmClientError::Protocol("provider generation timed out".into()))
+                            }),
                         None => generation.await,
                     }
                 } => response,
             };
             match response {
                 Ok(response) => {
+                    candidate_trace("provider-generation.network-completed", json!({
+                        "category": "Generated", "textBytes": response.text.len(),
+                        "nonempty": !response.text.trim().is_empty(),
+                        "finishReason": match response.finish_reason.as_ref() {
+                            Some(crate::llm_client::LlmFinishReason::Stop) => "Stop",
+                            Some(crate::llm_client::LlmFinishReason::Length) => "Length",
+                            Some(crate::llm_client::LlmFinishReason::ToolUse) => "ToolUse",
+                            Some(crate::llm_client::LlmFinishReason::ContentFilter) => "ContentFilter",
+                            Some(crate::llm_client::LlmFinishReason::Other(_)) => "Other",
+                            None => "None",
+                        },
+                    }));
                     return Ok(ProviderTextGenerationOutcome::Generated {
                         response,
                         model_limits: text_generation_model_limits(model, timeout_ms),
                     });
                 }
-                Err(LlmClientError::UnsupportedProtocol) => continue,
                 Err(error) => {
+                    let http = match &error {
+                        LlmClientError::Http(error) => Some(error),
+                        _ => None,
+                    };
+                    candidate_trace("provider-generation.network-failed", json!({
+                        "class": match &error {
+                            LlmClientError::UnsupportedProtocol => "UnsupportedProtocol",
+                            LlmClientError::Http(_) => "Http",
+                            LlmClientError::Protocol(_) => "Protocol",
+                            LlmClientError::StreamSink(_) => "StreamSink",
+                        },
+                        "statusCode": http.and_then(|error| error.status()).map(|status| status.as_u16()),
+                        "isTimeout": http.is_some_and(|error| error.is_timeout()),
+                        "isConnect": http.is_some_and(|error| error.is_connect()),
+                        "isDecode": http.is_some_and(|error| error.is_decode()),
+                        "outputEmitted": response_sink.emitted,
+                    }));
+                    if matches!(error, LlmClientError::UnsupportedProtocol) {
+                        continue;
+                    }
                     // Once output reaches the consumer, another candidate would corrupt the stream.
                     if is_streaming
                         && (response_sink.emitted || matches!(error, LlmClientError::StreamSink(_)))
@@ -311,7 +408,9 @@ impl ProviderModelOwner {
     fn resolve_text_generation_candidates<'a>(
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &'a ProviderCascade,
+        accounts: &'a [ProviderAccount],
+        catalog: &'a ProviderModelCatalog,
+        routing: Option<&ProviderRouting>,
         capability: ProviderRoutingCapability,
         model_ref: Option<&str>,
     ) -> Result<Option<Vec<(&'a ProviderAccount, &'a ProviderModel, Option<u64>)>>, ()> {
@@ -319,9 +418,12 @@ impl ProviderModelOwner {
         match model_ref {
             Some(model_ref) => {
                 let identity_ops = runtime.provider_runtime_identity_ops().ok_or(())?;
-                let identities = provider_runtime_identities(identity_ops, cascade.accounts())?;
-                for model in cascade.catalog().selectable_for(required_capability) {
-                    let Some(account) = cascade.account(model.account_id()) else {
+                let identities = provider_runtime_identities(identity_ops, accounts)?;
+                for model in catalog.selectable_for(required_capability) {
+                    let Some(account) = accounts
+                        .iter()
+                        .find(|account| account.id() == model.account_id())
+                    else {
                         continue;
                     };
                     if !account.configuration().enabled() {
@@ -335,7 +437,9 @@ impl ProviderModelOwner {
                 }
                 Ok(None)
             }
-            None => Ok(resolve_generation_models(cascade, capability)),
+            None => Ok(resolve_generation_models(
+                accounts, catalog, routing, capability,
+            )),
         }
     }
 
@@ -1189,16 +1293,18 @@ fn text_generation_model_limits(
     }
 }
 
-fn resolve_generation_models(
-    cascade: &ProviderCascade,
+fn resolve_generation_models<'a>(
+    accounts: &'a [ProviderAccount],
+    catalog: &'a ProviderModelCatalog,
+    routing: Option<&ProviderRouting>,
     capability: ProviderRoutingCapability,
-) -> Option<Vec<(&ProviderAccount, &ProviderModel, Option<u64>)>> {
-    let route = cascade.routing()?.route(capability)?;
+) -> Option<Vec<(&'a ProviderAccount, &'a ProviderModel, Option<u64>)>> {
+    let route = routing?.route(capability)?;
     let candidates = std::iter::once(route.primary())
         .chain(route.fallbacks())
         .filter_map(|reference| {
-            let account = cascade.account(reference.account_id())?;
-            let model = cascade.catalog().models().iter().find(|model| {
+            let account = accounts.iter().find(|account| account.id() == reference.account_id())?;
+            let model = catalog.models().iter().find(|model| {
                 provider_model_matches_routing_reference(model, capability, reference)
             })?;
             Some((account, model, route.timeout_ms().or(model.timeout_ms())))

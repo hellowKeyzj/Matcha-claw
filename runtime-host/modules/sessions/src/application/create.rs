@@ -143,6 +143,18 @@ impl SessionCreateCommand {
     pub const fn provider(&self) -> SessionProvider {
         self.provider
     }
+
+    pub fn identity(&self) -> SessionIdentity {
+        SessionIdentity::with_endpoint(
+            self.session_key.clone(),
+            crate::state::SessionEndpoint {
+                kind: "native-runtime".to_owned(),
+                runtime_adapter_id: self.provider,
+                runtime_instance_id: self.endpoint.runtime_instance_id().to_owned(),
+            },
+            self.agent_id.clone(),
+        ).expect("validated create identity")
+    }
 }
 
 fn generated_endpoint_session_id(now_ms: u64) -> Result<String, InvalidSessionCreate> {
@@ -246,7 +258,10 @@ pub fn project_matcha_create(
         agent_id,
         epoch,
     )
-    .map(SessionCreateOutcome::Succeeded)
+    .map(|mut view| {
+        view.goal = crate::goal::SessionGoalView::Unsupported;
+        SessionCreateOutcome::Succeeded(view)
+    })
     .unwrap_or(SessionCreateOutcome::Unknown)
 }
 
@@ -257,7 +272,7 @@ pub fn project_created_session_view(
     agent_id: Option<String>,
     epoch: u64,
 ) -> Option<SessionView> {
-    let identity = SessionIdentity::new(session_key, provider, agent_id)?;
+    let identity = SessionIdentity::new(session_key, provider, agent_id?)?;
     SessionState::new(identity, epoch)
         .and_then(|state| state.with_endpoint_session_id(endpoint_session_id))
         .ok()

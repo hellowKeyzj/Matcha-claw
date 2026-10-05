@@ -347,7 +347,12 @@ impl SealedSkillStore {
                 return Err(error);
             }
         };
-        let installed_path = match self.install_receipt_locked(&receipt) {
+        let file_name = super::export::package_file_name(
+            &root,
+            package.descriptor().name(),
+            SEALED_SKILL_PACKAGE_EXTENSION,
+        )?;
+        let installed_path = match self.install_receipt_locked(&receipt, &file_name) {
             Ok(path) => path,
             Err(error) => {
                 trace_export_error("install", &skill_key, error);
@@ -368,7 +373,7 @@ impl SealedSkillStore {
                 target: package.target(),
                 descriptor: package.descriptor().clone(),
             },
-            file_name: receipt.package_file_name().to_owned(),
+            file_name,
             package_sha256: receipt.package_sha256().to_owned(),
             package_bytes: receipt.into_package_bytes(),
         })
@@ -469,7 +474,7 @@ impl SealedSkillStore {
                 self.install_cloud_receipt_locked(&receipt, metadata)?;
             }
             None => {
-                self.install_receipt_locked(&receipt)?;
+                self.install_receipt_locked(&receipt, receipt.package_file_name())?;
             }
         }
         Ok(SealedSkillCatalogEntry {
@@ -518,9 +523,10 @@ impl SealedSkillStore {
     fn install_receipt_locked(
         &self,
         package: &SealSkillPackageReceipt,
+        file_name: &str,
     ) -> Result<PathBuf, SealedResourceError> {
         let root = ensure_skills_directory(self.root.skills_directory())?;
-        let path = root.join(package.package_file_name());
+        let path = root.join(file_name);
         ensure_missing(&path)?;
         let staging = root.join(format!(".{}.tmp", package.package_file_name()));
         let key_path = self.authorization_key_path(package.package_sha256());

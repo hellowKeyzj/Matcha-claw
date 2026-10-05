@@ -8,69 +8,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::WikiFailure;
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SearchProvider {
-    #[default]
-    None,
-    Tavily,
-    Serpapi,
-    Searxng,
-    Ollama,
-    Brave,
-    Bocha,
-    Firecrawl,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DeepResearchSource {
+#[serde(rename_all = "kebab-case")]
+pub enum EmbeddingSource {
+    #[serde(rename = "local-minilm")]
+    LocalMiniLm,
     #[default]
-    Web,
-    Anytxt,
-    Both,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub struct SearchProviderConfig {
-    pub base_url: Option<String>,
-    #[serde(rename = "serpApiEngine")]
-    pub serp_api_engine: Option<String>,
-    #[serde(rename = "searXngUrl")]
-    pub sear_xng_url: Option<String>,
-    #[serde(rename = "searXngCategories")]
-    pub sear_xng_categories: Option<Vec<String>>,
-    pub ollama_url: Option<String>,
-    pub api_key_configured: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub struct AnyTxtConfig {
-    pub enabled: bool,
-    pub endpoint: String,
-    pub filter_dir: String,
-    pub filter_ext: String,
-    pub limit: usize,
-}
-
-impl Default for AnyTxtConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            endpoint: "http://127.0.0.1:9920".into(),
-            filter_dir: String::new(),
-            filter_ext: "*".into(),
-            limit: 20,
-        }
-    }
+    Remote,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct EmbeddingConfig {
     pub enabled: bool,
+    pub source: EmbeddingSource,
     pub endpoint: String,
     pub model: String,
     pub output_dimensionality: Option<f64>,
@@ -87,6 +38,7 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            source: EmbeddingSource::default(),
             endpoint: String::new(),
             model: String::new(),
             output_dimensionality: None,
@@ -100,11 +52,20 @@ impl Default for EmbeddingConfig {
     }
 }
 
+impl EmbeddingConfig {
+    pub fn is_ready(&self) -> bool {
+        self.enabled
+            && (self.source == EmbeddingSource::LocalMiniLm
+                || (!self.endpoint.trim().is_empty() && !self.model.trim().is_empty()))
+    }
+}
+
 impl fmt::Debug for EmbeddingConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("EmbeddingConfig")
             .field("enabled", &self.enabled)
+            .field("source", &self.source)
             .field("model", &self.model)
             .field("api_key_configured", &self.api_key_configured)
             .finish_non_exhaustive()
@@ -112,34 +73,16 @@ impl fmt::Debug for EmbeddingConfig {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase")]
 pub struct SearchConfig {
-    pub provider: SearchProvider,
-    pub provider_configs: BTreeMap<SearchProvider, SearchProviderConfig>,
-    pub deep_research_source: DeepResearchSource,
-    pub any_txt: AnyTxtConfig,
     pub embedding: EmbeddingConfig,
-}
-
-#[derive(Clone, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub struct SearchProviderConfigUpdate {
-    pub base_url: Option<String>,
-    #[serde(rename = "serpApiEngine")]
-    pub serp_api_engine: Option<String>,
-    #[serde(rename = "searXngUrl")]
-    pub sear_xng_url: Option<String>,
-    #[serde(rename = "searXngCategories")]
-    pub sear_xng_categories: Option<Vec<String>>,
-    pub ollama_url: Option<String>,
-    pub api_key: Option<String>,
-    pub api_key_configured: Option<bool>,
 }
 
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct EmbeddingConfigUpdate {
     pub enabled: Option<bool>,
+    pub source: Option<EmbeddingSource>,
     pub endpoint: Option<String>,
     pub model: Option<String>,
     #[serde(default, deserialize_with = "deserialize_dimensionality_patch")]
@@ -165,10 +108,6 @@ where
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchConfigUpdate {
-    pub provider: Option<SearchProvider>,
-    pub provider_configs: Option<BTreeMap<SearchProvider, SearchProviderConfigUpdate>>,
-    pub deep_research_source: Option<DeepResearchSource>,
-    pub any_txt: Option<AnyTxtConfig>,
     pub embedding: Option<EmbeddingConfigUpdate>,
 }
 
@@ -181,11 +120,7 @@ macro_rules! redacted_debug {
         }
     )+};
 }
-redacted_debug!(
-    SearchProviderConfigUpdate,
-    EmbeddingConfigUpdate,
-    SearchConfigUpdate
-);
+redacted_debug!(EmbeddingConfigUpdate, SearchConfigUpdate);
 
 #[derive(Clone, Default)]
 pub struct EmbeddingCredentials {
@@ -193,24 +128,9 @@ pub struct EmbeddingCredentials {
     pub(crate) extra_headers: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Default)]
-pub struct SearchCredentials {
-    provider_keys: BTreeMap<SearchProvider, String>,
-}
-
-impl SearchCredentials {
-    pub fn api_key(&self, provider: SearchProvider) -> &str {
-        self.provider_keys
-            .get(&provider)
-            .map(String::as_str)
-            .unwrap_or("")
-    }
-}
-
 #[derive(Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase")]
 struct PrivateConfig {
-    provider_keys: BTreeMap<SearchProvider, String>,
     embedding_api_key: String,
     embedding_headers: BTreeMap<String, String>,
 }
@@ -237,75 +157,21 @@ pub fn update_config(
     Ok(config)
 }
 
-pub fn execution_snapshot(
-    root: &Path,
-    state_root: &Path,
-    project_id: &str,
-) -> Result<(SearchConfig, SearchCredentials), WikiFailure> {
-    let (config, private) = read_owned_config(root, state_root, project_id)?;
-    Ok((
-        config,
-        SearchCredentials {
-            provider_keys: private.provider_keys,
-        },
-    ))
-}
-
 pub fn embedding_execution_config(
     root: &Path,
     state_root: &Path,
     project_id: &str,
 ) -> Result<(EmbeddingConfig, EmbeddingCredentials), WikiFailure> {
     let (config, private) = read_owned_config(root, state_root, project_id)?;
-    Ok((
-        config.embedding,
+    let credentials = if config.embedding.source == EmbeddingSource::Remote {
         EmbeddingCredentials {
             api_key: private.embedding_api_key,
             extra_headers: private.embedding_headers,
-        },
-    ))
-}
-
-pub(crate) fn apply_search_test_input(
-    config: &SearchConfig,
-    credentials: &SearchCredentials,
-    input: SearchConfigUpdate,
-) -> Result<(SearchConfig, SearchCredentials), WikiFailure> {
-    let mut config = config.clone();
-    let mut private = PrivateConfig {
-        provider_keys: credentials.provider_keys.clone(),
-        ..PrivateConfig::default()
+        }
+    } else {
+        EmbeddingCredentials::default()
     };
-    apply_update(&mut config, &mut private, input)?;
-    Ok((
-        config,
-        SearchCredentials {
-            provider_keys: private.provider_keys,
-        },
-    ))
-}
-
-pub fn has_configured_web(config: &SearchConfig) -> bool {
-    let provider = config.provider;
-    let active = config.provider_configs.get(&provider);
-    match provider {
-        SearchProvider::None => false,
-        SearchProvider::Searxng => active
-            .and_then(|value| value.sear_xng_url.as_deref())
-            .is_some_and(|value| !value.trim().is_empty()),
-        SearchProvider::Firecrawl => true,
-        _ => active.is_some_and(|value| value.api_key_configured),
-    }
-}
-
-pub fn has_configured_sources(config: &SearchConfig) -> bool {
-    let web = has_configured_web(config);
-    let anytxt = config.any_txt.enabled && !config.any_txt.endpoint.trim().is_empty();
-    match config.deep_research_source {
-        DeepResearchSource::Web => web,
-        DeepResearchSource::Anytxt => anytxt,
-        DeepResearchSource::Both => web || anytxt,
-    }
+    Ok((config.embedding, credentials))
 }
 
 fn read_owned_config(
@@ -329,53 +195,13 @@ fn apply_update(
     private: &mut PrivateConfig,
     input: SearchConfigUpdate,
 ) -> Result<(), WikiFailure> {
-    if let Some(provider) = input.provider {
-        config.provider = provider;
-    }
-    if let Some(source) = input.deep_research_source {
-        config.deep_research_source = source;
-    }
-    if let Some(anytxt) = input.any_txt {
-        config.any_txt = anytxt;
-    }
-    if let Some(providers) = input.provider_configs {
-        for (provider, input) in providers {
-            if provider == SearchProvider::None {
-                return Err(WikiFailure::invalid_input(
-                    "providerConfigs",
-                    "none has no provider configuration",
-                ));
-            }
-            let target = config.provider_configs.entry(provider).or_default();
-            if input.base_url.is_some() {
-                target.base_url = input.base_url;
-            }
-            if input.serp_api_engine.is_some() {
-                target.serp_api_engine = input.serp_api_engine;
-            }
-            if input.sear_xng_url.is_some() {
-                target.sear_xng_url = input.sear_xng_url;
-            }
-            if input.sear_xng_categories.is_some() {
-                target.sear_xng_categories = input.sear_xng_categories;
-            }
-            if input.ollama_url.is_some() {
-                target.ollama_url = input.ollama_url;
-            }
-            if let Some(key) = input.api_key {
-                let key = key.trim();
-                if key.is_empty() {
-                    private.provider_keys.remove(&provider);
-                } else {
-                    private.provider_keys.insert(provider, key.to_owned());
-                }
-            }
-        }
-    }
     if let Some(input) = input.embedding {
         let target = &mut config.embedding;
         if let Some(value) = input.enabled {
             target.enabled = value;
+        }
+        if let Some(value) = input.source {
+            target.source = value;
         }
         if let Some(value) = input.endpoint {
             target.endpoint = value;
@@ -420,48 +246,18 @@ fn apply_update(
             }
         }
     }
-    config.any_txt.limit = config.any_txt.limit.clamp(1, 100);
-    if config.any_txt.endpoint.trim().is_empty() {
-        config.any_txt.endpoint = AnyTxtConfig::default().endpoint;
-    }
-    if !config.any_txt.endpoint.starts_with("http://")
-        && !config.any_txt.endpoint.starts_with("https://")
-    {
-        config.any_txt.endpoint = format!("http://{}", config.any_txt.endpoint.trim());
-    }
-    if config.any_txt.filter_ext.trim().is_empty() {
-        config.any_txt.filter_ext = "*".into();
-    }
     validate_config(config)?;
     project_flags(config, private);
     Ok(())
 }
 
 fn project_flags(config: &mut SearchConfig, private: &PrivateConfig) {
-    for (provider, value) in &mut config.provider_configs {
-        value.api_key_configured = private
-            .provider_keys
-            .get(provider)
-            .is_some_and(|key| !key.trim().is_empty());
-    }
     config.embedding.api_key_configured = !private.embedding_api_key.trim().is_empty();
 }
 
 fn validate_config(config: &SearchConfig) -> Result<(), WikiFailure> {
-    for provider in config.provider_configs.values() {
-        for (field, url) in [
-            ("baseUrl", &provider.base_url),
-            ("searXngUrl", &provider.sear_xng_url),
-            ("ollamaUrl", &provider.ollama_url),
-        ] {
-            if let Some(url) = url.as_deref().filter(|value| !value.trim().is_empty()) {
-                validate_public_url(field, url, field == "searXngUrl")?;
-            }
-        }
-    }
-    validate_public_url("anyTxt.endpoint", &config.any_txt.endpoint, true)?;
     if !config.embedding.endpoint.trim().is_empty() {
-        validate_public_url("embedding.endpoint", &config.embedding.endpoint, false)?;
+        validate_public_url("embedding.endpoint", &config.embedding.endpoint)?;
     }
     let cfg = &config.embedding;
     if cfg.max_chunk_chars == 0
@@ -496,13 +292,8 @@ fn validate_config(config: &SearchConfig) -> Result<(), WikiFailure> {
     Ok(())
 }
 
-fn validate_public_url(field: &str, raw: &str, allow_bare: bool) -> Result<(), WikiFailure> {
-    let normalized = if allow_bare && !raw.contains("://") {
-        format!("https://{raw}")
-    } else {
-        raw.to_owned()
-    };
-    let url = reqwest::Url::parse(&normalized)
+fn validate_public_url(field: &str, raw: &str) -> Result<(), WikiFailure> {
+    let url = reqwest::Url::parse(raw)
         .map_err(|_| WikiFailure::invalid_input(field, "expected an HTTP(S) URL"))?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()

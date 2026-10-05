@@ -36,6 +36,17 @@ where
         control_input,
         control_output,
     } = app;
+    let team_mcp = crate::team_mcp::Discovery::prepare(
+        &input.open_claw.runtime_host_mcp_state_dir,
+        runtime_host_transport_port,
+    )
+    .map_err(|_| ControlError::Transport("team MCP discovery"))?;
+    crate::team_mcp::project_matcha(
+        &input.matcha.storage_root,
+        &input.open_claw.runtime_host_mcp_executable,
+        &input.open_claw.runtime_host_mcp_state_dir,
+    )
+    .map_err(|_| ControlError::Transport("Matcha MCP projection"))?;
     let mut runtime = runtime::start(input).await?;
 
     let provider_private_resolver =
@@ -87,7 +98,12 @@ where
         webhook_token,
     });
     let route_snapshot = install_plan.route_snapshot();
-    let router = crate::http::Router::new(route_snapshot.clone());
+    let mut routes = route_snapshot.clone();
+    routes.push(team_mcp.descriptor(
+        runtime.handles.organization.clone(),
+        runtime.handles.runtime_directory.clone(),
+    ));
+    let router = crate::http::Router::new(routes);
     if let Err(error) = runtime
         .host_mut()
         .register_route_effects(&route_snapshot, router.clone())
@@ -112,6 +128,10 @@ where
         }
     };
     runtime.spawn_owner();
+    if team_mcp.publish().is_err() {
+        let _ = shutdown_runtime(&mut runtime).await;
+        return Err(ControlError::Transport("team MCP discovery"));
+    }
     let mut http_server = http_server.into_scoped_extension();
     let result =
         runtime::run_private_control(&mut runtime, private_control, control_input, control_output)

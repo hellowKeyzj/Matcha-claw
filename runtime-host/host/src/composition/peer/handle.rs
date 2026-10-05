@@ -3,7 +3,7 @@ use std::sync::Arc;
 use foundation::execution::{OwnerRuntimeHandle, OwnerRuntimeSendError};
 use openclaw::gateway::request::{
     OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest,
-    OpenClawQuestionResolveGatewayRequest,
+    OpenClawQuestionListGatewayRequest, OpenClawQuestionResolveGatewayRequest,
 };
 use platform::call::CallReceipt;
 use runtime_directory::{RuntimeControlLifecycleError, call::RuntimeControlCallContext};
@@ -25,6 +25,7 @@ use super::{PeerCommand, PeerQuery, RuntimeStopCommandError, command::RuntimeLif
 pub(crate) struct PeerHandle {
     owner: OwnerRuntimeHandle<PeerCommand, PeerQuery>,
     admission: Arc<crate::composition::admission::HostAdmission>,
+    runtime_directory: Arc<crate::composition::runtime_ports::RuntimeDriverDirectory>,
 }
 
 impl runtime_directory::RuntimeEndpointDirectorySource for PeerHandle {
@@ -53,8 +54,9 @@ impl PeerHandle {
     pub(crate) fn new(
         owner: OwnerRuntimeHandle<PeerCommand, PeerQuery>,
         admission: Arc<crate::composition::admission::HostAdmission>,
+        runtime_directory: Arc<crate::composition::runtime_ports::RuntimeDriverDirectory>,
     ) -> Self {
-        Self { owner, admission }
+        Self { owner, admission, runtime_directory }
     }
 
     pub(crate) async fn state(&self) -> Result<HostState, ()> {
@@ -68,7 +70,7 @@ impl PeerHandle {
         Ok(runtime_directory::Directory::from_lifecycles(
             runtime_lifecycle(state.matcha().lifecycle()),
             runtime_lifecycle(state.open_claw().lifecycle()),
-        ))
+        ).with_goal_support(|identity| self.runtime_directory.supports_goal(&identity.endpoint())))
     }
 
     pub(crate) async fn request_peer_autostart(
@@ -364,6 +366,15 @@ impl PeerHandle {
         })
         .await
         .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
+    }
+
+    pub(crate) async fn open_claw_question_list(
+        &self,
+        request: OpenClawQuestionListGatewayRequest,
+    ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
+        self.request_query(|reply| PeerQuery::OpenClawQuestionList { request, reply })
+            .await
+            .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
     }
 
     pub(crate) async fn open_claw_question_resolve(

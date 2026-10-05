@@ -88,19 +88,32 @@ async fn replay_to_snapshot(
     target: Sequence,
     client: &AppServerClient,
 ) -> Result<EventReplayPayload, HydrationIncomplete> {
-    if target.get() == 0 {
+    replay_from_cursor(session_id, Sequence::try_new(0).expect("zero is valid"), target, client).await
+}
+
+pub(crate) async fn replay_from_cursor(
+    session_id: &SessionId,
+    mut cursor: Sequence,
+    target: Sequence,
+    client: &AppServerClient,
+) -> Result<EventReplayPayload, HydrationIncomplete> {
+    if target.get() < cursor.get() || target.get() - cursor.get() > MAX_TRANSCRIPT_LINES as u64 {
+        return Err(HydrationIncomplete::ReplayIncomplete);
+    }
+    if target == cursor {
         return Ok(EventReplayPayload::new(
             EventReplay::new(0, target),
             Vec::new(),
         ));
     }
 
-    let replay_limit = ReplayLimit::try_new(REPLAY_PAGE_LIMIT).expect("replay limit is finite");
-    let mut cursor = Sequence::try_new(0).expect("zero is a valid replay cursor");
     let mut events = Vec::new();
     while cursor.get() < target.get() {
+        let replay_limit = ReplayLimit::try_new(
+            REPLAY_PAGE_LIMIT.min((target.get() - cursor.get()) as f64),
+        ).expect("bounded replay limit is finite");
         let page = client
-            .replay_event_payload(session_id.clone(), Some(cursor), Some(replay_limit))
+            .read_replay_payload(session_id.clone(), Some(cursor), Some(replay_limit))
             .await
             .map_err(client_failure)?;
         let next = page.cursor();

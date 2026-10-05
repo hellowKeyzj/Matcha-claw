@@ -27,12 +27,25 @@
         "creativeTasksDesc": "写作、头脑风暴、创意"
     },
     "input": {
+        "teamDesignStart": "设计Team运行图",
+        "teamDesignInProgress": "运行图设计中",
+        "teamDesignExit": "退出设计，保留运行图",
+        "teamDesignExitWaiting": "请先停止当前回复，再退出设计",
+        "teamDesignActive": "调整Team任务与协作关系，不启动执行",
         "gatewayDisconnectedPlaceholder": "运行时不可用...",
         "gatewayRecoveringNotice": "运行时正在准备…",
         "messagePlaceholder": "输入消息，/ 选择技能，Enter 发送，Shift+Enter 换行",
         "approvalWaitingPlaceholder": "等待审批中...",
         "imageGenerationActive": "正在生成图片",
         "pickModel": "选择模型",
+        "pickWiki": "选择知识库",
+        "wikiPickerLabel": "知识库：{{name}}",
+        "wikiLoading": "正在加载知识库…",
+        "wikiEmpty": "暂无知识库，请先在知识库页面创建或打开。",
+        "wikiRetry": "加载失败，点击重试",
+        "wikiLoadFailed": "无法加载知识库，请重试。",
+        "wikiSwitched": "已切换到知识库「{{name}}」",
+        "wikiSwitchFailed": "知识库切换失败，请重试。",
         "modelPickerTitle": "切换当前 Agent 模型",
         "pickPermissionMode": "选择权限模式",
         "permissionPickerTitle": "切换当前会话权限",
@@ -61,6 +74,12 @@
         "contextUsageLabel": "上下文已用 {{pct}}%",
         "contextUsageTitle": "上下文已用 {{pct}}%（{{detail}}）"
     },
+    "goal": {
+        "title": "会话目标", "set": "设定目标", "edit": "编辑目标", "cancel": "取消目标模式", "placeholder": "输入目标正文，Enter 提交，Shift+Enter 换行", "pause": "暂停", "resume": "恢复", "complete": "标记完成", "block": "标记阻塞", "clear": "清除目标", "more": "更多目标操作", "refresh": "确认最新状态", "unknown": "目标状态待确认", "note": "说明", "tokens": "已用 {{count}} tokens", "budget": "预算 {{count}} tokens", "inlineOnly": "目标模式仅支持 5 MB 以内的文件附件，请移除大文件或目录。", "noAttachmentsOnEdit": "编辑仅修改目标，请先移除附件。",
+        "status": { "active": "进行中", "paused": "已暂停", "blocked": "受阻", "complete": "已完成", "budget_limited": "预算已用尽", "usage_limited": "用量受限" },
+        "errors": { "unknown": "结果尚未确认，正文已保留；请点击“确认最新状态”，不要重复提交。", "unsupported": "当前运行时不支持目标，请切换到支持目标的运行时或取消目标模式。", "unavailable": "目标操作暂不可用，请检查运行时连接后重试。", "target_rejected": "运行时拒绝了目标操作；请确认最新状态，并在当前回复结束后重试。", "empty": "请先输入目标正文。", "active": "当前回复仍在运行或停止中，请等待结束后再提交目标。", "missing-session": "会话尚未就绪，请等待加载完成或重新打开会话后提交。", "goal-attachments": "目标仅支持 5 MB 以内的文件附件，请移除大文件或目录后提交。", "error": "目标操作失败，正文已保留；请确认最新状态后再重试。" }
+    },
+    "reuseMessage": "填入输入框",
     "noLogs": "（暂无日志）",
     "toolbar": {
         "refresh": "刷新聊天",

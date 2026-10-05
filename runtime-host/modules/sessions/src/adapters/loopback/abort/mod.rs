@@ -3,7 +3,7 @@ use platform::capability::CapabilityDecisionVerifier;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::abort::{NativeEndpoint, SessionAbortCommand, SessionAbortOutcome};
+use crate::{abort::{SessionAbortCommand, SessionAbortOutcome}, state::SessionIdentity};
 
 pub(crate) mod handler;
 
@@ -39,42 +39,23 @@ pub(crate) struct SessionAbortRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Scope {
     kind: String,
-    endpoint: Endpoint,
-    session_key: String,
+    identity: SessionIdentity,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Target {
     kind: String,
+    identity: SessionIdentity,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Input {
-    endpoint: Endpoint,
-    session_key: String,
+    identity: SessionIdentity,
     endpoint_session_id: Option<String>,
     run_id: Option<String>,
     approval_ids: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Endpoint {
-    kind: String,
-    runtime_adapter_id: String,
-    runtime_instance_id: String,
-}
-
-impl Endpoint {
-    fn parse(&self) -> Option<NativeEndpoint> {
-        NativeEndpoint::parse(
-            &self.kind,
-            &self.runtime_adapter_id,
-            &self.runtime_instance_id,
-        )
-    }
 }
 
 fn valid_endpoint_session_id(value: Option<&str>) -> bool {
@@ -117,9 +98,9 @@ impl SessionAbortRequest {
             && self.operation_id == OPERATION_ID
             && self.scope.kind == "session"
             && self.target.kind == "session"
-            && self.scope.endpoint == self.input.endpoint
-            && self.scope.endpoint.parse().is_some()
-            && self.scope.session_key == self.input.session_key
+            && self.scope.identity == self.target.identity
+            && self.scope.identity == self.input.identity
+            && self.scope.identity.validate().is_ok()
             && valid_endpoint_session_id(self.input.endpoint_session_id.as_deref())
             && self
                 .input
@@ -131,11 +112,9 @@ impl SessionAbortRequest {
     }
 
     pub(crate) fn into_command(self) -> Result<SessionAbortCommand, RequestError> {
-        let endpoint = self.scope.endpoint.parse().ok_or(RequestError::Invalid)?;
         SessionAbortCommand::try_new(
-            endpoint,
-            self.input.session_key,
-            None,
+            self.input.identity,
+            self.input.endpoint_session_id,
             self.input.run_id,
             self.input.approval_ids,
         )

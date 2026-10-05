@@ -101,8 +101,35 @@ impl Operations {
                 results.remove(context.id()).await;
                 let _ = context.finish(CallStatus::Failed, &call.detail).await;
             } else {
+                let importing = matches!(
+                    call.command,
+                    "skills.import.markdown"
+                        | "skills.import.bundle"
+                        | "skills.importBundles"
+                        | "skills.bundles.import"
+                );
+                let started = std::time::Instant::now();
+                if importing {
+                    eprintln!(
+                        "[startup-trace] source=skills-import phase=running callIdHigh={} callIdLow={} command={}",
+                        &context.id().as_str()[..16],
+                        &context.id().as_str()[16..],
+                        call.command
+                    );
+                }
                 let response = operation.await;
                 let (status, detail) = call::terminal(call.detail, &response);
+                if importing {
+                    eprintln!(
+                        "[startup-trace] source=skills-import phase=terminal callIdHigh={} callIdLow={} command={} status={} httpStatus={} elapsedMs={}",
+                        &context.id().as_str()[..16],
+                        &context.id().as_str()[16..],
+                        call.command,
+                        status.as_str(),
+                        response.status(),
+                        started.elapsed().as_millis()
+                    );
+                }
                 if let Err(error) = context.finish(status, &detail).await {
                     eprintln!("[skills-call] terminal transition failed: {error}");
                 }

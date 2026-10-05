@@ -3,6 +3,8 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use arc_swap::ArcSwap;
 use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
 use tokio::time::{Instant, timeout_at};
+use platform::trace::{session_trace, with_session_trace};
+use serde_json::json;
 
 use crate::{
     ProviderAccount, ProviderAccountId, ProviderCascade, ProviderModel, ProviderModelCapability,
@@ -29,6 +31,7 @@ struct ProviderSnapshot {
     accounts: Vec<ProviderAccount>,
     catalog: ProviderModelCatalog,
     routing: Option<ProviderRouting>,
+    models: ProviderModelOwner,
 }
 
 #[derive(Clone)]
@@ -53,16 +56,18 @@ pub(crate) struct ProviderOwner {
 
 impl ProviderOwner {
     pub fn new(input: ProviderOwnerInput) -> Self {
+        let models = ProviderModelOwner::new();
         let snapshot = Arc::new(ArcSwap::new(Arc::new(ProviderSnapshot {
             accounts: input.cascade.accounts().to_vec(),
             catalog: input.cascade.catalog().clone(),
             routing: input.cascade.routing().cloned(),
+            models: models.clone(),
         })));
 
         Self {
             cascade: input.cascade,
             accounts: ProviderAccountsOwner::new(Resolver::disabled()),
-            models: ProviderModelOwner::new(),
+            models,
             routing: ProviderRoutingOwner::new(),
             runtime_directory: input.runtime_directory,
             snapshot,
@@ -454,41 +459,7 @@ impl ProviderOwner {
                 );
                 send_reply(call, reply, outcome).await;
             }
-            ProviderQuery::GenerateText {
-                request,
-                cancellation,
-                stream,
-                reply,
-                ..
-            } => {
-                let mut stream = stream.map(crate::api::ProviderStreamSink);
-                let outcome = self
-                    .models
-                    .generate_text(
-                        self.runtime_directory.as_ref(),
-                        &self.cascade,
-                        request,
-                        cancellation,
-                        stream
-                            .as_mut()
-                            .map(|sink| sink as &mut dyn crate::llm_client::LlmStreamSink),
-                    )
-                    .await;
-                let outcome = match outcome {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        if let Some(stream) = &stream {
-                            let _ = stream
-                                .0
-                                .send(crate::api::ProviderStreamMessage::Failed(error))
-                                .await;
-                        }
-                        crate::ProviderTextGenerationOutcome::Unavailable
-                    }
-                };
-                drop(stream);
-                send_reply(call, reply, outcome).await;
-            }
+            ProviderQuery::GenerateText { .. } => unreachable!("generation uses the direct route"),
             ProviderQuery::SelectSessionModel {
                 endpoint,
                 session_key,
@@ -575,6 +546,7 @@ impl ProviderOwner {
             accounts: self.cascade.accounts().to_vec(),
             catalog: self.cascade.catalog().clone(),
             routing: self.cascade.routing().cloned(),
+            models: self.models.clone(),
         };
         self.snapshot.store(Arc::new(new_snapshot));
     }
@@ -784,7 +756,19 @@ impl ProviderOwner {
 
 async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: ProviderQuery) {
     let mut call = query.take_call();
-    if ProviderCall::start(&mut call).await.is_err() {
+    let started = match &query {
+        ProviderQuery::GenerateText { diagnostic_trace, .. } => {
+            with_session_trace(diagnostic_trace.clone(), async {
+                ProviderCall::start(&mut call).await.map_err(|_| {
+                    session_trace("provider-generation.call-start-failed", json!({
+                        "providerCallHash": call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str())),
+                    }));
+                })
+            }).await
+        }
+        _ => ProviderCall::start(&mut call).await,
+    };
+    if started.is_err() {
         return;
     }
     match query {
@@ -842,13 +826,62 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
             )
             .await;
         }
-        ProviderQuery::GenerateText { reply, .. } => {
-            send_reply(
-                call,
-                reply,
-                crate::ProviderTextGenerationOutcome::Unavailable,
-            )
-            .await;
+        ProviderQuery::GenerateText {
+            request,
+            cancellation,
+            diagnostic_trace,
+            stream,
+            reply,
+            ..
+        } => {
+            with_session_trace(diagnostic_trace, async {
+                let started = Instant::now();
+                let provider_call_hash = call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str()));
+                session_trace("provider-generation.direct-started", json!({
+                    "providerCallHash": provider_call_hash, "streaming": stream.is_some(),
+                }));
+                let snapshot = shared.snapshot.load_full();
+                let mut stream = stream.map(crate::api::ProviderStreamSink);
+                let outcome = snapshot
+                    .models
+                    .generate_text(
+                        shared.runtime_directory.as_ref(),
+                        &snapshot.accounts,
+                        &snapshot.catalog,
+                        snapshot.routing.as_ref(),
+                        request,
+                        cancellation,
+                        provider_call_hash.as_deref(),
+                        stream
+                            .as_mut()
+                            .map(|sink| sink as &mut dyn crate::llm_client::LlmStreamSink),
+                    )
+                    .await;
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        if let Some(stream) = &stream {
+                            let _ = stream
+                                .0
+                                .send(crate::api::ProviderStreamMessage::Failed(error))
+                                .await;
+                        }
+                        crate::ProviderTextGenerationOutcome::Unavailable
+                    }
+                };
+                session_trace("provider-generation.direct-completed", json!({
+                    "providerCallHash": provider_call_hash,
+                    "category": match &outcome {
+                        crate::ProviderTextGenerationOutcome::Generated { .. } => "Generated",
+                        crate::ProviderTextGenerationOutcome::Rejected => "Rejected",
+                        crate::ProviderTextGenerationOutcome::Unavailable => "Unavailable",
+                        crate::ProviderTextGenerationOutcome::Cancelled => "Cancelled",
+                    },
+                    "elapsedMs": started.elapsed().as_millis() as u64,
+                }));
+                drop(stream);
+                send_reply(call, reply, outcome).await;
+            }).await;
         }
         ProviderQuery::SelectSessionModel { reply, .. }
         | ProviderQuery::SelectMatchaSessionModelRuntime { reply, .. }

@@ -33,6 +33,7 @@ type OrganizationModule = organization::OrganizationModule;
 
 pub(in crate::composition::host) struct OwnerRuntimeTasks {
     pub(in crate::composition::host) system: OwnerRuntimeSystem,
+    provider_system: OwnerRuntimeSystem,
     pub(in crate::composition::host) peer: OwnedTask<()>,
     pub(in crate::composition::host) module_scopes: Vec<ModuleScope>,
     organization_calls: OrganizationModule,
@@ -93,6 +94,9 @@ impl OwnerRuntimeTasks {
         self.dispose_module_scope("security").await;
         self.dispose_module_scope("sessions").await;
         self.dispose_module_scope("provider").await;
+        if self.provider_system.drain_and_join().await.is_err() {
+            record_join_failure(&self.join_failures, "provider-runtime-system");
+        }
         self.organization.dispose_after_session().await;
         self.dispose_module_scope("runtime-directory").await;
         if self.system.drain_and_join().await.is_err() {
@@ -200,7 +204,7 @@ pub(in crate::composition::host) struct RuntimeOwnerInput {
     pub(in crate::composition::host) runtime_state_dir: std::path::PathBuf,
     pub(in crate::composition::host) diagnostics_state_root: CanonicalStateDir,
     pub(in crate::composition::host) runtime_host_mcp_executable: std::path::PathBuf,
-    pub(in crate::composition::host) team_run_mcp_state_dir: std::path::PathBuf,
+    pub(in crate::composition::host) runtime_host_mcp_state_dir: std::path::PathBuf,
     pub(in crate::composition::host) provider_cascade: provider_module::ProviderCascade,
     pub(in crate::composition::host) fleet_private_root: std::path::PathBuf,
     pub(in crate::composition::host) matcha_startup_diagnostics:
@@ -229,7 +233,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         runtime_state_dir,
         diagnostics_state_root,
         runtime_host_mcp_executable,
-        team_run_mcp_state_dir,
+        runtime_host_mcp_state_dir,
         provider_cascade,
         fleet_private_root,
         matcha_startup_diagnostics,
@@ -314,7 +318,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             state_dir: diagnostics_state_root.as_path().to_path_buf(),
             runtime_directory: runtime_directory.clone(),
             runtime_host_mcp_executable,
-            team_run_mcp_state_dir,
+            runtime_host_mcp_state_dir,
         },
     )
     .map_err(|_| ConstructionError::ExternalConnectors)?;
@@ -330,8 +334,17 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     .map_err(|_| ConstructionError::Settings)?;
     let settings = settings.with_call_recorder(calls.clone());
 
+    let provider_system = OwnerRuntimeSystem::spawn_observed(
+        foundation::execution::OwnerRuntimeConfig {
+            mailbox_capacity: 64,
+            worker_count: 4,
+            ready_queue_capacity: 8,
+            ..foundation::execution::OwnerRuntimeConfig::default()
+        },
+        runtime_observation.sink(),
+    );
     let (provider_module, provider_task) = provider_module::spawn_owner(
-        &owner_runtime_system,
+        &provider_system,
         provider_module::ProviderOwnerInput {
             cascade: provider_cascade,
             runtime_directory: runtime_directory.clone(),
@@ -343,7 +356,10 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     let (organization_module, organization_task) = organization::spawn_owner(
         &owner_runtime_system,
         organization.into_owner_input(
-            runtime_directory.clone() as Arc<dyn organization::OrganizationRuntimeDirectory>
+            runtime_directory.clone() as Arc<dyn organization::OrganizationRuntimeDirectory>,
+            Arc::new(super::super::ports::ProviderTeamMemberIntroductions::new(
+                provider_handle.clone(),
+            )),
         ),
     );
     let organization_module = organization_module.with_call_recorder(calls.clone());
@@ -371,6 +387,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             ownership_reader: Arc::new(
                 super::super::ports::organization::OrganizationSessionOwnership::new(
                     organization_handle.clone(),
+                    Arc::clone(&runtime_directory),
                 ),
             ),
             session_delta,
@@ -432,7 +449,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         },
     );
     let vector_index =
-        Arc::new(wiki::index::RemoteWikiVectorIndex::new().map_err(|_| ConstructionError::Wiki)?)
+        Arc::new(wiki::index::LanceWikiVectorIndex::new().map_err(|_| ConstructionError::Wiki)?)
             as Arc<dyn wiki::index::WikiVectorIndex>;
     let (wiki, wiki_task) = wiki::spawn_owner(
         &owner_runtime_system,
@@ -502,7 +519,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         ),
     );
     let peer_handle =
-        crate::composition::peer::PeerHandle::new(peer_owner_handle, Arc::clone(&admission));
+        crate::composition::peer::PeerHandle::new(peer_owner_handle, Arc::clone(&admission), Arc::clone(&runtime_directory));
     let (diagnostics, diagnostics_task) = ::diagnostics::spawn_owner(
         &owner_runtime_system,
         ::diagnostics::DiagnosticsOwnerInput {
@@ -520,6 +537,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     Ok(RuntimeOwners {
         tasks: OwnerRuntimeTasks {
             system: owner_runtime_system,
+            provider_system,
             peer: peer_task,
             module_scopes: vec![
                 module_scope("provider", provider_task),

@@ -70,7 +70,9 @@ pub enum OrganizationQuery {
         lookup: StartGateRuntimeBindingLookup,
         proposal_id_seed: Option<String>,
         requested_at: u64,
-        reply: tokio::sync::oneshot::Sender<Option<StartGatePromptPlan>>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<Option<StartGatePromptPlan>, organization::StoreFault>,
+        >,
     },
     TriggerList {
         team_id: Option<TeamId>,

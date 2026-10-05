@@ -5,6 +5,7 @@ mod host_actor;
 mod http;
 mod module_registry;
 mod parent_callback;
+pub mod team_mcp;
 
 pub use ::diagnostics::{
     HostLifecycle, HostState, RuntimeFailure, RuntimeLifecycle, RuntimeObservationConfig,
@@ -22,9 +23,6 @@ pub use composition::{
 pub use control::ControlError;
 pub use organization::{
     TeamDecisionCompositionError, TeamDecisionFacade, TeamDecisionReceiptProjection,
-    TeamDecisionRequest, TeamGraphContextOutcome, TeamGraphContextRequest,
-    TeamGraphContextRequestView, TeamGraphPatchCommand, TeamNodeEventCommand,
-    TeamNodeEventCommandKind, TeamNodeEventOutcome, TeamRunMcpError, TeamRunMcpFacade,
-    open_organization_store,
+    TeamDecisionRequest, TeamRunMcpFacade, open_organization_store,
 };
 pub use provider_module::{Resolver as ProviderCredentialResolver, ResolverConfigurationError};

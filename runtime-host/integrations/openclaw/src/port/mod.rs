@@ -32,6 +32,7 @@ pub use outcome::{
     OpenClawSessionMutationFailure, SessionModelPatchFailure,
 };
 pub use session::OpenClawSessionGateway;
+pub(crate) use session::validate_observation_identity;
 pub use team::TeamNativeRunWaiter;
 
 pub use crate::session::{

@@ -11,6 +11,7 @@ use crate::{
     delete::SessionDeleteOutcome,
     model_selection::SessionModelSelectionOutcome,
     query::SessionQuery,
+    ports::{SessionObserveOutcome, SessionReleaseOutcome},
     rename::SessionRenameOutcome,
     send::SessionSendOutcome,
     session_catalog::SessionCatalogOutcome,
@@ -45,6 +46,7 @@ pub enum SessionsCallOutcome {
     Succeeded,
     Responded,
     Subscribed,
+    Released,
     Complete,
     Incomplete,
     NotFound,
@@ -165,7 +167,7 @@ impl SessionsCallDetail {
         use SessionsCallOutcome::*;
         self.outcome = Some(outcome);
         match outcome {
-            Queued | Started | Succeeded | Responded | Subscribed | Complete | Incomplete
+            Queued | Started | Succeeded | Responded | Subscribed | Released | Complete | Incomplete
             | NotFound => CallStatus::Succeeded,
             Rejected | Unsupported => CallStatus::Rejected,
             Unknown => CallStatus::Unknown,
@@ -197,13 +199,17 @@ impl SessionCommand {
                 request: SessionSendRequest::Session { command, .. },
             } => {
                 let mut detail = SessionsCallDetail::session(
-                    command.endpoint.provider(),
-                    &command.session_key,
+                    command.identity.provider(),
+                    &command.identity.session_key,
                     command.endpoint_session_id.as_deref(),
                 );
                 detail.count = Some(command.attachments.len());
                 ("sessions.send", detail)
             }
+            Goal { command, .. } => (
+                if matches!(command.mutation, crate::goal::SessionGoalMutation::Clear) { "sessions.goal.clear" } else { "sessions.goal.update" },
+                SessionsCallDetail::session(command.identity.provider(), command.identity.session_key(), Some(&command.endpoint_session_id)),
+            ),
             Delete { command, .. } => (
                 "sessions.delete",
                 SessionsCallDetail::session(SessionProvider::OpenClaw, &command.session_key, None),
@@ -239,7 +245,12 @@ impl SessionCommand {
                     None,
                 ),
             ),
-            Ensure { .. } | Ingest { .. } | ConfigurePrivateResolver { .. } | Audited { .. } => {
+            Release { identity, .. } => (
+                "sessions.release",
+                SessionsCallDetail::session(identity.provider(), identity.session_key(), None),
+            ),
+            Ensure { .. } | Ingest { .. } | SendCompleted { .. } | GoalCompleted { .. } | SyncCompleted { .. } | ObservationClosed { .. }
+            | ConfigurePrivateResolver { .. } | Audited { .. } => {
                 return None;
             }
         };
@@ -263,10 +274,14 @@ impl SessionQuery {
                     ..SessionsCallDetail::default()
                 },
             ),
+            Observe { command, .. } => (
+                "sessions.observe",
+                SessionsCallDetail::session(command.identity.provider(), command.identity.session_key(), None),
+            ),
             Abort { command, .. } => {
                 let mut detail = SessionsCallDetail::session(
-                    command.endpoint.provider(),
-                    &command.session_key,
+                    command.identity.provider(),
+                    &command.identity.session_key,
                     command.endpoint_session_id.as_deref(),
                 );
                 detail.run_ref = command.run_id.as_deref().map(reference);
@@ -377,6 +392,45 @@ simple_outcome!(SessionModelSelectionOutcome,
     SessionModelSelectionOutcome::OutcomeUnknown => Unknown,
     SessionModelSelectionOutcome::Unsupported => Unsupported,
     SessionModelSelectionOutcome::Unavailable => Unavailable);
+
+simple_outcome!(SessionReleaseOutcome,
+    SessionReleaseOutcome::Released => Succeeded,
+    SessionReleaseOutcome::NotFound => NotFound,
+    SessionReleaseOutcome::Rejected => Rejected,
+    SessionReleaseOutcome::Unavailable => Unavailable);
+
+impl CallOutcome for SessionObserveOutcome {
+    fn summarize(&self, detail: &mut SessionsCallDetail) -> CallStatus {
+        let outcome = match self {
+            Self::Observed { view, .. } => {
+                detail.view(view);
+                SessionsCallOutcome::Subscribed
+            }
+            Self::Released { .. } => SessionsCallOutcome::Released,
+            Self::Rejected => SessionsCallOutcome::Rejected,
+            Self::Unavailable => SessionsCallOutcome::Unavailable,
+            Self::Unknown => SessionsCallOutcome::Unknown,
+        };
+        detail.outcome(outcome)
+    }
+}
+
+impl CallOutcome for crate::goal::SessionGoalOutcome {
+    fn summarize(&self, detail: &mut SessionsCallDetail) -> CallStatus {
+        use crate::goal::{SessionGoalOutcome, SessionGoalOperationStatus};
+        let outcome = match self {
+            SessionGoalOutcome::Succeeded { receipt } => {
+                detail.run_ref = receipt.run_id.as_deref().map(reference);
+                if receipt.status == SessionGoalOperationStatus::Started { SessionsCallOutcome::Started } else { SessionsCallOutcome::Succeeded }
+            }
+            SessionGoalOutcome::TargetRejected => SessionsCallOutcome::Rejected,
+            SessionGoalOutcome::Unknown => SessionsCallOutcome::Unknown,
+            SessionGoalOutcome::Unsupported => SessionsCallOutcome::Unsupported,
+            SessionGoalOutcome::Unavailable => SessionsCallOutcome::Unavailable,
+        };
+        detail.outcome(outcome)
+    }
+}
 
 impl CallOutcome for SessionSendOutcome {
     fn summarize(&self, detail: &mut SessionsCallDetail) -> CallStatus {

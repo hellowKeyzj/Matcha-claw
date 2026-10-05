@@ -118,8 +118,35 @@ pub(crate) fn references(hits: &[crate::domain::WikiSearchHit]) -> Vec<WikiQuest
     references
 }
 
+fn strip_thinking(content: &str) -> String {
+    let mut output = String::new();
+    let mut rest = content;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let opening = ["<think>", "<thinking>"]
+            .iter()
+            .filter_map(|tag| lower.find(tag).map(|index| (index, *tag)))
+            .min_by_key(|(index, _)| *index);
+        let Some((start, tag)) = opening else {
+            output.push_str(rest);
+            break;
+        };
+        output.push_str(&rest[..start]);
+        let closing = if tag == "<think>" {
+            "</think>"
+        } else {
+            "</thinking>"
+        };
+        let Some(end) = lower[start + tag.len()..].find(closing) else {
+            break;
+        };
+        rest = &rest[start + tag.len() + end + closing.len()..];
+    }
+    output.trim().to_owned()
+}
+
 pub(crate) fn clean_for_save(content: &str) -> String {
-    let clean = crate::research::synthesis::clean(content);
+    let clean = strip_thinking(content);
     let mut output = String::new();
     let mut rest = clean.as_str();
     while let Some(start) = rest.find("<!--") {

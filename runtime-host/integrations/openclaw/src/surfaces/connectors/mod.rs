@@ -10,14 +10,14 @@ use crate::{
 
 pub fn apply_runtime_mcp_projection(
     state_dir: CanonicalStateDir,
-    preset: Option<ports::TeamRunMcpPreset<'_>>,
+    preset: Option<ports::McpPreset<'_>>,
     catalog: &ConnectorCatalog,
     secrets: &dyn ports::ConnectorSecretResolverPort,
 ) -> ports::ConnectorProjectionEffect {
     let preset = preset.map(|preset| {
         PresetMcpProjection::new(
             preset.runtime_host_mcp_executable(),
-            preset.team_run_mcp_state_dir(),
+            preset.runtime_host_mcp_state_dir(),
         )
     });
     external::project_runtime_mcp_connectors(state_dir, preset, catalog, secrets)

@@ -26,6 +26,10 @@ import type { GatewayTransportIssue } from '../types/session/runtime-state';
 import {
   createSessionTraceId,
   logSessionTrace,
+  isSessionTraceEnabled,
+  summarizeError,
+  summarizeSessionChanges,
+  summarizeSessionIdentity,
   summarizeIdentifier,
 } from '@/lib/session-trace';
 
@@ -53,7 +57,8 @@ interface GatewayErrorEventPayload {
 function sessionDeltaTextLength(changes: readonly SessionChange[]): number {
   return changes.reduce((total, change) => {
     if (change.kind === 'messageDelta') return total + change.text.length;
-    if (change.kind !== 'messageUpdated') return total;
+    if (change.kind === 'itemsReplaced') return total + change.items.reduce((length, item) => length + sessionItemTextLength(item), 0);
+    if (change.kind !== 'messageUpdated' && change.kind !== 'messageReplaced') return total;
     return total + sessionItemTextLength(change.item);
   }, 0);
 }
@@ -90,7 +95,10 @@ function traceSessionDeltaBoundary(
   delta: SessionDelta,
   extra: Record<string, unknown> = {},
 ): void {
+  if (!traceId || !isSessionTraceEnabled()) return;
   logSessionTrace(stage, traceId, {
+    identity: summarizeSessionIdentity(delta.identity),
+    mappedChanges: summarizeSessionChanges(delta.changes),
     sessionKey: summarizeIdentifier(delta.sessionKey),
     runId: summarizeIdentifier(sessionDeltaRunId(delta)),
     epoch: delta.epoch,
@@ -358,6 +366,12 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               },
             }));
           }));
+          unsubscribers.push(subscribeHostEvent<unknown>('session.resync', (payload) => {
+            void useChatStore.getState().resyncSession(payload).catch((error) => {
+              console.warn('[session.resync]', summarizeError(error));
+              if (isSessionTraceEnabled()) logSessionTrace('session.resync.failed', 'session-resync-boundary', summarizeError(error));
+            });
+          }));
           unsubscribers.push(subscribeHostEvent<unknown>('session.delta', (payload) => {
             const traceId = createSessionTraceId('session.delta-boundary');
             logSessionTrace('session.delta.received', traceId, {
@@ -369,7 +383,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
             } catch (error) {
               logSessionTrace('session.delta.decode', traceId, {
                 decoded: false,
-                errorName: error instanceof Error ? error.name : typeof error,
+                ...summarizeError(error),
               });
               return;
             }
@@ -380,8 +394,15 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
             }, delta);
             traceSessionDeltaBoundary('session.delta.apply', traceId, delta, {
               status: applyResult.status,
-              reason: 'reason' in applyResult ? applyResult.reason : null,
+              reason: 'reason' in applyResult ? summarizeIdentifier(applyResult.reason) : null,
             });
+            if (applyResult.status === 'gap' || applyResult.status === 'epoch-mismatch') {
+              void useChatStore.getState().resyncSession({ identity: delta.identity, epoch: delta.epoch, seq: delta.seq })
+                .catch((error) => {
+                  console.warn('[session.resync]', summarizeError(error));
+                  if (isSessionTraceEnabled()) logSessionTrace('session.resync.failed', 'session-resync-boundary', summarizeError(error));
+                });
+            }
           }));
           unsubscribers.push(subscribeHostEvent<TaskSnapshotEvent>(
             'task:snapshot',

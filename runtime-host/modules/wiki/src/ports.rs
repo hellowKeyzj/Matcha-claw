@@ -57,7 +57,9 @@ impl Default for WikiIngestLlmOptions {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WikiIngestLlmModelLimits {
+    /// Provider context window in tokens, not a character budget.
     pub context_window: Option<u64>,
+    /// Provider maximum output length in tokens.
     pub max_tokens: Option<u64>,
     pub timeout_ms: Option<u64>,
 }

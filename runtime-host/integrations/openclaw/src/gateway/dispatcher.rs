@@ -3,9 +3,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::{
-    connection::{ExchangeFailure, GatewayConnection},
+    connection::{ExchangeFailure, GatewayConnection, GatewayFrame},
     delivery::{DispatcherError, MutationDelivery},
-    wire::{self, GatewayResponse, RpcRequest},
+    wire::{GatewayResponse, RpcRequest},
 };
 
 pub(crate) const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
@@ -19,7 +19,7 @@ pub(crate) struct Dispatcher {
 impl Dispatcher {
     pub(crate) fn new(
         socket: super::client::GatewaySocket,
-    ) -> (Self, mpsc::Receiver<wire::GatewayEvent>) {
+    ) -> (Self, mpsc::Receiver<GatewayFrame>) {
         let (events, receiver) = mpsc::channel(256);
         (
             Self {
@@ -44,6 +44,14 @@ impl Dispatcher {
         self.connection
             .request(request, deadline)
             .await
+            .map_err(|failure| failure.error)
+    }
+
+    pub(crate) async fn ordered_query(
+        &self,
+        request: RpcRequest,
+    ) -> Result<GatewayResponse, DispatcherError> {
+        self.connection.ordered_request(request, REQUEST_DEADLINE).await
             .map_err(|failure| failure.error)
     }
 
@@ -76,6 +84,18 @@ impl Dispatcher {
             Ok(response) => MutationDelivery::Response(response),
             Err(failure) => mutation_failure(failure),
         }
+    }
+
+    pub(crate) fn failure(&self) -> tokio::sync::watch::Receiver<Option<DispatcherError>> {
+        self.connection.failure()
+    }
+
+    pub(crate) async fn closed(&self) {
+        self.connection.closed().await;
+    }
+
+    pub(crate) async fn disconnect(&self) {
+        self.connection.disconnect().await;
     }
 
     pub(crate) async fn close(self) {

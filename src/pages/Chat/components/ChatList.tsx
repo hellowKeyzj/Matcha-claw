@@ -2,6 +2,7 @@ import {
   forwardRef,
   memo,
   useCallback,
+  useEffect,
   useImperativeHandle,
   useLayoutEffect,
   useMemo,
@@ -31,6 +32,7 @@ import { ChatAssistantTurn } from '../ChatAssistantTurn';
 import type { MessageAvatarSlot } from '../chat-message-shell';
 import { ExecutionGraphCard } from '../ExecutionGraphCard';
 import { useChatScroll } from '../useChatScroll';
+import { sampleViewportAnchor, type ViewportAnchor } from '../chat-scroll-model';
 import type { UseChatViewResult } from '../useChatView';
 import { FailureScreen } from './ChatStates';
 import type { ChatArtifactGroup } from '../artifacts';
@@ -44,6 +46,7 @@ import type {
 } from '../../../types/desktop/runtime-address';
 import type { WorkspaceFileContext } from '@/lib/host-api';
 import type { GeneratedFile } from '@/lib/generated-files';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeRenderItems, summarizeSessionIdentity } from '@/lib/session-trace';
 
 const STARTUP_TRACE_PREFIX = '[startup-trace]';
 const tracedFirstPaintSessionKeys = new Set<string>();
@@ -74,6 +77,7 @@ export interface ChatListProps {
   artifactGroups: ChatArtifactGroup[];
   onOpenArtifactFile: (file: GeneratedFile) => void;
   onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
+  onReuseMessage?: (text: string) => void;
 }
 
 interface ChatListSurfaceProps {
@@ -103,6 +107,7 @@ interface ChatListSurfaceProps {
   artifactFilesByGraphKey: ReadonlyMap<string, GeneratedFile[]>;
   onOpenArtifactFile: (file: GeneratedFile) => void;
   onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
+  onReuseMessage?: (text: string) => void;
 }
 
 type ChatListContentProps = Omit<
@@ -262,6 +267,7 @@ function renderChatItem(input: {
   artifactFilesByGraphKey: ReadonlyMap<string, GeneratedFile[]>;
   onOpenArtifactFile: (file: GeneratedFile) => void;
   onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
+  onReuseMessage?: (text: string) => void;
 }) {
   if (input.item.kind === 'assistant-turn') {
     return (
@@ -323,6 +329,7 @@ function renderChatItem(input: {
   return (
     <ChatMessage
       item={input.item as ChatUserMessageItem}
+      onReuseMessage={input.onReuseMessage}
       userAvatarImageUrl={input.userAvatarImageUrl}
       sessionIdentity={input.sessionIdentity}
       endpointSessionId={input.endpointSessionId}
@@ -349,10 +356,27 @@ const ChatListContent = memo(function ChatListContent({
   artifactFilesByGraphKey = new Map<string, GeneratedFile[]>(),
   onOpenArtifactFile = () => {},
   onOpenAttachedArtifact = () => {},
+  onReuseMessage,
 }: ChatListContentProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
+  const tracing = isSessionTraceEnabled();
+  const metadataStartedAt = tracing ? performance.now() : 0;
   const replyStartedAtByAssistantKey = useMemo(() => buildReplyStartedAtByAssistantKey(items), [items]);
   const assistantAvatarSlots = useMemo(() => buildAssistantAvatarSlots(items, showThinking), [items, showThinking]);
+  const metadataBuildElapsedMs = tracing ? performance.now() - metadataStartedAt : null;
+  let contentElementsBuildElapsedMs: number | null = null;
+  useEffect(() => {
+    if (!isSessionTraceEnabled()) return;
+    logSessionTrace('session.chat-list.committed', 'session-chat-list-boundary', {
+      identity: summarizeSessionIdentity(sessionIdentity), showThinking,
+      metadataBuildElapsedMs, contentElementsBuildElapsedMs,
+      rendered: !showBlockingLoading && !showBlockingError && !isEmptyState,
+      reason: showBlockingLoading ? 'blocking-loading' : showBlockingError ? 'blocking-error' : isEmptyState ? 'empty-state' : null,
+      items: summarizeRenderItems(items),
+      routes: items.slice(0, 200).map((item, itemIndex) => ({ itemIndex, renderKeyHash: summarizeIdentifier(item.key).hash,
+        component: item.kind === 'assistant-turn' ? 'ChatAssistantTurn' : item.kind === 'execution-graph' ? 'ExecutionGraphCard' : item.kind === 'system' ? 'SystemInfoRow' : 'ChatMessage' })),
+    });
+  }, [isEmptyState, items, sessionIdentity, showBlockingError, showBlockingLoading, showThinking]);
 
   if (showBlockingLoading) {
     return (
@@ -366,7 +390,8 @@ const ChatListContent = memo(function ChatListContent({
     return <FailureScreen message={errorMessage} />;
   }
 
-  return (
+  const contentElementsStartedAt = tracing ? performance.now() : 0;
+  const content = (
     <>
       {showLoadOlderButton && !isEmptyState ? (
         <div
@@ -416,6 +441,7 @@ const ChatListContent = memo(function ChatListContent({
                       artifactFilesByGraphKey,
                       onOpenArtifactFile,
                       onOpenAttachedArtifact,
+                      onReuseMessage,
                     })}
                   </div>
                 </div>
@@ -426,6 +452,8 @@ const ChatListContent = memo(function ChatListContent({
       ) : null}
     </>
   );
+  contentElementsBuildElapsedMs = tracing ? performance.now() - contentElementsStartedAt : null;
+  return content;
 });
 
 const ChatScrollChrome = memo(function ChatScrollChrome({
@@ -498,6 +526,7 @@ export const ChatListSurface = memo(function ChatListSurface({
   artifactFilesByGraphKey = new Map<string, GeneratedFile[]>(),
   onOpenArtifactFile = () => {},
   onOpenAttachedArtifact = () => {},
+  onReuseMessage,
 }: ChatListSurfaceProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
 
@@ -549,6 +578,7 @@ export const ChatListSurface = memo(function ChatListSurface({
               artifactFilesByGraphKey={artifactFilesByGraphKey}
               onOpenArtifactFile={onOpenArtifactFile}
               onOpenAttachedArtifact={onOpenAttachedArtifact}
+              onReuseMessage={onReuseMessage}
             />
           </div>
         </div>
@@ -581,11 +611,18 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     artifactGroups,
     onOpenArtifactFile,
     onOpenAttachedArtifact,
+    onReuseMessage,
   },
   ref,
 ) {
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messageContentRef = useRef<HTMLDivElement>(null);
+  const olderPageAnchorRef = useRef<{
+    sessionKey: string;
+    sessionIdentity: SessionIdentity | undefined;
+    windowStartOffset: number;
+    anchor: ViewportAnchor | null;
+  } | null>(null);
   const [scrollChromeStore] = useState(() => (
     createChatScrollChromeStore({
       phase: 'follow',
@@ -680,13 +717,37 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     contentRef: messageContentRef,
   });
 
-  const handleLoadOlder = useCallback(() => {
-    if (!currentSessionKey) {
+  useLayoutEffect(() => {
+    const pending = olderPageAnchorRef.current;
+    if (!pending) {
       return;
     }
-    prepareScopeAnchorRestore(currentSessionKey);
+    if (!isActive || pending.sessionKey !== currentSessionKey || pending.sessionIdentity !== sessionIdentity
+      || viewport.isLoadingNewer) {
+      olderPageAnchorRef.current = null;
+      return;
+    }
+    if (viewport.windowStartOffset < pending.windowStartOffset) {
+      olderPageAnchorRef.current = null;
+      prepareScopeAnchorRestore(currentSessionKey, pending.anchor);
+    } else if (!viewport.isLoadingMore || viewport.windowStartOffset !== pending.windowStartOffset) {
+      olderPageAnchorRef.current = null;
+    }
+  }, [currentSessionKey, isActive, prepareScopeAnchorRestore, sessionIdentity, viewport]);
+
+  const handleLoadOlder = useCallback(() => {
+    if (!currentSessionKey || !sessionIdentity || !viewport.hasMore || viewport.isLoadingMore) {
+      return;
+    }
+    olderPageAnchorRef.current = {
+      sessionKey: currentSessionKey,
+      sessionIdentity,
+      windowStartOffset: viewport.windowStartOffset,
+      anchor: sampleViewportAnchor(messagesViewportRef.current),
+    };
     onLoadOlder();
-  }, [currentSessionKey, onLoadOlder, prepareScopeAnchorRestore]);
+  }, [currentSessionKey, onLoadOlder, sessionIdentity, viewport.hasMore,
+    viewport.isLoadingMore, viewport.windowStartOffset]);
 
   const handleJumpToItemKey = useCallback((itemKey?: string) => {
     if (!itemKey) {
@@ -708,6 +769,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     if (!currentSessionKey) {
       return;
     }
+    olderPageAnchorRef.current = null;
     if (viewport.isAtLatest) {
       jumpToBottom();
       return;
@@ -744,6 +806,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       if (!currentSessionKey) {
         return;
       }
+      olderPageAnchorRef.current = null;
       prepareScopeBottomAlign(currentSessionKey);
     },
     scrollByWheelDelta: (deltaY) => {
@@ -782,6 +845,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       artifactFilesByGraphKey={artifactFilesByGraphKey}
       onOpenArtifactFile={onOpenArtifactFile}
       onOpenAttachedArtifact={onOpenAttachedArtifact}
+      onReuseMessage={onReuseMessage}
     />
   );
 });

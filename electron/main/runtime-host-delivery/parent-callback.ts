@@ -19,7 +19,6 @@ const SHELL_OPEN_PATH_ACTION = 'shell_open_path';
 const GATEWAY_EVENT_NAMES = new Set([
   'gateway:lifecycle',
   'gateway:notification',
-  'session:update',
   'task:snapshot',
   'gateway:channel-status',
   'gateway:error',

@@ -11,13 +11,15 @@ use crate::{
     },
     create::{SessionAdmission, SessionCreateCommand, SessionCreateOutcome},
     delete::{SessionDeleteCommand, SessionDeleteOutcome},
+    goal::{SessionGoalCommand, SessionGoalOutcome},
     model_selection::{ResolvedSessionModelSelection, SessionModelSelectionOutcome},
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
     session_catalog::{SessionCatalogCommand, SessionCatalogOutcome},
     session_history::{SessionHistoryCommand, SessionHistoryFailure, SessionHistoryOutcome},
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
-    state::{SessionSourceBinding, SessionView},
+    state::{RunPhase, SessionIdentity as ViewIdentity, SessionSourceBinding, SessionView},
+    timeline::WindowRequest,
     timeline::{self, ContentCommand, ContentOutcome},
 };
 
@@ -58,8 +60,97 @@ pub trait RuntimeDriver: Send + Sync {
     }
 }
 
+/// Owner-internal binding. A UI lease ID is deliberately absent from native ingress.
+#[derive(Clone, Debug)]
+pub struct SessionObservationRequest {
+    pub identity: ViewIdentity,
+    pub endpoint_session_id: Option<String>,
+    pub generation: u64,
+}
+
+pub trait SessionObservation: Send + Sync {
+    /// Subscribe before reading; reconcile native replay/history inside the Integration.
+    /// The returned view is not by itself proof that Host consumed the event frontier.
+    fn sync<'a>(
+        &'a self,
+        command: timeline::Command,
+        epoch: u64,
+    ) -> SessionFuture<'a, Result<SessionSync, RuntimeOperationFailure>>;
+
+    /// Rebinds a failed receive resource while preserving Integration reconciliation facts.
+    /// Native ingress for the new generation starts only after the owner's next sync.
+    fn restart(&self, generation: u64) -> OwnedRuntimeFuture<Result<(), RuntimeOperationFailure>>;
+
+    /// Closes only this receive resource; never aborts a native run.
+    fn close(&self) -> OwnedRuntimeFuture<()>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionSyncCut {
+    /// A history/snapshot read, not a consumed event frontier.
+    Snapshot,
+    /// The Integration actually projected events through this source cursor.
+    /// Gateway-global cursors are non-contiguous; opaque history cursors stay private.
+    EventFrontier { cursor: u64, contiguous: bool },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionTerminalRun {
+    pub run_id: String,
+    pub phase: RunPhase,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionSync {
+    pub view: SessionView,
+    pub source_epoch: Option<u64>,
+    /// Native transcript branch, distinct from the event source epoch; never public.
+    pub source_branch: Option<String>,
+    pub cut: SessionSyncCut,
+    /// Facts at an actually consumed replay frontier, not transcript coverage.
+    /// The Integration awaits Host ingress receipts before returning this baseline.
+    pub replay_baseline: Option<SessionView>,
+    /// Only explicit native run facts, never inferred from final history items.
+    pub terminal_runs: Vec<SessionTerminalRun>,
+    /// Explicit display retirement evidence from native reconciliation, not missing
+    /// history rows, shared run IDs, or equal bodies. Applied even to partial items.
+    pub retired_item_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionObserveCommand {
+    pub identity: ViewIdentity,
+    /// Receive resource ID, not a message-routing or native authorization token.
+    pub lease_id: String,
+    pub window: WindowRequest,
+}
+
+#[derive(Clone, Debug)]
+pub enum SessionObserveOutcome {
+    Observed { lease_id: String, view: SessionView },
+    Released { lease_id: String },
+    Rejected,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionReleaseOutcome {
+    Released,
+    NotFound,
+    Rejected,
+    Unavailable,
+}
+
 pub trait SessionOps: Send + Sync {
     fn admission(&self) -> SessionAdmission;
+
+    /// Construct the handle without waiting for native IO; the Sessions owner runs
+    /// sync/close under its existing OwnedTask lifetime and bounded ingress queue.
+    fn prepare_observation(
+        &self,
+        request: SessionObservationRequest,
+    ) -> Result<Arc<dyn SessionObservation>, RuntimeOperationFailure>;
 
     fn agent_scoped_session_key(
         &self,
@@ -167,6 +258,17 @@ pub trait SessionOps: Send + Sync {
         &'a self,
         command: ResolvedSessionModelSelection,
     ) -> SessionFuture<'a, SessionModelSelectionOutcome>;
+
+    fn supports_goal(&self) -> bool {
+        false
+    }
+
+    fn mutate_session_goal<'a>(
+        &'a self,
+        _command: SessionGoalCommand,
+    ) -> SessionFuture<'a, SessionGoalOutcome> {
+        Box::pin(async { SessionGoalOutcome::Unsupported })
+    }
 
     fn session_permission<'a>(
         &'a self,

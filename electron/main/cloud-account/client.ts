@@ -246,6 +246,8 @@ function downloadFilename(response: Response, request: CloudPackageDownloadReque
 }
 
 function filenameFromContentDisposition(value: string | null): string | undefined {
+  const encoded = value?.match(/(?:^|;)\s*filename\*=utf-8'[^']*'([^;]+)/i)?.[1];
+  if (encoded) return basename(decodeURIComponent(encoded.trim()));
   const match = value?.match(/filename=(?:"([^"]+)"|([^;]+))/i);
   const filename = (match?.[1] || match?.[2])?.trim();
   return filename ? basename(filename) : undefined;

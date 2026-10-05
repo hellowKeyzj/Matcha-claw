@@ -130,7 +130,6 @@ pub(crate) fn parse_review_blocks(text: &str, source_path: &str) -> Vec<WikiRevi
             description: review_description(&body_text),
             source_path: Some(source_path.to_owned()),
             affected_pages: review_csv_line(&body_text, "PAGES:"),
-            search_queries: review_pipe_line(&body_text, "SEARCH:"),
             options: review_options(&body_text),
             resolved: false,
             resolved_action: None,
@@ -141,9 +140,11 @@ pub(crate) fn parse_review_blocks(text: &str, source_path: &str) -> Vec<WikiRevi
 }
 
 pub(crate) fn should_run_dedicated_review_stage(text: &str) -> bool {
-    text.chars().count() >= 10_000
+    super::text::len(text) >= 10_000
         || count_file_openers(text) >= 4
-        || has_unclosed_review_block(text)
+        || text
+            .lines()
+            .any(|line| parse_review_opener_line(line).is_some())
 }
 
 pub(crate) fn is_safe_ingest_path(path: &str) -> bool {
@@ -254,7 +255,6 @@ fn review_description(body: &str) -> String {
             let trimmed = line.trim_start();
             !starts_with_ascii_case(trimmed, "OPTIONS:")
                 && !starts_with_ascii_case(trimmed, "PAGES:")
-                && !starts_with_ascii_case(trimmed, "SEARCH:")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -302,19 +302,6 @@ fn split_values(line: &str, delimiter: char) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .collect()
-}
-
-fn has_unclosed_review_block(text: &str) -> bool {
-    let normalized = text.replace("\r\n", "\n");
-    let review_count = normalized
-        .lines()
-        .filter(|line| parse_review_opener_line(line).is_some())
-        .count();
-    let closed_count = normalized
-        .lines()
-        .filter(|line| line.trim() == "---END REVIEW---")
-        .count();
-    review_count > closed_count
 }
 
 fn count_file_openers(text: &str) -> usize {
@@ -439,7 +426,6 @@ mod tests {
             &[
                 "---REVIEW: suggestion | Closed---",
                 "Description",
-                "SEARCH: query one | query two",
                 "---END REVIEW---",
                 "---REVIEW: suggestion | Unclosed---",
                 "Should be ignored",

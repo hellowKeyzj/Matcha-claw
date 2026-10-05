@@ -1,7 +1,8 @@
 use super::actor::SessionShared;
 use crate::{
-    abort::{NativeEndpoint, SessionAbortCommand, SessionAbortOutcome},
-    command::session_lane_key,
+    abort::{SessionAbortCommand, SessionAbortOutcome},
+    command::session_identity_lane_key,
+    state::SessionProvider,
     ports::RuntimeOperationFailure,
     trace as session_trace,
 };
@@ -10,7 +11,7 @@ impl SessionShared {
     pub(super) async fn handle_abort(&self, command: SessionAbortCommand) -> SessionAbortOutcome {
         let started = std::time::Instant::now();
         let trace_id = command.trace_id().map(str::to_owned);
-        let lane_key = session_lane_key(command.endpoint.provider(), &command.session_key);
+        let lane_key = session_identity_lane_key(&command.identity);
         let runtime_summary = || {
             if trace_id.is_none() || std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1")
             {
@@ -36,8 +37,8 @@ impl SessionShared {
             "runtime.abort.execution.start",
             trace_id.as_deref(),
             serde_json::json!({
-                "endpoint": format!("{:?}", command.endpoint),
-                "sessionKey": session_trace::id_shape(Some(&command.session_key)),
+                "endpoint": command.identity.provider().as_str(),
+                "sessionKey": session_trace::id_shape(Some(&command.identity.session_key)),
                 "runId": session_trace::id_shape(command.run_id.as_deref()),
                 "runtime": runtime_summary(),
                 "elapsedMs": started.elapsed().as_millis(),
@@ -54,7 +55,10 @@ impl SessionShared {
                 return outcome;
             }
         };
-        let driver = match self.running_session_driver(command.endpoint.runtime_endpoint()) {
+        let endpoint = platform::endpoint::runtime_address::RuntimeEndpoint::try_new(
+            command.identity.provider().as_str(), &command.identity.endpoint.runtime_instance_id,
+        ).ok();
+        let driver = match self.running_session_driver(endpoint) {
             Ok(driver) => driver,
             Err(failure) => {
                 let outcome = match failure {
@@ -102,10 +106,10 @@ impl SessionShared {
         &self,
         command: SessionAbortCommand,
     ) -> Result<SessionAbortCommand, SessionAbortOutcome> {
-        if command.endpoint != NativeEndpoint::MatchaAgentLocal {
+        if command.identity.provider() != SessionProvider::MatchaAgent {
             return Ok(command);
         }
-        let lane_key = session_lane_key(command.endpoint.provider(), &command.session_key);
+        let lane_key = session_identity_lane_key(&command.identity);
         let session_id = self
             .snapshot
             .load()

@@ -131,7 +131,7 @@ fn page_stem(path: &str) -> String {
         .to_owned()
 }
 
-pub(super) fn wiki_links(content: &str) -> Vec<String> {
+pub(crate) fn wiki_links(content: &str) -> Vec<String> {
     let mut links = Vec::new();
     let mut rest = content;
     while let Some(start) = rest.find("[[") {

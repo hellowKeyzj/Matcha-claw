@@ -5,10 +5,8 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
-use tokio::sync::{broadcast, mpsc};
 
 use serde_json::{Map, Value};
 
@@ -20,21 +18,20 @@ use foundation::process::{
     },
 };
 use platform::exchange::InvocationOutcome;
-use sessions_module::command::SessionIngressEvent;
+#[cfg(test)]
+use tokio::sync::mpsc;
 
 use crate::{
-    driver::matcha_session_event,
     lifecycle::secret::Secret,
     session::{
         canonical::{CanonicalSessionReadResult, read as read_canonical_session},
         client::{
-            AppServerClient, AppServerClientError, AppServerEndpoint, EventSubscriptionCursor,
-            RawEvent,
+            AppServerClient, AppServerClientError, AppServerEndpoint,
         },
         close::SessionCloseParams,
         events::{
             ApprovalPhase, EventActivity, EventProjectionResult, EventRejection, MessageLifecycle,
-            ProjectedRunError, RunLifecycle, SessionEventObservation, SessionEventProjector,
+            ProjectedRunError, RunLifecycle, SessionEventProjector,
             SessionEventUpdate, ToolActivityPhase,
         },
         history::{HistoryContentResult, HistoryListResult, HistoryLoadResult},
@@ -80,7 +77,6 @@ pub struct RoleSessionPromptHandle {
     handle: SupervisorHandle,
     endpoint: AppServerEndpoint,
     secret: Arc<Secret>,
-    source_epoch: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -209,8 +205,8 @@ impl fmt::Debug for RendererEvent {
 /// envelopes and their payloads are never carried by this type.
 #[derive(Clone, Eq, PartialEq)]
 pub struct RendererEventEnvelope {
-    route_key: String,
-    session_key: String,
+    identity: sessions_module::state::SessionIdentity,
+    generation: u64,
     run_id: String,
     source_cursor: u64,
     source_epoch: Option<u64>,
@@ -221,25 +217,25 @@ pub struct RendererEventEnvelope {
 pub enum SessionSubscriptionItem {
     Event(RendererEventEnvelope),
     Recovery {
-        route_key: String,
-        session_key: String,
-        run_id: String,
+        identity: sessions_module::state::SessionIdentity,
+        generation: u64,
+        run_id: Option<String>,
         recovery: SessionRecovery,
     },
 }
 
 impl RendererEventEnvelope {
     pub fn new(
-        route_key: String,
-        session_key: String,
+        identity: sessions_module::state::SessionIdentity,
+        generation: u64,
         run_id: String,
         source_cursor: u64,
         source_epoch: Option<u64>,
         event: RendererEvent,
     ) -> Self {
         Self {
-            route_key,
-            session_key,
+            identity,
+            generation,
             run_id,
             source_cursor,
             source_epoch,
@@ -247,12 +243,12 @@ impl RendererEventEnvelope {
         }
     }
 
-    pub fn route_key(&self) -> &str {
-        &self.route_key
+    pub fn identity(&self) -> &sessions_module::state::SessionIdentity {
+        &self.identity
     }
 
-    pub fn session_key(&self) -> &str {
-        &self.session_key
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn run_id(&self) -> &str {
@@ -280,8 +276,8 @@ impl fmt::Debug for RendererEventEnvelope {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RendererEventEnvelope")
-            .field("route_key", &self.route_key)
-            .field("session_key", &self.session_key)
+            .field("identity", &self.identity)
+            .field("generation", &self.generation)
             .field("run_id", &self.run_id)
             .field("source_cursor", &self.source_cursor)
             .field("source_epoch", &self.source_epoch)
@@ -292,6 +288,7 @@ impl fmt::Debug for RendererEventEnvelope {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RendererRunPhase {
+    Queued,
     Started,
     WaitingForApproval,
     CancellationRequested,
@@ -390,14 +387,14 @@ async fn load_or_create_role_session(
     }
 }
 
-struct RendererProjection {
-    run_id: String,
-    source_cursor: u64,
-    event: RendererEvent,
+pub(crate) struct RendererProjection {
+    pub(crate) run_id: String,
+    pub(crate) source_cursor: u64,
+    pub(crate) event: RendererEvent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RendererProjectionFailure {
+pub(crate) enum RendererProjectionFailure {
     Gap {
         expected: Sequence,
         received: Sequence,
@@ -422,7 +419,7 @@ fn renderer_event_step(
         .map(|projection| projection.event))
 }
 
-fn renderer_projection_step(
+pub(crate) fn renderer_projection_step(
     projector: &mut SessionEventProjector,
     envelope: crate::session::protocol_event::EventEnvelope,
 ) -> Result<Option<RendererProjection>, RendererProjectionFailure> {
@@ -568,54 +565,6 @@ fn matcha_trace_enabled() -> bool {
         || std::env::var(MATCHA_AGENT_RUN_TRACE).as_deref() == Ok("1")
 }
 
-fn log_renderer_subscription_trace(trace_id: Option<&str>, stage: &str, payload: Value) {
-    if trace_id.is_none() || !matcha_trace_enabled() {
-        return;
-    }
-    let mut event = Map::new();
-    event.insert("prefix".into(), Value::String("session-trace".into()));
-    event.insert("source".into(), Value::String("runtime-host".into()));
-    event.insert(
-        "traceId".into(),
-        Value::String(trace_id.expect("checked trace id").to_owned()),
-    );
-    event.insert("stage".into(), Value::String(stage.to_owned()));
-    event.insert("at".into(), Value::Number(now_millis().into()));
-    if let Value::Object(fields) = payload {
-        event.extend(fields);
-    }
-    eprintln!("{}", Value::Object(event));
-}
-
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
-fn app_server_client_error_trace_kind(error: AppServerClientError) -> &'static str {
-    match error {
-        AppServerClientError::InvalidEndpoint => "invalid-endpoint",
-        AppServerClientError::HealthDeadline => "health-deadline",
-        AppServerClientError::HealthFailed => "health-failed",
-        AppServerClientError::UpgradeDeadline => "upgrade-deadline",
-        AppServerClientError::UpgradeFailed => "upgrade-failed",
-        AppServerClientError::InitializeFailed => "initialize-failed",
-        AppServerClientError::RequestDeadline => "request-deadline",
-        AppServerClientError::ConnectionClosed => "connection-closed",
-        AppServerClientError::UnknownResponse => "unknown-response",
-        AppServerClientError::Transport => "transport",
-        AppServerClientError::Protocol => "protocol",
-        AppServerClientError::PeerRejected => "peer-rejected",
-        AppServerClientError::SessionNotFound => "session-not-found",
-        AppServerClientError::EventRecoveryRequired => "event-recovery-required",
-        AppServerClientError::CloseFailed => "close-failed",
-    }
-}
-
 fn safe_trace_detail(event: &Value, key: &str) -> Option<Value> {
     let value = event.get("details")?.get(key)?;
     match value {
@@ -626,150 +575,6 @@ fn safe_trace_detail(event: &Value, key: &str) -> Option<Value> {
         Value::Bool(value) => Some(Value::Bool(*value)),
         Value::Null => Some(Value::Null),
         _ => None,
-    }
-}
-
-fn renderer_subscription_projection_step(
-    projector: &mut SessionEventProjector,
-    replay_cursor: Sequence,
-    envelope: crate::session::protocol_event::EventEnvelope,
-) -> Result<Option<RendererProjection>, RendererProjectionFailure> {
-    if envelope.seq.get() <= replay_cursor.get() {
-        return Ok(None);
-    }
-    let event_type = envelope.event.event_type().to_owned();
-    let seq = envelope.seq.get();
-    let session_key = envelope.session_id.as_str().to_owned();
-    let run_id = envelope.run_id.as_ref().map(|r| r.as_str().to_owned());
-    let result = renderer_projection_step(projector, envelope);
-
-    let log_json = match &result {
-        Ok(Some(p)) => serde_json::json!({
-            "sessionKey": session_key,
-            "runId": run_id,
-            "seq": seq,
-            "eventType": event_type,
-            "result": "Projected",
-            "eventKind": match &p.event {
-                RendererEvent::Run { .. } | RendererEvent::RunFailed { .. } => "run",
-                RendererEvent::Message { .. } => "message",
-                RendererEvent::Tool { .. } => "tool",
-                RendererEvent::Approval { .. } => "approval",
-            }
-        }),
-        Ok(None) => serde_json::json!({
-            "sessionKey": session_key,
-            "runId": run_id,
-            "seq": seq,
-            "eventType": event_type,
-            "result": "None"
-        }),
-        Err(e) => serde_json::json!({
-            "sessionKey": session_key,
-            "runId": run_id,
-            "seq": seq,
-            "eventType": event_type,
-            "result": "Err",
-            "error": format!("{:?}", e)
-        }),
-    };
-
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "prefix": "session-trace",
-            "source": "runtime-host",
-            "stage": "runtime.matcha.renderer-projection",
-            "payload": log_json
-        })
-    );
-
-    result
-}
-
-fn renderer_projection_recovery(
-    session_id: SessionId,
-    native_cursor: Sequence,
-    source_epoch: u64,
-    failure: RendererProjectionFailure,
-) -> SessionRecovery {
-    match failure {
-        RendererProjectionFailure::Gap { expected, received } => SessionRecovery::from_observation(
-            session_id,
-            SessionEventObservation::Gap { expected, received },
-        )
-        .expect("gap projection failure always produces recovery"),
-        RendererProjectionFailure::Stale { cursor, received } => SessionRecovery::from_observation(
-            session_id,
-            SessionEventObservation::Stale { cursor, received },
-        )
-        .expect("stale projection failure always produces recovery"),
-        RendererProjectionFailure::Rejected { sequence, reason } => {
-            SessionRecovery::from_projection_rejection(session_id, sequence, native_cursor, reason)
-        }
-    }
-    .with_source_epoch(source_epoch)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SubscriptionDelivery {
-    Sent,
-    Recovering,
-    Closed,
-}
-
-async fn send_renderer_event(
-    events: &mpsc::Sender<SessionIngressEvent>,
-    event: RendererEventEnvelope,
-    session_id: SessionId,
-    native_cursor: Sequence,
-    source_epoch: u64,
-) -> SubscriptionDelivery {
-    let route_key = event.route_key().to_owned();
-    let session_key = event.session_key().to_owned();
-    let run_id = event.run_id().to_owned();
-    let Some(event) = matcha_session_event(SessionSubscriptionItem::Event(event)) else {
-        return SubscriptionDelivery::Sent;
-    };
-    match events.try_send(event) {
-        Ok(()) => SubscriptionDelivery::Sent,
-        Err(mpsc::error::TrySendError::Closed(_)) => SubscriptionDelivery::Closed,
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            let recovery = SessionRecovery::from_raw_event(
-                session_id.clone(),
-                native_cursor,
-                &RawEvent::Overflow,
-            )
-            .expect("overflow raw event always produces recovery")
-            .with_source_epoch(source_epoch);
-            if send_recovery(events, &route_key, &session_key, &run_id, recovery).await {
-                SubscriptionDelivery::Recovering
-            } else {
-                SubscriptionDelivery::Closed
-            }
-        }
-    }
-}
-
-async fn send_recovery(
-    events: &mpsc::Sender<SessionIngressEvent>,
-    route_key: &str,
-    session_key: &str,
-    run_id: &str,
-    recovery: SessionRecovery,
-) -> bool {
-    let Some(event) = matcha_session_event(SessionSubscriptionItem::Recovery {
-        route_key: route_key.to_owned(),
-        session_key: session_key.to_owned(),
-        run_id: run_id.to_owned(),
-        recovery,
-    }) else {
-        return false;
-    };
-    match events.try_send(event) {
-        Ok(()) => true,
-        Err(mpsc::error::TrySendError::Closed(_)) => false,
-        Err(mpsc::error::TrySendError::Full(item)) => events.send(item).await.is_ok(),
     }
 }
 
@@ -854,7 +659,8 @@ fn renderer_event(sequence: u64, activity: &EventActivity) -> Option<RendererEve
                 option_ids,
             })
         }
-        EventActivity::Run(RunLifecycle::Queued) | EventActivity::Ignored => None,
+        EventActivity::Run(RunLifecycle::Queued) => Some(RendererEvent::Run { sequence, phase: RendererRunPhase::Queued }),
+        EventActivity::Ignored => None,
     }
 }
 
@@ -880,10 +686,6 @@ impl MatchaPeer {
         self.handle.snapshot()
     }
 
-    fn current_source_epoch(&self) -> u64 {
-        self.source_epoch.load(Ordering::Relaxed)
-    }
-
     pub fn advance_source_epoch(&self) -> u64 {
         self.source_epoch.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -893,7 +695,6 @@ impl MatchaPeer {
             handle: self.handle.clone(),
             endpoint: self.endpoint,
             secret: Arc::clone(&self.secret),
-            source_epoch: Arc::clone(&self.source_epoch),
         }
     }
 
@@ -981,31 +782,6 @@ impl MatchaPeer {
         client.finish_with_cleanup(outcome).await
     }
 
-    pub async fn subscribe_renderer_events(
-        &self,
-        session_id: SessionId,
-        renderer_session_key: String,
-        run_id: RunId,
-        route_key: String,
-        events: mpsc::Sender<SessionIngressEvent>,
-        trace_id: Option<String>,
-    ) -> Result<tokio::task::JoinHandle<()>, RendererSubscriptionError> {
-        if !receipt_reading_admitted(self.snapshot().phase()) {
-            return Err(RendererSubscriptionError::RuntimeUnavailable);
-        }
-        subscribe_renderer_events_raw(
-            self.endpoint,
-            &self.secret,
-            self.current_source_epoch(),
-            session_id,
-            renderer_session_key,
-            run_id,
-            route_key,
-            events,
-            trace_id,
-        )
-        .await
-    }
 
     pub async fn prompt_session(
         &self,
@@ -1289,316 +1065,21 @@ impl MatchaPeerLifecycleHandle {
     }
 }
 
-async fn subscribe_renderer_events_raw(
-    endpoint: AppServerEndpoint,
-    secret: &Arc<Secret>,
-    source_epoch: u64,
-    session_id: SessionId,
-    renderer_session_key: String,
-    run_id: RunId,
-    route_key: String,
-    events: mpsc::Sender<SessionIngressEvent>,
-    trace_id: Option<String>,
-) -> Result<tokio::task::JoinHandle<()>, RendererSubscriptionError> {
-    log_renderer_subscription_trace(
-        trace_id.as_deref(),
-        "runtime.matcha.renderer-subscribe.connect-start",
-        serde_json::json!({
-            "sessionId": session_id.as_str(),
-            "runId": run_id.as_str(),
-            "routeKey": route_key.as_str(),
-            "sourceEpoch": source_epoch,
-        }),
-    );
-    let (client, _) = match AppServerClient::connect_and_initialize_raw_only(endpoint, secret).await
-    {
-        Ok(connected) => connected,
-        Err(error) => {
-            log_renderer_subscription_trace(
-                trace_id.as_deref(),
-                "runtime.matcha.renderer-subscribe.connect-failed",
-                serde_json::json!({ "error": app_server_client_error_trace_kind(error) }),
-            );
-            return Err(RendererSubscriptionError::Client(error));
-        }
-    };
-    log_renderer_subscription_trace(
-        trace_id.as_deref(),
-        "runtime.matcha.renderer-subscribe.connect-ready",
-        serde_json::json!({}),
-    );
-    let mut raw_events = client.raw_events();
-    log_renderer_subscription_trace(
-        trace_id.as_deref(),
-        "runtime.matcha.renderer-subscribe.request-start",
-        serde_json::json!({
-            "sessionId": session_id.as_str(),
-            "afterSeq": null,
-        }),
-    );
-    let subscription = match client
-        .subscribe_events_with_cursor(session_id.clone(), None)
-        .await
-    {
-        Ok(subscription) => subscription,
-        Err(error) => {
-            log_renderer_subscription_trace(
-                trace_id.as_deref(),
-                "runtime.matcha.renderer-subscribe.request-failed",
-                serde_json::json!({ "error": app_server_client_error_trace_kind(error) }),
-            );
-            return Err(RendererSubscriptionError::Client(error));
-        }
-    };
-    let cursor = match subscription {
-        EventSubscriptionCursor::Subscribed(replay) => {
-            log_renderer_subscription_trace(
-                trace_id.as_deref(),
-                "runtime.matcha.renderer-subscribe.response",
-                serde_json::json!({
-                    "result": "subscribed",
-                    "cursor": replay.cursor().get(),
-                }),
-            );
-            replay.cursor()
-        }
-        EventSubscriptionCursor::ClientNotFound => {
-            log_renderer_subscription_trace(
-                trace_id.as_deref(),
-                "runtime.matcha.renderer-subscribe.response",
-                serde_json::json!({ "result": "client-not-found" }),
-            );
-            let _ = client.close().await;
-            return Err(RendererSubscriptionError::Client(
-                AppServerClientError::SessionNotFound,
-            ));
-        }
-        EventSubscriptionCursor::ClientRequired => {
-            log_renderer_subscription_trace(
-                trace_id.as_deref(),
-                "runtime.matcha.renderer-subscribe.response",
-                serde_json::json!({ "result": "client-required" }),
-            );
-            let _ = client.close().await;
-            return Err(RendererSubscriptionError::Client(
-                AppServerClientError::PeerRejected,
-            ));
-        }
-    };
-    let task_trace_id = trace_id;
-    Ok(tokio::spawn(async move {
-        let mut replay_cursor = cursor;
-        let mut projector =
-            SessionEventProjector::resume_after(session_id.clone(), run_id.clone(), replay_cursor);
-        loop {
-            if client.is_closed() {
-                log_renderer_subscription_trace(
-                    task_trace_id.as_deref(),
-                    "runtime.matcha.renderer-subscribe.stream-closed",
-                    serde_json::json!({
-                        "reason": "client-closed",
-                        "cursor": projector.cursor().get(),
-                    }),
-                );
-                let recovery = SessionRecovery::from_raw_event(
-                    session_id.clone(),
-                    projector.cursor(),
-                    &RawEvent::Closed,
-                )
-                .expect("closed raw event always produces recovery")
-                .with_source_epoch(source_epoch);
-                let _ = send_recovery(
-                    &events,
-                    &route_key,
-                    &renderer_session_key,
-                    run_id.as_str(),
-                    recovery,
-                )
-                .await;
-                break;
-            }
-            let recovery = match raw_events.recv().await {
-                Ok(RawEvent::Envelope(event)) => {
-                    match renderer_subscription_projection_step(
-                        &mut projector,
-                        replay_cursor,
-                        event,
-                    ) {
-                        Ok(Some(projection)) => {
-                            let terminal = projection.event.is_terminal();
-                            let event = RendererEventEnvelope::new(
-                                route_key.clone(),
-                                renderer_session_key.clone(),
-                                projection.run_id,
-                                projection.source_cursor,
-                                Some(source_epoch),
-                                projection.event,
-                            );
-                            match send_renderer_event(
-                                &events,
-                                event,
-                                session_id.clone(),
-                                projector.cursor(),
-                                source_epoch,
-                            )
-                            .await
-                            {
-                                SubscriptionDelivery::Sent if !terminal => continue,
-                                SubscriptionDelivery::Sent
-                                | SubscriptionDelivery::Recovering
-                                | SubscriptionDelivery::Closed => break,
-                            }
-                        }
-                        Ok(None) => {
-                            continue;
-                        }
-                        Err(failure) => renderer_projection_recovery(
-                            session_id.clone(),
-                            projector.cursor(),
-                            source_epoch,
-                            failure,
-                        ),
-                    }
-                }
-                Ok(raw @ (RawEvent::Overflow | RawEvent::Closed)) => {
-                    log_renderer_subscription_trace(
-                        task_trace_id.as_deref(),
-                        "runtime.matcha.renderer-subscribe.stream-closed",
-                        serde_json::json!({
-                            "reason": match &raw {
-                                RawEvent::Overflow => "overflow",
-                                RawEvent::Closed => "raw-closed",
-                                RawEvent::Envelope(_) => "envelope",
-                            },
-                            "cursor": projector.cursor().get(),
-                        }),
-                    );
-                    let Some(recovery) = SessionRecovery::from_raw_event(
-                        session_id.clone(),
-                        projector.cursor(),
-                        &raw,
-                    ) else {
-                        break;
-                    };
-                    recovery.with_source_epoch(source_epoch)
-                }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    log_renderer_subscription_trace(
-                        task_trace_id.as_deref(),
-                        "runtime.matcha.renderer-subscribe.stream-closed",
-                        serde_json::json!({
-                            "reason": "lagged",
-                            "skipped": skipped,
-                            "cursor": projector.cursor().get(),
-                        }),
-                    );
-                    SessionRecovery::from_broadcast_lagged(
-                        session_id.clone(),
-                        projector.cursor(),
-                        skipped,
-                    )
-                    .with_source_epoch(source_epoch)
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    log_renderer_subscription_trace(
-                        task_trace_id.as_deref(),
-                        "runtime.matcha.renderer-subscribe.stream-closed",
-                        serde_json::json!({
-                            "reason": "broadcast-closed",
-                            "cursor": projector.cursor().get(),
-                        }),
-                    );
-                    SessionRecovery::from_raw_event(
-                        session_id.clone(),
-                        projector.cursor(),
-                        &RawEvent::Closed,
-                    )
-                    .expect("closed raw event always produces recovery")
-                    .with_source_epoch(source_epoch)
-                }
-            };
-            let should_recover = matches!(recovery, SessionRecovery::RecoveryRequired { .. });
-            if !send_recovery(
-                &events,
-                &route_key,
-                &renderer_session_key,
-                run_id.as_str(),
-                recovery,
-            )
-            .await
-            {
-                break;
-            }
-            if !should_recover {
-                break;
-            }
-            match client
-                .recover_events(
-                    crate::session::client::EventRecoveryCursor::resume_after(
-                        session_id.clone(),
-                        projector.cursor(),
-                    ),
-                    None,
-                )
-                .await
-            {
-                Ok(recovered) => {
-                    replay_cursor = recovered.cursor().sequence();
-                    projector = SessionEventProjector::resume_after(
-                        session_id.clone(),
-                        run_id.clone(),
-                        replay_cursor,
-                    );
-                }
-                Err(error) => {
-                    log_renderer_subscription_trace(
-                        task_trace_id.as_deref(),
-                        "runtime.matcha.renderer-subscribe.recover-failed",
-                        serde_json::json!({ "error": app_server_client_error_trace_kind(error) }),
-                    );
-                    break;
-                }
-            }
-        }
-        let _ = client.close().await;
-    }))
-}
-
 impl MatchaPeerSessionHandle {
-    pub async fn subscribe_renderer_events(
-        &self,
-        session_id: SessionId,
-        renderer_session_key: String,
-        run_id: RunId,
-        route_key: String,
-        events: mpsc::Sender<SessionIngressEvent>,
-        trace_id: Option<String>,
-    ) -> Result<tokio::task::JoinHandle<()>, RendererSubscriptionError> {
-        if !receipt_reading_admitted(self.handle.snapshot().phase()) {
-            return Err(RendererSubscriptionError::RuntimeUnavailable);
-        }
-        subscribe_renderer_events_raw(
-            self.endpoint,
-            &self.secret,
-            self.source_epoch.load(Ordering::Relaxed),
-            session_id,
-            renderer_session_key,
-            run_id,
-            route_key,
-            events,
-            trace_id,
-        )
-        .await
-    }
-
-    async fn connect_client(&self) -> Result<AppServerClient, AppServerClientError> {
+    pub(crate) async fn connect_observer(&self) -> Result<AppServerClient, AppServerClientError> {
         if !receipt_reading_admitted(self.handle.snapshot().phase()) {
             return Err(AppServerClientError::ConnectionClosed);
         }
-        let (events, _updates) = tokio::sync::mpsc::channel::<SessionEventUpdate>(1);
-        AppServerClient::connect_and_initialize(self.endpoint, &self.secret, events)
-            .await
-            .map(|(client, _)| client)
+        AppServerClient::connect_and_initialize_raw_only(self.endpoint, &self.secret)
+            .await.map(|(client, _)| client)
+    }
+
+    pub(crate) fn observer_source_epoch(&self) -> u64 {
+        self.source_epoch.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    async fn connect_client(&self) -> Result<AppServerClient, AppServerClientError> {
+        self.connect_observer().await
     }
 
     pub async fn list_history(&self) -> HistoryListResult {
@@ -1660,9 +1141,7 @@ impl MatchaPeerSessionHandle {
         session_id: SessionId,
     ) -> Result<crate::session::model::SessionRecord, AppServerClientError> {
         let client = self.connect_client().await?;
-        let outcome = client
-            .load_session(SessionLoadParams::new(session_id))
-            .await;
+        let outcome = client.load_session(SessionLoadParams::new(session_id)).await;
         client.finish_with_cleanup(outcome).await
     }
 
@@ -1790,9 +1269,6 @@ impl RoleSessionPromptHandle {
         session_id: &RoleSessionId,
         prompt: RolePrompt,
         run_id: RoleRunId,
-        renderer_session_key: String,
-        route_key: String,
-        events: mpsc::Sender<SessionIngressEvent>,
     ) -> InvocationOutcome<RoleRunId, RoleSessionError> {
         if !receipt_reading_admitted(self.handle.snapshot().phase()) {
             return InvocationOutcome::TargetRejected(RoleSessionError::RuntimeUnavailable);
@@ -1808,76 +1284,21 @@ impl RoleSessionPromptHandle {
                 }
             };
         let params = prompt.into_params(session_id).with_run_id(run_id.native());
-        let subscription = match subscribe_renderer_events_raw(
-            self.endpoint,
-            &self.secret,
-            self.source_epoch.load(Ordering::Relaxed),
-            session_id.native(),
-            renderer_session_key,
-            run_id.native(),
-            route_key,
-            events,
-            None,
-        )
-        .await
-        {
-            Ok(subscription) => subscription,
-            Err(error) => {
-                let error = match error {
-                    RendererSubscriptionError::RuntimeUnavailable => {
-                        RoleSessionError::RuntimeUnavailable
-                    }
-                    RendererSubscriptionError::Client(error) => RoleSessionError::Client(error),
-                };
-                return client
-                    .finish_with_cleanup(InvocationOutcome::TargetRejected(error))
-                    .await;
-            }
-        };
         let outcome = match client.prompt_session(params).await {
             InvocationOutcome::Succeeded(result) => {
                 InvocationOutcome::Succeeded(RoleRunId::from_native(result.run_id))
             }
             InvocationOutcome::TargetRejected(error) => {
-                subscription.abort();
                 InvocationOutcome::TargetRejected(RoleSessionError::Client(error))
             }
             InvocationOutcome::Cancelled => {
-                subscription.abort();
                 InvocationOutcome::Cancelled
             }
             InvocationOutcome::Unknown => {
-                subscription.abort();
                 InvocationOutcome::Unknown
             }
         };
         client.finish_with_cleanup(outcome).await
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RendererSubscriptionError {
-    RuntimeUnavailable,
-    Client(AppServerClientError),
-}
-
-impl fmt::Display for RendererSubscriptionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RuntimeUnavailable => {
-                formatter.write_str("matcha peer renderer subscription is unavailable")
-            }
-            Self::Client(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl std::error::Error for RendererSubscriptionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::RuntimeUnavailable => None,
-            Self::Client(error) => Some(error),
-        }
     }
 }
 

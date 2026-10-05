@@ -10,6 +10,7 @@ use crate::{
 };
 use organization::{
     MaterializationOperationOutcome, TeamMaterializationRemoval, TeamMaterializationRequest,
+    TeamProvisionObserver,
 };
 
 #[derive(Clone)]
@@ -49,11 +50,19 @@ impl OpenClawGateway {
         &self,
         request: TeamMaterializationRequest,
     ) -> MaterializationOperationOutcome {
+        self.materialize_team_observed(request, None).await
+    }
+
+    pub async fn materialize_team_observed(
+        &self,
+        request: TeamMaterializationRequest,
+        observer: Option<TeamProvisionObserver>,
+    ) -> MaterializationOperationOutcome {
         let Some(state_dir) = self.team_state_dir.clone() else {
             return MaterializationOperationOutcome::OutcomeUnknown;
         };
         TeamProvider::new(&self.client, state_dir)
-            .materialize(request)
+            .materialize_observed(request, observer)
             .await
     }
 
@@ -69,6 +78,24 @@ impl OpenClawGateway {
         };
         TeamProvider::new(&self.client, state_dir)
             .recover_materialization(request)
+            .await
+    }
+
+    /// Confirms cleanup only from matching private recovery evidence, without
+    /// promoting an unconfirmed materialization to installed native facts.
+    pub async fn remove_unconfirmed_team_materialization(
+        &self,
+        request: TeamMaterializationRequest,
+    ) -> MaterializationOperationOutcome {
+        let Some(state_dir) = self.team_state_dir.clone() else {
+            platform::trace::session_trace(
+                "runtime.team.unconfirmed-remove.end",
+                serde_json::json!({"outcome":"OutcomeUnknown","reason":"state-dir-missing"}),
+            );
+            return MaterializationOperationOutcome::OutcomeUnknown;
+        };
+        TeamProvider::new(&self.client, state_dir)
+            .remove_unconfirmed(request)
             .await
     }
 

@@ -1,4 +1,5 @@
 import type { ResourceStatusState } from '@/lib/resource-state';
+import type { SessionGoalOutcome, SessionGoalView, SessionSendIntent } from '@/types/session-goal';
 import type { SessionOwnership } from '../../types/desktop/session-ownership';
 import type {
   AgentScope,
@@ -218,6 +219,8 @@ export interface ChatSessionMetaState {
   manualLabel?: boolean;
   displayName?: string | null;
   modelState: SessionModelState | null;
+  goal: SessionGoalView;
+  goalReadRevision: number;
   lastActivityAt: number | null;
   historyStatus: ChatSessionHistoryStatus;
   thinkingLevel: string | null;
@@ -386,6 +389,7 @@ export type ChatSendRejectReason =
   | 'missing-session'
   | 'missing-session-identity'
   | 'automation-session'
+  | 'goal-attachments'
   | 'error';
 
 export type ChatSendGate =
@@ -410,9 +414,10 @@ export type ChatSendGate =
     sessionKey?: string;
   };
 
-export type ChatSendResult =
+export type ChatSendResult = (
   | { accepted: true }
-  | { accepted: false; reason: ChatSendRejectReason; error?: string; attachmentReselectionRequired?: boolean };
+  | { accepted: false; reason: ChatSendRejectReason; error?: string; outcome?: Exclude<SessionGoalOutcome['outcome'], 'succeeded'>; attachmentReselectionRequired?: boolean }
+) & { sessionRecordKey?: string };
 
 export type ChatHistoryLoadMode = 'active' | 'quiet';
 export type ChatHistoryLoadScope = 'foreground' | 'background';
@@ -434,6 +439,9 @@ export interface ChatHistoryLoadRequest {
 }
 
 export interface ChatStoreActions {
+  observeSession: (identity: SessionIdentity, leaseId?: string) => { leaseId: string; ready: Promise<void> };
+  releaseSession: (identity: SessionIdentity, leaseId: string) => Promise<void>;
+  resyncSession: (event: unknown) => Promise<void>;
   bootstrapSessionRuntime: () => Promise<void>;
   loadSessions: () => Promise<void>;
   openAgentConversation: (agentId: string, endpoint?: RuntimeEndpointRef) => void;
@@ -451,7 +459,7 @@ export interface ChatStoreActions {
   loadOlderViewportItems: (sessionKey?: string) => Promise<void>;
   jumpViewportToLatest: (sessionKey?: string) => Promise<void>;
   setViewportAnchorItemKey: (itemKey: string | null, sessionKey?: string) => void;
-  sendMessage: (text: string, attachments?: ChatSendAttachment[]) => Promise<ChatSendResult>;
+  sendMessage: (text: string, attachments?: ChatSendAttachment[], intent?: SessionSendIntent, operationId?: string) => Promise<ChatSendResult>;
   abortRun: () => Promise<void>;
   resolveApproval: (approval: ApprovalItem, decision: ApprovalDecision) => Promise<void>;
   syncPendingApprovals: (sessionKeyHint?: string) => Promise<void>;

@@ -4,7 +4,7 @@ use foundation::execution::QueryRoute;
 
 use openclaw::gateway::request::{
     OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest,
-    OpenClawQuestionResolveGatewayRequest,
+    OpenClawQuestionListGatewayRequest, OpenClawQuestionResolveGatewayRequest,
 };
 
 use crate::{
@@ -103,6 +103,12 @@ pub(crate) enum PeerQuery {
             Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
         >,
     },
+    OpenClawQuestionList {
+        request: OpenClawQuestionListGatewayRequest,
+        reply: oneshot::Sender<
+            Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
+        >,
+    },
     OpenClawQuestionResolve {
         request: OpenClawQuestionResolveGatewayRequest,
         call: Option<openclaw::gateway::loopback::GatewayCallContext>,
@@ -129,6 +135,7 @@ impl PeerQuery {
             | Self::OpenClawControlSnapshot { .. }
             | Self::OpenClawBrowserRequest { .. }
             | Self::OpenClawMcpAppRequest { .. }
+            | Self::OpenClawQuestionList { .. }
             | Self::OpenClawQuestionResolve { .. } => {
                 QueryRoute::Keyed(RuntimeDriverIdentity::open_claw().endpoint())
             }

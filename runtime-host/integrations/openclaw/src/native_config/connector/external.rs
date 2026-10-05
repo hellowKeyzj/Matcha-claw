@@ -17,7 +17,7 @@ use crate::native_config::config_store::{
     OpenClawConfigMutation, OpenClawConfigStore, OpenClawConfigStoreError,
 };
 
-use super::preset::{PRESET_TEAM_RUN_MCP_SERVER_ID, PresetMcpProjection};
+use super::preset::{PRESET_MCP_SERVER_ID, PresetMcpProjection, reconcile_server, server_matches};
 
 const MANAGED_EXTERNAL_SERVER_PREFIX: &str = "matcha-external.";
 const DEFAULT_MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -101,11 +101,11 @@ pub fn project_runtime_mcp_connectors(
     };
     let mut servers = Map::new();
     if let Some(preset) = preset {
-        let Some(server) = preset.team_run_server() else {
+        let Some(server) = preset.server() else {
             return Ok((ConnectorProjectionEffect::Unavailable, report));
         };
-        report.projected.push(PRESET_TEAM_RUN_MCP_SERVER_ID.into());
-        servers.insert(PRESET_TEAM_RUN_MCP_SERVER_ID.into(), server);
+        report.projected.push(PRESET_MCP_SERVER_ID.into());
+        servers.insert(PRESET_MCP_SERVER_ID.into(), server);
     }
     for connector in catalog.connectors() {
         if !connector.enabled() {
@@ -152,7 +152,9 @@ pub fn project_runtime_mcp_connectors(
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
-        let mut changed = false;
+        let mut changed = servers
+            .get_mut(PRESET_MCP_SERVER_ID)
+            .is_some_and(|server| reconcile_server(&mut current_servers, server));
         current_servers.retain(|id, _| {
             let stale = is_stale_managed_server_id(id, &servers);
             changed |= stale;
@@ -190,7 +192,7 @@ pub fn project_runtime_mcp_connectors(
 }
 
 fn projection_readback_matches(store: &OpenClawConfigStore, expected: &Map<String, Value>) -> bool {
-    let Ok(document) = store.read() else {
+    let Ok(document) = store.read_private() else {
         return false;
     };
     let actual = document
@@ -201,6 +203,9 @@ fn projection_readback_matches(store: &OpenClawConfigStore, expected: &Map<Strin
     expected
         .iter()
         .all(|(id, server)| actual.and_then(|servers| servers.get(id)) == Some(server))
+        && expected
+            .get(PRESET_MCP_SERVER_ID)
+            .is_none_or(|preset| actual.is_some_and(|servers| server_matches(servers, preset)))
         && actual.is_none_or(|servers| {
             servers
                 .keys()

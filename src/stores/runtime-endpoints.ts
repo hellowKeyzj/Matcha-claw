@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { hostRuntimeEndpointsList } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
-import { buildRuntimeEndpointKey } from '../types/desktop/runtime-address';
+import { buildRuntimeEndpointKey, runtimeEndpointsEqual, type RuntimeEndpointRef } from '../types/desktop/runtime-address';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
 
 const RUNTIME_ENDPOINT_DIRECTORY_PENDING_MESSAGE = 'runtime endpoint directory is unavailable';
@@ -97,6 +97,13 @@ export function isSessionRuntimeEndpointCandidate(endpoint: RuntimeEndpointSumma
   return endpoint.capabilities.chat
     && supportsRuntimeEndpointCapabilityFamily(endpoint, 'session')
     && endpoint.defaultAgentId.trim().length > 0;
+}
+
+export function supportsSessionGoal(endpoints: readonly RuntimeEndpointSummary[], endpoint: RuntimeEndpointRef | null, agentId: string): boolean {
+  const runtime = endpoint ? endpoints.find((entry) => runtimeEndpointsEqual(entry.endpointRef, endpoint)) : undefined;
+  if (!runtime?.capabilities.supportsGoal || !agentId) return false;
+  const agent = runtime.agents.find((agent) => agent.agentId === agentId);
+  return agent ? agent.capabilities.supportsGoal : runtime.acceptsDynamicAgents;
 }
 
 export function isRuntimeEndpointReady(endpoint: RuntimeEndpointSummary): boolean {

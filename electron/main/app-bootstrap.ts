@@ -11,7 +11,8 @@ import { warmupNetworkOptimization } from '../utils/uv-env';
 import type { HostEventBus } from '../api/event-bus';
 import { startHostApiServer, waitForHostApiServerListening } from '../api/server';
 import { registerHostEventBridge } from './host-event-bridge';
-import { RendererEventRouteRegistry } from './renderer-event-routes';
+import { RendererSessionObservationRegistry } from './renderer-event-routes';
+import { observationRequest } from './runtime-host-delivery/transport/sessions/observation';
 import { createMainWindow, loadMainWindowContent } from './main-window';
 import { isQuitting } from './app-state';
 import { applyLaunchAtStartupSetting } from './launch-at-startup';
@@ -150,6 +151,7 @@ export async function bootstrapMainApplication(deps: {
   mainWindow: BrowserWindow;
   directRuntimeHost: RuntimeHostLifecycleOwner;
   closeRuntimeHostDelivery: () => Promise<void>;
+  closeSessionObservations: () => Promise<void>;
 }> {
   logger.init();
   logger.info('=== MatchaClaw Application Starting ===');
@@ -180,14 +182,15 @@ export async function bootstrapMainApplication(deps: {
   }
 
   registerGatewayControlUiSecurityHeaders();
-  registerStaticIpcHandlers(deps.getMainWindow);
+  const sessionObservers = new RendererSessionObservationRegistry();
+  sessionObservers.attach(mainWindow.webContents);
+  registerStaticIpcHandlers(deps.getMainWindow, sessionObservers);
   if (isE2EMode) {
     registerE2EUpdateHandlers();
   } else {
     registerUpdateHandlers(appUpdater, mainWindow);
   }
   loadMainWindowContent(mainWindow);
-  const rendererEventRoutes = new RendererEventRouteRegistry();
   let directRuntimeHost: RuntimeHostLifecycleOwner;
   let startedRuntimeHost: DirectRuntimeHost | undefined;
   let closeRuntimeHostDelivery: (() => Promise<void>) | undefined;
@@ -215,7 +218,12 @@ export async function bootstrapMainApplication(deps: {
           }
         : undefined,
     });
+    sessionObservers.setNativeRelease(async (identity, leaseId) => {
+      const response = await transportBundle.hostApiTransports.sessionObservationTransport.release(observationRequest(identity, leaseId, 'sessions.release'));
+      if (response.status !== 200) throw new Error('Session observation release is unavailable');
+    });
     closeRuntimeHostDelivery = async () => {
+      await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during delivery close'));
       await cloudAccountService?.close();
       transportBundle.close();
       await delivery.close();
@@ -241,6 +249,7 @@ export async function bootstrapMainApplication(deps: {
       void cloudAccountService.runtimeRestarted().catch(() => logger.warn('Cloud package authorization restore failed'));
     });
     closeRuntimeHostDelivery = async () => {
+      await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during delivery close'));
       stopPackageExit();
       stopPackageRestart();
       try { await cloudAccountService.close(); } finally {
@@ -249,6 +258,7 @@ export async function bootstrapMainApplication(deps: {
       }
     };
   } catch (error) {
+    await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during bootstrap cleanup'));
     if (startedRuntimeHost) {
       await stopOrForceKillRuntimeHost(startedRuntimeHost).catch(() => undefined);
     }
@@ -267,7 +277,7 @@ export async function bootstrapMainApplication(deps: {
         cloudAccountService,
         eventBus: deps.hostEventBus,
         runtimeHost: directRuntimeHost,
-        rendererEventRoutes,
+        sessionObservers,
         runtimeHostTransports: transportBundle.hostApiTransports,
         providerCredentialStatusTransport,
         credentialWriteAdapter: createFleetCredentialWriteAdapter(
@@ -288,8 +298,13 @@ export async function bootstrapMainApplication(deps: {
       runtimeHost: directRuntimeHost,
       hostEventBus: deps.hostEventBus,
       getMainWindow: deps.getMainWindow,
-      rendererEventRoutes,
+      sessionObservers,
       sessionEvents: transportBundle.sessionEventsTransport,
+      resyncSessions: () => sessionObservers.resync(async (identity, leaseId) => {
+        const response = await transportBundle.hostApiTransports.sessionObservationTransport.observe(
+          observationRequest(identity, leaseId, 'sessions.observe'));
+        return response.status === 200 && 'leaseId' in response.body ? response.body : null;
+      }),
     });
     cloudAccountService.prewarm();
 
@@ -312,9 +327,11 @@ export async function bootstrapMainApplication(deps: {
       mainWindow,
       directRuntimeHost,
       closeRuntimeHostDelivery: closeRuntimeHostDelivery ?? (async () => undefined),
+      closeSessionObservations: () => sessionObservers.close(),
     };
   } catch (error) {
     publishE2EStartupOutcome({ stage: 'host-api', outcome: 'HOST_API_FAILED' });
+    await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during bootstrap cleanup'));
     await stopOrForceKillRuntimeHost(directRuntimeHost).catch(() => undefined);
     await closeRuntimeHostDelivery?.().catch(() => undefined);
     throw error;

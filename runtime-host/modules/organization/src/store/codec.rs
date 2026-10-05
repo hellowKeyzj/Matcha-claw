@@ -457,22 +457,38 @@ fn encode_materialization_request(
     for agent in intent.agents() {
         push_string(output, agent.role().as_str())?;
         let tools = agent.tools();
-        // Tags 0/1 retain the existing empty-tools layout; 2/3 carry role tools.
+        // Tags 4/5 carry tools and the complete AGENTS.md block content.
+        let has_markdown = agent.agents_markdown().is_some();
         match agent.agent() {
             RoleMaterializationAgent::Managed { name } => {
-                output.push(if tools.is_empty() { 0 } else { 2 });
+                output.push(if has_markdown {
+                    4
+                } else if tools.is_empty() {
+                    0
+                } else {
+                    2
+                });
                 push_string(output, name)?;
             }
             RoleMaterializationAgent::External { agent } => {
-                output.push(if tools.is_empty() { 1 } else { 3 });
+                output.push(if has_markdown {
+                    5
+                } else if tools.is_empty() {
+                    1
+                } else {
+                    3
+                });
                 push_string(output, agent.as_str())?;
             }
         }
-        if !tools.is_empty() {
+        if has_markdown || !tools.is_empty() {
             push_count(output, tools.len())?;
             for tool in tools {
                 push_string(output, tool)?;
             }
+        }
+        if let Some(markdown) = agent.agents_markdown() {
+            push_string(output, markdown)?;
         }
     }
     push_string(output, request.idempotency_key().as_str())
@@ -525,9 +541,11 @@ fn encode_materialization(
     for role in receipt.roles() {
         push_string(output, role.role().as_str())?;
         push_string(output, role.agent().as_str())?;
-        output.push(match role.ownership() {
-            crate::RoleMaterializationOwnership::Managed => 0,
-            crate::RoleMaterializationOwnership::External => 1,
+        output.push(match (role.ownership(), role.agents_markdown().is_some()) {
+            (crate::RoleMaterializationOwnership::Managed, false) => 0,
+            (crate::RoleMaterializationOwnership::External, false) => 1,
+            (crate::RoleMaterializationOwnership::Managed, true) => 2,
+            (crate::RoleMaterializationOwnership::External, true) => 3,
         });
         push_string(output, role.endpoint().as_str())?;
         push_optional_string(
@@ -535,6 +553,9 @@ fn encode_materialization(
             role.native_workspace()
                 .map(crate::ports::materialization::NativeWorkspaceReceipt::as_str),
         )?;
+        if let Some(markdown) = role.agents_markdown() {
+            push_string(output, markdown)?;
+        }
     }
     Ok(())
 }
@@ -1175,12 +1196,19 @@ fn encode_command_payload(
 ) -> Result<(), StoreFault> {
     match payload {
         CommandPayload::GraphPatch(patch) => {
-            output.push(0);
+            output.push(if patch.content_fingerprint().is_some() {
+                4
+            } else {
+                0
+            });
             push_string(output, patch.base_graph_id())?;
             push_string(output, patch.base_workflow_plan_id())?;
             push_count(output, patch.operations().len())?;
             for operation in patch.operations() {
                 encode_graph_patch_operation(output, operation)?;
+            }
+            if let Some(fingerprint) = patch.content_fingerprint() {
+                push_string(output, fingerprint.as_str())?;
             }
             Ok(())
         }
@@ -1205,6 +1233,13 @@ fn encode_command_payload(
     }
 }
 
+pub(crate) fn graph_version(definition: &crate::GraphDefinition) -> Result<String, StoreFault> {
+    use sha2::{Digest, Sha256};
+    let mut bytes = Vec::new();
+    encode_graph_definition(&mut bytes, definition)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 fn encode_graph_definition(
     output: &mut Vec<u8>,
     definition: &crate::GraphDefinition,
@@ -1215,73 +1250,152 @@ fn encode_graph_definition(
     push_string(output, definition.title())?;
     push_count(output, definition.nodes().len())?;
     for node in definition.nodes() {
-        push_string(output, node.id().as_str())?;
-        output.push(node_kind_tag(node.kind()));
-        push_string(output, node.title())?;
-        output.extend_from_slice(&node.max_attempts().get().to_le_bytes());
-        output.push(u8::from(node.is_control()));
-        match node.trigger() {
-            None => output.push(0),
-            Some(StartTrigger::Webhook { path }) => {
-                output.push(1);
-                push_string(output, path)?;
-            }
-            Some(StartTrigger::Cron { expression }) => {
-                output.push(2);
-                push_string(output, expression)?;
-            }
-        }
-        match node.work_assignment() {
-            None => output.push(0),
-            Some(work) => {
-                output.push(1);
-                push_string(output, work.task_id())?;
-                push_string(output, work.prompt())?;
-                push_string(output, work.role_id())?;
-                push_string(output, work.session_ref().as_str())?;
-                push_optional_string(output, work.output_artifact_kind())?;
-                push_optional_string(output, work.group_id().map(crate::GroupId::as_str))?;
-            }
-        }
-        match node.review_assignment() {
-            None => output.push(0),
-            Some(review) => {
-                output.push(1);
-                push_string(output, review.role_id())?;
-                push_string(output, review.session_ref().as_str())?;
-                push_string(output, review.prompt())?;
-            }
-        }
-        match node.work_group() {
-            None => output.push(0),
-            Some(group) => {
-                output.push(1);
-                push_string(output, group.id().as_str())?;
-                output.push(u8::from(group.join_policy().require_completed()));
-                output.push(u8::from(group.join_policy().allow_failed()));
-                output.extend_from_slice(&group.join_policy().retry_limit().to_le_bytes());
-            }
-        }
+        encode_node_definition(output, node)?;
     }
     push_count(output, definition.edges().len())?;
     for edge in definition.edges() {
-        push_string(output, edge.id().as_str())?;
-        push_string(output, edge.source_node_id().as_str())?;
-        push_string(output, edge.source_port())?;
-        push_string(output, edge.target_node_id().as_str())?;
-        push_string(output, edge.target_port())?;
-        output.push(edge_action_tag(edge.action()));
-        output.push(u8::from(edge.payload().include_upstream_result()));
-        match edge.dependency() {
-            None => output.push(0),
-            Some(dependency) => {
-                output.push(1);
-                push_string(output, dependency.dependency_task_id())?;
-                push_string(output, dependency.task_id())?;
-            }
+        encode_edge_definition(output, edge)?;
+    }
+    Ok(())
+}
+
+fn encode_node_definition(
+    output: &mut Vec<u8>,
+    node: &crate::NodeDefinition,
+) -> Result<(), StoreFault> {
+    push_string(output, node.id().as_str())?;
+    output.push(node_kind_tag(node.kind()));
+    push_string(output, node.title())?;
+    output.extend_from_slice(&node.max_attempts().get().to_le_bytes());
+    output.push(u8::from(node.is_control()));
+    match node.trigger() {
+        None => output.push(0),
+        Some(StartTrigger::Webhook { path }) => {
+            output.push(1);
+            push_string(output, path)?;
+        }
+        Some(StartTrigger::Cron { expression }) => {
+            output.push(2);
+            push_string(output, expression)?;
+        }
+    }
+    match node.work_assignment() {
+        None => output.push(0),
+        Some(work) => {
+            output.push(1);
+            push_string(output, work.task_id())?;
+            push_string(output, work.prompt())?;
+            push_string(output, work.role_id())?;
+            push_string(output, work.session_ref().as_str())?;
+            push_optional_string(output, work.output_artifact_kind())?;
+            push_optional_string(output, work.group_id().map(crate::GroupId::as_str))?;
+        }
+    }
+    match node.review_assignment() {
+        None => output.push(0),
+        Some(review) => {
+            output.push(1);
+            push_string(output, review.role_id())?;
+            push_string(output, review.session_ref().as_str())?;
+            push_string(output, review.prompt())?;
+        }
+    }
+    match node.work_group() {
+        None => output.push(0),
+        Some(group) => {
+            output.push(1);
+            push_string(output, group.id().as_str())?;
+            output.push(u8::from(group.join_policy().require_completed()));
+            output.push(u8::from(group.join_policy().allow_failed()));
+            output.extend_from_slice(&group.join_policy().retry_limit().to_le_bytes());
         }
     }
     Ok(())
+}
+
+fn encode_edge_definition(
+    output: &mut Vec<u8>,
+    edge: &crate::EdgeDefinition,
+) -> Result<(), StoreFault> {
+    push_string(output, edge.id().as_str())?;
+    push_string(output, edge.source_node_id().as_str())?;
+    push_string(output, edge.source_port())?;
+    push_string(output, edge.target_node_id().as_str())?;
+    push_string(output, edge.target_port())?;
+    output.push(edge_action_tag(edge.action()));
+    output.push(u8::from(edge.payload().include_upstream_result()));
+    match edge.dependency() {
+        None => output.push(0),
+        Some(dependency) => {
+            output.push(1);
+            push_string(output, dependency.dependency_task_id())?;
+            push_string(output, dependency.task_id())?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn graph_patch_fingerprint(
+    patch: &crate::GraphPatch,
+) -> Result<crate::run::event::OpaqueId, StoreFault> {
+    use sha2::{Digest, Sha256};
+    let mut bytes = Vec::new();
+    push_string(&mut bytes, patch.expected_graph_id())?;
+    push_string(&mut bytes, patch.expected_workflow_plan_id())?;
+    for operation in patch.operations() {
+        match operation {
+            crate::GraphPatchOperation::AddNode(node) => {
+                bytes.push(0);
+                encode_node_definition(&mut bytes, node)?;
+            }
+            crate::GraphPatchOperation::ReplaceNode(node) => {
+                bytes.push(1);
+                encode_node_definition(&mut bytes, node)?;
+            }
+            crate::GraphPatchOperation::RemoveNode(id) => {
+                bytes.push(2);
+                push_string(&mut bytes, id.as_str())?;
+            }
+            crate::GraphPatchOperation::AddEdge(edge) => {
+                bytes.push(3);
+                encode_edge_definition(&mut bytes, edge)?;
+            }
+            crate::GraphPatchOperation::ReplaceEdge(edge) => {
+                bytes.push(4);
+                encode_edge_definition(&mut bytes, edge)?;
+            }
+            crate::GraphPatchOperation::RemoveEdge(id) => {
+                bytes.push(5);
+                push_string(&mut bytes, id.as_str())?;
+            }
+            crate::GraphPatchOperation::SetNodePosition { node_id, position } => {
+                bytes.push(6);
+                push_string(&mut bytes, node_id.as_str())?;
+                bytes.extend_from_slice(&position.x().to_le_bytes());
+                bytes.extend_from_slice(&position.y().to_le_bytes());
+            }
+            crate::GraphPatchOperation::SetMetadata { key, value } => {
+                bytes.push(7);
+                push_string(&mut bytes, key.as_str())?;
+                match value {
+                    MetadataValue::Enabled(value) => {
+                        bytes.push(0);
+                        bytes.push(u8::from(*value));
+                    }
+                    MetadataValue::Revision(value) => {
+                        bytes.push(1);
+                        bytes.extend_from_slice(&value.to_le_bytes());
+                    }
+                    MetadataValue::OpaqueId(value) => {
+                        bytes.push(2);
+                        push_string(&mut bytes, value.as_str())?;
+                    }
+                }
+            }
+        }
+    }
+    crate::run::event::OpaqueId::try_new(format!("sgpatch-{:x}", Sha256::digest(bytes)))
+        .map_err(|_| StoreFault::InvalidFacts)
 }
 
 fn encode_graph_patch_operation(
@@ -1545,6 +1659,34 @@ fn encode_start_gate(output: &mut Vec<u8>, start_gate: &RunStartGate) -> Result<
             push_string(output, source_delivery_id)?;
         }
         RunStartGate::Started => output.push(2),
+        RunStartGate::Designing {
+            design_epoch,
+            prompt_generation,
+        } => {
+            output.push(3);
+            push_string(output, design_epoch)?;
+            push_optional_string(output, prompt_generation.as_deref())?;
+        }
+        RunStartGate::DesignProposalPending {
+            design_epoch,
+            prompt_generation,
+            graph_version,
+            proposal_id,
+            summary,
+            source_delivery_id,
+        } => {
+            output.push(4);
+            for value in [
+                design_epoch,
+                prompt_generation,
+                graph_version,
+                proposal_id,
+                summary,
+                source_delivery_id,
+            ] {
+                push_string(output, value)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1709,24 +1851,26 @@ impl<'a> Reader<'a> {
             .map(|_| {
                 let role = RoleId::try_new(self.string()?).map_err(|_| StoreFault::InvalidFacts)?;
                 let tag = self.byte()?;
-                let agent = match tag {
-                    0 | 2 => RoleAgentMaterialization::managed(role, self.string()?)
+                let mut agent = match tag {
+                    0 | 2 | 4 => RoleAgentMaterialization::managed(role, self.string()?)
                         .map_err(|_| StoreFault::InvalidFacts)?,
-                    1 | 3 => RoleAgentMaterialization::external(
+                    1 | 3 | 5 => RoleAgentMaterialization::external(
                         role,
                         ManagedAgentReference::try_new(self.string()?)
                             .map_err(|_| StoreFault::InvalidFacts)?,
                     ),
                     _ => return Err(StoreFault::InvalidFacts),
                 };
-                if matches!(tag, 2 | 3) {
+                if matches!(tag, 2..=5) {
                     let tools = (0..self.count()?)
                         .map(|_| self.string())
                         .collect::<Result<Vec<_>, _>>()?;
-                    Ok(agent.with_tools(tools))
-                } else {
-                    Ok(agent)
+                    agent = agent.with_tools(tools);
                 }
+                if matches!(tag, 4 | 5) {
+                    agent = agent.with_agents_markdown(self.string()?);
+                }
+                Ok(agent)
             })
             .collect::<Result<Vec<_>, StoreFault>>()?;
         let intent = TeamMaterializationIntent::try_new(team, endpoint, source, agents)
@@ -1783,14 +1927,15 @@ impl<'a> Reader<'a> {
                 let role = RoleId::try_new(self.string()?).map_err(|_| StoreFault::InvalidFacts)?;
                 let agent = ManagedAgentReference::try_new(self.string()?)
                     .map_err(|_| StoreFault::InvalidFacts)?;
-                let ownership = match self.byte()? {
-                    0 => crate::RoleMaterializationOwnership::Managed,
-                    1 => crate::RoleMaterializationOwnership::External,
+                let tag = self.byte()?;
+                let ownership = match tag {
+                    0 | 2 => crate::RoleMaterializationOwnership::Managed,
+                    1 | 3 => crate::RoleMaterializationOwnership::External,
                     _ => return Err(StoreFault::InvalidFacts),
                 };
                 let endpoint = RuntimeEndpointReference::try_new(self.string()?)
                     .map_err(|_| StoreFault::InvalidFacts)?;
-                Ok(match self.optional_string()? {
+                let mut receipt = match self.optional_string()? {
                     Some(workspace) => RoleMaterializationReceipt::with_native_workspace(
                         role,
                         agent,
@@ -1802,7 +1947,11 @@ impl<'a> Reader<'a> {
                     None => {
                         RoleMaterializationReceipt::with_ownership(role, agent, ownership, endpoint)
                     }
-                })
+                };
+                if matches!(tag, 2 | 3) {
+                    receipt = receipt.with_agents_markdown(self.string()?);
+                }
+                Ok(receipt)
             })
             .collect::<Result<Vec<_>, StoreFault>>()?;
         MaterializationReceipt::try_new(team, endpoint, roles).map_err(|_| StoreFault::InvalidFacts)
@@ -2443,6 +2592,18 @@ impl<'a> Reader<'a> {
             1 => RunStartGate::proposal_pending(self.string()?, self.string()?, self.string()?)
                 .map_err(|_| StoreFault::InvalidFacts),
             2 => Ok(RunStartGate::Started),
+            3 => Ok(RunStartGate::Designing {
+                design_epoch: self.string()?,
+                prompt_generation: self.optional_string()?,
+            }),
+            4 => Ok(RunStartGate::DesignProposalPending {
+                design_epoch: self.string()?,
+                prompt_generation: self.string()?,
+                graph_version: self.string()?,
+                proposal_id: self.string()?,
+                summary: self.string()?,
+                source_delivery_id: self.string()?,
+            }),
             _ => Err(StoreFault::InvalidFacts),
         }
     }
@@ -2742,15 +2903,20 @@ impl<'a> Reader<'a> {
 
     fn command_payload(&mut self) -> Result<CommandPayload, StoreFault> {
         match self.byte()? {
-            0 => {
+            tag @ (0 | 4) => {
                 let graph_id = self.string()?;
                 let workflow_plan_id = self.string()?;
                 let operations = (0..self.count()?)
                     .map(|_| self.graph_patch_operation())
                     .collect::<Result<Vec<_>, _>>()?;
-                GraphPatch::try_new(graph_id, workflow_plan_id, operations)
-                    .map(CommandPayload::GraphPatch)
-                    .map_err(|_| StoreFault::InvalidFacts)
+                let patch = GraphPatch::try_new(graph_id, workflow_plan_id, operations)
+                    .map_err(|_| StoreFault::InvalidFacts)?;
+                let patch = if tag == 4 {
+                    patch.with_content_fingerprint(self.opaque_id()?)
+                } else {
+                    patch
+                };
+                Ok(CommandPayload::GraphPatch(patch))
             }
             1 => Ok(CommandPayload::NodeProgress(
                 NodeProgressCommand::with_event(self.opaque_id()?, self.node_event_kind()?),

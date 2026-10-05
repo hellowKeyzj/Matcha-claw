@@ -35,8 +35,8 @@ use crate::{
 use super::owner::{SupervisorLifecycleHandle, SupervisorOwner};
 
 pub struct OpenClawInput {
-    pub team_run_mcp_executable: PathBuf,
-    pub team_run_mcp_state_dir: PathBuf,
+    pub runtime_host_mcp_executable: PathBuf,
+    pub runtime_host_mcp_state_dir: PathBuf,
     pub electron_image: PathBuf,
     pub working_directory: PathBuf,
     pub openclaw_dir: PathBuf,
@@ -221,8 +221,8 @@ impl OpenClawDriver {
         let openclaw_dir = input.openclaw_dir.clone();
         let managed_plugin_root = input.managed_plugin_root.clone();
         let companion_skill_source_root = input.companion_skill_source_root.clone();
-        let team_run_mcp_executable = input.team_run_mcp_executable.clone();
-        let team_run_mcp_state_dir = input.team_run_mcp_state_dir.clone();
+        let runtime_host_mcp_executable = input.runtime_host_mcp_executable.clone();
+        let runtime_host_mcp_state_dir = input.runtime_host_mcp_state_dir.clone();
         let state_dir = input.state_dir.clone();
         let subagent_templates =
             crate::native_config::subagent_templates::SubagentTemplateDirectory::try_new(
@@ -252,10 +252,10 @@ impl OpenClawDriver {
         )
         .map_err(ConstructionError::ControlUiPolicy)?;
         if !matches!(
-            crate::native_config::connector::preset::project_preset_team_run_mcp_server(
+            crate::native_config::connector::preset::project_preset_mcp_server(
                 state_dir.clone(),
-                &team_run_mcp_executable,
-                &team_run_mcp_state_dir,
+                &runtime_host_mcp_executable,
+                &runtime_host_mcp_state_dir,
             ),
             crate::native_config::connector::external::ConnectorProjectionEffect::Written { .. }
         ) {

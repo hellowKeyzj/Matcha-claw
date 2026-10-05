@@ -61,7 +61,6 @@ export type WikiReviewItem = Readonly<{
   description: string;
   sourcePath: string | null;
   affectedPages: readonly string[];
-  searchQueries: readonly string[];
   options: readonly WikiReviewOption[];
   resolved: boolean;
   resolvedAction: string | null;
@@ -113,8 +112,15 @@ export type WikiSourceTask = Readonly<{
   error: string | null;
   stage: string | null;
   progress: number | null;
+  completed: number | null;
+  total: number | null;
+  stageStartedAtMs: number | null;
   cancelRequestedAtMs: number | null;
 }>;
+
+export function isActiveSourceTask(task: WikiSourceTask): boolean {
+  return (task.status === 'pending' || task.status === 'running') && task.stage !== 'paused';
+}
 
 export type WikiSearchImage = Readonly<{ url: string; alt: string }>;
 
@@ -166,7 +172,7 @@ export type WikiReceiptSummary = Readonly<{
   label: string;
 }>;
 
-export type WikiWorkspaceTab = 'wiki' | 'sources' | 'review' | 'search' | 'graph' | 'research' | 'search-settings' | 'qa' | 'lint' | 'maintenance';
+export type WikiWorkspaceTab = 'wiki' | 'sources' | 'review' | 'search' | 'graph' | 'qa' | 'lint' | 'maintenance';
 export type WikiSourceView = 'sources' | 'settings';
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -330,7 +336,6 @@ export function normalizeReviews(value: unknown): readonly WikiReviewItem[] {
       description: typeof item.description === 'string' ? item.description : '',
       sourcePath: pickString(item, ['sourcePath']),
       affectedPages: stringArray(item.affectedPages),
-      searchQueries: stringArray(item.searchQueries),
       options: firstArray(item, ['options']).flatMap((option): WikiReviewOption[] => {
         if (!isRecord(option)) return [];
         const label = pickString(option, ['label']);
@@ -366,6 +371,9 @@ export function normalizeSourceTasks(value: unknown): readonly WikiSourceTask[] 
         error: pickString(task, ['error']),
         stage: pickString(task, ['stage']),
         progress: typeof task.progress === 'number' && Number.isFinite(task.progress) ? Math.max(0, Math.min(100, task.progress)) : null,
+        completed: typeof task.completed === 'number' && Number.isSafeInteger(task.completed) && task.completed >= 0 ? task.completed : null,
+        total: typeof task.total === 'number' && Number.isSafeInteger(task.total) && task.total >= 0 ? task.total : null,
+        stageStartedAtMs: pickNumber(task, ['stageStartedAtMs']) || null,
         cancelRequestedAtMs: pickNumber(task, ['cancelRequestedAtMs', 'cancel_requested_at_ms']) || null,
       } satisfies WikiSourceTask;
     })

@@ -9,14 +9,12 @@ const SESSION_STORE_FIELD: &str = "sessionStore";
 const BOOTSTRAP_MAX_CHARS: u64 = 32_000;
 const BOOTSTRAP_TOTAL_MAX_CHARS: u64 = 100_000;
 const STARTUP_TOOL_DENY: &[&str] = &[
+    "skill_workshop",
     "gateway",
     "nodes",
     "progress_card",
     "suggest_task",
     "dismiss_task",
-    "create_goal",
-    "get_goal",
-    "update_goal",
 ];
 
 pub(crate) fn apply_gateway_startup_defaults(document: &mut OpenClawConfigDocument) -> bool {

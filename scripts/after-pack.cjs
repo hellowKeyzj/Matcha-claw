@@ -283,7 +283,10 @@ function cleanupLanceDbPlatformPackages(nodeModulesDir, platform, arch) {
 }
 
 function cleanupOnnxRuntimeNodeBinaries(nodeModulesDir, platform, arch) {
-  const napiDir = join(nodeModulesDir, 'onnxruntime-node', 'bin', 'napi-v6');
+  return cleanupOnnxRuntimeBinaries(join(nodeModulesDir, 'onnxruntime-node', 'bin', 'napi-v6'), platform, arch);
+}
+
+function cleanupOnnxRuntimeBinaries(napiDir, platform, arch) {
   if (!existsSync(napiDir)) return 0;
 
   let removed = 0;
@@ -579,6 +582,13 @@ exports.default = async function afterPack(context) {
   } else {
     resourcesDir = join(appOutDir, 'resources');
   }
+
+  const { checkWikiAssets } = await import('./download-wiki-assets.mjs');
+  const wikiDir = join(resourcesDir, 'resources', 'wiki');
+  checkWikiAssets(wikiDir, platform, arch);
+  const wikiRemoved = cleanupOnnxRuntimeBinaries(join(wikiDir, 'onnxruntime'), platform, arch);
+  checkWikiAssets(wikiDir, platform, arch);
+  console.log(`[after-pack] Wiki assets verified; removed ${wikiRemoved} non-target ONNX Runtime directories.`);
 
   const openclawRoot = join(resourcesDir, 'openclaw');
   const dest = join(openclawRoot, 'node_modules');

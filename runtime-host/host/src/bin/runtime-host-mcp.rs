@@ -9,12 +9,12 @@ use std::{
 use platform::mcp::{ToolCatalog, run_stdio};
 
 fn main() -> ExitCode {
-    let Ok(config) = TeamRunMcpInvocation::parse() else {
+    let Ok(config) = McpInvocation::parse() else {
         eprintln!("runtime-host-mcp: artifact configuration is invalid");
         return ExitCode::FAILURE;
     };
 
-    let Ok(team_run) = organization::team_run_mcp_provider(&config.state_dir) else {
+    let Ok(team_run) = runtime_host::team_mcp::team_provider(&config.state_dir) else {
         return ExitCode::FAILURE;
     };
     let Ok(wiki) = wiki::wiki_mcp_provider(&config.state_dir) else {
@@ -32,11 +32,11 @@ fn main() -> ExitCode {
     }
 }
 
-struct TeamRunMcpInvocation {
+struct McpInvocation {
     state_dir: PathBuf,
 }
 
-impl TeamRunMcpInvocation {
+impl McpInvocation {
     fn parse() -> Result<Self, ()> {
         let mut args = std::env::args_os();
         let _program = args.next();

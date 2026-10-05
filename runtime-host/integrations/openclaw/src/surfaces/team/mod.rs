@@ -2,6 +2,7 @@ pub(crate) mod adapters;
 mod agent;
 mod buddy;
 mod config;
+mod member_profiles;
 mod native_effects;
 mod provider;
 mod recovery;

@@ -1,8 +1,6 @@
 use crate::domain::{ConnectorCatalog, ConnectorKind};
 
-use crate::ports::{
-    McpServerConfig, McpServerKind, McpServerStatusList, PRESET_TEAM_RUN_MCP_SERVER_ID,
-};
+use crate::ports::{McpServerConfig, McpServerKind, McpServerStatusList, PRESET_MCP_SERVER_ID};
 
 use crate::application::receipts::{
     ConnectorSessionMcpServerState, ConnectorSessionMcpServerStatus,
@@ -13,7 +11,7 @@ use crate::application::receipts::{
 const MANAGED_EXTERNAL_SERVER_PREFIX: &str = "matcha-external.";
 
 pub(crate) fn runtime_mcp_servers(catalog: &ConnectorCatalog) -> Vec<RuntimeMcpServerSummary> {
-    let mut servers = vec![team_run_preset_summary(true)];
+    let mut servers = vec![preset_summary(true)];
     servers.extend(catalog.connectors().iter().filter_map(|connector| {
         let kind = match connector.kind() {
             ConnectorKind::McpStdio => RuntimeMcpServerKind::McpStdio,
@@ -54,8 +52,8 @@ fn openclaw_mcp_server(
     server: McpServerConfig,
     catalog: &ConnectorCatalog,
 ) -> RuntimeMcpServerSummary {
-    if server.server_id == PRESET_TEAM_RUN_MCP_SERVER_ID {
-        let mut summary = team_run_preset_summary(server.enabled);
+    if server.server_id == PRESET_MCP_SERVER_ID {
+        let mut summary = preset_summary(server.enabled);
         summary.kind = map_server_kind(server.kind);
         return summary;
     }
@@ -96,11 +94,11 @@ fn openclaw_mcp_server(
     }
 }
 
-fn team_run_preset_summary(enabled: bool) -> RuntimeMcpServerSummary {
+fn preset_summary(enabled: bool) -> RuntimeMcpServerSummary {
     RuntimeMcpServerSummary {
-        server_id: PRESET_TEAM_RUN_MCP_SERVER_ID.into(),
+        server_id: PRESET_MCP_SERVER_ID.into(),
         connector_id: None,
-        display_name: "Matcha TeamRun MCP".into(),
+        display_name: "Matcha MCP".into(),
         description: None,
         kind: RuntimeMcpServerKind::McpStdio,
         source: RuntimeMcpServerSource::Preset,

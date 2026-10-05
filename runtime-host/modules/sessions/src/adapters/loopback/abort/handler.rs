@@ -95,15 +95,10 @@ async fn handle_request(
             return Response::bad_request();
         }
     };
-    if matches!(command.endpoint, crate::abort::NativeEndpoint::Unsupported) {
-        session.record_boundary_outcome("sessions.abort", crate::call::SessionsCallOutcome::Unsupported).await;
-        session_trace::log("runtime.abort.outcome", trace_id, serde_json::json!({ "outcome": "unsupported", "elapsedMs": started.elapsed().as_millis() }));
-        return Response::from_delivery(SessionAbortDelivery::Unsupported);
-    }
     drop(verifier);
     session_trace::log("runtime.abort.owner.submit", trace_id, serde_json::json!({
-        "endpoint": format!("{:?}", command.endpoint),
-        "sessionKey": session_trace::id_shape(Some(&command.session_key)),
+        "endpoint": command.identity.provider().as_str(),
+        "sessionKey": session_trace::id_shape(Some(command.identity.session_key())),
         "endpointSessionId": session_trace::id_shape(command.endpoint_session_id.as_deref()),
         "runId": session_trace::id_shape(command.run_id.as_deref()),
         "approvalIds": approval_ids_shape,

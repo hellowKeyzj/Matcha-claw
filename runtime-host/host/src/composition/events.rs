@@ -13,6 +13,7 @@ pub enum HostEvent {
     MatchaLifecycle(SupervisorSnapshot),
     CallChanged(platform::call::CallChanged),
     CallsResync,
+    OrganizationChanged,
 }
 
 pub struct HostEvents {
@@ -21,6 +22,8 @@ pub struct HostEvents {
     open_claw_runtime: mpsc::Receiver<()>,
     matcha_lifecycle: mpsc::Receiver<SupervisorSnapshot>,
     calls: Option<broadcast::Receiver<platform::call::CallChanged>>,
+    organization:
+        Option<tokio::sync::watch::Receiver<organization::owner::coordinator::TeamRunWake>>,
     open_claw_open: bool,
     cron_open: bool,
     open_claw_runtime_open: bool,
@@ -35,6 +38,13 @@ impl HostEvents {
         self.calls = Some(changes);
     }
 
+    pub(super) fn set_organization_changes(
+        &mut self,
+        changes: tokio::sync::watch::Receiver<organization::owner::coordinator::TeamRunWake>,
+    ) {
+        self.organization = Some(changes);
+    }
+
     pub async fn next(&mut self) -> Option<HostEvent> {
         loop {
             if !self.open_claw_open
@@ -42,10 +52,20 @@ impl HostEvents {
                 && !self.open_claw_runtime_open
                 && !self.matcha_lifecycle_open
                 && self.calls.is_none()
+                && self.organization.is_none()
             {
                 return None;
             }
             tokio::select! {
+                changed = async {
+                    match self.organization.as_mut() {
+                        Some(organization) => organization.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => match changed {
+                    Ok(()) => return Some(HostEvent::OrganizationChanged),
+                    Err(_) => self.organization = None,
+                },
                 change = async {
                     match self.calls.as_mut() {
                         Some(calls) => calls.recv().await,
@@ -133,6 +153,7 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
             open_claw_runtime: open_claw_runtime_events,
             matcha_lifecycle: matcha_lifecycle_events,
             calls: None,
+            organization: None,
             open_claw_open: true,
             cron_open: true,
             open_claw_runtime_open: true,

@@ -100,6 +100,7 @@ impl RuntimeCapabilityFamily {
             | "session.management"
             | "session.approval"
             | "session.modelSelection"
+            | "session.goal"
             | "tool.invoke" => Some(Self::Session),
             "task.management" => Some(Self::Task),
             "subagent.management" | "subagent.skills" | "subagent.tools" => Some(Self::Subagent),

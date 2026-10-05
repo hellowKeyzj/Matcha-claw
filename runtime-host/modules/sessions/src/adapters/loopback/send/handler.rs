@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     adapters::loopback::trace as session_trace,
-    send::{NativeEndpoint, SessionSendOutcome},
+    send::SessionSendOutcome,
     send_hook::SessionSendHookSet,
 };
 
@@ -111,18 +111,14 @@ async fn handle_request(
         "runtime.send.command",
         trace_id.as_deref(),
         serde_json::json!({
-            "endpoint": format!("{:?}", command.endpoint),
-            "sessionKey": session_trace::id_shape(Some(&command.session_key)),
+            "endpoint": command.identity.provider().as_str(),
+            "sessionKey": session_trace::id_shape(Some(command.identity.session_key())),
             "endpointSessionId": session_trace::id_shape(command.endpoint_session_id.as_deref()),
             "runId": session_trace::id_shape(command.run_id.as_deref()),
             "idempotencyKey": session_trace::id_shape(command.idempotency_key.as_deref()),
             "attachmentCount": command.attachments.len(),
         }),
     );
-    if matches!(command.endpoint, NativeEndpoint::Unsupported) {
-        session.record_boundary_outcome("sessions.send", crate::call::SessionsCallOutcome::Unsupported).await;
-        return Response::from_delivery(SessionSendDelivery::Unsupported);
-    }
     drop(verifier);
     let prepared = match send_hooks.prepare(command, now_millis).await {
         Ok(prepared) => prepared,

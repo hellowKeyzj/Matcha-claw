@@ -1,3 +1,5 @@
+import type { SessionGoalReceipt, SessionSendIntent } from '../../../../../src/types/session-goal';
+import { decodeSessionGoalReceipt, isGoalIdentifier, isGoalObjective, isSessionSendIntent } from './goal';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
@@ -11,11 +13,7 @@ const UNAVAILABLE = {
   error: 'Session send is unavailable',
 } as const;
 
-type Endpoint = Readonly<{
-  kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw' | 'matcha-agent';
-  runtimeInstanceId: 'local';
-}>;
+import { isSessionIdentity, sameSessionIdentity, type SessionIdentity } from './session-contract';
 
 export type SessionSendAttachment = Readonly<{
   mimeType: string;
@@ -28,27 +26,25 @@ export type SessionSendRequest = Readonly<{
   operationId: 'sessions.send';
   scope: Readonly<{
     kind: 'session';
-    endpoint: Endpoint;
-    sessionKey: string;
-    routeKey: string;
+    identity: SessionIdentity;
   }>;
-  target: Readonly<{ kind: 'session' }>;
+  target: Readonly<{ kind: 'session'; identity: SessionIdentity }>;
   input: Readonly<{
-    endpoint: Endpoint;
-    sessionKey: string;
+    identity: SessionIdentity;
     endpointSessionId?: string;
     message: string;
     runId?: string;
     idempotencyKey?: string;
     deliver?: boolean;
+    intent?: SessionSendIntent;
     attachments: readonly SessionSendAttachment[];
   }>;
 }>;
 
 type RustSessionSendResponse =
   | Readonly<{ outcome: 'queued'; runId: string }>
-  | Readonly<{ outcome: 'succeeded'; runId: string; status: 'started' | 'in_flight' | 'ok' }>
-  | Readonly<{ outcome: 'target_rejected' | 'unavailable' | 'unknown' }>;
+  | Readonly<{ outcome: 'succeeded'; runId: string; status: 'started' | 'in_flight' | 'ok'; goal?: SessionGoalReceipt }>
+  | Readonly<{ outcome: 'target_rejected' | 'unavailable' | 'unknown' | 'unsupported' }>;
 
 type SessionSendResponse =
   | Readonly<{ outcome: 'queued'; runId: string }>
@@ -56,8 +52,9 @@ type SessionSendResponse =
     outcome: 'succeeded';
     runId: string;
     status: 'started' | 'in_flight' | 'ok';
+    goal?: SessionGoalReceipt;
   }>
-  | Readonly<{ outcome: 'target_rejected' | 'unavailable' | 'unknown' }>;
+  | Readonly<{ outcome: 'target_rejected' | 'unavailable' | 'unknown' | 'unsupported' }>;
 
 type SessionSendInvalidRequest = Readonly<{
   success: false;
@@ -82,7 +79,7 @@ type E2EProcess = typeof process & {
       mimeLengths: readonly number[];
       fileNameLengths: readonly number[];
       fileNamesSafe: boolean;
-      routeKeyLength: number;
+      agentIdLength: number;
       requestRunIdentityLength: number;
     }>;
   }>;
@@ -105,7 +102,7 @@ function e2eAttachmentShape(request: SessionSendRequest): NonNullable<
         && !attachment.fileName.includes('\\')
         && !hasControlCharacter(attachment.fileName),
     ),
-    routeKeyLength: request.scope.routeKey.length,
+    agentIdLength: request.scope.identity.agentId.length,
     requestRunIdentityLength: request.input.runId?.length ?? request.input.idempotencyKey?.length ?? 0,
   };
 }
@@ -145,8 +142,8 @@ export function createSessionSendTransport(
       }
       const startedAt = Date.now();
       logSessionTrace('electron.send.request', traceId, {
-        adapter: request.input.endpoint.runtimeAdapterId,
-        sessionKey: summarizeIdentifier(request.input.sessionKey),
+        adapter: request.input.identity.endpoint.runtimeAdapterId,
+        sessionKey: summarizeIdentifier(request.input.identity.sessionKey),
         endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
         runId: summarizeIdentifier(request.input.runId),
         idempotencyKey: summarizeIdentifier(request.input.idempotencyKey),
@@ -172,32 +169,34 @@ export function createSessionSendTransport(
         logSessionTrace('electron.send.failure', traceId, {
           elapsedMs: Date.now() - startedAt,
         });
-        return { status: 503, body: UNAVAILABLE };
+        return request.input.intent === undefined
+          ? { status: 503, body: UNAVAILABLE }
+          : { status: 200, body: { outcome: 'unknown' } };
       }
       const body = response.body;
       publishE2ESessionSendBoundary({
         stage: 'http-response',
         status: response.status,
         elapsedMs: Date.now() - startedAt,
-        contract: isRustSessionSendResponse(body) ? 'valid' : 'invalid',
+        contract: isRustSessionSendResponse(body, request) ? 'valid' : 'invalid',
         attachmentShape: e2eAttachmentShape(request),
       });
       logSessionTrace('electron.send.response', traceId, {
         status: response.status,
-        contract: isRustSessionSendResponse(body) ? 'valid' : 'invalid',
-        outcome: isRustSessionSendResponse(body) ? body.outcome : null,
+        contract: isRustSessionSendResponse(body, request) ? 'valid' : 'invalid',
+        outcome: isRustSessionSendResponse(body, request) ? body.outcome : null,
         elapsedMs: Date.now() - startedAt,
       });
       if (response.status === 202
-        && request.scope.endpoint.runtimeAdapterId === 'openclaw'
-        && isRustSessionSendResponse(body)
+        && request.scope.identity.endpoint.runtimeAdapterId === 'openclaw'
+        && isRustSessionSendResponse(body, request)
         && body.outcome === 'queued') {
         return {
           status: 202,
           body: { outcome: 'queued', runId: body.runId },
         };
       }
-      if (response.status === 200 && isRustSessionSendResponse(body)) {
+      if (response.status === 200 && isRustSessionSendResponse(body, request)) {
         if (body.outcome === 'succeeded') {
           return {
             status: 200,
@@ -205,33 +204,49 @@ export function createSessionSendTransport(
               outcome: 'succeeded',
               runId: body.runId,
               status: body.status,
+              ...(body.goal === undefined ? {} : { goal: body.goal }),
             },
           };
         }
-        if (body.outcome === 'target_rejected' || body.outcome === 'unavailable' || body.outcome === 'unknown') {
+        if (body.outcome === 'target_rejected' || body.outcome === 'unavailable' || body.outcome === 'unknown'
+          || body.outcome === 'unsupported') {
           return { status: 200, body };
         }
       }
       if (response.status === 400) {
         return { status: 400, body: INVALID_REQUEST };
       }
-      return { status: 503, body: UNAVAILABLE };
+      return request.input.intent === undefined
+        ? { status: 503, body: UNAVAILABLE }
+        : { status: 200, body: { outcome: 'unknown' } };
     },
   };
 }
 
-function isRustSessionSendResponse(value: unknown): value is RustSessionSendResponse {
+function isRustSessionSendResponse(value: unknown, request: SessionSendRequest): value is RustSessionSendResponse {
   if (!isRecord(value) || typeof value.outcome !== 'string') return false;
   if (value.outcome === 'queued') {
-    return hasExactKeys(value, ['outcome', 'runId']) && typeof value.runId === 'string';
+    return request.input.intent === undefined
+      && hasExactKeys(value, ['outcome', 'runId']) && typeof value.runId === 'string';
   }
   if (value.outcome === 'succeeded') {
-    return hasExactKeys(value, ['outcome', 'runId', 'status'])
+    return hasAllowedKeys(value, ['outcome', 'runId', 'status'], ['goal'])
       && typeof value.runId === 'string'
-      && (value.status === 'started' || value.status === 'in_flight' || value.status === 'ok');
+      && (value.status === 'started' || value.status === 'in_flight' || value.status === 'ok')
+      && isSessionSendGoalResponse(value, request);
   }
   return hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'target_rejected' || value.outcome === 'unavailable' || value.outcome === 'unknown');
+    && (value.outcome === 'target_rejected' || value.outcome === 'unavailable' || value.outcome === 'unknown'
+      || (request.input.intent !== undefined && value.outcome === 'unsupported'));
+}
+
+export function isSessionSendGoalResponse(value: Record<string, unknown>, request: SessionSendRequest): boolean {
+  if (request.input.intent === undefined) return !Object.hasOwn(value, 'goal');
+  const receipt = decodeSessionGoalReceipt(value.goal);
+  return receipt !== null && value.status === 'started'
+    && receipt.action === 'start' && receipt.status === 'started'
+    && receipt.operationId === request.input.idempotencyKey && receipt.runId === value.runId
+    && (request.input.endpointSessionId === undefined || receipt.sessionId === request.input.endpointSessionId);
 }
 
 function isSessionSendRequest(value: unknown): value is SessionSendRequest {
@@ -241,16 +256,13 @@ function isSessionSendRequest(value: unknown): value is SessionSendRequest {
     || value.operationId !== 'sessions.send'
     || !isSessionScope(value.scope)
     || !isRecord(value.target)
-    || !hasExactKeys(value.target, ['kind'])
-    || value.target.kind !== 'session'
+    || !hasExactKeys(value.target, ['kind', 'identity'])
+    || value.target.kind !== 'session' || !isSessionIdentity(value.target.identity)
     || !isRecord(value.input)
-    || !hasAllowedKeys(value.input, ['endpoint', 'sessionKey', 'message', 'attachments'], ['endpointSessionId', 'runId', 'idempotencyKey', 'deliver'])
-    || !isEndpoint(value.input.endpoint)
-    || value.scope.endpoint.runtimeAdapterId !== value.input.endpoint.runtimeAdapterId
-    || value.scope.endpoint.runtimeInstanceId !== value.input.endpoint.runtimeInstanceId
-    || value.scope.sessionKey !== value.input.sessionKey
-    || typeof value.input.sessionKey !== 'string'
-    || !value.input.sessionKey
+    || !hasAllowedKeys(value.input, ['identity', 'message', 'attachments'], ['endpointSessionId', 'runId', 'idempotencyKey', 'deliver', 'intent'])
+    || !isSessionIdentity(value.input.identity)
+    || !sameSessionIdentity(value.scope.identity, value.input.identity)
+    || !sameSessionIdentity(value.scope.identity, value.target.identity)
     || (value.input.endpointSessionId !== undefined
       && (typeof value.input.endpointSessionId !== 'string' || !value.input.endpointSessionId))
     || typeof value.input.message !== 'string'
@@ -259,6 +271,9 @@ function isSessionSendRequest(value: unknown): value is SessionSendRequest {
     || (value.input.idempotencyKey !== undefined
       && (typeof value.input.idempotencyKey !== 'string' || !value.input.idempotencyKey))
     || (value.input.deliver !== undefined && typeof value.input.deliver !== 'boolean')
+    || (Object.hasOwn(value.input, 'intent') && (!isSessionSendIntent(value.input.intent)
+      || value.input.runId !== undefined || !isGoalIdentifier(value.input.idempotencyKey, 128)
+      || !isGoalObjective(value.input.message)))
     || (value.input.runId === undefined && value.input.idempotencyKey === undefined)
     || !Array.isArray(value.input.attachments)
     || value.input.attachments.length > MAX_ATTACHMENTS
@@ -274,31 +289,14 @@ function isSessionSendRequest(value: unknown): value is SessionSendRequest {
       .reduce<number>((total, bytes) => total + (bytes ?? 0), 0) > MAX_TOTAL_ATTACHMENT_DECODED_BYTES) {
     return false;
   }
-  return isEndpoint(value.scope.endpoint);
+  return true;
 }
 
 function isSessionScope(value: unknown): value is SessionSendRequest['scope'] {
   return isRecord(value)
-    && hasExactKeys(value, ['kind', 'endpoint', 'sessionKey', 'routeKey'])
+    && hasExactKeys(value, ['kind', 'identity'])
     && value.kind === 'session'
-    && isEndpoint(value.endpoint)
-    && typeof value.sessionKey === 'string'
-    && value.sessionKey.length > 0
-    && isRendererRouteKey(value.routeKey);
-}
-
-function isRendererRouteKey(value: unknown): value is string {
-  return typeof value === 'string'
-    && /^renderer-route:[A-Za-z0-9_-]+$/.test(value)
-    && value.length <= 128;
-}
-
-function isEndpoint(value: unknown): value is Endpoint {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime'
-    && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
-    && value.runtimeInstanceId === 'local';
+    && isSessionIdentity(value.identity);
 }
 
 function hasControlCharacter(value: string): boolean {

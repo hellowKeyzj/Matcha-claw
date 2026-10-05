@@ -15,6 +15,8 @@ path = "src/bin/runtime-host-mcp.rs"
 [dependencies]
 fleet = { version = "0.1.0", path = "../modules/fleet" }
 base64.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
 call-log = { version = "0.1.0", path = "../modules/call-log" }
 channels = { version = "0.1.0", path = "../modules/channels" }
 security = { version = "0.1.0", path = "../modules/security" }

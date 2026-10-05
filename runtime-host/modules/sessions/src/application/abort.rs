@@ -1,8 +1,8 @@
+use super::state::SessionIdentity;
 use serde::Serialize;
 
 pub use super::endpoint::NativeEndpoint;
 
-const MAX_SESSION_KEY_BYTES: usize = 4096;
 const MAX_ENDPOINT_SESSION_ID_BYTES: usize = 4096;
 const MAX_RUN_ID_BYTES: usize = 4096;
 const MAX_APPROVAL_ID_BYTES: usize = 4096;
@@ -10,8 +10,7 @@ const MAX_APPROVAL_IDS: usize = 32;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionAbortCommand {
-    pub endpoint: NativeEndpoint,
-    pub session_key: String,
+    pub identity: SessionIdentity,
     /// Peer-native session binding. OpenClaw cancellation uses `session_key`; Matcha
     /// cancellation uses this native handle when it is present.
     pub endpoint_session_id: Option<String>,
@@ -23,13 +22,12 @@ pub struct SessionAbortCommand {
 
 impl SessionAbortCommand {
     pub fn try_new(
-        endpoint: NativeEndpoint,
-        session_key: String,
+        identity: SessionIdentity,
         endpoint_session_id: Option<String>,
         run_id: Option<String>,
         approval_ids: Option<Vec<String>>,
     ) -> Result<Self, InvalidCommand> {
-        if !valid_identity(&session_key, MAX_SESSION_KEY_BYTES)
+        if identity.validate().is_err()
             || endpoint_session_id
                 .as_deref()
                 .is_some_and(|endpoint_session_id| {
@@ -49,8 +47,7 @@ impl SessionAbortCommand {
             return Err(InvalidCommand);
         }
         Ok(Self {
-            endpoint,
-            session_key,
+            identity,
             endpoint_session_id,
             run_id,
             approval_ids,
@@ -96,7 +93,6 @@ pub enum SessionAbortOutcome {
     Unsupported,
     Unavailable,
 }
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;

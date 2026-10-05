@@ -68,9 +68,7 @@ pub struct TruncatedFileRepairPromptParams<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReviewSuggestionPromptParams<'a> {
     pub purpose: &'a str,
-    pub schema: &'a str,
     pub index: &'a str,
-    pub overview: &'a str,
     pub source_identity: &'a str,
     pub analysis: &'a str,
     pub source_context: &'a str,
@@ -140,28 +138,30 @@ pub fn compute_ingest_source_budget(
     clamp_usize(available, LONG_SOURCE_MIN_BUDGET, upper)
 }
 
-pub fn compute_ingest_generation_max_tokens(max_context_size: Option<usize>) -> usize {
-    let max_ctx = compute_context_budget(max_context_size).max_ctx;
-    if max_ctx >= 512_000 {
+pub fn compute_ingest_generation_max_tokens(max_context_tokens: Option<usize>) -> usize {
+    let context_tokens = max_context_tokens
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_CTX);
+    if context_tokens >= 512_000 {
         INGEST_GENERATION_TOKENS_512K
-    } else if max_ctx >= 256_000 {
+    } else if context_tokens >= 256_000 {
         INGEST_GENERATION_TOKENS_256K
-    } else if max_ctx >= 128_000 {
+    } else if context_tokens >= 128_000 {
         INGEST_GENERATION_TOKENS_128K
     } else {
         INGEST_GENERATION_TOKENS_DEFAULT
     }
 }
 
-pub fn compute_ingest_review_max_tokens(max_context_size: Option<usize>) -> usize {
-    (compute_ingest_generation_max_tokens(max_context_size) / 2).clamp(4_096, 8_192)
+pub fn compute_ingest_review_max_tokens(max_context_tokens: Option<usize>) -> usize {
+    (compute_ingest_generation_max_tokens(max_context_tokens) / 2).clamp(4_096, 8_192)
 }
 
 pub fn language_rule(output_language: Option<&str>, fallback_text: &str) -> String {
     let language =
         match output_language.filter(|language| !language.is_empty() && *language != "auto") {
             Some(language) => language.to_owned(),
-            None => detect_language(if fallback_text.is_empty() {
+            None => super::language::detect_language(if fallback_text.is_empty() {
                 "English"
             } else {
                 fallback_text
@@ -324,7 +324,6 @@ pub fn build_generation_prompt(params: GenerationPromptParams<'_>) -> String {
         "- duplicate: OPTIONS: Create Page | Skip".to_owned(),
         "- missing-page: OPTIONS: Create Page | Skip".to_owned(),
         "- suggestion: OPTIONS: Create Page | Skip".to_owned(),
-        "The user also has a 'Deep Research' button (auto-added by the system) that triggers web search.".to_owned(),
         "Do NOT invent custom option labels. Only use 'Create Page' and 'Skip'.".to_owned(),
         "For suggestion and missing-page reviews, the SEARCH field must contain 2-3 web search queries".to_owned(),
         "(keyword-rich, specific, suitable for a search engine — NOT titles or sentences). Example:".to_owned(),
@@ -369,19 +368,18 @@ pub fn build_review_suggestion_prompt(params: ReviewSuggestionPromptParams<'_>) 
     let index_cap = 3_000.max(section_cap * 8 / 10);
     join_non_empty(vec![
         "You are identifying high-value follow-up research items for a personal wiki.".to_owned(),
-        "Your job is NOT to generate wiki pages. The wiki page generation already happened.".to_owned(),
-        "Output only REVIEW blocks for unresolved knowledge gaps that deserve human attention or Deep Research.".to_owned(),
-        "Prefer 1-5 high-signal reviews. If there is nothing worth reviewing, output nothing.".to_owned(),
-        "Return REVIEW blocks only. Do not output FILE blocks. Do not wrap the response in markdown fences.".to_owned(),
+        "Do not output chain-of-thought, hidden reasoning, or explanatory preamble.".to_owned(),
         language_rule(params.output_language, params.source_context),
-        "Review types:".to_owned(),
+        "Your job is NOT to generate wiki pages. The wiki page generation already happened.".to_owned(),
+        "Output only REVIEW blocks for unresolved knowledge gaps that deserve human attention.".to_owned(),
+        "Create REVIEW blocks only for genuinely useful follow-up work:".to_owned(),
+        "- missing-page: an important entity/concept is referenced but still lacks a dedicated page".to_owned(),
+        "- suggestion: a research question, source type, or comparison that would materially improve the wiki".to_owned(),
         "- contradiction: a conflict or tension that requires user judgment".to_owned(),
         "- duplicate: likely duplicate pages/names that need user review".to_owned(),
-        "- missing-page: an important concept is referenced but has no dedicated page".to_owned(),
-        "- suggestion: follow-up research, related sources to look for, or connections worth exploring".to_owned(),
-        "Use only these options: OPTIONS: Create Page | Skip".to_owned(),
+        "Prefer 1-5 high-signal reviews. If there is nothing worth reviewing, output nothing.".to_owned(),
         "For suggestion and missing-page reviews, include a SEARCH line with 2-3 keyword-rich web search queries separated by ` | `.".to_owned(),
-        "The user has a Deep Research button added by the system. Do not invent a Deep Research option label.".to_owned(),
+        "Use only these options: OPTIONS: Create Page | Skip".to_owned(),
         "REVIEW block template:".to_owned(),
         "```".to_owned(),
         "---REVIEW: suggestion | Precise title---".to_owned(),
@@ -391,14 +389,13 @@ pub fn build_review_suggestion_prompt(params: ReviewSuggestionPromptParams<'_>) 
         "SEARCH: query 1 | query 2 | query 3".to_owned(),
         "---END REVIEW---".to_owned(),
         "```".to_owned(),
-        optional_section(!params.purpose.is_empty(), format!("## Wiki Purpose\n{}", trim_long_text(params.purpose, section_cap))),
-        optional_section(!params.schema.is_empty(), format!("## Wiki Schema\n{}", trim_long_text(params.schema, section_cap))),
+        "Return REVIEW blocks only. Do not output FILE blocks. Do not wrap the response in markdown fences.".to_owned(),
+        optional_section(!params.purpose.is_empty(), format!("## Wiki Purpose\n{}", params.purpose)),
         optional_section(!params.index.is_empty(), format!("## Current Wiki Index\n{}", trim_long_text(params.index, index_cap))),
-        optional_section(!params.overview.is_empty(), format!("## Current Overview\n{}", trim_long_text(params.overview, section_cap))),
-        format!("## Source identity\n{}", params.source_identity),
-        format!("## Stage 1 analysis\n{}", trim_long_text(params.analysis, section_cap)),
-        format!("## Source context\n{}", trim_long_text(params.source_context, section_cap)),
-        format!("## Generated FILE/REVIEW output to inspect\n{}", trim_long_text(params.generation, section_cap)),
+        format!("## Source\n{}", params.source_identity),
+        format!("## Stage 1 Analysis\n{}", trim_long_text(params.analysis, section_cap)),
+        format!("## Source Context\n{}", trim_long_text(params.source_context, section_cap)),
+        format!("## Generated Wiki Output\n{}", trim_long_text(params.generation, section_cap)),
     ])
 }
 
@@ -513,13 +510,11 @@ pub fn build_page_merge_system_prompt() -> String {
 }
 
 pub fn trim_long_text(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
+    let prefix = super::text::prefix(text, max_chars);
+    if prefix.len() == text.len() {
         return text.to_owned();
     }
-    format!(
-        "{}\n\n[...trimmed for prompt budget...]",
-        text.chars().take(max_chars).collect::<String>().trim_end()
-    )
+    format!("{}\n\n[...trimmed for prompt budget...]", prefix.trim_end())
 }
 
 fn clamp_usize(value: isize, min: usize, max: usize) -> usize {
@@ -558,153 +553,4 @@ fn language_prompt_name(language: &str) -> String {
         "" => "English".to_owned(),
         other => other.to_owned(),
     }
-}
-
-fn detect_language(text: &str) -> String {
-    let mut chinese = 0;
-    let mut japanese = 0;
-    let mut korean = 0;
-    let mut arabic = 0;
-    let mut persian = 0;
-    let mut hebrew = 0;
-    let mut thai = 0;
-    let mut hindi = 0;
-    let mut cyrillic = 0;
-    let mut greek = 0;
-
-    for ch in text.chars() {
-        let cp = ch as u32;
-        match cp {
-            0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x20000..=0x2A6DF | 0xF900..=0xFAFF => chinese += 1,
-            0x3040..=0x309F | 0x30A0..=0x30FF | 0x31F0..=0x31FF | 0xFF65..=0xFF9F => japanese += 1,
-            0xAC00..=0xD7AF | 0x1100..=0x11FF | 0x3130..=0x318F => korean += 1,
-            0x0600..=0x06FF
-            | 0x0750..=0x077F
-            | 0x08A0..=0x08FF
-            | 0xFB50..=0xFDFF
-            | 0xFE70..=0xFEFF => {
-                arabic += 1;
-                if matches!(ch, 'پ' | 'چ' | 'ژ' | 'گ' | 'ک' | 'ی') {
-                    persian += 1;
-                }
-            }
-            0x0590..=0x05FF | 0xFB1D..=0xFB4F => hebrew += 1,
-            0x0E00..=0x0E7F => thai += 1,
-            0x0900..=0x097F => hindi += 1,
-            0x0400..=0x04FF | 0x0500..=0x052F => cyrillic += 1,
-            0x0370..=0x03FF | 0x1F00..=0x1FFF => greek += 1,
-            _ => {}
-        }
-    }
-
-    if japanese > 0 && chinese > 0 {
-        return "Japanese".to_owned();
-    }
-
-    let scripts = [
-        ("Chinese", chinese),
-        ("Japanese", japanese),
-        ("Korean", korean),
-        (
-            if persian >= 3 && persian > arabic - persian {
-                "Persian"
-            } else {
-                "Arabic"
-            },
-            arabic,
-        ),
-        ("Hebrew", hebrew),
-        ("Thai", thai),
-        ("Hindi", hindi),
-        ("Russian", cyrillic),
-        ("Greek", greek),
-    ];
-    scripts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .filter(|(_, count)| *count >= 2)
-        .map(|(language, _)| language.to_owned())
-        .unwrap_or_else(|| detect_latin_language(text).unwrap_or_else(|| "English".to_owned()))
-}
-
-fn detect_latin_language(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    let words = lower
-        .split(|ch: char| !ch.is_alphabetic())
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
-    if lower
-        .chars()
-        .any(|ch| "ảạắằẳẵặấầẩẫậđẻẽẹếềểễệỉĩịỏọốồổỗộơớờởỡợủũụưứừửữựỷỹỵ".contains(ch))
-    {
-        return Some("Vietnamese".to_owned());
-    }
-    if lower.chars().any(|ch| "ąćęłńśźż".contains(ch)) {
-        return Some("Polish".to_owned());
-    }
-    if lower.chars().any(|ch| "ěšžřďťňů".contains(ch)) {
-        return Some("Czech".to_owned());
-    }
-    if lower.chars().any(|ch| "ğışş".contains(ch)) {
-        return Some("Turkish".to_owned());
-    }
-    if lower.chars().any(|ch| "ățș".contains(ch)) {
-        return Some("Romanian".to_owned());
-    }
-    if lower.chars().any(|ch| "őű".contains(ch)) {
-        return Some("Hungarian".to_owned());
-    }
-    if lower.chars().any(|ch| "ß".contains(ch))
-        || has_any_word(&words, &["der", "die", "das", "und", "nicht", "ist", "mit"])
-    {
-        return Some("German".to_owned());
-    }
-    if lower.chars().any(|ch| "çêëîïôûù".contains(ch))
-        || has_any_word(&words, &["le", "la", "les", "des", "une", "avec", "pour"])
-    {
-        return Some("French".to_owned());
-    }
-    if lower.chars().any(|ch| "ãõ".contains(ch))
-        || has_any_word(&words, &["que", "para", "com", "uma", "não"])
-    {
-        return Some("Portuguese".to_owned());
-    }
-    if lower.chars().any(|ch| "ñ¿¡".contains(ch))
-        || has_any_word(&words, &["el", "los", "las", "una", "con", "para", "que"])
-    {
-        return Some("Spanish".to_owned());
-    }
-    if has_any_word(&words, &["il", "lo", "gli", "della", "che", "con", "per"]) {
-        return Some("Italian".to_owned());
-    }
-    if has_any_word(&words, &["het", "een", "van", "voor", "niet"]) {
-        return Some("Dutch".to_owned());
-    }
-    if lower.chars().any(|ch| "åäö".contains(ch)) {
-        return Some("Swedish".to_owned());
-    }
-    if lower.chars().any(|ch| "øæ".contains(ch)) {
-        return Some("Norwegian".to_owned());
-    }
-    if has_any_word(&words, &["og", "ikke", "for", "med"]) {
-        return Some("Danish".to_owned());
-    }
-    if has_any_word(&words, &["ja", "että", "ovat", "kanssa"]) {
-        return Some("Finnish".to_owned());
-    }
-    if has_any_word(&words, &["yang", "dan", "untuk", "dengan"]) {
-        return Some("Indonesian".to_owned());
-    }
-    if has_any_word(&words, &["na", "kwa", "ya", "katika"]) {
-        return Some("Swahili".to_owned());
-    }
-    None
-}
-
-fn has_any_word(words: &[&str], needles: &[&str]) -> bool {
-    needles
-        .iter()
-        .filter(|needle| words.iter().any(|word| *word == **needle))
-        .count()
-        >= 2
 }

@@ -1,4 +1,6 @@
-import type { WikiInsightResearchInputReceipt, WikiLintFixReceipt, WikiQuestionSaveReceipt, WikiRebuildIndexReceipt } from './wiki-capabilities';
+import { isWikiDuplicateGroup, type WikiDedupDetection, type WikiMissingPageReceipt, type WikiLintFixReceipt, type WikiQuestionSaveReceipt, type WikiRebuildIndexReceipt } from './wiki-capabilities';
+
+import { decodeWikiSelectionApplyReceipt, type WikiSelectionApplyReceipt } from './wiki-selection';
 
 export interface WikiProjectImportResult {
   projects: { projectId: string; title: string; rootPath: string; isCurrent: boolean; createdAtMs: number; openedAtMs: number }[];
@@ -17,14 +19,39 @@ export interface WikiDeleteSourceResult {
   deletedMedia: string[];
 }
 
+export interface WikiDeletePageResult {
+  projectId: string;
+  path: string;
+  deletedPages: string[];
+  updatedPages: string[];
+  deletedMedia: string[];
+  failures: { stage: 'file' | 'vector' | 'media' | 'references' | 'snapshot'; path: string; message: string }[];
+}
+
+const wikiEmbedFailureCodes = [
+  'disabled', 'not-configured', 'model-unavailable', 'model-changed',
+  'provider-unavailable', 'provider-auth', 'provider-rate-limit', 'invalid-response',
+  'empty-content', 'input-too-large', 'index-unavailable', 'failed',
+] as const;
+
+export type WikiEmbedFailureCode = typeof wikiEmbedFailureCodes[number];
+
+export type WikiEmbedResult =
+  | { status: 'completed'; projectId: string }
+  | { status: 'failed'; projectId: string; code: WikiEmbedFailureCode };
+
 export type WikiCallResult =
+  | { callId: string; operation: 'selection.apply'; result: WikiSelectionApplyReceipt }
+  | { callId: string; operation: 'dedup.detect'; result: WikiDedupDetection }
+  | { callId: string; operation: 'missing-page.create'; result: WikiMissingPageReceipt }
   | { callId: string; operation: 'apply-generated-pages'; result: { writtenPages: WikiWriteResult[] } }
   | { callId: string; operation: 'delete-source'; result: WikiDeleteSourceResult }
+  | { callId: string; operation: 'delete-page'; result: WikiDeletePageResult }
+  | { callId: string; operation: 'embed-page'; result: WikiEmbedResult }
   | { callId: string; operation: 'project.import-archive'; result: WikiProjectImportResult }
   | { callId: string; operation: 'rebuild-index'; result: WikiRebuildIndexReceipt }
   | { callId: string; operation: 'qa.save'; result: WikiQuestionSaveReceipt }
-  | { callId: string; operation: 'lint.fix' | 'lint.review' | 'lint.delete'; result: WikiLintFixReceipt }
-  | { callId: string; operation: 'graph.insights.research-input'; result: WikiInsightResearchInputReceipt };
+  | { callId: string; operation: 'lint.fix' | 'lint.review' | 'lint.delete'; result: WikiLintFixReceipt };
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -62,6 +89,36 @@ function writeResult(value: unknown): value is WikiWriteResult {
 export function decodeWikiCallResult(value: unknown): WikiCallResult {
   if (record(value) && exact(value, ['callId', 'operation', 'result']) && typeof value.callId === 'string' && /^[a-f0-9]{32}$/.test(value.callId)
     && record(value.result)) {
+    if (value.operation === 'selection.apply' && relativePath(value.result.relativePath)) {
+      return { callId: value.callId, operation: value.operation, result: decodeWikiSelectionApplyReceipt(value.result) };
+    }
+    if (value.operation === 'dedup.detect' && exact(value.result, ['projectId', 'groups'])
+      && typeof value.result.projectId === 'string' && Array.isArray(value.result.groups)
+      && value.result.groups.every(isWikiDuplicateGroup)) {
+      return { callId: value.callId, operation: value.operation, result: {
+        projectId: value.result.projectId, groups: value.result.groups,
+      } };
+    }
+    if (value.operation === 'missing-page.create' && exact(value.result, ['projectId', 'path'])
+      && typeof value.result.projectId === 'string' && relativePath(value.result.path)) {
+      return { callId: value.callId, operation: value.operation, result: {
+        projectId: value.result.projectId, path: value.result.path,
+      } };
+    }
+    if (value.operation === 'embed-page' && typeof value.result.projectId === 'string') {
+      if (value.result.status === 'completed' && exact(value.result, ['status', 'projectId'])) {
+        return { callId: value.callId, operation: value.operation, result: {
+          status: value.result.status, projectId: value.result.projectId,
+        } };
+      }
+      if (value.result.status === 'failed' && exact(value.result, ['status', 'projectId', 'code'])
+        && typeof value.result.code === 'string'
+        && (wikiEmbedFailureCodes as readonly string[]).includes(value.result.code)) {
+        return { callId: value.callId, operation: value.operation, result: {
+          status: value.result.status, projectId: value.result.projectId, code: value.result.code as WikiEmbedFailureCode,
+        } };
+      }
+    }
     if (value.operation === 'qa.save' && exact(value.result, ['projectId', 'savedPath'])
       && typeof value.result.projectId === 'string' && relativePath(value.result.savedPath)) {
       return { callId: value.callId, operation: value.operation, result: {
@@ -72,15 +129,6 @@ export function decodeWikiCallResult(value: unknown): WikiCallResult {
       && typeof value.result.projectId === 'string' && integer(value.result.pages) && integer(value.result.groups)) {
       return { callId: value.callId, operation: value.operation, result: {
         projectId: value.result.projectId, pages: value.result.pages, groups: value.result.groups,
-      } };
-    }
-    if (value.operation === 'graph.insights.research-input'
-      && exact(value.result, ['projectId', 'insightKey', 'topic', 'searchQueries'])
-      && typeof value.result.projectId === 'string' && typeof value.result.insightKey === 'string'
-      && typeof value.result.topic === 'string' && strings(value.result.searchQueries)) {
-      return { callId: value.callId, operation: value.operation, result: {
-        projectId: value.result.projectId, insightKey: value.result.insightKey,
-        topic: value.result.topic, searchQueries: value.result.searchQueries,
       } };
     }
     if ((value.operation === 'lint.fix' || value.operation === 'lint.review' || value.operation === 'lint.delete')
@@ -103,6 +151,16 @@ export function decodeWikiCallResult(value: unknown): WikiCallResult {
     if (value.operation === 'apply-generated-pages' && exact(value.result, ['writtenPages'])
       && Array.isArray(value.result.writtenPages) && value.result.writtenPages.every(writeResult)) {
       return { callId: value.callId, operation: value.operation, result: { writtenPages: value.result.writtenPages } };
+    }
+    if (value.operation === 'delete-page'
+      && exact(value.result, ['projectId', 'path', 'deletedPages', 'updatedPages', 'deletedMedia', 'failures'])
+      && typeof value.result.projectId === 'string' && relativePath(value.result.path)
+      && paths(value.result.deletedPages) && paths(value.result.updatedPages) && paths(value.result.deletedMedia)
+      && Array.isArray(value.result.failures) && value.result.failures.every((failure) => record(failure)
+        && exact(failure, ['stage', 'path', 'message']) && typeof failure.stage === 'string'
+        && ['file', 'vector', 'media', 'references', 'snapshot'].includes(failure.stage)
+        && relativePath(failure.path) && typeof failure.message === 'string')) {
+      return { callId: value.callId, operation: value.operation, result: value.result as unknown as WikiDeletePageResult };
     }
     if (value.operation === 'delete-source'
       && exact(value.result, ['sourceRelativePath', 'deletedPages', 'updatedPages', 'deletedMedia'])

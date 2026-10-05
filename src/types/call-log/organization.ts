@@ -1,5 +1,15 @@
 import type {} from '../call-log';
 
+export interface OrganizationProvisionProgress {
+  stage: 'reading_profiles' | 'generating_introductions' | 'configuring_team' | 'verifying_team' | 'saving_team' | 'rolling_back';
+  members: Array<'queued' | 'running' | 'completed' | 'failed'>;
+}
+
+type OrganizationCommit = {
+  nativeInstalled: boolean | null;
+  commit: 'committed' | 'failed' | 'outcome_unknown' | null;
+};
+
 export interface OrganizationCallDetail {
   teamId: string | null;
   runId: string | null;
@@ -11,11 +21,8 @@ export interface OrganizationCallDetail {
     nodes: number;
     edges: number;
   } | null;
-  provision: {
-    nativeInstalled: boolean | null;
-    commit: 'committed' | 'failed' | 'outcome_unknown' | null;
-  } | null;
-  creation: OrganizationCallDetail['provision'];
+  provision: (OrganizationCommit & { progress?: OrganizationProvisionProgress }) | null;
+  creation: OrganizationCommit | null;
   /** Operation completion is not native delivery or graph business completion. */
   outcome:
     | 'read' | 'command_committed' | 'materialized' | 'created' | 'started' | 'intake'
@@ -52,7 +59,7 @@ export function decodeOrganizationCallDetail(value: unknown): OrganizationCallDe
       edges: value.graph.edges,
     };
   }
-  const provision = decodeCommit(value.provision);
+  const provision = decodeProvision(value.provision);
   const creation = decodeCommit(value.creation);
   if (provision === undefined || creation === undefined) return null;
   return {
@@ -68,7 +75,26 @@ export function decodeOrganizationCallDetail(value: unknown): OrganizationCallDe
   };
 }
 
-function decodeCommit(value: unknown): OrganizationCallDetail['provision'] | undefined {
+function decodeProvision(value: unknown): OrganizationCallDetail['provision'] | undefined {
+  if (value === null) return null;
+  if (!isRecord(value) || !hasKeys(value, Object.hasOwn(value, 'progress')
+    ? ['nativeInstalled', 'commit', 'progress'] : ['nativeInstalled', 'commit'])) return undefined;
+  const commit = decodeCommit({ nativeInstalled: value.nativeInstalled, commit: value.commit });
+  if (!commit) return undefined;
+  if (!Object.hasOwn(value, 'progress')) return commit;
+  const progress = value.progress;
+  if (!isRecord(progress) || !hasKeys(progress, ['stage', 'members'])
+    || !['reading_profiles', 'generating_introductions', 'configuring_team', 'verifying_team', 'saving_team', 'rolling_back']
+      .includes(progress.stage as string)
+    || !Array.isArray(progress.members)
+    || !Array.from(progress.members).every((member) => ['queued', 'running', 'completed', 'failed'].includes(member))) return undefined;
+  return {
+    ...commit,
+    progress: { stage: progress.stage as OrganizationProvisionProgress['stage'], members: [...progress.members] },
+  };
+}
+
+function decodeCommit(value: unknown): OrganizationCommit | null | undefined {
   if (value === null) return null;
   if (!isRecord(value) || !hasKeys(value, ['nativeInstalled', 'commit'])
     || (value.nativeInstalled !== null && typeof value.nativeInstalled !== 'boolean')

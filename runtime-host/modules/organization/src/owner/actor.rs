@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use foundation::execution::{
@@ -23,6 +23,8 @@ use organization::{
 };
 
 use crate::ports::RuntimeReceiptOutcome;
+use platform::trace::{current_session_trace, session_trace, with_session_trace};
+use serde_json::json;
 use runtime_directory::{OwnedRuntimeFuture, RuntimeDriverIdentity};
 
 use crate::{
@@ -44,14 +46,17 @@ use super::{
 pub struct OrganizationOwnerInput {
     pub store: OrganizationStore,
     pub runtime_directory: Arc<dyn OrganizationRuntimeDirectory>,
+    pub member_introductions: Option<Arc<dyn crate::TeamMemberIntroductions>>,
     pub team_skill_selections: TeamSkillSelectionResolver,
 }
 
 #[derive(Clone)]
 pub struct OrganizationShared {
     runtime_directory: Arc<dyn OrganizationRuntimeDirectory>,
+    member_introductions: Option<Arc<dyn crate::TeamMemberIntroductions>>,
     store_path: PathBuf,
     command_target: Arc<OnceLock<OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>>>,
+    start_gate_prompts: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
 }
 
 pub struct OrganizationGlobalState {
@@ -90,8 +95,10 @@ impl OrganizationOwner {
         Self {
             shared: OrganizationShared {
                 runtime_directory: input.runtime_directory,
+                member_introductions: input.member_introductions,
                 store_path: store_path.clone(),
                 command_target: Arc::new(OnceLock::new()),
+                start_gate_prompts: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             },
             global: OrganizationGlobalState {
                 store: input.store,
@@ -142,13 +149,28 @@ impl OrganizationShared {
     fn team_materialize(
         &self,
         request: organization::TeamMaterializationRequest,
+        observer: Option<crate::TeamProvisionObserver>,
     ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
         let Some(runtime) = self.team_runtime_for_endpoint(request.intent().endpoint()) else {
             return Box::pin(async {
+                session_trace(
+                    "runtime.team.native.materialize.end",
+                    json!({"reason": "runtime_missing", "nativeOutcome": "outcome_unknown"}),
+                );
                 organization::MaterializationOperationOutcome::OutcomeUnknown
             });
         };
-        runtime.materialize_team(request)
+        let native = runtime.materialize_team_observed(request, observer);
+        Box::pin(async move {
+            let started = Instant::now();
+            session_trace("runtime.team.native.materialize.start", json!({}));
+            let outcome = native.await;
+            session_trace(
+                "runtime.team.native.materialize.end",
+                json!({"nativeOutcome": materialization_outcome_label(&outcome), "elapsedMs": started.elapsed().as_millis()}),
+            );
+            outcome
+        })
     }
 
     fn team_remove(
@@ -163,14 +185,56 @@ impl OrganizationShared {
         runtime.remove_team(removal)
     }
 
+    fn team_remove_unconfirmed(
+        &self,
+        request: organization::TeamMaterializationRequest,
+    ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
+        let Some(runtime) = self.team_runtime_for_endpoint(request.intent().endpoint()) else {
+            return Box::pin(async {
+                session_trace(
+                    "runtime.team.native.remove-unconfirmed.end",
+                    json!({"reason": "runtime_missing", "nativeOutcome": "outcome_unknown"}),
+                );
+                organization::MaterializationOperationOutcome::OutcomeUnknown
+            });
+        };
+        let native = runtime.remove_unconfirmed_team(request);
+        Box::pin(async move {
+            let started = Instant::now();
+            session_trace("runtime.team.native.remove-unconfirmed.start", json!({}));
+            let outcome = native.await;
+            session_trace(
+                "runtime.team.native.remove-unconfirmed.end",
+                json!({"nativeOutcome": materialization_outcome_label(&outcome), "elapsedMs": started.elapsed().as_millis()}),
+            );
+            outcome
+        })
+    }
+
     fn team_confirm_receipt(
         &self,
         receipt: organization::RunRuntimeReceipt,
     ) -> OwnedRuntimeFuture<RuntimeReceiptOutcome> {
         let Some(runtime) = self.team_runtime_for_bindings(receipt.bindings()) else {
-            return Box::pin(async { RuntimeReceiptOutcome::OutcomeUnknown });
+            return Box::pin(async {
+                session_trace(
+                    "runtime.team.native.install.end",
+                    json!({"reason": "runtime_missing", "nativeOutcome": "outcome_unknown"}),
+                );
+                RuntimeReceiptOutcome::OutcomeUnknown
+            });
         };
-        runtime.confirm_team_run_receipt(receipt)
+        let native = runtime.confirm_team_run_receipt(receipt);
+        Box::pin(async move {
+            let started = Instant::now();
+            session_trace("runtime.team.native.install.start", json!({}));
+            let outcome = native.await;
+            session_trace(
+                "runtime.team.native.install.end",
+                json!({"nativeOutcome": runtime_receipt_label(&outcome), "elapsedMs": started.elapsed().as_millis()}),
+            );
+            outcome
+        })
     }
 
     fn team_abort_role_sessions(
@@ -313,7 +377,7 @@ impl OrganizationGlobalState {
             Ok((_, request)) => request,
             Err(outcome) => return outcome,
         };
-        let outcome = shared.team_materialize(request).await;
+        let outcome = shared.team_materialize(request, None).await;
         self.settle_team_materialization_outcome(&team, managed_agent_count, outcome, call)
             .await
     }
@@ -326,7 +390,22 @@ impl OrganizationGlobalState {
     {
         let team = materialization.definition().team_id().clone();
         let request = materialization.request().clone();
+        let started = Instant::now();
+        session_trace("runtime.team.materialization.begin.start", json!({}));
         let committed = self.store.create_team_materialization(materialization);
+        trace_store_result(
+            "runtime.team.materialization.begin.commit",
+            started,
+            &committed,
+        );
+        session_trace(
+            "runtime.team.materialization.begin.end",
+            json!({"reason": match &committed {
+            Ok(MaterializationRecordOutcome::Recorded) => "recorded",
+            Ok(MaterializationRecordOutcome::Replayed) => "replayed",
+            Err(_) => "store_fault",
+        }, "elapsedMs": started.elapsed().as_millis()}),
+        );
         if let (Some(call), Err(error)) = (call, &committed) {
             call.materialization(None, Err(error)).await;
         }
@@ -346,9 +425,19 @@ impl OrganizationGlobalState {
         outcome: organization::MaterializationOperationOutcome,
         call: Option<&crate::call::CallReply<TeamMaterializationCommandOutcome>>,
     ) -> TeamMaterializationCommandOutcome {
+        let started = Instant::now();
+        session_trace(
+            "runtime.team.materialization.settle.start",
+            json!({"nativeOutcome": materialization_outcome_label(&outcome)}),
+        );
         let committed = self
             .store
             .record_team_materialization_outcome(team, outcome.clone());
+        trace_store_result(
+            "runtime.team.materialization.settle.commit",
+            started,
+            &committed,
+        );
         if let Some(call) = call {
             let installed = match &outcome {
                 organization::MaterializationOperationOutcome::Confirmed { .. } => Some(true),
@@ -389,15 +478,45 @@ impl OrganizationGlobalState {
         idempotency_key: IdempotencyKey,
         call: Option<&crate::call::CallReply<TeamMaterializationCommandOutcome>>,
     ) -> TeamMaterializationCommandOutcome {
-        let materialization = match organization::compile_manual_team_materialization(
+        let started = Instant::now();
+        session_trace(
+            "runtime.team.compile.start",
+            json!({"roleCount": roles.len()}),
+        );
+        let compiled = organization::compile_manual_team_materialization(
             team_id,
             team_name,
             endpoint,
             roles,
             idempotency_key,
-        ) {
+        );
+        session_trace(
+            "runtime.team.compile.end",
+            json!({"reason": match &compiled {
+            Ok(_) => "compiled", Err(organization::TeamMaterializationError::Invalid) => "invalid",
+        }, "elapsedMs": started.elapsed().as_millis()}),
+        );
+        let materialization = match compiled {
             Ok(materialization) => materialization,
             Err(_) => return TeamMaterializationCommandOutcome::Rejected,
+        };
+        let observer = call.and_then(crate::call::CallReply::provision_observer);
+        let materialization = match super::member_introduction::prepare_manual_team(
+            materialization,
+            &self.store,
+            shared.runtime_directory.as_ref(),
+            shared.member_introductions.as_ref(),
+            observer.as_ref(),
+        )
+        .await
+        {
+            Ok(materialization) => materialization,
+            Err(super::member_introduction::PreparationError::Rejected) => {
+                return TeamMaterializationCommandOutcome::Rejected;
+            }
+            Err(super::member_introduction::PreparationError::Unavailable) => {
+                return TeamMaterializationCommandOutcome::Unavailable;
+            }
         };
         let team_id = materialization.definition().team_id().clone();
         let managed_agent_count = materialization.request().intent().agents().len();
@@ -405,7 +524,14 @@ impl OrganizationGlobalState {
             Ok((_, request)) => request,
             Err(outcome) => return outcome,
         };
-        let outcome = shared.team_materialize(request).await;
+        let outcome = shared.team_materialize(request, observer.clone()).await;
+        if matches!(outcome, organization::MaterializationOperationOutcome::Confirmed { .. }) {
+            if let Some(observer) = &observer {
+                observer.report(crate::TeamProvisionUpdate::Stage(
+                    crate::TeamProvisionStage::SavingTeam,
+                )).await;
+            }
+        }
         self.settle_team_materialization_outcome(&team_id, managed_agent_count, outcome, call)
             .await
     }
@@ -425,18 +551,50 @@ impl OrganizationGlobalState {
             run,
             run_idempotency_key,
         } = input;
-        let materialization = match organization::compile_manual_team_materialization(
+        let started = Instant::now();
+        session_trace(
+            "runtime.team.compile.start",
+            json!({"roleCount": roles.len()}),
+        );
+        let compiled = organization::compile_manual_team_materialization(
             team_id,
             team_name,
             endpoint,
             roles,
             materialization_idempotency_key,
-        ) {
+        );
+        session_trace(
+            "runtime.team.compile.end",
+            json!({"reason": match &compiled {
+            Ok(_) => "compiled", Err(organization::TeamMaterializationError::Invalid) => "invalid",
+        }, "elapsedMs": started.elapsed().as_millis()}),
+        );
+        let materialization = match compiled {
             Ok(materialization) => materialization,
             Err(_) => return ManualTeamCreateOutcome::Rejected,
         };
+        let materialization = match super::member_introduction::prepare_manual_team(
+            materialization,
+            &self.store,
+            shared.runtime_directory.as_ref(),
+            shared.member_introductions.as_ref(),
+            None,
+        )
+        .await
+        {
+            Ok(materialization) => materialization,
+            Err(super::member_introduction::PreparationError::Rejected) => {
+                return ManualTeamCreateOutcome::Rejected;
+            }
+            Err(super::member_introduction::PreparationError::Unavailable) => {
+                return ManualTeamCreateOutcome::Unavailable;
+            }
+        };
         let team_id = materialization.definition().team_id().clone();
-        let request = match self.begin_team_materialization(materialization, Some(call)).await {
+        let request = match self
+            .begin_team_materialization(materialization, Some(call))
+            .await
+        {
             Ok((_, request)) => request,
             Err(TeamMaterializationCommandOutcome::Rejected) => {
                 return ManualTeamCreateOutcome::Rejected;
@@ -451,10 +609,20 @@ impl OrganizationGlobalState {
                 return ManualTeamCreateOutcome::OutcomeUnknown;
             }
         };
-        let outcome = shared.team_materialize(request).await;
+        let outcome = shared.team_materialize(request, None).await;
+        let started = Instant::now();
+        session_trace(
+            "runtime.team.materialization.settle.start",
+            json!({"nativeOutcome": materialization_outcome_label(&outcome)}),
+        );
         let committed = self
             .store
             .record_team_materialization_outcome(&team_id, outcome.clone());
+        trace_store_result(
+            "runtime.team.materialization.settle.commit",
+            started,
+            &committed,
+        );
         let native = match &outcome {
             organization::MaterializationOperationOutcome::Confirmed { .. } => Some(true),
             organization::MaterializationOperationOutcome::Rejected { .. } => Some(false),
@@ -472,9 +640,22 @@ impl OrganizationGlobalState {
             return manual_materialization_outcome(outcome);
         }
         let run_id = run.run_id().clone();
+        let started = Instant::now();
+        session_trace("runtime.team.run_create.start", json!({}));
         let committed = self
             .team_run
             .create(&mut self.store, run, &run_idempotency_key);
+        trace_store_result("runtime.team.run_create.commit", started, &committed);
+        session_trace(
+            "runtime.team.run_create.end",
+            json!({"reason": match &committed {
+            Ok(CreateGraphRunOutcome::Created(_)) => "created",
+            Ok(CreateGraphRunOutcome::Replayed(_)) => "replayed",
+            Ok(CreateGraphRunOutcome::ConflictingIdempotency) => "conflicting_idempotency",
+            Ok(CreateGraphRunOutcome::ExistingRun) => "existing_run",
+            Err(_) => "store_fault",
+        }, "elapsedMs": started.elapsed().as_millis()}),
+        );
         if let Err(error) = &committed {
             call.creation(None, Err(error)).await;
         }
@@ -486,7 +667,14 @@ impl OrganizationGlobalState {
             return ManualTeamCreateOutcome::Unavailable;
         }
         call.creation(None, Ok(())).await;
-        let receipt = match prepare_runtime_receipt(&self.store, &team_id, &run_id) {
+        let started = Instant::now();
+        session_trace("runtime.team.install.prepare.start", json!({}));
+        let prepared = prepare_runtime_receipt(&self.store, &team_id, &run_id);
+        session_trace(
+            "runtime.team.install.prepare.end",
+            json!({"reason": prepared.as_ref().map_or_else(runtime_receipt_label, |_| "prepared"), "elapsedMs": started.elapsed().as_millis()}),
+        );
+        let receipt = match prepared {
             Ok(receipt) => receipt,
             Err(outcome) => {
                 call.creation(
@@ -504,7 +692,10 @@ impl OrganizationGlobalState {
         let outcome = shared.team_confirm_receipt(receipt.clone()).await;
         match outcome {
             RuntimeReceiptOutcome::Installed => {
+                let started = Instant::now();
+                session_trace("runtime.team.install.commit.start", json!({}));
                 let committed = install_prepared_runtime_receipt(&mut self.store, receipt);
+                trace_store_result("runtime.team.install.commit.end", started, &committed);
                 call.creation(Some(true), committed.as_ref().map(|_| ()))
                     .await;
                 committed.map_or(ManualTeamCreateOutcome::Unavailable, |_| {
@@ -773,7 +964,7 @@ impl OrganizationGlobalState {
         &mut self,
         shared: &OrganizationShared,
         team_id: &TeamId,
-        removal: organization::TeamMaterializationRemoval,
+        outcome: OwnedRuntimeFuture<organization::MaterializationOperationOutcome>,
     ) {
         self.reap_team_delete_tasks();
         let Some(command_target) = shared.command_target.get().cloned() else {
@@ -783,18 +974,26 @@ impl OrganizationGlobalState {
         if !self.team_delete_removal_tasks.insert(task_key) {
             return;
         }
+        let trace_id = current_session_trace().or_else(|| {
+            self.team_delete_replies
+                .get(team_id.as_str())?
+                .first()?
+                .reply
+                .trace_id()
+        });
         let team_id = team_id.clone();
-        let outcome = shared.team_remove(removal);
-        let (task, _) = OwnedTask::spawn(move |cancellation| async move {
-            tokio::select! {
-                _ = cancellation.cancelled() => {}
-                outcome = outcome => {
-                    let _ = command_target.send_command(OrganizationCommand::TeamDeleteRemovalSettled {
-                        team_id,
-                        outcome,
-                    }).await;
+        let (task, _) = OwnedTask::spawn(move |cancellation| {
+            with_session_trace(trace_id, async move {
+                tokio::select! {
+                    _ = cancellation.cancelled() => {}
+                    outcome = outcome => {
+                        let _ = command_target.send_command(OrganizationCommand::TeamDeleteRemovalSettled {
+                            team_id,
+                            outcome,
+                        }).await;
+                    }
                 }
-            }
+            })
         });
         self.team_delete_tasks.push(task);
     }
@@ -900,7 +1099,18 @@ impl OrganizationGlobalState {
             return Ok(false);
         }
         if let Some(removal) = self.store.team_materialization_removal(team_id) {
-            self.spawn_team_delete_removal_task(shared, team_id, removal);
+            self.spawn_team_delete_removal_task(shared, team_id, shared.team_remove(removal));
+            return Ok(true);
+        }
+        if let Some(request) = self
+            .store
+            .team_unconfirmed_materialization_cleanup_request(team_id)
+        {
+            self.spawn_team_delete_removal_task(
+                shared,
+                team_id,
+                shared.team_remove_unconfirmed(request),
+            );
             return Ok(true);
         }
         Ok(false)
@@ -1170,11 +1380,18 @@ impl OrganizationGlobalState {
                 continue;
             };
             let outcome = runtime.recover_team_materialization(request).await;
-            let organization::MaterializationOperationOutcome::Confirmed { receipt } = outcome
-            else {
-                continue;
-            };
-            let _ = self.store.confirm_team_materialization(receipt);
+            match outcome {
+                organization::MaterializationOperationOutcome::Confirmed { receipt } => {
+                    let _ = self.store.confirm_team_materialization(receipt);
+                }
+                outcome @ organization::MaterializationOperationOutcome::Rejected { .. } => {
+                    let _ = self
+                        .store
+                        .record_team_materialization_outcome(&team_id, outcome);
+                }
+                organization::MaterializationOperationOutcome::Accepted { .. }
+                | organization::MaterializationOperationOutcome::OutcomeUnknown => {}
+            }
         }
     }
 }
@@ -1220,6 +1437,10 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::SettleActivity { run_id, .. }
             | OrganizationCommand::NativeRunSettled { run_id, .. } => {
                 CommandRoute::Keyed(run_id.clone())
+            }
+            OrganizationCommand::RecordEvidence { .. } => CommandRoute::Global,
+            OrganizationCommand::Design { operation, .. } => {
+                CommandRoute::Keyed(operation.run_id().clone())
             }
             OrganizationCommand::TriggerFire { request, .. } => {
                 CommandRoute::Keyed(GraphRunId::new(request.run_id.clone()))
@@ -1475,13 +1696,111 @@ impl OwnerSpec for OrganizationOwner {
                 });
                 let _ = reply.send(outcome).await;
             }
+            OrganizationCommand::Design {
+                operation,
+                resolver,
+                reply,
+            } => {
+                let run_id = operation.run_id().clone();
+                let exits = matches!(
+                    operation,
+                    crate::application::design::DesignOperation::Exit { .. }
+                );
+                let begins = matches!(
+                    operation,
+                    crate::application::design::DesignOperation::Begin { .. }
+                );
+                let ui_patch = matches!(
+                    operation,
+                    crate::application::design::DesignOperation::Patch {
+                        generation: None,
+                        ..
+                    }
+                );
+                let outcome = {
+                    let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
+                    state.open_store().and_then(|mut store| {
+                        if exits {
+                            let was_designing = store.facts().run(&run_id).is_some_and(|run| {
+                                matches!(
+                                    run.start_gate(),
+                                    crate::RunStartGate::Designing { .. }
+                                        | crate::RunStartGate::DesignProposalPending { .. }
+                                )
+                            });
+                            let result = crate::application::design::execute(
+                                &mut store,
+                                operation,
+                                resolver.as_ref(),
+                            )?;
+                            if was_designing {
+                                prompts.remove(run_id.as_str());
+                            }
+                            return Ok(result);
+                        }
+                        let before = store
+                            .facts()
+                            .run(&run_id)
+                            .map(|run| run.graph().definition().clone());
+                        let gate = store
+                            .facts()
+                            .run(&run_id)
+                            .map(|run| run.start_gate().clone());
+                        let result = crate::application::design::execute(
+                            &mut store,
+                            operation,
+                            resolver.as_ref(),
+                        )?;
+                        let changed = store
+                            .facts()
+                            .run(&run_id)
+                            .map(|run| run.graph().definition())
+                            != before.as_ref();
+                        let gate_changed =
+                            store.facts().run(&run_id).map(|run| run.start_gate()) != gate.as_ref();
+                        if (begins && gate_changed) || (ui_patch && changed) {
+                            prompts.remove(run_id.as_str());
+                        }
+                        Ok(result)
+                    })
+                };
+                let _ = reply.send(outcome);
+            }
             OrganizationCommand::StartGateTerminalProposalSet {
                 run_id,
                 proposal_id,
                 source_delivery_id,
                 final_assistant_text,
+                generation,
+                design,
                 reply,
             } => {
+                let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
+                if prompts.get(run_id.as_str()).map(String::as_str) != Some(generation.as_str()) {
+                    let _ = reply.send(Ok(None));
+                    return;
+                }
+                prompts.remove(run_id.as_str());
+                if design {
+                    let outcome = match crate::application::start_gate_control::design_ready(
+                        &final_assistant_text,
+                    ) {
+                        Some(summary) => state
+                            .open_store()
+                            .and_then(|mut store| {
+                                store.record_design_ready(
+                                    &run_id,
+                                    generation,
+                                    summary,
+                                    source_delivery_id,
+                                )
+                            })
+                            .map(|()| Some(crate::SetRunStartProposalOutcome::Recorded)),
+                        None => Ok(None),
+                    };
+                    let _ = reply.send(outcome);
+                    return;
+                }
                 let proposal = crate::application::start_gate_control::terminal_proposal(
                     run_id,
                     proposal_id,
@@ -1503,6 +1822,7 @@ impl OwnerSpec for OrganizationOwner {
                     }),
                     None => Ok(None),
                 };
+                drop(prompts);
                 let _ = reply.send(outcome);
             }
             OrganizationCommand::RunStartConfirm {
@@ -1520,9 +1840,16 @@ impl OwnerSpec for OrganizationOwner {
                 proposal_id,
                 reply,
             } => {
-                let outcome = state
-                    .open_store()
-                    .and_then(|mut store| store.continue_run_discussion(&run_id, &proposal_id));
+                let outcome = {
+                    let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
+                    let outcome = state
+                        .open_store()
+                        .and_then(|mut store| store.continue_run_discussion(&run_id, &proposal_id));
+                    if matches!(outcome, Ok(crate::ContinueRunDiscussionOutcome::Intake)) {
+                        prompts.remove(run_id.as_str());
+                    }
+                    outcome
+                };
                 let _ = reply.send(outcome).await;
             }
             OrganizationCommand::TriggerFire {
@@ -1540,17 +1867,51 @@ impl OwnerSpec for OrganizationOwner {
                 definition,
                 reply,
             } => {
-                let outcome = state.open_store().and_then(|mut store| {
-                    state
-                        .team_run
-                        .replace_graph(&mut store, command, definition)
-                });
+                let run_id = GraphRunId::new(command.run_id().as_str());
+                let outcome = {
+                    let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
+                    state.open_store().and_then(|mut store| {
+                        let before = store
+                            .facts()
+                            .run(&run_id)
+                            .map(|run| run.graph().definition().clone());
+                        let outcome = state
+                            .team_run
+                            .replace_graph(&mut store, command, definition)?;
+                        if store
+                            .facts()
+                            .run(&run_id)
+                            .map(|run| run.graph().definition())
+                            != before.as_ref()
+                        {
+                            prompts.remove(run_id.as_str());
+                        }
+                        Ok(outcome)
+                    })
+                };
                 let _ = reply.send(outcome).await;
             }
             OrganizationCommand::GraphPatch { patch, reply } => {
-                let outcome = state
-                    .open_store()
-                    .and_then(|mut store| state.team_run.apply_graph_patch(&mut store, patch));
+                let run_id = patch.run_id.clone();
+                let outcome = {
+                    let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
+                    state.open_store().and_then(|mut store| {
+                        let before = store
+                            .facts()
+                            .run(&run_id)
+                            .map(|run| run.graph().definition().clone());
+                        let outcome = state.team_run.apply_graph_patch(&mut store, patch)?;
+                        if store
+                            .facts()
+                            .run(&run_id)
+                            .map(|run| run.graph().definition())
+                            != before.as_ref()
+                        {
+                            prompts.remove(run_id.as_str());
+                        }
+                        Ok(outcome)
+                    })
+                };
                 let _ = reply.send(outcome).await;
             }
             OrganizationCommand::NodeEvent {
@@ -1688,7 +2049,8 @@ impl OwnerSpec for OrganizationOwner {
                 });
                 let _ = reply.send(outcome);
             }
-            OrganizationCommand::TeamSkillAuthorize { .. }
+            OrganizationCommand::RecordEvidence { .. }
+            | OrganizationCommand::TeamSkillAuthorize { .. }
             | OrganizationCommand::TeamSkillMaterialize { .. }
             | OrganizationCommand::ManualTeamMaterialize { .. }
             | OrganizationCommand::ManualTeamCreate { .. }
@@ -1750,22 +2112,42 @@ impl OwnerSpec for OrganizationOwner {
                 idempotency_key,
                 reply,
             } => {
-                if state.refresh().is_err() {
-                    let _ = reply.send(TeamMaterializationCommandOutcome::Unavailable).await;
-                    return;
-                }
-                let outcome = state
-                    .manual_team_materialize(
-                        &shared,
-                        team_id,
-                        team_name,
-                        endpoint,
-                        roles,
-                        idempotency_key,
-                        Some(&reply),
-                    )
-                    .await;
-                let _ = reply.send(outcome).await;
+                with_session_trace(reply.trace_id(), async {
+                    let started = Instant::now();
+                    session_trace("runtime.team.refresh.start", json!({}));
+                    let refreshed = state.refresh();
+                    trace_store_result("runtime.team.refresh.end", started, &refreshed);
+                    if refreshed.is_err() {
+                        let _ = reply
+                            .send(TeamMaterializationCommandOutcome::Unavailable)
+                            .await;
+                        return;
+                    }
+                    let owner_started = Instant::now();
+                    session_trace("runtime.team.owner.start", json!({}));
+                    let outcome = state
+                        .manual_team_materialize(
+                            &shared,
+                            team_id,
+                            team_name,
+                            endpoint,
+                            roles,
+                            idempotency_key,
+                            Some(&reply),
+                        )
+                        .await;
+                    session_trace(
+                        "runtime.team.owner.end",
+                        json!({"reason": match &outcome {
+                    TeamMaterializationCommandOutcome::Materialized { .. } => "succeeded",
+                    TeamMaterializationCommandOutcome::Rejected => "rejected",
+                    TeamMaterializationCommandOutcome::Unavailable => "unavailable",
+                    TeamMaterializationCommandOutcome::OutcomeUnknown => "outcome_unknown",
+                }, "elapsedMs": owner_started.elapsed().as_millis()}),
+                    );
+                    let _ = reply.send(outcome).await;
+                })
+                .await;
             }
             OrganizationCommand::ManualTeamCreate {
                 team_id,
@@ -1777,26 +2159,44 @@ impl OwnerSpec for OrganizationOwner {
                 run_idempotency_key,
                 reply,
             } => {
-                if state.refresh().is_err() {
-                    let _ = reply.send(ManualTeamCreateOutcome::Unavailable).await;
-                    return;
-                }
-                let outcome = state
-                    .manual_team_create(
-                        &shared,
-                        ManualTeamMaterializationInput {
-                            team_id,
-                            team_name,
-                            endpoint,
-                            roles,
-                            materialization_idempotency_key,
-                            run,
-                            run_idempotency_key,
-                        },
-                        &reply,
-                    )
-                    .await;
-                let _ = reply.send(outcome).await;
+                with_session_trace(reply.trace_id(), async {
+                    let started = Instant::now();
+                    session_trace("runtime.team.refresh.start", json!({}));
+                    let refreshed = state.refresh();
+                    trace_store_result("runtime.team.refresh.end", started, &refreshed);
+                    if refreshed.is_err() {
+                        let _ = reply.send(ManualTeamCreateOutcome::Unavailable).await;
+                        return;
+                    }
+                    let owner_started = Instant::now();
+                    session_trace("runtime.team.owner.start", json!({}));
+                    let outcome = state
+                        .manual_team_create(
+                            &shared,
+                            ManualTeamMaterializationInput {
+                                team_id,
+                                team_name,
+                                endpoint,
+                                roles,
+                                materialization_idempotency_key,
+                                run,
+                                run_idempotency_key,
+                            },
+                            &reply,
+                        )
+                        .await;
+                    session_trace(
+                        "runtime.team.owner.end",
+                        json!({"reason": match &outcome {
+                    ManualTeamCreateOutcome::Created(_) => "succeeded",
+                    ManualTeamCreateOutcome::Rejected => "rejected",
+                    ManualTeamCreateOutcome::Unavailable => "unavailable",
+                    ManualTeamCreateOutcome::OutcomeUnknown => "outcome_unknown",
+                }, "elapsedMs": owner_started.elapsed().as_millis()}),
+                    );
+                    let _ = reply.send(outcome).await;
+                })
+                .await;
             }
             OrganizationCommand::TeamDelete {
                 team_id,
@@ -1804,14 +2204,17 @@ impl OwnerSpec for OrganizationOwner {
                 observed_at,
                 reply,
             } => {
-                let outcome = match state.refresh() {
-                    Ok(()) => {
-                        state
-                            .team_delete(&shared, team_id.clone(), idempotency_key, observed_at)
-                            .await
+                let outcome = with_session_trace(reply.trace_id(), async {
+                    match state.refresh() {
+                        Ok(()) => {
+                            state
+                                .team_delete(&shared, team_id.clone(), idempotency_key, observed_at)
+                                .await
+                        }
+                        Err(error) => Err(error),
                     }
-                    Err(error) => Err(error),
-                };
+                })
+                .await;
                 if reply.awaits_workflow_settlement() && state.team_delete_has_pending_tasks(&team_id) {
                     let outcome = match outcome {
                         Err(error) => Err(error),
@@ -1953,6 +2356,10 @@ impl OwnerSpec for OrganizationOwner {
                 };
                 let _ = reply.send(outcome).await;
             }
+            OrganizationCommand::RecordEvidence { record, reply } => {
+                let outcome = state.store.record_evidence(record);
+                let _ = reply.send(outcome);
+            }
             OrganizationCommand::RecoverMaterializationReceipts { reply } => {
                 if state.refresh().is_ok() {
                     state.recover_materialization_receipts(&shared).await;
@@ -1963,6 +2370,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::RunCreateFromTeamTemplate { .. }
             | OrganizationCommand::RunCancel { .. }
             | OrganizationCommand::RunDelete { .. }
+            | OrganizationCommand::Design { .. }
             | OrganizationCommand::StartGateTerminalProposalSet { .. }
             | OrganizationCommand::RunStartConfirm { .. }
             | OrganizationCommand::RunStartContinue { .. }
@@ -2218,19 +2626,20 @@ impl OwnerSpec for OrganizationOwner {
                 requested_at,
                 reply,
             } => {
-                let outcome = match state.refresh() {
-                    Ok(()) => crate::application::start_gate_control::resolve_runtime_binding(
-                        state.store.facts(),
-                        &lookup,
-                    )
-                    .and_then(|binding| {
-                        crate::application::start_gate_control::prompt_plan(
-                            &binding,
+                let outcome = {
+                    let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
+                    let outcome = state.refresh().and_then(|()| {
+                        crate::application::start_gate_control::prepare_prompt(
+                            &mut state.store,
+                            &lookup,
                             proposal_id_seed.as_deref(),
                             requested_at,
                         )
-                    }),
-                    Err(_) => None,
+                    });
+                    if let Ok(Some(plan)) = &outcome {
+                        prompts.insert(plan.run_id().as_str().to_owned(), plan.generation.clone());
+                    }
+                    outcome
                 };
                 let _ = reply.send(outcome);
             }
@@ -2342,6 +2751,64 @@ impl OwnerSpec for OrganizationOwner {
         _state: &mut Self::GlobalState,
         _query: Self::Query,
     ) {
+    }
+}
+
+fn materialization_outcome_label(
+    outcome: &organization::MaterializationOperationOutcome,
+) -> &'static str {
+    match outcome {
+        organization::MaterializationOperationOutcome::Confirmed { .. } => "confirmed",
+        organization::MaterializationOperationOutcome::Rejected { .. } => "rejected",
+        organization::MaterializationOperationOutcome::Accepted { .. } => "accepted",
+        organization::MaterializationOperationOutcome::OutcomeUnknown => "outcome_unknown",
+    }
+}
+
+fn runtime_receipt_label(outcome: &RuntimeReceiptOutcome) -> &'static str {
+    match outcome {
+        RuntimeReceiptOutcome::Installed => "installed",
+        RuntimeReceiptOutcome::Rejected => "rejected",
+        RuntimeReceiptOutcome::OutcomeUnknown => "outcome_unknown",
+        RuntimeReceiptOutcome::Unavailable => "unavailable",
+    }
+}
+
+fn trace_store_result<T>(stage: &'static str, started: Instant, result: &Result<T, StoreFault>) {
+    session_trace(
+        stage,
+        json!({"reason": result.as_ref().map_or_else(store_fault_label, |_| "committed"), "elapsedMs": started.elapsed().as_millis()}),
+    );
+}
+
+fn store_fault_label(error: &StoreFault) -> &'static str {
+    match error {
+        StoreFault::WriterBusy => "writer_busy",
+        StoreFault::Lock(_) => "lock",
+        StoreFault::Read(_) => "read",
+        StoreFault::Recovery(_) => "recovery",
+        StoreFault::Commit(_) => "commit",
+        StoreFault::CommitOutcomeUnknown(_) => "commit_outcome_unknown",
+        StoreFault::RecoveryRequired => "recovery_required",
+        StoreFault::RecordTooLarge => "record_too_large",
+        StoreFault::LogFull => "log_full",
+        StoreFault::EpochOverflow => "epoch_overflow",
+        StoreFault::CorruptRecord => "corrupt_record",
+        StoreFault::UnsupportedSchemaVersion(_) => "unsupported_schema_version",
+        StoreFault::InvalidFacts => "invalid_facts",
+        StoreFault::RuntimeReceipt(_) => "runtime_receipt",
+        StoreFault::Evidence(_) => "evidence",
+        StoreFault::ActivityTransition(_) => "activity_transition",
+        StoreFault::DeliveryRequest(_) => "delivery_request",
+        StoreFault::DeliveryReceipt(_) => "delivery_receipt",
+        StoreFault::TriggerFire(_) => "trigger_fire",
+        StoreFault::TerminalObservation(_) => "terminal_observation",
+        StoreFault::NativeRunOutputResolution(_) => "native_run_output_resolution",
+        StoreFault::AuthorizedGraphResolution(_) => "authorized_graph_resolution",
+        StoreFault::AgentNodeEventResolution(_) => "agent_node_event_resolution",
+        StoreFault::GraphPatch(_) => "graph_patch",
+        StoreFault::EventLedger(_) => "event_ledger",
+        StoreFault::ControlNodeResolution(_) => "control_node_resolution",
     }
 }
 
@@ -3739,6 +4206,7 @@ mod tests {
             crate::OrganizationOwnerInput {
                 store,
                 runtime_directory: Arc::new(FixedRuntimeDirectory { driver }),
+                member_introductions: None,
                 team_skill_selections: TeamSkillSelectionResolver::open(
                     temp_dir.path().join("team-skill-selections.json"),
                 )
@@ -3794,8 +4262,10 @@ mod tests {
     fn organization_shared(driver: Arc<FixedTeamDriver>) -> OrganizationShared {
         OrganizationShared {
             runtime_directory: Arc::new(FixedRuntimeDirectory { driver }),
+            member_introductions: None,
             store_path: PathBuf::new(),
             command_target: Arc::new(OnceLock::new()),
+            start_gate_prompts: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         }
     }
 

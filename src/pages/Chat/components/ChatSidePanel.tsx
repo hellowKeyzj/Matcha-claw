@@ -10,6 +10,7 @@ import {
   getChatRuntimeSurfaceSnapshot,
   subscribeChatRuntimeSurface,
   type ChatSidePanelTab,
+  type ChatRuntimeSurfaceDescriptor,
 } from '../useChatSidePanelController';
 import { ChatRuntimeSurfacePanel } from './ChatRuntimeSurfacePanel';
 import { supportsInlineDiff, type GeneratedFile } from '@/lib/generated-files';
@@ -51,6 +52,7 @@ interface ChatSidePanelProps {
   onArtifactViewModeChange: (mode: FilePreviewMode) => void;
   onArtifactRevealInFileManager: (filePath: string) => void;
   sessionIdentity?: SessionIdentity;
+  teamGraphSurface?: Extract<ChatRuntimeSurfaceDescriptor, { kind: 'team-graph' }> | null;
 }
 
 const ARTIFACT_GROUP_RAIL_MIN_WIDTH = 240;
@@ -85,8 +87,9 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   onArtifactViewModeChange,
   onArtifactRevealInFileManager,
   sessionIdentity,
+  teamGraphSurface = null,
 }: ChatSidePanelProps) {
-  const { t } = useTranslation('chat');
+  const { t } = useTranslation(['chat', 'teams']);
   const runtimeSurface = useSyncExternalStore(
     subscribeChatRuntimeSurface,
     getChatRuntimeSurfaceSnapshot,
@@ -551,9 +554,9 @@ export const ChatSidePanel = memo(function ChatSidePanel({
         <TabsContent value="runtime" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col">
           <div className={cn('border-b border-border/40', SIDE_PANEL_CONTENT_PAD_X, SIDE_PANEL_CONTENT_PAD_Y)}>
             <p className="text-sm font-medium text-foreground">运行面</p>
-            <p className="mt-1 text-xs text-muted-foreground">Browser Tab / MCP App 预览</p>
+            <p className="mt-1 text-xs text-muted-foreground">{teamGraphSurface ? t('teams:run.graph') : 'Browser Tab / MCP App 预览'}</p>
           </div>
-          <ChatRuntimeSurfacePanel surface={runtimeSurface} />
+          <ChatRuntimeSurfacePanel surface={teamGraphSurface ?? runtimeSurface} sessionIdentity={sessionIdentity} />
         </TabsContent>
       </Tabs>
     </aside>

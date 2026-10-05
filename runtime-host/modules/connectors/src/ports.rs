@@ -5,7 +5,7 @@ use zeroize::Zeroizing;
 
 use crate::domain::{Connector, ConnectorCatalog};
 
-pub const PRESET_TEAM_RUN_MCP_SERVER_ID: &str = "matcha-teamrun";
+pub const PRESET_MCP_SERVER_ID: &str = "matcha";
 
 const CONNECTOR_SECRET_REFERENCE_PREFIX: &str = "credential:v1:";
 const MAX_CONNECTOR_SECRET_REFERENCE_BYTES: usize = 512;
@@ -244,7 +244,7 @@ pub trait ConnectorRuntimeDirectory: Send + Sync {
 pub trait ConnectorOps: Send + Sync {
     fn apply_runtime_mcp_projection<'a>(
         &'a self,
-        preset: Option<TeamRunMcpPreset<'a>>,
+        preset: Option<McpPreset<'a>>,
         catalog: ConnectorCatalog,
         secrets: &'a dyn ConnectorSecretResolverPort,
     ) -> ConnectorFuture<'a, ConnectorProjectionEffect>;
@@ -272,16 +272,19 @@ pub trait ConnectorOps: Send + Sync {
 }
 
 #[derive(Clone, Copy)]
-pub struct TeamRunMcpPreset<'a> {
+pub struct McpPreset<'a> {
     runtime_host_mcp_executable: &'a Path,
-    team_run_mcp_state_dir: &'a Path,
+    runtime_host_mcp_state_dir: &'a Path,
 }
 
-impl<'a> TeamRunMcpPreset<'a> {
-    pub fn new(runtime_host_mcp_executable: &'a Path, team_run_mcp_state_dir: &'a Path) -> Self {
+impl<'a> McpPreset<'a> {
+    pub fn new(
+        runtime_host_mcp_executable: &'a Path,
+        runtime_host_mcp_state_dir: &'a Path,
+    ) -> Self {
         Self {
             runtime_host_mcp_executable,
-            team_run_mcp_state_dir,
+            runtime_host_mcp_state_dir,
         }
     }
 
@@ -289,8 +292,8 @@ impl<'a> TeamRunMcpPreset<'a> {
         self.runtime_host_mcp_executable
     }
 
-    pub fn team_run_mcp_state_dir(&self) -> &'a Path {
-        self.team_run_mcp_state_dir
+    pub fn runtime_host_mcp_state_dir(&self) -> &'a Path {
+        self.runtime_host_mcp_state_dir
     }
 }
 

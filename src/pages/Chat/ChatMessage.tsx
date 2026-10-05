@@ -2,6 +2,7 @@ import { useState, memo } from 'react';
 import type { ChatUserMessageItem } from './chat-render-item-model';
 import { MessageShell } from './chat-message-shell';
 import { UserMessageBody } from './user-message-body';
+import { useLargeTextContent } from './large-text-loader';
 import { ChatImageLightbox } from './components/ChatImageLightbox';
 import {
   UserMessageMedia,
@@ -15,8 +16,24 @@ export const ChatMessage = memo(function ChatMessage({
   userAvatarImageUrl,
   sessionIdentity,
   endpointSessionId,
+  onReuseMessage,
 }: ChatMessageProps) {
   const [lightboxImg, setLightboxImg] = useState<MessageLightboxState | null>(null);
+  const largeTextContent = useLargeTextContent({
+    initialText: item.text,
+    itemKey: item.key,
+    largeText: item.largeText,
+    sessionIdentity,
+    endpointSessionId,
+  });
+  const reuseMessage = () => {
+    if (!onReuseMessage) return;
+    if (item.largeText) {
+      largeTextContent.loadAll(onReuseMessage);
+    } else {
+      onReuseMessage(item.text);
+    }
+  };
 
   const hasText = !!item.largeText || item.text.trim().length > 0;
   if (!hasText && item.images.length === 0 && item.attachedFiles.length === 0) return null;
@@ -35,14 +52,16 @@ export const ChatMessage = memo(function ChatMessage({
 
         {hasText && (
           <UserMessageBody
-            text={item.text}
-            largeText={item.largeText}
-            sessionIdentity={sessionIdentity}
-            endpointSessionId={endpointSessionId}
+            text={largeTextContent.text}
+            loadMoreButton={largeTextContent.loadMoreButton}
           />
         )}
 
-        <UserMessageMetaBar timestamp={item.createdAt} />
+        <UserMessageMetaBar
+          timestamp={item.createdAt}
+          onReuse={hasText && onReuseMessage ? reuseMessage : undefined}
+          loading={largeTextContent.loading}
+        />
       </MessageShell>
 
       {lightboxImg && (
@@ -62,4 +81,5 @@ interface ChatMessageProps {
   userAvatarImageUrl?: string | null;
   sessionIdentity?: SessionIdentity;
   endpointSessionId?: string | null;
+  onReuseMessage?: (text: string) => void;
 }

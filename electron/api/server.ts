@@ -72,6 +72,7 @@ import {
   isMainOwnedRoute,
 } from './route-boundary';
 import { requireJsonContentType, sendJson, setCorsHeaders } from './route-utils';
+import { isSessionTraceEnabled, logSessionTrace, readTraceHeader } from '../main/runtime-host-delivery/transport/sessions/trace';
 
 type RouteHandler = (
   req: IncomingMessage,
@@ -228,6 +229,16 @@ export async function readHostApiConnection(): Promise<HostApiConnection> {
 
 export function createHostApiRequestHandler(deps: HostApiContext, port: number, runtimeHostTransportPort?: number) {
   return async (req: IncomingMessage, res: ServerResponse) => {
+    const traceId = isSessionTraceEnabled() ? readTraceHeader(req.headers) : null;
+    const traceActive = traceId !== null && req.url?.split(/[?#]/, 1)[0] === '/api/capabilities/execute';
+    const traceStartedAt = traceActive ? Date.now() : 0;
+    const trace = (stage: string, payload: Record<string, unknown> = {}): void => {
+      if (!traceActive) return;
+      logSessionTrace(`electron.hostapi.server.${stage}`, traceId, {
+        path: '/api/capabilities/execute', elapsedMs: Date.now() - traceStartedAt, ...payload,
+      });
+    };
+    trace('received');
     try {
       const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${port}`);
       const origin = typeof req.headers?.origin === 'string' ? req.headers.origin : undefined;
@@ -248,6 +259,7 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
         return;
       }
 
+      trace('auth.start');
       if (hostApiToken) {
         const authHeader = typeof req.headers?.authorization === 'string'
           ? req.headers.authorization
@@ -260,10 +272,13 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
           : '';
         const presentedToken = bearerToken || queryToken;
         if (!presentedToken || presentedToken !== hostApiToken) {
+          trace('auth.end', { outcome: 'rejected', status: 401 });
           sendJson(res, 401, { success: false, error: 'Unauthorized' });
           return;
         }
       }
+
+      trace('auth.end', { outcome: hostApiToken ? 'accepted' : 'not-required' });
 
       if (!requireJsonContentType(req)) {
         sendJson(res, 415, { success: false, error: 'Content-Type must be application/json' });
@@ -282,11 +297,14 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
         return;
       }
 
+      trace('dispatch.start');
       for (const handler of routeHandlers) {
         if (await handler(req, res, requestUrl, deps)) {
+          trace('dispatch.end', { outcome: 'handled', status: res.statusCode });
           return;
         }
       }
+      trace('dispatch.end', { outcome: 'unhandled' });
       if (isMainOwnedRoute(requestUrl.pathname)) {
         sendJson(res, 500, {
           success: false,
@@ -296,6 +314,7 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
       }
       sendJson(res, 404, { success: false, error: `No route for ${req.method} ${requestUrl.pathname}` });
     } catch {
+      trace('failure', { outcome: 'failed', status: 500 });
       logger.error('Host API request failed.');
       sendJson(res, 500, { success: false, error: 'Host API request failed.' });
     }

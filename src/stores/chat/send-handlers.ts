@@ -1,3 +1,5 @@
+import type { SessionSendIntent } from '@/types/session-goal';
+import { buildSessionIdentityKey } from '../../types/desktop/runtime-address';
 import { cacheSendAttachments } from './attachment-helpers';
 import { hasActiveStreamingRun } from './runtime-stream-state';
 import type { StoreSessionRunCache } from './session-run-cache';
@@ -166,34 +168,6 @@ export function resumeActiveStoreSend(
   });
 }
 
-interface MaybeEnterStoreWaitingApprovalParams {
-  get: ChatStoreGetFn;
-  sessionKey: string;
-}
-
-async function maybeEnterStoreWaitingApproval(
-  params: MaybeEnterStoreWaitingApprovalParams,
-): Promise<boolean> {
-  const { get, sessionKey } = params;
-  await get().syncPendingApprovals(sessionKey);
-  const pendingApprovals = get().pendingApprovalsBySession[sessionKey] ?? [];
-  if (pendingApprovals.length === 0) {
-    return false;
-  }
-  return true;
-}
-
-function hasStoreApprovalEvidence(
-  state: ChatStoreState,
-  sessionKey: string,
-): boolean {
-  const pendingApprovals = state.pendingApprovalsBySession[sessionKey] ?? [];
-  const runtime = getSessionRuntime(state, sessionKey);
-  return (
-    pendingApprovals.length > 0
-    || runtime.activeRunId != null
-  );
-}
 
 interface FinalizeStoreSendFailureParams {
   set: ChatStoreSetFn;
@@ -377,7 +351,7 @@ function clearOptimisticRuntimeState(
   if (runtime.runPhase === 'stopping') return runtime;
   const ownsPendingTurn = runtime.pendingTurnKey === optimisticAssistantItemKey;
   const ownsActiveTurn = runtime.activeTurnItemKey === optimisticAssistantItemKey;
-  const ownsSubmittedPhase = runtime.runPhase === 'submitted' && runtime.activeRunId == null;
+  const ownsSubmittedPhase = ownsPendingTurn && runtime.runPhase === 'submitted' && runtime.activeRunId == null;
   if (!ownsPendingTurn && !ownsActiveTurn && !ownsSubmittedPhase) {
     return runtime;
   }
@@ -391,24 +365,6 @@ function clearOptimisticRuntimeState(
     imageGeneration: undefined,
     updatedAt: Date.now(),
   };
-}
-
-function removeOptimisticAssistantPlaceholder(params: {
-  set: ChatStoreSetFn;
-  sessionKey: string;
-  clientId: string;
-}): void {
-  const { set, sessionKey, clientId } = params;
-  set((state) => {
-    const current = state.loadedSessions[sessionKey];
-    if (!current) return state;
-    const key = `renderer-assistant:${clientId}`;
-    const items = current.items.filter((item) => !(item.kind === 'assistant-turn' && item.key === key));
-    const runtime = clearOptimisticRuntimeState(current.runtime, key);
-    return items.length === current.items.length && runtime === current.runtime ? state : {
-      loadedSessions: patchSessionRecord(state, sessionKey, { items, runtime }),
-    };
-  });
 }
 
 function removeOptimisticSendItems(params: {
@@ -445,6 +401,8 @@ interface ExecuteStoreSendParams {
   beginMutating: () => void;
   finishMutating: () => void;
   text: string;
+  intent?: SessionSendIntent;
+  operationId?: string;
   attachments?: ChatSendAttachment[];
 }
 
@@ -458,7 +416,11 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     text,
     attachments,
   } = params;
-  const trimmed = text.trim();
+  const trimmed = params.intent ? text : text.trim();
+  if (params.intent && !text.trim()) return { accepted: false, reason: 'empty' };
+  if (params.intent && attachments?.some((attachment) => isDirectoryAttachment(attachment) || attachment.fileSize > CHAT_INLINE_ATTACHMENT_MAX_BYTES)) {
+    return { accepted: false, reason: 'goal-attachments' };
+  }
   const traceId = createSessionTraceId('send-boundary');
   const readableSendAttachments = readableAttachments(attachments);
   const attachmentCount = readableSendAttachments?.length ?? 0;
@@ -503,7 +465,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     activeRunId: summarizeIdentifier(runtimeBeforeSend.activeRunId),
   });
   const nowMs = Date.now();
-  const clientMessageId = crypto.randomUUID();
+  const clientMessageId = params.operationId ?? crypto.randomUUID();
   const sendGeneration = sessionRunCache.nextSendGeneration(currentSessionKey);
   applyStoreSendStart({
     set,
@@ -527,6 +489,16 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     onSafetyTimeout: () => {},
   });
 
+  const recordIdentity = stateBeforeSend.loadedSessions[currentSessionKey]?.meta.sessionIdentity;
+  const identityKey = buildSessionIdentityKey(sessionIdentity);
+  const isCurrent = () => sendGeneration === sessionRunCache.getSendGeneration(currentSessionKey)
+    && get().loadedSessions[currentSessionKey]?.meta.sessionIdentity === recordIdentity;
+  const reconcileUnknown = async (error: string): Promise<ChatSendResult> => {
+    await get().syncPendingApprovals(currentSessionKey);
+    if (!isCurrent()) return { accepted: false, reason: 'error', error: 'Send result superseded' };
+    finalizeStoreSendFailure({ set, error });
+    return { accepted: false, reason: 'error', error, outcome: 'unknown', attachmentReselectionRequired: attachmentReselectionRequired(attachments) };
+  };
   beginMutating();
   try {
     if (readableSendAttachments) {
@@ -537,19 +509,20 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       endpointSessionId,
       sessionIdentity,
       message: transportPayload.message,
+      intent: params.intent,
       idempotencyKey: clientMessageId,
       attachments: transportPayload.attachments,
       timeoutMs: CHAT_SEND_RPC_TIMEOUT_MS,
       traceId,
     });
 
-    if (sendGeneration !== sessionRunCache.getSendGeneration(currentSessionKey)) {
-      removeOptimisticSendItems({
+    if (!isCurrent()) {
+      if (get().loadedSessions[currentSessionKey]?.meta.sessionIdentity === recordIdentity) removeOptimisticSendItems({
         set,
         sessionKey: currentSessionKey,
         clientId: clientMessageId,
       });
-      return { accepted: true };
+      return { accepted: false, reason: 'error', error: 'Send result superseded' };
     }
 
     if (!sendResult.ok) {
@@ -558,48 +531,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         category: isRecoverableChatSendTimeout(errorMsg) ? 'recoverable-timeout' : 'transport-error',
         attachmentReselectionRequired: Boolean(attachmentReselectionRequired(attachments)),
       });
-      if (isRecoverableChatSendTimeout(errorMsg)) {
-        if (attachmentReselectionRequired(attachments)) {
-          removeOptimisticSendItems({
-            set,
-            sessionKey: currentSessionKey,
-            clientId: clientMessageId,
-          });
-          finalizeStoreSendFailure({
-            set,
-            error: errorMsg,
-          });
-          return {
-            accepted: false,
-            reason: 'error',
-            error: errorMsg,
-            attachmentReselectionRequired: true,
-          };
-        }
-        removeOptimisticAssistantPlaceholder({
-          set,
-          sessionKey: currentSessionKey,
-          clientId: clientMessageId,
-        });
-        if (await maybeEnterStoreWaitingApproval({
-          get,
-          sessionKey: currentSessionKey,
-        })) {
-          return { accepted: true };
-        }
-        return { accepted: true };
-      }
-      if (await maybeEnterStoreWaitingApproval({
-        get,
-        sessionKey: currentSessionKey,
-      })) {
-        removeOptimisticAssistantPlaceholder({
-          set,
-          sessionKey: currentSessionKey,
-          clientId: clientMessageId,
-        });
-        return { accepted: true };
-      }
+      if (sendResult.outcome === 'unknown' || !sendResult.outcome && isRecoverableChatSendTimeout(errorMsg)) return reconcileUnknown(errorMsg);
       removeOptimisticSendItems({
         set,
         sessionKey: currentSessionKey,
@@ -613,6 +545,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         accepted: false,
         reason: 'error',
         error: errorMsg,
+        ...(sendResult.outcome ? { outcome: sendResult.outcome } : {}),
         attachmentReselectionRequired: attachmentReselectionRequired(attachments),
       };
     }
@@ -621,6 +554,11 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       runId: summarizeIdentifier(sendResult.runId),
       hasProjection: Boolean(sendResult.projection),
     });
+    if (sendResult.replayed) {
+      removeOptimisticSendItems({ set, sessionKey: currentSessionKey, clientId: clientMessageId });
+      void get().loadHistory({ sessionKey: currentSessionKey, mode: 'quiet', scope: 'background', reason: 'manual_refresh' });
+      return { accepted: true };
+    }
     confirmOptimisticSendItems({
       set,
       sessionKey: currentSessionKey,
@@ -628,72 +566,36 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       runId: sendResult.runId,
       retainReceipt: (attachments?.length ?? 0) > 0,
     });
-    if (sendResult.projection) {
+    if (sendResult.projection && buildSessionIdentityKey(sendResult.projection.kind === 'view'
+      ? sendResult.projection.view.identity : sendResult.projection.delta.identity) === identityKey) {
       if (sendResult.projection.kind === 'view') {
         applySessionView({ set, get }, sendResult.projection.view);
       } else {
-        applySessionDelta({ set, get }, sendResult.projection.delta);
+        const delta = sendResult.projection.delta;
+        const result = applySessionDelta({ set, get }, delta);
+        if (result.status === 'gap' || result.status === 'epoch-mismatch') {
+          void get().resyncSession({ identity: delta.identity, epoch: delta.epoch, seq: delta.seq })
+            .catch((error) => console.warn('[session.resync]', error));
+        }
       }
     }
+    if (params.intent) void get().loadHistory({ sessionKey: currentSessionKey, mode: 'quiet', scope: 'background', reason: 'manual_refresh' });
     return { accepted: true };
   } catch (error) {
-    if (sendGeneration !== sessionRunCache.getSendGeneration(currentSessionKey)) {
-      removeOptimisticSendItems({
+    if (!isCurrent()) {
+      if (get().loadedSessions[currentSessionKey]?.meta.sessionIdentity === recordIdentity) removeOptimisticSendItems({
         set,
         sessionKey: currentSessionKey,
         clientId: clientMessageId,
       });
-      return { accepted: true };
+      return { accepted: false, reason: 'error', error: 'Send result superseded' };
     }
     const errorMsg = String(error);
     logSessionTrace('send.exception', traceId, {
       errorName: error instanceof Error ? error.name : typeof error,
       timeoutSignal: hasTimeoutSignal(error),
     });
-    if (isRecoverableChatSendTimeout(errorMsg)) {
-      if (attachmentReselectionRequired(attachments)) {
-        removeOptimisticSendItems({
-          set,
-          sessionKey: currentSessionKey,
-          clientId: clientMessageId,
-        });
-        finalizeStoreSendFailure({
-          set,
-          error: errorMsg,
-        });
-        return {
-          accepted: false,
-          reason: 'error',
-          error: errorMsg,
-          attachmentReselectionRequired: true,
-        };
-      }
-      removeOptimisticAssistantPlaceholder({
-        set,
-        sessionKey: currentSessionKey,
-        clientId: clientMessageId,
-      });
-      if (await maybeEnterStoreWaitingApproval({
-        get,
-        sessionKey: currentSessionKey,
-      })) {
-        return { accepted: true };
-      }
-      return { accepted: true };
-    }
-    const timeoutSignal = hasTimeoutSignal(error);
-    if (timeoutSignal) {
-      await get().syncPendingApprovals(currentSessionKey);
-    }
-    const state = get();
-    if (timeoutSignal && hasStoreApprovalEvidence(state, currentSessionKey)) {
-      removeOptimisticAssistantPlaceholder({
-        set,
-        sessionKey: currentSessionKey,
-        clientId: clientMessageId,
-      });
-      return { accepted: true };
-    }
+    if (params.intent || isRecoverableChatSendTimeout(errorMsg) || hasTimeoutSignal(error)) return reconcileUnknown(errorMsg);
     removeOptimisticSendItems({
       set,
       sessionKey: currentSessionKey,

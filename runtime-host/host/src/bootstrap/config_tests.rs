@@ -265,11 +265,11 @@ fn materializes_host_and_organization_runtime_input() {
     assert_eq!(input.matcha.storage_root, Path::new(&root.path("storage")));
     assert_eq!(input.matcha.port, 34102);
     assert_eq!(
-        input.open_claw.team_run_mcp_executable,
+        input.open_claw.runtime_host_mcp_executable,
         Path::new(&root.path("runtime-host-mcp"))
     );
     assert_eq!(
-        input.open_claw.team_run_mcp_state_dir,
+        input.open_claw.runtime_host_mcp_state_dir,
         Path::new(&root.runtime_host_state_dir())
     );
     assert_eq!(

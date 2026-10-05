@@ -262,6 +262,29 @@ impl AppServerClient {
         after: Option<Sequence>,
         limit: Option<ReplayLimit>,
     ) -> Result<EventReplayPayload, AppServerClientError> {
+        self.ingress
+            .begin_replay(session_id.clone(), after)
+            .await
+            .map_err(AppServerClientError::from_ingress)?;
+        let replay = match self.read_replay_payload(session_id.clone(), after, limit).await {
+            Ok(replay) => replay,
+            Err(error) => {
+                self.ingress.abort().await;
+                return Err(error);
+            }
+        };
+        self.ingress
+            .settle_replay_payload(session_id, after, replay.events().to_vec())
+            .await
+            .map_err(AppServerClientError::from_ingress)
+    }
+
+    pub(crate) async fn read_replay_payload(
+        &self,
+        session_id: SessionId,
+        after: Option<Sequence>,
+        limit: Option<ReplayLimit>,
+    ) -> Result<EventReplayPayload, AppServerClientError> {
         let mut params = EventsReplayParams::new(session_id.clone());
         if let Some(after) = after {
             params = params.after(after);
@@ -271,21 +294,18 @@ impl AppServerClient {
         }
         let request = events_replay_request(next_json_rpc_id()?, params)
             .map_err(|_| AppServerClientError::Protocol)?;
-        self.ingress
-            .begin_replay(session_id.clone(), after)
-            .await
-            .map_err(AppServerClientError::from_ingress)?;
-        let replay = match self.read(request, decode_events_replay_result).await {
-            Ok(replay) => replay,
-            Err(error) => {
-                self.ingress.abort().await;
-                return Err(error);
+        let replay = self.read(request, decode_events_replay_result).await?;
+        let mut cursor = after.unwrap_or_else(zero_sequence);
+        for event in &replay.events {
+            if event.session_id != session_id || event.seq.get() != cursor.get() + 1 {
+                return Err(AppServerClientError::EventRecoveryRequired);
             }
-        };
-        self.ingress
-            .settle_replay_payload(session_id, after, replay.events)
-            .await
-            .map_err(AppServerClientError::from_ingress)
+            cursor = event.seq;
+        }
+        Ok(EventReplayPayload::new(
+            EventReplay::new(replay.events.len(), cursor),
+            replay.events,
+        ))
     }
 
     /// Recovers the app-server event stream from a session-bound replay cursor.

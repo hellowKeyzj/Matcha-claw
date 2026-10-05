@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use crate::session::protocol::{ChatHistoryResult, HistoryRole};
 
 use super::model::{
-    Direction, InFlightRun, InputReceipt, Message, MessageContent, MessageRole,
+    Direction, HistoryKind, InFlightRun, InputReceipt, Message, MessageContent, MessageRole,
     MessageToolDeliveryMedia, OmittedContentKind, PageMetadata, PageRequest, PendingInput,
     PendingInputState, RunState, SessionState, SessionWindow, WindowRange, window_range,
 };
@@ -191,32 +191,53 @@ pub fn decode_window(payload: Value, request: PageRequest) -> Result<SessionWind
         .transpose()?
         .flatten()
         .filter(|value| !value.is_empty());
-    let messages = match decode_native_window(payload.clone()) {
-        Ok(messages) => messages,
-        Err(_) if is_text_history(&payload) => decode_text_history(payload)?,
-        Err(error) => return Err(error),
+    let kind = match envelope.as_ref().and_then(|value| value.get("kind")).and_then(Value::as_str) {
+        None => HistoryKind::Full,
+        Some("delta") => HistoryKind::Delta,
+        Some("reset") => HistoryKind::Reset,
+        Some(_) => return Err(payload_error("kind", "unsupported", "string")),
+    };
+    let messages = if kind == HistoryKind::Reset {
+        Vec::new()
+    } else if kind == HistoryKind::Delta {
+        envelope.as_ref().and_then(|value| value.get("messages")).and_then(Value::as_array)
+            .ok_or_else(|| payload_error("messages", "expected_array", "missing"))?
+            .iter().map(decode_session_message).collect::<Result<Vec<_>, _>>()?
+    } else {
+        match decode_native_window(payload.clone()) {
+            Ok(messages) => messages,
+            Err(_) if is_text_history(&payload) => decode_text_history(payload)?,
+            Err(error) => return Err(error),
+        }
     };
     let pagination = envelope
         .as_ref()
-        .map(|envelope| decode_pagination(envelope, request))
+        .map(decode_pagination)
         .transpose()?
         .flatten();
     let total_item_count = pagination
         .map(|pagination| pagination.total_messages())
         .unwrap_or(messages.len());
     let range = pagination
-        .map(|pagination| page_range(pagination, messages.len()))
+        .map(|pagination| page_range(pagination, &messages))
+        .transpose()?
         .unwrap_or_else(|| window_range(total_item_count, request));
-    let messages = if pagination.is_some() {
-        messages
+    let (messages, range) = if kind == HistoryKind::Full {
+        bound_source_window(messages, range, total_item_count, request)?
     } else {
-        messages[range.start()..range.end()].to_vec()
+        (messages, range)
     };
     let state = envelope
         .as_ref()
         .map(decode_session_state)
         .transpose()?
-        .unwrap_or_else(empty_session_state);
+        .unwrap_or_else(empty_session_state)
+        .with_history(kind, envelope.as_ref().and_then(|value| value.get("sessionInfo"))
+            .and_then(Value::as_object).map(|info| match info.get("activeLeafEntryId") {
+                None | Some(Value::Null) => Ok(None),
+                _ => optional_string(info, "activeLeafEntryId"),
+            })
+            .transpose()?.flatten());
     Ok(SessionWindow::new(
         messages,
         range,
@@ -241,20 +262,22 @@ fn decode_native_session_id(envelope: &Map<String, Value>) -> Result<Option<Stri
     optional_bounded_id(object, "sessionId")
 }
 
+pub(crate) fn decode_total_messages(payload: &Value) -> Result<usize, HistoryError> {
+    let envelope = payload.as_object().ok_or_else(HistoryError::malformed)?;
+    optional_usize(envelope, "totalMessages")?
+        .filter(|total| *total as u64 <= MAX_SAFE_SEQUENCE)
+        .ok_or_else(|| payload_error("totalMessages", "missing_or_invalid", "number"))
+}
+
 fn decode_pagination(
     envelope: &Map<String, Value>,
-    request: PageRequest,
 ) -> Result<Option<PageMetadata>, HistoryError> {
     let Some(total_messages) = optional_usize(envelope, "totalMessages")? else {
         return Ok(None);
     };
-    let offset =
-        optional_usize(envelope, "offset")?.unwrap_or_else(|| request.offset().unwrap_or(0));
+    let offset = optional_usize(envelope, "offset")?.unwrap_or(0).min(total_messages);
     let next_offset = optional_usize(envelope, "nextOffset")?;
     let has_more = optional_bool(envelope, "hasMore")?;
-    if offset > total_messages {
-        return Err(payload_error("offset", "exceeds_total_messages", "number"));
-    }
     if next_offset.is_some_and(|next_offset| next_offset > total_messages) {
         return Err(payload_error(
             "nextOffset",
@@ -273,14 +296,79 @@ fn decode_pagination(
     )))
 }
 
-fn page_range(pagination: PageMetadata, message_count: usize) -> WindowRange {
+fn page_range(pagination: PageMetadata, messages: &[Message]) -> Result<WindowRange, HistoryError> {
     let total = pagination.total_messages();
     let end = total.saturating_sub(pagination.offset());
-    let start = pagination
-        .next_offset()
-        .map(|next_offset| total.saturating_sub(next_offset))
-        .unwrap_or_else(|| end.saturating_sub(message_count));
-    WindowRange::new(start, end)
+    let start = if let Some(next_offset) = pagination.next_offset() {
+        total.saturating_sub(next_offset)
+    } else if pagination.has_more() == Some(false) {
+        0
+    } else if let Some(seq) = messages.iter().filter_map(Message::sequence).min() {
+        usize::try_from(seq).ok().filter(|seq| *seq > 0 && *seq <= end)
+            .ok_or_else(|| payload_error("seq", "outside_source_range", "number"))? - 1
+    } else {
+        return Err(payload_error("pagination", "source_range_required", "missing"));
+    };
+    if start == end && !messages.is_empty() {
+        return Err(payload_error("pagination", "source_group_cannot_advance", "number"));
+    }
+    Ok(WindowRange::new(start, end))
+}
+
+fn bound_source_window(
+    mut messages: Vec<Message>,
+    range: WindowRange,
+    total: usize,
+    request: PageRequest,
+) -> Result<(Vec<Message>, WindowRange), HistoryError> {
+    let requested = window_range(total, request);
+    let mut end = range.end().min(requested.end());
+    let mut start = range.start().max(match request.direction() {
+        Direction::Latest => end.saturating_sub(PageRequest::MAX_LIMIT),
+        Direction::Older | Direction::Newer => requested.start(),
+    }).min(end);
+    if request.limit() == 0 {
+        return Ok((Vec::new(), requested));
+    }
+    let needs_source = start != range.start() || end != range.end()
+        || messages.len() > request.limit()
+        || messages.iter().any(|message| message.sequence().is_some_and(|seq| seq <= start as u64 || seq > end as u64));
+    if !needs_source {
+        return Ok((messages, WindowRange::new(start, end)));
+    }
+    let mut groups = std::collections::BTreeMap::<usize, usize>::new();
+    for message in &messages {
+        let seq = message.sequence().filter(|seq| *seq > 0 && *seq <= total as u64)
+            .ok_or_else(|| payload_error("seq", "source_position_required", "missing_or_invalid"))? as usize;
+        if seq > start && seq <= end {
+            *groups.entry(seq).or_default() += 1;
+        }
+    }
+    let mut count = 0;
+    let mut take_group = |size: usize| -> Result<bool, HistoryError> {
+        if size > PageRequest::MAX_LIMIT {
+            return Err(payload_error("messages", "source_siblings_exceed_budget", "array"));
+        }
+        if count > 0 && count + size > request.limit() || count + size > PageRequest::MAX_LIMIT {
+            return Ok(false);
+        }
+        count += size;
+        Ok(true)
+    };
+    match request.direction() {
+        Direction::Latest | Direction::Older => {
+            for (&seq, &size) in groups.iter().rev() {
+                if !take_group(size)? { start = seq; break; }
+            }
+        }
+        Direction::Newer => {
+            for (&seq, &size) in &groups {
+                if !take_group(size)? { end = seq - 1; break; }
+            }
+        }
+    }
+    messages.retain(|message| message.sequence().is_some_and(|seq| seq > start as u64 && seq <= end as u64));
+    Ok((messages, WindowRange::new(start, end)))
 }
 
 fn empty_session_state() -> SessionState {
@@ -401,7 +489,9 @@ fn decode_in_flight_run(
         .map(decode_run_state)
         .transpose()?
         .unwrap_or(RunState::Started);
-    Ok(Some(InFlightRun::new(run_id, state)))
+    let text = optional_string(object, "text")?.unwrap_or_default();
+    let text = bounded_message_text(0, "inFlightRun.text", &text)?;
+    Ok(Some(InFlightRun::new(run_id, state).with_text(text)))
 }
 
 fn decode_run_state(value: &Value) -> Result<RunState, HistoryError> {
@@ -554,6 +644,18 @@ fn decode_text_history(payload: Value) -> Result<Vec<Message>, HistoryError> {
         .collect())
 }
 
+pub(crate) fn decode_session_message(value: &Value) -> Result<Message, HistoryError> {
+    let envelope = value.as_object().ok_or_else(HistoryError::malformed)?;
+    let mut message = envelope.get("message").and_then(Value::as_object)
+        .cloned().ok_or_else(HistoryError::malformed)?;
+    insert_missing_string_alias(&mut message, "messageId", "id", envelope.get("messageId"))?;
+    insert_missing_string_alias(&mut message, "runId", "runId", envelope.get("runId"))?;
+    if !message.contains_key("seq") && !message.contains_key("sequence") {
+        if let Some(sequence) = envelope.get("messageSeq") { message.insert("seq".to_owned(), sequence.clone()); }
+    }
+    decode_message(0, &Value::Object(message))
+}
+
 pub(crate) fn decode_transcript_event_message(
     source_sequence: u64,
     object: &Map<String, Value>,
@@ -631,7 +733,11 @@ fn decode_message(index: usize, value: &Value) -> Result<Message, HistoryError> 
     let role_value = required_message(message, index, "role")?;
     let role = decode_role(index, string_message(role_value, index, "role")?)?;
     let (text, mut content) = decode_content(index, required_message(message, index, "content")?)?;
-    let message_id = optional_alias_string_message(message, index, "messageId", "id")?;
+    let native = message.get("__openclaw").filter(|value| !value.is_null())
+        .map(|value| value.as_object().ok_or_else(|| message_error(index, "__openclaw", "expected_object", value_kind(value))))
+        .transpose()?;
+    let message_id = native.map(|meta| bounded_optional_string_message(meta, index, "id", MAX_METADATA_BYTES))
+        .transpose()?.flatten().or(optional_alias_string_message(message, index, "messageId", "id")?);
     let parent_id = optional_alias_string_message(message, index, "parentId", "parentMessageId")?;
     let origin = bounded_optional_string_message(message, index, "origin", MAX_METADATA_BYTES)?;
     let tool_call_id = bounded_optional_alias_string_message(
@@ -655,8 +761,17 @@ fn decode_message(index: usize, value: &Value) -> Result<Message, HistoryError> 
             content.push(delivery);
         }
     }
-    let run_id = bounded_optional_string_message(message, index, "runId", MAX_METADATA_BYTES)?;
-    let sequence = optional_alias_u64_pair_message(message, index, "seq", "sequence")?;
+    let fallback = message.get("openclawStreamFallback").filter(|value| !value.is_null())
+        .map(|value| value.as_object().ok_or_else(|| message_error(index, "openclawStreamFallback", "expected_object", value_kind(value))))
+        .transpose()?;
+    let display_item_id = fallback.map(|value| bounded_optional_string_message(value, index, "itemId", MAX_METADATA_BYTES))
+        .transpose()?.flatten();
+    let run_id = native.map(|meta| bounded_optional_string_message(meta, index, "runId", MAX_METADATA_BYTES))
+        .transpose()?.flatten().or(bounded_optional_string_message(message, index, "runId", MAX_METADATA_BYTES)?)
+        .or(fallback.map(|meta| bounded_optional_string_message(meta, index, "runId", MAX_METADATA_BYTES)).transpose()?.flatten())
+        .map(|run| run.strip_suffix(":user").unwrap_or(&run).to_owned());
+    let sequence = native.map(|meta| optional_u64_message(meta, index, "seq")).transpose()?.flatten()
+        .or(optional_alias_u64_pair_message(message, index, "seq", "sequence")?);
     if sequence.is_some_and(|value| value > MAX_SAFE_SEQUENCE) {
         return Err(message_error(
             index,
@@ -679,7 +794,7 @@ fn decode_message(index: usize, value: &Value) -> Result<Message, HistoryError> 
         sequence,
         created_at,
         updated_at,
-    ))
+    ).with_display_item_id(display_item_id))
 }
 
 fn decode_role(index: usize, role: &str) -> Result<MessageRole, HistoryError> {

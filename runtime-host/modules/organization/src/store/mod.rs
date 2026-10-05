@@ -1,4 +1,5 @@
-mod codec;
+pub(crate) mod codec;
+mod design;
 mod durable;
 mod facts;
 mod fault;

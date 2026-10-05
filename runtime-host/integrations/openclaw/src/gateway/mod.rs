@@ -11,5 +11,6 @@ pub(crate) mod dispatcher;
 pub(crate) mod ingress;
 pub mod loopback;
 pub(crate) mod operation;
+pub(crate) mod observation;
 pub mod request;
 pub mod wire;

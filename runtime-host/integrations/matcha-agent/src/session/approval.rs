@@ -39,6 +39,8 @@ impl fmt::Debug for ApprovalRespondParams {
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRecord {
     approval_id: ApprovalId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<super::model::RunId>,
     option_ids: Vec<OptionId>,
 }
 
@@ -50,6 +52,7 @@ impl<'de> Deserialize<'de> for ApprovalRecord {
         let approval = NativePendingApproval::deserialize(deserializer)?;
         Ok(Self {
             approval_id: approval.approval_id,
+            run_id: approval.run_id,
             option_ids: approval
                 .options
                 .into_iter()
@@ -62,6 +65,10 @@ impl<'de> Deserialize<'de> for ApprovalRecord {
 impl ApprovalRecord {
     pub fn approval_id(&self) -> &ApprovalId {
         &self.approval_id
+    }
+
+    pub fn run_id(&self) -> Option<&super::model::RunId> {
+        self.run_id.as_ref()
     }
 
     pub fn option_ids(&self) -> &[OptionId] {
@@ -82,6 +89,7 @@ impl fmt::Debug for ApprovalRecord {
 #[serde(rename_all = "camelCase")]
 struct NativePendingApproval {
     approval_id: ApprovalId,
+    run_id: Option<super::model::RunId>,
     options: Vec<NativeApprovalOption>,
     #[serde(rename = "status")]
     _status: NativePendingApprovalStatus,

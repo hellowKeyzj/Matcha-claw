@@ -16,11 +16,13 @@ impl OrganizationOwnerProvision {
     pub(in crate::composition::host) fn into_owner_input(
         self,
         runtime_directory: Arc<dyn organization::OrganizationRuntimeDirectory>,
+        member_introductions: Arc<dyn organization::TeamMemberIntroductions>,
     ) -> organization::OrganizationOwnerInput {
         organization::OrganizationOwnerInput {
             store: self.store,
             runtime_directory,
             team_skill_selections: self.team_skill_selections,
+            member_introductions: Some(member_introductions),
         }
     }
 }

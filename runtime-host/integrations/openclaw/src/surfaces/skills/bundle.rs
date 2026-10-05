@@ -206,12 +206,20 @@ impl SkillBundleStore {
     }
 
     pub fn import(&self, bundles: Vec<SkillBundle>) -> ImportOutcome {
+        eprintln!(
+            "[startup-trace] source=skills-import phase=store detail=begin bundleCount={}",
+            bundles.len()
+        );
         if self.state_dir.open().is_err() {
+            eprintln!("[startup-trace] source=skills-import phase=state-dir detail=open-rejected");
             return ImportOutcome::Unknown;
         }
         let bundles = match normalize_bundles(bundles) {
             Ok(bundles) => bundles,
-            Err(_) => return ImportOutcome::Rejected,
+            Err(_) => {
+                eprintln!("[startup-trace] source=skills-import phase=normalize detail=rejected");
+                return ImportOutcome::Rejected;
+            }
         };
         if bundles.is_empty() {
             return ImportOutcome::Accepted;
@@ -222,14 +230,19 @@ impl SkillBundleStore {
         }
         let root = match fs::canonicalize(&root) {
             Ok(root) => root,
-            Err(_) => return ImportOutcome::Unknown,
+            Err(error) => {
+                import_io_error("canonicalize-root", error);
+                return ImportOutcome::Unknown;
+            }
         };
         let staging = root.join(format!(".matchaclaw-skill-bundle-{}", next_staging_id()));
-        if fs::create_dir(&staging).is_err() {
+        if let Err(error) = fs::create_dir(&staging) {
+            import_io_error("create-staging", error);
             return ImportOutcome::Unknown;
         }
         let result = import_all(&root, &staging, bundles);
-        let cleanup = fs::remove_dir_all(&staging);
+        let cleanup =
+            fs::remove_dir_all(&staging).map_err(|error| import_io_error("cleanup-staging", error));
         match (result, cleanup) {
             (Ok(()), Ok(())) => ImportOutcome::Accepted,
             (Err(BundleError::Rejected), Ok(())) => ImportOutcome::Rejected,
@@ -513,27 +526,43 @@ fn normalize_bundles(bundles: Vec<SkillBundle>) -> Result<Vec<SkillBundle>, Bund
         .collect())
 }
 
+fn import_io_error(phase: &'static str, error: std::io::Error) -> BundleError {
+    eprintln!(
+        "[startup-trace] source=skills-import phase={phase} detail=io-error kind={:?} osCode={:?}",
+        error.kind(),
+        error.raw_os_error()
+    );
+    BundleError::Unknown
+}
+
 fn import_all(root: &Path, staging: &Path, bundles: Vec<SkillBundle>) -> Result<(), BundleError> {
     let mut staged = Vec::new();
     for bundle in &bundles {
         let target = root.join(bundle.skill_key());
         match fs::symlink_metadata(&target) {
-            Ok(_) => return Err(BundleError::Rejected),
+            Ok(_) => {
+                eprintln!(
+                    "[startup-trace] source=skills-import phase=check-target detail=already-exists"
+                );
+                return Err(BundleError::Rejected);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(BundleError::Unknown),
+            Err(error) => return Err(import_io_error("check-target", error)),
         }
         let directory = staging.join(bundle.skill_key());
-        fs::create_dir(&directory).map_err(|_| BundleError::Unknown)?;
+        fs::create_dir(&directory).map_err(|error| import_io_error("create-bundle", error))?;
         fs::write(
             directory.join(MANAGED_MARKER),
             format!("{}\nmanaged\n", bundle.skill_key()),
         )
-        .map_err(|_| BundleError::Unknown)?;
+        .map_err(|error| import_io_error("write-marker", error))?;
         for file in bundle.files() {
             let path = directory.join(file.path());
             let parent = path.parent().ok_or(BundleError::Unknown)?;
-            fs::create_dir_all(parent).map_err(|_| BundleError::Unknown)?;
-            fs::write(path, file.content()).map_err(|_| BundleError::Unknown)?;
+            fs::create_dir_all(parent)
+                .map_err(|error| import_io_error("create-file-parent", error))?;
+            fs::write(path, file.content())
+                .map_err(|error| import_io_error("write-file", error))?;
         }
         staged.push((directory, target));
     }
@@ -543,16 +572,22 @@ fn import_all(root: &Path, staging: &Path, bundles: Vec<SkillBundle>) -> Result<
 fn publish_staged(staged: Vec<(PathBuf, PathBuf)>) -> Result<(), BundleError> {
     for (_, target) in &staged {
         match fs::symlink_metadata(target) {
-            Ok(_) => return Err(BundleError::Rejected),
+            Ok(_) => {
+                eprintln!(
+                    "[startup-trace] source=skills-import phase=publish-check detail=already-exists"
+                );
+                return Err(BundleError::Rejected);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(BundleError::Unknown),
+            Err(error) => return Err(import_io_error("publish-check", error)),
         }
     }
     let mut published = Vec::new();
     for (directory, target) in staged {
         match fs::rename(&directory, &target) {
             Ok(()) => published.push(target),
-            Err(_) => {
+            Err(error) => {
+                import_io_error("publish-rename", error);
                 return match rollback_published(&published) {
                     Ok(()) => Err(BundleError::Unknown),
                     Err(()) => Err(BundleError::Unknown),
@@ -565,11 +600,18 @@ fn publish_staged(staged: Vec<(PathBuf, PathBuf)>) -> Result<(), BundleError> {
 
 fn rollback_published(published: &[PathBuf]) -> Result<(), ()> {
     for directory in published.iter().rev() {
-        let metadata = fs::symlink_metadata(directory).map_err(|_| ())?;
+        let metadata = fs::symlink_metadata(directory).map_err(|error| {
+            import_io_error("rollback-check", error);
+        })?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            eprintln!(
+                "[startup-trace] source=skills-import phase=rollback-check detail=not-regular-directory"
+            );
             return Err(());
         }
-        fs::remove_dir_all(directory).map_err(|_| ())?;
+        fs::remove_dir_all(directory).map_err(|error| {
+            import_io_error("rollback-remove", error);
+        })?;
     }
     Ok(())
 }
@@ -797,11 +839,16 @@ fn rollback_force(moved: &[(PathBuf, PathBuf)], published: &[PathBuf], backup: &
 fn ensure_root(root: &Path) -> Result<(), BundleError> {
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
-        Ok(_) => Err(BundleError::Unknown),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(root).map_err(|_| BundleError::Unknown)
+        Ok(_) => {
+            eprintln!(
+                "[startup-trace] source=skills-import phase=check-root detail=not-regular-directory"
+            );
+            Err(BundleError::Unknown)
         }
-        Err(_) => Err(BundleError::Unknown),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(root).map_err(|error| import_io_error("create-root", error))
+        }
+        Err(error) => Err(import_io_error("check-root", error)),
     }
 }
 

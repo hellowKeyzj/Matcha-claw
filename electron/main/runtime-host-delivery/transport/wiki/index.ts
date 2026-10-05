@@ -1,6 +1,7 @@
 import type { CallReceipt } from '../../../../../src/types/call-log';
 import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import { decodeWikiCallResult, type WikiCallResult } from '../../../../../src/types/wiki-call-result';
+import { decodeWikiSelectionTask } from '../../../../../src/types/wiki-selection';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
@@ -25,6 +26,8 @@ export interface WikiTransport {
   openProject(request: unknown): Promise<WikiTransportResponse>;
   currentProject(): Promise<WikiTransportResponse>;
   files(projectId?: string, directory?: string): Promise<WikiTransportResponse>;
+  navigation(projectId?: string): Promise<WikiTransportResponse>;
+  deletePage(request: unknown): Promise<WikiCallTransportResponse>;
   readFile(request: unknown): Promise<WikiTransportResponse>;
   readBinaryFile(request: unknown): Promise<WikiTransportResponse>;
   readSourcePreview(request: unknown): Promise<WikiTransportResponse>;
@@ -32,11 +35,6 @@ export interface WikiTransport {
   search(request: unknown): Promise<WikiTransportResponse>;
   searchConfig(projectId?: string): Promise<WikiTransportResponse>;
   updateSearchConfig(request: unknown): Promise<WikiTransportResponse>;
-  testSearchProvider(request: unknown): Promise<WikiTransportResponse>;
-  researchTasks(projectId?: string): Promise<WikiTransportResponse>;
-  startResearch(request: unknown): Promise<WikiCallTransportResponse>;
-  rerunResearchTask(request: unknown): Promise<WikiCallTransportResponse>;
-  removeResearchTask(request: unknown): Promise<WikiTransportResponse>;
   graph(projectId?: string): Promise<WikiTransportResponse>;
   sourceWatchConfig(projectId?: string): Promise<WikiTransportResponse>;
   updateSourceWatchConfig(request: unknown): Promise<WikiTransportResponse>;
@@ -65,6 +63,20 @@ export interface WikiTransport {
   exportArchive(request: unknown): Promise<WikiCallTransportResponse>;
   importArchive(request: unknown): Promise<WikiCallTransportResponse>;
   rebuildIndex(request: unknown): Promise<WikiCallTransportResponse>;
+  detectDuplicates(request: unknown): Promise<WikiCallTransportResponse>;
+  mergeDuplicates(request: unknown): Promise<WikiCallTransportResponse>;
+  dedupState(projectId?: string): Promise<WikiTransportResponse>;
+  cancelDedup(request: unknown): Promise<WikiTransportResponse>;
+  retryDedup(request: unknown): Promise<WikiCallTransportResponse>;
+  resumeDedup(request: unknown): Promise<WikiCallTransportResponse>;
+  excludeDuplicates(request: unknown): Promise<WikiTransportResponse>;
+  pageLinks(projectId?: string, relativePath?: string): Promise<WikiTransportResponse>;
+  createMissingPage(request: unknown): Promise<WikiCallTransportResponse>;
+  cancelMissingPage(request: unknown): Promise<WikiTransportResponse>;
+  generateSelection(request: unknown): Promise<WikiCallTransportResponse>;
+  selectionTask(projectId?: string, taskId?: string): Promise<WikiTransportResponse>;
+  cancelSelection(request: unknown): Promise<WikiTransportResponse>;
+  applySelection(request: unknown): Promise<WikiCallTransportResponse>;
   askQuestion(request: unknown): Promise<WikiCallTransportResponse>;
   questionTask(projectId?: string, taskId?: string): Promise<WikiTransportResponse>;
   cancelQuestion(request: unknown): Promise<WikiTransportResponse>;
@@ -82,7 +94,6 @@ export interface WikiTransport {
   startReindex(request: unknown): Promise<WikiCallTransportResponse>;
   graphInsights(projectId?: string): Promise<WikiTransportResponse>;
   dismissGraphInsight(request: unknown): Promise<WikiTransportResponse>;
-  prepareInsightResearch(request: unknown): Promise<WikiCallTransportResponse>;
 }
 
 export function createWikiTransport(
@@ -98,6 +109,8 @@ export function createWikiTransport(
     openProject: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/project/open', 'POST', 'wiki:write', request),
     currentProject: () => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/project/current', 'GET', 'wiki:read'),
     files: (projectId, directory) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/files', 'GET', 'wiki:read', undefined, filesQuery(projectId, directory)),
+    navigation: (projectId) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/navigation', 'GET', 'wiki:read', undefined, projectQuery(projectId)),
+    deletePage: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/delete-page', request),
     readFile: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/read-file', 'POST', 'wiki:read', request),
     readBinaryFile: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/read-binary-file', 'POST', 'wiki:read', request),
     readSourcePreview: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/read-source-preview', 'POST', 'wiki:read', request),
@@ -105,11 +118,6 @@ export function createWikiTransport(
     search: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/search', 'POST', 'wiki:read', request),
     searchConfig: (projectId) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/search-config', 'GET', 'wiki:read', undefined, projectQuery(projectId)),
     updateSearchConfig: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/search-config', 'POST', 'wiki:write', request),
-    testSearchProvider: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/search-provider/test', 'POST', 'wiki:write', request),
-    researchTasks: (projectId) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/research-tasks', 'GET', 'wiki:read', undefined, projectQuery(projectId)),
-    startResearch: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/research/start', request),
-    rerunResearchTask: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/research-task/rerun', request),
-    removeResearchTask: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/research-task/remove', 'POST', 'wiki:write', request),
     graph: (projectId) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/graph', 'GET', 'wiki:read', undefined, projectQuery(projectId)),
     sourceWatchConfig: (projectId) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/source-watch-config', 'GET', 'wiki:read', undefined, projectQuery(projectId)),
     updateSourceWatchConfig: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/source-watch-config', 'POST', 'wiki:write', request),
@@ -150,6 +158,35 @@ export function createWikiTransport(
     exportArchive: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/project/export-archive', request),
     importArchive: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/project/import-archive', request),
     rebuildIndex: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/rebuild-index', request),
+    detectDuplicates: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/dedup/detect', request),
+    mergeDuplicates: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/dedup/merge', request),
+    dedupState: (projectId) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/dedup/state', 'GET', 'wiki:read', undefined, projectQuery(projectId)),
+    cancelDedup: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/dedup/cancel', 'POST', 'wiki:write', request),
+    retryDedup: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/dedup/retry', request),
+    resumeDedup: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/dedup/resume', request),
+    excludeDuplicates: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/dedup/exclude', 'POST', 'wiki:write', request),
+    pageLinks: (projectId, relativePath) => {
+      const query = projectQuery(projectId) ?? new URLSearchParams();
+      if (relativePath) query.set('relativePath', relativePath);
+      return send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/page-links', 'GET', 'wiki:read', undefined, query);
+    },
+    createMissingPage: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/missing-page/create', request),
+    cancelMissingPage: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/missing-page/cancel', 'POST', 'wiki:write', request),
+    generateSelection: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/selection/generate', request),
+    selectionTask: async (projectId, taskId) => {
+      const query = projectQuery(projectId) ?? new URLSearchParams();
+      if (taskId) query.set('taskId', taskId);
+      return selectionTaskResponse(
+        await send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/selection/task', 'GET', 'wiki:read', undefined, query),
+        projectId, taskId,
+      );
+    },
+    cancelSelection: async (request) => selectionTaskResponse(
+      await send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/selection/cancel', 'POST', 'wiki:write', request),
+      isRecord(request) && typeof request.projectId === 'string' ? request.projectId : undefined,
+      isRecord(request) && typeof request.taskId === 'string' ? request.taskId : undefined,
+    ),
+    applySelection: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/selection/apply', request),
     askQuestion: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/qa/ask', request),
     questionTask: (projectId, taskId) => {
       const query = projectQuery(projectId) ?? new URLSearchParams();
@@ -171,7 +208,6 @@ export function createWikiTransport(
     startReindex: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/embedding/reindex', request),
     graphInsights: (projectId) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/graph/insights', 'GET', 'wiki:read', undefined, projectQuery(projectId)),
     dismissGraphInsight: (request) => send(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/graph/insights/dismiss', 'POST', 'wiki:write', request),
-    prepareInsightResearch: (request) => sendCall(runtimeHostTransportPort, issuer, fetcher, '/api/wiki/graph/insights/research-input', request),
   };
 }
 
@@ -234,6 +270,17 @@ async function send(
   if (response === null) return { status: 503, body: WIKI_UNAVAILABLE };
   if (!isWikiStatus(response.status)) return { status: 503, body: WIKI_UNAVAILABLE };
   return { status: response.status, body: response.body };
+}
+
+function selectionTaskResponse(response: WikiTransportResponse, projectId: string | undefined, taskId: string | undefined): WikiTransportResponse {
+  if (response.status !== 200) return response;
+  try {
+    const body = decodeWikiSelectionTask(response.body);
+    if (body.taskId === taskId && (projectId === undefined || body.projectId === projectId)) {
+      return { status: 200, body };
+    }
+  } catch { /* closed public boundary */ }
+  return { status: 503, body: WIKI_UNAVAILABLE };
 }
 
 function filesQuery(projectId: string | undefined, directory: string | undefined): URLSearchParams | undefined {

@@ -38,6 +38,7 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
     let initialize = responses.remove(0);
     assert_eq!(initialize["id"], 1);
     assert_eq!(initialize["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(initialize["result"]["serverInfo"]["name"], "matcha");
     let tools = responses.remove(0);
     assert_eq!(tools["id"], 2);
     assert_eq!(
@@ -56,7 +57,6 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
             "team_evidence_record",
             "wiki_status",
             "wiki_projects",
-            "wiki_set_project",
             "wiki_files",
             "wiki_read_file",
             "wiki_search",
@@ -194,7 +194,7 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
         })
     );
     assert_eq!(
-        tools["result"]["tools"][17],
+        tools["result"]["tools"][16],
         json!({
             "name": "wiki_apply_generated_pages",
             "description": "Apply generated wiki pages for a source file.",
@@ -202,7 +202,6 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "projectId": { "type": ["string", "null"], "minLength": 1 },
                     "sourcePath": { "type": "string", "minLength": 1 },
                     "files": {
                         "type": "array",
@@ -222,12 +221,11 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
         })
     );
     assert_eq!(
-        tools["result"]["tools"][18]["inputSchema"],
+        tools["result"]["tools"][17]["inputSchema"],
         json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
-                "projectId": { "type": ["string", "null"], "minLength": 1 },
                 "sourcePath": { "type": "string", "minLength": 1 },
                 "fileAlreadyDeleted": { "type": ["boolean", "null"], "default": false }
             },

@@ -424,11 +424,12 @@ impl subagents::SealedAgentStorePort for SealedAgentStoreAdapter {
     fn export_package(
         &self,
         agent_id: String,
+        agent_name: String,
     ) -> Result<subagents::PackageExportReceipt, subagents::SealedAgentError> {
         let agent_key =
             AgentKey::parse(agent_id).map_err(|_| subagents::SealedAgentError::Rejected)?;
         self.store
-            .export_plain_workspace_package(agent_key)
+            .export_plain_workspace_package(agent_key, &agent_name)
             .map(project_agent_export)
             .map_err(project_agent_error)
     }
@@ -436,13 +437,14 @@ impl subagents::SealedAgentStorePort for SealedAgentStoreAdapter {
     fn export_cloud_package(
         &self,
         agent_id: String,
+        agent_name: String,
         cloud_public_key: String,
         cloud_key_id: String,
     ) -> Result<subagents::PackageExportReceipt, subagents::SealedAgentError> {
         let agent_key =
             AgentKey::parse(agent_id).map_err(|_| subagents::SealedAgentError::Rejected)?;
         self.store
-            .export_cloud_workspace_package(agent_key, cloud_public_key, cloud_key_id)
+            .export_cloud_workspace_package(agent_key, &agent_name, cloud_public_key, cloud_key_id)
             .map(project_agent_export)
             .map_err(project_agent_error)
     }
@@ -487,7 +489,7 @@ impl subagents::SealedAgentStorePort for SealedAgentStoreAdapter {
             .map_err(project_agent_error)
     }
 
-    fn contains_agents(
+    fn agents_using_sealed_source(
         &self,
         agent_ids: &[String],
     ) -> Result<Vec<String>, subagents::SealedAgentError> {
@@ -496,7 +498,7 @@ impl subagents::SealedAgentStorePort for SealedAgentStoreAdapter {
             .filter_map(|agent_id| AgentKey::parse(agent_id.clone()).ok())
             .collect::<Vec<_>>();
         self.store
-            .contains_agents(&agent_keys)
+            .agents_using_sealed_source(&agent_keys)
             .map(|sealed| {
                 sealed
                     .into_iter()

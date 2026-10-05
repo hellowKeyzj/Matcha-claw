@@ -1,5 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
-import { decodeSessionDelta, type SessionDelta } from './session-contract';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionChanges, summarizeSessionIdentity } from './trace';
+import { decodeSessionDelta, decodeSessionResync, type SessionDelta, type SessionResync } from './session-contract';
 
 const ENDPOINT = '/api/sessions/events';
 const DECISION_TTL_MS = 30_000;
@@ -13,6 +14,8 @@ export type SessionEventsTransportOptions = Readonly<{
 
 export interface SessionEventsTransport {
   onDelta(handler: SessionDeltaEventHandler): () => void;
+  onResync(handler: (event: SessionResync) => void): () => void;
+  onReconnect(handler: () => void): () => void;
   close(): void;
 }
 
@@ -31,6 +34,9 @@ export function createSessionEventsTransport(
   const url = `http://127.0.0.1:${runtimeHostTransportPort}${ENDPOINT}`;
   const reconnectDelayMs = options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
   const handlers = new Set<SessionDeltaEventHandler>();
+  const resyncHandlers = new Set<(event: SessionResync) => void>();
+  const reconnectHandlers = new Set<() => void>();
+  let connected = false;
   let closed = false;
   let started = false;
   let controller: AbortController | null = null;
@@ -56,14 +62,44 @@ export function createSessionEventsTransport(
         scheduleReconnect();
         return;
       }
+      if (connected) reconnectHandlers.forEach((handler) => handler());
+      connected = true;
       await readEventStream(response.body, (frame) => {
-        if (frame.id !== undefined) lastEventId = frame.id;
-        if (frame.event !== 'session.delta') return;
-        const delta = decodeSessionDeltaData(frame.data);
-        if (delta) handlers.forEach((handler) => handler(delta));
+        const value = parseEventData(frame.data);
+        const tracing = isSessionTraceEnabled();
+        if (tracing && (frame.event === 'session.delta' || frame.event === 'session.resync')) logSessionTrace('electron.session.sse.decode.before', 'session-events-boundary', {
+          event: frame.event, eventId: summarizeIdentifier(frame.id), utf8Bytes: Buffer.byteLength(frame.data, 'utf8'), utf16Length: frame.data.length, parsed: value !== null,
+        });
+        if (frame.event === 'session.delta') {
+          const delta = decodeSessionDelta(value);
+          if (tracing) logSessionTrace('electron.session.sse.decode.after', 'session-events-boundary', {
+            event: 'session.delta', decoded: !!delta, reason: delta ? null : 'strict-decode-rejected',
+            ...(delta ? { identity: summarizeSessionIdentity(delta.identity), epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor,
+              changes: summarizeSessionChanges(delta.changes), handlerCount: handlers.size } : {}),
+          });
+          if (!delta) return;
+          if (frame.id !== undefined) lastEventId = frame.id;
+          handlers.forEach((handler) => handler(delta));
+          if (tracing) logSessionTrace('electron.session.sse.publish', 'session-events-boundary', {
+            event: 'session.delta', identity: summarizeSessionIdentity(delta.identity), epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor,
+          });
+        } else if (frame.event === 'session.resync') {
+          const event = decodeSessionResync(value);
+          if (tracing) logSessionTrace('electron.session.sse.decode.after', 'session-events-boundary', {
+            event: 'session.resync', decoded: !!event, reason: event ? null : 'strict-decode-rejected',
+            ...(event ? { identity: summarizeSessionIdentity(event.identity), epoch: event.epoch, seq: event.seq, handlerCount: resyncHandlers.size } : {}),
+          });
+          if (!event) return;
+          if (frame.id !== undefined) lastEventId = frame.id;
+          resyncHandlers.forEach((handler) => handler(event));
+        }
       });
       scheduleReconnect();
-    } catch {
+    } catch (error) {
+      if (isSessionTraceEnabled()) logSessionTrace('electron.session.sse.failed', 'session-events-boundary', {
+        aborted: requestController.signal.aborted, closed, lastEventId: summarizeIdentifier(lastEventId),
+        error: summarizeIdentifier(error instanceof Error ? error.message : String(error)),
+      });
       scheduleReconnect();
     } finally {
       if (controller === requestController) controller = null;
@@ -89,9 +125,19 @@ export function createSessionEventsTransport(
         handlers.delete(handler);
       };
     },
+    onResync(handler): () => void {
+      resyncHandlers.add(handler);
+      return () => { resyncHandlers.delete(handler); };
+    },
+    onReconnect(handler): () => void {
+      reconnectHandlers.add(handler);
+      return () => { reconnectHandlers.delete(handler); };
+    },
     close(): void {
       closed = true;
       handlers.clear();
+      resyncHandlers.clear();
+      reconnectHandlers.clear();
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -146,9 +192,9 @@ async function readEventStream(
   }
 }
 
-function decodeSessionDeltaData(data: string): SessionDelta | null {
+function parseEventData(data: string): unknown {
   try {
-    return decodeSessionDelta(JSON.parse(data));
+    return JSON.parse(data);
   } catch {
     return null;
   }

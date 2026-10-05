@@ -1,19 +1,23 @@
 import { useEffect, useState, type FormEvent, type JSX, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, FileText, FolderOpen, ListChecks, Search, Settings2 } from 'lucide-react';
+import { FileText, FolderOpen, ListChecks, Loader2, Search, Settings2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
-import { Switch } from '@/components/ui/switch';
 import { fetchSelectableProviderModels } from '@/lib/provider-models';
 import type { WikiFileItem, WikiReceiptSummary, WikiSourceTask, WikiSourceView, WikiSourceWatchConfig, WikiSourceWatchConfigUpdate } from '../wiki-model';
-import { formatDateTime } from '../wiki-model';
+import { formatDateTime, isActiveSourceTask } from '../wiki-model';
 import { WikiEmpty, WikiIconButton, WikiPanel, WikiPanelHeader, WikiPrimaryButton, WikiSurface } from './WikiChrome';
+import { WikiEmbeddingSettings } from './WikiEmbeddingSettings';
+import { SourceTaskProgress } from './SourceTaskProgress';
+import { SettingGroup, SettingRow, SelectSettingRow } from './WikiSettings';
 
 export type SourcesPanelProps = Readonly<{
+  projectId: string;
   files: readonly WikiFileItem[];
   sourceTasks: readonly WikiSourceTask[];
+  sourceTasksError: string | null;
+  cancellingSourcePaths: ReadonlySet<string>;
   sourceWatchConfig: WikiSourceWatchConfig;
   lastReceipt: WikiReceiptSummary | null;
   busy: string | null;
@@ -39,10 +43,6 @@ function taskStatusVariant(status: string): 'success' | 'warning' | 'destructive
   if (['queued', 'pending', 'running', 'processing', 'retrying'].includes(normalized)) return 'warning';
   if (['failed', 'error'].includes(normalized)) return 'destructive';
   return 'secondary';
-}
-
-function canCancelSourceTask(task: WikiSourceTask): boolean {
-  return task.cancelRequestedAtMs === null && ['queued', 'pending', 'running', 'processing', 'retrying'].includes(task.status.toLowerCase());
 }
 
 const OUTPUT_LANGUAGE_OPTIONS = [
@@ -180,54 +180,6 @@ async function loadSourceModelOptions(capability: 'chat' | 'imageUnderstand'): P
   }).filter((model) => model.reference);
 }
 
-function SettingRow(props: Readonly<{ title: string; description: string; checked: boolean; disabled: boolean; onChange(value: boolean): void }>): JSX.Element {
-  return (
-    <div className="flex items-center gap-4 border-b border-border/60 px-4 py-4 last:border-b-0">
-      <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium">{props.title}</div>
-        <div className="mt-1 max-w-xl text-sm text-muted-foreground">{props.description}</div>
-      </div>
-      <Switch checked={props.checked} disabled={props.disabled} onCheckedChange={props.onChange} aria-label={props.title} />
-    </div>
-  );
-}
-
-function SelectSettingRow(props: Readonly<{ title: string; description: string; value: string; disabled: boolean; options: readonly (readonly [string, string])[]; onChange(value: string): void }>): JSX.Element {
-  const selectedLabel = props.options.find(([value]) => value === props.value)?.[1] ?? props.value;
-  return (
-    <div className="flex items-center gap-4 border-b border-border/60 px-4 py-4 last:border-b-0">
-      <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium">{props.title}</div>
-        <div className="mt-1 max-w-xl text-sm text-muted-foreground">{props.description}</div>
-      </div>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={props.disabled}
-            title={selectedLabel}
-            className="h-9 w-56 justify-between rounded-[var(--radius-interactive)] bg-card px-3 text-sm font-normal"
-          >
-            <span className="min-w-0 truncate">{selectedLabel}</span>
-            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="end"
-          className="w-56 max-h-[min(16rem,var(--radix-dropdown-menu-content-available-height))] max-w-[calc(100vw-2rem)] overflow-y-auto"
-        >
-          {props.options.map(([value, label]) => (
-            <DropdownMenuItem key={value} onSelect={() => props.onChange(value)}>
-              <span className="truncate" title={label}>{label}</span>
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
-  );
-}
-
 function TextSettingRow(props: Readonly<{ title: string; description: string; value: string; disabled: boolean; saveLabel: string; onChange(value: string): void; onSubmit(): Promise<void> }>): JSX.Element {
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -264,23 +216,6 @@ function SecretSettingRow(props: Readonly<{ title: string; description: string; 
   );
 }
 
-function SettingGroup(props: Readonly<{ title: string; description: string; children: ReactNode }>): JSX.Element {
-  return (
-    <WikiSurface>
-      <details className="group">
-        <summary className="flex cursor-pointer select-none items-center gap-3 px-4 py-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">{props.title}</div>
-            <div className="mt-1 max-w-xl text-sm text-muted-foreground">{props.description}</div>
-          </div>
-          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-150 group-open:rotate-180" />
-        </summary>
-        <div className="border-t border-border/60">{props.children}</div>
-      </details>
-    </WikiSurface>
-  );
-}
-
 function SettingSubgroup(props: Readonly<{ title: string; description: string; children: ReactNode }>): JSX.Element {
   return (
     <div className="border-b border-border/60 last:border-b-0">
@@ -298,6 +233,8 @@ export function SourcesPanel(props: SourcesPanelProps): JSX.Element {
   const {
     files,
     sourceTasks,
+    sourceTasksError,
+    cancellingSourcePaths,
     sourceWatchConfig,
     lastReceipt,
     busy,
@@ -388,12 +325,12 @@ export function SourcesPanel(props: SourcesPanelProps): JSX.Element {
   const panelActions = inSettings ? undefined : (
     <>
       <WikiPrimaryButton size="sm" onClick={onPickSourceFile} disabled={modelActionDisabled}>
-        <FileText className="h-4 w-4" />
-        {t('sources.importFile')}
+        {busy === 'import-source' ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <FileText className="h-4 w-4" />}
+        {t(busy === 'import-source' ? 'sourceProgress.importingFile' : 'sources.importFile')}
       </WikiPrimaryButton>
       <Button size="sm" variant="outline" onClick={onPickSourceFolder} disabled={modelActionDisabled} className="h-8 rounded-full bg-card">
-        <FolderOpen className="h-4 w-4" />
-        {t('sources.folder')}
+        {busy === 'import-folder' ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <FolderOpen className="h-4 w-4" />}
+        {t(busy === 'import-folder' ? 'sourceProgress.importingFolder' : 'sources.folder')}
       </Button>
       <Button size="sm" variant="outline" onClick={onRescanSources} disabled={modelActionDisabled} className="h-8 rounded-full bg-card">
         <Search className="h-4 w-4" />
@@ -465,6 +402,7 @@ export function SourcesPanel(props: SourcesPanelProps): JSX.Element {
                   onChange={onOutputLanguageChange}
                 />
               </WikiSurface>
+              <WikiEmbeddingSettings projectId={props.projectId} busy={isBusy} />
               <SettingGroup title={t('sources.mineruTitle')} description={t('sources.mineruDescription')}>
                 <SettingSubgroup title={t('sources.mineruBasicTitle')} description={t('sources.mineruBasicDescription')}>
                   <SettingRow
@@ -630,34 +568,26 @@ export function SourcesPanel(props: SourcesPanelProps): JSX.Element {
               <h3 className="font-medium">{t('sources.activityLog')}</h3>
               <div className="flex items-center gap-1">
                 <span className="text-xs text-muted-foreground">{sourceTasks.length}</span>
-                <WikiIconButton onClick={onLoadSourceTasks} disabled={isBusy} title={t('sources.refreshRecords')} className="h-7 w-7">
+                <WikiIconButton onClick={onLoadSourceTasks} title={t('sources.refreshRecords')} className="h-7 w-7">
                   <ListChecks className="h-4 w-4" />
                 </WikiIconButton>
               </div>
             </div>
+            {sourceTasksError ? <div role="status" className="mb-3 text-xs text-destructive">{sourceTasksError}</div> : null}
             {visibleSourceTasks.length > 0 ? (
               <div className="space-y-2">
                 {visibleSourceTasks.map((task) => (
                   <div key={task.id} className="rounded-2xl border border-border/70 bg-card px-3 py-2.5 text-sm">
                     <div className="flex min-w-0 items-center gap-2">
-                      <Badge variant={taskStatusVariant(task.status)}>{task.status}</Badge>
-                      <Badge variant="outline">{task.kind}</Badge>
+                      <Badge variant={taskStatusVariant(task.status)}>{t(`sourceProgress.status.${task.status}`, { defaultValue: task.status })}</Badge>
+                      <Badge variant="outline">{t(`sourceProgress.kind.${task.kind}`, { defaultValue: task.kind })}</Badge>
                       <span className="ml-auto text-xs text-muted-foreground">{formatDateTime(task.updatedAtMs, t('time.unrecorded'))}</span>
                     </div>
                     <div className="mt-1 truncate text-xs text-muted-foreground">{task.sourcePath}</div>
-                    {task.stage || task.progress !== null || task.cancelRequestedAtMs !== null ? (
-                      <div className="mt-2 space-y-1 text-xs text-muted-foreground">
-                        <div className="flex items-center gap-2">
-                          {task.stage ? <span className="capitalize">{task.stage}</span> : null}
-                          {task.progress !== null ? <span className="ml-auto tabular-nums">{task.progress}%</span> : null}
-                          {canCancelSourceTask(task) ? <Button size="sm" variant="ghost" className="h-6 px-2" disabled={isBusy} onClick={() => onCancelSourceTask(task.sourcePath)}>{t('common.cancel')}</Button> : null}
-                        </div>
-                        {task.progress !== null ? <div className="h-1 overflow-hidden rounded-full bg-secondary"><div className="h-full bg-primary" style={{ width: `${task.progress}%` }} /></div> : null}
-                        {task.cancelRequestedAtMs !== null ? <div>{t('sources.cancelRequested')}</div> : null}
-                      </div>
-                    ) : canCancelSourceTask(task) ? (
-                      <Button size="sm" variant="ghost" className="mt-2 h-6 px-2" disabled={isBusy} onClick={() => onCancelSourceTask(task.sourcePath)}>{t('common.cancel')}</Button>
-                    ) : null}
+                    <div className="mt-2 flex items-center gap-2">
+                      <SourceTaskProgress task={task} />
+                      {isActiveSourceTask(task) && task.cancelRequestedAtMs === null ? <Button size="sm" variant="ghost" className="ml-auto h-6 px-2" disabled={cancellingSourcePaths.has(task.sourcePath)} onClick={() => onCancelSourceTask(task.sourcePath)}>{t(cancellingSourcePaths.has(task.sourcePath) ? 'sourceProgress.cancelling' : 'common.cancel')}</Button> : null}
+                    </div>
                     {task.error ? <div className="mt-2 rounded-lg bg-destructive/10 px-2 py-1 text-xs text-destructive">{task.error}</div> : null}
                   </div>
                 ))}

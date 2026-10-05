@@ -3,6 +3,7 @@ use std::{
     path::PathBuf,
 };
 
+use crate::StoreFault;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -137,7 +138,7 @@ pub fn decode_team_runtime_capability_request(
 
 pub async fn execute_team_runtime_capability_request(
     owner: &organization::OrganizationHandle,
-    resolver: &dyn organization::RoleSessionIdentityResolver,
+    resolver: std::sync::Arc<dyn organization::RoleSessionIdentityResolver>,
     request: TeamRuntimeCapabilityRequest,
 ) -> Result<(String, TeamRuntimeControlOutcome), TeamRuntimeDecodeError> {
     execute_inline(owner, resolver, request).await
@@ -145,23 +146,39 @@ pub async fn execute_team_runtime_capability_request(
 
 pub(crate) async fn execute_inline(
     owner: &organization::OrganizationHandle,
-    resolver: &dyn organization::RoleSessionIdentityResolver,
+    resolver: std::sync::Arc<dyn organization::RoleSessionIdentityResolver>,
     request: TeamRuntimeCapabilityRequest,
 ) -> Result<(String, TeamRuntimeControlOutcome), TeamRuntimeDecodeError> {
     let operation_id = request.operation_id().to_owned();
     let team_id = request.team_id().map(str::to_owned);
     let run_id = request.run_id().map(str::to_owned);
     let (command, projection_context) = request.into_execution();
-    let outcome = owner
-        .execute_team_runtime_inline(command)
-        .await
-        .map_err(|_| TeamRuntimeDecodeError::Unavailable)?;
+    let outcome = match command {
+        TeamRuntimeCommand::Design { operation } => {
+            let read = matches!(
+                operation,
+                super::design::DesignOperation::Snapshot { .. }
+                    | super::design::DesignOperation::Context { .. }
+            );
+            let result = owner
+                .design_operation(operation, resolver.clone())
+                .await
+                .map_err(|_| TeamRuntimeDecodeError::Unavailable)?;
+            let outcome = TeamRuntimeCommandOutcome::Design { read, result };
+            owner.summarize_call(&outcome).await;
+            outcome
+        }
+        command => owner
+            .execute_team_runtime_inline(command)
+            .await
+            .map_err(|_| TeamRuntimeDecodeError::Unavailable)?,
+    };
     let outcome = project_team_runtime_outcome(
         outcome,
         team_id.as_deref(),
         run_id.as_deref(),
         projection_context.as_ref(),
-        resolver,
+        resolver.as_ref(),
     );
     Ok((operation_id, outcome))
 }
@@ -316,6 +333,11 @@ fn team_runtime_outcome_with_context(
     resolver: &dyn organization::RoleSessionIdentityResolver,
 ) -> TeamRuntimeProjectionOutcome {
     match outcome {
+        TeamRuntimeCommandOutcome::Design { result, .. } => match result {
+            Ok(result) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(result)),
+            Err(StoreFault::CommitOutcomeUnknown(_) | StoreFault::RecoveryRequired) => TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({"outcome":"outcome-unknown"}))),
+            Err(_) => TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team workflow design request was rejected."),
+        },
         TeamRuntimeCommandOutcome::PackageValidate(validation) => {
             TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(team_skill_package_validation_json(&validation)))
         }
@@ -1020,7 +1042,7 @@ fn team_run_list_item_legacy_json(
     }
 }
 
-fn team_run_public_snapshot_legacy_json(
+pub(crate) fn team_run_public_snapshot_legacy_json(
     snapshot: &organization::run::public_projection::TeamRunPublicSnapshot,
     role_sessions: Option<&[organization::RoleSessionReceipt]>,
     resolver: &dyn organization::RoleSessionIdentityResolver,
@@ -1072,7 +1094,7 @@ fn team_public_unavailable_sections_legacy_json(
         .collect()
 }
 
-fn team_role_session_receipts_legacy_json(
+pub(crate) fn team_role_session_receipts_legacy_json(
     sessions: &[organization::RoleSessionReceipt],
     resolver: &dyn organization::RoleSessionIdentityResolver,
 ) -> Vec<Value> {
@@ -1100,7 +1122,7 @@ pub(super) fn team_public_run_legacy_json(
     })
 }
 
-fn team_public_graph_legacy_json(
+pub(crate) fn team_public_graph_legacy_json(
     run_id: &str,
     graph: &organization::run::public_projection::TeamPublicGraph,
 ) -> Value {
@@ -1288,7 +1310,8 @@ fn team_run_start_gate_legacy_json(
     run: &organization::run::public_projection::TeamRunPublicRun,
 ) -> Value {
     let proposal = match run.start_gate() {
-        organization::run::public_projection::TeamRunPublicStartGate::ProposalPending => {
+        organization::run::public_projection::TeamRunPublicStartGate::ProposalPending
+        | organization::run::public_projection::TeamRunPublicStartGate::DesignProposalPending => {
             Some(json!({
                 "proposalId": run.proposal_id(),
                 "taskSummary": run.proposal_summary().unwrap_or_default(),
@@ -1296,10 +1319,15 @@ fn team_run_start_gate_legacy_json(
         }
         _ => None,
     };
-    json!({
+    let mut gate = json!({
         "status": team_run_start_gate_status_name(run.start_gate()),
         "proposal": proposal,
-    })
+    });
+    if let Some(epoch) = run.design_epoch() {
+        gate["designEpoch"] = json!(epoch);
+        gate["graphVersion"] = json!(run.graph_version());
+    }
+    gate
 }
 
 fn team_run_start_gate_status_name(
@@ -1311,6 +1339,10 @@ fn team_run_start_gate_status_name(
             "proposal_pending"
         }
         organization::run::public_projection::TeamRunPublicStartGate::Started => "started",
+        organization::run::public_projection::TeamRunPublicStartGate::Designing => "designing",
+        organization::run::public_projection::TeamRunPublicStartGate::DesignProposalPending => {
+            "design_proposal_pending"
+        }
     }
 }
 

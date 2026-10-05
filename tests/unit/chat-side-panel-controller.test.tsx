@@ -11,6 +11,7 @@ import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fix
 describe('chat side panel controller', () => {
   beforeEach(() => {
     window.localStorage.clear();
+    window.sessionStorage.clear();
 
     useRuntimeHostStore.setState({
       runtimeHost: { lifecycle: 'running' },
@@ -74,7 +75,7 @@ describe('chat side panel controller', () => {
     window.localStorage.setItem('chat:side-panel-open', '1');
     window.localStorage.setItem('chat:side-panel-tab', 'artifacts');
     window.localStorage.setItem('chat:side-panel-light-width', '360');
-    window.localStorage.setItem('chat:side-panel-artifact-width', '520');
+    window.sessionStorage.setItem('chat:side-panel-artifact-width', '520');
 
     const layoutNode = document.createElement('div');
     Object.defineProperty(layoutNode, 'clientWidth', {
@@ -93,14 +94,14 @@ describe('chat side panel controller', () => {
     });
 
     expect(result.current.sidePanelWidth).toBe(720);
-    expect(window.localStorage.getItem('chat:side-panel-artifact-width')).toBe('720');
+    expect(window.sessionStorage.getItem('chat:side-panel-artifact-width')).toBe('720');
     expect(window.localStorage.getItem('chat:side-panel-light-width')).toBe('360');
   });
 
   it('keeps separate remembered widths for runtime and artifacts', () => {
     window.localStorage.setItem('chat:side-panel-tab', 'runtime');
     window.localStorage.setItem('chat:side-panel-light-width', '360');
-    window.localStorage.setItem('chat:side-panel-artifact-width', '640');
+    window.sessionStorage.setItem('chat:side-panel-artifact-width', '640');
 
     const layoutNode = document.createElement('div');
     Object.defineProperty(layoutNode, 'clientWidth', {
@@ -131,7 +132,7 @@ describe('chat side panel controller', () => {
   it('falls back from the retired tasks tab to artifacts', () => {
     window.localStorage.setItem('chat:side-panel-tab', 'tasks');
     window.localStorage.setItem('chat:side-panel-light-width', '360');
-    window.localStorage.setItem('chat:side-panel-artifact-width', '640');
+    window.sessionStorage.setItem('chat:side-panel-artifact-width', '640');
 
     const layoutNode = document.createElement('div');
     Object.defineProperty(layoutNode, 'clientWidth', {
@@ -148,7 +149,7 @@ describe('chat side panel controller', () => {
   it('keeps artifact fullscreen scoped to the artifacts tab and exits when switching away', async () => {
     window.localStorage.setItem('chat:side-panel-tab', 'artifacts');
     window.localStorage.setItem('chat:side-panel-light-width', '360');
-    window.localStorage.setItem('chat:side-panel-artifact-width', '640');
+    window.sessionStorage.setItem('chat:side-panel-artifact-width', '640');
 
     const layoutNode = document.createElement('div');
     Object.defineProperty(layoutNode, 'clientWidth', {

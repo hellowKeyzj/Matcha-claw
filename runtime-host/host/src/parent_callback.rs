@@ -52,7 +52,6 @@ impl ParentShellAction {
 pub enum ParentGatewayEventName {
     GatewayLifecycle,
     GatewayNotification,
-    SessionUpdate,
     TaskSnapshot,
     GatewayChannelStatus,
     GatewayError,
@@ -64,7 +63,6 @@ impl ParentGatewayEventName {
         match self {
             Self::GatewayLifecycle => "gateway:lifecycle",
             Self::GatewayNotification => "gateway:notification",
-            Self::SessionUpdate => "session:update",
             Self::TaskSnapshot => "task:snapshot",
             Self::GatewayChannelStatus => "gateway:channel-status",
             Self::GatewayError => "gateway:error",
@@ -136,7 +134,6 @@ impl TryFrom<&str> for ParentGatewayEventName {
         let event_name = match value {
             "gateway:lifecycle" => Self::GatewayLifecycle,
             "gateway:notification" => Self::GatewayNotification,
-            "session:update" => Self::SessionUpdate,
             "task:snapshot" => Self::TaskSnapshot,
             "gateway:channel-status" => Self::GatewayChannelStatus,
             "gateway:error" => Self::GatewayError,

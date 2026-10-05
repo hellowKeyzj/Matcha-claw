@@ -30,7 +30,7 @@ pub(super) struct PreparedHost {
     pub(super) clawhub_registry: clawhub::ClawHubRegistryClient,
     pub(super) toolchain: Arc<::toolchain::NativeToolchain>,
     pub(super) runtime_host_mcp_executable: PathBuf,
-    pub(super) team_run_mcp_state_dir: PathBuf,
+    pub(super) runtime_host_mcp_state_dir: PathBuf,
     pub(super) sealed_runtime_token: Option<Arc<str>>,
 }
 
@@ -44,7 +44,7 @@ pub(super) struct ProvisionedHost {
     pub(super) clawhub_registry: clawhub::ClawHubRegistryClient,
     pub(super) toolchain: Arc<::toolchain::NativeToolchain>,
     pub(super) runtime_host_mcp_executable: PathBuf,
-    pub(super) team_run_mcp_state_dir: PathBuf,
+    pub(super) runtime_host_mcp_state_dir: PathBuf,
     pub(super) sealed_resource: sealed_resource::SealedResourceModule,
     pub(super) provider_cascade: provider_module::ProviderCascade,
     pub(super) fleet_private_root: PathBuf,
@@ -66,8 +66,8 @@ pub(super) fn prepare_host(input: PrepareHostInput) -> PreparedHost {
     let diagnostics_state_root = open_claw.state_dir.clone();
     let clawhub_registry =
         clawhub::ClawHubRegistryClient::new(diagnostics_state_root.as_path().to_owned());
-    let runtime_host_mcp_executable = open_claw.team_run_mcp_executable.clone();
-    let team_run_mcp_state_dir = open_claw.team_run_mcp_state_dir.clone();
+    let runtime_host_mcp_executable = open_claw.runtime_host_mcp_executable.clone();
+    let runtime_host_mcp_state_dir = open_claw.runtime_host_mcp_state_dir.clone();
     let sealed_runtime_token = open_claw.sealed_token.clone().map(Arc::<str>::from);
     let toolchain = super::resources::provision_native_toolchain(&open_claw);
 
@@ -86,7 +86,7 @@ pub(super) fn prepare_host(input: PrepareHostInput) -> PreparedHost {
         clawhub_registry,
         toolchain,
         runtime_host_mcp_executable,
-        team_run_mcp_state_dir,
+        runtime_host_mcp_state_dir,
         sealed_runtime_token,
     }
 }

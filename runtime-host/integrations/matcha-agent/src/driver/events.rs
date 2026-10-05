@@ -10,66 +10,29 @@ use sessions_module::{
     state::{
         ApprovalPhase, ApprovalView, ItemStatus, RecoveryReason, RunPhase, RuntimeErrorDetail,
         RuntimeErrorKind, RuntimeView, SessionChange, SessionContent, SessionEventBinding,
-        SessionIdentity, SessionItem, SessionProvider, ToolPhase, ToolView,
+        SessionItem, ToolPhase, ToolView,
     },
 };
 
 pub fn matcha_session_event(item: SessionSubscriptionItem) -> Option<SessionIngressEvent> {
     match item {
-        SessionSubscriptionItem::Event(event) => matcha_renderer_event(event),
-        SessionSubscriptionItem::Recovery {
-            route_key,
-            session_key,
-            run_id,
-            recovery,
-        } => matcha_recovery_event(route_key, session_key, run_id, recovery),
+        SessionSubscriptionItem::Event(event) => {
+            let identity = event.identity().clone();
+            let binding = SessionEventBinding::observed(identity.clone(), event.generation(), event.source_epoch(), true)?;
+            let run_id = event.run_id().to_owned();
+            let cursor = event.source_cursor();
+            let changes = matcha_event_changes(event)?;
+            Some(SessionIngressEvent::new(identity, SessionEvent { binding, run_id: Some(run_id), cursor: Some(cursor), changes }))
+        }
+        SessionSubscriptionItem::Recovery { identity, generation, run_id, recovery } => {
+            let cursor = recovery.native_cursor()?;
+            let binding = SessionEventBinding::observed(identity.clone(), generation, recovery.source_epoch(), true)?;
+            Some(SessionIngressEvent::new(identity, SessionEvent {
+                binding, run_id, cursor: Some(cursor.sequence().get()),
+                changes: vec![SessionChange::RecoveryRequired { reason: matcha_recovery_reason(recovery.reason()) }],
+            }))
+        }
     }
-}
-
-fn matcha_renderer_event(event: RendererEventEnvelope) -> Option<SessionIngressEvent> {
-    let route_key = event.route_key().to_owned();
-    let session_key = event.session_key().to_owned();
-    let run_id = event.run_id().to_owned();
-    let cursor = event.source_cursor();
-    let source_epoch = event.source_epoch();
-    let changes = matcha_event_changes(event)?;
-    let binding = SessionEventBinding::new(session_key.clone(), Some(route_key), source_epoch)?;
-    let identity = SessionIdentity::new(session_key, SessionProvider::MatchaAgent, None)?;
-    Some(SessionIngressEvent::new(
-        identity,
-        SessionEvent {
-            binding,
-            run_id: Some(run_id),
-            cursor: Some(cursor),
-            changes,
-        },
-    ))
-}
-
-fn matcha_recovery_event(
-    route_key: String,
-    session_key: String,
-    run_id: String,
-    recovery: crate::session::recovery::SessionRecovery,
-) -> Option<SessionIngressEvent> {
-    let cursor = recovery.native_cursor()?;
-    let binding = SessionEventBinding::new(
-        session_key.clone(),
-        Some(route_key),
-        recovery.source_epoch(),
-    )?;
-    let identity = SessionIdentity::new(session_key, SessionProvider::MatchaAgent, None)?;
-    Some(SessionIngressEvent::new(
-        identity,
-        SessionEvent {
-            binding,
-            run_id: Some(run_id),
-            cursor: Some(cursor.sequence().get()),
-            changes: vec![SessionChange::RecoveryRequired {
-                reason: matcha_recovery_reason(recovery.reason()),
-            }],
-        },
-    ))
 }
 
 fn matcha_recovery_reason(reason: &MatchaRecoveryReason) -> RecoveryReason {
@@ -94,6 +57,7 @@ pub fn matcha_event_changes(event: RendererEventEnvelope) -> Option<Vec<SessionC
         RendererEvent::Run { phase, .. } => Some(vec![SessionChange::RunPhaseChanged {
             run_id,
             phase: match phase {
+                RendererRunPhase::Queued => RunPhase::Queued,
                 RendererRunPhase::Started => RunPhase::Started,
                 RendererRunPhase::WaitingForApproval => RunPhase::WaitingForApproval,
                 RendererRunPhase::CancellationRequested => RunPhase::CancellationRequested,

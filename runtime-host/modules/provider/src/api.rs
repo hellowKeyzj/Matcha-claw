@@ -1,5 +1,7 @@
 use foundation::execution::{CommandRoute, OwnerRuntimeHandle, QueryRoute};
 use platform::call::{CallId, CallReceipt, CallRecorder};
+use platform::trace::{current_session_trace, session_trace};
+use serde_json::json;
 use std::sync::Arc;
 use crate::owner::discovery::{DiscoveryReservation, DiscoveryResult, ProviderDiscoveries};
 
@@ -430,18 +432,33 @@ impl ProviderHandle {
             ProviderCallKind::GenerateText,
             "providerGeneration.generateText",
         )
-        .await?;
+        .await.map_err(|_| {
+            session_trace("provider-generation.call-begin-failed", json!({ "streaming": false }));
+        })?;
+        let provider_call_hash = call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str()));
+        session_trace("provider-generation.call-begun", json!({
+            "providerCallHash": provider_call_hash, "streaming": false,
+        }));
         let (reply, rx) = oneshot::channel();
         self.send_query(ProviderQuery::GenerateText {
             call,
             request,
             cancellation,
+            diagnostic_trace: current_session_trace(),
             stream: None,
             reply,
         })
         .await
-        .map_err(|_| ())?;
-        rx.await.map_err(|_| ())
+        .map_err(|_| {
+            session_trace("provider-generation.send-query-failed", json!({
+                "providerCallHash": provider_call_hash, "streaming": false,
+            }));
+        })?;
+        rx.await.map_err(|_| {
+            session_trace("provider-generation.reply-channel-failed", json!({
+                "providerCallHash": provider_call_hash, "streaming": false,
+            }));
+        })
     }
 
     pub async fn stream_generate_text_cancellable(
@@ -462,18 +479,31 @@ impl ProviderHandle {
                     "providerGeneration.generateText",
                 )
                 .await
-                .map_err(|_| LlmClientError::StreamSink("provider owner unavailable".into()))?;
+                .map_err(|_| {
+                    session_trace("provider-generation.call-begin-failed", json!({ "streaming": true }));
+                    LlmClientError::StreamSink("provider owner unavailable".into())
+                })?;
+                let provider_call_hash = call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str()));
+                session_trace("provider-generation.call-begun", json!({
+                    "providerCallHash": provider_call_hash, "streaming": true,
+                }));
                 let (stream, mut events) = mpsc::channel::<ProviderStreamMessage>(1);
                 let (reply, rx) = oneshot::channel();
                 self.send_query(ProviderQuery::GenerateText {
                     call,
                     request,
                     cancellation: cancellation.clone(),
+                    diagnostic_trace: current_session_trace(),
                     stream: Some(stream),
                     reply,
                 })
                 .await
-                .map_err(|_| LlmClientError::StreamSink("provider owner unavailable".into()))?;
+                .map_err(|_| {
+                    session_trace("provider-generation.send-query-failed", json!({
+                        "providerCallHash": provider_call_hash, "streaming": true,
+                    }));
+                    LlmClientError::StreamSink("provider owner unavailable".into())
+                })?;
                 while let Some(message) = events.recv().await {
                     let (event, ack) = match message {
                         ProviderStreamMessage::Event(event, ack) => (event, ack),
@@ -487,7 +517,12 @@ impl ProviderHandle {
                         }
                     }
                 }
-                rx.await.map_err(|_| LlmClientError::StreamSink("provider owner unavailable".into()))
+                rx.await.map_err(|_| {
+                    session_trace("provider-generation.reply-channel-failed", json!({
+                        "providerCallHash": provider_call_hash, "streaming": true,
+                    }));
+                    LlmClientError::StreamSink("provider owner unavailable".into())
+                })
             } => outcome,
         }
     }
@@ -793,6 +828,7 @@ pub(crate) enum ProviderQuery {
         call: Option<ProviderCall>,
         request: ProviderTextGenerationRequest,
         cancellation: CancellationToken,
+        diagnostic_trace: Option<String>,
         stream: Option<mpsc::Sender<ProviderStreamMessage>>,
         reply: oneshot::Sender<ProviderTextGenerationOutcome>,
     },
@@ -865,13 +901,13 @@ impl ProviderQuery {
             | Self::GetAccount { .. }
             | Self::ListModels { .. }
             | Self::SelectableModels { .. }
-            | Self::ListRouting { .. } => QueryRoute::Direct,
+            | Self::ListRouting { .. }
+            | Self::GenerateText { .. } => QueryRoute::Direct,
             Self::SelectSessionModel { .. }
             | Self::SelectMatchaSessionModelRuntime { .. }
             | Self::AcceptSessionRuntimeModels { .. }
             | Self::SelectSessionModelRebound { .. }
-            | Self::TextGenerationModelLimits { .. }
-            | Self::GenerateText { .. } => QueryRoute::Global,
+            | Self::TextGenerationModelLimits { .. } => QueryRoute::Global,
         }
     }
 }

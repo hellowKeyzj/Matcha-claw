@@ -167,9 +167,15 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
             if endpoint != NativeEndpoint::OpenClawLocal {
                 return Outcome::Unsupported;
             }
+            let agent_name = match export_agent_name(shared, endpoint, &agent_id).await {
+                Ok(name) => name,
+                Err(outcome) => return outcome,
+            };
             let sealed_agents = Arc::clone(&shared.sealed_agents);
-            return match tokio::task::spawn_blocking(move || sealed_agents.export_package(agent_id))
-                .await
+            return match tokio::task::spawn_blocking(move || {
+                sealed_agents.export_package(agent_id, agent_name)
+            })
+            .await
             {
                 Ok(result) => sealed_outcome(result, Outcome::PackageExported),
                 Err(_) => Outcome::Unavailable,
@@ -184,9 +190,18 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
             if endpoint != NativeEndpoint::OpenClawLocal {
                 return Outcome::Unsupported;
             }
+            let agent_name = match export_agent_name(shared, endpoint, &agent_id).await {
+                Ok(name) => name,
+                Err(outcome) => return outcome,
+            };
             let sealed_agents = Arc::clone(&shared.sealed_agents);
             return match tokio::task::spawn_blocking(move || {
-                sealed_agents.export_cloud_package(agent_id, cloud_public_key, cloud_key_id)
+                sealed_agents.export_cloud_package(
+                    agent_id,
+                    agent_name,
+                    cloud_public_key,
+                    cloud_key_id,
+                )
             })
             .await
             {
@@ -234,6 +249,34 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
             project_sealed_state(&*shared.sealed_agents, outcome)
         }
     }
+}
+
+async fn export_agent_name(
+    shared: &SubagentShared,
+    endpoint: NativeEndpoint,
+    agent_id: &str,
+) -> Result<String, Outcome> {
+    let Some(ops) = shared.runtime_directory.subagent_ops(endpoint) else {
+        return Err(Outcome::Unsupported);
+    };
+    if !ops.subagent_runtime_ready() {
+        return Err(Outcome::Unavailable);
+    }
+    let outcome = ops.subagents(Command::List { endpoint }).await;
+    let Outcome::Agents { agents, .. } = outcome else {
+        return Err(outcome);
+    };
+    let agent = agents
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or(Outcome::Rejected)?;
+    Ok(agent
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(agent_id)
+        .to_owned())
 }
 
 async fn install_agent_package(
@@ -357,9 +400,10 @@ fn project_sealed_state(sealed_agents: &dyn SealedAgentStorePort, outcome: Outco
         .iter()
         .map(|agent| agent.id.clone())
         .collect::<Vec<_>>();
-    let sealed = sealed_agents
-        .contains_agents(&agent_ids)
-        .unwrap_or_default();
+    let sealed = match sealed_agents.agents_using_sealed_source(&agent_ids) {
+        Ok(sealed) => sealed,
+        Err(error) => return sealed_error(error),
+    };
     for agent in &mut agents {
         agent.sealed = sealed.iter().any(|sealed| sealed == &agent.id);
     }

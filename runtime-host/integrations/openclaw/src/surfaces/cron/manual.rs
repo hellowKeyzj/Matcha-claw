@@ -14,9 +14,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::gateway::{
     client::{GatewayClient, GatewayClientError},
+    connection::GatewayFrame,
     delivery::{DispatcherError, MutationDelivery},
     dispatcher::Dispatcher,
-    wire::{self, GatewayEvent, RpcRequest},
+    wire::{self, RpcRequest},
 };
 
 use super::provider::CronProvider;
@@ -39,7 +40,7 @@ pub struct CronExecutionAdmission {
     pub(crate) job_id: String,
     pub(crate) run_id: String,
     pub(crate) dispatcher: Dispatcher,
-    pub(crate) events: mpsc::Receiver<GatewayEvent>,
+    pub(crate) events: mpsc::Receiver<GatewayFrame>,
     pub(crate) terminal: Option<CronExecutionStatus>,
 }
 
@@ -183,7 +184,7 @@ async fn receive_run_receipt(
 }
 
 fn drain_early_terminal(
-    events: &mut mpsc::Receiver<GatewayEvent>,
+    events: &mut mpsc::Receiver<GatewayFrame>,
     job_id: &str,
     run_id: &str,
 ) -> Option<CronExecutionStatus> {
@@ -199,7 +200,14 @@ fn drain_early_terminal(
         .find_map(|event| terminal_status(event, job_id, run_id))
 }
 
-fn terminal_status(event: GatewayEvent, job_id: &str, run_id: &str) -> Option<CronExecutionStatus> {
+fn terminal_status(frame: GatewayFrame, job_id: &str, run_id: &str) -> Option<CronExecutionStatus> {
+    let event = match frame {
+        GatewayFrame::Event(event) => event,
+        GatewayFrame::Response { response, reply } => {
+            let _ = reply.send(Ok(response));
+            return None;
+        }
+    };
     wire::cron::decode_run_finished_event(event, job_id, run_id)
         .ok()
         .flatten()
@@ -230,7 +238,7 @@ async fn read_terminal_from_native_history(
 }
 
 async fn receive_terminal(
-    events: &mut mpsc::Receiver<GatewayEvent>,
+    events: &mut mpsc::Receiver<GatewayFrame>,
     job_id: &str,
     run_id: &str,
     cancellation: CancellationToken,

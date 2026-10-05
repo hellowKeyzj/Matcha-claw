@@ -1,4 +1,4 @@
-import type { RendererEventRouteRegistry } from '../main/renderer-event-routes';
+import type { RendererSessionObservationRegistry } from '../main/renderer-event-routes';
 import type { HostEventBus } from './event-bus';
 import type { RuntimeHostTransports } from '../main/runtime-host-delivery/transport/host-api-transports';
 import type { ProviderCredentialStatusTransport } from '../main/ipc/provider-private-auth';
@@ -16,7 +16,7 @@ export interface HostApiContext {
   cloudAccountService?: CloudAccountService;
   eventBus: HostEventBus;
   runtimeHost: RuntimeHostLifecycle;
-  rendererEventRoutes: RendererEventRouteRegistry;
+  sessionObservers: RendererSessionObservationRegistry;
   runtimeHostTransports: RuntimeHostTransports;
   providerCredentialStatusTransport: ProviderCredentialStatusTransport;
   credentialWriteAdapter?: RemoteFleetCredentialWriteAdapter;
@@ -32,9 +32,10 @@ export type FileApiContext = RuntimeHostTransportContext<
   'workspaceTextTransport' | 'workspaceBinaryTransport' | 'workspaceDirectoryTransport' | 'workspaceWriteTransport'
 >;
 
-export type SessionApiContext = Pick<HostApiContext, 'runtimeHost' | 'rendererEventRoutes'> & RuntimeHostTransportContext<
+export type SessionApiContext = Pick<HostApiContext, 'runtimeHost' | 'sessionObservers'> & RuntimeHostTransportContext<
   | 'sessionListTransport'
   | 'sessionTimelineTransport'
+  | 'sessionObservationTransport'
   | 'sessionContentTransport'
   | 'sessionAbortTransport'
   | 'sessionCreateTransport'

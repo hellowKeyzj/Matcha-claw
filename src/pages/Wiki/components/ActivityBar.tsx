@@ -5,12 +5,15 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { WikiSourceTask, WikiStatus } from '../wiki-model';
-import { formatDateTime } from '../wiki-model';
+import { formatDateTime, isActiveSourceTask } from '../wiki-model';
+import { SourceTaskProgress } from './SourceTaskProgress';
 
 export type ActivityBarProps = Readonly<{
   status: WikiStatus;
   sourceTasks: readonly WikiSourceTask[];
   busy: string | null;
+  sourceTasksError: string | null;
+  cancellingSourcePaths: ReadonlySet<string>;
   onLoadSourceTasks(): void;
   onCancelSourceTask(sourcePath: string): void;
 }>;
@@ -27,10 +30,6 @@ function isRunningStatus(status: string): boolean {
   return normalizedStatus === 'running' || normalizedStatus === 'processing';
 }
 
-function canCancelSourceTask(task: WikiSourceTask): boolean {
-  return task.cancelRequestedAtMs === null && ['queued', 'pending', 'running', 'processing', 'retrying'].includes(task.status.toLowerCase());
-}
-
 function statusBadgeVariant(status: string) {
   const normalizedStatus = status.toLowerCase();
   if (normalizedStatus === 'done' || normalizedStatus === 'completed' || normalizedStatus === 'success') return 'success';
@@ -41,14 +40,15 @@ function statusBadgeVariant(status: string) {
 
 export function ActivityBar(props: ActivityBarProps): JSX.Element {
   const { t } = useTranslation('wiki');
-  const { status, sourceTasks, busy, onLoadSourceTasks, onCancelSourceTask } = props;
+  const { status, sourceTasks, busy, sourceTasksError, cancellingSourcePaths, onLoadSourceTasks, onCancelSourceTask } = props;
   const [expanded, setExpanded] = useState(false);
   const failedCount = sourceTasks.filter((task) => isFailedStatus(task.status)).length;
-  const runningCount = sourceTasks.filter((task) => isRunningStatus(task.status)).length;
+  const runningCount = sourceTasks.filter(isActiveSourceTask).length;
+  const activeTask = sourceTasks.find((task) => task.status === 'running' && isActiveSourceTask(task)) ?? sourceTasks.find(isActiveSourceTask);
   const recentTasks = [...sourceTasks]
     .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
     .slice(0, RECENT_TASK_LIMIT);
-  const isBusy = busy !== null;
+  const importing = busy === 'import-source' || busy === 'import-folder' || busy === 'refresh-sources';
 
   return (
     <section className="shrink-0 border-t border-border/70 bg-card/95 px-3 py-2">
@@ -57,9 +57,16 @@ export function ActivityBar(props: ActivityBarProps): JSX.Element {
         <ActivityMetric label={t('activity.tasks')} value={sourceTasks.length} />
         <ActivityMetric label={t('activity.failed')} value={failedCount} tone={failedCount > 0 ? 'danger' : undefined} />
         <ActivityMetric label={t('activity.running')} value={runningCount} tone={runningCount > 0 ? 'active' : undefined} />
+        {activeTask ? (
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="max-w-40 truncate" title={activeTask.sourcePath}>{activeTask.sourcePath}</span>
+            <SourceTaskProgress task={activeTask} />
+            {activeTask.cancelRequestedAtMs === null ? <Button size="sm" variant="ghost" className="h-6 px-2" disabled={cancellingSourcePaths.has(activeTask.sourcePath)} onClick={() => onCancelSourceTask(activeTask.sourcePath)}>{t(cancellingSourcePaths.has(activeTask.sourcePath) ? 'sourceProgress.cancelling' : 'common.cancel')}</Button> : null}
+          </div>
+        ) : importing ? <span className="inline-flex items-center gap-2"><Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" />{t('sourceProgress.waiting')}</span> : null}
         <div className="ml-auto flex items-center gap-1.5">
-          <Button size="icon" variant="ghost" className="h-7 w-7 rounded-full" onClick={onLoadSourceTasks} disabled={isBusy} title={t('activity.refresh')}>
-            {isBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+          <Button size="icon" variant="ghost" className="h-7 w-7 rounded-full" onClick={onLoadSourceTasks} title={t('activity.refresh')}>
+            <RefreshCw className="h-3.5 w-3.5" />
           </Button>
           <Button size="icon" variant="ghost" className="h-7 w-7 rounded-full" onClick={() => setExpanded((value) => !value)} title={t('activity.details')}>
             <ChevronUp className={cn('h-3.5 w-3.5 transition-transform', !expanded && 'rotate-180')} />
@@ -67,19 +74,19 @@ export function ActivityBar(props: ActivityBarProps): JSX.Element {
         </div>
       </div>
 
+      {sourceTasksError ? <div role="status" className="mt-1 text-xs text-destructive">{sourceTasksError}</div> : null}
       {expanded ? (
         <div className="mt-2 border-t border-border/70 pt-2">
           {recentTasks.length > 0 ? (
             <div className="space-y-1">
               {recentTasks.map((task) => (
                 <div key={task.id} className="flex min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-secondary/50">
-                  <Badge variant={statusBadgeVariant(task.status)}>{task.status}</Badge>
-                  <Badge variant="outline">{task.kind}</Badge>
-                  {task.stage ? <span className="shrink-0 text-muted-foreground capitalize">{task.stage}</span> : null}
-                  {task.progress !== null ? <span className="shrink-0 tabular-nums text-muted-foreground">{task.progress}%</span> : null}
+                  <Badge variant={statusBadgeVariant(task.status)}>{t(`sourceProgress.status.${task.status}`, { defaultValue: task.status })}</Badge>
+                  <Badge variant="outline">{t(`sourceProgress.kind.${task.kind}`, { defaultValue: task.kind })}</Badge>
+                  <SourceTaskProgress task={task} />
                   <span className="min-w-0 flex-1 truncate text-foreground" title={task.sourcePath}>{task.sourcePath}</span>
                   <span className="shrink-0 text-muted-foreground">{formatDateTime(task.updatedAtMs, t('time.unrecorded'))}</span>
-                  {canCancelSourceTask(task) ? <Button size="sm" variant="ghost" className="h-6 px-2" disabled={isBusy} onClick={() => onCancelSourceTask(task.sourcePath)}>{t('common.cancel')}</Button> : null}
+                  {isActiveSourceTask(task) && task.cancelRequestedAtMs === null ? <Button size="sm" variant="ghost" className="h-6 px-2" disabled={cancellingSourcePaths.has(task.sourcePath)} onClick={() => onCancelSourceTask(task.sourcePath)}>{t(cancellingSourcePaths.has(task.sourcePath) ? 'sourceProgress.cancelling' : 'common.cancel')}</Button> : null}
                   {task.error ? <AlertCircle className="h-3.5 w-3.5 shrink-0 text-destructive" aria-label={task.error} /> : null}
                 </div>
               ))}

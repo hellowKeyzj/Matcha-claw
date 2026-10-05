@@ -5,6 +5,7 @@
  */
 import { create } from 'zustand';
 import { createIdleResourceStatusState } from '@/lib/resource-state';
+import { useComposerDraftStore } from '../composer-drafts';
 import { hostSessionApprovals, hostSessionRename, hostSessionResolveApproval } from '@/lib/host-api';
 import {
   isRuntimeEndpointDirectoryPending,
@@ -19,7 +20,7 @@ import {
   groupApprovalsBySession,
 } from './approval-handlers';
 import { executeHistoryLoad } from './history-load-execution';
-import { CHAT_HISTORY_LOADING_TIMEOUT_MS } from './history-constants';
+import { CHAT_HISTORY_FULL_LIMIT, CHAT_HISTORY_LOADING_TIMEOUT_MS } from './history-constants';
 import { executeStoreSend } from './send-handlers';
 import {
   executeCleanupEmptySession,
@@ -51,16 +52,21 @@ import {
   type ChatSessionRuntimeEndpointTarget,
   type ChatStoreState,
 } from './types';
-import { getSessionMeta, getSessionRuntime, patchSessionMeta } from './store-state-helpers';
+import { applySessionView, getSessionMeta, getSessionRuntime, patchSessionMeta } from './store-state-helpers';
+import { observeChatSession, releaseChatSession } from '@/services/runtime/session-runtime';
 import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, findSessionRecordKey, resolveSessionOperationTarget, sameRuntimeEndpointScope } from './session-identity';
 import {
   buildSessionIdentityKey,
+  assertSessionIdentity,
+  type SessionIdentity,
   type AgentScope,
   type RuntimeEndpointRef,
 } from '../../types/desktop/runtime-address';
 import type { RuntimeEndpointSummary } from '../../types/runtime-topology';
+import type { SessionView } from '../../types/session/snapshot';
 import { finishChatRunTelemetry } from './telemetry';
 import { buildRuntimeErrorDismissMarker } from './runtime-error-view';
+import { isSessionTraceEnabled, logSessionTrace, summarizeError, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
 
 function isStaleApprovalResolveError(message: string): boolean {
   return /not found|expired|already resolved|unknown approval|invalid approval/i.test(message);
@@ -212,6 +218,122 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
   const runtimeKernel = createChatStoreKernel(set);
   const { beginMutating, finishMutating, historyRuntime, sessionRunCache } = runtimeKernel;
   let sessionRuntimeBootstrapSequence = 0;
+  const observations = new Map<string, {
+    identity: SessionIdentity;
+    leaseId: string;
+    requestSequence: number;
+    request?: Promise<SessionView | null>;
+    historyTask?: Promise<void>;
+    watermark?: { epoch: number; seq: number };
+  }>();
+  const releaseObservation = async (identity: SessionIdentity, leaseId: string) => {
+    const key = buildSessionIdentityKey(identity);
+    if (observations.get(key)?.leaseId === leaseId) observations.delete(key);
+    await releaseChatSession({ sessionIdentity: identity, leaseId });
+  };
+  const observeHistory = (identity: SessionIdentity, options: { timeoutMs?: number; traceId?: string | null }) => {
+    const observation = observations.get(buildSessionIdentityKey(identity));
+    if (!observation) return Promise.resolve(null);
+    if (observation.request) return observation.request;
+    const key = buildSessionIdentityKey(identity);
+    const recordKey = findSessionRecordKey(get(), identity);
+    const generation = recordKey ? sessionRunCache.getSendGeneration(recordKey) : null;
+    const requestSequence = ++observation.requestSequence;
+    const startedAt = isSessionTraceEnabled() ? performance.now() : null;
+    const task = (async () => {
+      if (isSessionTraceEnabled()) logSessionTrace('session.observe.request', options.traceId, {
+        identity: summarizeSessionIdentity(identity), leaseHash: summarizeIdentifier(observation.leaseId).hash,
+        requestSequence, generation, limit: CHAT_HISTORY_FULL_LIMIT,
+      });
+      let result: Awaited<ReturnType<typeof observeChatSession>>;
+      try {
+        result = await observeChatSession({ sessionIdentity: identity, leaseId: observation.leaseId, limit: CHAT_HISTORY_FULL_LIMIT }, options);
+      } catch (error) {
+        if (isSessionTraceEnabled()) logSessionTrace('session.observe.error', options.traceId, {
+          identity: summarizeSessionIdentity(identity), leaseHash: summarizeIdentifier(observation.leaseId).hash,
+          requestSequence, requestElapsedMs: startedAt === null ? null : performance.now() - startedAt,
+          current: observations.get(key) === observation, ...summarizeError(error),
+        });
+        throw error;
+      }
+      if ('outcome' in result || observations.get(key) !== observation) {
+        if (isSessionTraceEnabled()) logSessionTrace('session.observe.drop', options.traceId, {
+          identity: summarizeSessionIdentity(identity), leaseHash: summarizeIdentifier(observation.leaseId).hash,
+          requestSequence, requestElapsedMs: startedAt === null ? null : performance.now() - startedAt,
+          reason: 'outcome' in result ? 'observation-released' : 'observation-replaced',
+        });
+        if ('view' in result) await releaseChatSession({ sessionIdentity: identity, leaseId: observation.leaseId });
+        return null;
+      }
+      if (isSessionTraceEnabled()) logSessionTrace('session.observe.response', options.traceId, {
+        identity: summarizeSessionIdentity(identity), leaseHash: summarizeIdentifier(observation.leaseId).hash,
+        requestSequence, requestElapsedMs: startedAt === null ? null : performance.now() - startedAt,
+        epoch: result.view.epoch, seq: result.view.seq, cursor: result.view.cursor,
+      });
+      return result.view;
+    })();
+    observation.request = task;
+    void task.finally(() => { if (observation.request === task) observation.request = undefined; }).catch(() => undefined);
+    return task;
+  };
+  const refreshObservation = async (identity: SessionIdentity, leaseId: string, cause: 'observe' | 'resync' = 'observe', watermark?: { epoch: number; seq: number }) => {
+    const tracing = isSessionTraceEnabled();
+    let requestElapsedMs: number | null = null;
+    const trace = (stage: string, extra: Record<string, unknown> = {}) => {
+      if (isSessionTraceEnabled()) logSessionTrace(stage, 'session-observation-boundary', {
+        identity: summarizeSessionIdentity(identity), leaseHash: summarizeIdentifier(leaseId).hash, cause, requestedWatermark: watermark ?? null, requestElapsedMs, ...extra,
+      });
+    };
+    const identityKey = buildSessionIdentityKey(identity);
+    const observation = observations.get(identityKey);
+    if (!observation || observation.leaseId !== leaseId) { trace('session.observe.drop', { reason: 'lease-not-current' }); return; }
+    const requestSequence = ++observation.requestSequence;
+    const recordKey = findSessionRecordKey(get(), identity);
+    if (!recordKey) { trace('session.observe.drop', { reason: 'record-not-found', requestSequence }); return; }
+    const generation = sessionRunCache.getSendGeneration(recordKey);
+    const recordIdentity = get().loadedSessions[recordKey]?.meta.sessionIdentity;
+    const isCurrent = () => observations.get(identityKey) === observation
+      && observation.requestSequence === requestSequence
+      && get().loadedSessions[recordKey]?.meta.sessionIdentity === recordIdentity
+      && sessionRunCache.getSendGeneration(recordKey) === generation;
+    const dropReason = () => observations.get(identityKey) !== observation ? 'observation-replaced'
+      : observation.requestSequence !== requestSequence ? 'request-superseded'
+      : get().loadedSessions[recordKey]?.meta.sessionIdentity !== recordIdentity ? 'record-identity-changed' : 'send-generation-changed';
+    if (isSessionTraceEnabled()) trace('session.observe.request', { requestSequence, generation, recordKey: summarizeIdentifier(recordKey) });
+    const requestStartedAt = tracing ? performance.now() : 0;
+    try {
+      const observationResult = await observeChatSession({ sessionIdentity: identity, leaseId });
+      requestElapsedMs = tracing ? performance.now() - requestStartedAt : null;
+      if ('outcome' in observationResult) {
+        trace('session.observe.drop', { requestSequence, generation, reason: 'observation-released' });
+        return;
+      }
+      const { view } = observationResult;
+      trace('session.observe.response', { requestSequence, generation, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
+      if (observations.get(identityKey) !== observation) {
+        trace('session.observe.drop', { requestSequence, reason: 'observation-replaced', epoch: view.epoch, seq: view.seq, cursor: view.cursor });
+        await releaseChatSession({ sessionIdentity: identity, leaseId });
+        return;
+      }
+      if (!isCurrent()) { trace('session.observe.drop', { requestSequence, reason: dropReason(), epoch: view.epoch, seq: view.seq, cursor: view.cursor }); return; }
+      const applyStartedAt = tracing ? performance.now() : 0;
+      const result = applySessionView({ set, get }, view);
+      const applyElapsedMs = tracing ? performance.now() - applyStartedAt : null;
+      if (isSessionTraceEnabled()) trace('session.observe.apply', { requestSequence, applyElapsedMs, status: result.status, reason: 'reason' in result ? summarizeIdentifier(result.reason) : null, epoch: view.epoch, seq: view.seq, cursor: view.cursor });
+      if ((result.status === 'applied' || result.status === 'duplicate')
+        && view.items !== 'unknown' && view.items !== 'unavailable') {
+        set((state) => ({ loadedSessions: patchSessionMeta(state, recordKey, { historyStatus: 'ready' }) }));
+      }
+    } catch (error) {
+      if (tracing && requestElapsedMs === null) requestElapsedMs = performance.now() - requestStartedAt;
+      if (isSessionTraceEnabled()) trace('session.observe.error', { requestSequence, current: isCurrent(), reason: isCurrent() ? null : dropReason(), ...summarizeError(error) });
+      if (!isCurrent()) return;
+      if (get().currentSessionKey === recordKey) {
+        set({ error: error instanceof Error ? error.message : String(error) });
+      }
+      throw error;
+    }
+  };
   const sessionInput = {
     set,
     get,
@@ -242,6 +364,53 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     mutating: false,
     error: null,
     showThinking: true,
+    observeSession: (identity, leaseId = crypto.randomUUID()) => {
+      observations.set(buildSessionIdentityKey(identity), { identity, leaseId, requestSequence: 0 });
+      if (identity.endpoint.kind !== 'native-runtime' || identity.endpoint.runtimeAdapterId !== 'openclaw') return { leaseId, ready: refreshObservation(identity, leaseId) };
+      const recordKey = findSessionRecordKey(get(), identity);
+      return { leaseId, ready: recordKey ? get().loadHistory({
+        sessionKey: recordKey,
+        mode: getSessionMeta(get(), recordKey).historyStatus === 'ready' || get().loadedSessions[recordKey]?.items.length ? 'quiet' : 'active',
+        scope: get().currentSessionKey === recordKey ? 'foreground' : 'background',
+        reason: 'chat_init_cold_start',
+      }) : Promise.resolve() };
+    },
+    releaseSession: releaseObservation,
+    resyncSession: async (event) => {
+      const drop = (reason: string) => { if (isSessionTraceEnabled()) logSessionTrace('session.resync.drop', 'session-resync-boundary', { reason }); };
+      if (!event || typeof event !== 'object' || Array.isArray(event)) { drop('invalid-event-shape'); return; }
+      const value = event as Record<string, unknown>;
+      if (Object.keys(value).length !== 3
+        || !Number.isSafeInteger(value.epoch) || (value.epoch as number) < 1
+        || !Number.isSafeInteger(value.seq) || (value.seq as number) < 0) { drop('invalid-watermark'); return; }
+      try {
+        assertSessionIdentity(value.identity);
+      } catch {
+        drop('invalid-identity');
+        return;
+      }
+      const observation = observations.get(buildSessionIdentityKey(value.identity));
+      if (isSessionTraceEnabled()) logSessionTrace('session.resync.request', 'session-resync-boundary', {
+        identity: summarizeSessionIdentity(value.identity), epoch: value.epoch, seq: value.seq,
+        accepted: !!observation, reason: observation ? null : 'no-active-observation',
+      });
+      if (observation?.identity.endpoint.kind === 'native-runtime' && observation.identity.endpoint.runtimeAdapterId === 'openclaw') {
+        const key = buildSessionIdentityKey(observation.identity);
+        const covered = () => observation.watermark && (observation.watermark.epoch > (value.epoch as number)
+          || observation.watermark.epoch === value.epoch && observation.watermark.seq >= (value.seq as number));
+        if (observations.get(key) !== observation || covered()) return;
+        const recordKey = findSessionRecordKey(get(), observation.identity);
+        if (!recordKey) return;
+        // Let the existing history apply finish before a later frontier supersedes it.
+        while (observation.historyTask) {
+          await observation.historyTask;
+          if (observations.get(key) !== observation || covered()) return;
+        }
+        if (observations.get(key) !== observation || covered()) return;
+        await get().loadHistory({ sessionKey: recordKey, mode: 'quiet',
+          scope: get().currentSessionKey === recordKey ? 'foreground' : 'background', reason: 'session_resync' });
+      } else if (observation) await refreshObservation(observation.identity, observation.leaseId, 'resync', { epoch: value.epoch as number, seq: value.seq as number });
+    },
     bootstrapSessionRuntime: async () => {
       const requestSequence = sessionRuntimeBootstrapSequence + 1;
       sessionRuntimeBootstrapSequence = requestSequence;
@@ -363,20 +532,40 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       if (!normalizedSessionKey) {
         return Promise.resolve();
       }
+      const recordIdentity = get().loadedSessions[normalizedSessionKey]?.meta.sessionIdentity;
+      const generation = sessionRunCache.getSendGeneration(normalizedSessionKey);
+      const isOpenClaw = recordIdentity?.endpoint.kind === 'native-runtime' && recordIdentity.endpoint.runtimeAdapterId === 'openclaw';
+      const observation = isOpenClaw ? observations.get(buildSessionIdentityKey(recordIdentity)) : undefined;
+      if (isOpenClaw && !observation && request.reason === 'same_session_refresh') return Promise.resolve();
+      if (observation?.historyTask) return observation.historyTask;
       const task = executeHistoryLoad({
         set,
         get,
         historyRuntime,
         loadingTimeoutMs: CHAT_HISTORY_LOADING_TIMEOUT_MS,
+        ...(observation ? {
+          observeHistory,
+          isObservationCurrent: () => observations.get(buildSessionIdentityKey(recordIdentity!)) === observation
+            && sessionRunCache.getSendGeneration(normalizedSessionKey) === generation,
+          onObservedViewApplied: (view: SessionView) => {
+            if (observations.get(buildSessionIdentityKey(view.identity)) === observation) observation.watermark = { epoch: view.epoch, seq: view.seq };
+          },
+        } : {}),
       }, {
         ...request,
         sessionKey: normalizedSessionKey,
       });
+      if (observation) {
+        observation.historyTask = task;
+        void task.finally(() => { if (observation.historyTask === task) observation.historyTask = undefined; }).catch(() => undefined);
+      }
       historyRuntime.setHistoryLoadInFlight(normalizedSessionKey, task);
       void task.then(
         () => {
           historyRuntime.clearHistoryLoadInFlight(normalizedSessionKey, task);
-          syncSessionRuntimeProjectionAfterHistoryLoad(set, normalizedSessionKey);
+          if (get().loadedSessions[normalizedSessionKey]?.meta.sessionIdentity === recordIdentity) {
+            syncSessionRuntimeProjectionAfterHistoryLoad(set, normalizedSessionKey);
+          }
         },
         () => historyRuntime.clearHistoryLoadInFlight(normalizedSessionKey, task),
       );
@@ -387,15 +576,25 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     setViewportAnchorItemKey: (itemKey, sessionKey) => {
       executeSetViewportAnchorItemKey(sessionInput, itemKey, sessionKey);
     },
-    sendMessage: async (text, attachments) => {
-      if (get().currentConversation?.kind === 'draft') {
-        await executeNewSession(sessionInput);
+    sendMessage: async (text, attachments, intent, operationId) => {
+      const conversation = get().currentConversation;
+      if (conversation?.kind === 'draft') {
+        const draftKey = `${conversation.runtimeScopeKey}:agent:${conversation.agentId}:draft`;
+        const mode = intent ? useComposerDraftStore.getState().modes[draftKey] : null;
+        const created = await executeNewSession(sessionInput, undefined, undefined, mode ? { key: draftKey, modeId: mode.id } : undefined);
+        const createdIdentity = created ? get().loadedSessions[created.sessionRecordKey]?.meta.sessionIdentity : null;
+        if (!created || get().currentSessionKey !== created.sessionRecordKey || !createdIdentity
+          || buildSessionIdentityKey(createdIdentity) !== buildSessionIdentityKey(created.sessionIdentity)) {
+          return { accepted: false, reason: 'missing-session', error: 'Conversation changed or session creation failed',
+            ...(intent && created ? { sessionRecordKey: created.sessionRecordKey } : {}) };
+        }
       }
       if (!get().currentSessionKey) {
         const error = get().error ?? 'Session runtime is not ready';
         return { accepted: false, reason: 'missing-session', error };
       }
-      return executeStoreSend({
+      const sessionRecordKey = get().currentSessionKey;
+      const result = await executeStoreSend({
         set,
         get,
         sessionRunCache,
@@ -403,7 +602,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         finishMutating,
         text,
         attachments,
+        intent,
+        operationId,
       });
+      return intent ? { ...result, sessionRecordKey } : result;
     },
     abortRun: async () => {
       await executeStoreAbortRun({

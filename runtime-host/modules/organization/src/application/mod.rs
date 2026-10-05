@@ -1,8 +1,11 @@
 pub mod decision;
+pub(crate) mod design;
+pub(crate) mod design_prompt;
 pub mod projection;
 pub mod review;
 pub mod start_gate_control;
 pub mod task_board;
+pub(crate) mod team_mcp;
 pub mod team_message;
 pub mod team_runtime;
 pub mod team_runtime_control;

@@ -8,11 +8,15 @@ use crate::state::{
 };
 
 pub(crate) fn session_view(view: &SessionView) -> Value {
+    if crate::trace::enabled() {
+        crate::trace::log_unscoped("sessions.public.view", crate::trace::view_shape(view));
+    }
     json!({
         "sessionKey": &view.session_key,
         "endpointSessionId": &view.endpoint_session_id,
         "ownership": &view.ownership,
         "modelState": &view.model_state,
+        "goal": &view.goal,
         "identity": identity_value(view),
         "epoch": view.epoch,
         "seq": view.seq,
@@ -191,18 +195,15 @@ fn runtime_error_detail(detail: &RuntimeErrorDetail) -> Value {
 }
 
 fn identity_value(view: &SessionView) -> Value {
-    let mut identity = json!({
+    json!({
         "sessionKey": &view.identity.session_key,
+        "agentId": &view.identity.agent_id,
         "endpoint": {
             "kind": &view.identity.endpoint.kind,
             "runtimeAdapterId": session_provider(view.identity.endpoint.runtime_adapter_id),
             "runtimeInstanceId": &view.identity.endpoint.runtime_instance_id,
         },
-    });
-    if let Some(agent_id) = &view.identity.agent_id {
-        identity["agentId"] = json!(agent_id);
-    }
-    identity
+    })
 }
 
 fn window_value(window: &SessionWindow) -> Value {
@@ -360,6 +361,7 @@ mod tests {
             endpoint_session_id: Some("session-1".to_owned()),
             ownership: None,
             model_state: None,
+            goal: crate::goal::SessionGoalView::Unknown,
             identity: SessionIdentity::new(
                 "agent:main:demo",
                 SessionProvider::OpenClaw,

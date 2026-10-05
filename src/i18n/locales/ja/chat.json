@@ -25,10 +25,23 @@
         "creativeTasksDesc": "ライティング、ブレスト、アイデア"
     },
     "input": {
+        "teamDesignStart": "Team実行グラフを設計",
+        "teamDesignInProgress": "実行グラフを設計中",
+        "teamDesignExit": "実行グラフを保持して設計を終了",
+        "teamDesignExitWaiting": "現在の応答を停止してから設計を終了してください",
+        "teamDesignActive": "実行を開始せずにTeamのタスクと連携を調整",
         "gatewayDisconnectedPlaceholder": "ゲートウェイ未接続...",
         "messagePlaceholder": "メッセージ、/ でスキル、Enter 送信、Shift+Enter 改行",
         "approvalWaitingPlaceholder": "承認待ちです...",
         "pickModel": "モデルを選択",
+        "pickWiki": "ナレッジベースを選択",
+        "wikiPickerLabel": "ナレッジベース：{{name}}",
+        "wikiLoading": "ナレッジベースを読み込み中…",
+        "wikiEmpty": "ナレッジベースがありません。Wikiページで作成するか開いてください。",
+        "wikiRetry": "読み込みに失敗しました。再試行",
+        "wikiLoadFailed": "ナレッジベースを読み込めませんでした。再試行してください。",
+        "wikiSwitched": "ナレッジベース「{{name}}」に切り替えました",
+        "wikiSwitchFailed": "ナレッジベースを切り替えられませんでした。再試行してください。",
         "modelPickerTitle": "モデルを切り替え",
         "pickPermissionMode": "権限モードを選択",
         "permissionPickerTitle": "OpenClaw ツール権限を切り替え",
@@ -45,6 +58,12 @@
         "contextUsageTitle": "コンテキスト使用 {{pct}}%（{{detail}}）",
         "imageGenerationActive": "画像を生成中"
     },
+    "goal": {
+        "title": "セッションの目標", "set": "目標を設定", "edit": "目標を編集", "cancel": "目標モードを解除", "placeholder": "目標を入力、Enter で送信、Shift+Enter で改行", "pause": "一時停止", "resume": "再開", "complete": "完了にする", "block": "中断状態にする", "clear": "目標を削除", "more": "その他の目標操作", "refresh": "最新状態を確認", "unknown": "目標の状態は未確認", "note": "説明", "tokens": "{{count}} tokens 使用済み", "budget": "上限 {{count}} tokens", "inlineOnly": "目標モードでは 5 MB 以下のファイルのみ添付できます。大きなファイルやフォルダを削除してください。", "noAttachmentsOnEdit": "編集は目標のみ変更します。添付を削除してください。",
+        "status": { "active": "進行中", "paused": "一時停止中", "blocked": "中断中", "complete": "完了", "budget_limited": "予算上限", "usage_limited": "利用制限" },
+        "errors": { "unknown": "結果は未確認です。本文は保持されています。「最新状態を確認」を押し、再送信しないでください。", "unsupported": "このランタイムは目標に対応していません。対応するランタイムに切り替えるか、目標モードを解除してください。", "unavailable": "目標の操作を利用できません。ランタイムの接続を確認してから再試行してください。", "target_rejected": "ランタイムが目標の操作を拒否しました。最新状態を確認し、現在の応答が終了してから再試行してください。", "empty": "送信する前に目標を入力してください。", "active": "現在の応答は実行中または停止処理中です。終了してから目標を送信してください。", "missing-session": "セッションの準備ができていません。読み込みを待つか、セッションを開き直してから送信してください。", "goal-attachments": "目標には 5 MB 以下のファイルのみ添付できます。大きなファイルやフォルダを削除してから送信してください。", "error": "目標の操作に失敗しました。本文は保持されています。最新状態を確認してから再試行してください。" }
+    },
+    "reuseMessage": "入力欄に入れる",
     "noLogs": "（ログはまだありません）",
     "toolbar": {
         "refresh": "チャットを更新",
