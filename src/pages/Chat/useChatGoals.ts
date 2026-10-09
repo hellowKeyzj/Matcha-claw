@@ -3,7 +3,7 @@ import { hostSessionGoalClear, hostSessionGoalUpdate } from '@/lib/host-api';
 import { useChatStore, type ChatSendAttachment, type ChatSendResult } from '@/stores/chat';
 import { useComposerDraftStore } from '@/stores/composer-drafts';
 import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
-import type { SessionGoalUpdate, SessionGoalOutcome } from '@/types/session-goal';
+import type { SessionGoalView, SessionGoalUpdate, SessionGoalOutcome } from '@/types/session-goal';
 
 type GoalAction = SessionGoalUpdate | { action: 'clear' };
 type GoalTarget = { identity: SessionIdentity; recordKey: string; endpointSessionId: string };
@@ -45,7 +45,7 @@ async function readAuthority({ identity, recordKey, endpointSessionId }: GoalTar
     && before !== undefined && meta.goalReadRevision > before ? meta.goal : null;
 }
 
-export function useChatGoals(identity: SessionIdentity | null, recordKey: string, endpointSessionId: string | null, draftKey: string, enabled: boolean) {
+export function useChatGoals(identity: SessionIdentity | null, recordKey: string, endpointSessionId: string | null, draftKey: string, enabled: boolean, view: SessionGoalView) {
   const mode = useComposerDraftStore((state) => state.modes[draftKey] ?? null);
   const [states, setStates] = useState<Record<string, ActionState>>({});
   const statesRef = useRef(states);
@@ -169,5 +169,7 @@ export function useChatGoals(identity: SessionIdentity | null, recordKey: string
     publish(recordKey, IDLE, mode.id);
   }, [currentState, draftKey, mode, publish, recordKey]);
 
-  return { ...state, mode, begin, submit, cancel, act, refresh };
+  const goal = view.kind === 'known' ? view.goal : null;
+  const dock = view.kind !== 'unsupported' && (goal || state.unknown) ? { goal } : null;
+  return { ...state, dock, mode, begin, submit, cancel, act, refresh };
 }

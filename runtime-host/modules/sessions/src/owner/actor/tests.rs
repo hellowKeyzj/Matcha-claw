@@ -309,6 +309,7 @@ fn event(phase: RunPhase, text: Option<&str>) -> SessionEvent {
             .unwrap(),
         run_id: Some(NATIVE_RUN.into()),
         cursor: None,
+        history_refresh: false,
         changes,
     }
 }

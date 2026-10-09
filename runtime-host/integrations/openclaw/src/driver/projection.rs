@@ -35,6 +35,7 @@ pub fn openclaw_session_event(
                     run_id: None,
                     cursor: delta.source_cursor(),
                     changes: openclaw_canonical_changes(delta.changes()),
+                    history_refresh: false,
                 },
             ))
         }
@@ -53,6 +54,7 @@ pub fn openclaw_session_event(
                     changes: vec![SessionChange::RecoveryRequired {
                         reason: RecoveryReason::NativeUnknown,
                     }],
+                    history_refresh: false,
                 },
             ))
         }
@@ -126,7 +128,7 @@ pub fn openclaw_canonical_changes(changes: &[CanonicalSessionChange]) -> Vec<Ses
             } => {
                 projected.push(SessionChange::ToolUpdated {
                     tool: ToolView {
-                        tool_call_id: tool_id.as_str().to_owned(),
+                        tool_call_id: crate::session::adapters::timeline::tool_call_id(Some(run_id.as_str()), tool_id.as_str()),
                         run_id: Some(run_id.as_str().to_owned()),
                         name: tool_name.clone(),
                         phase: match phase {

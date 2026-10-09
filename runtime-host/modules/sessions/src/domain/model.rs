@@ -1426,6 +1426,13 @@ impl SessionState {
         self.endpoint_session_id.as_deref()
     }
 
+    pub(crate) fn active_run_id(&self) -> Option<&str> {
+        match &self.runtime {
+            SessionFact::Complete(runtime) | SessionFact::Incomplete { facts: runtime, .. } => runtime.active_run_id.as_deref(),
+            SessionFact::Unknown | SessionFact::Unavailable => None,
+        }
+    }
+
     pub fn assistant_text_for_run_id(&self, run_id: &str) -> Option<String> {
         match assistant_turn_for_run_id(&self.items, run_id)? {
             SessionItem::AssistantTurn {
@@ -1694,12 +1701,18 @@ impl SessionState {
             || sync.source_epoch.is_some_and(|epoch| !valid_epoch(epoch))
             || (self.native_source_epoch != baseline.native_source_epoch
                 && self.native_source_epoch != sync.source_epoch)
-            || sync.retired_item_ids.len() > MAX_ITEMS
-            || !sync
-                .retired_item_ids
-                .iter()
-                .enumerate()
-                .all(|(index, id)| valid_id(id) && !sync.retired_item_ids[..index].contains(id))
+            || [
+                (&sync.retired_item_ids, MAX_ITEMS),
+                (&sync.retired_tool_ids, MAX_TOOLS),
+                (&sync.retired_approval_ids, MAX_APPROVALS),
+            ].iter().any(|(ids, limit)| {
+                ids.len() > *limit || !ids.iter().enumerate()
+                    .all(|(index, id)| valid_id(id) && !ids[..index].contains(id))
+            })
+            || list_values(&sync.view.tools).iter()
+                .any(|tool| sync.retired_tool_ids.contains(&tool.tool_call_id))
+            || list_values(&sync.view.approvals).iter()
+                .any(|approval| sync.retired_approval_ids.contains(&approval.approval_id))
             || sync
                 .terminal_runs
                 .iter()
@@ -1740,7 +1753,7 @@ impl SessionState {
             sync.replay_baseline.as_ref().map(|view| &view.tools),
             &sync.view.tools,
             |tool| tool.tool_call_id.as_str(),
-            &[],
+            &sync.retired_tool_ids,
             MAX_TOOLS,
             |tool| !bounded_latest || !self.evictable_observation_tool(tool, list_values(&next.items)),
         );
@@ -1750,7 +1763,7 @@ impl SessionState {
             sync.replay_baseline.as_ref().map(|view| &view.approvals),
             &sync.view.approvals,
             |approval| approval.approval_id.as_str(),
-            &[],
+            &sync.retired_approval_ids,
             MAX_APPROVALS,
             |approval| !bounded_latest || approval.phase == ApprovalPhase::Requested,
         );
@@ -2013,9 +2026,14 @@ impl SessionState {
             };
         }
 
+        let foreign_terminal = foreign_terminal_run(&self.runtime, &changes);
         let mut next = self.clone();
         let mut delta_changes = Vec::with_capacity(changes.len());
         for change in &changes {
+            if foreign_terminal && matches!(change, SessionChange::RuntimeChanged { runtime }
+                if runtime.active_run_id.is_none() && terminal_run_phase(runtime.phase)) {
+                continue;
+            }
             if !next.apply_change(change) {
                 return SessionApplyResult::Rejected {
                     reason: SessionApplyRejection::InvalidChange,
@@ -2194,9 +2212,14 @@ impl SessionState {
             };
         }
 
+        let foreign_terminal = foreign_terminal_run(&self.runtime, &changes);
         let mut next = self.clone();
         let mut delta_changes = Vec::with_capacity(changes.len());
         for change in &changes {
+            if foreign_terminal && matches!(change, SessionChange::RuntimeChanged { runtime }
+                if runtime.active_run_id.is_none() && terminal_run_phase(runtime.phase)) {
+                continue;
+            }
             if !next.apply_change(change) {
                 return SessionApplyResult::Rejected {
                     reason: SessionApplyRejection::InvalidChange,
@@ -2573,7 +2596,30 @@ fn clear_runtime_run_progress(fact: &mut SessionFact<RuntimeView>, run_id: Optio
     }
 }
 
+fn foreign_terminal_run(runtime: &SessionFact<RuntimeView>, changes: &[SessionChange]) -> bool {
+    let mut owner = None;
+    for change in changes {
+        if let SessionChange::RunPhaseChanged { run_id, phase } = change
+            && terminal_run_phase(*phase)
+        {
+            if owner.is_some_and(|owner| owner != run_id.as_str()) { return false; }
+            owner = Some(run_id.as_str());
+        }
+    }
+    match runtime {
+        SessionFact::Complete(runtime) | SessionFact::Incomplete { facts: runtime, .. } => owner
+            .zip(runtime.active_run_id.as_deref()).is_some_and(|(owner, active)| owner != active),
+        SessionFact::Unavailable | SessionFact::Unknown => false,
+    }
+}
+
 fn update_runtime_phase(fact: &mut SessionFact<RuntimeView>, run_id: &str, phase: RunPhase) {
+    if terminal_run_phase(phase)
+        && matches!(fact, SessionFact::Complete(runtime) | SessionFact::Incomplete { facts: runtime, .. }
+            if runtime.active_run_id.as_deref().is_some_and(|active| active != run_id))
+    {
+        return;
+    }
     let current = mem::replace(fact, SessionFact::Unknown);
     let (mut runtime, mut gaps) = match current {
         SessionFact::Complete(runtime) => (runtime, Vec::new()),

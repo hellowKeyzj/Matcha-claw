@@ -66,7 +66,10 @@ export interface SendChatTransportParams {
 }
 
 export type SendChatTransportResult =
-  | { ok: true; runId: string; replayed?: true; projection: SessionProjectionEvent | null }
+  | ({ ok: true; runId: string; replayed?: true; projection: SessionProjectionEvent | null } & (
+    | { outcome: 'queued' }
+    | { outcome: 'succeeded'; status: 'started' | 'in_flight' | 'ok' }
+  ))
   | { ok: false; error: string; outcome?: Exclude<SessionGoalOutcome['outcome'], 'succeeded'> };
 
 export async function sendChatTransport(
@@ -117,12 +120,13 @@ export async function sendChatTransport(
   const normalizedRunId = typeof response.runId === 'string'
     ? response.runId.trim()
     : '';
-  const accepted = normalizedRunId.length > 0 && (
-    response.success === true
-    || response.outcome === 'queued'
-    || response.outcome === 'succeeded'
-  );
-  if (!accepted || params.intent && (response.outcome !== 'succeeded' || !response.goal || response.goal.action !== 'start'
+  const admission = response.outcome === 'queued'
+    ? { outcome: 'queued' as const }
+    : response.outcome === 'succeeded'
+      && (response.status === 'started' || response.status === 'in_flight' || response.status === 'ok')
+      ? { outcome: 'succeeded' as const, status: response.status }
+      : null;
+  if (!admission || !normalizedRunId || params.intent && (response.outcome !== 'succeeded' || response.status !== 'started' || !response.goal || response.goal.action !== 'start'
     || response.goal.status !== 'started' || response.goal.runId !== normalizedRunId
     || response.goal.operationId !== params.idempotencyKey
     || params.endpointSessionId && response.goal.sessionId !== params.endpointSessionId)) {
@@ -133,7 +137,7 @@ export async function sendChatTransport(
       ok: false,
       ...(response.outcome === 'target_rejected' || response.outcome === 'unavailable' || response.outcome === 'unsupported' || response.outcome === 'unknown'
         ? { outcome: response.outcome }
-        : params.intent && (accepted || response.outcome === 'succeeded' || response.success === true) ? { outcome: 'unknown' as const } : {}),
+        : response.outcome === 'queued' || response.outcome === 'succeeded' || response.success === true ? { outcome: 'unknown' as const } : {}),
       error: failureMessage
         ? failureMessage
         : CHAT_SEND_DEFAULT_ERROR,
@@ -141,6 +145,7 @@ export async function sendChatTransport(
   }
   return {
     ok: true,
+    ...admission,
     runId: normalizedRunId,
     ...(params.intent && response.goal?.replayed ? { replayed: true as const } : {}),
     projection: decodeSessionProjectionEvent(response.projection ?? response.snapshot),

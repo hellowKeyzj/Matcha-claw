@@ -151,7 +151,6 @@
   },
   "design": {
     "start": "Design run graph",
-    "active": "Design mode · Edit the current graph without starting execution",
     "readyTitle": "Run graph design is ready",
     "readyDescription": "The current graph version has been validated. Confirming starts this version; further edits invalidate this proposal.",
     "confirm": "Confirm and start",

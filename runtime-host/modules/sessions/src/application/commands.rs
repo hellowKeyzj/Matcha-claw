@@ -52,6 +52,7 @@ pub struct SessionEvent {
     pub binding: SessionEventBinding,
     pub run_id: Option<String>,
     pub cursor: Option<u64>,
+    pub history_refresh: bool,
     pub changes: Vec<super::state::SessionChange>,
 }
 
@@ -132,6 +133,7 @@ pub enum SessionCommand {
     SendCompleted {
         command: SessionSendCommand,
         goal_demand: Option<(String, Option<String>)>,
+        receive_demand_added: bool,
         outcome: SessionSendOutcome,
         reply: oneshot::Sender<SessionSendOutcome>,
         call: Option<crate::call::SessionCall>,

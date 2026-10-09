@@ -3,11 +3,11 @@ import { useTranslation } from 'react-i18next';
 import { ChevronDown, MoreHorizontal, Target } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu';
-import type { SessionGoalView, SessionGoalUpdate } from '@/types/session-goal';
+import type { SessionGoal, SessionGoalUpdate } from '@/types/session-goal';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 
 type Props = {
-  view: SessionGoalView;
+  goal: SessionGoal | null;
   busy: boolean;
   runActive: boolean;
   disabled: boolean;
@@ -17,12 +17,10 @@ type Props = {
   onRefresh: () => void;
 };
 
-export function ChatGoalDock({ view, busy, runActive, disabled, error, onEdit, onAction, onRefresh }: Props) {
+export function ChatGoalDock({ goal, busy, runActive, disabled, error, onEdit, onAction, onRefresh }: Props) {
   const { t } = useTranslation('chat');
   const [expanded, setExpanded] = useState(false);
   const detailsId = useId();
-  if (view.kind === 'unsupported' || view.kind === 'known' && !view.goal) return null;
-  const goal = view.kind === 'known' ? view.goal : null;
   const locked = busy || disabled || !goal;
   return (
     <section aria-label={t('goal.title')} className={`${CHAT_LAYOUT_TOKENS.runtimeDockRail} mb-2 rounded-2xl border border-border/50 bg-background px-3 py-2 text-xs`}>

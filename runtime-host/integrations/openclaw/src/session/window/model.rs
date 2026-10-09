@@ -210,6 +210,43 @@ pub enum MessageContent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisplayPosition {
+    pub source: String,
+    pub raw_seq: u64,
+    pub activity: Option<ActivityPosition>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActivityPosition {
+    pub after_raw_seq: Option<u64>,
+    pub scope_id: String,
+    pub start_order: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamFallbackSource {
+    Segment,
+    Current,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamFallback {
+    pub source: StreamFallbackSource,
+    pub replacement_text: String,
+    pub item_id: Option<String>,
+    pub run_id: Option<String>,
+    pub after_boundary_run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LargeTextFacts {
+    pub text: String,
+    pub content_ref: String,
+    pub total_bytes: u64,
+    pub loaded_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Message {
     role: MessageRole,
     text: String,
@@ -219,10 +256,28 @@ pub struct Message {
     origin: Option<String>,
     tool_call_id: Option<String>,
     run_id: Option<String>,
+    identity_run_id: Option<String>,
+    identity_message_id: Option<String>,
+    identity_sequence: Option<u64>,
+    steer_target_run_id: Option<String>,
+    after_sequence: Option<Option<u64>>,
     sequence: Option<u64>,
     created_at: Option<u64>,
     updated_at: Option<u64>,
-    display_item_id: Option<String>,
+    display_position: Option<DisplayPosition>,
+    stream_fallback: Option<StreamFallback>,
+    has_active_run: Option<bool>,
+    event_run_id: Option<String>,
+    event_client_run_id: Option<String>,
+    has_send_identity: bool,
+    import_sequence_proven: bool,
+    terminal_reply_signature: Option<String>,
+    mirror_origin: Option<String>,
+    run_terminal: bool,
+    is_imported: bool,
+    hidden_control_reply: bool,
+    truncated: bool,
+    large_text: Option<LargeTextFacts>,
 }
 
 impl Message {
@@ -248,21 +303,170 @@ impl Message {
             parent_id,
             origin,
             tool_call_id,
+            identity_run_id: None,
+            identity_message_id: None,
+            identity_sequence: None,
+            steer_target_run_id: None,
+            after_sequence: None,
             run_id,
             sequence,
             created_at,
             updated_at,
-            display_item_id: None,
+            display_position: None,
+            stream_fallback: None,
+            has_active_run: None,
+            event_run_id: None,
+            event_client_run_id: None,
+            has_send_identity: false,
+            import_sequence_proven: false,
+            terminal_reply_signature: None,
+            mirror_origin: None,
+            run_terminal: false,
+            is_imported: false,
+            hidden_control_reply: false,
+            truncated: false,
+            large_text: None,
         }
     }
 
-    pub(crate) fn with_display_item_id(mut self, item_id: Option<String>) -> Self {
-        self.display_item_id = item_id;
+    pub(crate) fn with_identity(
+        mut self,
+        message_id: Option<String>,
+        run_id: Option<String>,
+        sequence: Option<u64>,
+        after_sequence: Option<Option<u64>>,
+    ) -> Self {
+        self.identity_message_id = message_id;
+        self.identity_run_id = run_id;
+        self.identity_sequence = sequence;
+        self.after_sequence = after_sequence;
         self
     }
 
+    pub(crate) fn with_terminal_text(mut self, text: String, after_sequence: Option<u64>) -> Self {
+        self.text = text;
+        let mut replaced = false;
+        self.content.retain_mut(|block| {
+            if let MessageContent::Text { text } = block {
+                if replaced { return false; }
+                *text = self.text.clone();
+                replaced = true;
+            }
+            true
+        });
+        self.after_sequence = Some(after_sequence);
+        self
+    }
+
+    pub(crate) fn identity_message_id(&self) -> Option<&str> { self.identity_message_id.as_deref() }
+    pub(crate) fn identity_run_id(&self) -> Option<&str> { self.identity_run_id.as_deref() }
+    pub(crate) const fn identity_sequence(&self) -> Option<u64> { self.identity_sequence }
+    pub(crate) const fn after_sequence(&self) -> Option<Option<u64>> { self.after_sequence }
+
+    pub(crate) fn with_event_facts(mut self, event_run_id: Option<String>, event_client_run_id: Option<String>, has_send_identity: bool, import_sequence_proven: bool, terminal_reply_signature: Option<String>) -> Self {
+        self.event_run_id = event_run_id;
+        self.event_client_run_id = event_client_run_id;
+        self.has_send_identity = has_send_identity;
+        self.import_sequence_proven = import_sequence_proven;
+        self.terminal_reply_signature = terminal_reply_signature;
+        self
+    }
+
+    pub(crate) fn event_run_id(&self) -> Option<&str> { self.event_run_id.as_deref() }
+    pub(crate) fn event_client_run_id(&self) -> Option<&str> { self.event_client_run_id.as_deref() }
+    pub(crate) const fn has_send_identity(&self) -> bool { self.has_send_identity }
+    pub(crate) const fn import_sequence_proven(&self) -> bool { self.import_sequence_proven }
+    pub(crate) fn terminal_reply_signature(&self) -> Option<&str> { self.terminal_reply_signature.as_deref() }
+
+    pub(crate) fn steer_target_run_id(&self) -> Option<&str> { self.steer_target_run_id.as_deref() }
+
+    pub(crate) fn with_steer_target_run_id(mut self, run_id: Option<String>) -> Self {
+        self.steer_target_run_id = run_id;
+        self
+    }
+
+    pub(crate) fn with_projection_state(
+        mut self,
+        has_active_run: Option<bool>,
+        mirror_origin: Option<String>,
+        run_terminal: bool,
+    ) -> Self {
+        self.has_active_run = has_active_run;
+        self.mirror_origin = mirror_origin;
+        self.run_terminal = run_terminal;
+        self
+    }
+
+    pub const fn has_active_run(&self) -> Option<bool> {
+        self.has_active_run
+    }
+
+    pub fn mirror_origin(&self) -> Option<&str> {
+        self.mirror_origin.as_deref()
+    }
+
+    pub const fn run_terminal(&self) -> bool {
+        self.run_terminal
+    }
+
+    pub(crate) fn with_imported(mut self, is_imported: bool) -> Self {
+        self.is_imported = is_imported;
+        self
+    }
+
+    pub const fn is_imported(&self) -> bool { self.is_imported }
+
+    pub(crate) fn with_hidden_control_reply(mut self, hidden: bool) -> Self {
+        self.hidden_control_reply = hidden;
+        self
+    }
+
+    pub const fn hidden_control_reply(&self) -> bool { self.hidden_control_reply }
+
+    pub(crate) fn with_truncated(mut self, truncated: bool) -> Self {
+        self.truncated = truncated;
+        self
+    }
+
+    pub const fn truncated(&self) -> bool { self.truncated }
+
+    pub fn large_text(&self) -> Option<&LargeTextFacts> { self.large_text.as_ref() }
+
+    pub(crate) fn with_large_text(mut self, facts: LargeTextFacts) -> Self {
+        self.text = facts.text.clone();
+        let mut inserted = false;
+        self.content.retain_mut(|block| {
+            if let MessageContent::Text { text } = block {
+                if inserted { return false; }
+                *text = facts.text.clone();
+                inserted = true;
+            }
+            true
+        });
+        self.large_text = Some(facts);
+        self
+    }
+
+    pub(crate) fn with_display(
+        mut self,
+        position: Option<DisplayPosition>,
+        fallback: Option<StreamFallback>,
+    ) -> Self {
+        self.display_position = position;
+        self.stream_fallback = fallback;
+        self
+    }
+
+    pub fn display_position(&self) -> Option<&DisplayPosition> {
+        self.display_position.as_ref()
+    }
+
+    pub fn stream_fallback(&self) -> Option<&StreamFallback> {
+        self.stream_fallback.as_ref()
+    }
+
     pub fn display_item_id(&self) -> Option<&str> {
-        self.display_item_id.as_deref()
+        (self.role == MessageRole::Assistant).then(|| self.stream_fallback.as_ref().and_then(|fallback| fallback.item_id.as_deref())).flatten()
     }
 
     pub const fn role(&self) -> MessageRole {
@@ -429,7 +633,10 @@ pub struct SessionState {
     delta_cursor: Option<String>,
     complete_snapshot: Option<bool>,
     kind: HistoryKind,
-    active_leaf_entry_id: Option<String>,
+    active_leaf_entry_id: Option<Option<String>>,
+    status: Option<String>,
+    has_active_run: Option<bool>,
+    active_run_ids: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -455,18 +662,48 @@ impl SessionState {
             complete_snapshot,
             kind: HistoryKind::Full,
             active_leaf_entry_id: None,
+            status: None,
+            has_active_run: None,
+            active_run_ids: None,
         }
     }
 
-    pub(crate) fn with_history(mut self, kind: HistoryKind, active_leaf_entry_id: Option<String>) -> Self {
+    pub(crate) fn with_history(mut self, kind: HistoryKind, active_leaf_entry_id: Option<Option<String>>) -> Self {
         self.kind = kind;
         self.active_leaf_entry_id = active_leaf_entry_id;
         self
     }
 
+    pub(crate) fn with_activity(
+        mut self,
+        status: Option<String>,
+        has_active_run: Option<bool>,
+        active_run_ids: Option<Vec<String>>,
+    ) -> Self {
+        self.status = status;
+        self.has_active_run = has_active_run;
+        self.active_run_ids = active_run_ids;
+        self
+    }
+
+    pub const fn has_active_run(&self) -> Option<bool> { self.has_active_run }
+
+    pub fn active_run_ids(&self) -> Option<&[String]> { self.active_run_ids.as_deref() }
+
+    pub fn is_active(&self) -> bool {
+        if self.status.as_deref().is_some_and(|status| !status.is_empty() && status != "queued" && status != "running") {
+            return false;
+        }
+        self.has_active_run.unwrap_or(matches!(self.status.as_deref(), Some("queued" | "running")))
+    }
+
     pub const fn kind(&self) -> HistoryKind { self.kind }
 
-    pub fn active_leaf_entry_id(&self) -> Option<&str> { self.active_leaf_entry_id.as_deref() }
+    pub fn active_leaf_entry_id(&self) -> Option<&str> { self.active_leaf_scope().flatten() }
+
+    pub(crate) fn active_leaf_scope(&self) -> Option<Option<&str>> {
+        self.active_leaf_entry_id.as_ref().map(|leaf| leaf.as_deref())
+    }
 
     pub fn pending_inputs(&self) -> &[PendingInput] {
         &self.pending_inputs
@@ -524,6 +761,8 @@ impl SessionWindow {
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
+
+    pub(crate) fn messages_mut(&mut self) -> &mut [Message] { &mut self.messages }
 
     pub const fn range(&self) -> WindowRange {
         self.range

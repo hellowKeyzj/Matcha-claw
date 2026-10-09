@@ -1,3 +1,6 @@
+#[path = "content.rs"]
+pub(crate) mod content;
+
 use std::{fmt, sync::Arc};
 
 use platform::exchange::InvocationOutcome;
@@ -363,17 +366,14 @@ impl SessionOperation {
         let request_id = request.request_id().to_owned();
         match self.gateway.rpc_mutation(request).await {
             MutationDelivery::Response(response) if response.request_id() != request_id => {
-                InvocationOutcome::TargetRejected(OperationError::UnknownResponse)
+                InvocationOutcome::Unknown
             }
             MutationDelivery::Response(GatewayResponse::Failure { error, .. }) => {
                 InvocationOutcome::TargetRejected(OperationError::gateway_rejected(error))
             }
             MutationDelivery::Response(response) => match decode(response) {
                 Ok(result) => InvocationOutcome::Succeeded(result),
-                Err(protocol::ProtocolError::Rejected) => {
-                    InvocationOutcome::TargetRejected(OperationError::Rejected)
-                }
-                Err(error) => InvocationOutcome::TargetRejected(OperationError::from(error)),
+                Err(_) => InvocationOutcome::Unknown,
             },
             MutationDelivery::NotWritten(error) | MutationDelivery::MayHaveReached(error) => {
                 let _ = error;

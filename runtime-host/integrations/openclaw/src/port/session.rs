@@ -321,6 +321,10 @@ impl sessions_module::ports::SessionObservation for OpenClawObservation {
 }
 
 impl OpenClawSessionGateway {
+    pub(crate) async fn load_content(&self, command: sessions_module::timeline::ContentCommand) -> sessions_module::timeline::ContentOutcome {
+        SessionOperation::new(Arc::clone(&self.client)).load_content(command).await
+    }
+
     pub(crate) fn supports_goal(&self) -> bool { self.client.supports_goal() }
 
     pub(crate) async fn goal_availability(&self) -> Result<(), sessions_module::ports::RuntimeOperationFailure> { self.client.goal_availability().await }
@@ -349,7 +353,9 @@ impl OpenClawSessionGateway {
         if matches!(page.direction(), window::Direction::Latest) && page.limit() > 0 {
             let mut params = params.try_with_limit(page.limit() as u64).map_err(|_| OpenClawSessionError::TargetRejected)?;
             if let Some(cursor) = cursor { params = params.try_with_cursor(cursor).map_err(|_| OpenClawSessionError::TargetRejected)?; }
-            return self.history_window(params, page).await;
+            let mut window = self.history_window(params, page).await?;
+            SessionOperation::new(Arc::clone(&self.client)).hydrate_history(identity, &mut window).await.map_err(OpenClawSessionError::from)?;
+            return Ok(window);
         }
         // An exhausted native page returns the authoritative count without reading a tail body.
         let operation = SessionOperation::new(Arc::clone(&self.client));
@@ -369,15 +375,20 @@ impl OpenClawSessionGateway {
                 .map_err(|_| OpenClawSessionError::TargetRejected)?;
             let payload = operation.history_payload(read_params).await.map_err(OpenClawSessionError::from)?;
             total = window::decode_total_messages(&payload).map_err(|error| OpenClawSessionError::Protocol(Some(error)))?;
-            let window = window::decode_window(payload, page).map_err(|error| OpenClawSessionError::Protocol(Some(error)))?;
+            let mut window = window::decode_window(payload, page).map_err(|error| OpenClawSessionError::Protocol(Some(error)))?;
             let requested = window::window_range(total, page);
             let range = window.range();
-            let covered = match page.direction() {
+            let covered = if requested.start() == requested.end() {
+                range.start() == requested.start() && range.end() == requested.end()
+            } else { match page.direction() {
                 window::Direction::Older => range.end() == requested.end() && range.start() < range.end(),
                 window::Direction::Newer => range.start() == requested.start() && range.end() > range.start(),
                 window::Direction::Latest => unreachable!(),
-            };
-            if covered { return Ok(window); }
+            } };
+            if covered {
+                operation.hydrate_history(identity, &mut window).await.map_err(OpenClawSessionError::from)?;
+                return Ok(window);
+            }
             if attempt == 0 {
                 // Rebase once after append; a dense newer page reads its first source group.
                 end = match page.direction() {

@@ -318,7 +318,9 @@ impl SessionLane {
         }
         entry.baseline = Some(baseline);
         entry.active_command = Some(command.clone());
-        entry.needs_sync = false;
+        if command.direction() == timeline::Direction::Latest {
+            entry.needs_sync = false;
+        }
         let identity = identity.clone();
         let generation = entry.generation;
         let epoch = shared.epoch;
@@ -539,12 +541,12 @@ impl SessionLane {
         shared: &SessionShared,
         identity: &SessionIdentity,
         run_id: Option<&str>,
-    ) -> Result<(), RuntimeOperationFailure> {
+    ) -> Result<bool, RuntimeOperationFailure> {
         if self.state.is_none() {
             self.state = SessionState::new(identity.clone(), shared.epoch).ok();
         }
         self.prepare_observer(shared, identity)?;
-        let needs_sync = {
+        let (needs_sync, demand_added) = {
             let mut entries = shared
                 .observations
                 .lock()
@@ -556,20 +558,18 @@ impl SessionLane {
             if entry.closing {
                 return Err(RuntimeOperationFailure::Unavailable);
             }
-            if let Some(run_id) = run_id {
-                if !entry.notified_terminals.contains(run_id) {
-                    entry.runs.insert(run_id.to_owned());
-                }
+            let demand_added = if let Some(run_id) = run_id {
+                !entry.notified_terminals.contains(run_id) && entry.runs.insert(run_id.to_owned())
             } else {
-                entry.unknown_send = true;
-            }
-            entry.committed_view.is_none() || entry.needs_sync
+                !std::mem::replace(&mut entry.unknown_send, true)
+            };
+            (entry.committed_view.is_none() || entry.needs_sync, demand_added)
         };
         if needs_sync {
             let command = self.latest_command(identity, timeline::WindowRequest::latest());
             self.start_sync(shared, identity, command);
         }
-        Ok(())
+        Ok(demand_added)
     }
 
     pub(super) fn prepare_goal_receive(
@@ -607,6 +607,24 @@ impl SessionLane {
         Ok((lease, native_session_id))
     }
 
+    pub(super) fn send_receive_run<'a>(
+        &self,
+        identity: &SessionIdentity,
+        outcome: &'a crate::send::SessionSendOutcome,
+    ) -> Option<&'a str> {
+        use crate::send::{SessionSendOutcome::*, SessionSendStatus};
+        let active = self.state.as_ref().and_then(SessionState::active_run_id);
+        match outcome {
+            Queued { run_id } => Some(run_id),
+            Succeeded { run_id, status: SessionSendStatus::Started, .. }
+                if identity.provider() != crate::state::SessionProvider::OpenClaw
+                    || active.is_none_or(|active| active == run_id) => Some(run_id),
+            Succeeded { run_id, status: SessionSendStatus::InFlight, .. }
+                if active == Some(run_id.as_str()) => Some(run_id),
+            _ => None,
+        }
+    }
+
     pub(super) fn finish_goal_receive(
         &self,
         shared: &SessionShared,
@@ -616,12 +634,12 @@ impl SessionLane {
     ) {
         if let Some(entry) = shared.observations.lock().expect("session observation lock").get_mut(&session_identity_lane_key(identity)) {
             entry.leases.remove(lease);
-            match outcome {
-                Some(crate::send::SessionSendOutcome::Succeeded { run_id, .. }) if !entry.notified_terminals.contains(run_id) => {
-                    entry.runs.insert(run_id.clone());
+            if let Some(run_id) = outcome.and_then(|outcome| self.send_receive_run(identity, outcome)) {
+                if !entry.notified_terminals.contains(run_id) {
+                    entry.runs.insert(run_id.to_owned());
                 }
-                Some(crate::send::SessionSendOutcome::Unknown) => entry.unknown_send = true,
-                _ => {}
+            } else if matches!(outcome, Some(crate::send::SessionSendOutcome::Unknown)) {
+                entry.unknown_send = true;
             }
         }
     }
@@ -631,6 +649,7 @@ impl SessionLane {
         shared: &SessionShared,
         identity: &SessionIdentity,
         requested: Option<&str>,
+        demand_added: bool,
         outcome: &crate::send::SessionSendOutcome,
     ) {
         use crate::send::SessionSendOutcome::*;
@@ -640,26 +659,22 @@ impl SessionLane {
             .expect("session observation lock")
             .get_mut(&session_identity_lane_key(identity))
         {
-            match outcome {
-                Queued { run_id } | Succeeded { run_id, .. } => {
-                    if let Some(requested) = requested {
+            if matches!(outcome, Unknown) {
+                return;
+            }
+            if demand_added {
+                if let Some(requested) = requested {
+                    if self.state.as_ref().and_then(SessionState::active_run_id) != Some(requested) {
                         entry.runs.remove(requested);
                     }
-                    if !entry.notified_terminals.contains(run_id) {
-                        entry.runs.insert(run_id.clone());
-                    }
-                    if requested.is_none() {
-                        entry.unknown_send = false;
-                    }
+                } else {
+                    entry.unknown_send = false;
                 }
-                Rejected | Unavailable | Unsupported => {
-                    if let Some(requested) = requested {
-                        entry.runs.remove(requested);
-                    } else {
-                        entry.unknown_send = false;
-                    }
-                }
-                Unknown => {}
+            }
+            if let Some(run_id) = self.send_receive_run(identity, outcome)
+                && !entry.notified_terminals.contains(run_id)
+            {
+                entry.runs.insert(run_id.to_owned());
             }
         }
     }
@@ -892,13 +907,15 @@ impl SessionLane {
                 .first()
                 .map(|waiter| waiter.command.clone())
                 .or_else(|| {
-                    (entry.needs_sync || (entry.demanded() && entry.committed_view.is_none())).then(
-                        || {
-                            entry.committed_command.clone().unwrap_or_else(|| {
-                                self.latest_command(identity, timeline::WindowRequest::latest())
-                            })
-                        },
-                    )
+                    if entry.needs_sync {
+                        Some(self.latest_command(identity, timeline::WindowRequest::latest()))
+                    } else if entry.demanded() && entry.committed_view.is_none() {
+                        Some(entry.committed_command.clone().unwrap_or_else(|| {
+                            self.latest_command(identity, timeline::WindowRequest::latest())
+                        }))
+                    } else {
+                        None
+                    }
                 });
             if crate::trace::enabled() {
                 crate::trace::log_unscoped("sessions.observation.continue", serde_json::json!({
@@ -956,7 +973,7 @@ impl SessionLane {
                     "outcome": match &result {
                         Ok(_) => "succeeded", Err(RuntimeOperationFailure::TargetRejected) => "target_rejected",
                         Err(RuntimeOperationFailure::Unknown) => "unknown", Err(RuntimeOperationFailure::Unsupported) => "unsupported",
-                        Err(RuntimeOperationFailure::Unavailable) => "unavailable",
+                        Err(RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending) => "unavailable",
                     },
                 }));
             }
@@ -1128,6 +1145,29 @@ impl SessionLane {
             },
         };
         if view.is_none() {
+            if failure == RuntimeOperationFailure::HistoryRetryPending {
+                let retained = {
+                    let mut entries = shared.observations.lock().expect("session observation lock");
+                    let entry = entries.get_mut(&session_identity_lane_key(&identity)).expect("sync observation");
+                    if identity.provider() == crate::state::SessionProvider::OpenClaw && entry.committed_view.is_some() {
+                        let waiters = entry.take_failed_waiters();
+                        Some((waiters, entry.demanded()))
+                    } else {
+                        None
+                    }
+                };
+                if let Some((waiters, demanded)) = retained {
+                    for waiter in waiters {
+                        finish_failed_waiter(waiter, failure).await;
+                    }
+                    if demanded {
+                        self.continue_observation(shared, &identity);
+                    } else {
+                        self.close_observation(shared, &identity, false);
+                    }
+                    return;
+                }
+            }
             let (waiters, restart) = {
                 let mut entries = shared
                     .observations
@@ -1219,7 +1259,25 @@ impl SessionLane {
         &mut self,
         shared: &SessionShared,
         identity: &SessionIdentity,
+        history_refresh: bool,
     ) {
+        if history_refresh {
+            if let Some(entry) = shared.observations.lock().expect("session observation lock").get_mut(&session_identity_lane_key(identity)) {
+                let needs_sync_before = entry.needs_sync;
+                entry.needs_sync = true;
+                if crate::trace::enabled() {
+                    crate::trace::log_unscoped("sessions.observation.history_refresh", serde_json::json!({
+                        "identity": crate::trace::identity_shape(identity), "generation": entry.generation,
+                        "needsSyncBefore": needs_sync_before, "needsSyncAfter": entry.needs_sync,
+                        "syncInflight": entry.baseline.is_some(), "closing": entry.closing, "hasHandle": entry.handle.is_some(),
+                    }));
+                }
+            } else if crate::trace::enabled() {
+                crate::trace::log_unscoped("sessions.observation.history_refresh", serde_json::json!({
+                    "identity": crate::trace::identity_shape(identity), "reason": "no_observation",
+                }));
+            }
+        }
         self.continue_observation(shared, identity);
     }
 }
@@ -1228,7 +1286,7 @@ fn observe_failure(failure: RuntimeOperationFailure) -> SessionObserveOutcome {
     match failure {
         RuntimeOperationFailure::TargetRejected => SessionObserveOutcome::Rejected,
         RuntimeOperationFailure::Unknown => SessionObserveOutcome::Unknown,
-        RuntimeOperationFailure::Unsupported | RuntimeOperationFailure::Unavailable => {
+        RuntimeOperationFailure::Unsupported | RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending => {
             SessionObserveOutcome::Unavailable
         }
     }
@@ -1248,7 +1306,7 @@ async fn finish_failed_waiter(waiter: Waiter, failure: RuntimeOperationFailure) 
                 RuntimeOperationFailure::Unsupported => {
                     timeline::UnavailableReason::RuntimeUnsupported
                 }
-                RuntimeOperationFailure::Unavailable => {
+                RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending => {
                     timeline::UnavailableReason::RuntimeUnavailable
                 }
             };

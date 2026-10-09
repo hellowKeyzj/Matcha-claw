@@ -63,7 +63,7 @@ impl SessionShared {
             Err(failure) => {
                 let outcome = match failure {
                     RuntimeOperationFailure::Unsupported => SessionAbortOutcome::Unsupported,
-                    RuntimeOperationFailure::Unavailable => SessionAbortOutcome::Unavailable,
+                    RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending => SessionAbortOutcome::Unavailable,
                     RuntimeOperationFailure::TargetRejected | RuntimeOperationFailure::Unknown => {
                         SessionAbortOutcome::Unknown
                     }

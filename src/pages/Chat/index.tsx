@@ -722,7 +722,7 @@ export function Chat({ isActive = true }: ChatProps) {
     : (currentConversationRuntime.state === 'unavailable' ? 'unavailable' : 'starting');
   const chatSideEffectsActive = workspaceActive && currentChatRuntimeAvailable;
   const goalSupported = supportsSessionGoal(runtimeEndpointDirectory.endpoints, currentConversationEndpoint, currentAgentId ?? '');
-  const chatGoals = useChatGoals(currentWorkspaceIdentity, currentSessionRecordKey, currentSession.meta.endpointSessionId, currentComposerDraftKey, goalSupported && chatSideEffectsActive);
+  const chatGoals = useChatGoals(currentWorkspaceIdentity, currentSessionRecordKey, currentSession.meta.endpointSessionId, currentComposerDraftKey, goalSupported && chatSideEffectsActive, currentSession.meta.goal);
   const beginTypedGoal = (goalId?: string, objective?: string) => {
     if (chatGoals.begin(goalId, objective)) composerRef.current?.focus();
   };
@@ -1567,9 +1567,9 @@ export function Chat({ isActive = true }: ChatProps) {
         onCancel: chatGoals.cancel,
         onSubmit: submitTypedGoal,
       }}
-      goalDock={goalSupported ? <ChatGoalDock
+      goalDock={goalSupported && chatGoals.dock ? <ChatGoalDock
         key={currentComposerDraftKey}
-        view={currentSession.meta.goal}
+        goal={chatGoals.dock.goal}
         busy={chatGoals.busy}
         runActive={activeRun}
         disabled={!chatSideEffectsActive || chatGoals.unknown || Boolean(chatGoals.mode)}

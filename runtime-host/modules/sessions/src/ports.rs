@@ -115,6 +115,9 @@ pub struct SessionSync {
     /// Explicit display retirement evidence from native reconciliation, not missing
     /// history rows, shared run IDs, or equal bodies. Applied even to partial items.
     pub retired_item_ids: Vec<String>,
+    /// Exact removals from an Integration-confirmed scope replacement.
+    pub retired_tool_ids: Vec<String>,
+    pub retired_approval_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -297,4 +300,6 @@ pub enum RuntimeOperationFailure {
     Unavailable,
     TargetRejected,
     Unknown,
+    /// The Integration owns a bounded history retry on the same live observation.
+    HistoryRetryPending,
 }

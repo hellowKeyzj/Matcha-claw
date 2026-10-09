@@ -1546,10 +1546,11 @@ function projectionRuntime(
   fact: SessionFact<SessionWireRuntime>,
   items: SessionRenderItem[],
   runtimeNotice: ChatSessionRuntimeState['runtimeNotice'],
+  pendingTurnTerminated = false,
 ): ChatSessionRuntimeState {
   const runtime = factValue(fact);
   if (!runtime) return current;
-  if (!isRunActive({ ...current, runPhase: projectionRuntimePhase(runtime.phase) })
+  if (!pendingTurnTerminated && !isRunActive({ ...current, runPhase: projectionRuntimePhase(runtime.phase) })
     && isRunActive(current) && current.pendingTurnKey !== null && current.activeRunId === null) return current;
   const issueMessage = runtime.issue === null ? null : `Session runtime ${runtime.issue}`;
   const imageGeneration = deriveSessionImageGenerationPendingStateFromItems(items, current.imageGeneration);
@@ -1667,6 +1668,7 @@ function applyDecodedSessionView(
   display: SessionProjectionState = view,
   traceId?: string | null,
   timing?: { projectionElapsedMs: number; reconcileElapsedMs: number; traceEmitElapsedMs: number },
+  pendingTurnTerminated = false,
 ): boolean {
   const state = input.get();
   const identity = sessionIdentityForProjection(state, view);
@@ -1692,6 +1694,9 @@ function applyDecodedSessionView(
     const displayKey = displayProjectionKey(nextState, view.identity);
     const projectionStartedAt = timing ? performance.now() : 0;
     let projectedItems = factValue(display.items) ? projectSessionViewItems(display) : current.items;
+    if (pendingTurnTerminated) projectedItems = projectedItems.filter((item) => (
+      item.kind !== 'assistant-turn' || item.key !== current.runtime.pendingTurnKey
+    ));
     if (buildSessionIdentityKey(nextIdentity!) !== buildSessionIdentityKey(view.identity)) {
       const incomingIds = new Set(projectedItems.map((item) => item.key));
       const retiredIds = display.retiredItemIds ?? new Set<string>();
@@ -1710,9 +1715,15 @@ function applyDecodedSessionView(
       reconciled: summarizeRenderAssistantTurns(nextItems),
     });
     if (timing) timing.traceEmitElapsedMs += performance.now() - traceStartedAt;
+    const nextRuntime = projectionRuntime(current.runtime, view.runtime, nextItems, view.runtimeNotice ?? null, pendingTurnTerminated);
     const pendingAssistant = current.items.find((item) => item.kind === 'assistant-turn' && item.key === current.runtime.pendingTurnKey);
-    if (pendingAssistant && !nextItems.some((item) => item.key === pendingAssistant.key
-      || item.kind === 'assistant-turn' && item.runId && item.runId === current.runtime.activeRunId)) nextItems.push(pendingAssistant);
+    if (pendingAssistant && isRunActive(nextRuntime)
+      && (pendingAssistant.status === 'streaming' || pendingAssistant.status === 'waiting_tool')
+      && !view.retiredItemIds?.has(pendingAssistant.key) && !display.retiredItemIds?.has(pendingAssistant.key)
+      && (pendingAssistant.runId ? pendingAssistant.runId === nextRuntime.activeRunId
+        : nextRuntime.activeRunId === null && nextRuntime.pendingTurnKey === pendingAssistant.key)
+      && !nextItems.some((item) => item.key === pendingAssistant.key
+        || item.kind === 'assistant-turn' && item.runId && item.runId === nextRuntime.activeRunId)) nextItems.push(pendingAssistant);
     const placeholderTraceStartedAt = timing ? performance.now() : 0;
     if (traceId) logSessionTrace('session.assembly.placeholder.after', traceId, {
       identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
@@ -1720,7 +1731,6 @@ function applyDecodedSessionView(
       items: summarizeRenderAssistantTurns(nextItems),
     });
     if (timing) timing.traceEmitElapsedMs += performance.now() - placeholderTraceStartedAt;
-    const nextRuntime = projectionRuntime(current.runtime, view.runtime, nextItems, view.runtimeNotice ?? null);
     const nextWindow = projectionWindow(current.window, display.window);
     windows.set(displayKey, { ...display, recordKey });
     const loadedSessions = patchSessionRecord(nextState, recordKey, {
@@ -2251,8 +2261,14 @@ export function applySessionDelta(
       return finish({ status: 'gap', sessionKey: recordKey, reason: error instanceof Error ? error.message : 'invalid replacement' });
     }
   }
+  const currentRecord = state.loadedSessions[recordKey];
+  const pendingTurnTerminated = currentRecord?.meta.sessionIdentity != null
+    && buildSessionIdentityKey(currentRecord.meta.sessionIdentity) === projectionKey
+    && delta.changes.some((change) => change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase)
+      && (currentRecord.runtime.activeRunId === null || currentRecord.runtime.activeRunId === change.runId)
+      && currentRecord.runtime.pendingTurnKey === `renderer-assistant:${change.runId}`);
   store.set(projectionKey, { ...projected, recordKey });
-  if (!applyDecodedSessionView(input, projected, undefined, display, traceId)) {
+  if (!applyDecodedSessionView(input, projected, undefined, display, traceId, undefined, pendingTurnTerminated)) {
     return finish({ status: 'unavailable', sessionKey: delta.sessionKey, reason: 'session identity unavailable' });
   }
   if (traceRuntimeState) {

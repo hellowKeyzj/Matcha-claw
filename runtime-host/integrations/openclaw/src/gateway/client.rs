@@ -534,12 +534,35 @@ impl GatewayClient {
 
     async fn history_observation(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64, page: crate::session::window::PageRequest, host_epoch: u64) -> Result<sessions_module::ports::SessionSync, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
-        for attempt in 0..3 {
+        use crate::session::window::{self, Direction, PageRequest};
+        let key = SessionKey::try_new(identity.session_key.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+        let params = crate::session::protocol::ChatHistoryParams::new(key).try_for_agent(identity.agent_id.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+        let paged = !matches!(page.direction(), Direction::Latest) || page.limit() == 0;
+        let mut total = 0;
+        let mut end = 0;
+        let mut empty = false;
+        if paged {
+            let count_params = params.clone().try_with_limit(1).and_then(|params| params.try_with_offset(9_007_199_254_740_991))
+                .map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+            let id = next_request_id("chat-history-count");
+            let request = wire::session_request(id.clone(), crate::session::protocol::CHAT_HISTORY_METHOD, serde_json::to_value(count_params).map_err(|_| RuntimeOperationFailure::Unknown)?).map_err(|_| RuntimeOperationFailure::Unknown)?;
+            let response = control.dispatcher.ordered_query(request).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+            let wire::GatewayResponse::Success { payload: Some(payload), .. } = response else { return Err(RuntimeOperationFailure::Unknown); };
+            total = window::decode_total_messages(&payload).map_err(|_| RuntimeOperationFailure::Unknown)?;
+            let requested = window::window_range(total, page);
+            end = requested.end();
+            empty = requested.start() == end;
+        }
+        let mut rebased = false;
+        let mut resets = 0;
+        for attempt in 0..4 {
             let mut cursor_reuse_reason = None;
+            let mut entry_binding = None;
             let cursor = self.observations.entries.lock().expect("observation registry lock poisoned")
                 .get(&identity_key(identity)).filter(|entry| entry.generation == generation).ok_or(RuntimeOperationFailure::Unavailable)
                 .map(|entry| {
                     if trace::enabled() {
+                        entry_binding = Some((entry.generation, entry.source_epoch));
                         cursor_reuse_reason = Some(if !matches!(page.direction(), crate::session::window::Direction::Latest) { "not_latest" }
                             else if entry.cursor.is_none() { "no_cursor" } else if entry.cursor_page != Some(page) { "page_mismatch" } else { "same_page" });
                     }
@@ -550,13 +573,22 @@ impl GatewayClient {
                     "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempt": attempt + 1,
                     "direction": match page.direction() { crate::session::window::Direction::Latest => "latest", crate::session::window::Direction::Older => "older", crate::session::window::Direction::Newer => "newer" }, "limit": page.limit().max(1), "offset": page.offset(),
                     "cursorPresent": cursor.is_some(), "cursorHash": cursor.as_deref().map(sessions_module::trace::fingerprint),
-                    "cursorSent": matches!(page.direction(), crate::session::window::Direction::Latest) && cursor.is_some(),
+                    "cursorSent": !paged && cursor.is_some(), "requestMode": if !paged && cursor.is_some() { "incremental" } else { "full" },
+                    "paged": paged, "pageLimit": page.limit(),
+                    "entryGeneration": entry_binding.map(|(generation, _)| generation), "entrySourceEpoch": entry_binding.and_then(|(_, epoch)| epoch),
+                    "generationMatched": entry_binding.map(|(entry_generation, _)| entry_generation == generation),
+                    "sourceEpochMatched": entry_binding.map(|(_, epoch)| epoch == control.epoch.map(|epoch| epoch.as_u64())),
                     "cursorReuseReason": cursor_reuse_reason }));
-            let key = SessionKey::try_new(identity.session_key.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
-            let mut params = crate::session::protocol::ChatHistoryParams::new(key).try_for_agent(identity.agent_id.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
-            if let Some(offset) = page.offset() { params = params.try_with_offset(offset as u64).map_err(|_| RuntimeOperationFailure::TargetRejected)?; }
-            params = params.try_with_limit(page.limit().max(1) as u64).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
-            if matches!(page.direction(), crate::session::window::Direction::Latest) && let Some(cursor) = cursor { params = params.try_with_cursor(cursor).map_err(|_| RuntimeOperationFailure::TargetRejected)?; }
+            let mut params = params.clone();
+            let decode_page = if empty { PageRequest::new(page.direction(), 0, page.offset()).ok_or(RuntimeOperationFailure::TargetRejected)? } else { page };
+            if paged {
+                params = params.try_with_limit(if empty { 1 } else { PageRequest::MAX_LIMIT as u64 })
+                    .and_then(|params| params.try_with_offset(if empty { 9_007_199_254_740_991 } else { total.saturating_sub(end) as u64 }))
+                    .map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+            } else {
+                params = params.try_with_limit(page.limit() as u64).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+                if let Some(cursor) = cursor { params = params.try_with_cursor(cursor).map_err(|_| RuntimeOperationFailure::TargetRejected)?; }
+            }
             let id = next_request_id("chat-history");
             if let Some(mut payload) = request_trace {
                 payload["requestHash"] = serde_json::json!(sessions_module::trace::fingerprint(&id));
@@ -564,7 +596,7 @@ impl GatewayClient {
             }
             let request = wire::session_request(id.clone(), crate::session::protocol::CHAT_HISTORY_METHOD, serde_json::to_value(params).map_err(|_| RuntimeOperationFailure::Unknown)?).map_err(|_| RuntimeOperationFailure::Unknown)?;
             let (reply, result) = tokio::sync::oneshot::channel();
-            self.observations.pending.lock().expect("observation pending lock poisoned").insert(id.clone(), OrderedContext::History { identity: identity.clone(), generation, page, host_epoch, reply });
+            self.observations.pending.lock().expect("observation pending lock poisoned").insert(id.clone(), OrderedContext::History { identity: identity.clone(), generation, page: decode_page, host_epoch, reply });
             // ordered_query returns only after ordered ingress has decoded/projected the response; not pure socket IO.
             let ordered_started = trace::enabled().then(std::time::Instant::now);
             let response = control.dispatcher.ordered_query(request).await;
@@ -579,7 +611,16 @@ impl GatewayClient {
             }
             response.map_err(|_| RuntimeOperationFailure::Unavailable)?;
             let reply_started = trace::enabled().then(std::time::Instant::now);
-            let result = result.await.map_err(|_| RuntimeOperationFailure::Unavailable);
+            let result = async {
+                match result.await.map_err(|_| RuntimeOperationFailure::Unavailable)?? {
+                    crate::gateway::observation::HistoryRead::Projected(sync) => Ok(sync),
+                    crate::gateway::observation::HistoryRead::NeedsContent { mut window, source_epoch } => {
+                        crate::session::operation::SessionOperation::new(Arc::new(self.clone())).hydrate_history(identity, &mut window).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+                        self.event_ingest.as_ref().ok_or(RuntimeOperationFailure::Unavailable)?
+                            .history_content(identity.clone(), generation, source_epoch, window, decode_page, host_epoch, Arc::clone(&self.observations)).await
+                    }
+                }
+            }.await;
             let reply_elapsed_ms = reply_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
             if trace::enabled() {
                 let entries = self.observations.entries.lock().expect("observation registry lock poisoned");
@@ -589,25 +630,53 @@ impl GatewayClient {
                     "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempt": attempt + 1,
                     "requestHash": sessions_module::trace::fingerprint(&id),
                     "routerReplyWaitElapsedMs": reply_elapsed_ms, "timingScope": "router_reply_wait_after_ordered_query_excluding_outer_trace",
-                    "outcome": match &result { Ok(Ok(Some(_))) => "ok", Ok(Ok(None)) => "reset", Ok(Err(_)) => "native_failed", Err(_) => "reply_unavailable" },
-                    "failure": match &result { Ok(Err(failure)) | Err(failure) => Some(observation_failure_kind(failure)), _ => None },
+                    "outcome": match &result { Ok(Some(_)) => "ok", Ok(None) => "reset", Err(_) => "native_failed" },
+                    "failure": result.as_ref().err().map(observation_failure_kind),
                     "entryGeneration": entry.map(|entry| entry.generation), "entrySourceEpoch": entry.and_then(|entry| entry.source_epoch),
                     "paused": entry.map(|entry| entry.paused), "cursorPresent": entry.is_some_and(|entry| entry.cursor.is_some()),
                     "cursorHash": entry.and_then(|entry| entry.cursor.as_deref()).map(sessions_module::trace::fingerprint),
-                    "sync": match &result { Ok(Ok(Some(sync))) => Some(sessions_module::trace::view_shape(&sync.view)), _ => None } }));
+                    "sync": match &result { Ok(Some(sync)) => Some(sessions_module::trace::view_shape(&sync.view)), _ => None } }));
             }
-            if let Some(sync) = result?? { return Ok(sync); }
+            if let Some(sync) = result? {
+                if paged && !empty {
+                    let range = match &sync.view.window {
+                        sessions_module::state::SessionFact::Complete(range) | sessions_module::state::SessionFact::Incomplete { facts: range, .. } => range,
+                        _ => return Err(RuntimeOperationFailure::Unknown),
+                    };
+                    total = usize::try_from(range.total_item_count).map_err(|_| RuntimeOperationFailure::Unknown)?;
+                    let requested = window::window_range(total, page);
+                    let covered = if requested.start() == requested.end() {
+                        range.window_start_offset == requested.start() as u64 && range.window_end_offset == requested.end() as u64
+                    } else { match page.direction() {
+                        Direction::Older => range.window_end_offset == requested.end() as u64 && range.window_start_offset < range.window_end_offset,
+                        Direction::Newer => range.window_start_offset == requested.start() as u64 && range.window_end_offset > range.window_start_offset,
+                        Direction::Latest => true,
+                    } };
+                    if !covered {
+                        if rebased { return Err(RuntimeOperationFailure::Unknown); }
+                        rebased = true;
+                        end = match page.direction() {
+                            Direction::Newer => requested.start().saturating_add(1).min(total),
+                            _ => requested.end(),
+                        };
+                        continue;
+                    }
+                }
+                return Ok(sync);
+            }
+            resets += 1;
             if trace::enabled() {
                 trace::log_unscoped("runtime.openclaw.observation.history.reset", serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
                     "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempt": attempt + 1,
-                    "retry": attempt < 2 }));
+                    "retry": resets < 3 }));
             }
+            if resets == 3 { break; }
         }
         if trace::enabled() {
             trace::log_unscoped("runtime.openclaw.observation.history.exhausted", serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
-                "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempts": 3 }));
+                "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "resets": resets, "rebased": rebased }));
         }
         Err(RuntimeOperationFailure::Unknown)
     }
@@ -619,6 +688,9 @@ impl GatewayClient {
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "hostEpoch": host_epoch,
                 "direction": match page.direction() { crate::session::window::Direction::Latest => "latest", crate::session::window::Direction::Older => "older", crate::session::window::Direction::Newer => "newer" }, "limit": page.limit(), "offset": page.offset() }));
         }
+        let ingest = self.event_ingest.as_ref().ok_or(RuntimeOperationFailure::Unavailable)?;
+        let read = ingest.history_started(identity.clone(), generation, page).await?;
+        let result = async {
         let control = self.control_dispatcher().await.map_err(|_| {
             if trace::enabled() {
                 trace::log_unscoped("runtime.openclaw.observation.sync.unavailable", serde_json::json!({
@@ -661,6 +733,9 @@ impl GatewayClient {
                 "retiredItemCount": result.as_ref().ok().map(|sync| sync.retired_item_ids.len()) }));
         }
         result
+        }.await;
+        let retry_pending = ingest.history_finished(identity.clone(), generation, read).await;
+        if result.is_err() && retry_pending { Err(RuntimeOperationFailure::HistoryRetryPending) } else { result }
     }
 
     pub(crate) async fn restart_observation(&self, identity: &sessions_module::state::SessionIdentity, generation: u64, next_generation: u64) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
@@ -1653,6 +1728,7 @@ fn observation_failure_kind(failure: &sessions_module::ports::RuntimeOperationFa
         RuntimeOperationFailure::Unavailable => "unavailable",
         RuntimeOperationFailure::TargetRejected => "target_rejected",
         RuntimeOperationFailure::Unknown => "unknown",
+        RuntimeOperationFailure::HistoryRetryPending => "history_retry_pending",
     }
 }
 

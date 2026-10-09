@@ -1386,26 +1386,23 @@ export const ChatInput = memo(function ChatInput({
         {teamDesign ? (
           <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
             {teamDesign.active ? (
-              <>
-                <div className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full border border-primary/25 bg-primary/5 pl-3.5 pr-1 text-xs font-medium text-primary">
-                  <GitBranch aria-hidden="true" className="h-3.5 w-3.5" />
-                  <span role="status">{t('input.teamDesignInProgress')}</span>
-                  <span title={t(sending || approvalWaiting || !sendGate.canSend ? 'input.teamDesignExitWaiting' : 'input.teamDesignExit')}>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-primary"
-                      aria-label={t('input.teamDesignExit')}
-                      disabled={disabled || sending || approvalWaiting || teamDesign.disabled || !sendGate.canSend}
-                      onClick={teamDesign.onExit}
-                    >
-                      <X aria-hidden="true" className="h-3.5 w-3.5" />
-                    </Button>
-                  </span>
-                </div>
-                <span className="text-xs text-muted-foreground">{t('input.teamDesignActive')}</span>
-              </>
+              <div className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full border border-primary/25 bg-primary/5 pl-3.5 pr-1 text-xs font-medium text-primary">
+                <GitBranch aria-hidden="true" className="h-3.5 w-3.5" />
+                <span role="status">{t('input.teamDesignInProgress')}</span>
+                <span title={t(sending || approvalWaiting || !sendGate.canSend ? 'input.teamDesignExitWaiting' : 'input.teamDesignExit')}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-primary"
+                    aria-label={t('input.teamDesignExit')}
+                    disabled={disabled || sending || approvalWaiting || teamDesign.disabled || !sendGate.canSend}
+                    onClick={teamDesign.onExit}
+                  >
+                    <X aria-hidden="true" className="h-3.5 w-3.5" />
+                  </Button>
+                </span>
+              </div>
             ) : (
               <Button
                 type="button"

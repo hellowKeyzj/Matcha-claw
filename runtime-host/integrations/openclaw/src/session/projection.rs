@@ -633,10 +633,10 @@ impl CanonicalSessionDeltaProducer {
                             }],
                         );
                     }
-                    state => {
+                    _ => {
                         let terminal = CanonicalSessionChange::Terminal {
                             run_id: chat.run_id.clone(),
-                            outcome: terminal_outcome(state)?,
+                            outcome: chat.terminal_outcome()?,
                             message_id: native_message_id(event),
                             error_kind: chat.error_kind,
                             error_message: chat.error_message.clone(),
@@ -803,15 +803,6 @@ impl CanonicalSessionDeltaProducer {
             provenance,
             changes: vec![CanonicalSessionChange::RecoveryRequired { reason }],
         }
-    }
-}
-
-fn terminal_outcome(state: ChatState) -> Option<TerminalOutcome> {
-    match state {
-        ChatState::Final => Some(TerminalOutcome::Completed),
-        ChatState::Aborted => Some(TerminalOutcome::Aborted),
-        ChatState::Error => Some(TerminalOutcome::Error),
-        ChatState::Status | ChatState::Delta => None,
     }
 }
 

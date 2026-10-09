@@ -314,6 +314,7 @@ impl Projection {
                 binding,
                 run_id,
                 cursor: Some(envelope.seq.get()),
+                history_refresh: false,
                 changes,
             },
         )))
@@ -466,6 +467,8 @@ impl Projection {
                 })
                 .collect(),
             retired_item_ids,
+            retired_tool_ids: Vec::new(),
+            retired_approval_ids: Vec::new(),
             replay_baseline: Some(self.state.view()),
         };
         // Replay is already consumed; this baseline keeps the later transcript body
@@ -591,6 +594,7 @@ async fn unavailable(
             binding: projection.binding(),
             run_id: None,
             cursor: (projection.cursor.get() > 0).then_some(projection.cursor.get()),
+            history_refresh: false,
             changes: vec![SessionChange::RecoveryRequired {
                 reason: RecoveryReason::NativeUnavailable,
             }],

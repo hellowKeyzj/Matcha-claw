@@ -22,13 +22,13 @@ pub fn matcha_session_event(item: SessionSubscriptionItem) -> Option<SessionIngr
             let run_id = event.run_id().to_owned();
             let cursor = event.source_cursor();
             let changes = matcha_event_changes(event)?;
-            Some(SessionIngressEvent::new(identity, SessionEvent { binding, run_id: Some(run_id), cursor: Some(cursor), changes }))
+            Some(SessionIngressEvent::new(identity, SessionEvent { binding, run_id: Some(run_id), cursor: Some(cursor), history_refresh: false, changes }))
         }
         SessionSubscriptionItem::Recovery { identity, generation, run_id, recovery } => {
             let cursor = recovery.native_cursor()?;
             let binding = SessionEventBinding::observed(identity.clone(), generation, recovery.source_epoch(), true)?;
             Some(SessionIngressEvent::new(identity, SessionEvent {
-                binding, run_id, cursor: Some(cursor.sequence().get()),
+                binding, run_id, cursor: Some(cursor.sequence().get()), history_refresh: false,
                 changes: vec![SessionChange::RecoveryRequired { reason: matcha_recovery_reason(recovery.reason()) }],
             }))
         }

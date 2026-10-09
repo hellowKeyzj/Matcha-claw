@@ -1,5 +1,5 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
-import { Download, GitBranch, MessageCircle, Minus, Plus, Upload } from 'lucide-react';
+import { Download, MessageCircle, Minus, Plus, Upload } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -72,7 +72,6 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const submitRunGraphPatch = useTeamsStore((state) => state.submitRunGraphPatch);
   const observeTeamDesign = useTeamsStore((state) => state.observeTeamDesign);
   const refreshDesignSnapshot = useTeamsStore((state) => state.refreshDesignSnapshot);
-  const startDesign = useTeamsStore((state) => state.startDesign);
   const continueDesign = useTeamsStore((state) => state.continueDesign);
   const confirmDesign = useTeamsStore((state) => state.confirmDesign);
   const continueDesignDiscussion = useTeamsStore((state) => state.continueDesignDiscussion);
@@ -244,8 +243,6 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const proposal = startGate?.status === 'proposal_pending' ? startGate.proposal : null;
   const proposalSummary = proposal?.taskSummary?.trim() ?? '';
   const canActOnProposal = Boolean(proposal?.proposalId && run) && !loading && !pendingActionId;
-  const canStartDesign = Boolean(run) && isGatewayRunning && Boolean(designSnapshot) && !designRecord?.loading && !designRecord?.mutationPending
-    && roles.some((role) => role.roleId === 'leader' && role.runId === run?.runId);
 
   return (
     <section className="space-y-4">
@@ -254,16 +251,6 @@ export function TeamChat({ teamId }: { teamId?: string }) {
           <h1 className="text-xl font-semibold">{team.name}</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {!designActive && startGate?.status !== 'started' ? (
-            <Button
-              variant="outline"
-              disabled={!canStartDesign}
-              onClick={() => { void runDesignUiAction(startDesign, true); }}
-            >
-              <GitBranch aria-hidden="true" className="mr-2 h-4 w-4" />
-              {t('design.start')}
-            </Button>
-          ) : null}
           <Button
             variant="outline"
             onClick={() => openLeaderDiscussion(designActive)}
@@ -304,12 +291,6 @@ export function TeamChat({ teamId }: { teamId?: string }) {
         </div>
       </header>
 
-      {designActive ? (
-        <div role="status" className="flex items-center gap-2 rounded-md border border-primary/25 bg-primary/5 p-3 text-sm text-primary">
-          <GitBranch aria-hidden="true" className="h-4 w-4 shrink-0" />
-          {t('design.active')}
-        </div>
-      ) : null}
       {designProposal ? (
         <TeamDesignDialog
           summary={designProposal.taskSummary}

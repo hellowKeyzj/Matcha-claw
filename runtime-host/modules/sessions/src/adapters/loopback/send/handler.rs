@@ -10,8 +10,9 @@ use tokio::sync::Mutex;
 
 use crate::{
     adapters::loopback::trace as session_trace,
-    send::SessionSendOutcome,
+    send::{SessionSendOutcome, SessionSendStatus},
     send_hook::SessionSendHookSet,
+    state::SessionProvider,
 };
 
 use super::{SessionSendDelivery, SessionSendRequest};
@@ -133,6 +134,7 @@ async fn handle_request(
         }
     };
     let (command, hook_states) = prepared.into_parts();
+    let provider = command.identity.provider();
     let outcome = match session.send_session(command).await {
         Ok(outcome) => outcome,
         Err(_) => {
@@ -144,8 +146,16 @@ async fn handle_request(
             return Response::unavailable();
         }
     };
-    if let SessionSendOutcome::Queued { run_id } = &outcome {
-        send_hooks.after_queued(hook_states, session.clone(), run_id.clone());
+    match &outcome {
+        SessionSendOutcome::Queued { run_id } => {
+            send_hooks.after_queued(hook_states, session.clone(), run_id.clone());
+        }
+        SessionSendOutcome::Succeeded { run_id, status: SessionSendStatus::Started, goal: None }
+            if provider == SessionProvider::OpenClaw =>
+        {
+            send_hooks.after_queued(hook_states, session.clone(), run_id.clone());
+        }
+        _ => {}
     }
     session_trace::log(
         "runtime.send.outcome",

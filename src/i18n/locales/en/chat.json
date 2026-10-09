@@ -31,7 +31,6 @@
         "teamDesignInProgress": "Designing run graph",
         "teamDesignExit": "Exit design and keep the run graph",
         "teamDesignExitWaiting": "Stop the current response before exiting design",
-        "teamDesignActive": "Adjust Team tasks and collaboration without starting execution",
         "gatewayDisconnectedPlaceholder": "Runtime unavailable...",
         "gatewayRecoveringNotice": "Runtime is preparing…",
         "messagePlaceholder": "Message, / for skills, Enter to send, Shift+Enter for newline",

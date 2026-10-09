@@ -7,6 +7,7 @@ import {
   CHAT_SEND_RPC_TIMEOUT_MS,
   resolveChatSendTransportPayload,
   sendChatTransport,
+  type SendChatTransportResult,
 } from './send-transport';
 import { selectCurrentChatSendGate } from './selectors';
 import { resolveChatSendGateForPayload } from './send-gate';
@@ -278,10 +279,12 @@ function confirmOptimisticSendItems(params: {
   set: ChatStoreSetFn;
   sessionKey: string;
   clientId: string;
-  runId: string;
+  receipt: Extract<SendChatTransportResult, { ok: true }>;
   retainReceipt: boolean;
 }): void {
-  const { set, sessionKey, clientId, runId, retainReceipt } = params;
+  const { set, sessionKey, clientId, receipt, retainReceipt } = params;
+  const { runId } = receipt;
+  const canBindRun = receipt.outcome === 'queued' || receipt.status === 'started';
   const clientAssistantKey = `renderer-assistant:${clientId}`;
   const runAssistantKey = `renderer-assistant:${runId}`;
   set((state) => {
@@ -294,9 +297,11 @@ function confirmOptimisticSendItems(params: {
       && item.runId === runId
       && item.key !== clientAssistantKey
     ));
+    const ownsPendingTurn = current.runtime.pendingTurnKey === clientAssistantKey
+      && current.runtime.activeRunId === null && isRunActive(current.runtime);
     const items = current.items.filter((item) => {
-      if ((hasRunAssistant || !isRunActive(current.runtime)
-        || (current.runtime.activeRunId !== null && current.runtime.activeRunId !== runId))
+      if ((!canBindRun || hasRunAssistant || !isRunActive(current.runtime)
+        || (current.runtime.activeRunId !== null ? current.runtime.activeRunId !== runId : !ownsPendingTurn))
         && item.kind === 'assistant-turn' && item.key === clientAssistantKey) {
         changed = true;
         return false;
@@ -325,20 +330,19 @@ function confirmOptimisticSendItems(params: {
       }
       return item;
     });
-    return changed ? {
-      loadedSessions: patchSessionRecord(state, sessionKey, {
-        items,
-        // Only the still-pending client turn may acquire the receipt's run identity.
-        runtime: current.runtime.activeRunId === null
-          && current.runtime.pendingTurnKey === clientAssistantKey
-          && isRunActive(current.runtime) ? {
-            ...current.runtime,
-            activeRunId: runId,
-            pendingTurnKey: runAssistantKey,
-            lastUserMessageAt,
-            updatedAt: current.runtime.runPhase === 'stopping' || current.runtime.lastIssue ? current.runtime.updatedAt : Date.now(),
-          } : current.runtime,
-      }),
+    // Admission is not transcript consumption; only Started/Queued can bind this local turn.
+    const runtime = !canBindRun
+      ? ownsPendingTurn ? clearOptimisticRuntimeState(current.runtime, clientAssistantKey) : current.runtime
+      : ownsPendingTurn ? {
+        ...current.runtime,
+        activeRunId: runId,
+        pendingTurnKey: hasRunAssistant ? null : runAssistantKey,
+        pendingTurnLaneKey: hasRunAssistant ? null : current.runtime.pendingTurnLaneKey,
+        lastUserMessageAt,
+        updatedAt: current.runtime.runPhase === 'stopping' || current.runtime.lastIssue ? current.runtime.updatedAt : Date.now(),
+      } : current.runtime;
+    return changed || runtime !== current.runtime ? {
+      loadedSessions: patchSessionRecord(state, sessionKey, { items, runtime }),
     } : state;
   });
 }
@@ -551,6 +555,8 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     }
 
     logSessionTrace('send.result.accepted', traceId, {
+      outcome: sendResult.outcome,
+      status: sendResult.outcome === 'succeeded' ? sendResult.status : null,
       runId: summarizeIdentifier(sendResult.runId),
       hasProjection: Boolean(sendResult.projection),
     });
@@ -563,7 +569,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       set,
       sessionKey: currentSessionKey,
       clientId: clientMessageId,
-      runId: sendResult.runId,
+      receipt: sendResult,
       retainReceipt: (attachments?.length ?? 0) > 0,
     });
     if (sendResult.projection && buildSessionIdentityKey(sendResult.projection.kind === 'view'
@@ -579,7 +585,9 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         }
       }
     }
-    if (params.intent) void get().loadHistory({ sessionKey: currentSessionKey, mode: 'quiet', scope: 'background', reason: 'manual_refresh' });
+    if (params.intent || sendResult.outcome === 'succeeded' && sendResult.status !== 'started') {
+      void get().loadHistory({ sessionKey: currentSessionKey, mode: 'quiet', scope: 'background', reason: 'manual_refresh' });
+    }
     return { accepted: true };
   } catch (error) {
     if (!isCurrent()) {

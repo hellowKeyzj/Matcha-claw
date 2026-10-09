@@ -398,8 +398,21 @@ impl OpenClawDriver {
             };
         }
         match self.session_gateway.send_chat(params).await {
-            Ok(InvocationOutcome::Succeeded(result)) => SessionSendOutcome::Queued {
+            Ok(InvocationOutcome::Succeeded(result)) => SessionSendOutcome::Succeeded {
                 run_id: result.run_id.as_str().to_owned(),
+                status: match result.status {
+                    crate::session::protocol::ChatSendStatus::Started => sessions_module::send::SessionSendStatus::Started,
+                    crate::session::protocol::ChatSendStatus::InFlight => sessions_module::send::SessionSendStatus::InFlight,
+                    crate::session::protocol::ChatSendStatus::Ok => sessions_module::send::SessionSendStatus::Ok,
+                    crate::session::protocol::ChatSendStatus::Timeout | crate::session::protocol::ChatSendStatus::Error => {
+                        return if result.stop_reason.as_deref() == Some("restart") {
+                            SessionSendOutcome::Unknown
+                        } else {
+                            SessionSendOutcome::Rejected
+                        };
+                    }
+                },
+                goal: None,
             },
             Ok(InvocationOutcome::TargetRejected(_)) => SessionSendOutcome::Rejected,
             Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) => SessionSendOutcome::Unknown,
@@ -1101,12 +1114,7 @@ impl SessionOps for OpenClawDriver {
         &'a self,
         command: sessions_module::timeline::ContentCommand,
     ) -> sessions_module::SessionFuture<'a, sessions_module::timeline::ContentOutcome> {
-        Box::pin(async move {
-            let _ = command;
-            sessions_module::timeline::ContentOutcome::unavailable(
-                sessions_module::timeline::UnavailableReason::RuntimeUnsupported,
-            )
-        })
+        Box::pin(self.session_gateway.load_content(command))
     }
 
     fn send_session<'a>(

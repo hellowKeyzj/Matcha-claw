@@ -232,7 +232,7 @@ pub(super) fn validate_start_outcome(
 fn goal_failure(failure: RuntimeOperationFailure) -> SessionGoalOutcome {
     match failure {
         RuntimeOperationFailure::Unsupported => SessionGoalOutcome::Unsupported,
-        RuntimeOperationFailure::Unavailable => SessionGoalOutcome::Unavailable,
+        RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending => SessionGoalOutcome::Unavailable,
         RuntimeOperationFailure::TargetRejected => SessionGoalOutcome::TargetRejected,
         RuntimeOperationFailure::Unknown => SessionGoalOutcome::Unknown,
     }

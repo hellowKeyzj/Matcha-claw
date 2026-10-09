@@ -26,8 +26,7 @@ const CONFIG_READ_METHODS: [&str; 1] = [CONFIG_GET_METHOD];
 const CONFIG_WRITE_METHODS: [&str; 1] = [CONFIG_PATCH_METHOD];
 const SKILL_STATUS_METHODS: [&str; 1] = [SKILLS_STATUS_METHOD];
 const TOOL_CATALOG_METHODS: [&str; 1] = [TOOLS_CATALOG_METHOD];
-const AGENT_FACING_INTERNAL_TOOL_DENY: [&str; 5] =
-    ["gateway", "nodes", "create_goal", "get_goal", "update_goal"];
+const AGENT_FACING_INTERNAL_TOOL_DENY: [&str; 2] = ["gateway", "nodes"];
 
 fn log_session_trace(stage: &str, trace_id: Option<&str>, payload: Value) {
     if trace_id.is_none() || std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {

@@ -31,7 +31,6 @@
         "teamDesignInProgress": "运行图设计中",
         "teamDesignExit": "退出设计，保留运行图",
         "teamDesignExitWaiting": "请先停止当前回复，再退出设计",
-        "teamDesignActive": "调整Team任务与协作关系，不启动执行",
         "gatewayDisconnectedPlaceholder": "运行时不可用...",
         "gatewayRecoveringNotice": "运行时正在准备…",
         "messagePlaceholder": "输入消息，/ 选择技能，Enter 发送，Shift+Enter 换行",

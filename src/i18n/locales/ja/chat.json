@@ -29,7 +29,6 @@
         "teamDesignInProgress": "実行グラフを設計中",
         "teamDesignExit": "実行グラフを保持して設計を終了",
         "teamDesignExitWaiting": "現在の応答を停止してから設計を終了してください",
-        "teamDesignActive": "実行を開始せずにTeamのタスクと連携を調整",
         "gatewayDisconnectedPlaceholder": "ゲートウェイ未接続...",
         "messagePlaceholder": "メッセージ、/ でスキル、Enter 送信、Shift+Enter 改行",
         "approvalWaitingPlaceholder": "承認待ちです...",

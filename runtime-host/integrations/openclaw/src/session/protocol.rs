@@ -1378,12 +1378,15 @@ pub enum ChatSendStatus {
     Started,
     InFlight,
     Ok,
+    Timeout,
+    Error,
 }
 #[derive(Clone, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatSendResult {
     pub run_id: RunId,
     pub status: ChatSendStatus,
+    pub stop_reason: Option<String>,
 }
 impl fmt::Debug for ChatSendResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2080,11 +2083,32 @@ pub struct ChatEvent {
     pub replace: bool,
     pub message_text: Option<String>,
     pub message_thinking: Option<String>,
+    pub final_message: Option<super::window::Message>,
+    pub yielded: bool,
+    pub message_absent: bool,
     pub error_kind: Option<SessionErrorKind>,
     pub error_message: Option<String>,
     pub stop_reason: Option<String>,
     pub error_detail: Option<Value>,
 }
+impl ChatEvent {
+    pub(crate) fn is_yielded(&self) -> bool {
+        self.state == ChatState::Final && self.yielded && self.stop_reason.as_deref() == Some("end_turn")
+    }
+
+    pub(crate) fn terminal_outcome(&self) -> Option<super::events::TerminalOutcome> {
+        use super::events::TerminalOutcome;
+        match self.state {
+            ChatState::Final if self.is_yielded() => None,
+            ChatState::Final if self.stop_reason.as_deref() == Some("error") => Some(TerminalOutcome::Error),
+            ChatState::Final => Some(TerminalOutcome::Completed),
+            ChatState::Aborted => Some(TerminalOutcome::Aborted),
+            ChatState::Error => Some(TerminalOutcome::Error),
+            ChatState::Status | ChatState::Delta => None,
+        }
+    }
+}
+
 impl fmt::Debug for ChatEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -2097,6 +2121,7 @@ impl fmt::Debug for ChatEvent {
             .field("replace", &self.replace)
             .field("has_message_text", &self.message_text.is_some())
             .field("has_message_thinking", &self.message_thinking.is_some())
+            .field("has_final_message", &self.final_message.is_some())
             .field("error_kind", &self.error_kind)
             .field("has_error_message", &self.error_message.is_some())
             .field("has_stop_reason", &self.stop_reason.is_some())
@@ -2189,7 +2214,7 @@ fn decode_chat_event(payload: Value) -> Result<ChatEvent, ProtocolError> {
     let delta_text = bounded_text(object.get("deltaText"), MAX_SESSION_UPDATE_TEXT_BYTES)?;
     let message = object.get("message");
     let message_text = message
-        .and_then(message_content_text)
+        .and_then(|message| message_content_text(message, state == ChatState::Delta))
         .map(|text| bounded_text_value(&text, MAX_SESSION_UPDATE_TEXT_BYTES))
         .transpose()?;
     let message_thinking = message
@@ -2200,11 +2225,25 @@ fn decode_chat_event(payload: Value) -> Result<ChatEvent, ProtocolError> {
     if sequence > MAX_SAFE_SEQUENCE {
         return Err(ProtocolError::InvalidSessionEvent);
     }
+    let final_message = if matches!(state, ChatState::Final | ChatState::Aborted | ChatState::Error) {
+        message.and_then(Value::as_object).filter(|message| {
+            message.get("role").and_then(Value::as_str).is_none_or(|role| role.trim().eq_ignore_ascii_case("assistant"))
+                && (message.contains_key("content") || message.get("text").is_some_and(Value::is_string))
+        }).map(|message| {
+            let mut message = message.clone();
+            message.insert("role".to_owned(), Value::from("assistant"));
+            if !message.contains_key("content") && let Some(text) = message.get("text").cloned() {
+                message.insert("content".to_owned(), serde_json::json!([{ "type": "text", "text": text }]));
+            }
+            let mut envelope = object.clone();
+            envelope.insert("message".to_owned(), Value::Object(message));
+            super::window::decode_event_message(None, &envelope).map_err(|_| ProtocolError::InvalidSessionEvent)
+        }).transpose()?
+    } else { None };
     let error_message = runtime_detail_text(object.get("errorMessage"))?;
-    let stop_reason = bounded_text(
-        object.get("stopReason"),
-        MAX_SESSION_UPDATE_STOP_REASON_BYTES,
-    )?;
+    let stop_reason = object.get("stopReason").and_then(Value::as_str).map(str::trim).filter(|reason| !reason.is_empty())
+        .or_else(|| message.and_then(|message| message.get("stopReason")).and_then(Value::as_str).map(str::trim).filter(|reason| !reason.is_empty()))
+        .map(|reason| bounded_text_value(reason, MAX_SESSION_UPDATE_STOP_REASON_BYTES)).transpose()?;
     Ok(ChatEvent {
         run_id: required(object, "runId")?,
         session_key: required(object, "sessionKey")?,
@@ -2219,6 +2258,9 @@ fn decode_chat_event(payload: Value) -> Result<ChatEvent, ProtocolError> {
             .unwrap_or(false),
         message_text,
         message_thinking,
+        final_message,
+        yielded: object.get("yielded").and_then(Value::as_bool) == Some(true),
+        message_absent: message.is_none_or(Value::is_null),
         error_kind: object.get("errorKind").and_then(SessionErrorKind::parse),
         error_message,
         stop_reason,
@@ -2244,20 +2286,23 @@ fn bounded_text_value(text: &str, limit: usize) -> Result<String, ProtocolError>
     Ok(text.to_owned())
 }
 
-fn message_content_text(message: &Value) -> Option<String> {
-    message_content_blocks(message, "text", "text")
+fn message_content_text(message: &Value, delta_snapshot: bool) -> Option<String> {
+    message_content_blocks(message, "text", "text", delta_snapshot)
 }
 
 fn message_content_thinking(message: &Value) -> Option<String> {
-    message_content_blocks(message, "thinking", "thinking")
+    message_content_blocks(message, "thinking", "thinking", false)
 }
 
-fn message_content_blocks(message: &Value, block_type: &str, text_key: &str) -> Option<String> {
+fn message_content_blocks(message: &Value, block_type: &str, text_key: &str, delta_snapshot: bool) -> Option<String> {
+    let is_blank = |text: &str| text.chars().all(|ch| matches!(ch,
+        '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}'
+        | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'));
     let content = message.get("content")?;
     if block_type == "text"
         && let Some(text) = content.as_str()
     {
-        return Some(text.to_owned());
+        return (!delta_snapshot || !is_blank(text)).then(|| text.to_owned());
     }
     let text = content
         .as_array()?
@@ -2269,10 +2314,10 @@ fn message_content_blocks(message: &Value, block_type: &str, text_key: &str) -> 
             }
             object.get(text_key).and_then(Value::as_str)
         })
+        .filter(|text| !delta_snapshot || !is_blank(text))
         .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end()
-        .to_owned();
+        .join("\n");
+    let text = if delta_snapshot { text } else { text.trim_end().to_owned() };
     (!text.is_empty()).then_some(text)
 }
 
@@ -2643,6 +2688,8 @@ fn project_tool_activity(
         .get("phase")
         .and_then(Value::as_str)
         .ok_or(ProtocolError::InvalidSessionEvent)?;
+    // These native UI-only phases do not update the public tool payload.
+    if matches!(phase, "input_delta" | "review") { return Ok(None); }
     let tool_id = bounded_activity_id(
         object.get("toolCallId").or_else(|| object.get("toolId")),
         ProtocolError::InvalidSessionEvent,
@@ -3045,19 +3092,27 @@ fn project_changed_event(
     session_key: SessionKey,
     run_id: Option<RunId>,
 ) -> Result<Option<SessionChangedEvent>, ProtocolError> {
-    let Some(run_id) = run_id else {
-        return Ok(None);
-    };
     let phase = match object.get("phase").and_then(Value::as_str) {
-        Some("start") => SessionChangedPhase::Start,
-        Some("end") => SessionChangedPhase::End,
-        Some("error") => SessionChangedPhase::Error,
-        _ => return Ok(None),
+        Some("start") => Some(SessionChangedPhase::Start),
+        Some("end") => Some(SessionChangedPhase::End),
+        Some("error") => Some(SessionChangedPhase::Error),
+        Some("reset") => Some(SessionChangedPhase::Reset),
+        Some("message") => Some(SessionChangedPhase::Message),
+        _ => None,
     };
+    let row = object.get("session").and_then(Value::as_object).unwrap_or(object);
+    let status = [row.get("status"), object.get("status")].into_iter().flatten()
+        .filter_map(Value::as_str)
+        .find(|status| matches!(*status, "queued" | "running" | "done" | "failed" | "killed" | "timeout"));
     Ok(Some(SessionChangedEvent {
         session_key,
         run_id,
         phase,
+        reason: bounded_text(object.get("reason"), MAX_SESSION_ACTIVITY_ID_BYTES)?,
+        status: status.map(str::to_owned),
+        has_active_run: row.get("hasActiveRun").and_then(Value::as_bool)
+            .or_else(|| object.get("hasActiveRun").and_then(Value::as_bool)),
+        has_message_cursor: ["message", "messageId", "messageSeq"].iter().any(|field| object.contains_key(*field)),
     }))
 }
 
@@ -3105,13 +3160,19 @@ pub enum SessionChangedPhase {
     Start,
     End,
     Error,
+    Reset,
+    Message,
 }
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct SessionChangedEvent {
     pub session_key: SessionKey,
-    pub run_id: RunId,
-    pub phase: SessionChangedPhase,
+    pub run_id: Option<RunId>,
+    pub phase: Option<SessionChangedPhase>,
+    pub reason: Option<String>,
+    pub status: Option<String>,
+    pub has_active_run: Option<bool>,
+    pub has_message_cursor: bool,
 }
 
 impl fmt::Debug for SessionChangedEvent {
@@ -3258,6 +3319,8 @@ pub struct SessionActivity {
     pub run_id: RunId,
     pub kind: SessionActivityKind,
     tool_payload: Option<ToolActivityPayload>,
+    thinking_delta: Option<String>,
+    is_reasoning_snapshot: Option<bool>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -3317,6 +3380,8 @@ impl SessionActivity {
     pub fn gateway_sequence(&self) -> Option<u64> {
         self.gateway_sequence
     }
+    pub fn thinking_delta(&self) -> Option<&str> { self.thinking_delta.as_deref() }
+    pub fn is_reasoning_snapshot(&self) -> Option<bool> { self.is_reasoning_snapshot }
     pub fn tool_payload(&self) -> Option<&ToolActivityPayload> {
         self.tool_payload.as_ref()
     }
@@ -3545,7 +3610,11 @@ pub fn decode_session_event(
     let chat = (kind == SessionEventKind::Chat)
         .then(|| decode_chat_event(payload.clone()))
         .transpose()?;
-    let message_id = optional(object, "messageId")?;
+    let message_id = if kind == SessionEventKind::Changed {
+        optional_value(object.get("messageId").filter(|value| !value.is_null()))?
+    } else {
+        optional(object, "messageId")?
+    };
     let embedded_message_id = embedded_message_id(object)?;
     let Some(session_key) = session_key_for_event(kind, object)? else {
         return Ok(None);
@@ -3565,7 +3634,13 @@ pub fn decode_session_event(
         SessionEventKind::Message if run_id.is_some() && object.get("lifecycle").is_some() => {
             project_message_activity(object, message_id.as_ref(), embedded_message_id.as_ref())?
         }
-        SessionEventKind::Tool if run_id.is_some() => project_tool_activity(object)?,
+        SessionEventKind::Tool if run_id.is_some() => {
+            if object.get("stream").and_then(Value::as_str) == Some("tool") {
+                project_agent_event(object, session_key.clone(), run_id.clone())?.activity
+            } else {
+                project_tool_activity(object)?
+            }
+        },
         SessionEventKind::Agent => {
             let agent = project_agent_event(object, session_key.clone(), run_id.clone())?;
             if let Some(agent_approval) = agent.approval {
@@ -3596,6 +3671,12 @@ pub fn decode_session_event(
                 gateway_sequence: event.sequence,
                 session_key: session_key.clone(),
                 run_id: run_id.clone(),
+                thinking_delta: if matches!(activity.kind, SessionActivityKind::Thinking { .. }) {
+                    bounded_text(object.get("data").and_then(|data| data.get("delta")), MAX_SESSION_UPDATE_TEXT_BYTES)?
+                } else { None },
+                is_reasoning_snapshot: if matches!(activity.kind, SessionActivityKind::Thinking { .. }) {
+                    object.get("data").and_then(Value::as_object).map(|data| optional_bool(data, "isReasoningSnapshot")).transpose()?.flatten()
+                } else { None },
                 kind: activity.kind,
                 tool_payload: activity.tool_payload,
             })
@@ -4957,6 +5038,7 @@ mod tests {
             &ChatSendResult {
                 run_id: run_id.clone(),
                 status: ChatSendStatus::Started,
+                stop_reason: None,
             },
             CANARIES,
         );

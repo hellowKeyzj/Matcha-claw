@@ -3,6 +3,7 @@ use serde_json::{Map, Value};
 use crate::session::protocol::{ChatHistoryResult, HistoryRole};
 
 use super::model::{
+    ActivityPosition, DisplayPosition, StreamFallback, StreamFallbackSource,
     Direction, HistoryKind, InFlightRun, InputReceipt, Message, MessageContent, MessageRole,
     MessageToolDeliveryMedia, OmittedContentKind, PageMetadata, PageRequest, PendingInput,
     PendingInputState, RunState, SessionState, SessionWindow, WindowRange, window_range,
@@ -223,7 +224,7 @@ pub fn decode_window(payload: Value, request: PageRequest) -> Result<SessionWind
         .transpose()?
         .unwrap_or_else(|| window_range(total_item_count, request));
     let (messages, range) = if kind == HistoryKind::Full {
-        bound_source_window(messages, range, total_item_count, request)?
+        bound_source_window(messages, range, total_item_count, request, pagination)?
     } else {
         (messages, range)
     };
@@ -233,11 +234,12 @@ pub fn decode_window(payload: Value, request: PageRequest) -> Result<SessionWind
         .transpose()?
         .unwrap_or_else(empty_session_state)
         .with_history(kind, envelope.as_ref().and_then(|value| value.get("sessionInfo"))
-            .and_then(Value::as_object).map(|info| match info.get("activeLeafEntryId") {
-                None | Some(Value::Null) => Ok(None),
-                _ => optional_string(info, "activeLeafEntryId"),
-            })
-            .transpose()?.flatten());
+            .and_then(Value::as_object).filter(|info| info.contains_key("activeLeafEntryId"))
+            .map(|info| match info.get("activeLeafEntryId") {
+                Some(Value::Null) => Ok(None),
+                _ => optional_string(info, "activeLeafEntryId").map(|leaf| leaf
+                    .map(|leaf| leaf.trim().to_owned()).filter(|leaf| !leaf.is_empty())),
+            }).transpose()?);
     Ok(SessionWindow::new(
         messages,
         range,
@@ -303,7 +305,7 @@ fn page_range(pagination: PageMetadata, messages: &[Message]) -> Result<WindowRa
         total.saturating_sub(next_offset)
     } else if pagination.has_more() == Some(false) {
         0
-    } else if let Some(seq) = messages.iter().filter_map(Message::sequence).min() {
+    } else if let Some(seq) = messages.iter().filter_map(Message::identity_sequence).min() {
         usize::try_from(seq).ok().filter(|seq| *seq > 0 && *seq <= end)
             .ok_or_else(|| payload_error("seq", "outside_source_range", "number"))? - 1
     } else {
@@ -320,6 +322,7 @@ fn bound_source_window(
     range: WindowRange,
     total: usize,
     request: PageRequest,
+    pagination: Option<PageMetadata>,
 ) -> Result<(Vec<Message>, WindowRange), HistoryError> {
     let requested = window_range(total, request);
     let mut end = range.end().min(requested.end());
@@ -330,17 +333,28 @@ fn bound_source_window(
     if request.limit() == 0 {
         return Ok((Vec::new(), requested));
     }
+    // A replay cursor excludes this partially returned source from the consumed cut.
+    let mut partial_start = pagination.is_some_and(|page| page.next_offset().is_some() && page.has_more() != Some(false))
+        && start == range.start()
+        && (matches!(request.direction(), Direction::Latest) || start > requested.start());
     let needs_source = start != range.start() || end != range.end()
         || messages.len() > request.limit()
-        || messages.iter().any(|message| message.sequence().is_some_and(|seq| seq <= start as u64 || seq > end as u64));
+        || messages.iter().any(|message| message.identity_sequence().is_some_and(|seq| seq <= start as u64 || seq > end as u64));
     if !needs_source {
         return Ok((messages, WindowRange::new(start, end)));
     }
     let mut groups = std::collections::BTreeMap::<usize, usize>::new();
+    let mut source = None;
     for message in &messages {
-        let seq = message.sequence().filter(|seq| *seq > 0 && *seq <= total as u64)
+        let seq = message.identity_sequence().filter(|seq| *seq > 0 && *seq <= total as u64)
             .ok_or_else(|| payload_error("seq", "source_position_required", "missing_or_invalid"))? as usize;
-        if seq > start && seq <= end {
+        if let Some(position) = message.display_position() {
+            if source.is_some_and(|source| source != position.source.as_str()) {
+                return Err(payload_error("transcriptPosition", "mixed_source_range", "object"));
+            }
+            source = Some(position.source.as_str());
+        }
+        if (seq > start || partial_start && seq == start) && seq <= end {
             *groups.entry(seq).or_default() += 1;
         }
     }
@@ -358,7 +372,7 @@ fn bound_source_window(
     match request.direction() {
         Direction::Latest | Direction::Older => {
             for (&seq, &size) in groups.iter().rev() {
-                if !take_group(size)? { start = seq; break; }
+                if !take_group(size)? { start = seq; partial_start = false; break; }
             }
         }
         Direction::Newer => {
@@ -367,7 +381,8 @@ fn bound_source_window(
             }
         }
     }
-    messages.retain(|message| message.sequence().is_some_and(|seq| seq > start as u64 && seq <= end as u64));
+    messages.retain(|message| message.identity_sequence().is_some_and(|seq|
+        (seq > start as u64 || partial_start && seq == start as u64) && seq <= end as u64));
     Ok((messages, WindowRange::new(start, end)))
 }
 
@@ -376,12 +391,25 @@ fn empty_session_state() -> SessionState {
 }
 
 fn decode_session_state(envelope: &Map<String, Value>) -> Result<SessionState, HistoryError> {
-    Ok(SessionState::new(
+    let state = SessionState::new(
         decode_pending_inputs(envelope)?,
         decode_input_receipts(envelope)?,
         decode_in_flight_run(envelope)?,
         decode_delta_cursor(envelope)?,
         optional_bool(envelope, "completeSnapshot")?,
+    );
+    let Some(info) = envelope.get("sessionInfo") else { return Ok(state); };
+    let info = info.as_object().ok_or_else(|| payload_error("sessionInfo", "expected_object", value_kind(info)))?;
+    Ok(state.with_activity(
+        optional_string(info, "status")?,
+        match info.get("hasActiveRun") {
+            None | Some(Value::Null) => None,
+            _ => optional_bool(info, "hasActiveRun")?,
+        },
+        info.get("activeRunIds").map(|value| {
+            value.as_array().ok_or_else(|| payload_error("activeRunIds", "expected_array", value_kind(value)))?
+                .iter().map(|value| bounded_id(value, "activeRunIds[]")).collect::<Result<Vec<_>, _>>()
+        }).transpose()?,
     ))
 }
 
@@ -594,7 +622,7 @@ fn decode_native_window(payload: Value) -> Result<Vec<Message>, HistoryError> {
     messages
         .iter()
         .enumerate()
-        .map(|(index, message)| decode_message(index, message))
+        .map(|(index, message)| decode_message(index, message, None))
         .collect()
 }
 
@@ -649,18 +677,31 @@ pub(crate) fn decode_session_message(value: &Value) -> Result<Message, HistoryEr
     let mut message = envelope.get("message").and_then(Value::as_object)
         .cloned().ok_or_else(HistoryError::malformed)?;
     insert_missing_string_alias(&mut message, "messageId", "id", envelope.get("messageId"))?;
-    insert_missing_string_alias(&mut message, "runId", "runId", envelope.get("runId"))?;
     if !message.contains_key("seq") && !message.contains_key("sequence") {
         if let Some(sequence) = envelope.get("messageSeq") { message.insert("seq".to_owned(), sequence.clone()); }
     }
-    decode_message(0, &Value::Object(message))
+    let message = decode_message(0, &Value::Object(message), Some(envelope))?;
+    let mirror_origin = message.mirror_origin().map(str::to_owned);
+    let run_terminal = message.run_terminal();
+    let has_active_run = match envelope.get("hasActiveRun") {
+        None | Some(Value::Null) => None,
+        _ => optional_bool(envelope, "hasActiveRun")?,
+    };
+    Ok(message.with_projection_state(has_active_run, mirror_origin, run_terminal))
 }
 
 pub(crate) fn decode_transcript_event_message(
     source_sequence: u64,
     object: &Map<String, Value>,
 ) -> Result<Message, HistoryError> {
-    if source_sequence > MAX_SAFE_SEQUENCE {
+    decode_event_message(Some(source_sequence), object)
+}
+
+pub(crate) fn decode_event_message(
+    source_sequence: Option<u64>,
+    object: &Map<String, Value>,
+) -> Result<Message, HistoryError> {
+    if source_sequence.is_some_and(|sequence| sequence > MAX_SAFE_SEQUENCE) {
         return Err(payload_error("seq", "exceeds_safe_integer", "number"));
     }
     let value = object
@@ -678,9 +719,9 @@ pub(crate) fn decode_transcript_event_message(
         object.get("parentId"),
     )?;
     if !message.contains_key("seq") && !message.contains_key("sequence") {
-        message.insert("seq".to_owned(), Value::from(source_sequence));
+        if let Some(sequence) = source_sequence { message.insert("seq".to_owned(), Value::from(sequence)); }
     }
-    decode_message(0, &Value::Object(message))
+    decode_message(0, &Value::Object(message), Some(object))
 }
 
 fn insert_missing_string_alias(
@@ -726,7 +767,7 @@ fn validate_envelope(envelope: &Map<String, Value>) -> Result<(), HistoryError> 
     Ok(())
 }
 
-fn decode_message(index: usize, value: &Value) -> Result<Message, HistoryError> {
+fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Value>>) -> Result<Message, HistoryError> {
     let message = value
         .as_object()
         .ok_or_else(|| message_error(index, "message", "expected_object", value_kind(value)))?;
@@ -736,8 +777,28 @@ fn decode_message(index: usize, value: &Value) -> Result<Message, HistoryError> 
     let native = message.get("__openclaw").filter(|value| !value.is_null())
         .map(|value| value.as_object().ok_or_else(|| message_error(index, "__openclaw", "expected_object", value_kind(value))))
         .transpose()?;
-    let message_id = native.map(|meta| bounded_optional_string_message(meta, index, "id", MAX_METADATA_BYTES))
-        .transpose()?.flatten().or(optional_alias_string_message(message, index, "messageId", "id")?);
+    let truncated = native.map(|meta| optional_alias_bool_message(meta, index, "truncated", &["truncated"]))
+        .transpose()?.flatten().unwrap_or(false);
+    let hidden_control_reply = role == MessageRole::Assistant && hidden_control_reply(message, &text);
+    if let Some(media) = native.and_then(|meta| meta.get("media")).and_then(Value::as_array) {
+        for fact in media.iter().filter_map(Value::as_object) {
+            if fact.get("hydrationSuppressed").and_then(Value::as_bool) == Some(true) { continue; }
+            let Some(reference) = fact.get("url").and_then(Value::as_str).and_then(safe_native_media_reference) else { continue; };
+            let media_type = explicit_media_type(fact).or_else(|| fact.get("contentType").and_then(Value::as_str)
+                .filter(|value| valid_media_reference_shape(value, MAX_TOOL_NAME_BYTES)).map(str::to_owned))
+                .or_else(|| infer_media_type(&reference));
+            if !content.iter().any(|block| matches!(block, MessageContent::Media { reference: Some(old), .. } if old == &reference)) {
+                content.push(MessageContent::Media { media_type, reference: Some(reference), bytes: None });
+            }
+        }
+    }
+    let mirror_origin = native.map(|meta| projection_string(meta, index, "mirrorOrigin"))
+        .transpose()?.flatten();
+    let run_terminal = native.map(|meta| optional_alias_bool_message(meta, index, "runTerminal", &["runTerminal"]))
+        .transpose()?.flatten().unwrap_or(false);
+    let identity_message_id = native.map(|meta| projection_string(meta, index, "id")).transpose()?.flatten()
+        .or(envelope.map(|envelope| projection_string(envelope, index, "messageId")).transpose()?.flatten());
+    let message_id = identity_message_id.clone().or(optional_alias_string_message(message, index, "messageId", "id")?);
     let parent_id = optional_alias_string_message(message, index, "parentId", "parentMessageId")?;
     let origin = bounded_optional_string_message(message, index, "origin", MAX_METADATA_BYTES)?;
     let tool_call_id = bounded_optional_alias_string_message(
@@ -764,14 +825,44 @@ fn decode_message(index: usize, value: &Value) -> Result<Message, HistoryError> 
     let fallback = message.get("openclawStreamFallback").filter(|value| !value.is_null())
         .map(|value| value.as_object().ok_or_else(|| message_error(index, "openclawStreamFallback", "expected_object", value_kind(value))))
         .transpose()?;
-    let display_item_id = fallback.map(|value| bounded_optional_string_message(value, index, "itemId", MAX_METADATA_BYTES))
-        .transpose()?.flatten();
-    let run_id = native.map(|meta| bounded_optional_string_message(meta, index, "runId", MAX_METADATA_BYTES))
-        .transpose()?.flatten().or(bounded_optional_string_message(message, index, "runId", MAX_METADATA_BYTES)?)
-        .or(fallback.map(|meta| bounded_optional_string_message(meta, index, "runId", MAX_METADATA_BYTES)).transpose()?.flatten())
-        .map(|run| run.strip_suffix(":user").unwrap_or(&run).to_owned());
-    let sequence = native.map(|meta| optional_u64_message(meta, index, "seq")).transpose()?.flatten()
-        .or(optional_alias_u64_pair_message(message, index, "seq", "sequence")?);
+    let stream_fallback = fallback.map(|fallback| decode_stream_fallback(index, fallback)).transpose()?;
+    let display_position = native.and_then(|meta| meta.get("transcriptPosition")).and_then(decode_display_position);
+    let is_imported = native.map(|meta| ["importedFrom", "cliSessionId", "externalId"].into_iter()
+        .try_fold(false, |imported, field| projection_string(meta, index, field).map(|value| imported || value.is_some())))
+        .transpose()?.unwrap_or(false);
+    let steer_target_run_id = native.map(|meta| projection_string(meta, index, "steerTargetRunId")).transpose()?.flatten();
+    let metadata_run = native.map(|meta| projection_string(meta, index, "runId")).transpose()?.flatten().and_then(normalize_run);
+    let envelope_run = envelope.map(|envelope| projection_string(envelope, index, "runId")).transpose()?.flatten().and_then(normalize_run);
+    let persisted_run = native.map(|meta| projection_string(meta, index, "idempotencyKey")).transpose()?.flatten()
+        .or(projection_string(message, index, "idempotencyKey")?)
+        .or(envelope.map(|envelope| projection_string(envelope, index, "idempotencyKey")).transpose()?.flatten())
+        .or(envelope.map(|envelope| projection_string(envelope, index, "clientRunId")).transpose()?.flatten())
+        .and_then(normalize_run);
+    let has_send_identity = persisted_run.is_some();
+    let cli_assistant = role == MessageRole::Assistant && projection_string(message, index, "api")?
+        .is_some_and(|api| api.eq_ignore_ascii_case("cli"));
+    let persisted_run = persisted_run.and_then(|run| {
+        if cli_assistant && let Some(run) = run.strip_prefix("cli-assistant:") {
+            (!run.trim().is_empty()).then(|| run.trim().to_owned())
+        } else { Some(run) }
+    });
+    let optimistic = native.is_some_and(|meta| meta.keys().all(|field| field == "idempotencyKey"));
+    let identity_run_id = if role == MessageRole::Assistant {
+        metadata_run.or(envelope_run).or_else(|| (cli_assistant || mirror_origin.is_none() || optimistic).then_some(persisted_run).flatten())
+    } else { metadata_run.or(persisted_run).or(envelope_run) };
+    let run_id = identity_run_id.clone().or(projection_string(message, index, "runId")?.and_then(normalize_run))
+        .or_else(|| (role == MessageRole::Assistant).then(|| stream_fallback.as_ref().and_then(|fallback| fallback.run_id.clone())).flatten());
+    let identity_sequence = native.map(|meta| optional_u64_message(meta, index, "seq")).transpose()?.flatten().filter(|seq| *seq > 0)
+        .or(envelope.map(|envelope| optional_u64_message(envelope, index, "messageSeq")).transpose()?.flatten().filter(|seq| *seq > 0));
+    let sequence = identity_sequence.or(optional_alias_u64_pair_message(message, index, "seq", "sequence")?);
+    let after_sequence = match envelope.and_then(|envelope| envelope.get("afterSequence")) {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(value) => Some(Some(value.as_u64().ok_or_else(|| message_error(index, "afterSequence", "expected_u64", value_kind(value)))?)),
+    };
+    if after_sequence.flatten().is_some_and(|seq| seq > MAX_SAFE_SEQUENCE) {
+        return Err(message_error(index, "afterSequence", "exceeds_safe_integer", "number"));
+    }
     if sequence.is_some_and(|value| value > MAX_SAFE_SEQUENCE) {
         return Err(message_error(
             index,
@@ -794,7 +885,103 @@ fn decode_message(index: usize, value: &Value) -> Result<Message, HistoryError> 
         sequence,
         created_at,
         updated_at,
-    ).with_display_item_id(display_item_id))
+    ).with_display(display_position, stream_fallback).with_imported(is_imported)
+        .with_identity(identity_message_id, identity_run_id, identity_sequence, after_sequence)
+        .with_steer_target_run_id(steer_target_run_id)
+        .with_projection_state(None, mirror_origin, run_terminal)
+        .with_event_facts(
+            envelope.map(|envelope| projection_string(envelope, index, "runId")).transpose()?.flatten(),
+            envelope.map(|envelope| projection_string(envelope, index, "clientRunId")).transpose()?.flatten(),
+            has_send_identity,
+            native.is_some_and(|meta| meta.get("seq").and_then(Value::as_u64).is_some_and(|seq| seq > 0)
+                || ["importedFrom", "cliSessionId", "externalId"].into_iter().all(|field| meta.get(field).and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty()))),
+            terminal_reply_signature(message, run_terminal, hidden_control_reply),
+        )
+        .with_hidden_control_reply(hidden_control_reply).with_truncated(truncated))
+}
+
+fn terminal_reply_signature(message: &Map<String, Value>, run_terminal: bool, hidden: bool) -> Option<String> {
+    if hidden { return None; }
+    let direct = message.get("phase").and_then(Value::as_str).filter(|phase| matches!(*phase, "commentary" | "final_answer"));
+    let mut phase = None;
+    let mut mixed = false;
+    if let Some(blocks) = message.get("content").and_then(Value::as_array) {
+        for block in blocks.iter().filter(|block| block.get("type").and_then(Value::as_str).is_some_and(|kind| TEXT_BLOCK_TYPES.contains(&kind))) {
+            let signature = block.get("textSignature").and_then(Value::as_str).and_then(|value| serde_json::from_str::<Value>(value).ok());
+            let Some(signature) = signature.filter(|value| value.get("v").and_then(Value::as_u64) == Some(1)) else { continue; };
+            if let Some(next) = signature.get("phase").and_then(Value::as_str).filter(|phase| matches!(*phase, "commentary" | "final_answer")) {
+                mixed |= phase.is_some_and(|phase| phase != next);
+                phase = Some(if next == "commentary" { "commentary" } else { "final_answer" });
+            }
+        }
+    }
+    let phase = direct.or_else(|| (!mixed).then_some(phase).flatten());
+    let stop = message.get("stopReason").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase();
+    if phase == Some("commentary") || ((stop.is_empty() || stop == "tooluse") && !run_terminal) { return None; }
+    let content = match message.get("content")? {
+        Value::String(text) if !text.trim().is_empty() => vec![serde_json::json!({ "type": "text", "text": text })],
+        Value::Array(blocks) => blocks.iter().filter(|block| {
+            let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
+            if kind == "text" { block.get("text").and_then(Value::as_str).is_some_and(|text| !text.trim().is_empty()) }
+            else { !TOOL_CALL_BLOCK_TYPES.contains(&kind) && !TOOL_RESULT_BLOCK_TYPES.contains(&kind) }
+        }).cloned().collect(),
+        _ => Vec::new(),
+    };
+    (!content.is_empty()).then(|| serde_json::to_string(&content).ok()).flatten()
+}
+
+fn projection_string(object: &Map<String, Value>, index: usize, field: &'static str) -> Result<Option<String>, HistoryError> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let text = string_message(value, index, field)?.trim();
+            if text.len() > MAX_METADATA_BYTES { return Err(message_error(index, field, "string_too_large", "string")); }
+            Ok((!text.is_empty()).then(|| text.to_owned()))
+        }
+    }
+}
+
+fn normalize_run(run: String) -> Option<String> {
+    let run = run.strip_suffix(":user").unwrap_or(&run);
+    (!run.is_empty()).then(|| run.to_owned())
+}
+
+fn decode_display_position(value: &Value) -> Option<DisplayPosition> {
+    let object = value.as_object()?;
+    let source = object.get("source")?.as_str()?;
+    if source.is_empty() || source.encode_utf16().count() > 128 { return None; }
+    let raw_seq = object.get("rawSeq")?.as_u64()?;
+    let activity = match object.get("activity") {
+        None => None,
+        Some(value) => {
+            let activity = value.as_object()?;
+            let after_raw_seq = match activity.get("afterRawSeq")? {
+                Value::Null => None,
+                value => Some(value.as_u64()?),
+            };
+            if after_raw_seq.is_some_and(|after| after >= raw_seq) { return None; }
+            let scope_id = activity.get("scopeId")?.as_str()?;
+            if scope_id.is_empty() || scope_id.encode_utf16().count() > 1024 { return None; }
+            Some(ActivityPosition { after_raw_seq, scope_id: scope_id.to_owned(), start_order: activity.get("startOrder")?.as_u64()? })
+        }
+    };
+    Some(DisplayPosition { source: source.to_owned(), raw_seq, activity })
+}
+
+fn decode_stream_fallback(index: usize, object: &Map<String, Value>) -> Result<StreamFallback, HistoryError> {
+    let source = match object.get("source").and_then(Value::as_str) {
+        Some("segment") => StreamFallbackSource::Segment,
+        Some("current") => StreamFallbackSource::Current,
+        _ => return Err(message_error(index, "openclawStreamFallback.source", "unsupported_source", "missing_or_invalid")),
+    };
+    let replacement_text = bounded_message_text(index, "replacementText", string_message(required_message(object, index, "replacementText")?, index, "replacementText")?)?;
+    Ok(StreamFallback {
+        source,
+        replacement_text,
+        item_id: projection_string(object, index, "itemId")?,
+        run_id: projection_string(object, index, "runId")?,
+        after_boundary_run_id: projection_string(object, index, "afterBoundaryRunId")?,
+    })
 }
 
 fn decode_role(index: usize, role: &str) -> Result<MessageRole, HistoryError> {
@@ -931,44 +1118,155 @@ fn decode_content(
                     is_error,
                 });
             }
-            Some("image") | Some("media") => {
+            Some("image" | "audio" | "video" | "media" | "attachment") => {
+                let media = block.get("attachment").and_then(Value::as_object).unwrap_or(block);
+                let source = media.get("source").and_then(Value::as_object);
                 let media_type = bounded_optional_block_string(
                     message_index,
                     block_index,
-                    "mimeType|mediaType",
-                    block.get("mimeType").or_else(|| block.get("mediaType")),
+                    "mimeType|mediaType|media_type",
+                    media.get("mimeType").or_else(|| media.get("mediaType"))
+                        .or_else(|| source.and_then(|source| source.get("mimeType").or_else(|| source.get("mediaType")).or_else(|| source.get("media_type")))),
                     MAX_METADATA_BYTES,
                 )?;
                 let reference = bounded_optional_block_string(
                     message_index,
                     block_index,
                     "ref|reference|viewId",
-                    block
-                        .get("ref")
-                        .or_else(|| block.get("reference"))
-                        .or_else(|| block.get("viewId")),
+                    media.get("ref").or_else(|| media.get("reference")).or_else(|| media.get("viewId")),
                     MAX_MEDIA_REF_BYTES,
-                )?;
-                let bytes = block.get("data").and_then(Value::as_str).map(str::len);
-                let unsafe_media = bytes.is_some() || reference.is_none();
-                content.push(MessageContent::Media {
-                    media_type,
-                    reference,
-                    bytes,
-                });
-                if unsafe_media {
-                    content.push(MessageContent::Omitted {
-                        kind: OmittedContentKind::UnsafeMedia,
-                    });
-                }
+                )?.or_else(|| native_media_reference(media));
+                let media_type = media_type.or_else(|| reference.as_deref().and_then(infer_media_type));
+                let bytes = [Some(media), source].into_iter().flatten()
+                    .find_map(|media| media.get("data").or_else(|| media.get("blob")).and_then(Value::as_str).map(str::len));
+                content.push(MessageContent::Media { media_type, reference, bytes });
             }
             Some(_) | None => content.push(MessageContent::Omitted {
                 kind: OmittedContentKind::Unknown,
             }),
         }
     }
-    let text = bounded_message_text(message_index, "content", &text_parts.join("\n"))?;
+    let text = join_display_text(message_index, text_parts.iter().map(String::as_str), MAX_TEXT_BYTES)?;
     Ok((text, content))
+}
+
+fn native_media_reference(media: &Map<String, Value>) -> Option<String> {
+    let fields = ["url", "openUrl", "image_url", "audio_url", "video_url"];
+    [Some(media), media.get("source").and_then(Value::as_object)].into_iter().flatten()
+        .flat_map(|media| fields.into_iter().filter_map(move |field| media.get(field).and_then(Value::as_str)))
+        .chain(media.get("source").and_then(Value::as_str))
+        .find_map(safe_native_media_reference)
+}
+
+fn safe_native_media_reference(reference: &str) -> Option<String> {
+    let value = reference.trim();
+    if !valid_media_reference_shape(value, MAX_MEDIA_REF_BYTES) || value.contains(['?', '#']) {
+        return None;
+    }
+    if value.starts_with(OUTGOING_MEDIA_PREFIX) { return Some(value.to_owned()); }
+    if value.starts_with(OUTGOING_MEDIA_PREFIX_WITHOUT_SLASH) { return Some(format!("/{value}")); }
+    let url = reqwest::Url::parse(value).ok()?;
+    (matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+        && url.username().is_empty() && url.password().is_none()).then(|| url.to_string())
+}
+
+fn hidden_control_reply(message: &Map<String, Value>, text: &str) -> bool {
+    let content = message.get("content");
+    let has_visible_nontext = content.and_then(Value::as_array).is_some_and(|blocks| blocks.iter().any(|block| {
+        !matches!(block.get("type").and_then(Value::as_str), Some("text" | "thinking" | "reasoning"))
+    }));
+    if has_visible_nontext { return false; }
+    if message.get("text").and_then(Value::as_str).unwrap_or(text).trim() == "NO_REPLY" { return true; }
+    if message.get("senderLabel").and_then(Value::as_str).is_some_and(|label| !label.trim().is_empty()) { return false; }
+    let text = match content {
+        Some(Value::Array(blocks)) => blocks.iter().filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(Value::as_str)).collect::<String>(),
+        Some(Value::String(text)) => text.clone(),
+        _ => text.to_owned(),
+    };
+    if !text.contains("HEARTBEAT_OK") { return false; }
+    let original = heartbeat_edges(&text);
+    let mut normalized = String::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find('<') {
+        normalized.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find('>') else { rest = &rest[start..]; break; };
+        normalized.push(' ');
+        rest = &rest[start + end + 1..];
+    }
+    normalized.push_str(rest);
+    let normalized = normalized.replace("&nbsp;", " ").replace("&NBSP;", " ");
+    let normalized = normalized.trim().trim_matches(|ch| matches!(ch, '*' | '`' | '~' | '_'));
+    let normalized = heartbeat_edges(normalized);
+    let picked = if original.1 && !original.0.is_empty() { original } else { normalized };
+    picked.1 && picked.0.encode_utf16().count() <= 300
+}
+
+fn heartbeat_edges(text: &str) -> (String, bool) {
+    let mut text = text.trim().to_owned();
+    let mut stripped = false;
+    loop {
+        if let Some(rest) = text.strip_prefix("HEARTBEAT_OK") {
+            text = rest.trim_start().to_owned();
+        } else if let Some(index) = text.rfind("HEARTBEAT_OK") {
+            let tail = &text[index + "HEARTBEAT_OK".len()..];
+            if tail.encode_utf16().count() > 4 || tail.chars().any(|ch| ch.is_ascii_alphanumeric() || ch == '_') { break; }
+            let before = text[..index].trim_end();
+            text = if before.is_empty() { String::new() } else { format!("{before}{tail}").trim_end().to_owned() };
+        } else { break; }
+        stripped = true;
+    }
+    (text.split_whitespace().collect::<Vec<_>>().join(" "), stripped)
+}
+
+pub(crate) fn decode_complete_text(value: &Value) -> Result<String, HistoryError> {
+    let message = value.as_object().ok_or_else(HistoryError::malformed)?;
+    if let Some(meta) = message.get("__openclaw").filter(|value| !value.is_null()) {
+        let meta = meta.as_object().ok_or_else(HistoryError::malformed)?;
+        if optional_alias_bool_message(meta, 0, "truncated", &["truncated"])?.unwrap_or(false) {
+            return Err(message_error(0, "truncated", "incomplete_message", "boolean"));
+        }
+    }
+    let text = display_content_text(0, required_message(message, 0, "content")?, 8_000_000)?;
+    if text.encode_utf16().count() > 2_000_000 {
+        return Err(message_error(0, "content", "text_too_large", "string"));
+    }
+    Ok(text)
+}
+
+fn display_content_text(index: usize, value: &Value, max_bytes: usize) -> Result<String, HistoryError> {
+    let text = match value {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => {
+            let mut parts = Vec::new();
+            let mut bytes = 0usize;
+            for (block_index, block) in blocks.iter().enumerate() {
+                let block = block.as_object().ok_or_else(|| block_error(index, block_index, "content[]", "expected_object", value_kind(block)))?;
+                if block.get("type").and_then(Value::as_str).is_some_and(|kind| TEXT_BLOCK_TYPES.contains(&kind)) {
+                    let text = string_block(required_block(block, index, block_index, "text")?, index, block_index, "text")?;
+                    bytes = bytes.saturating_add(text.len()).saturating_add(usize::from(!parts.is_empty()));
+                    if bytes > max_bytes { return Err(message_error(index, "content", "text_too_large", "string")); }
+                    parts.push(text);
+                }
+            }
+            join_display_text(index, parts.into_iter(), max_bytes)?
+        }
+        _ => return Err(message_error(index, "content", "expected_string_or_array", value_kind(value))),
+    };
+    if text.len() > max_bytes { return Err(message_error(index, "content", "text_too_large", "string")); }
+    Ok(text)
+}
+
+fn join_display_text<'a>(index: usize, parts: impl Iterator<Item = &'a str>, max_bytes: usize) -> Result<String, HistoryError> {
+    let mut text = String::new();
+    for (part_index, part) in parts.enumerate() {
+        if text.len().saturating_add(part.len()).saturating_add(usize::from(part_index > 0)) > max_bytes {
+            return Err(message_error(index, "content", "text_too_large", "string"));
+        }
+        if part_index > 0 { text.push('\n'); }
+        text.push_str(part);
+    }
+    Ok(text)
 }
 
 fn has_tool_result_content(content: &[MessageContent]) -> bool {

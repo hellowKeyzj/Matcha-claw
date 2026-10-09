@@ -260,6 +260,8 @@ pub enum SessionSendOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum SessionSendStatus {
     Started,
+    InFlight,
+    Ok,
 }
 #[cfg(test)]
 mod tests {

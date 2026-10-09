@@ -3,7 +3,12 @@ use std::{collections::HashMap, sync::{Arc, Mutex as StdMutex, atomic::{AtomicU6
 use sessions_module::{ports::{RuntimeOperationFailure, SessionObservationRequest, SessionSync}, state::SessionIdentity};
 use tokio::sync::{Mutex, oneshot};
 
-use crate::session::{trace, window::PageRequest};
+use crate::session::{trace, window::{PageRequest, SessionWindow}};
+
+pub(crate) enum HistoryRead {
+    Projected(Option<SessionSync>),
+    NeedsContent { window: SessionWindow, source_epoch: crate::gateway::ingress::GatewayEpoch },
+}
 
 pub(crate) fn identity_key(identity: &SessionIdentity) -> String {
     serde_json::to_string(identity).expect("session identity serializes")
@@ -23,7 +28,7 @@ pub(crate) enum OrderedContext {
     Subscribe { identity: SessionIdentity, generation: u64, reply: oneshot::Sender<Result<(), RuntimeOperationFailure>> },
     Describe { identity: SessionIdentity, generation: u64, supported: bool, reply: oneshot::Sender<Result<(), RuntimeOperationFailure>> },
     History { identity: SessionIdentity, generation: u64, page: PageRequest, host_epoch: u64,
-        reply: oneshot::Sender<Result<Option<SessionSync>, RuntimeOperationFailure>> },
+        reply: oneshot::Sender<Result<HistoryRead, RuntimeOperationFailure>> },
 }
 
 pub(crate) struct Observations {
@@ -63,17 +68,16 @@ impl Observations {
     pub(crate) fn restart(&self, identity: &SessionIdentity, generation: u64, next_generation: u64) -> Result<(), RuntimeOperationFailure> {
         let mut entries = self.entries.lock().expect("observation registry lock poisoned");
         let entry = entries.get_mut(&identity_key(identity)).filter(|entry| entry.generation == generation).ok_or(RuntimeOperationFailure::Unavailable)?;
-        let epoch = self.current_epoch.load(Ordering::Acquire);
         if trace::enabled() {
             trace::log_unscoped("runtime.openclaw.observation.restart.registry", serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "nextGeneration": next_generation,
-                "previousSourceEpoch": entry.source_epoch, "sourceEpoch": (epoch != 0).then_some(epoch),
+                "previousSourceEpoch": entry.source_epoch, "sourceEpoch": null,
                 "previousSubscribedEpoch": entry.subscribed_epoch, "cursorPresent": entry.cursor.is_some(),
                 "cursorHash": entry.cursor.as_deref().map(sessions_module::trace::fingerprint),
                 "previousPaused": entry.paused, "nextPaused": true, "nextCursorPresent": false }));
         }
         entry.generation = next_generation;
-        entry.source_epoch = (epoch != 0).then_some(epoch);
+        entry.source_epoch = None;
         entry.subscribed_epoch = None;
         entry.cursor = None;
         entry.cursor_page = None;
@@ -106,6 +110,13 @@ impl Observations {
             trace::log_unscoped("runtime.openclaw.observation.source.deactivate", serde_json::json!({
                 "sourceEpoch": epoch, "deactivated": result.is_ok(), "activeSourceEpoch": result.err() }));
         }
+    }
+
+    pub(crate) fn is_active(&self, identity: &SessionIdentity, generation: u64, epoch: u64) -> bool {
+        let entries = self.entries.lock().expect("observation registry lock poisoned");
+        self.current_epoch.load(Ordering::Acquire) == epoch
+            && entries.get(&identity_key(identity)).is_some_and(|entry|
+                entry.generation == generation && entry.source_epoch == Some(epoch) && !entry.paused)
     }
 
     pub(crate) fn contains(&self, identity: &SessionIdentity, generation: u64, epoch: Option<u64>) -> bool {

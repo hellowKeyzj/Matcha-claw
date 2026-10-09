@@ -29,7 +29,6 @@
     "teamDesignInProgress": "Проектирование графа выполнения",
     "teamDesignExit": "Выйти из проектирования, сохранив граф выполнения",
     "teamDesignExitWaiting": "Остановите текущий ответ перед выходом из проектирования",
-    "teamDesignActive": "Настройка задач и взаимодействия Team без запуска выполнения",
     "gatewayDisconnectedPlaceholder": "Gateway not connected...",
     "messagePlaceholder": "Message, / for skills, Enter to send, Shift+Enter for newline",
     "approvalWaitingPlaceholder": "Waiting for approval...",

@@ -204,6 +204,9 @@ pub(crate) struct SessionEventIngest {
 
 pub(crate) enum IngestFrame {
     Socket { epoch: GatewayEpoch, frame: crate::gateway::connection::GatewayFrame, observations: Arc<crate::gateway::observation::Observations> },
+    HistoryContent { identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: GatewayEpoch, window: super::window::SessionWindow, page: super::window::PageRequest, host_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Option<sessions_module::ports::SessionSync>, sessions_module::ports::RuntimeOperationFailure>> },
+    HistoryStarted { identity: sessions_module::state::SessionIdentity, generation: u64, page: super::window::PageRequest, reply: tokio::sync::oneshot::Sender<u64> },
+    HistoryFinished { identity: sessions_module::state::SessionIdentity, generation: u64, read: u64, reply: tokio::sync::oneshot::Sender<bool> },
     Close { identity: sessions_module::state::SessionIdentity, generation: u64, reply: tokio::sync::oneshot::Sender<()> },
     Restart { identity: sessions_module::state::SessionIdentity, generation: u64, next_generation: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<(), sessions_module::ports::RuntimeOperationFailure>> },
 }
@@ -232,7 +235,7 @@ impl SessionEventIngest {
         let session_events = self.session_events.clone();
         let (task, _) = foundation::execution::OwnedTask::spawn(move |cancel| async move {
             loop {
-                let frame = tokio::select! { _ = cancel.cancelled() => return, frame = events.recv() => frame };
+                let frame = tokio::select! { _ = cancel.cancelled() => { observations.deactivate(value); return; }, frame = events.recv() => frame };
                 let Some(frame) = frame else { break };
                 if sender.send(IngestFrame::Socket { epoch, frame, observations: Arc::clone(&observations) }).await.is_err() { break; }
             }
@@ -244,7 +247,7 @@ impl SessionEventIngest {
             };
             for (identity, generation) in observation_targets(&observations, value, None) {
                 let binding = sessions_module::state::SessionEventBinding::observed(identity.clone(), generation, Some(value), false).expect("validated observation binding");
-                let event = SessionIngressEvent::new(identity, sessions_module::command::SessionEvent { binding, run_id: None, cursor: None, changes: vec![sessions_module::state::SessionChange::RecoveryRequired { reason }] });
+                let event = SessionIngressEvent::new(identity, sessions_module::command::SessionEvent { binding, run_id: None, cursor: None, history_refresh: false, changes: vec![sessions_module::state::SessionChange::RecoveryRequired { reason }] });
                 if session_events.send(event).await.is_err() { break; }
             }
         });
@@ -256,6 +259,26 @@ impl SessionEventIngest {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.sender.send(IngestFrame::Restart { identity, generation, next_generation, observations, reply }).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
         receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
+    }
+
+    pub(crate) async fn history_content(&self, identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: GatewayEpoch, window: super::window::SessionWindow, page: super::window::PageRequest, host_epoch: u64, observations: Arc<crate::gateway::observation::Observations>) -> Result<Option<sessions_module::ports::SessionSync>, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.sender.send(IngestFrame::HistoryContent { identity, generation, source_epoch, window, page, host_epoch, observations, reply }).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
+    }
+
+    pub(crate) async fn history_started(&self, identity: sessions_module::state::SessionIdentity, generation: u64, page: super::window::PageRequest) -> Result<u64, sessions_module::ports::RuntimeOperationFailure> {
+        use sessions_module::ports::RuntimeOperationFailure;
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.sender.send(IngestFrame::HistoryStarted { identity, generation, page, reply }).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        receiver.await.map_err(|_| RuntimeOperationFailure::Unavailable)
+    }
+
+    pub(crate) async fn history_finished(&self, identity: sessions_module::state::SessionIdentity, generation: u64, read: u64) -> bool {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        if self.sender.send(IngestFrame::HistoryFinished { identity, generation, read, reply }).await.is_err() { return false; }
+        receiver.await.unwrap_or(false)
     }
 
     pub(crate) async fn close_observation(&self, identity: sessions_module::state::SessionIdentity, generation: u64) {
@@ -270,9 +293,38 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
     let mut router = EventRouter::new(session_events);
     let mut active_epoch = 0;
     let mut last_sequence = None;
-    while let Some(frame) = receiver.recv().await {
+    loop {
+        let deadline = router.recovery_deadline();
+        let frame = tokio::select! {
+            frame = receiver.recv() => { let Some(frame) = frame else { break }; frame },
+            _ = async { if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; } else { std::future::pending::<()>().await; } } => {
+                router.refresh_terminal_history().await;
+                continue;
+            }
+        };
         let (epoch, frame, observations) = match frame {
+            IngestFrame::HistoryStarted { identity, generation, page, reply } => {
+                let _ = reply.send(router.history_started(&identity, generation, page));
+                continue;
+            }
+            IngestFrame::HistoryFinished { identity, generation, read, reply } => {
+                let _ = reply.send(router.history_finished(&identity, generation, read));
+                continue;
+            }
             IngestFrame::Socket { epoch, frame, observations } => (epoch, frame, observations),
+            IngestFrame::HistoryContent { identity, generation, source_epoch, window, page, host_epoch, observations, reply } => {
+                let result = if source_epoch.as_u64() != active_epoch || !observations.contains(&identity, generation, Some(active_epoch)) {
+                    Err(RuntimeOperationFailure::Unavailable)
+                } else {
+                    let cursor = window.state().delta_cursor().map(str::to_owned);
+                    let history_kind = super::trace::enabled().then(|| window.state().kind());
+                    let result = router.history(identity.clone(), generation, window, page, source_epoch, host_epoch);
+                    update_history_cursor(&observations, &identity, generation, page, cursor, &result, source_epoch.as_u64(), history_kind);
+                    result
+                };
+                let _ = reply.send(result);
+                continue;
+            }
             IngestFrame::Close { identity, generation, reply } => { router.close(&identity, generation); let _ = reply.send(()); continue; }
             IngestFrame::Restart { identity, generation, next_generation, observations, reply } => {
                 let result = if observations.contains(&identity, next_generation, None) {
@@ -308,6 +360,17 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                     trace_gateway_drop("runtime.openclaw.ingress.dropped", trace_payload, "non_monotonic_gateway_sequence");
                     let targets = observation_targets(&observations, active_epoch, None);
                     for (identity, generation) in targets { router.recover(identity, generation, epoch, CanonicalRecoveryReason::CursorStale).await; }
+                    continue;
+                }
+                if event.sequence.zip(last_sequence).is_some_and(|(seq, last)| seq > last + 1) {
+                    trace_gateway_drop("runtime.openclaw.ingress.dropped", trace_payload, "gateway_sequence_gap");
+                    let targets: Vec<_> = {
+                        let mut entries = observations.entries.lock().expect("observation registry lock poisoned");
+                        entries.values_mut().filter(|entry| !entry.paused && entry.source_epoch == Some(active_epoch))
+                            .map(|entry| { entry.paused = true; (entry.identity.clone(), entry.generation) }).collect()
+                    };
+                    last_sequence = event.sequence;
+                    for (identity, generation) in targets { router.recover(identity, generation, epoch, CanonicalRecoveryReason::CursorGap).await; }
                     continue;
                 }
                 if event.sequence.is_some() { last_sequence = event.sequence; }
@@ -361,7 +424,7 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                         })).collect::<Vec<_>>() }));
                 }
                 for (identity, generation) in targets {
-                    if observations.contains(&identity, generation, Some(active_epoch)) { router.route(envelope.clone(), epoch, identity, generation).await; }
+                    if observations.contains(&identity, generation, Some(active_epoch)) { router.route(envelope.clone(), epoch, identity, generation, &observations).await; }
                     else if super::trace::enabled() {
                         super::trace::log_unscoped("runtime.openclaw.ingress.target_dropped", serde_json::json!({
                             "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
@@ -459,8 +522,12 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                                         }));
                                     }
                                     match decoded {
+                                        Ok(window) if window.messages().iter().any(super::window::Message::truncated) => {
+                                            Ok(crate::gateway::observation::HistoryRead::NeedsContent { window, source_epoch: epoch })
+                                        }
                                         Ok(window) => {
                                             let cursor = window.state().delta_cursor().map(str::to_owned);
+                                            let history_kind = super::trace::enabled().then(|| window.state().kind());
                                             let projection_started = super::trace::enabled().then(std::time::Instant::now);
                                             let result = if super::trace::enabled() {
                                                 sessions_module::trace::with_context(serde_json::json!({ "requestHash": &request_hash }), ||
@@ -474,8 +541,8 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                                                     "projectionElapsedMs": projection_elapsed_ms, "timingScope": "router_history_with_context_including_internal_trace_excluding_outer_trace",
                                                 }));
                                             }
-                                            if result.is_ok() && matches!(page.direction(), super::window::Direction::Latest) { if let Some(entry) = observations.entries.lock().expect("observation registry lock poisoned").get_mut(&identity_key(&identity)) { if entry.generation == generation { entry.cursor = if matches!(result, Ok(Some(_))) { cursor } else { None }; entry.cursor_page = entry.cursor.as_ref().map(|_| page); } } }
-                                            result
+                                            update_history_cursor(&observations, &identity, generation, page, cursor, &result, epoch.as_u64(), history_kind);
+                                            result.map(crate::gateway::observation::HistoryRead::Projected)
                                         }
                                         Err(_) => {
                                             if super::trace::enabled() {
@@ -497,7 +564,7 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                                 "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
                                 "sourceEpoch": epoch.as_u64(), "activeSourceEpoch": active_epoch, "direction": format!("{:?}", page.direction()),
                                 "requestHash": &request_hash, "limit": page.limit(), "offset": page.offset(),
-                                "accepted": result.is_ok(), "hasSnapshot": result.as_ref().is_ok_and(Option::is_some),
+                                "accepted": result.is_ok(), "hasSnapshot": matches!(&result, Ok(crate::gateway::observation::HistoryRead::Projected(Some(_)))),
                                 "failure": result.as_ref().err().map(|failure| format!("{:?}", failure)) }));
                         }
                         let status = result.as_ref().map(|_| ()).map_err(|error| *error);
@@ -509,6 +576,50 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                 let _ = reply.send(Ok(response));
             }
         }
+    }
+}
+
+fn update_history_cursor(observations: &crate::gateway::observation::Observations, identity: &sessions_module::state::SessionIdentity, generation: u64, page: super::window::PageRequest, cursor: Option<String>, result: &Result<Option<sessions_module::ports::SessionSync>, sessions_module::ports::RuntimeOperationFailure>, source_epoch: u64, history_kind: Option<super::window::HistoryKind>) {
+    let mut cursor_trace = super::trace::enabled().then(|| serde_json::json!({
+        "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "sourceEpoch": source_epoch,
+        "historyKind": history_kind.map(|kind| format!("{:?}", kind)), "direction": format!("{:?}", page.direction()),
+        "limit": page.limit(), "offset": page.offset(), "cursorState": "observation",
+        "historyResult": match result { Ok(Some(_)) => "snapshot", Ok(None) => "reset", Err(_) => "failed" },
+        "ingressBindingAdmitted": true,
+        "responseCursorPresent": cursor.is_some(), "saveCandidatePresent": cursor.is_some(),
+        "saveCandidateHash": cursor.as_deref().map(sessions_module::trace::fingerprint),
+        "registryObserved": false, "cursorSaveDecision": if result.is_err() { "history_failed" } else { "not_latest" }
+    }));
+    if result.is_ok() && matches!(page.direction(), super::window::Direction::Latest) {
+        if let Some(payload) = cursor_trace.as_mut() {
+            payload["registryObserved"] = serde_json::json!(true);
+            payload["cursorSaveDecision"] = serde_json::json!("registry_missing");
+        }
+        if let Some(entry) = observations.entries.lock().expect("observation registry lock poisoned").get_mut(&crate::gateway::observation::identity_key(identity)) {
+            if let Some(payload) = cursor_trace.as_mut() {
+                payload["entryGeneration"] = serde_json::json!(entry.generation);
+                payload["entrySourceEpoch"] = serde_json::json!(entry.source_epoch);
+                payload["generationMatched"] = serde_json::json!(entry.generation == generation);
+                payload["sourceEpochMatched"] = serde_json::json!(entry.source_epoch == Some(source_epoch));
+                payload["cursorBeforePresent"] = serde_json::json!(entry.cursor.is_some());
+                payload["cursorBeforeHash"] = serde_json::json!(entry.cursor.as_deref().map(sessions_module::trace::fingerprint));
+                payload["cursorSaveDecision"] = serde_json::json!(if entry.generation != generation { "stale_generation" }
+                    else if entry.source_epoch != Some(source_epoch) { "stale_epoch" }
+                    else if matches!(result, Ok(None)) { "reset_cleared" }
+                    else if cursor.is_none() { "response_no_cursor" } else { "saved" });
+            }
+            if entry.generation == generation && entry.source_epoch == Some(source_epoch) {
+                entry.cursor = if matches!(result, Ok(Some(_))) { cursor } else { None };
+                entry.cursor_page = entry.cursor.as_ref().map(|_| page);
+            }
+            if let Some(payload) = cursor_trace.as_mut() {
+                payload["cursorAfterPresent"] = serde_json::json!(entry.cursor.is_some());
+                payload["cursorAfterHash"] = serde_json::json!(entry.cursor.as_deref().map(sessions_module::trace::fingerprint));
+            }
+        }
+    }
+    if let Some(payload) = cursor_trace {
+        super::trace::log_unscoped("runtime.openclaw.ingress.history_cursor", payload);
     }
 }
 
@@ -565,6 +676,9 @@ mod tests {
                 replace: false,
                 message_text: None,
                 message_thinking: None,
+                final_message: None,
+                yielded: false,
+                message_absent: true,
                 error_kind: None,
                 error_message: None,
                 stop_reason: None,

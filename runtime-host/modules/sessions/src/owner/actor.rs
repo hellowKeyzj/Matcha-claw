@@ -41,7 +41,7 @@ use crate::{
     },
     query::SessionQuery,
     rename::SessionRenameOutcome,
-    send::{SessionDeliveryContext, SessionSendCommand, SessionSendOutcome},
+    send::{SessionDeliveryContext, SessionSendCommand, SessionSendOutcome, SessionSendStatus},
     session_catalog::{
         self, SessionCatalog, SessionCatalogCommand, SessionCatalogEntry, SessionCatalogOutcome,
     },
@@ -299,7 +299,7 @@ impl SessionShared {
             Err(RuntimeOperationFailure::Unsupported) => {
                 return PendingApprovalsOutcome::Unsupported;
             }
-            Err(RuntimeOperationFailure::Unavailable) => {
+            Err(RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending) => {
                 return PendingApprovalsOutcome::Unavailable;
             }
             Err(RuntimeOperationFailure::TargetRejected | RuntimeOperationFailure::Unknown) => {
@@ -712,7 +712,7 @@ impl SessionLane {
                 let outcome = self.handle_ingest(shared, &key, identity, event).await;
                 let _ = reply.send(outcome);
             }
-            SendCompleted { command, goal_demand, outcome, reply, call } => {
+            SendCompleted { command, goal_demand, receive_demand_added, outcome, reply, call } => {
                 let outcome = super::goal::validate_start_outcome(&command, outcome);
                 if let Some((lease, native_session_id)) = &goal_demand {
                     let received = match &outcome {
@@ -726,7 +726,7 @@ impl SessionLane {
                         return;
                     }
                 }
-                self.complete_send(shared, command, goal_demand, &outcome).await;
+                self.complete_send(shared, command, goal_demand, receive_demand_added, &outcome).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             Goal { command, reply } => self.start_goal(shared, command, reply, call).await,
@@ -843,7 +843,7 @@ impl SessionLane {
                 "bindingIdentity": crate::trace::identity_shape(event.binding.identity()),
                 "generation": event.binding.generation(), "currentGeneration": shared.observation_generation(&identity),
                 "sourceEpoch": event.binding.source_epoch(), "nativeCursor": event.cursor,
-                "contiguous": event.binding.source_cursor_contiguous(),
+                "contiguous": event.binding.source_cursor_contiguous(), "historyRefresh": event.history_refresh,
                 "runHash": event.run_id.as_deref().map(crate::trace::fingerprint),
                 "changes": crate::trace::changes_shape(&event.changes),
                 "before": self.state.as_ref().map(|state| crate::trace::view_shape(&state.view())),
@@ -864,6 +864,7 @@ impl SessionLane {
             };
         }
         let provider = identity.endpoint.provider();
+        let history_refresh = event.history_refresh;
         let receive_changes = event.changes.clone();
 
         if let Some(state) = &self.state {
@@ -928,6 +929,7 @@ impl SessionLane {
             }
         }
 
+        let trace_source = crate::trace::enabled().then(|| (event.binding.generation(), event.binding.source_epoch(), event.cursor));
         let result = self
             .apply_changes_to_state(
                 shared,
@@ -945,8 +947,17 @@ impl SessionLane {
         match &result {
             crate::state::SessionApplyResult::Applied(_) | crate::state::SessionApplyResult::Consumed { .. } => {
                 shared.receive_event(&identity, &receive_changes);
-                if receive_changes.iter().any(|change| matches!(change, SessionChange::RunPhaseChanged { phase, .. } if crate::state::terminal_run_phase(*phase))) {
-                    self.sync_after_terminal(shared, &identity);
+                let refresh = history_refresh || receive_changes.iter().any(|change| matches!(change, SessionChange::RunPhaseChanged { phase, .. } if crate::state::terminal_run_phase(*phase)));
+                if let Some((generation, source_epoch, native_cursor)) = trace_source.filter(|_| refresh) {
+                    crate::trace::log_unscoped("sessions.ingest.history_refresh", serde_json::json!({
+                        "identity": crate::trace::identity_shape(&identity), "historyRefresh": history_refresh,
+                        "generation": generation, "sourceEpoch": source_epoch, "nativeCursor": native_cursor,
+                        "applyResult": if matches!(&result, crate::state::SessionApplyResult::Applied(_)) { "applied" } else { "consumed" },
+                        "syncRequested": refresh,
+                    }));
+                }
+                if refresh {
+                    self.sync_after_terminal(shared, &identity, history_refresh);
                 }
             }
             crate::state::SessionApplyResult::Gap { .. } | crate::state::SessionApplyResult::Rejected { .. } => self.recover_observation(shared, &identity),
@@ -1276,7 +1287,7 @@ impl SessionLane {
         }
         let driver = match shared.running_session_driver(Some(command.endpoint().clone())) {
             Ok(driver) => driver,
-            Err(RuntimeOperationFailure::Unsupported | RuntimeOperationFailure::Unavailable) => {
+            Err(RuntimeOperationFailure::Unsupported | RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending) => {
                 return SessionCreateOutcome::Unknown;
             }
             Err(RuntimeOperationFailure::TargetRejected) => {
@@ -1361,23 +1372,24 @@ impl SessionLane {
                 "generation": shared.observation_generation(&receive_identity),
             }));
         }
-        let goal_demand = if command.intent.is_some() {
+        let (goal_demand, receive_demand_added) = if command.intent.is_some() {
             match self.prepare_goal_receive(shared, &receive_identity, command.endpoint_session_id.as_deref()) {
-                Ok(demand) => Some(demand),
+                Ok(demand) => (Some(demand), false),
                 Err(failure) => { crate::call::reply(call.as_ref(), reply, send_driver_failure(failure)).await; return; }
             }
         } else {
-            if let Err(failure) = self.prepare_send_receive(shared, &receive_identity, requested_run_id.as_deref()) {
-                crate::call::reply(call.as_ref(), reply, send_driver_failure(failure)).await;
-                return;
+            match self.prepare_send_receive(shared, &receive_identity, requested_run_id.as_deref()) {
+                Ok(added) => (None, added),
+                Err(failure) => { crate::call::reply(call.as_ref(), reply, send_driver_failure(failure)).await; return; }
             }
-            None
         };
         let Some(sender) = shared.completion_handle.get().cloned() else {
             if let Some((lease, _)) = &goal_demand {
                 self.finish_goal_receive(shared, &receive_identity, lease, None);
-                self.close_if_idle(shared, &receive_identity);
+            } else {
+                self.send_receive_outcome(shared, &receive_identity, requested_run_id.as_deref(), receive_demand_added, &SessionSendOutcome::Unavailable);
             }
+            self.close_if_idle(shared, &receive_identity);
             crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
             return;
         };
@@ -1387,7 +1399,7 @@ impl SessionLane {
                 if let Some((lease, _)) = &goal_demand {
                     self.finish_goal_receive(shared, &receive_identity, lease, None);
                 } else {
-                    self.send_receive_outcome(shared, &receive_identity, requested_run_id.as_deref(), &SessionSendOutcome::Rejected);
+                    self.send_receive_outcome(shared, &receive_identity, requested_run_id.as_deref(), receive_demand_added, &SessionSendOutcome::Rejected);
                 }
                 self.close_if_idle(shared, &receive_identity);
                 crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
@@ -1396,7 +1408,7 @@ impl SessionLane {
         };
         if let (Some(run_id), Some(context)) = (&requested_run_id, &command.delivery_context) {
             if !next.has_terminal_run(run_id) {
-                next.run_delivery_contexts.insert(run_id.clone(), context.clone());
+                next.run_delivery_contexts.entry(run_id.clone()).or_insert_with(|| context.clone());
             }
         }
         self.state = Some(next.clone());
@@ -1420,22 +1432,21 @@ impl SessionLane {
                 _ = cancel.cancelled() => { crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unknown).await; return; },
                 outcome = send => outcome,
             };
-            tokio::select! { _ = cancel.cancelled() => {}, _ = sender.send_command(SessionCommand::SendCompleted { command, goal_demand, outcome, reply, call }) => {} }
+            tokio::select! { _ = cancel.cancelled() => {}, _ = sender.send_command(SessionCommand::SendCompleted { command, goal_demand, receive_demand_added, outcome, reply, call }) => {} }
         });
         let mut tasks = shared_for_tasks.read_tasks.lock().expect("session read tasks lock");
         tasks.retain(|task| !task.is_finished());
         tasks.push(task);
     }
 
-    async fn complete_send(&mut self, shared: &SessionShared, command: SessionSendCommand, goal_demand: Option<(String, Option<String>)>, outcome: &SessionSendOutcome) {
+    async fn complete_send(&mut self, shared: &SessionShared, command: SessionSendCommand, goal_demand: Option<(String, Option<String>)>, receive_demand_added: bool, outcome: &SessionSendOutcome) {
         let identity = command.identity.clone();
         let requested = command.request_run_identity().map(str::to_owned);
         if let Some(requested) = &requested {
-            let remove = match outcome {
-                SessionSendOutcome::Queued { run_id } | SessionSendOutcome::Succeeded { run_id, .. } => run_id != requested,
-                SessionSendOutcome::Rejected | SessionSendOutcome::Unavailable | SessionSendOutcome::Unsupported => true,
-                SessionSendOutcome::Unknown => false,
-            };
+            let remove = receive_demand_added
+                && !matches!(outcome, SessionSendOutcome::Unknown)
+                && self.send_receive_run(&identity, outcome) != Some(requested.as_str())
+                && self.state.as_ref().and_then(SessionState::active_run_id) != Some(requested.as_str());
             if remove && let Some(state) = &mut self.state {
                 if state.run_delivery_contexts.remove(requested).is_some() {
                     shared.store_snapshot_state(state.clone()).await;
@@ -1447,7 +1458,7 @@ impl SessionLane {
         if let Some((lease, _)) = &goal_demand {
             self.finish_goal_receive(shared, &identity, lease, Some(receive_outcome));
         } else {
-            self.send_receive_outcome(shared, &identity, requested.as_deref(), receive_outcome);
+            self.send_receive_outcome(shared, &identity, requested.as_deref(), receive_demand_added, receive_outcome);
         }
         if crate::trace::enabled() {
             crate::trace::log_unscoped("sessions.send.completed", serde_json::json!({
@@ -1492,6 +1503,12 @@ impl SessionLane {
         let (Some(identity), Some(binding)) = (identity, binding) else {
             return;
         };
+        if provider == SessionProvider::OpenClaw
+            && matches!(outcome, SessionSendOutcome::Succeeded { status: SessionSendStatus::Started, .. })
+            && self.state.as_ref().and_then(SessionState::active_run_id).is_some()
+        {
+            return;
+        }
         let (run_id, runtime) = match send_outcome_runtime(outcome, failure_run_id) {
             Some(projection) => projection,
             None => return,
@@ -1572,7 +1589,7 @@ impl SessionLane {
             Err(RuntimeOperationFailure::Unsupported) => {
                 return SessionApprovalOutcome::Unsupported;
             }
-            Err(RuntimeOperationFailure::Unavailable) => {
+            Err(RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending) => {
                 return SessionApprovalOutcome::Unavailable;
             }
             Err(RuntimeOperationFailure::TargetRejected | RuntimeOperationFailure::Unknown) => {
@@ -1598,7 +1615,7 @@ impl SessionLane {
             Err(RuntimeOperationFailure::Unsupported) => {
                 return SessionPermissionOutcome::unsupported();
             }
-            Err(RuntimeOperationFailure::Unavailable) => {
+            Err(RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending) => {
                 return SessionPermissionOutcome::Unavailable;
             }
             Err(RuntimeOperationFailure::TargetRejected | RuntimeOperationFailure::Unknown) => {
@@ -1629,7 +1646,7 @@ impl SessionLane {
         {
             return match failure {
                 RuntimeOperationFailure::Unsupported => SessionModelSelectionOutcome::Unsupported,
-                RuntimeOperationFailure::Unavailable => SessionModelSelectionOutcome::Unavailable,
+                RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending => SessionModelSelectionOutcome::Unavailable,
                 RuntimeOperationFailure::TargetRejected => {
                     SessionModelSelectionOutcome::target_rejected(
                         SessionModelSelectionRejection::RuntimeTargetRejected,
@@ -1648,7 +1665,7 @@ impl SessionLane {
             Err(RuntimeOperationFailure::Unsupported) => {
                 return SessionModelSelectionOutcome::Unsupported;
             }
-            Err(RuntimeOperationFailure::Unavailable) => {
+            Err(RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending) => {
                 return SessionModelSelectionOutcome::Unavailable;
             }
             Err(RuntimeOperationFailure::TargetRejected) => {
@@ -1865,7 +1882,7 @@ fn log_session_catalog_model_reconciled(session_count: usize, corrected_count: u
 fn send_driver_failure(failure: RuntimeOperationFailure) -> SessionSendOutcome {
     match failure {
         RuntimeOperationFailure::Unsupported => SessionSendOutcome::Unsupported,
-        RuntimeOperationFailure::Unavailable => SessionSendOutcome::Unavailable,
+        RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending => SessionSendOutcome::Unavailable,
         RuntimeOperationFailure::TargetRejected => SessionSendOutcome::Rejected,
         RuntimeOperationFailure::Unknown => SessionSendOutcome::Unknown,
     }
@@ -2011,9 +2028,10 @@ fn send_outcome_runtime(
 ) -> Option<(Option<String>, RuntimeView)> {
     let (run_id, phase, issue) = match outcome {
         SessionSendOutcome::Queued { run_id } => (Some(run_id.clone()), RunPhase::Queued, None),
-        SessionSendOutcome::Succeeded { run_id, .. } => {
+        SessionSendOutcome::Succeeded { run_id, status: SessionSendStatus::Started, .. } => {
             (Some(run_id.clone()), RunPhase::Started, None)
         }
+        SessionSendOutcome::Succeeded { status: SessionSendStatus::InFlight | SessionSendStatus::Ok, .. } => return None,
         SessionSendOutcome::Rejected => (
             failure_run_id,
             RunPhase::Failed,
@@ -2049,7 +2067,7 @@ fn send_outcome_runtime(
 fn timeline_driver_failure(failure: RuntimeOperationFailure) -> timeline::UnavailableReason {
     match failure {
         RuntimeOperationFailure::Unsupported => timeline::UnavailableReason::RuntimeUnsupported,
-        RuntimeOperationFailure::Unavailable => timeline::UnavailableReason::RuntimeUnavailable,
+        RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending => timeline::UnavailableReason::RuntimeUnavailable,
         RuntimeOperationFailure::TargetRejected => {
             timeline::UnavailableReason::RuntimeTargetRejected
         }
