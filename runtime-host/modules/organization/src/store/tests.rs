@@ -3048,7 +3048,7 @@ fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
         .replace_facts(facts_with_delivery(delivery, graph, binding, Vec::new()))
         .unwrap();
     let target = native_terminal_target(&store);
-    let final_text = r#"noise <team_message>{"summary":"已安全完成","decision":"completed","dispatch":[{"role_id":"leader","task":"复核结果"}]}</team_message>"#.to_owned();
+    let final_text = r#"noise <team_message>{"summary":"已安全完成","decision":"completed"}</team_message>"#.to_owned();
 
     assert_eq!(
         store.resolve_native_run_output(
@@ -3074,9 +3074,6 @@ fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
     assert_eq!(output.final_assistant_text(), final_text);
     assert_eq!(output.summary(), "已安全完成");
     assert_eq!(output.decision(), "completed");
-    assert_eq!(output.dispatch().len(), 1);
-    assert_eq!(output.dispatch()[0].role_id(), "leader");
-    assert_eq!(output.dispatch()[0].task(), "复核结果");
     assert!(matches!(
         observation.resolution(),
         TerminalObservationResolution::GraphResolved(resolution)
@@ -3120,9 +3117,6 @@ fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
         .output()
         .expect("native output should survive reopen");
     assert_eq!(output.decision(), "completed");
-    assert_eq!(output.dispatch().len(), 1);
-    assert_eq!(output.dispatch()[0].role_id(), "leader");
-    assert_eq!(output.dispatch()[0].task(), "复核结果");
     drop(reopened);
     remove_test_path(&path);
 }
@@ -3205,6 +3199,12 @@ fn activity_registration_accepts_deterministic_teamrun_completion_prompt_only() 
         .unwrap();
     accepted.activity_id = crate::ActivityId::new("activity:accepted").unwrap();
     accepted.idempotency_key = "activity:accepted".to_owned();
+    let composed = crate::run::scheduler::compose_agent_task_prompt_with_upstream_context(
+        run.team(), run.graph().definition().node(&accepted.node_id).unwrap(), &accepted, &[],
+    ).unwrap();
+    if let crate::ActivityKind::AgentTask { prompt, .. } = &mut accepted.activity_kind {
+        *prompt = composed;
+    }
     assert!(matches!(
         store.register_activity(accepted),
         Ok(crate::ActivityRegistrationOutcome::Recorded(_))

@@ -28,7 +28,7 @@ const TEAM_RUNTIME_OPERATIONS = [
   ['team.webhookTriggerFire', 'Fire TeamRun webhook trigger by path', 'team'],
   ['team.runSnapshot', 'Read TeamRun snapshot', 'team-run'],
   ['team.designStart', 'Start TeamRun design', 'team'],
-  ['team.designContinue', 'Continue TeamRun design', 'team'],
+  ['team.runStart', 'Start TeamRun', 'team'],
   ['team.designExit', 'Exit TeamRun design', 'team'],
   ['team.designSnapshot', 'Read TeamRun design snapshot', 'team'],
   ['team.designGraphPatch', 'Patch TeamRun design graph', 'team'],
@@ -38,9 +38,6 @@ const TEAM_RUNTIME_OPERATIONS = [
   ['team.graphExportYaml', 'Export TeamRun graph YAML', 'team-run'],
   ['team.graphImportYaml', 'Import TeamRun graph YAML', 'team-run'],
   ['team.triggerFire', 'Fire TeamRun StartNode trigger', 'team-run'],
-  ['team.proposalConfirm', 'Confirm TeamRun start proposal', 'team-run'],
-  ['team.proposalContinue', 'Continue TeamRun start discussion', 'team-run'],
-  ['team.proposalCancel', 'Cancel TeamRun start proposal', 'team-run'],
   ['team.nodePromptRetryDue', 'Wake due TeamRun node prompt retries', 'team-run'],
   ['team.nodeEvent', 'Submit TeamRun node event command', 'team-run'],
   ['team.runDiagnostics', 'Read TeamRun diagnostics', 'team-run'],
@@ -121,16 +118,19 @@ function validateOperation(
         && target.kind === 'team' && matchingField(target, 'teamId', input, 'teamId')
         && hasExactKeys(input, ['teamId', 'runId', 'designEpoch'])
         && isIdentifier(input.runId) && isOpaque(input.designEpoch);
+    case 'team.runStart':
+      return isRecord(target) && hasExactKeys(target, ['kind', 'teamId'])
+        && target.kind === 'team' && matchingField(target, 'teamId', input, 'teamId')
+        && hasExactKeys(input, ['teamId', 'runId', 'designEpoch', 'expectedGraphVersion', 'idempotencyKey'])
+        && isIdentifier(input.runId) && (input.designEpoch === null || isOpaque(input.designEpoch))
+        && isTeamGraphVersion(input.expectedGraphVersion) && isOpaque(input.idempotencyKey);
     case 'team.designStart':
-    case 'team.designContinue':
     case 'team.designSnapshot':
       return isRecord(target) && hasExactKeys(target, ['kind', 'teamId'])
         && target.kind === 'team' && matchingField(target, 'teamId', input, 'teamId') && isIdentifier(input.runId)
         && (operation === 'team.designSnapshot'
           ? hasExactKeys(input, ['teamId', 'runId'])
-          : isOpaque(input.idempotencyKey) && (operation === 'team.designStart'
-            ? hasExactKeys(input, ['teamId', 'runId', 'idempotencyKey'])
-            : hasExactKeys(input, ['teamId', 'runId', 'proposalId', 'idempotencyKey']) && isOpaque(input.proposalId)));
+          : hasExactKeys(input, ['teamId', 'runId', 'idempotencyKey']) && isOpaque(input.idempotencyKey));
     case 'team.runSnapshot':
     case 'team.graphExportYaml':
     case 'team.runDiagnostics':
@@ -163,14 +163,6 @@ function validateOperation(
         && isIdentifier(input.startNodeId)
         && (input.triggerSource === 'cron' || input.triggerSource === 'webhook')
         && (input.payloadSummary === undefined || typeof input.payloadSummary === 'string')
-        && isOpaque(input.idempotencyKey);
-    case 'team.proposalConfirm':
-    case 'team.proposalContinue':
-    case 'team.proposalCancel':
-      return hasOnlyKeys(input, ['runId', 'teamId', 'proposalId', 'idempotencyKey'])
-        && hasRequiredKeys(input, ['runId', 'proposalId', 'idempotencyKey'])
-        && matchingRunTarget(target, input)
-        && isOpaque(input.proposalId)
         && isOpaque(input.idempotencyKey);
     case 'team.nodeEvent':
       return isNodeEventRequest(target, input);

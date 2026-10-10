@@ -38,6 +38,7 @@ pub enum GraphPatchError {
     UnknownRun,
     StaleRevision,
     InvalidDefinition,
+    Definition(super::DefinitionError),
     NodeAlreadyExists(NodeId),
     UnknownNode(NodeId),
     NodeKindChanged(NodeId),
@@ -232,13 +233,17 @@ fn validate_node_payload(node: &NodeDefinition) -> Result<(), GraphPatchError> {
     match node.kind() {
         NodeKind::Work => {
             let Some(work) = node.work_assignment() else {
-                return Err(GraphPatchError::InvalidDefinition);
+                return Err(GraphPatchError::Definition(
+                    super::DefinitionError::InvalidWorkAssignment(node.id().clone()),
+                ));
             };
             if node.review_assignment().is_some()
                 || work.task_id().trim().is_empty()
                 || work.role_id().trim().is_empty()
             {
-                return Err(GraphPatchError::InvalidDefinition);
+                return Err(GraphPatchError::Definition(
+                    super::DefinitionError::InvalidWorkAssignment(node.id().clone()),
+                ));
             }
         }
         NodeKind::Review => {
@@ -247,7 +252,9 @@ fn validate_node_payload(node: &NodeDefinition) -> Result<(), GraphPatchError> {
                     review.role_id().trim().is_empty() || review.prompt().trim().is_empty()
                 })
             {
-                return Err(GraphPatchError::InvalidDefinition);
+                return Err(GraphPatchError::Definition(
+                    super::DefinitionError::InvalidReviewAssignment(node.id().clone()),
+                ));
             }
         }
         _ if node.work_assignment().is_some() || node.review_assignment().is_some() => {
@@ -272,8 +279,21 @@ fn validate_edge_payload<'a>(
         return Err(GraphPatchError::InvalidDefinition);
     }
     let node_ids = node_ids.collect::<BTreeSet<_>>();
-    if !node_ids.contains(edge.source_node_id()) || !node_ids.contains(edge.target_node_id()) {
-        return Err(GraphPatchError::InvalidDefinition);
+    if !node_ids.contains(edge.source_node_id()) {
+        return Err(GraphPatchError::Definition(
+            super::DefinitionError::UnknownEdgeSource {
+                edge_id: edge.id().clone(),
+                node_id: edge.source_node_id().clone(),
+            },
+        ));
+    }
+    if !node_ids.contains(edge.target_node_id()) {
+        return Err(GraphPatchError::Definition(
+            super::DefinitionError::UnknownEdgeTarget {
+                edge_id: edge.id().clone(),
+                node_id: edge.target_node_id().clone(),
+            },
+        ));
     }
     Ok(())
 }
@@ -312,6 +332,7 @@ fn validate_metadata_and_layout_projection(
 fn map_reduce_error(error: ReduceError) -> GraphPatchError {
     match error {
         ReduceError::StaleGraphIdentity => GraphPatchError::StaleRevision,
+        ReduceError::InvalidDefinition(source) => GraphPatchError::Definition(source),
         ReduceError::InvalidGraphPatch
         | ReduceError::InvalidSettlementEvent
         | ReduceError::UnknownNode(_)

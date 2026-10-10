@@ -1403,10 +1403,8 @@ function projectionItemStatus(status: SessionWireItem['status']): SessionAssista
 function projectionToolCard(
   tool: SessionWireTool,
   runtimeAdapterId: SessionRenderToolCard['runtimeAdapterId'],
+  status: SessionRenderToolCard['status'],
 ): SessionRenderToolCard {
-  const status = tool.phase === 'failed'
-    ? 'error'
-    : tool.phase === 'completed' ? 'completed' : 'running';
   const summary = tool.summary ?? undefined;
   const input = tool.input ?? {};
   const inputText = tool.inputText ?? stringifyToolPayload(tool.input);
@@ -1459,7 +1457,37 @@ export function projectSessionViewItems(view: SessionProjectionState): SessionRe
   }
   const tools = factValue(view.tools) ?? [];
   const runtimeAdapterId = view.identity.endpoint.runtimeAdapterId;
-  const toolsById = new Map(tools.map((tool) => [tool.toolCallId, projectionToolCard(tool, runtimeAdapterId)] as const));
+  const abortedRunIds = new Set<string>();
+  const abortedToolIds = new Set<string>();
+  const toolRunIds = new Map<string, string | null>();
+  for (const item of items) {
+    if (item.kind !== 'assistantTurn') continue;
+    if (item.status === 'aborted' && item.runId) abortedRunIds.add(item.runId);
+    for (const segment of item.segments) {
+      if (segment.kind !== 'toolUse' && segment.kind !== 'toolResult') continue;
+      if (item.status === 'aborted') abortedToolIds.add(segment.toolCallId);
+      if (!item.runId) continue;
+      const previous = toolRunIds.get(segment.toolCallId);
+      toolRunIds.set(segment.toolCallId, previous === undefined || previous === item.runId ? item.runId : null);
+    }
+  }
+  const runtime = factValue(view.runtime);
+  const runtimeConfirmed = runtime !== null && runtime.issue === null
+    && view.completeness !== 'unknown' && view.completeness !== 'unavailable'
+    && !(typeof view.completeness === 'object' && view.completeness.incomplete.missing.includes('replay_cursor'));
+  const statusForTool = (tool: SessionWireTool): SessionRenderToolCard['status'] => {
+    if (tool.phase === 'completed') return 'completed';
+    if (tool.phase === 'failed') return 'error';
+    const runId = tool.runId ?? toolRunIds.get(tool.toolCallId);
+    if (abortedToolIds.has(tool.toolCallId) || (runId && abortedRunIds.has(runId))) return 'cancelled';
+    if (!runtimeConfirmed) return 'unknown';
+    if (isTerminalRunPhase(runtime.phase) || runtime.activeRunId === null) return 'missing_result';
+    if (!runId) return 'unknown';
+    return runtime.activeRunId === runId ? 'running' : 'missing_result';
+  };
+  const toolsById = new Map(tools.map((tool) => [tool.toolCallId,
+    projectionToolCard(tool, runtimeAdapterId, statusForTool(tool)),
+  ] as const));
   return items.map((item) => {
     if (item.kind === 'userMessage') {
       const media = item.content.flatMap((content) => projectionMedia(content));

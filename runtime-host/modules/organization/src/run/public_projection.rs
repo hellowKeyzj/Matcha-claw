@@ -38,9 +38,6 @@ pub struct TeamPublicProjection {
     team_revision: u64,
     runtime: TeamRuntimeState,
     start_gate: TeamRunPublicStartGate,
-    proposal_id: Option<String>,
-    proposal_summary: Option<String>,
-    proposal_source_delivery_id: Option<String>,
     graph: TeamPublicGraph,
 }
 
@@ -63,18 +60,6 @@ impl TeamPublicProjection {
 
     pub const fn start_gate(&self) -> TeamRunPublicStartGate {
         self.start_gate
-    }
-
-    pub fn proposal_id(&self) -> Option<&str> {
-        self.proposal_id.as_deref()
-    }
-
-    pub fn proposal_summary(&self) -> Option<&str> {
-        self.proposal_summary.as_deref()
-    }
-
-    pub fn proposal_source_delivery_id(&self) -> Option<&str> {
-        self.proposal_source_delivery_id.as_deref()
     }
 
     pub fn graph(&self) -> &TeamPublicGraph {
@@ -425,9 +410,6 @@ pub struct TeamRunPublicRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     graph_version: Option<String>,
     start_gate: TeamRunPublicStartGate,
-    proposal_id: Option<String>,
-    proposal_summary: Option<String>,
-    proposal_source_delivery_id: Option<String>,
 }
 
 impl TeamRunPublicRun {
@@ -463,26 +445,13 @@ impl TeamRunPublicRun {
         self.start_gate
     }
 
-    pub fn proposal_id(&self) -> Option<&str> {
-        self.proposal_id.as_deref()
-    }
-
-    pub fn proposal_summary(&self) -> Option<&str> {
-        self.proposal_summary.as_deref()
-    }
-
-    pub fn proposal_source_delivery_id(&self) -> Option<&str> {
-        self.proposal_source_delivery_id.as_deref()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamRunPublicStartGate {
     Intake,
-    ProposalPending,
     Designing,
-    DesignProposalPending,
     Started,
 }
 
@@ -1244,25 +1213,18 @@ fn build_public_snapshot(
             runtime,
             lifecycle: lifecycle_status(run.lifecycle().state()),
             design_epoch: match run.start_gate() {
-                RunStartGate::Designing { design_epoch, .. }
-                | RunStartGate::DesignProposalPending { design_epoch, .. } => {
+                RunStartGate::Designing { design_epoch, .. } => {
                     Some(design_epoch.clone())
                 }
                 _ => None,
             },
             graph_version: match run.start_gate() {
-                RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. } => {
+                RunStartGate::Designing { .. } => {
                     crate::store::codec::graph_version(run.graph().definition()).ok()
                 }
                 _ => None,
             },
             start_gate: start_gate_status(run.start_gate()),
-            proposal_id: run.start_gate().proposal_id().map(ToOwned::to_owned),
-            proposal_summary: run.start_gate().summary().map(ToOwned::to_owned),
-            proposal_source_delivery_id: run
-                .start_gate()
-                .source_delivery_id()
-                .map(ToOwned::to_owned),
         },
         graph,
         attempts,
@@ -1478,10 +1440,8 @@ pub fn project_team_run_public_event(event: &crate::run::event::TeamEvent) -> Te
 fn start_gate_status(start_gate: &RunStartGate) -> TeamRunPublicStartGate {
     match start_gate {
         RunStartGate::Intake => TeamRunPublicStartGate::Intake,
-        RunStartGate::ProposalPending { .. } => TeamRunPublicStartGate::ProposalPending,
         RunStartGate::Started => TeamRunPublicStartGate::Started,
         RunStartGate::Designing { .. } => TeamRunPublicStartGate::Designing,
-        RunStartGate::DesignProposalPending { .. } => TeamRunPublicStartGate::DesignProposalPending,
     }
 }
 
@@ -1654,9 +1614,6 @@ pub fn query_team_public_projection(
         team_revision: team.revision().get(),
         runtime: runtime_state(facts, run_id, run.runtime().is_some()),
         start_gate: start_gate_status(run.start_gate()),
-        proposal_id: run.start_gate().proposal_id().map(ToOwned::to_owned),
-        proposal_summary: run.start_gate().summary().map(ToOwned::to_owned),
-        proposal_source_delivery_id: run.start_gate().source_delivery_id().map(ToOwned::to_owned),
         graph: graph_projection(facts, run.graph()),
     })
 }
@@ -1886,16 +1843,13 @@ mod tests {
         let json = serde_json::to_string(&projection).unwrap();
         let document: serde_json::Value = serde_json::from_str(&json).unwrap();
         let object = document.as_object().unwrap();
-        assert_eq!(object.len(), 9);
+        assert_eq!(object.len(), 6);
         for field in [
             "teamId",
             "runId",
             "teamRevision",
             "runtime",
             "startGate",
-            "proposalId",
-            "proposalSummary",
-            "proposalSourceDeliveryId",
             "graph",
         ] {
             assert!(object.contains_key(field));

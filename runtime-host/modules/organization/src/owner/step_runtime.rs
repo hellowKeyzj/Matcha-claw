@@ -109,7 +109,7 @@ impl<'a> TeamRunStepPlanner<'a> {
             }
             let activity = compose_activity_prompt(
                 self.store,
-                run.run_id(),
+                run,
                 graph,
                 item.bind_activity_target(
                     ActivityTarget::new(binding.session_ref().as_str().to_owned())
@@ -160,7 +160,7 @@ fn graph_event_for_control_step(step: &ControlExecutionStep) -> GraphEvent {
 
 fn compose_activity_prompt(
     store: &OrganizationStore,
-    run_id: &GraphRunId,
+    run: &GraphRunFacts,
     graph: &GraphState,
     request: ActivityRequest,
 ) -> Result<ActivityRequest, StoreFault> {
@@ -177,11 +177,11 @@ fn compose_activity_prompt(
         .definition()
         .node(&request.node_id)
         .ok_or(StoreFault::InvalidFacts)?;
-    let upstream = upstream_prompt_contexts(store, run_id, graph, &request, role_id);
+    let upstream = upstream_prompt_contexts(store, run.run_id(), graph, &request);
     let prompt = organization::run::scheduler::compose_agent_task_prompt_with_upstream_context(
-        graph.definition(),
+        run.team(),
         node,
-        base_prompt(node).ok_or(StoreFault::InvalidFacts)?,
+        &request,
         &upstream,
     )
     .ok_or(StoreFault::InvalidFacts)?;
@@ -196,24 +196,11 @@ fn compose_activity_prompt(
     })
 }
 
-fn base_prompt(node: &organization::NodeDefinition) -> Option<&str> {
-    match node.kind() {
-        organization::NodeKind::Work => node.work_assignment().map(|work| work.prompt()),
-        organization::NodeKind::Review => node.review_assignment().map(|review| review.prompt()),
-        organization::NodeKind::Start
-        | organization::NodeKind::HumanDecision
-        | organization::NodeKind::ScriptReview
-        | organization::NodeKind::Join
-        | organization::NodeKind::End => None,
-    }
-}
-
 fn upstream_prompt_contexts<'a>(
     store: &'a OrganizationStore,
     run_id: &GraphRunId,
     graph: &GraphState,
     request: &ActivityRequest,
-    role_id: &str,
 ) -> Vec<organization::run::scheduler::UpstreamPromptContext<'a>> {
     let Some(attempt) = graph.current_attempt(&request.node_id) else {
         return Vec::new();
@@ -228,12 +215,6 @@ fn upstream_prompt_contexts<'a>(
         .map(
             |output| organization::run::scheduler::UpstreamPromptContext {
                 summary: output.summary(),
-                tasks: output
-                    .dispatch()
-                    .iter()
-                    .filter(|dispatch| dispatch.role_id() == role_id)
-                    .map(|dispatch| dispatch.task())
-                    .collect(),
             },
         )
         .collect()

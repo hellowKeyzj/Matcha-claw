@@ -30,7 +30,6 @@ export type {
   TeamGraphPatchOperation,
   TeamGraphSnapshotRecord,
   TeamRoleBindingRecord,
-  TeamRunProposalProjection,
   TeamRunStartGateProjection,
   TeamStartGateStatus,
 } from '../../types/team-design';
@@ -48,7 +47,7 @@ export type TeamRuntimeOperationId =
   | 'team.webhookTriggerFire'
   | 'team.runSnapshot'
   | 'team.designStart'
-  | 'team.designContinue'
+  | 'team.runStart'
   | 'team.designExit'
   | 'team.designSnapshot'
   | 'team.designGraphPatch'
@@ -62,9 +61,6 @@ export type TeamRuntimeOperationId =
   | 'team.graphExportYaml'
   | 'team.graphImportYaml'
   | 'team.triggerFire'
-  | 'team.proposalConfirm'
-  | 'team.proposalContinue'
-  | 'team.proposalCancel'
   | 'team.nodePromptRetryDue'
   | 'team.nodeEvent'
   | 'team.runCancel'
@@ -680,13 +676,6 @@ export interface TeamGraphYamlImportResult extends TeamRuntimeOperationReceipt {
   snapshot?: TeamRunSnapshot;
 }
 
-export interface TeamProposalConfirmResult extends TeamRuntimeOperationReceipt {
-  success?: true;
-  runId?: string;
-  outcome?: 'recorded' | 'replayed' | 'started' | 'intake';
-  snapshot?: TeamRunSnapshot;
-}
-
 export interface TeamRunCancelResult {
   success: true;
   runId: string;
@@ -962,12 +951,22 @@ export async function startTeamDesign(payload: TeamDesignTarget & { idempotencyK
   }, (value) => decodeTeamDesignMutation(value, 'designing'));
 }
 
-export async function continueTeamDesign(payload: TeamDesignTarget & { proposalId: string; idempotencyKey: string }): Promise<{ success: true; outcome: 'designing' }> {
+export async function startTeamRun(payload: TeamDesignTarget & {
+  designEpoch: string | null;
+  expectedGraphVersion: string;
+  idempotencyKey: string;
+}): Promise<{ success: true; outcome: 'started' }> {
   return await teamRuntimeApi({
-    operationId: 'team.designContinue',
+    operationId: 'team.runStart',
     target: { kind: 'team', teamId: payload.teamId },
-    input: { teamId: payload.teamId, runId: payload.runId, proposalId: payload.proposalId, idempotencyKey: payload.idempotencyKey },
-  }, (value) => decodeTeamDesignMutation(value, 'designing'));
+    input: {
+      teamId: payload.teamId,
+      runId: payload.runId,
+      designEpoch: payload.designEpoch,
+      expectedGraphVersion: payload.expectedGraphVersion,
+      idempotencyKey: payload.idempotencyKey,
+    },
+  }, (value) => decodeTeamDesignMutation(value, 'started'));
 }
 
 export async function exitTeamDesign(payload: TeamDesignTarget & { designEpoch: string }): Promise<{ success: true; outcome: 'intake' }> {
@@ -1186,54 +1185,6 @@ export async function submitTeamRunNodeEvent(payload: {
   }, decodeTeamNodeEvent);
 }
 
-export async function confirmTeamRunProposal(payload: {
-  runId: string;
-  proposalId: string;
-  idempotencyKey: string;
-}): Promise<TeamProposalConfirmResult> {
-  return await teamRuntimeApi({
-    operationId: 'team.proposalConfirm',
-    target: { kind: 'team-run', runId: payload.runId },
-    input: {
-      runId: payload.runId,
-      proposalId: payload.proposalId,
-      idempotencyKey: payload.idempotencyKey,
-    },
-  }, decodeTeamProposalConfirm);
-}
-
-export async function continueTeamRunProposal(payload: {
-  runId: string;
-  proposalId: string;
-  idempotencyKey: string;
-}): Promise<TeamProposalConfirmResult> {
-  return await teamRuntimeApi({
-    operationId: 'team.proposalContinue',
-    target: { kind: 'team-run', runId: payload.runId },
-    input: {
-      runId: payload.runId,
-      proposalId: payload.proposalId,
-      idempotencyKey: payload.idempotencyKey,
-    },
-  }, decodeTeamProposalConfirm);
-}
-
-export async function cancelTeamRunProposal(payload: {
-  runId: string;
-  proposalId: string;
-  idempotencyKey: string;
-}): Promise<TeamProposalConfirmResult> {
-  return await teamRuntimeApi({
-    operationId: 'team.proposalCancel',
-    target: { kind: 'team-run', runId: payload.runId },
-    input: {
-      runId: payload.runId,
-      proposalId: payload.proposalId,
-      idempotencyKey: payload.idempotencyKey,
-    },
-  }, decodeTeamProposalConfirm);
-}
-
 export async function cancelTeamRun(payload: {
   runId: string;
   reason?: string;
@@ -1421,18 +1372,6 @@ function decodeTeamNodeEvent(payload: unknown): TeamAgentCommandResult {
     && isText(payload.runId)
     && isText(payload.outcome)) {
     return payload as TeamAgentCommandResult;
-  }
-  return teamRuntimeDecodeFailure();
-}
-
-function decodeTeamProposalConfirm(payload: unknown): TeamProposalConfirmResult {
-  if (isRecord(payload)
-    && hasOnlyKeys(payload, ['success', 'runId', 'outcome', 'snapshot'])
-    && (payload.success === undefined || payload.success === true)
-    && (payload.runId === undefined || isText(payload.runId))
-    && (payload.outcome === undefined || payload.outcome === 'recorded' || payload.outcome === 'replayed' || payload.outcome === 'started' || payload.outcome === 'intake')
-    && (payload.snapshot === undefined || isRecord(payload.snapshot))) {
-    return payload as TeamProposalConfirmResult;
   }
   return teamRuntimeDecodeFailure();
 }

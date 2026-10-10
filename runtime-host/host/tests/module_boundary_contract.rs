@@ -800,7 +800,6 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
     }
     assert!(
         organization_module.contains("StartGateSendHook")
-            && organization_module.contains("StartGateRegistry")
             && organization_module.contains("OrganizationSessionTerminal")
             && organization_module.contains("team_run_mcp_provider")
             && organization_send_hook.contains("start_gate_prompt_plan")
@@ -824,7 +823,6 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
     );
     for residue in [
         "start_gate_prompt_plan",
-        "start_gate_terminal_proposal_set",
         "team_message_terminal_observed",
         "TeamRunMcpFacade::from_canonical_store",
     ] {

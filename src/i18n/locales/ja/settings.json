@@ -199,6 +199,36 @@
     "matchaAgentAppServerStatus": "matcha-agent app-server 状態",
     "matchaAgentAppServerDescription": "matcha-agent app-server のプロセス状態とポートを確認します。",
     "matchaAgentAppServerRestartFailed": "matcha-agent app-server の再起動に失敗しました: {{error}}",
+    "repair": {
+      "action": "修復",
+      "confirmTitle": "OpenClaw を修復しますか？",
+      "confirmDescription": "OpenClaw を停止し、標準の修復ツールを実行します。設定の変更や旧データの移行が行われる場合があります。その後、起動準備をやり直して OpenClaw を起動します。実行中のタスクは中断されます。続行しますか？",
+      "confirmAction": "停止して修復",
+      "automatic": "自動修復",
+      "manual": "手動修復",
+      "pending": "修復リクエストを処理中",
+      "statusUnavailable": "修復の進捗を一時的に取得できません。ログを確認してください。",
+      "unknown": "今回の修復結果はまだ確認できていません。動作状況とログを確認してから操作してください。自動で再試行することはありません。",
+      "rejected": "ランタイムが今回の修復リクエストを拒否しました。現在の操作が完了してから、再度確認してください。",
+      "phases": {
+        "idle": "待機中",
+        "stopping": "停止中",
+        "repairing": "修復中",
+        "preparing": "準備中",
+        "starting": "起動中",
+        "succeeded": "修復完了",
+        "failed": "修復失敗"
+      },
+      "failures": {
+        "stopFailed": "OpenClaw を停止できませんでした。ログを確認してください。",
+        "doctorFailed": "OpenClaw の標準修復ツールによる修復に失敗しました。ログを確認してください。",
+        "doctorTimedOut": "OpenClaw の標準修復ツールの実行がタイムアウトしました。ログを確認してください。",
+        "doctorCancelled": "OpenClaw の標準修復ツールの実行がキャンセルされました。ログを確認してください。",
+        "doctorSpawnFailed": "OpenClaw の標準修復ツールのプロセスを起動できませんでした。ログを確認してください。",
+        "preparationFailed": "修復後の OpenClaw の起動準備に失敗しました。ログを確認してください。",
+        "startFailed": "修復後に OpenClaw を起動できませんでした。ログを確認してください。"
+      }
+    },
     "tabs": {
       "general": "一般",
       "browser": "ブラウザ"

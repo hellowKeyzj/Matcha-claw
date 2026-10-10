@@ -1,8 +1,10 @@
+mod authority;
 mod client;
 mod discovery;
 mod route;
 
 pub use client::team_provider;
+pub(crate) use authority::ExecutionAuthority;
 pub(crate) use discovery::{Discovery, project_matcha};
 
 const ROUTE: &str = "/internal/team/mcp";

@@ -156,6 +156,13 @@ impl LifecycleLogBuffer {
         self.len() == 0
     }
 
+    pub fn append(&self, stream: LogStream, bytes: &[u8]) {
+        self.push(LifecycleLogEntry {
+            stream,
+            line: sanitize_log_line(&bytes[..bytes.len().min(MAX_LINE_BYTES)]),
+        });
+    }
+
     fn push(&self, entry: LifecycleLogEntry) {
         let mut state = self
             .state
@@ -189,10 +196,22 @@ pub enum LifecycleDiagnosticCategory {
 pub struct LifecycleDiagnostic {
     stream: LogStream,
     category: LifecycleDiagnosticCategory,
+    repair: RepairDisposition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepairDisposition {
+    None,
+    Required,
+    Blocked,
 }
 impl LifecycleDiagnostic {
     pub const fn new(stream: LogStream, category: LifecycleDiagnosticCategory) -> Self {
-        Self { stream, category }
+        Self {
+            stream,
+            category,
+            repair: RepairDisposition::None,
+        }
     }
 
     pub const fn stream(&self) -> LogStream {
@@ -211,7 +230,7 @@ impl LifecycleDiagnostic {
 
 #[derive(Clone, Default)]
 pub struct LifecycleDiagnosticState {
-    categories: Arc<Mutex<Vec<LifecycleDiagnosticCategory>>>,
+    diagnostics: Arc<Mutex<Vec<LifecycleDiagnostic>>>,
 }
 
 impl LifecycleDiagnosticState {
@@ -225,22 +244,51 @@ impl LifecycleDiagnosticState {
     }
 
     pub fn record(&self, diagnostic: LifecycleDiagnostic) {
-        self.categories
+        let mut diagnostics = self
+            .diagnostics
             .lock()
-            .expect("OpenClaw lifecycle diagnostic state mutex poisoned")
-            .push(diagnostic.category());
+            .expect("OpenClaw lifecycle diagnostic state mutex poisoned");
+        if let Some(index) = diagnostics
+            .iter()
+            .position(|previous| *previous == diagnostic)
+        {
+            diagnostics.remove(index);
+        }
+        diagnostics.push(diagnostic);
     }
 
     pub fn snapshot(&self) -> Vec<LifecycleDiagnosticCategory> {
-        self.categories
+        self.diagnostics
             .lock()
             .expect("OpenClaw lifecycle diagnostic state mutex poisoned")
-            .clone()
+            .iter()
+            .map(LifecycleDiagnostic::category)
+            .collect()
     }
 
-    #[cfg(test)]
+    pub fn requires_repair(&self) -> bool {
+        let diagnostics = self
+            .diagnostics
+            .lock()
+            .expect("OpenClaw lifecycle diagnostic state mutex poisoned");
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.repair == RepairDisposition::Required)
+            && !diagnostics.iter().any(|diagnostic| {
+                diagnostic.repair == RepairDisposition::Blocked
+                    || matches!(
+                        diagnostic.category,
+                        LifecycleDiagnosticCategory::PortConflict
+                            | LifecycleDiagnosticCategory::BindRejected
+                            | LifecycleDiagnosticCategory::InvalidEncoding
+                            | LifecycleDiagnosticCategory::LineTooLong
+                            | LifecycleDiagnosticCategory::DiagnosticLimitReached
+                    )
+            })
+    }
+
     pub fn clear(&self) {
-        self.categories
+        self.diagnostics
             .lock()
             .expect("OpenClaw lifecycle diagnostic state mutex poisoned")
             .clear();
@@ -281,6 +329,8 @@ impl fmt::Display for LifecycleDiagnostic {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Signal {
+    RepairRequired,
+    RepairBlocked,
     PortConflict,
     ConfigurationRejected,
     BindRejected,
@@ -289,7 +339,27 @@ enum Signal {
     StartupFailed,
 }
 
-const PATTERNS: [(Signal, &[u8]); 13] = [
+const PATTERNS: [(Signal, &[u8]); 30] = [
+    // Native startup-maintenance errors, not arbitrary mentions of Doctor.
+    (Signal::RepairRequired, b"openclaw state database schema migration required ("),
+    (Signal::RepairRequired, b"legacy workspace setup state requires migration for "),
+    (Signal::RepairRequired, b"legacy session store requires migration: "),
+    (Signal::RepairRequired, b"run openclaw doctor --fix to migrate persisted media before using it."),
+    (Signal::RepairRequired, b"stop active agents and run openclaw doctor --fix to migrate session identities before using it."),
+    (Signal::RepairRequired, b"has a legacy operator approval schema; run openclaw doctor --fix to migrate it."),
+    (Signal::RepairRequired, b"legacy exec approvals exist at "),
+    (Signal::RepairRequired, b"run \"openclaw doctor --fix\" to repair, then retry."),
+    (Signal::RepairRequired, b"run \"openclaw doctor --fix\" to repair the config, then retry."),
+    (Signal::RepairBlocked, b"database schema preflight rejected newer schema"),
+    (Signal::RepairBlocked, b"openclaw database schema(s) are newer than this build."),
+    (Signal::RepairBlocked, b"this openclaw build cannot open your existing data."),
+    (Signal::RepairBlocked, b"gateway requires a newer openclaw build"),
+    (Signal::RepairBlocked, b"config file is not readable by the current process."),
+    (Signal::RepairBlocked, b"eacces"),
+    (Signal::RepairBlocked, b"eperm"),
+    (Signal::RepairBlocked, b"legacy config entries detected while running in nix mode."),
+    (Signal::RepairBlocked, b"this is a plugin packaging issue, not a local config problem."),
+
     (
         Signal::PortConflict,
         b"another gateway instance is already listening",
@@ -299,7 +369,6 @@ const PATTERNS: [(Signal, &[u8]); 13] = [
     (Signal::ConfigurationRejected, b"invalid config"),
     (Signal::ConfigurationRejected, b"config invalid"),
     (Signal::ConfigurationRejected, b"unrecognized key"),
-    (Signal::ConfigurationRejected, b"run: openclaw doctor --fix"),
     (Signal::BindRejected, b"refusing to bind gateway"),
     (Signal::BindRejected, b"failed to bind gateway socket"),
     (Signal::ListenerTag, b"[gateway]"),
@@ -420,7 +489,7 @@ impl Utf8Validator {
 }
 
 struct LineRecognition {
-    patterns: [Pattern; 13],
+    patterns: [Pattern; PATTERNS.len()],
     utf8: Utf8Validator,
 }
 
@@ -442,6 +511,9 @@ impl LineRecognition {
     fn category(&self) -> Option<LifecycleDiagnosticCategory> {
         if !self.utf8.is_valid() {
             return Some(LifecycleDiagnosticCategory::InvalidEncoding);
+        }
+        if self.has(Signal::RepairBlocked) || self.has(Signal::RepairRequired) {
+            return Some(LifecycleDiagnosticCategory::ConfigurationRejected);
         }
         match (
             self.has(Signal::PortConflict),
@@ -523,20 +595,12 @@ impl LifecycleLogClassifier {
                     self.append(byte, &mut diagnostics);
                 }
             }
-            if self.diagnostics_reported == MAX_DIAGNOSTICS_PER_STREAM {
-                break;
-            }
         }
         diagnostics
     }
 
     pub fn finish(&mut self) -> Vec<LifecycleDiagnostic> {
         if self.finished {
-            return Vec::new();
-        }
-        if self.diagnostics_reported == MAX_DIAGNOSTICS_PER_STREAM {
-            self.reset_line();
-            self.finished = true;
             return Vec::new();
         }
         let mut diagnostics = Vec::new();
@@ -595,10 +659,7 @@ impl LifecycleLogClassifier {
 
     fn retain_line(&self) {
         if let Some(buffer) = &self.buffer {
-            buffer.push(LifecycleLogEntry {
-                stream: self.stream,
-                line: sanitize_log_line(&self.line),
-            });
+            buffer.append(self.stream, &self.line);
         }
     }
 
@@ -630,10 +691,20 @@ impl LifecycleLogClassifier {
         }
     }
 
-    const fn diagnostic(&self, category: LifecycleDiagnosticCategory) -> LifecycleDiagnostic {
+    fn diagnostic(&self, category: LifecycleDiagnosticCategory) -> LifecycleDiagnostic {
         LifecycleDiagnostic {
             stream: self.stream,
             category,
+            repair: if self.recognition.has(Signal::RepairBlocked)
+                || self.recognition.has(Signal::PortConflict)
+                || self.recognition.has(Signal::BindRejected)
+            {
+                RepairDisposition::Blocked
+            } else if self.recognition.has(Signal::RepairRequired) {
+                RepairDisposition::Required
+            } else {
+                RepairDisposition::None
+            },
         }
     }
 }

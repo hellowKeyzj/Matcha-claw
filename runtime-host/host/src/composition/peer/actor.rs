@@ -243,7 +243,16 @@ impl OwnerSpec for PeerOwner {
     }
 }
 
-async fn handle_command(shared: &PeerShared, key: &PeerKey, command: PeerCommand) {
+async fn handle_command(shared: &PeerShared, key: &PeerKey, mut command: PeerCommand) {
+    let _reservation = match &mut command {
+        PeerCommand::AutostartOpenClaw { reservation, .. }
+        | PeerCommand::StartRuntime { reservation, .. }
+        | PeerCommand::StopRuntime { reservation, .. }
+        | PeerCommand::RestartRuntime { reservation, .. }
+        | PeerCommand::RepairRuntime { reservation, .. }
+        | PeerCommand::RestartOpenClawAfterPluginChange { reservation, .. } => reservation.take(),
+        PeerCommand::AutostartMatcha => None,
+    };
     let Some(driver) = shared.runtime_directory().lookup(key) else {
         reject_missing_lifecycle(shared, command).await;
         return;
@@ -256,7 +265,7 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, command: PeerCommand
         PeerCommand::AutostartMatcha => {
             super::matcha::autostart(shared, lifecycle).await;
         }
-        PeerCommand::AutostartOpenClaw { reply } => {
+        PeerCommand::AutostartOpenClaw { reply, .. } => {
             let _ = reply.send(super::openclaw::autostart(shared, lifecycle).await);
         }
         PeerCommand::StartRuntime { call, .. } => {
@@ -334,7 +343,38 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, command: PeerCommand
                 let _ = reply.send(result);
             }
         }
-        PeerCommand::RestartOpenClawAfterPluginChange { reply } => {
+        PeerCommand::RepairRuntime { call, .. } => {
+            if !run_lifecycle_call(&call, key).await {
+                return;
+            }
+            let result = super::openclaw::repair_manual(shared, lifecycle).await;
+            let repair = shared.open_claw().repair_snapshot();
+            let state = result.as_ref().cloned().unwrap_or_else(|_| runtime_state(shared, key));
+            let status = if result.is_ok()
+                && state.lifecycle() == crate::RuntimeLifecycle::Running
+                && repair.phase == runtime_directory::RuntimeRepairPhase::Succeeded
+            {
+                platform::call::CallStatus::Succeeded
+            } else if repair.phase == runtime_directory::RuntimeRepairPhase::Failed {
+                platform::call::CallStatus::Failed
+            } else {
+                platform::call::CallStatus::Unknown
+            };
+            let mut detail = runtime_directory::call::RuntimeControlCallDetail::new(key);
+            let observation = crate::composition::runtime_ports::runtime_control_status(&state);
+            detail.lifecycle = Some(observation.lifecycle);
+            detail.failure = observation.failure;
+            detail.startup_diagnostic = observation.startup_diagnostic;
+            detail.repair = Some(repair);
+            detail.error = result.err().map(|_| runtime_directory::RuntimeControlLifecycleError::CommandFailed);
+            detail.result = Some(match status {
+                platform::call::CallStatus::Succeeded => runtime_directory::call::RuntimeControlCallResult::Succeeded,
+                platform::call::CallStatus::Failed => runtime_directory::call::RuntimeControlCallResult::Failed,
+                _ => runtime_directory::call::RuntimeControlCallResult::Unknown,
+            });
+            runtime_directory::call::finish_runtime_control_call(Some(call.context), status, &detail).await;
+        }
+        PeerCommand::RestartOpenClawAfterPluginChange { reply, .. } => {
             let _ = reply.send(super::openclaw::restart_admitted(shared, lifecycle).await);
         }
         PeerCommand::RestartRuntime { call, .. } => {
@@ -432,6 +472,9 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
     match query {
         PeerQuery::State { reply } => {
             let _ = reply.send(super::status::host_state(shared));
+        }
+        PeerQuery::OpenClawRepairStatus { reply } => {
+            let _ = reply.send(shared.open_claw().repair_snapshot());
         }
         PeerQuery::OpenClawStatus { reply } => {
             let _ = reply.send(super::status::open_claw_state(shared));
@@ -575,12 +618,12 @@ async fn reject_missing_lifecycle(shared: &PeerShared, command: PeerCommand) {
         PeerCommand::AutostartMatcha => {
             shared.record_matcha_start(Err(DriverStartFailure::Unsupported));
         }
-        PeerCommand::AutostartOpenClaw { reply } => {
+        PeerCommand::AutostartOpenClaw { reply, .. } => {
             shared.record_open_claw_start(Err(DriverStartFailure::Unsupported));
             shared.notify_open_claw_runtime();
             let _ = reply.send(Err(AutostartOpenClawError::RuntimeStart));
         }
-        PeerCommand::StartRuntime { endpoint, call } => {
+        PeerCommand::StartRuntime { endpoint, call, .. } => {
             finish_lifecycle_call(
                 Some(call),
                 &endpoint,
@@ -599,6 +642,7 @@ async fn reject_missing_lifecycle(shared: &PeerShared, command: PeerCommand) {
             endpoint,
             call,
             reply,
+            ..
         } => {
             finish_lifecycle_call(
                 call,
@@ -618,13 +662,21 @@ async fn reject_missing_lifecycle(shared: &PeerShared, command: PeerCommand) {
                 )));
             }
         }
-        PeerCommand::RestartOpenClawAfterPluginChange { reply } => {
+        PeerCommand::RestartOpenClawAfterPluginChange { reply, .. } => {
             shared.notify_open_claw_runtime();
             let _ = reply.send(Err(RuntimeRestartCommandError::RuntimeRestart(
                 crate::RuntimeLifecycleFailure::Rejected,
             )));
         }
-        PeerCommand::RestartRuntime { endpoint, call } => {
+        PeerCommand::RepairRuntime { endpoint, call, .. } => {
+            finish_lifecycle_call(
+                Some(call),
+                &endpoint,
+                runtime_directory::control_loopback::RuntimeControlOperation::LifecycleRepair,
+                &Err(runtime_directory::RuntimeControlLifecycleError::Unsupported),
+            ).await;
+        }
+        PeerCommand::RestartRuntime { endpoint, call, .. } => {
             finish_lifecycle_call(
                 Some(call),
                 &endpoint,

@@ -127,7 +127,47 @@ pub enum RuntimeControlStartupDiagnostic {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RuntimeRepairSnapshot {
+    pub phase: RuntimeRepairPhase,
+    pub trigger: Option<RuntimeRepairTrigger>,
+    pub failure: Option<RuntimeRepairFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeRepairPhase {
+    Idle,
+    Stopping,
+    Repairing,
+    Preparing,
+    Starting,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeRepairTrigger {
+    Automatic,
+    Manual,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeRepairFailure {
+    StopFailed,
+    DoctorFailed,
+    DoctorTimedOut,
+    DoctorCancelled,
+    DoctorSpawnFailed,
+    PreparationFailed,
+    StartFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RuntimeControlLifecycleError {
+    Busy,
     Unsupported,
     Unavailable,
     CommandFailed,

@@ -455,6 +455,17 @@ impl NodeDefinition {
         self.review.as_ref()
     }
 
+    pub(crate) fn set_agent_prompt(&mut self, prompt: String) -> bool {
+        if let Some(work) = &mut self.work {
+            work.prompt = prompt;
+        } else if let Some(review) = &mut self.review {
+            review.prompt = prompt;
+        } else {
+            return false;
+        }
+        true
+    }
+
     pub fn work_group(&self) -> Option<&WorkGroup> {
         self.group.as_ref()
     }

@@ -61,6 +61,25 @@ export async function handleGatewayRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/gateway/repair' && req.method === 'POST') {
+    await handleLifecycleMutation(ctx, res, 'repair');
+    return true;
+  }
+
+  if (url.pathname === '/api/gateway/repair' && req.method === 'GET') {
+    try {
+      const response = await ctx.runtimeHostTransports.runtimeControlTransport.repairStatus();
+      if (response.status === 200) {
+        sendJson(res, 200, response.body.result);
+      } else {
+        sendJson(res, 503, { success: false, error: 'Gateway repair status is unavailable' });
+      }
+    } catch {
+      sendJson(res, 503, { success: false, error: 'Gateway repair status is unavailable' });
+    }
+    return true;
+  }
+
   if (url.pathname === '/api/gateway/control-ui' && req.method === 'GET') {
     try {
       const response = await ctx.runtimeHostTransports.runtimeControlTransport.controlUiUrl();
@@ -82,12 +101,12 @@ export async function handleGatewayRoutes(
 async function handleLifecycleMutation(
   ctx: GatewayApiContext,
   res: ServerResponse,
-  operation: 'start' | 'stop' | 'restart',
+  operation: 'start' | 'stop' | 'restart' | 'repair',
 ): Promise<void> {
   try {
     const transport = ctx.runtimeHostTransports.runtimeControlTransport;
     const response = await transport[
-      operation === 'start' ? 'lifecycleStart' : operation === 'stop' ? 'lifecycleStop' : 'lifecycleRestart'
+      operation === 'start' ? 'lifecycleStart' : operation === 'stop' ? 'lifecycleStop' : operation === 'repair' ? 'lifecycleRepair' : 'lifecycleRestart'
     ]();
     if (response.status === 202) {
       sendJson(res, 202, response.body);
@@ -101,10 +120,14 @@ async function handleLifecycleMutation(
 
 function sendLifecycleFailure(
   res: ServerResponse,
-  operation: 'start' | 'stop' | 'restart',
+  operation: 'start' | 'stop' | 'restart' | 'repair',
   error: unknown,
   status: number | undefined,
 ): void {
+  if (status === 409) {
+    sendJson(res, 409, { success: false, error: `Gateway ${operation} is busy` });
+    return;
+  }
   const unknown = status === 503
     || error instanceof RuntimeHostControlError && error.delivery === 'unknown-delivery';
   const unavailable = status === 400 || status === 401 || status === 422;

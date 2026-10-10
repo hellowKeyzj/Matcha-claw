@@ -6,7 +6,6 @@ import {
   CHAT_WORKSPACE_LAYOUT,
   clampChatSidePanelWidth,
   type ChatSidePanelMode,
-  type ChatSidePanelWidthPolicy,
   type ChatWindowDockPhase,
 } from '@/components/layout/chat-workspace-layout';
 
@@ -70,7 +69,6 @@ interface UseChatWindowDockControllerOptions {
   panelOpen: boolean;
   preferredWidth: number;
   renderWidth: number;
-  widthPolicy: ChatSidePanelWidthPolicy;
   artifactWorkbenchFullscreen: boolean;
   chatLayoutRef: RefObject<HTMLDivElement | null>;
   openPanel: () => void;
@@ -92,8 +90,8 @@ function normalizeWidth(width: number): number {
   return Math.max(0, Math.round(width));
 }
 
-function normalizePanelWidth(width: number, containerWidth: number, policy: ChatSidePanelWidthPolicy): number {
-  return clampChatSidePanelWidth(normalizeWidth(width), containerWidth || Number.POSITIVE_INFINITY, policy);
+function normalizePanelWidth(width: number, containerWidth: number): number {
+  return clampChatSidePanelWidth(normalizeWidth(width), containerWidth || Number.POSITIVE_INFINITY);
 }
 
 function readLayoutWidth(chatLayoutRef: RefObject<HTMLDivElement | null>): number {
@@ -232,7 +230,6 @@ export function useChatWindowDockController({
   panelOpen,
   preferredWidth,
   renderWidth,
-  widthPolicy,
   artifactWorkbenchFullscreen,
   chatLayoutRef,
   openPanel,
@@ -247,7 +244,6 @@ export function useChatWindowDockController({
   const panelOpenRef = useRef(panelOpen);
   const preferredWidthRef = useRef(preferredWidth);
   const renderWidthRef = useRef(renderWidth);
-  const widthPolicyRef = useRef(widthPolicy);
   const artifactWorkbenchFullscreenRef = useRef(artifactWorkbenchFullscreen);
   const openPanelRef = useRef(openPanel);
   const closePanelRef = useRef(closePanel);
@@ -257,7 +253,6 @@ export function useChatWindowDockController({
   panelOpenRef.current = panelOpen;
   preferredWidthRef.current = preferredWidth;
   renderWidthRef.current = renderWidth;
-  widthPolicyRef.current = widthPolicy;
   artifactWorkbenchFullscreenRef.current = artifactWorkbenchFullscreen;
   openPanelRef.current = openPanel;
   closePanelRef.current = closePanel;
@@ -288,7 +283,7 @@ export function useChatWindowDockController({
     const seq = transitionSeqRef.current + 1;
     transitionSeqRef.current = seq;
     const baseWindowWidth = normalizeWidth(window.innerWidth);
-    const sidePanelWidth = normalizePanelWidth(preferredWidthRef.current, Number.POSITIVE_INFINITY, widthPolicyRef.current);
+    const sidePanelWidth = normalizePanelWidth(preferredWidthRef.current, Number.POSITIVE_INFINITY);
     const requestedDockWidth = sidePanelWidth + CHAT_WORKSPACE_LAYOUT.paneResizerWidth;
     const mainWidth = readMainWidth(chatLayoutRef, sidePanelWidth, 'overlay');
     const openingState: ChatWindowDockState = {
@@ -516,7 +511,7 @@ export function useChatWindowDockController({
   const resizeSidePanelWidth = useCallback((nextWidth: number) => {
     const currentState = dockStateRef.current;
     const layoutWidth = readLayoutWidth(chatLayoutRef);
-    const sidePanelWidth = normalizePanelWidth(nextWidth, layoutWidth, widthPolicyRef.current);
+    const sidePanelWidth = normalizePanelWidth(nextWidth, layoutWidth);
     setPanelWidthRef.current(sidePanelWidth);
     if (currentState.phase !== 'open' || currentState.mode !== 'docked') {
       return;
@@ -540,7 +535,7 @@ export function useChatWindowDockController({
       return;
     }
     const layoutWidth = readLayoutWidth(chatLayoutRef);
-    const sidePanelWidth = normalizePanelWidth(nextWidth ?? currentState.sidePanelWidth, layoutWidth, widthPolicyRef.current);
+    const sidePanelWidth = normalizePanelWidth(nextWidth ?? currentState.sidePanelWidth, layoutWidth);
     const dockWidth = sidePanelWidth + CHAT_WORKSPACE_LAYOUT.paneResizerWidth;
     const baseWidth = Math.max(1, normalizeWidth(window.innerWidth) - dockWidth);
     const mainWidth = resolveDockedMainWidth(layoutWidth, sidePanelWidth);

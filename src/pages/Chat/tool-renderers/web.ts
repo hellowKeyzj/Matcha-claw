@@ -1,5 +1,6 @@
+import type { TFunction } from 'i18next';
 import type { SessionRenderToolCard } from '../../../types/session/tool-card';
-import type { ToolActivityTextBlock, ToolActivityTrailingLabel, ToolActivityViewModel } from '../tool-activity-view-model';
+import type { ToolActivityTextBlock, ToolActivityTrailingLabel, ToolActivityContent } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
 
 const WEB_TOOL_NAMES = new Set([
@@ -180,24 +181,24 @@ function resolveQuery(input: unknown): string | null {
   return readStringField(input, ['query', 'prompt']);
 }
 
-function resolveTitle(tool: SessionRenderToolCard, query: string | null, url: string | null, output: WebToolOutput): string {
+function resolveTitle(tool: SessionRenderToolCard, query: string | null, url: string | null, output: WebToolOutput, t: TFunction<'chat'>): string {
   const host = parseHost(url ?? output.url ?? null);
-  if (query || isSearchToolName(tool.name)) return `搜索网页 ${query ?? tool.displayDetail?.trim() ?? ''}`.trim();
-  if (host) return `打开 ${host}`;
-  if (output.title) return `打开 ${output.title}`;
-  return '打开网页';
+  if (query || isSearchToolName(tool.name)) return t('toolActivity.web.search', { query: query ?? tool.displayDetail?.trim() ?? '' }).trim();
+  if (host) return t('toolActivity.web.open', { name: host });
+  if (output.title) return t('toolActivity.web.open', { name: output.title });
+  return t('toolActivity.web.openPage');
 }
 
-function resultSummary(result: WebSearchResult, index: number): string {
-  const title = result.title ?? result.url ?? `结果 ${index + 1}`;
+function resultSummary(result: WebSearchResult, index: number, t: TFunction<'chat'>): string {
+  const title = result.title ?? result.url ?? t('toolActivity.web.result', { index: index + 1 });
   const detail = [result.summary, result.content, result.status].find((value) => value?.trim());
   return [title, result.url, detail].filter(Boolean).join('\n');
 }
 
-function buildTextBlocks(query: string | null, url: string | null, output: WebToolOutput): ToolActivityTextBlock[] {
+function buildTextBlocks(query: string | null, url: string | null, output: WebToolOutput, t: TFunction<'chat'>): ToolActivityTextBlock[] {
   const blocks: ToolActivityTextBlock[] = [];
   if (query) {
-    blocks.push({ kind: 'input', title: '搜索', text: query, copyable: true });
+    blocks.push({ kind: 'input', title: t('toolActivity.web.searchLabel'), text: query, copyable: true });
   }
   if (url) {
     blocks.push({ kind: 'input', title: 'URL', text: url, copyable: true });
@@ -205,8 +206,8 @@ function buildTextBlocks(query: string | null, url: string | null, output: WebTo
   if (output.results.length > 0) {
     blocks.push({
       kind: 'output',
-      title: '结果摘要',
-      text: output.results.map(resultSummary).join('\n\n'),
+      title: t('toolActivity.resultSummary'),
+      text: output.results.map((result, index) => resultSummary(result, index, t)).join('\n\n'),
       copyable: false,
     });
   } else {
@@ -214,50 +215,37 @@ function buildTextBlocks(query: string | null, url: string | null, output: WebTo
       .filter((value): value is string => Boolean(value?.trim()))
       .join('\n');
     if (summary) {
-      blocks.push({ kind: 'output', title: '摘要', text: summary, copyable: false });
+      blocks.push({ kind: 'output', title: t('toolActivity.summary'), text: summary, copyable: false });
     }
   }
   return blocks;
 }
 
-function buildTrailingLabels(tool: SessionRenderToolCard, query: string | null, url: string | null, output: WebToolOutput): ToolActivityTrailingLabel[] {
+function buildTrailingLabels(query: string | null, url: string | null, output: WebToolOutput, t: TFunction<'chat'>): ToolActivityTrailingLabel[] {
   const labels: ToolActivityTrailingLabel[] = [];
   const host = parseHost(url ?? output.url ?? null);
   if (host) labels.push({ text: host, tone: 'muted' });
-  if (output.results.length > 0) labels.push({ text: `${output.results.length} 条结果`, tone: 'muted' });
-  if (output.status) labels.push({ text: output.status, tone: 'muted' });
-  if (tool.status === 'running') labels.push({ text: '运行中', tone: 'muted' });
-  if (tool.status === 'missing_result') labels.push({ text: '无结果', tone: 'muted' });
-  if (!host && !output.status && query) labels.push({ text: '网页', tone: 'muted' });
+  if (output.results.length > 0) labels.push({ text: t('toolActivity.web.results', { count: output.results.length }), tone: 'muted' });
+  if (!host && query) labels.push({ text: t('toolActivity.web.page'), tone: 'muted' });
   return labels;
-}
-
-function resolveTone(status: SessionRenderToolCard['status']): ToolActivityViewModel['tone'] {
-  if (status === 'running') return 'running';
-  if (status === 'error') return 'danger';
-  if (status === 'missing_result') return 'muted';
-  return 'neutral';
 }
 
 export function canRenderWebToolActivity(tool: SessionRenderToolCard): boolean {
   return isWebToolName(tool.name) || isWebToolName(tool.displayTitle);
 }
 
-export function renderWebToolActivity(tool: SessionRenderToolCard): ToolActivityViewModel {
+export function renderWebToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {
   const input = readInput(tool);
   const query = resolveQuery(input);
   const inputUrl = firstInputUrl(input);
   const output = readOutput(readResultPayload(tool), readOutputText(tool));
   const url = inputUrl ?? output.url ?? null;
-  const textBlocks = buildTextBlocks(query, url, output);
+  const textBlocks = buildTextBlocks(query, url, output, t);
 
   return {
-    title: resolveTitle(tool, query, url, output),
-    tone: resolveTone(tool.status),
-    isRunning: tool.status === 'running',
-    isError: tool.status === 'error',
+    title: resolveTitle(tool, query, url, output, t),
     canExpand: textBlocks.length > 0,
-    trailingLabels: buildTrailingLabels(tool, query, url, output),
+    trailingLabels: buildTrailingLabels(query, url, output, t),
     textBlocks,
   };
 }

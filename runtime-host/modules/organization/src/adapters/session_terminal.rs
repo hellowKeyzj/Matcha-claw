@@ -11,7 +11,6 @@ use foundation::execution::{
 use platform::endpoint::runtime_address::SessionIdentity;
 use tokio::{sync::mpsc, task::JoinError};
 
-use super::start_gate_send_hook::StartGateRegistry;
 use crate::{OrganizationHandle, TeamMessageRepairDispatch, TeamMessageTerminalObservation};
 
 const SESSION_TERMINAL_CAPACITY: usize = 256;
@@ -66,7 +65,6 @@ pub enum TeamMessageRepairSessionOutcome {
 /// `run_terminal` is synchronous on the sessions lane, so it only enqueues; every settlement call
 /// happens on the task started by [`OrganizationSessionTerminal::start`].
 pub struct OrganizationSessionTerminal<SourceBinding> {
-    start_gate: Arc<StartGateRegistry>,
     repair_session: Arc<Mutex<Option<Arc<dyn TeamMessageRepairSessionPort<SourceBinding>>>>>,
     snapshots: Mutex<Option<mpsc::Sender<OrganizationRunTerminalSnapshot<SourceBinding>>>>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -85,27 +83,20 @@ where
     SourceBinding: Clone + Send + 'static,
 {
     pub fn start(organization: OrganizationHandle, observation: ObservationSink) -> Self {
-        let start_gate = Arc::new(StartGateRegistry::new());
         let repair_session = Arc::new(Mutex::new(None));
         let (snapshots, receiver) = mpsc::channel(SESSION_TERMINAL_CAPACITY);
         let task = tokio::spawn(consume(
             organization,
-            Arc::clone(&start_gate),
             Arc::clone(&repair_session),
             receiver,
             observation.clone(),
         ));
         Self {
-            start_gate,
             repair_session,
             snapshots: Mutex::new(Some(snapshots)),
             task: Mutex::new(Some(task)),
             observation,
         }
-    }
-
-    pub fn start_gate_registry(&self) -> Arc<StartGateRegistry> {
-        Arc::clone(&self.start_gate)
     }
 
     pub fn bind_repair_session(
@@ -183,7 +174,6 @@ where
 
 async fn consume<SourceBinding>(
     organization: OrganizationHandle,
-    start_gate: Arc<StartGateRegistry>,
     repair_session: Arc<Mutex<Option<Arc<dyn TeamMessageRepairSessionPort<SourceBinding>>>>>,
     mut snapshots: mpsc::Receiver<OrganizationRunTerminalSnapshot<SourceBinding>>,
     observation: ObservationSink,
@@ -194,7 +184,6 @@ async fn consume<SourceBinding>(
     while let Some(snapshot) = snapshots.recv().await {
         settle(
             &organization,
-            &start_gate,
             &repair_session,
             snapshot,
             settlement_timestamp_seconds(),
@@ -206,7 +195,6 @@ async fn consume<SourceBinding>(
 
 async fn settle<SourceBinding>(
     organization: &OrganizationHandle,
-    start_gate: &StartGateRegistry,
     repair_session: &Arc<Mutex<Option<Arc<dyn TeamMessageRepairSessionPort<SourceBinding>>>>>,
     snapshot: OrganizationRunTerminalSnapshot<SourceBinding>,
     settled_at: u64,
@@ -222,15 +210,6 @@ async fn settle<SourceBinding>(
         phase,
         final_assistant_text,
     } = snapshot;
-    settle_start_gate_proposal(
-        organization,
-        start_gate,
-        &native_run_id,
-        phase,
-        final_assistant_text.as_deref(),
-        observation,
-    )
-    .await;
     let Some(status) = native_terminal_status(phase) else {
         return;
     };
@@ -317,44 +296,6 @@ async fn settle_rejected_repair(
 ) {
     match organization.team_message_repair_rejected(dispatch).await {
         Ok(Ok(())) => {}
-        Ok(Err(_)) => observe_event(
-            observation,
-            EventStage::Drop,
-            Some(EventReason::ValidationRejected),
-        ),
-        Err(_) => observe_event(observation, EventStage::Drop, Some(EventReason::SinkClosed)),
-    }
-}
-
-async fn settle_start_gate_proposal(
-    organization: &OrganizationHandle,
-    start_gate: &StartGateRegistry,
-    native_run_id: &str,
-    phase: OrganizationRunPhase,
-    final_assistant_text: Option<&str>,
-    observation: &ObservationSink,
-) {
-    let Some((run_id, proposal_id, generation, design)) = start_gate.take(native_run_id) else {
-        return;
-    };
-    if phase != OrganizationRunPhase::Completed {
-        return;
-    }
-    let Some(text) = final_assistant_text else {
-        return;
-    };
-    match organization
-        .start_gate_terminal_proposal_set(
-            run_id,
-            proposal_id,
-            native_run_id.to_owned(),
-            text.to_owned(),
-            generation,
-            design,
-        )
-        .await
-    {
-        Ok(Ok(_)) => {}
         Ok(Err(_)) => observe_event(
             observation,
             EventStage::Drop,

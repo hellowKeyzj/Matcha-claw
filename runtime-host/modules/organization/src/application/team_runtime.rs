@@ -18,7 +18,7 @@ use organization::{
         approval::{HumanDecisionCommand, HumanDecisionOutcome},
         event::{
             GraphEdgeAction, GraphNodeKind, GraphPatch as EventGraphPatch,
-            GraphPatchOperation as EventGraphPatchOperation, InvalidEventInput, OpaqueId,
+            GraphPatchOperation as EventGraphPatchOperation, OpaqueId,
         },
         graph::NodePosition,
         public_projection::TeamRunPublicSnapshotQueryOutcome,
@@ -70,10 +70,6 @@ pub struct TeamGraphPatchDraft {
     pub(crate) created_at: u64,
 }
 
-pub(crate) enum TeamGraphPatchResolveError {
-    InvalidInput,
-}
-
 impl TeamGraphPatchDraft {
     pub fn new(
         run_id: GraphRunId,
@@ -100,7 +96,7 @@ impl TeamGraphPatchDraft {
     pub(crate) fn resolve(
         self,
         current: &GraphDefinition,
-    ) -> Result<(RunCommand, GraphPatch), TeamGraphPatchResolveError> {
+    ) -> Result<(RunCommand, GraphPatch), StoreFault> {
         let base_graph_id = self
             .base_graph_id
             .unwrap_or_else(|| current.graph_id().to_owned());
@@ -112,7 +108,7 @@ impl TeamGraphPatchDraft {
             base_workflow_plan_id.clone(),
             self.operations,
         )
-        .map_err(|_| TeamGraphPatchResolveError::InvalidInput)?;
+        .map_err(StoreFault::GraphPatch)?;
         let command_patch = EventGraphPatch::try_new(
             base_graph_id,
             base_workflow_plan_id,
@@ -122,11 +118,8 @@ impl TeamGraphPatchDraft {
                 .map(team_event_graph_patch_operation)
                 .collect::<Vec<_>>(),
         )
-        .map_err(map_event_input)?
-        .with_content_fingerprint(
-            crate::store::codec::graph_patch_fingerprint(&patch)
-                .map_err(|_| TeamGraphPatchResolveError::InvalidInput)?,
-        );
+        .map_err(StoreFault::GraphPatchInput)?
+        .with_content_fingerprint(crate::store::codec::graph_patch_fingerprint(&patch)?);
         Ok((
             RunCommand::new(
                 self.audit_run_id,
@@ -138,10 +131,6 @@ impl TeamGraphPatchDraft {
             patch,
         ))
     }
-}
-
-fn map_event_input(_: InvalidEventInput) -> TeamGraphPatchResolveError {
-    TeamGraphPatchResolveError::InvalidInput
 }
 
 fn team_event_graph_patch_operation(operation: &GraphPatchOperation) -> EventGraphPatchOperation {
@@ -220,6 +209,12 @@ fn team_event_graph_node_role_id(node: &organization::NodeDefinition) -> Option<
 }
 
 pub enum TeamRuntimeCommand {
+    RunStart {
+        team_id: TeamId,
+        run_id: GraphRunId,
+        epoch: Option<String>,
+        version: String,
+    },
     Design {
         operation: crate::application::design::DesignOperation,
     },
@@ -290,14 +285,6 @@ pub enum TeamRuntimeCommand {
         request: TriggerFireRequest,
         fired_at: u64,
     },
-    RunStartConfirm {
-        run_id: GraphRunId,
-        proposal_id: String,
-    },
-    RunStartContinue {
-        run_id: GraphRunId,
-        proposal_id: String,
-    },
     NodePromptRetryDue {
         run_id: GraphRunId,
     },
@@ -364,8 +351,7 @@ pub enum TeamRuntimeCommandOutcome {
     GraphExportYaml(Result<String, TeamRuntimeStatus>),
     GraphImportYaml(Result<TeamRunCommandOutcome, StoreFault>),
     TriggerFire(Result<TeamRunTriggerOutcome, StoreFault>),
-    RunStartConfirm(Result<organization::ConfirmRunStartOutcome, StoreFault>),
-    RunStartContinue(Result<organization::ContinueRunDiscussionOutcome, StoreFault>),
+    RunStart(Result<(), StoreFault>),
     NodePromptRetryDue(NodePromptRetryDueQueryOutcome),
     NodeEvent(Result<TeamNodeEventCommandOutcome, TeamRuntimeStatus>),
     RunDiagnostics(TeamRunDiagnosticsQueryOutcome),
@@ -473,10 +459,10 @@ pub fn decode_team_runtime_command(
             Ok(TeamRuntimeCommand::TriggerList { team_id })
         }
         "team.designStart"
-        | "team.designContinue"
         | "team.designExit"
         | "team.designSnapshot"
         | "team.designGraphPatch" => super::design::decode(operation_id, input, target),
+        "team.runStart" => decode_team_run_start(input, target),
         "team.runCreate" => decode_team_run_create(input, target),
         "team.webhookTriggerFire" => decode_team_webhook_trigger(input, target),
         "team.graphSave" => decode_team_graph_save(input, target),
@@ -489,13 +475,6 @@ pub fn decode_team_runtime_command(
         "team.graphExportYaml" => decode_team_graph_export(input, target),
         "team.graphImportYaml" => decode_team_graph_import(input, target),
         "team.runDiagnostics" => decode_team_run_diagnostics(input, target),
-        "team.proposalConfirm" | "team.runStartConfirm" => {
-            decode_team_run_start_confirm(input, target)
-        }
-        "team.proposalContinue"
-        | "team.proposalCancel"
-        | "team.runStartContinue"
-        | "team.runStartReject" => decode_team_run_start_continue(input, target),
         "team.triggerFire" => decode_team_trigger(input, target),
         "team.approvalResolve" => decode_team_approval(input, target),
         "team.runCancel" => decode_team_run_cancel(input, target),
@@ -503,47 +482,34 @@ pub fn decode_team_runtime_command(
     }
 }
 
-fn decode_team_run_start_confirm(
+fn decode_team_run_start(
     input: &serde_json::Map<String, Value>,
     target: &Value,
 ) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
-    let (_, run_id) = decode_team_target(target, input, false)?;
-    let proposal_id = decode_start_proposal_id(input)?;
-    Ok(TeamRuntimeCommand::RunStartConfirm {
-        run_id,
-        proposal_id,
-    })
-}
-
-fn decode_team_run_start_continue(
-    input: &serde_json::Map<String, Value>,
-    target: &Value,
-) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
-    let (_, run_id) = decode_team_target(target, input, false)?;
-    let proposal_id = decode_start_proposal_id(input)?;
-    Ok(TeamRuntimeCommand::RunStartContinue {
-        run_id,
-        proposal_id,
-    })
-}
-
-fn decode_start_proposal_id(
-    input: &serde_json::Map<String, Value>,
-) -> Result<String, TeamRuntimeDecodeError> {
-    if !input.keys().all(|key| {
-        matches!(
-            key.as_str(),
-            "runId" | "teamId" | "proposalId" | "idempotencyKey"
-        )
-    }) {
-        return Err(TeamRuntimeDecodeError::InvalidInput);
+    use TeamRuntimeDecodeError::InvalidInput;
+    let fields = ["teamId", "runId", "designEpoch", "expectedGraphVersion", "idempotencyKey"];
+    if input.len() != fields.len() || input.keys().any(|key| !fields.contains(&key.as_str())) {
+        return Err(InvalidInput);
     }
-    input
-        .get("proposalId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned)
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)
+    let field = |key| input.get(key).and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty()).ok_or(InvalidInput);
+    let team_id = TeamId::try_new(field("teamId")?).map_err(|_| InvalidInput)?;
+    if target != &json!({"kind":"team","teamId":team_id.as_str()}) {
+        return Err(InvalidInput);
+    }
+    let run_id = GraphRunId::new(field("runId")?);
+    OpaqueId::try_new(field("idempotencyKey")?).map_err(|_| InvalidInput)?;
+    let epoch = match input.get("designEpoch") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(OpaqueId::try_new(value.clone())
+            .map_err(|_| InvalidInput)?.as_str().to_owned()),
+        _ => return Err(InvalidInput),
+    };
+    let version = field("expectedGraphVersion")?;
+    if version.len() != 64 || !version.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return Err(InvalidInput);
+    }
+    Ok(TeamRuntimeCommand::RunStart { team_id, run_id, epoch, version: version.to_owned() })
 }
 
 fn decode_team_run_cancel(

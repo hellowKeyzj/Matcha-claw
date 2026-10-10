@@ -102,6 +102,7 @@ where
     routes.push(team_mcp.descriptor(
         runtime.handles.organization.clone(),
         runtime.handles.runtime_directory.clone(),
+        runtime.handles.execution_authority.clone(),
     ));
     let router = crate::http::Router::new(routes);
     if let Err(error) = runtime

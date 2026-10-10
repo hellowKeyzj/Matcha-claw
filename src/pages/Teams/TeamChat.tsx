@@ -1,5 +1,5 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
-import { Download, MessageCircle, Minus, Plus, Upload } from 'lucide-react';
+import { Copy, Download, MessageCircle, Minus, Plus, Upload } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -7,13 +7,13 @@ import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTranslation } from 'react-i18next';
+import { useTeamRunLabels } from '@/hooks/use-team-run-labels';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import { readTeamWebhookAuth, type TeamWebhookAuthProjection } from '@/services/openclaw/team-runtime-client';
 import { TeamRunGraphCanvas } from './TeamRunGraphCanvas';
-import { TeamDesignDialog } from './TeamDesignDialog';
 import { useTeamGraphLabels } from './team-graph-labels';
 import { toast } from 'sonner';
-import type { TeamDesignSnapshot, TeamDesignTarget } from '@/types/team-design';
+import type { TeamDesignSnapshot } from '@/types/team-design';
 
 const EMPTY_ROLES: TeamDesignSnapshot['roles'] = [];
 
@@ -52,6 +52,7 @@ function downloadYamlFile(fileName: string, yaml: string): void {
 export function TeamChat({ teamId }: { teamId?: string }) {
   const { t } = useTranslation('teams');
   const graphLabels = useTeamGraphLabels();
+  const runLabels = useTeamRunLabels();
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
@@ -66,15 +67,9 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
   const syncRunList = useTeamsStore((state) => state.syncRunList);
   const cancelRun = useTeamsStore((state) => state.cancelRun);
-  const confirmProposal = useTeamsStore((state) => state.confirmProposal);
-  const continueProposal = useTeamsStore((state) => state.continueProposal);
-  const cancelProposal = useTeamsStore((state) => state.cancelProposal);
   const submitRunGraphPatch = useTeamsStore((state) => state.submitRunGraphPatch);
   const observeTeamDesign = useTeamsStore((state) => state.observeTeamDesign);
   const refreshDesignSnapshot = useTeamsStore((state) => state.refreshDesignSnapshot);
-  const continueDesign = useTeamsStore((state) => state.continueDesign);
-  const confirmDesign = useTeamsStore((state) => state.confirmDesign);
-  const continueDesignDiscussion = useTeamsStore((state) => state.continueDesignDiscussion);
   const exportGraphYaml = useTeamsStore((state) => state.exportGraphYaml);
   const importGraphYaml = useTeamsStore((state) => state.importGraphYaml);
   const openSessionIdentity = useChatStore((state) => state.openSessionIdentity);
@@ -89,11 +84,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const graph = designSnapshot?.graph;
   const roles = designSnapshot?.roles ?? EMPTY_ROLES;
   const startGate = designSnapshot?.startGate;
-  const designActive = startGate?.status === 'designing' || startGate?.status === 'design_proposal_pending';
-  const designProposal = startGate?.status === 'design_proposal_pending' ? startGate.proposal : null;
-  const currentDesignTargetKey = JSON.stringify([resolvedTeamId, run?.runId]);
-  const currentDesignTargetRef = useRef(currentDesignTargetKey);
-  currentDesignTargetRef.current = currentDesignTargetKey;
+  const designActive = startGate?.status === 'designing';
   const loading = useTeamsStore((state) => (resolvedTeamId ? Boolean(state.loadingByTeamId[resolvedTeamId]) : false));
   const error = useTeamsStore((state) => (resolvedTeamId ? state.errorByTeamId[resolvedTeamId] : undefined));
 
@@ -171,6 +162,16 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     });
   };
 
+  const copyRunId = async (): Promise<void> => {
+    if (!run) return;
+    try {
+      await navigator.clipboard.writeText(run.runId);
+      toast.success(t('run.idCopied'));
+    } catch {
+      toast.error(t('run.copyIdFailed'));
+    }
+  };
+
   const openLeaderDiscussion = (openDesignGraph = false): void => {
     const leader = roles.find((role) => role.roleId === 'leader' && role.runId === run?.runId);
     if (!leader || !team) {
@@ -181,40 +182,6 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     navigate('/', openDesignGraph ? { state: { teamDesignSurface: {
       kind: 'team-graph', sourceSessionIdentity: leader.sessionIdentity, teamId: team.id, runId: leader.runId,
     } } } : undefined);
-  };
-
-  const runDesignUiAction = async (action: (target: TeamDesignTarget) => Promise<void>, openDiscussion = false): Promise<void> => {
-    if (!team || !run) return;
-    const target = { teamId: team.id, runId: run.runId };
-    const targetKey = currentDesignTargetKey;
-    try {
-      await action(target);
-      if (openDiscussion && currentDesignTargetRef.current === targetKey) openLeaderDiscussion(true);
-    } catch (error) {
-      toast.error(t('design.actionFailed', { error: error instanceof Error ? error.message : String(error) }));
-    }
-  };
-
-  const continuePendingProposal = async (): Promise<void> => {
-    if (!team) {
-      return;
-    }
-    await runUiAction(`proposal-continue:${team.id}:${run?.runId ?? 'none'}`, () => continueProposal(team.id));
-    openLeaderDiscussion();
-  };
-
-  const cancelPendingProposal = async (): Promise<void> => {
-    if (!team) {
-      return;
-    }
-    await runUiAction(`proposal-cancel:${team.id}:${run?.runId ?? 'none'}`, () => cancelProposal(team.id));
-  };
-
-  const confirmPendingProposal = async (): Promise<void> => {
-    if (!team) {
-      return;
-    }
-    await runUiAction(`proposal-confirm:${team.id}:${run?.runId ?? 'none'}`, () => confirmProposal(team.id));
   };
 
   const runs = [...runList];
@@ -240,9 +207,6 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const hasGraphToExport = hasExportableGraph(graph);
   const canExportGraphYaml = canAct && hasGraphToExport;
   const exportGraphYamlTitle = hasGraphToExport ? t('run.exportYaml') : t('run.exportYamlNoGraph');
-  const proposal = startGate?.status === 'proposal_pending' ? startGate.proposal : null;
-  const proposalSummary = proposal?.taskSummary?.trim() ?? '';
-  const canActOnProposal = Boolean(proposal?.proposalId && run) && !loading && !pendingActionId;
 
   return (
     <section className="space-y-4">
@@ -291,17 +255,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
         </div>
       </header>
 
-      {designProposal ? (
-        <TeamDesignDialog
-          summary={designProposal.taskSummary}
-          busy={Boolean(designRecord?.mutationPending) || Boolean(designRecord?.loading)}
-          error={designRecord?.error ?? undefined}
-          onConfirm={() => { void runDesignUiAction(confirmDesign); }}
-          onReturnDiscussion={() => { void runDesignUiAction(continueDesignDiscussion, true); }}
-          onContinueDesign={() => { void runDesignUiAction(continueDesign, true); }}
-        />
-      ) : null}
-      {designRecord?.error && !designProposal ? (
+      {designRecord?.error ? (
         <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
           {designRecord.error}
         </div>
@@ -317,55 +271,6 @@ export function TeamChat({ teamId }: { teamId?: string }) {
         <div className="rounded-md border border-border bg-muted/25 p-3 text-sm text-muted-foreground">
           {t('run.createFirstRunHint')}
         </div>
-      ) : null}
-
-      {proposal ? (
-        <Card className="border-primary/25 bg-primary/5">
-          <CardContent className="space-y-3 py-4">
-            <div className="flex items-start gap-3">
-              <div className="mt-0.5 rounded-full bg-primary/10 p-2 text-primary">
-                <MessageCircle className="h-4 w-4" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-sm font-medium text-foreground">{t('run.proposalPending.title')}</div>
-                <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
-                  {proposalSummary || t('run.proposalPending.emptySummary')}
-                </p>
-                {proposal.detail ? (
-                  <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-muted-foreground/80">{proposal.detail}</p>
-                ) : null}
-              </div>
-            </div>
-            <div className="flex flex-wrap justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => { void continuePendingProposal(); }}
-                disabled={!canActOnProposal || !roles.some((role) => role.roleId === 'leader')}
-              >
-                {t('run.proposalPending.discuss')}
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => { void cancelPendingProposal(); }}
-                disabled={!canActOnProposal || !roles.some((role) => role.roleId === 'leader')}
-              >
-                {t('run.proposalPending.cancel')}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => { void confirmPendingProposal(); }}
-                disabled={!canActOnProposal}
-              >
-                {t('run.proposalPending.confirm')}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
       ) : null}
 
       <Card className="min-w-0">
@@ -387,6 +292,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
                 ) : (
                   <select
                     aria-label={t('run.history')}
+                    title={run?.runId}
                     className="max-w-[18rem] rounded border bg-background px-2 py-1 text-foreground"
                     value={run?.runId ?? ''}
                     onChange={(event) => {
@@ -395,9 +301,22 @@ export function TeamChat({ teamId }: { teamId?: string }) {
                     }}
                     disabled={loading || Boolean(pendingActionId)}
                   >
-                    {runs.map((teamRun) => <option key={teamRun.runId} value={teamRun.runId}>{teamRun.runId}</option>)}
+                    {runs.map((teamRun) => <option key={teamRun.runId} value={teamRun.runId} title={teamRun.runId}>{runLabels[teamRun.runId]}</option>)}
                   </select>
                 )}
+                {run ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    aria-label={t('run.copyId')}
+                    title={t('run.copyId')}
+                    className="h-8 w-8 p-0"
+                    onClick={() => { void copyRunId(); }}
+                  >
+                    <Copy aria-hidden="true" className="h-4 w-4" />
+                  </Button>
+                ) : null}
                 <input
                   ref={yamlFileInputRef}
                   type="file"

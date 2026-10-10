@@ -200,6 +200,36 @@
     "matchaAgentAppServerStatus": "matcha-agent app-server Status",
     "matchaAgentAppServerDescription": "Inspect the matcha-agent endpoint readiness, app-server process state, and port.",
     "matchaAgentAppServerRestartFailed": "Failed to restart matcha-agent app-server: {{error}}",
+    "repair": {
+      "action": "Repair",
+      "confirmTitle": "Repair OpenClaw?",
+      "confirmDescription": "This will stop OpenClaw and run its native repair tool, which may change configuration and migrate legacy data. OpenClaw will then be prepared and started again. Running tasks will be interrupted. Continue?",
+      "confirmAction": "Stop and repair",
+      "automatic": "Automatic repair",
+      "manual": "Manual repair",
+      "pending": "Processing repair request",
+      "statusUnavailable": "Repair progress is temporarily unavailable. Check the logs.",
+      "unknown": "The outcome of this repair is not yet confirmed. Check the runtime status and logs before taking further action. It will not be retried automatically.",
+      "rejected": "The runtime rejected this repair request. Wait for the current operation to finish, then check again.",
+      "phases": {
+        "idle": "Idle",
+        "stopping": "Stopping",
+        "repairing": "Repairing",
+        "preparing": "Preparing",
+        "starting": "Starting",
+        "succeeded": "Repair complete",
+        "failed": "Repair failed"
+      },
+      "failures": {
+        "stopFailed": "Could not stop OpenClaw. Check the logs.",
+        "doctorFailed": "OpenClaw's native repair failed. Check the logs.",
+        "doctorTimedOut": "OpenClaw's native repair timed out. Check the logs.",
+        "doctorCancelled": "OpenClaw's native repair was cancelled. Check the logs.",
+        "doctorSpawnFailed": "Could not start OpenClaw's native repair process. Check the logs.",
+        "preparationFailed": "Could not prepare OpenClaw for startup after repair. Check the logs.",
+        "startFailed": "Could not start OpenClaw after repair. Check the logs."
+      }
+    },
     "tabs": {
       "general": "General",
       "browser": "Browser"

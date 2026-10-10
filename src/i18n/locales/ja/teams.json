@@ -151,13 +151,11 @@
   },
   "design": {
     "start": "実行グラフを設計",
-    "readyTitle": "実行グラフの設計が完了しました",
-    "readyDescription": "現在のグラフのバージョンは検証済みです。確定するとこのバージョンで実行し、設計を続けると今回の提案は無効になります。",
-    "confirm": "確定して実行",
+    "run": "開始",
+    "starting": "開始中…",
     "discuss": "議論に戻る",
-    "adjust": "設計の調整を続ける",
     "discussion": "チームの議論を開く",
-    "actionFailed": "設計操作が完了しませんでした：{{error}}"
+    "actionFailed": "チーム操作が完了しませんでした：{{error}}"
   },
   "chat": {
     "teamNotFound": "チームが見つかりません",
@@ -172,6 +170,11 @@
     "autoRunnerError": "自動実行エラー: {{error}}"
   },
   "run": {
+    "history": "実行履歴",
+    "unnamed": "新しい実行",
+    "copyId": "実行 ID をコピー",
+    "idCopied": "実行 ID をコピーしました",
+    "copyIdFailed": "実行 ID をコピーできませんでした。もう一度お試しください。",
     "start": "Start Run",
     "resume": "Resume Run",
     "notStarted": "Not started",
@@ -365,13 +368,6 @@
     "notePlaceholder": "Optional note",
     "waitingDecision": "Waiting Run Decision",
     "submitDecision": "Submit Decision",
-    "proposalPending": {
-      "title": "提案の確認待ち",
-      "emptySummary": "Leader が提案を準備しました。",
-      "confirm": "確認して開始",
-      "discuss": "続けて相談",
-      "cancel": "キャンセル"
-    },
     "dependencyMissing": {
       "title": "実行を続行する前に依存関係の対応が必要です",
       "description": "必須依存関係はバイパスできません。不足している Skill をインストールするか Tool を設定してから依存関係チェックを再試行してください。",

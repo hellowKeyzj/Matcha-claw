@@ -140,6 +140,7 @@
     "/api/gateway/start",
     "/api/gateway/stop",
     "/api/gateway/restart",
+    "/api/gateway/repair",
     "/api/gateway/control-ui",
     "/api/openclaw/status",
     "/api/openclaw/ready",
@@ -626,6 +627,14 @@
     [
       "POST",
       "/api/gateway/restart"
+    ],
+    [
+      "POST",
+      "/api/gateway/repair"
+    ],
+    [
+      "GET",
+      "/api/gateway/repair"
     ],
     [
       "GET",

@@ -349,7 +349,6 @@ fn assemble_host(
             clawhub_registry,
             runtime_observation: runtime_observation.clone(),
             session_delta_source: session_delta_source.clone(),
-            start_gate_registry: std::sync::Arc::clone(&owners.start_gate_registry),
         },
         &owners,
     );

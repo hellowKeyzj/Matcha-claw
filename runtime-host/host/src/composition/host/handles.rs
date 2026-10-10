@@ -39,6 +39,7 @@ pub(crate) struct HostHandles {
     pub fleet_module: FleetModule,
     pub organization_module: OrganizationModule,
     pub organization: organization::OrganizationHandle,
+    pub execution_authority: crate::team_mcp::ExecutionAuthority,
     pub toolchain: ToolchainModule,
     pub platform_tools: PlatformToolsModule,
     pub plugins: plugins_module::PluginsModule,
@@ -53,6 +54,5 @@ pub(crate) struct HostHandles {
     pub diagnostics: DiagnosticsModule,
     pub(crate) observation: ObservationSink,
     pub session_delta_source: sessions_module::SessionDeltaSource,
-    pub start_gate_registry: Arc<organization::StartGateRegistry>,
     pub runtime_directory: Arc<super::super::runtime_ports::RuntimeDriverDirectory>,
 }

@@ -1,76 +1,35 @@
+use platform::trace::session_trace;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 const LEADER_ROLE_ID: &str = "leader";
 
-const TEAM_CONTROL_PROTOCOL: &str = r#"<team_control_protocol>
-正常回复用户；在整段回复最后追加且只能追加一个控制块：
-
-<team_control mode="pending" />
-或
-<team_control mode="propose_run">任务摘要</team_control>
-
-仅当用户明确要求现在执行，且任务目标、范围、约束已足够清楚，无需再澄清时，才可使用 propose_run。
-
-用户仍在咨询、讨论、比较方案、补充信息、修改目标、等待建议，或你不确定是否该执行时，必须使用 pending。
-
-任务摘要用一句话写清要执行什么、范围和关键约束。
-
-控制块必须位于回复最后；不得省略、重复、嵌套，不得使用 JSON、Markdown 或额外字段。
-</team_control_protocol>"#;
+const TEAM_DISCUSSION_PROMPT: &str = "你负责与用户讨论当前团队的任务，明确目标、交付物、范围和约束。\n\n信息足够时直接给出推荐方案及关键取舍；仅当缺失信息会改变任务范围、交付物或关键依赖时提问，不反复确认已明确的要求。\n\n区分用户已确认的要求、你的建议和待确认的假设；不把讨论结论表述为已保存的工作流或已执行的结果。\n\n本阶段只讨论和分析，不修改运行图、不启动 Run、不派发或执行节点任务。";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StartGateRuntimeBindingLookup {
-    pub(crate) endpoint: organization::RuntimeEndpointReference,
-    pub(crate) agent: organization::ManagedAgentReference,
-    pub(crate) endpoint_session_id: organization::EndpointSessionId,
-}
-
-impl StartGateRuntimeBindingLookup {
-    pub fn new(
+pub enum StartGateRuntimeBindingLookup {
+    AgentScoped {
         endpoint: organization::RuntimeEndpointReference,
         agent: organization::ManagedAgentReference,
+        session_key: String,
+    },
+    NativeSession {
+        endpoint: organization::RuntimeEndpointReference,
         endpoint_session_id: organization::EndpointSessionId,
-    ) -> Self {
-        Self {
-            endpoint,
-            agent,
-            endpoint_session_id,
-        }
-    }
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StartGateBinding {
-    pub(crate) team_id: organization::TeamId,
     pub(crate) run_id: organization::GraphRunId,
     pub(crate) role_id: organization::RoleId,
-    pub(crate) session_ref: organization::RoleSessionRef,
-    pub(crate) agent: organization::ManagedAgentReference,
-    pub(crate) endpoint_session_id: organization::EndpointSessionId,
     pub(crate) start_gate: organization::RunStartGate,
-}
-
-impl StartGateBinding {
-    fn run_id(&self) -> &organization::GraphRunId {
-        &self.run_id
-    }
-
-    fn is_leader_intake(&self) -> bool {
-        self.role_id.as_str() == LEADER_ROLE_ID
-            && matches!(
-                self.start_gate,
-                organization::RunStartGate::Intake
-                    | organization::RunStartGate::ProposalPending { .. }
-            )
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartGatePromptPlan {
     run_id: organization::GraphRunId,
-    proposal_id: String,
     protocol: String,
-    pub(crate) generation: String,
     pub(crate) design: bool,
 }
 
@@ -79,295 +38,102 @@ impl StartGatePromptPlan {
         &self.run_id
     }
 
-    pub fn proposal_id(&self) -> &str {
-        &self.proposal_id
-    }
-
     pub fn system_provenance_receipt(&self) -> &str {
         &self.protocol
-    }
-
-    pub fn into_registry_parts(self) -> (organization::GraphRunId, String) {
-        (self.run_id, self.proposal_id)
     }
 }
 
 pub(crate) fn prepare_prompt(
     store: &mut crate::OrganizationStore,
     lookup: &StartGateRuntimeBindingLookup,
-    seed: Option<&str>,
-    at: u64,
+    resolver: &dyn crate::RoleSessionIdentityResolver,
 ) -> Result<Option<StartGatePromptPlan>, crate::StoreFault> {
-    let Some(binding) = resolve_runtime_binding(store.facts(), lookup) else {
+    let Some(binding) = resolve_runtime_binding(store.facts(), lookup, resolver) else {
         return Ok(None);
     };
     if binding.role_id.as_str() != LEADER_ROLE_ID
         || matches!(binding.start_gate, crate::RunStartGate::Started)
     {
+        session_trace("runtime.start-gate.prompt", json!({
+            "outcome": "skipped",
+            "reason": if binding.role_id.as_str() != LEADER_ROLE_ID { "non_leader" } else { "started" },
+        }));
         return Ok(None);
     }
-    let mut entropy = [0u8; 32];
-    getrandom::fill(&mut entropy).map_err(|_| crate::StoreFault::InvalidFacts)?;
-    let generation = format!("sgg-{:x}", Sha256::digest(entropy));
-    let design = matches!(
-        binding.start_gate,
-        crate::RunStartGate::Designing { .. } | crate::RunStartGate::DesignProposalPending { .. }
-    );
-    if design {
+    let design = matches!(binding.start_gate, crate::RunStartGate::Designing { .. });
+    let protocol = if design {
+        let mut entropy = [0u8; 32];
+        getrandom::fill(&mut entropy).map_err(|_| crate::StoreFault::InvalidFacts)?;
+        let generation = format!("sgg-{:x}", Sha256::digest(entropy));
         store.register_design_prompt(&binding.run_id, generation.clone())?;
         let run = store
             .facts()
             .run(&binding.run_id)
             .ok_or(crate::StoreFault::InvalidFacts)?;
-        Ok(Some(StartGatePromptPlan {
-            run_id: binding.run_id.clone(),
-            proposal_id: generation.clone(),
-            protocol: super::design_prompt::compose(store.facts(), run, &generation),
-            generation,
-            design: true,
-        }))
+        super::design_prompt::compose(store.facts(), run, &generation)
     } else {
-        let Some(mut plan) = prompt_plan(&binding, seed, at) else {
-            return Ok(None);
-        };
-        plan.generation = generation;
-        Ok(Some(plan))
-    }
-}
-
-pub(crate) fn design_ready(text: &str) -> Option<String> {
-    let text = text.trim_end();
-    let body = text.strip_suffix("</team_control>")?;
-    let open = "<team_control mode=\"design_ready\">";
-    let index = body.rfind(open)?;
-    if body[..index].contains("<team_control") || body[..index].matches("```").count() % 2 != 0 {
-        return None;
-    }
-    let summary = body[index + open.len()..].trim();
-    (!summary.is_empty() && summary.lines().count() == 1 && !summary.contains(['<', '>']))
-        .then(|| summary.to_owned())
-}
-
-enum TeamControl {
-    Pending,
-    ProposeRun(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StartGateTerminalProposal {
-    run_id: organization::GraphRunId,
-    proposal_id: String,
-    summary: String,
-    source_delivery_id: String,
-}
-
-impl StartGateTerminalProposal {
-    pub fn into_store_parts(self) -> (organization::GraphRunId, String, String, String) {
-        (
-            self.run_id,
-            self.proposal_id,
-            self.summary,
-            self.source_delivery_id,
-        )
-    }
+        TEAM_DISCUSSION_PROMPT.to_owned()
+    };
+    Ok(Some(StartGatePromptPlan {
+        run_id: binding.run_id,
+        protocol,
+        design,
+    }))
 }
 
 pub(crate) fn resolve_runtime_binding(
     facts: &organization::OrganizationFacts,
     lookup: &StartGateRuntimeBindingLookup,
+    resolver: &dyn crate::RoleSessionIdentityResolver,
 ) -> Option<StartGateBinding> {
-    let mut matches = facts
-        .runs()
-        .filter_map(|run| {
-            let receipt = run.runtime()?;
-            let binding = receipt.bindings().iter().find(|binding| {
-                binding.endpoint() == &lookup.endpoint
-                    && binding.agent() == &lookup.agent
-                    && binding.endpoint_session_id() == &lookup.endpoint_session_id
-                    && binding.team() == run.team()
+    let mut matches = facts.runs().flat_map(|run| {
+        run.runtime().into_iter().flat_map(move |receipt| {
+            receipt.bindings().iter().filter_map(move |binding| {
+                let matched = binding.team() == run.team()
                     && binding.team_run() == run.run_id()
-            })?;
-            Some(StartGateBinding {
-                team_id: binding.team().clone(),
-                run_id: binding.team_run().clone(),
-                role_id: binding.role().clone(),
-                session_ref: binding.session_ref().clone(),
-                agent: binding.agent().clone(),
-                endpoint_session_id: binding.endpoint_session_id().clone(),
-                start_gate: run.start_gate().clone(),
+                    && match lookup {
+                        StartGateRuntimeBindingLookup::AgentScoped {
+                            endpoint,
+                            agent,
+                            session_key,
+                        } => {
+                            binding.endpoint() == endpoint
+                                && binding.agent() == agent
+                                && resolver.session_key(binding).as_deref()
+                                    == Some(session_key.as_str())
+                        }
+                        StartGateRuntimeBindingLookup::NativeSession {
+                            endpoint,
+                            endpoint_session_id,
+                        } => {
+                            binding.endpoint() == endpoint
+                                && binding.endpoint_session_id() == endpoint_session_id
+                        }
+                    };
+                matched.then_some((run, binding))
             })
         })
-        .collect::<Vec<_>>();
-    (matches.len() == 1).then(|| matches.remove(0))
-}
-
-pub(crate) fn prompt_plan(
-    binding: &StartGateBinding,
-    proposal_id_seed: Option<&str>,
-    requested_at: u64,
-) -> Option<StartGatePromptPlan> {
-    binding.is_leader_intake().then(|| StartGatePromptPlan {
-        run_id: binding.run_id().clone(),
-        proposal_id: proposal_id(binding, proposal_id_seed, requested_at),
-        protocol: TEAM_CONTROL_PROTOCOL.to_owned(),
-        generation: String::new(),
-        design: false,
+    });
+    let Some((run, binding)) = matches.next() else {
+        session_trace("runtime.start-gate.binding", json!({ "outcome": "unmatched" }));
+        return None;
+    };
+    if matches.next().is_some() {
+        session_trace("runtime.start-gate.binding", json!({ "outcome": "ambiguous" }));
+        return None;
+    }
+    session_trace("runtime.start-gate.binding", json!({
+        "outcome": "matched",
+        "role": if binding.role().as_str() == LEADER_ROLE_ID { "leader" } else { "member" },
+        "gate": match run.start_gate() {
+            crate::RunStartGate::Intake => "intake",
+            crate::RunStartGate::Designing { .. } => "designing",
+            crate::RunStartGate::Started => "started",
+        },
+    }));
+    Some(StartGateBinding {
+        run_id: binding.team_run().clone(),
+        role_id: binding.role().clone(),
+        start_gate: run.start_gate().clone(),
     })
-}
-
-fn proposal_id(
-    binding: &StartGateBinding,
-    idempotency_key: Option<&str>,
-    requested_at: u64,
-) -> String {
-    let mut digest = Sha256::new();
-    digest.update(binding.run_id.as_str().as_bytes());
-    digest.update(b"\0");
-    digest.update(binding.role_id.as_str().as_bytes());
-    digest.update(b"\0");
-    digest.update(binding.session_ref.as_str().as_bytes());
-    digest.update(b"\0");
-    match idempotency_key {
-        Some(value) => digest.update(value.as_bytes()),
-        None => digest.update(requested_at.to_string().as_bytes()),
-    }
-    format!("sgp-{:x}", digest.finalize())
-}
-
-pub fn terminal_proposal(
-    run_id: organization::GraphRunId,
-    proposal_id: String,
-    source_delivery_id: String,
-    final_assistant_text: &str,
-) -> Option<StartGateTerminalProposal> {
-    match parse_control(final_assistant_text) {
-        TeamControl::ProposeRun(summary) => Some(StartGateTerminalProposal {
-            run_id,
-            proposal_id,
-            summary,
-            source_delivery_id,
-        }),
-        TeamControl::Pending => None,
-    }
-}
-
-fn parse_control(text: &str) -> TeamControl {
-    let trimmed = text.trim_end();
-    let pending = "<team_control mode=\"pending\" />";
-    if trimmed.strip_suffix(pending).is_some() {
-        return TeamControl::Pending;
-    }
-    let close = "</team_control>";
-    let Some(without_close) = trimmed.strip_suffix(close) else {
-        return TeamControl::Pending;
-    };
-    let open = "<team_control mode=\"propose_run\">";
-    let Some(open_index) = without_close.rfind(open) else {
-        return TeamControl::Pending;
-    };
-    let prefix = &without_close[..open_index];
-    if prefix.contains("<team_control") {
-        return TeamControl::Pending;
-    }
-    let summary = without_close[open_index + open.len()..].trim();
-    if summary.is_empty()
-        || summary.contains('<')
-        || summary.contains('>')
-        || summary.lines().count() > 1
-    {
-        return TeamControl::Pending;
-    }
-    TeamControl::ProposeRun(summary.to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn binding(role_id: &str, start_gate: organization::RunStartGate) -> StartGateBinding {
-        StartGateBinding {
-            team_id: organization::TeamId::try_new("team:one").unwrap(),
-            run_id: organization::GraphRunId::new("run:one"),
-            role_id: organization::RoleId::try_new(role_id).unwrap(),
-            session_ref: organization::RoleSessionRef::initial(),
-            agent: organization::ManagedAgentReference::try_new("agent:leader").unwrap(),
-            endpoint_session_id: organization::EndpointSessionId::try_new("native:leader").unwrap(),
-            start_gate,
-        }
-    }
-
-    #[test]
-    fn prompt_plan_only_allows_leader_intake_or_pending() {
-        assert!(
-            prompt_plan(
-                &binding("leader", organization::RunStartGate::Intake),
-                None,
-                1
-            )
-            .is_some()
-        );
-        assert!(
-            prompt_plan(
-                &binding(
-                    "leader",
-                    organization::RunStartGate::ProposalPending {
-                        proposal_id: "proposal:one".into(),
-                        summary: "Do it".into(),
-                        source_delivery_id: "native:old".into(),
-                    },
-                ),
-                None,
-                1,
-            )
-            .is_some()
-        );
-        assert!(
-            prompt_plan(
-                &binding("reviewer", organization::RunStartGate::Intake),
-                None,
-                1
-            )
-            .is_none()
-        );
-        assert!(
-            prompt_plan(
-                &binding("leader", organization::RunStartGate::Started),
-                None,
-                1
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn prompt_plan_uses_stable_proposal_id_seed_and_protocol() {
-        let binding = binding("leader", organization::RunStartGate::Intake);
-        let first = prompt_plan(&binding, Some("seed:one"), 1).unwrap();
-        let second = prompt_plan(&binding, Some("seed:one"), 999).unwrap();
-        let third = prompt_plan(&binding, Some("seed:two"), 1).unwrap();
-
-        assert_eq!(first.proposal_id(), second.proposal_id());
-        assert_ne!(first.proposal_id(), third.proposal_id());
-        assert!(first.proposal_id().starts_with("sgp-"));
-        assert_eq!(first.system_provenance_receipt(), TEAM_CONTROL_PROTOCOL);
-        assert_eq!(first.run_id().as_str(), "run:one");
-    }
-
-    #[test]
-    fn parses_only_trailing_single_proposal_block() {
-        match parse_control("ok\n<team_control mode=\"propose_run\">执行 A</team_control>") {
-            TeamControl::ProposeRun(summary) => assert_eq!(summary, "执行 A"),
-            TeamControl::Pending => panic!("expected proposal"),
-        }
-        assert!(matches!(
-            parse_control("<team_control mode=\"propose_run\">A</team_control> extra"),
-            TeamControl::Pending
-        ));
-        assert!(matches!(
-            parse_control(
-                "<team_control mode=\"pending\" /><team_control mode=\"propose_run\">A</team_control>"
-            ),
-            TeamControl::Pending
-        ));
-    }
 }

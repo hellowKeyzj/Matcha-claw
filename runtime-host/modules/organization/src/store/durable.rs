@@ -17,11 +17,11 @@ use crate::{
     ActivityClaim, ActivityClaimOutcome, ActivityDispatchOutcome, ActivityId,
     ActivityRegistrationOutcome, ActivityRequest, ActivitySettlement, ActivitySettlementOutcome,
     AgentNodeEventResolution, AuthorizedGraphResolution, AuthorizedGraphResolutionOutcome,
-    ConfirmRunStartOutcome, ContinueRunDiscussionOutcome, ControlExecutionStep,
+    ControlExecutionStep,
     ControlNodeResolution, ControlNodeResolutionOutcome, DeliveryClaim, DeliveryId,
     DeliveryReceipt, DeliveryResolution, DeliveryStart, EvidenceRecord, GraphDefinition,
     GraphEvent, GraphPatch, GraphRunFacts, GraphRunId, IdempotencyKey, NativeTerminalStatus,
-    RecordOutcome, SetRunStartProposalOutcome, TeamId, TerminalObservationOutcome,
+    RecordOutcome, TeamId, TerminalObservationOutcome,
     TriggerFireRequest, TriggerRegistration,
     run::{
         approval::{HumanDecisionCommand, HumanDecisionOutcome},
@@ -333,48 +333,50 @@ impl OrganizationStore {
         Ok(outcome)
     }
 
-    pub fn set_run_start_proposal(
+    pub(crate) fn start_run(
         &mut self,
+        team_id: &TeamId,
         run_id: &GraphRunId,
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    ) -> Result<SetRunStartProposalOutcome, StoreFault> {
+        epoch: Option<&str>,
+        version: &str,
+    ) -> Result<bool, StoreFault> {
         self.ensure_writable()?;
         let lock = WriterLock::acquire(&self.lock_path)?;
         self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .set_run_start_proposal(run_id, proposal_id, summary, source_delivery_id)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, SetRunStartProposalOutcome::Recorded) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
+        let run = self
+            .facts
+            .run(run_id)
+            .ok_or(StoreFault::Design(super::DesignError::UnknownRun))?;
+        if run.team() != team_id {
+            return Err(StoreFault::Design(super::DesignError::TeamMismatch));
         }
-        Ok(outcome)
-    }
-
-    pub fn confirm_run_start(
-        &mut self,
-        run_id: &GraphRunId,
-        proposal_id: &str,
-    ) -> Result<ConfirmRunStartOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .confirm_run_start(run_id, proposal_id)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, ConfirmRunStartOutcome::Started) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
+        // Started is the existing one-way, no-write replay boundary.
+        if matches!(run.start_gate(), crate::RunStartGate::Started) {
+            return Ok(false);
         }
-        Ok(outcome)
+        if !matches!(run.lifecycle().state(), crate::GraphRunLifecycleState::Active) {
+            return Err(StoreFault::Design(super::DesignError::RunInactive));
+        }
+        match run.start_gate() {
+            crate::RunStartGate::Intake if epoch.is_none() => {}
+            crate::RunStartGate::Designing { design_epoch, .. }
+                if epoch == Some(design_epoch.as_str()) => {}
+            _ => return Err(StoreFault::Design(super::DesignError::StaleEpoch)),
+        }
+        if super::codec::graph_version(run.graph().definition())? != version {
+            return Err(StoreFault::Design(super::DesignError::StaleGraphVersion));
+        }
+        crate::application::design::validate_graph(&self.facts, run)?;
+        let mut candidate = self.facts.clone();
+        candidate
+            .design_run_mut(run_id)
+            .expect("validated run")
+            .start_gate = crate::RunStartGate::Started;
+        candidate
+            .validate_transition_from(&self.facts)
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        self.commit_locked(&lock, candidate)?;
+        Ok(true)
     }
 
     pub(crate) fn exit_design(
@@ -395,34 +397,13 @@ impl OrganizationStore {
             .start_gate
             .exit_design(epoch)
             .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, ContinueRunDiscussionOutcome::Intake) {
+        if outcome {
             candidate
                 .validate_transition_from(&self.facts)
                 .map_err(|_| StoreFault::InvalidFacts)?;
             self.commit_locked(&lock, candidate)?;
         }
         Ok(())
-    }
-
-    pub fn continue_run_discussion(
-        &mut self,
-        run_id: &GraphRunId,
-        proposal_id: &str,
-    ) -> Result<ContinueRunDiscussionOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .continue_run_discussion(run_id, proposal_id)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, ContinueRunDiscussionOutcome::Intake) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
     }
 
     pub fn begin_graph_run_cancellation(
@@ -1151,9 +1132,7 @@ impl OrganizationStore {
         let lock = WriterLock::acquire(&self.lock_path)?;
         self.refresh_locked()?;
         let mut candidate = self.facts.clone();
-        let receipt = candidate
-            .team_graph_patch(command, &patch)
-            .map_err(StoreFault::EventLedger)?;
+        let receipt = candidate.team_graph_patch(command, &patch)?;
         if !receipt.is_replay() {
             candidate
                 .validate_transition_from(&self.facts)
@@ -1312,6 +1291,16 @@ impl OrganizationStore {
             .map_err(|_| StoreFault::InvalidFacts)?;
         self.commit_locked(&lock, candidate)?;
         Ok(outcome)
+    }
+
+    pub(super) fn read_locked<T>(
+        &mut self,
+        read: impl FnOnce(&OrganizationFacts) -> Result<T, StoreFault>,
+    ) -> Result<T, StoreFault> {
+        self.ensure_writable()?;
+        let _lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        read(&self.facts)
     }
 
     pub(super) fn transact<T>(

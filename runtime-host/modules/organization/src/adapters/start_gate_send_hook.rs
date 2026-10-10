@@ -1,39 +1,39 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
+use platform::trace::{identifier_hash, session_trace};
 use runtime_directory::RuntimeDriverIdentity;
+use serde_json::json;
 
 use crate::{
-    EndpointSessionId, GraphRunId, ManagedAgentReference, OrganizationHandle,
-    RuntimeEndpointReference, StartGateRuntimeBindingLookup,
+    EndpointSessionId, ManagedAgentReference, OrganizationHandle,
+    RoleSessionIdentityResolver, RuntimeEndpointReference, StartGateRuntimeBindingLookup,
 };
 
 #[derive(Clone)]
 pub struct StartGateSendHook {
     organization: OrganizationHandle,
-    start_gate: Arc<StartGateRegistry>,
+    resolver: Arc<dyn RoleSessionIdentityResolver>,
 }
 
 impl StartGateSendHook {
-    pub fn new(organization: OrganizationHandle, start_gate: Arc<StartGateRegistry>) -> Self {
+    pub fn new(
+        organization: OrganizationHandle,
+        resolver: Arc<dyn RoleSessionIdentityResolver>,
+    ) -> Self {
         Self {
             organization,
-            start_gate,
+            resolver,
         }
     }
 
     pub async fn prepare(
         &self,
         request: StartGateSendRequest,
-        now_millis: u64,
     ) -> Result<Option<PreparedStartGateSend>, ()> {
         prepare_start_gate_send(
             self.organization.clone(),
-            Arc::clone(&self.start_gate),
+            Arc::clone(&self.resolver),
             request,
-            now_millis,
         )
         .await
     }
@@ -49,9 +49,8 @@ pub enum StartGateNativeEndpoint {
 pub struct StartGateSendRequest {
     endpoint: StartGateNativeEndpoint,
     session_key: String,
+    agent_id: String,
     endpoint_session_id: Option<String>,
-    run_id: Option<String>,
-    idempotency_key: Option<String>,
     has_delivery_context: bool,
 }
 
@@ -59,17 +58,15 @@ impl StartGateSendRequest {
     pub fn new(
         endpoint: StartGateNativeEndpoint,
         session_key: String,
+        agent_id: String,
         endpoint_session_id: Option<String>,
-        run_id: Option<String>,
-        idempotency_key: Option<String>,
         has_delivery_context: bool,
     ) -> Self {
         Self {
             endpoint,
             session_key,
+            agent_id,
             endpoint_session_id,
-            run_id,
-            idempotency_key,
             has_delivery_context,
         }
     }
@@ -77,147 +74,73 @@ impl StartGateSendRequest {
 
 pub struct PreparedStartGateSend {
     system_provenance_receipt: String,
-    state: StartGateSendState,
 }
 
 impl PreparedStartGateSend {
     pub fn system_provenance_receipt(&self) -> &str {
         &self.system_provenance_receipt
     }
-
-    pub fn into_state(self) -> StartGateSendState {
-        self.state
-    }
-}
-
-/// Shared `native_run_id -> (run_id, proposal_id)` registry for start-gate proposals. The send hook
-/// registers a sent start-gate prompt; the organization session terminal consumes it when the
-/// native run reaches a terminal phase.
-#[derive(Default)]
-pub struct StartGateRegistry {
-    proposals: Mutex<BTreeMap<String, StartGateProposal>>,
-}
-
-struct StartGateProposal {
-    run_id: GraphRunId,
-    proposal_id: String,
-    generation: String,
-    design: bool,
-}
-
-impl StartGateRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn register(
-        &self,
-        native_run_id: String,
-        run_id: GraphRunId,
-        proposal_id: String,
-        generation: String,
-        design: bool,
-    ) {
-        self.proposals
-            .lock()
-            .expect("start gate registry lock is never poisoned")
-            .insert(
-                native_run_id,
-                StartGateProposal {
-                    run_id,
-                    proposal_id,
-                    generation,
-                    design,
-                },
-            );
-    }
-
-    pub(crate) fn take(&self, native_run_id: &str) -> Option<(GraphRunId, String, String, bool)> {
-        self.proposals
-            .lock()
-            .expect("start gate registry lock is never poisoned")
-            .remove(native_run_id)
-            .map(|proposal| {
-                (
-                    proposal.run_id,
-                    proposal.proposal_id,
-                    proposal.generation,
-                    proposal.design,
-                )
-            })
-    }
 }
 
 async fn prepare_start_gate_send(
     organization: OrganizationHandle,
-    start_gate: Arc<StartGateRegistry>,
+    resolver: Arc<dyn RoleSessionIdentityResolver>,
     request: StartGateSendRequest,
-    now_millis: u64,
 ) -> Result<Option<PreparedStartGateSend>, ()> {
+    session_trace("runtime.start-gate.input", json!({
+        "identityKind": match request.endpoint {
+            StartGateNativeEndpoint::OpenClawLocal => "agent_scoped",
+            StartGateNativeEndpoint::MatchaAgentLocal => "native_session",
+            StartGateNativeEndpoint::Unsupported => "unsupported",
+        },
+        "sessionKeyHash": identifier_hash(&request.session_key),
+        "endpointSessionIdHash": request.endpoint_session_id.as_deref().map(identifier_hash),
+    }));
     if request.has_delivery_context {
+        session_trace("runtime.start-gate.prompt", json!({
+            "outcome": "skipped", "reason": "delivery_context",
+        }));
         return Ok(None);
     }
     let Some(lookup) = start_gate_lookup(&request) else {
+        session_trace("runtime.start-gate.prompt", json!({
+            "outcome": "skipped", "reason": "unsupported_or_invalid_identity",
+        }));
         return Ok(None);
     };
-    let proposal_id_seed = request
-        .idempotency_key
-        .clone()
-        .or_else(|| request.run_id.clone());
     let Some(plan) = organization
-        .start_gate_prompt_plan(lookup, proposal_id_seed, now_millis)
+        .start_gate_prompt_plan(lookup, resolver)
         .await
-        .map_err(|_| ())?
+        .map_err(|_| {
+            session_trace("runtime.start-gate.prompt", json!({
+                "outcome": "error", "reason": "owner_request_failed",
+            }));
+        })?
     else {
         return Ok(None);
     };
     let system_provenance_receipt = plan.system_provenance_receipt().to_owned();
-    let generation = plan.generation.clone();
-    let design = plan.design;
-    let (run_id, proposal_id) = plan.into_registry_parts();
-    let state = StartGateSendState {
-        start_gate,
-        run_id,
-        proposal_id,
-        generation,
-        design,
-    };
     Ok(Some(PreparedStartGateSend {
         system_provenance_receipt,
-        state,
     }))
 }
 
 fn start_gate_lookup(request: &StartGateSendRequest) -> Option<StartGateRuntimeBindingLookup> {
     let endpoint = endpoint_reference(request.endpoint)?;
-    let agent = agent_from_session_key(&request.session_key)?;
-    let endpoint_session_id =
-        EndpointSessionId::try_new(request.endpoint_session_id.clone()?).ok()?;
-    Some(StartGateRuntimeBindingLookup::new(
-        endpoint,
-        agent,
-        endpoint_session_id,
-    ))
-}
-
-pub struct StartGateSendState {
-    start_gate: Arc<StartGateRegistry>,
-    run_id: GraphRunId,
-    proposal_id: String,
-    generation: String,
-    design: bool,
-}
-
-impl StartGateSendState {
-    pub fn after_queued(self, native_run_id: String) {
-        let Self {
-            start_gate,
-            run_id,
-            proposal_id,
-            generation,
-            design,
-        } = self;
-        start_gate.register(native_run_id, run_id, proposal_id, generation, design);
+    match request.endpoint {
+        StartGateNativeEndpoint::OpenClawLocal => Some(StartGateRuntimeBindingLookup::AgentScoped {
+            endpoint,
+            agent: ManagedAgentReference::try_new(request.agent_id.clone()).ok()?,
+            session_key: request.session_key.clone(),
+        }),
+        StartGateNativeEndpoint::MatchaAgentLocal => {
+            Some(StartGateRuntimeBindingLookup::NativeSession {
+                endpoint,
+                endpoint_session_id: EndpointSessionId::try_new(request.endpoint_session_id.clone()?)
+                    .ok()?,
+            })
+        }
+        StartGateNativeEndpoint::Unsupported => None,
     }
 }
 
@@ -228,12 +151,4 @@ fn endpoint_reference(endpoint: StartGateNativeEndpoint) -> Option<RuntimeEndpoi
         StartGateNativeEndpoint::Unsupported => return None,
     };
     RuntimeEndpointReference::try_new(endpoint.runtime_endpoint_reference()).ok()
-}
-
-fn agent_from_session_key(session_key: &str) -> Option<ManagedAgentReference> {
-    let (agent_id, suffix) = session_key.strip_prefix("agent:")?.split_once(':')?;
-    if agent_id.is_empty() || suffix.is_empty() {
-        return None;
-    }
-    ManagedAgentReference::try_new(agent_id).ok()
 }

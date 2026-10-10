@@ -9,7 +9,7 @@
 import { memo, useState, useRef, useEffect, useLayoutEffect, useImperativeHandle, useCallback, useMemo, type ReactNode, type Ref, type SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
 import * as SelectPrimitive from '@radix-ui/react-select';
-import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare, ShieldCheck, Settings2, GitBranch, Target } from 'lucide-react';
+import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare, ShieldCheck, Settings2, GitBranch, ArrowUpRight, Play, Target } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import type {
@@ -176,7 +176,7 @@ interface ChatInputProps {
   modelPicker?: ModelPickerState | null;
   permissionPicker?: PermissionPickerState | null;
   contextUsage?: ChatContextUsageViewModel | null;
-  teamDesign?: { active: boolean; disabled: boolean; onStart: () => void; onExit: () => void } | null;
+  teamDesign?: { active: boolean; disabled: boolean; starting: boolean; exiting: boolean; error: string | null; onOpen: () => void; onStart: () => void; onExit: () => void; onRun: () => void } | null;
   disabled?: boolean;
   reconnecting?: boolean;
   sending?: boolean;
@@ -1384,39 +1384,54 @@ export const ChatInput = memo(function ChatInput({
           </div>
         ) : null}
         {teamDesign ? (
-          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-            {teamDesign.active ? (
-              <div className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full border border-primary/25 bg-primary/5 pl-3.5 pr-1 text-xs font-medium text-primary">
-                <GitBranch aria-hidden="true" className="h-3.5 w-3.5" />
-                <span role="status">{t('input.teamDesignInProgress')}</span>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 px-3 max-md:px-2.5 max-sm:px-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 gap-1.5 rounded-md px-2 text-foreground"
+              disabled={!teamDesign.active && (disabled || sending || approvalWaiting || teamDesign.disabled || !sendGate.canSend)}
+              onClick={teamDesign.active ? teamDesign.onOpen : teamDesign.onStart}
+            >
+              <GitBranch aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+              <span role={teamDesign.active ? 'status' : undefined} className="truncate">{t(teamDesign.active ? 'input.teamDesignInProgress' : 'input.teamDesignStart')}</span>
+              {teamDesign.active ? <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /> : null}
+            </Button>
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              {teamDesign.active ? (
                 <span title={t(sending || approvalWaiting || !sendGate.canSend ? 'input.teamDesignExitWaiting' : 'input.teamDesignExit')}>
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-primary"
-                    aria-label={t('input.teamDesignExit')}
+                    size="sm"
+                    className="h-8 rounded-md px-2.5 text-foreground"
                     disabled={disabled || sending || approvalWaiting || teamDesign.disabled || !sendGate.canSend}
                     onClick={teamDesign.onExit}
+                    aria-busy={teamDesign.exiting}
                   >
-                    <X aria-hidden="true" className="h-3.5 w-3.5" />
+                    {teamDesign.exiting ? <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : null}
+                    {t(teamDesign.exiting ? 'input.teamDesignExiting' : 'teams:design.discuss')}
                   </Button>
                 </span>
-              </div>
-            ) : (
+              ) : null}
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={disabled || sending || approvalWaiting || teamDesign.disabled}
-                onClick={teamDesign.onStart}
+                className="h-8 gap-1.5 rounded-md px-3"
+                disabled={disabled || sending || approvalWaiting || teamDesign.disabled || !sendGate.canSend}
+                onClick={teamDesign.onRun}
+                aria-busy={teamDesign.starting}
               >
-                <GitBranch aria-hidden="true" className="h-3.5 w-3.5" />
-                {t('input.teamDesignStart')}
+                {teamDesign.starting
+                  ? <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+                  : <Play aria-hidden="true" className="h-3.5 w-3.5" />}
+                {t(teamDesign.starting ? 'teams:design.starting' : 'teams:design.run')}
               </Button>
-            )}
+            </div>
           </div>
         ) : null}
+        {teamDesign?.error ? <p role="alert" className="mb-2 text-xs text-destructive">{teamDesign.error}</p> : null}
         {/* Input Row */}
         <div
           className={cn(

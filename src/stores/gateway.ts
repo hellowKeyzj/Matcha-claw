@@ -6,6 +6,7 @@ import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { waitForCall } from '@/lib/call-log-await';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
+import { runGatewayRepair, type GatewayRepairOutcome } from '@/lib/gateway-repair';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { TaskSnapshotEvent } from '../types/session/task-snapshot';
 import {
@@ -211,6 +212,9 @@ interface GatewayState {
   start: () => Promise<void>;
   stop: () => Promise<void>;
   restart: () => Promise<void>;
+  lifecycleOperation: 'restart' | 'repair' | null;
+  repairOutcome: GatewayRepairOutcome | null;
+  repair: () => Promise<void>;
   refreshRuntimeHostStatus: () => Promise<void>;
   checkHealth: () => Promise<GatewayHealth>;
   setStatus: (status: GatewayStatus) => void;
@@ -328,6 +332,8 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
   },
   isInitialized: false,
   lastError: null,
+  lifecycleOperation: null,
+  repairOutcome: null,
 
   init: async () => {
     if (get().isInitialized) return;
@@ -552,8 +558,9 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
   },
 
   restart: async () => {
+    if (get().lifecycleOperation) return;
+    set({ lifecycleOperation: 'restart', lastError: null });
     try {
-      set({ lastError: null });
       const error = await runGatewayLifecycle('restart');
       if (error) {
         set({ lastError: error });
@@ -563,6 +570,18 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
       set((state) => (isCurrentGatewayStatus(state.status, status) ? { status } : {}));
     } catch (error) {
       set({ lastError: String(error) });
+    } finally {
+      set({ lifecycleOperation: null });
+    }
+  },
+
+  repair: async () => {
+    if (get().lifecycleOperation) return;
+    set({ lifecycleOperation: 'repair', repairOutcome: null });
+    try {
+      set({ repairOutcome: await runGatewayRepair() });
+    } finally {
+      set({ lifecycleOperation: null });
     }
   },
 

@@ -1,11 +1,15 @@
 use std::{
     fs,
     io::Write,
+    net::TcpListener,
     num::NonZeroU32,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use organization::{
@@ -30,7 +34,7 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
         json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
     );
 
-    let output = run(&home, input.as_bytes());
+    let output = run(&home.0, input.as_bytes());
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
@@ -77,7 +81,7 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
         json!({
             "name": "team_node_event",
             "description": "Record a legacy/manual TeamRun node event. Terminal complete/reject events are accepted only as non-scheduler evidence; runtime terminal settle remains the completion path.",
-            "inputSchema": {
+            "inputSchema": { "type": "object", "allOf": [{
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
@@ -91,12 +95,18 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
                     "deliveryId": { "type": "string", "minLength": 1 },
                     "receipt": { "type": "string", "minLength": 1 },
                     "nodeId": { "type": "string", "minLength": 1 },
-                    "attemptNumber": { "type": "integer", "minimum": 1 },
+                    "attemptNumber": { "type": "integer", "minimum": 1, "maximum": u32::MAX },
                     "summary": { "type": "string", "minLength": 1, "maxLength": 512 },
                     "outputPort": { "type": "string", "minLength": 1 }
                 },
                 "required": ["runId", "commandId", "idempotencyKey", "nodeExecutionId", "event"]
-            }
+            }, {
+                "if": { "properties": { "event": { "const": "request_approval" } }, "required": ["event"] },
+                "then": { "required": ["approvalAction"] }
+            }, {
+                "if": { "properties": { "event": { "enum": ["complete", "reject"] } }, "required": ["event"] },
+                "then": { "required": ["deliveryId", "receipt", "nodeId", "attemptNumber", "summary", "outputPort"] }
+            }] }
         })
     );
     assert_eq!(
@@ -118,17 +128,23 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
             }
         })
     );
+    let patch = &tools["result"]["tools"][2]["inputSchema"]["oneOf"];
+    assert_eq!(patch.as_array().unwrap().len(), 2);
     assert_eq!(
-        tools["result"]["tools"][2]["inputSchema"]["properties"]["operations"]["items"]["oneOf"]
+        patch[0]["properties"]["operations"]["items"]["oneOf"]
             .as_array()
             .unwrap()
             .len(),
         5
     );
     assert_eq!(
-        tools["result"]["tools"][2]["inputSchema"]["required"],
+        patch[0]["required"],
         json!([
+            "teamId",
             "runId",
+            "designEpoch",
+            "promptGeneration",
+            "expectedGraphVersion",
             "commandId",
             "idempotencyKey",
             "baseGraphId",
@@ -137,23 +153,48 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
         ])
     );
     assert_eq!(
-        tools["result"]["tools"][3],
-        json!({
-            "name": "team_graph_context",
-            "description": "Read a redacted TeamRun graph context.",
-            "inputSchema": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "teamId": { "type": "string", "minLength": 1 },
-                    "runId": { "type": "string", "minLength": 1 },
-                    "view": { "enum": ["current_node", "graph_summary"] },
-                    "nodeExecutionId": { "type": ["string", "null"], "minLength": 1 }
-                },
-                "required": ["teamId", "runId", "view"]
-            }
-        })
+        patch[1]["required"],
+        json!([
+            "teamId",
+            "runId",
+            "executionAuthority",
+            "expectedGraphVersion",
+            "commandId",
+            "idempotencyKey",
+            "operations"
+        ])
     );
+    assert_eq!(
+        patch[1]["properties"]["operations"]["items"]["properties"]["op"],
+        json!({ "const": "set_node_prompt" })
+    );
+    let context = &tools["result"]["tools"][3]["inputSchema"]["oneOf"];
+    assert_eq!(context.as_array().unwrap().len(), 3);
+    assert_eq!(
+        context[0]["required"],
+        json!(["teamId", "runId", "view", "executionAuthority"])
+    );
+    assert_eq!(
+        context[0]["properties"]["view"],
+        json!({ "const": "run_prompts" })
+    );
+    assert_eq!(context[1]["required"], json!(["teamId", "runId", "view"]));
+    assert_eq!(
+        context[1]["properties"]["view"]["enum"],
+        json!(["current_node", "graph_summary"])
+    );
+    assert_eq!(
+        context[2]["required"],
+        json!(["teamId", "runId", "designEpoch", "promptGeneration", "view"])
+    );
+    for branch in patch
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(context.as_array().unwrap())
+    {
+        assert_eq!(branch["additionalProperties"], false);
+    }
     assert_eq!(
         tools["result"]["tools"][4],
         json!({
@@ -267,7 +308,7 @@ fn records_and_replays_a_standard_team_evidence_reference_call() {
         }),
     );
 
-    let output = run(&home, input.as_bytes());
+    let output = run_with_host(&home, input.as_bytes());
 
     assert!(output.status.success());
     let responses = decode_responses(&output.stdout);
@@ -293,7 +334,7 @@ fn silently_accepts_initialized_notification_and_returns_closed_errors() {
         json!({ "jsonrpc": "2.0", "id": "unknown", "method": "private/method" }),
     );
 
-    let output = run(&home, input.as_bytes());
+    let output = run(&home.0, input.as_bytes());
 
     assert!(output.status.success());
     let responses = decode_responses(&output.stdout);
@@ -315,7 +356,7 @@ fn silently_accepts_initialized_notification_and_returns_closed_errors() {
 #[test]
 fn rejects_malformed_framing_and_unknown_tool_arguments_without_leaking_input() {
     let home = Home::new();
-    let malformed = run(&home, b"Content-Type: application/json\r\n\r\n");
+    let malformed = run(&home.0, b"Content-Type: application/json\r\n\r\n");
 
     assert!(malformed.status.success());
     let malformed_response = decode_responses(&malformed.stdout).remove(0);
@@ -340,7 +381,7 @@ fn rejects_malformed_framing_and_unknown_tool_arguments_without_leaking_input() 
             }
         }
     });
-    let output = run(&home, format!("{invalid_tool}\n").as_bytes());
+    let output = run_with_host(&home, format!("{invalid_tool}\n").as_bytes());
 
     assert!(output.status.success());
     let response = decode_responses(&output.stdout).remove(0);
@@ -369,7 +410,7 @@ fn artifact_contains_no_store_opening_or_static_signing_material() {
         );
     }
     assert!(source.contains("ToolCatalog::new"));
-    assert!(source.contains("organization::team_run_mcp_provider"));
+    assert!(source.contains("runtime_host::team_mcp::team_provider"));
 }
 
 #[test]
@@ -391,7 +432,7 @@ fn rejects_terminal_event_without_resolution_fields() {
         }
     });
 
-    let output = run(&home, format!("{request}\n").as_bytes());
+    let output = run_with_host(&home, format!("{request}\n").as_bytes());
 
     assert!(output.status.success());
     let response = decode_responses(&output.stdout).remove(0);
@@ -423,7 +464,7 @@ fn terminal_node_event_is_legacy_evidence_not_completion() {
         }
     });
 
-    let output = run(&home, format!("{request}\n").as_bytes());
+    let output = run_with_host(&home, format!("{request}\n").as_bytes());
 
     assert!(output.status.success());
     let response = decode_responses(&output.stdout).remove(0);
@@ -465,10 +506,10 @@ impl Drop for Home {
     }
 }
 
-fn run(home: &Home, input: &[u8]) -> std::process::Output {
+fn run(home: &std::path::Path, input: &[u8]) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_runtime-host-mcp"))
         .arg("--state-dir")
-        .arg(home.0.join("state"))
+        .arg(home.join("state"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -476,6 +517,134 @@ fn run(home: &Home, input: &[u8]) -> std::process::Output {
         .unwrap();
     child.stdin.take().unwrap().write_all(input).unwrap();
     child.wait_with_output().unwrap()
+}
+
+fn run_with_host(home: &Home, input: &[u8]) -> std::process::Output {
+    use tokio::io::AsyncReadExt;
+
+    let workspace = openclaw::workspace::WorkspaceProjectionFixture::install(&home.0);
+    let listeners: [_; 3] = std::array::from_fn(|_| TcpListener::bind("127.0.0.1:0").unwrap());
+    let [host_port, matcha_port, openclaw_port] =
+        listeners.map(|listener| listener.local_addr().unwrap().port());
+    let state = CanonicalStateDir::provision(home.0.join("openclaw-state")).unwrap();
+    let mut settings = settings::DesiredState::open(state.as_path()).unwrap();
+    assert_eq!(
+        settings.replace(
+            "mcp-test-no-autostart".into(),
+            settings::Desired::try_new(
+                settings::BrowserMode::Off,
+                settings::ProxyDesired::default(),
+                false,
+                false,
+            )
+            .unwrap(),
+        ),
+        (1, None)
+    );
+    drop(settings);
+    let host = runtime_host::HostInput {
+        // Deliberately absent artifacts keep peer runtimes and model calls out of this fixture.
+        matcha: runtime_host::MatchaAgentInput {
+            bun_executable: home.0.join("missing-bun"),
+            entry: home.0.join("missing-matcha-entry"),
+            working_directory: home.0.clone(),
+            storage_root: home.0.join("matcha-storage"),
+            port: matcha_port,
+            #[cfg(windows)]
+            git_bash: home.0.join("missing-git-bash"),
+            #[cfg(unix)]
+            guardian_executable: home.0.join("missing-guardian"),
+        },
+        matcha_secret: matcha_agent::lifecycle::secret::Secret::new(
+            "mcp-test-matcha-secret".into(),
+        )
+        .unwrap(),
+        open_claw: runtime_host::OpenClawInput {
+            runtime_host_mcp_executable: PathBuf::from(env!("CARGO_BIN_EXE_runtime-host-mcp")),
+            runtime_host_mcp_state_dir: home.0.join("state"),
+            electron_image: home.0.join("missing-electron"),
+            working_directory: home.0.clone(),
+            openclaw_dir: workspace.openclaw_dir().to_owned(),
+            companion_skill_source_root: home.0.join("companion-skills"),
+            managed_plugin_root: home.0.join("plugins"),
+            subagent_template_dir: home.0.join("subagent-templates"),
+            entry: workspace.openclaw_dir().join("openclaw.mjs"),
+            state_dir: state,
+            port: openclaw_port,
+            sealed_endpoint: None,
+            sealed_token: None,
+            client_metadata: openclaw::gateway::client::GatewayClientMetadata::try_new(
+                "test".into(),
+                std::env::consts::OS.into(),
+            )
+            .unwrap(),
+            report_diagnostic: Arc::new(|_| {}),
+            #[cfg(unix)]
+            guardian_executable: home.0.join("missing-guardian"),
+        },
+        open_claw_secret: openclaw::gateway::auth::GatewaySecret::new(
+            "mcp-test-openclaw-secret".into(),
+        )
+        .unwrap(),
+        organization_store: organization::OrganizationStore::open(
+            home.0.join("state/organization-facts.log"),
+        )
+        .unwrap(),
+        runtime_state_dir: home.0.join("state"),
+        app_log_dir: home.0.join("logs"),
+        parent_callback_base_url: "http://127.0.0.1:1".into(),
+        parent_callback_dispatch_token: "mcp-test-parent-token".into(),
+        runtime_observation: runtime_host::RuntimeObservationConfig::off(),
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (control, control_input) = tokio::io::duplex(1024);
+            let (control_output, mut output) = tokio::io::duplex(8192);
+            let service = tokio::spawn(runtime_host::run_app_service(runtime_host::AppInput {
+                host,
+                verifier: platform::capability::CapabilityDecisionVerifier::try_new(
+                    "MCowBQYDK2VwAyEAhI7FT5ZzRIPEHVkZavhKl2CqMou1WrMW7b9vB7BHXoE",
+                )
+                .unwrap(),
+                provider_credential_resolver: None,
+                webhook_token: organization::adapters::loopback::trigger::WebhookToken::try_new(
+                    "mctwh_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
+                runtime_host_transport_port: host_port,
+                control_input,
+                control_output,
+            }));
+            let ready = tokio::time::timeout(Duration::from_secs(10), async {
+                let length = output.read_u32().await?;
+                let mut body = vec![0; length as usize];
+                output.read_exact(&mut body).await?;
+                Ok::<_, std::io::Error>(serde_json::from_slice::<Value>(&body).unwrap())
+            })
+            .await
+            .unwrap();
+            let result = match ready {
+                Ok(ready) => {
+                    assert_eq!(ready["type"], "ready");
+                    let home = home.0.clone();
+                    let input = input.to_vec();
+                    tokio::task::spawn_blocking(move || run(&home, &input))
+                        .await
+                        .unwrap()
+                }
+                Err(error) => panic!("Host did not become ready: {error}; {:?}", service.await),
+            };
+            drop(control);
+            tokio::time::timeout(Duration::from_secs(10), service)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            result
+        })
 }
 
 #[cfg(unix)]

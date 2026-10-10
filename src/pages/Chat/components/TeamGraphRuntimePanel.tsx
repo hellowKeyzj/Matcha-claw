@@ -1,7 +1,9 @@
 import { useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2, RefreshCw } from 'lucide-react';
+import { Copy, Loader2, RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { useTeamRunLabels } from '@/hooks/use-team-run-labels';
 import { useTeamsStore } from '@/stores/teams';
 import { TeamRunGraphCanvas } from '@/pages/Teams/TeamRunGraphCanvas';
 import { useTeamGraphLabels } from '@/pages/Teams/team-graph-labels';
@@ -11,6 +13,9 @@ type TeamGraphSurface = Extract<ChatRuntimeSurfaceDescriptor, { kind: 'team-grap
 
 export function TeamGraphRuntimePanel({ surface }: { surface: TeamGraphSurface }) {
   const { t } = useTranslation('teams');
+  const runLabels = useTeamRunLabels();
+  const runTitle = runLabels[surface.runId] ?? t('run.unnamed');
+  const teamName = useTeamsStore((state) => state.teams.find((team) => team.id === surface.teamId)?.name);
   const target = useMemo(() => ({ teamId: surface.teamId, runId: surface.runId }), [surface.teamId, surface.runId]);
   const record = useTeamsStore((state) => state.designByRunId[surface.runId]);
   const observeTeamDesign = useTeamsStore((state) => state.observeTeamDesign);
@@ -22,12 +27,34 @@ export function TeamGraphRuntimePanel({ surface }: { surface: TeamGraphSurface }
 
   useEffect(() => observeTeamDesign(target), [observeTeamDesign, target]);
 
+  const copyRunId = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(surface.runId);
+      toast.success(t('run.idCopied'));
+    } catch {
+      toast.error(t('run.copyIdFailed'));
+    }
+  };
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden px-3 py-3">
       <div className="flex shrink-0 items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium" title={surface.title}>{surface.title ?? t('run.graph')}</p>
-          <p className="mt-1 break-all text-xs text-muted-foreground">{surface.teamId} · {surface.runId}</p>
+          <p className="truncate text-sm font-medium" title={surface.teamId}>{teamName}</p>
+          <div className="mt-1 flex min-w-0 items-center gap-1">
+            <p className="truncate text-xs text-muted-foreground" title={`${runTitle}\n${surface.runId}`}>{runTitle}</p>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 shrink-0"
+              aria-label={t('run.copyId')}
+              title={t('run.copyId')}
+              onClick={() => { void copyRunId(); }}
+            >
+              <Copy className="h-3 w-3" />
+            </Button>
+          </div>
         </div>
         <Button
           type="button"

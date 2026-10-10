@@ -11,8 +11,7 @@ pub use model::{
     DeliveryRequestError, InvalidAuthorizedGraphResolution,
     InvalidAuthorizedGraphResolutionReceipt, InvalidNativeRunReceiptReference,
     NativeDeliveryCorrelation, NativeRunReceiptReference, NativeTerminalStatus, TeamNodeOutput,
-    TeamNodeOutputDispatch, TeamNodeOutputError, TerminalObservation,
-    TerminalObservationResolution, delivery_retry_at,
+    TeamNodeOutputError, TerminalObservation, TerminalObservationResolution, delivery_retry_at,
 };
 pub use restore::{
     DeliveryClaimSnapshot, DeliveryPhaseSnapshot, DeliverySnapshot, RestoreDeliveryError,

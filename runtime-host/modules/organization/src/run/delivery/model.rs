@@ -389,13 +389,6 @@ pub struct TeamNodeOutput {
     final_assistant_text: String,
     summary: String,
     decision: String,
-    dispatch: Vec<TeamNodeOutputDispatch>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TeamNodeOutputDispatch {
-    role_id: String,
-    task: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -422,7 +415,6 @@ impl TeamNodeOutput {
         final_assistant_text: impl Into<String>,
         summary: impl Into<String>,
         decision: impl Into<String>,
-        dispatch: Vec<TeamNodeOutputDispatch>,
     ) -> Result<Self, TeamNodeOutputError> {
         let final_assistant_text = final_assistant_text.into();
         if final_assistant_text.trim().is_empty() {
@@ -430,15 +422,10 @@ impl TeamNodeOutput {
         }
         let summary = validate_summary(summary.into())?;
         let decision = validate_decision(decision.into())?;
-        for item in &dispatch {
-            validate_dispatch_string(&item.role_id, "role_id")?;
-            validate_dispatch_string(&item.task, "task")?;
-        }
         Ok(Self {
             final_assistant_text,
             summary,
             decision,
-            dispatch,
         })
     }
 
@@ -447,14 +434,13 @@ impl TeamNodeOutput {
             return Err(TeamNodeOutputError::InvalidField("root"));
         };
         for field in object.keys() {
-            if !matches!(field.as_str(), "summary" | "decision" | "dispatch") {
+            if !matches!(field.as_str(), "summary" | "decision") {
                 return Err(TeamNodeOutputError::UnexpectedField(field.clone()));
             }
         }
         let summary = required_message_string(object, "summary")?;
         let decision = required_message_string(object, "decision")?;
-        let dispatch = required_dispatch(object.get("dispatch"))?;
-        Self::restore(final_assistant_text, summary, decision, dispatch)
+        Self::restore(final_assistant_text, summary, decision)
     }
 
     pub fn final_assistant_text(&self) -> &str {
@@ -468,31 +454,6 @@ impl TeamNodeOutput {
     pub fn decision(&self) -> &str {
         &self.decision
     }
-
-    pub fn dispatch(&self) -> &[TeamNodeOutputDispatch] {
-        &self.dispatch
-    }
-}
-
-impl TeamNodeOutputDispatch {
-    pub fn new(
-        role_id: impl Into<String>,
-        task: impl Into<String>,
-    ) -> Result<Self, TeamNodeOutputError> {
-        let role_id = role_id.into();
-        let task = task.into();
-        validate_dispatch_string(&role_id, "role_id")?;
-        validate_dispatch_string(&task, "task")?;
-        Ok(Self { role_id, task })
-    }
-
-    pub fn role_id(&self) -> &str {
-        &self.role_id
-    }
-
-    pub fn task(&self) -> &str {
-        &self.task
-    }
 }
 
 impl fmt::Debug for TeamNodeOutput {
@@ -502,7 +463,6 @@ impl fmt::Debug for TeamNodeOutput {
             .field("final_assistant_text", &"<redacted>")
             .field("summary", &"<redacted>")
             .field("decision", &"<redacted>")
-            .field("dispatch", &self.dispatch.len())
             .finish()
     }
 }
@@ -529,35 +489,6 @@ fn required_message_string(
     }
 }
 
-fn required_dispatch(
-    value: Option<&Value>,
-) -> Result<Vec<TeamNodeOutputDispatch>, TeamNodeOutputError> {
-    let Some(Value::Array(items)) = value else {
-        return match value {
-            Some(_) => Err(TeamNodeOutputError::InvalidField("dispatch")),
-            None => Err(TeamNodeOutputError::MissingField("dispatch")),
-        };
-    };
-    let mut dispatch = Vec::with_capacity(items.len());
-    for item in items {
-        let Some(object) = item.as_object() else {
-            return Err(TeamNodeOutputError::InvalidField("dispatch"));
-        };
-        for field in object.keys() {
-            if !matches!(field.as_str(), "role_id" | "task") {
-                return Err(TeamNodeOutputError::UnexpectedField(format!(
-                    "dispatch.{field}"
-                )));
-            }
-        }
-        dispatch.push(TeamNodeOutputDispatch::new(
-            required_message_string(object, "role_id")?,
-            required_message_string(object, "task")?,
-        )?);
-    }
-    Ok(dispatch)
-}
-
 fn validate_summary(summary: String) -> Result<String, TeamNodeOutputError> {
     if summary.trim().is_empty()
         || summary.len() > MAX_TEAM_MESSAGE_SUMMARY_BYTES
@@ -573,13 +504,6 @@ fn validate_decision(decision: String) -> Result<String, TeamNodeOutputError> {
         return Err(TeamNodeOutputError::UnsafeDecision);
     }
     Ok(decision)
-}
-
-fn validate_dispatch_string(value: &str, field: &'static str) -> Result<(), TeamNodeOutputError> {
-    if value.trim().is_empty() {
-        return Err(TeamNodeOutputError::InvalidField(field));
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

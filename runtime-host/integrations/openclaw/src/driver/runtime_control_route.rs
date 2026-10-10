@@ -52,6 +52,12 @@ impl RuntimeControlRouteFragment for OpenClawRuntimeControlRoute {
             RuntimeControlOperation::LifecycleRestart => {
                 Some(lifecycle_restart(Arc::clone(&self.lifecycle), request))
             }
+            RuntimeControlOperation::LifecycleRepair => {
+                Some(lifecycle_repair(Arc::clone(&self.lifecycle), request))
+            }
+            RuntimeControlOperation::RepairStatus => {
+                Some(repair_status(Arc::clone(&self.lifecycle), request))
+            }
             RuntimeControlOperation::Logs => Some(logs(Arc::clone(&self.driver), request)),
             RuntimeControlOperation::ControlReady => {
                 Some(control_ready(Arc::clone(&self.driver), request))
@@ -134,6 +140,54 @@ fn lifecycle_restart(
             .await
         {
             Ok(receipt) => Response::json(202, json!(receipt)),
+            Err(error) => lifecycle_error_response(error),
+        }
+    })
+}
+
+fn lifecycle_repair(
+    lifecycle: Arc<dyn RuntimeControlLifecyclePort>,
+    request: RuntimeControlRequest,
+) -> RuntimeControlRouteFuture {
+    Box::pin(async move {
+        let Some(call) = request.call else {
+            return runtime_directory::control_loopback::unavailable_response();
+        };
+        match lifecycle.admit_lifecycle_repair(request.endpoint, call).await {
+            Ok(receipt) => Response::json(202, json!(receipt)),
+            Err(error) => lifecycle_error_response(error),
+        }
+    })
+}
+
+fn repair_status(
+    lifecycle: Arc<dyn RuntimeControlLifecyclePort>,
+    request: RuntimeControlRequest,
+) -> RuntimeControlRouteFuture {
+    Box::pin(async move {
+        let result = lifecycle.repair_status(request.endpoint.clone()).await;
+        let mut detail = RuntimeControlCallDetail::new(&request.endpoint);
+        detail.repair = result.as_ref().ok().copied();
+        let (status, outcome) = match &result {
+            Ok(_) => (CallStatus::Succeeded, RuntimeControlCallResult::Succeeded),
+            Err(runtime_directory::RuntimeControlLifecycleError::Unsupported) => {
+                (CallStatus::Rejected, RuntimeControlCallResult::Unsupported)
+            }
+            Err(runtime_directory::RuntimeControlLifecycleError::Busy) => {
+                (CallStatus::Rejected, RuntimeControlCallResult::Unavailable)
+            }
+            Err(runtime_directory::RuntimeControlLifecycleError::Unavailable) => {
+                (CallStatus::Failed, RuntimeControlCallResult::Unavailable)
+            }
+            Err(runtime_directory::RuntimeControlLifecycleError::CommandFailed) => {
+                (CallStatus::Unknown, RuntimeControlCallResult::Unknown)
+            }
+        };
+        detail.error = result.as_ref().err().copied();
+        detail.result = Some(outcome);
+        finish_runtime_control_call(request.call, status, &detail).await;
+        match result {
+            Ok(snapshot) => Response::json(200, json!({ "result": snapshot })),
             Err(error) => lifecycle_error_response(error),
         }
     })

@@ -21,9 +21,13 @@ import {
   Trash2,
   User,
   FolderOpen,
+  Wrench,
 } from 'lucide-react';
 import { StableScrollArea } from '@/components/scroll';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { fetchGatewayRepair, isGatewayRepairActive } from '@/lib/gateway-repair';
+import type { RuntimeRepairSnapshot } from '@/types/runtime-repair';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -175,7 +179,7 @@ type RuntimeStatusVariant = 'success' | 'outline' | 'destructive' | 'secondary';
 type RuntimeStatusAction = {
   id: string;
   label: string;
-  icon: 'refresh' | 'logs';
+  icon: 'refresh' | 'repair' | 'logs';
   onClick: () => void;
   disabled?: boolean;
   loading?: boolean;
@@ -232,6 +236,9 @@ function RuntimeStatusActionIcon({ action }: { action: RuntimeStatusAction }) {
   if (action.loading) {
     return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
   }
+  if (action.icon === 'repair') {
+    return <Wrench className="h-3.5 w-3.5" />;
+  }
   if (action.icon === 'logs') {
     return <FileText className="h-3.5 w-3.5" />;
   }
@@ -262,7 +269,7 @@ function RuntimeStatusList({ items }: { items: RuntimeStatusItem[] }) {
           key={item.id}
           role="listitem"
           className={cn(
-            'grid gap-3 px-4 py-3.5 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center',
+            'grid gap-3 px-4 py-3.5 sm:grid-cols-[8rem_auto_minmax(0,1fr)] sm:items-center',
             index > 0 && 'border-t border-border/70',
           )}
         >
@@ -270,7 +277,7 @@ function RuntimeStatusList({ items }: { items: RuntimeStatusItem[] }) {
             <RuntimeStatusDot tone={item.tone} />
             <span className="truncate text-sm font-medium tracking-[-0.01em] text-foreground">{item.title}</span>
           </div>
-          <div className="sm:justify-self-end">
+          <div className="sm:justify-self-start">
             <RuntimeStatusPill tone={item.tone}>{item.status}</RuntimeStatusPill>
           </div>
           <div className="flex flex-wrap items-center gap-2 sm:justify-self-end">
@@ -433,6 +440,13 @@ export function Settings() {
   const initGatewayEvents = useGatewayStore((state) => state.init);
   const refreshRuntimeHostStatusSnapshot = useGatewayStore((state) => state.refreshRuntimeHostStatus);
   const restartGateway = useGatewayStore((state) => state.restart);
+  const repairGateway = useGatewayStore((state) => state.repair);
+  const gatewayLifecycleOperation = useGatewayStore((state) => state.lifecycleOperation);
+  const gatewayProcessState = useGatewayStore((state) => state.status.processState);
+  const gatewayRepairOutcome = useGatewayStore((state) => state.repairOutcome);
+  const [gatewayRepair, setGatewayRepair] = useState<RuntimeRepairSnapshot | null>(null);
+  const [gatewayRepairUnavailable, setGatewayRepairUnavailable] = useState(false);
+  const [showRepairConfirmation, setShowRepairConfirmation] = useState(false);
   const refreshing = usePluginsStore((state) => state.refreshing);
   const refreshReason = usePluginsStore((state) => state.refreshReason);
   const mutating = usePluginsStore((state) => state.mutating);
@@ -486,6 +500,48 @@ export function Settings() {
       }
     });
   }, [initGatewayEvents, refreshRuntime, t]);
+
+  useEffect(() => {
+    let stopped = false;
+    let request: AbortController | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const isVisible = () => document.visibilityState !== 'hidden';
+    const refresh = async () => {
+      if (stopped || !isVisible() || request) return;
+      clearTimeout(timer);
+      request = new AbortController();
+      try {
+        const snapshot = await fetchGatewayRepair(request.signal);
+        if (stopped) return;
+        setGatewayRepair(snapshot);
+        setGatewayRepairUnavailable(false);
+      } catch {
+        if (!stopped) setGatewayRepairUnavailable(true);
+      } finally {
+        request = null;
+        // Gateway events do not expose every doctor phase; keep one visible-page read in flight.
+        if (!stopped && isVisible()) timer = setTimeout(() => void refresh(), 5_000);
+      }
+    };
+    const onVisibilityChange = () => {
+      clearTimeout(timer);
+      if (isVisible()) void refresh();
+    };
+    const unsubscribe = useGatewayStore.subscribe((state, previous) => {
+      if (state.status !== previous.status || state.lifecycleOperation !== previous.lifecycleOperation) {
+        void refresh();
+      }
+    });
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    void refresh();
+    return () => {
+      stopped = true;
+      request?.abort();
+      clearTimeout(timer);
+      unsubscribe();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
 
   const handleShowOpenClawLogs = async () => {
     try {
@@ -1135,7 +1191,19 @@ export function Settings() {
     }
   }, [restartHostAction, t]);
 
-  const openClawEndpointTone = runtimeStatusToneForVariant(openClawEndpointBadgeVariant);
+  const gatewayRepairActive = isGatewayRepairActive(gatewayRepair);
+  const gatewayActionsBusy = gatewayLifecycleOperation !== null || gatewayRepairActive
+    || gatewayProcessState === 'starting' || gatewayProcessState === 'control_connecting';
+  const repairOutcomeMessage = gatewayRepairOutcome
+    ? gatewayRepairOutcome === 'succeeded'
+      ? t('gateway.repair.phases.succeeded')
+      : gatewayRepairOutcome === 'unknown' || gatewayRepairOutcome === 'rejected'
+        ? t(`gateway.repair.${gatewayRepairOutcome}`)
+        : t(`gateway.repair.failures.${gatewayRepairOutcome}`)
+    : null;
+  const openClawEndpointTone = gatewayRepairActive
+    ? 'pending'
+    : runtimeStatusToneForVariant(openClawEndpointBadgeVariant);
   const runtimeHostTone = runtimeHostStatusTone(effectiveRuntimeHostStatus);
   const matchaAgentAppServerTone = runtimeStatusToneForVariant(matchaAgentAppServerBadgeVariant);
   const shouldShowRuntimeHostDetails = Boolean(
@@ -1198,7 +1266,9 @@ export function Settings() {
     {
       id: 'openclaw',
       title: t('gateway.openclawRuntimeLabel'),
-      status: openClawEndpointStatus,
+      status: gatewayRepairActive && gatewayRepair
+        ? t(`gateway.repair.phases.${gatewayRepair.phase}`)
+        : openClawEndpointStatus,
       tone: openClawEndpointTone,
       actions: [
         {
@@ -1206,6 +1276,16 @@ export function Settings() {
           label: t('common:actions.restart'),
           icon: 'refresh',
           onClick: restartGateway,
+          disabled: gatewayActionsBusy,
+          loading: gatewayLifecycleOperation === 'restart',
+        },
+        {
+          id: 'repair',
+          label: t('gateway.repair.action'),
+          icon: 'repair',
+          onClick: () => setShowRepairConfirmation(true),
+          disabled: gatewayActionsBusy,
+          loading: gatewayLifecycleOperation === 'repair' || gatewayRepairActive,
         },
         {
           id: 'logs',
@@ -1214,7 +1294,28 @@ export function Settings() {
           onClick: handleShowOpenClawLogs,
         },
       ],
-      details: showOpenClawLogs ? (
+      details: gatewayRepairActive || gatewayRepair?.trigger === 'automatic'
+        || gatewayLifecycleOperation === 'repair' || repairOutcomeMessage || gatewayRepairUnavailable || showOpenClawLogs ? (
+        <>
+        <div role="status" aria-live="polite" className="space-y-2 text-xs text-muted-foreground">
+          {gatewayRepair && (gatewayRepairActive || gatewayRepair.trigger === 'automatic') && (
+            <p>
+              {gatewayRepair.trigger && `${t(`gateway.repair.${gatewayRepair.trigger}`)} · `}
+              {t(`gateway.repair.phases.${gatewayRepair.phase}`)}
+              {gatewayRepair.failure && ` · ${t(`gateway.repair.failures.${gatewayRepair.failure}`)}`}
+            </p>
+          )}
+          {gatewayLifecycleOperation === 'repair' && !gatewayRepairActive && (
+            <p>{t('gateway.repair.pending')}</p>
+          )}
+          {repairOutcomeMessage && (
+            <p className={gatewayRepairOutcome === 'succeeded' ? 'text-emerald-700 dark:text-emerald-200' : 'text-muted-foreground'}>
+              {t('gateway.repair.manual')}{' · '}{repairOutcomeMessage}
+            </p>
+          )}
+          {gatewayRepairUnavailable && <p>{t('gateway.repair.statusUnavailable')}</p>}
+        </div>
+        {showOpenClawLogs && (
         <div className="rounded-lg border border-border bg-card p-4">
           <div className="mb-2 flex items-center justify-between gap-2">
             <p className="text-sm font-medium">{t('gateway.openclawLogs')}</p>
@@ -1234,6 +1335,8 @@ export function Settings() {
             </pre>
           </StableScrollArea>
         </div>
+        )}
+        </>
       ) : undefined,
     },
     {
@@ -1295,6 +1398,19 @@ export function Settings() {
 
   return (
     <div className="flex flex-col gap-6 text-foreground" data-testid="settings-page">
+      <ConfirmDialog
+        open={showRepairConfirmation}
+        title={t('gateway.repair.confirmTitle')}
+        message={t('gateway.repair.confirmDescription')}
+        confirmLabel={t('gateway.repair.confirmAction')}
+        cancelLabel={t('common:actions.cancel')}
+        variant="destructive"
+        onCancel={() => setShowRepairConfirmation(false)}
+        onConfirm={async () => {
+          setShowRepairConfirmation(false);
+          if (!gatewayActionsBusy) await repairGateway();
+        }}
+      />
       <div>
         <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t('title')}</h1>
         <p className="text-[hsl(var(--shell-text-muted))]">

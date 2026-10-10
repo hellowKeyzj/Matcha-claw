@@ -22,7 +22,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
 import { useTeamsStore } from '@/stores/teams';
-import { TeamDesignDialog } from '@/pages/Teams/TeamDesignDialog';
+import type { TeamDesignTarget } from '@/types/team-design';
 import { useComposerDraftStore, clampComposerDraftSelection, type ComposerDraftSelection } from '@/stores/composer-drafts';
 import type { GatewayTransportIssue } from '../../types/session/runtime-state';
 import {
@@ -685,14 +685,13 @@ export function Chat({ isActive = true }: ChatProps) {
   const designRecord = useTeamsStore((state) => designRunId ? state.designByRunId[designRunId] : undefined);
   const observeTeamDesign = useTeamsStore((state) => state.observeTeamDesign);
   const startDesign = useTeamsStore((state) => state.startDesign);
-  const continueDesign = useTeamsStore((state) => state.continueDesign);
-  const confirmDesign = useTeamsStore((state) => state.confirmDesign);
-  const continueDesignDiscussion = useTeamsStore((state) => state.continueDesignDiscussion);
+  const startRun = useTeamsStore((state) => state.startRun);
+  const exitDesign = useTeamsStore((state) => state.exitDesign);
   const designActionPending = Boolean(designRecord?.mutationPending);
   const designSnapshot = designRecord?.snapshot && designRecord.snapshot.teamId === designTeamId && designRecord.snapshot.runId === designRunId ? designRecord.snapshot : null;
-  const designActive = designSnapshot?.startGate.status === 'designing' || designSnapshot?.startGate.status === 'design_proposal_pending';
-  const designProposal = designSnapshot?.startGate.status === 'design_proposal_pending' ? designSnapshot.startGate.proposal : null;
+  const designActive = designSnapshot?.startGate.status === 'designing';
   const designContextKey = JSON.stringify([designTeamId, designRunId, currentWorkspaceIdentity ? buildSessionIdentityKey(currentWorkspaceIdentity) : null]);
+  const [pendingDesignAction, setPendingDesignAction] = useState<{ contextKey: string; action: 'start' | 'exit' } | null>(null);
   const currentDesignContextRef = useRef(designContextKey);
   currentDesignContextRef.current = designContextKey;
   const currentWorkspaceAvailabilityKey = workspaceAvailabilityKey(currentWorkspaceIdentity);
@@ -845,7 +844,6 @@ export function Chat({ isActive = true }: ChatProps) {
     sidePanelOpen: sidePanelIntentOpen,
     sidePanelWidth: sidePanelRenderWidth,
     sidePanelPreferredWidth,
-    sidePanelWidthPolicy,
     activeSidePanelTab,
     artifactWorkbenchFullscreen,
     openSidePanel: openSidePanelDomain,
@@ -868,14 +866,23 @@ export function Chat({ isActive = true }: ChatProps) {
     openedDesignNavigationRef.current = location.key;
     openChatRuntimeSurface(surface);
   }, [location.key, location.state, chatSideEffectsActive, currentWorkspaceIdentity, designTeamId, designRunId]);
-  const runDesignAction = async (action: (target: { teamId: string; runId: string }) => Promise<void>, focusComposer = false): Promise<void> => {
-    if (!designTeamId || !designRunId || designActionPending) return;
+  const designActionDisabled = !designTeamKnown || !designSnapshot || designSnapshot.startGate.status === 'started'
+    || Boolean(designRecord?.loading) || designActionPending || !isGatewayRunning || !chatSideEffectsActive
+    || currentWorkspaceUnavailable || isRunActive(currentSession.runtime) || isImageGenerationActive(currentSession.runtime)
+    || approvalStatus === 'awaiting_approval' || !currentSendGate.canSend;
+  const runDesignAction = async (action: (target: TeamDesignTarget) => Promise<void>, focusComposer = false): Promise<void> => {
+    if (!designTeamId || !designRunId || designActionDisabled) return;
     const contextKey = designContextKey;
+    const pending: typeof pendingDesignAction = action === startRun ? { contextKey, action: 'start' }
+      : action === exitDesign ? { contextKey, action: 'exit' } : null;
+    if (pending) setPendingDesignAction(pending);
     try {
       await action({ teamId: designTeamId, runId: designRunId });
       if (focusComposer && currentDesignContextRef.current === contextKey) composerRef.current?.focus();
     } catch (error) {
       toast.error(t('teams:design.actionFailed', { error: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      if (pending) setPendingDesignAction((current) => current === pending ? null : current);
     }
   };
   const chatWindowDock = useChatWindowDockController({
@@ -883,7 +890,6 @@ export function Chat({ isActive = true }: ChatProps) {
     panelOpen: sidePanelIntentOpen,
     preferredWidth: sidePanelPreferredWidth,
     renderWidth: sidePanelRenderWidth,
-    widthPolicy: sidePanelWidthPolicy,
     artifactWorkbenchFullscreen,
     chatLayoutRef,
     openPanel: openSidePanelDomain,
@@ -1607,12 +1613,19 @@ export function Chat({ isActive = true }: ChatProps) {
       contextUsage={contextUsage}
       teamDesign={designTeamId && designRunId && currentWorkspaceIdentity && designSnapshot?.startGate.status !== 'started' ? {
         active: designActive,
-        disabled: !designTeamKnown || !designSnapshot || Boolean(designRecord?.loading) || designActionPending || !isGatewayRunning,
+        disabled: designActionDisabled,
+        starting: designActionPending && pendingDesignAction?.contextKey === designContextKey && pendingDesignAction.action === 'start',
+        exiting: designActionPending && pendingDesignAction?.contextKey === designContextKey && pendingDesignAction.action === 'exit',
+        error: designRecord?.error ?? null,
+        onOpen: () => {
+          openChatRuntimeSurface({ kind: 'team-graph', sourceSessionIdentity: currentWorkspaceIdentity, teamId: designTeamId, runId: designRunId });
+        },
         onStart: () => {
           openChatRuntimeSurface({ kind: 'team-graph', sourceSessionIdentity: currentWorkspaceIdentity, teamId: designTeamId, runId: designRunId });
           void runDesignAction(startDesign, true);
         },
-        onExit: () => { void runDesignAction(continueDesignDiscussion, true); },
+        onExit: () => { void runDesignAction(exitDesign, true); },
+        onRun: () => { void runDesignAction(startRun); },
       } : null}
       disabled={!currentChatRuntimeAvailable || currentWorkspaceUnavailable}
       reconnecting={currentRuntimeReconnecting}
@@ -1661,16 +1674,6 @@ export function Chat({ isActive = true }: ChatProps) {
           {t('teams:chat.teamNotFound')}
           <Button variant="outline" size="sm" onClick={() => navigate('/teams')}>{t('teams:chat.backToList')}</Button>
         </div>
-      ) : null}
-      {workspaceActive && designTeamKnown && designProposal ? (
-        <TeamDesignDialog
-          summary={designProposal.taskSummary}
-          busy={designActionPending || Boolean(designRecord?.loading)}
-          error={designRecord?.error ?? undefined}
-          onConfirm={() => { void runDesignAction(confirmDesign); }}
-          onReturnDiscussion={() => { void runDesignAction(continueDesignDiscussion, true); }}
-          onContinueDesign={() => { void runDesignAction(continueDesign, true); }}
-        />
       ) : null}
       <ChatShell
         chatLayoutRef={chatLayoutRef}

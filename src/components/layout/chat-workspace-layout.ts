@@ -3,13 +3,12 @@ export const CHAT_WORKSPACE_LAYOUT = {
   sidebarMaxWidth: 420,
   sidebarDefaultWidth: 256,
   sidePanelMinWidth: 260,
-  sidePanelLightMaxWidth: 520,
-  sidePanelArtifactMaxWidth: 1600,
+  sidePanelMaxWidth: 1600,
   sidePanelLightDefaultWidth: 360,
   sidePanelArtifactDefaultWidth: 640,
   paneResizerWidth: 6,
   chatMainLightMinWidth: 360,
-  chatMainArtifactMinWidth: 180,
+  chatMainMinWidth: 180,
 } as const;
 
 export interface ChatWorkspaceLayoutInput {
@@ -31,18 +30,6 @@ export interface ChatSidePanelLayoutResult {
   sidePanelOpen: boolean;
   sidePanelMode: ChatSidePanelMode;
   sidePanelWidth: number;
-}
-
-function getChatMainMinWidth(policy: ChatSidePanelWidthPolicy): number {
-  return policy === 'artifacts'
-    ? CHAT_WORKSPACE_LAYOUT.chatMainArtifactMinWidth
-    : CHAT_WORKSPACE_LAYOUT.chatMainLightMinWidth;
-}
-
-function getChatSidePanelMaxCap(policy: ChatSidePanelWidthPolicy): number {
-  return policy === 'artifacts'
-    ? CHAT_WORKSPACE_LAYOUT.sidePanelArtifactMaxWidth
-    : CHAT_WORKSPACE_LAYOUT.sidePanelLightMaxWidth;
 }
 
 export function getDefaultChatSidePanelWidth(policy: ChatSidePanelWidthPolicy): number {
@@ -99,23 +86,17 @@ export function resolveChatWorkspaceLayout(
   };
 }
 
-export function canDockSidePanel(
-  containerWidth: number,
-  policy: ChatSidePanelWidthPolicy = 'light',
-): boolean {
+export function canDockSidePanel(containerWidth: number): boolean {
   return containerWidth >= (
     CHAT_WORKSPACE_LAYOUT.sidePanelMinWidth
-    + getChatMainMinWidth(policy)
+    + CHAT_WORKSPACE_LAYOUT.chatMainMinWidth
   );
 }
 
-export function getChatSidePanelMaxWidth(
-  containerWidth: number,
-  policy: ChatSidePanelWidthPolicy = 'light',
-): number {
+export function getChatSidePanelMaxWidth(containerWidth: number): number {
   const bounded = Math.min(
-    getChatSidePanelMaxCap(policy),
-    containerWidth - getChatMainMinWidth(policy),
+    CHAT_WORKSPACE_LAYOUT.sidePanelMaxWidth,
+    containerWidth - CHAT_WORKSPACE_LAYOUT.chatMainMinWidth,
   );
   return Math.max(CHAT_WORKSPACE_LAYOUT.sidePanelMinWidth, bounded);
 }
@@ -123,12 +104,11 @@ export function getChatSidePanelMaxWidth(
 export function clampChatSidePanelWidth(
   width: number,
   containerWidth: number,
-  policy: ChatSidePanelWidthPolicy = 'light',
 ): number {
   return clampPaneWidth(
     width,
     CHAT_WORKSPACE_LAYOUT.sidePanelMinWidth,
-    getChatSidePanelMaxWidth(containerWidth, policy),
+    getChatSidePanelMaxWidth(containerWidth),
   );
 }
 
@@ -136,11 +116,10 @@ export function resolveChatSidePanelLayout(
   open: boolean,
   containerWidth: number,
   width: number = getDefaultChatSidePanelWidth('light'),
-  policy: ChatSidePanelWidthPolicy = 'light',
 ): ChatSidePanelLayoutResult {
   return {
     sidePanelOpen: open,
-    sidePanelMode: canDockSidePanel(containerWidth, policy) ? 'docked' : 'overlay',
-    sidePanelWidth: clampChatSidePanelWidth(width, containerWidth, policy),
+    sidePanelMode: canDockSidePanel(containerWidth) ? 'docked' : 'overlay',
+    sidePanelWidth: clampChatSidePanelWidth(width, containerWidth),
   };
 }

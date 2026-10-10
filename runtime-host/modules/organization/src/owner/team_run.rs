@@ -601,9 +601,7 @@ impl TeamRunOwner {
                 organization::RecordCommandError::InvalidEventId,
             ));
         };
-        let (command, patch) = patch
-            .resolve(current.graph().definition())
-            .map_err(|_| StoreFault::InvalidFacts)?;
+        let (command, patch) = patch.resolve(current.graph().definition())?;
         store.team_graph_patch(command, patch)?;
         let team = store
             .facts()
@@ -1570,7 +1568,7 @@ mod tests {
         let settled = NativeRunSettled {
             status: NativeTerminalStatus::Completed,
             final_assistant_text: Some(
-                "<team_message>{\"summary\":\"旧摘要\",\"decision\":\"old\",\"dispatch\":[]}</team_message><team_message>{\"summary\":\"新摘要\",\"decision\":\"done\",\"dispatch\":[]}</team_message>"
+                "<team_message>{\"summary\":\"旧摘要\",\"decision\":\"old\"}</team_message><team_message>{\"summary\":\"新摘要\",\"decision\":\"done\"}</team_message>"
                     .to_owned(),
             ),
         };
@@ -1580,7 +1578,6 @@ mod tests {
 
         assert_eq!(message.summary(), "新摘要");
         assert_eq!(message.decision(), "done");
-        assert_eq!(message.dispatch(), &[]);
     }
 
     fn facts(materialization: Option<MaterializationReceipt>) -> OrganizationFacts {

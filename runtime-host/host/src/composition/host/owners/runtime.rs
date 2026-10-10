@@ -193,8 +193,7 @@ pub(in crate::composition::host) struct RuntimeOwners {
     pub(in crate::composition::host) fleet_module: FleetModule,
     pub(in crate::composition::host) organization_module: OrganizationModule,
     pub(in crate::composition::host) organization_handle: organization::OrganizationHandle,
-    pub(in crate::composition::host) start_gate_registry:
-        std::sync::Arc<organization::StartGateRegistry>,
+    pub(in crate::composition::host) execution_authority: crate::team_mcp::ExecutionAuthority,
 }
 
 pub(in crate::composition::host) struct RuntimeOwnerInput {
@@ -249,6 +248,9 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         open_claw_runtime,
         cron_events,
     } = owner_input;
+    let execution_authority =
+        crate::team_mcp::ExecutionAuthority::load_or_create(&runtime_host_mcp_state_dir)
+            .map_err(|_| ConstructionError::TeamExecutionAuthority)?;
     let join_failures = Arc::new(Mutex::new(Vec::new()));
     let module_scope = |id: &'static str, mut task: OwnedTask<()>| {
         let mut scope = ModuleScope::new(id);
@@ -376,7 +378,6 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     organization_scope.register_event_subscription("sessions.run-terminal", move || async move {
         let _ = session_terminal_scope.close_and_join().await;
     });
-    let start_gate_registry = session_terminal.start_gate_registry();
 
     let (session_module, session_task) = sessions_module::spawn_owner(
         &owner_runtime_system,
@@ -483,6 +484,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         Arc::clone(&admission),
         session_handle.clone(),
         Arc::clone(&runtime_directory),
+        execution_authority.clone(),
     ));
     let (admission_changes_tx, admission_changes) =
         tokio::sync::watch::channel(organization::AdmissionState::Changed);
@@ -519,7 +521,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         ),
     );
     let peer_handle =
-        crate::composition::peer::PeerHandle::new(peer_owner_handle, Arc::clone(&admission), Arc::clone(&runtime_directory));
+        crate::composition::peer::PeerHandle::new(peer_owner_handle, Arc::clone(&admission), Arc::clone(&runtime_directory), Arc::clone(&open_claw));
     let (diagnostics, diagnostics_task) = ::diagnostics::spawn_owner(
         &owner_runtime_system,
         ::diagnostics::DiagnosticsOwnerInput {
@@ -597,6 +599,6 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         fleet_module,
         organization_module,
         organization_handle,
-        start_gate_registry,
+        execution_authority,
     })
 }

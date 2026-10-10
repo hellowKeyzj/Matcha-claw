@@ -367,6 +367,7 @@ impl OpenClawDriver {
             Ok(params) => params,
             Err(_) => return SessionSendOutcome::Rejected,
         };
+        let system_provenance_receipt_bytes = command.system_provenance_receipt.as_ref().map(String::len);
         if let Some(receipt) = command.system_provenance_receipt {
             params = params.with_system_provenance_receipt(receipt);
         }
@@ -396,6 +397,13 @@ impl OpenClawDriver {
                 Err(sessions_module::ports::RuntimeOperationFailure::Unsupported) => SessionSendOutcome::Unsupported,
                 Err(_) => SessionSendOutcome::Unavailable,
             };
+        }
+        if crate::session::trace::enabled() {
+            crate::session::trace::log_unscoped("openclaw.chat.send.request", serde_json::json!({
+                "traceId": command.trace_id,
+                "systemProvenanceReceiptPresent": system_provenance_receipt_bytes.is_some(),
+                "systemProvenanceReceiptBytes": system_provenance_receipt_bytes.unwrap_or(0),
+            }));
         }
         match self.session_gateway.send_chat(params).await {
             Ok(InvocationOutcome::Succeeded(result)) => SessionSendOutcome::Succeeded {

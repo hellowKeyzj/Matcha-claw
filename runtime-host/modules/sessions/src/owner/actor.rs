@@ -199,14 +199,54 @@ impl SessionShared {
                 if !crate::state::terminal_run_phase(*phase) {
                     return None;
                 }
-                Some(SessionRunTerminalSnapshot {
+                let snapshot = SessionRunTerminalSnapshot {
                     identity: state.identity().clone(),
                     source_binding: state.source_binding().clone(),
                     native_run_id: run_id.clone(),
                     delivery_context: state.run_delivery_contexts.remove(run_id),
                     phase: *phase,
                     final_assistant_text: state.assistant_text_for_run_id(run_id),
-                })
+                };
+                if crate::trace::enabled() {
+                    use crate::state::{SessionContent, SessionFact, SessionItem};
+                    let view = state.view();
+                    let (items_fact, items) = match &view.items {
+                        SessionFact::Complete(items) => ("complete", items.as_slice()),
+                        SessionFact::Incomplete { facts, .. } => ("incomplete", facts.as_slice()),
+                        SessionFact::Unknown => ("unknown", &[][..]),
+                        SessionFact::Unavailable => ("unavailable", &[][..]),
+                    };
+                    let mut candidate_count = 0;
+                    let mut selected = None;
+                    let mut last = None;
+                    for (index, item) in items.iter().enumerate() {
+                        if let SessionItem::AssistantTurn { run_id: Some(candidate_run), item_id, status, text, segments, .. } = item
+                            && candidate_run == run_id
+                        {
+                            let candidate = (index, item_id, status, text, segments);
+                            selected.get_or_insert(candidate);
+                            last = Some(candidate);
+                            candidate_count += 1;
+                        }
+                    }
+                    let summary = |(index, item_id, status, text, segments): (usize, &String, &crate::state::ItemStatus, &String, &Vec<SessionContent>)| {
+                        serde_json::json!({
+                            "index": index, "itemHash": crate::trace::fingerprint(item_id),
+                            "status": status, "textBytes": text.len(),
+                            "hasToolSegment": segments.iter().any(|segment| matches!(segment, SessionContent::ToolUse { .. } | SessionContent::ToolResult { .. })),
+                        })
+                    };
+                    crate::trace::log_unscoped("sessions.terminal.snapshot", serde_json::json!({
+                        "identity": crate::trace::identity_shape(state.identity()),
+                        "nativeRunIdHash": crate::trace::fingerprint(run_id), "phase": phase,
+                        "epoch": delta.epoch, "seq": delta.seq, "cursor": delta.cursor,
+                        "itemsFact": items_fact, "candidateCount": candidate_count,
+                        "selection": "first_same_run_assistant", "selected": selected.map(summary),
+                        "last": last.map(summary), "hasDeliveryContext": snapshot.delivery_context.is_some(),
+                        "finalTextBytes": snapshot.final_assistant_text.as_ref().map(String::len),
+                    }));
+                }
+                Some(snapshot)
             })
             .collect()
     }
@@ -219,6 +259,16 @@ impl SessionShared {
     }
 
     pub(super) fn emit_terminals(&self, terminals: Vec<SessionRunTerminalSnapshot>) {
+        if crate::trace::enabled() {
+            for terminal in &terminals {
+                crate::trace::log_unscoped("sessions.terminal.emit", serde_json::json!({
+                    "nativeRunIdHash": crate::trace::fingerprint(&terminal.native_run_id),
+                    "phase": terminal.phase, "hookPresent": self.terminal_hook.is_some(),
+                    "hasDeliveryContext": terminal.delivery_context.is_some(),
+                    "finalTextBytes": terminal.final_assistant_text.as_ref().map(String::len),
+                }));
+            }
+        }
         if let Some(hook) = &self.terminal_hook {
             for terminal in terminals {
                 hook.run_terminal(terminal);

@@ -151,11 +151,9 @@
   },
   "design": {
     "start": "Спроектировать граф запуска",
-    "readyTitle": "Проект графа готов",
-    "readyDescription": "Текущая версия графа прошла проверку. Подтверждение запустит эту версию; дальнейшие изменения отменят предложение.",
-    "confirm": "Подтвердить запуск",
+    "run": "Запустить",
+    "starting": "Запуск…",
     "discuss": "Вернуться к обсуждению",
-    "adjust": "Продолжить проектирование",
     "discussion": "Открыть обсуждение команды",
     "actionFailed": "Действие не завершено: {{error}}"
   },
@@ -172,6 +170,11 @@
     "autoRunnerError": "Auto runner error: {{error}}"
   },
   "run": {
+    "history": "История запусков",
+    "unnamed": "Новый запуск",
+    "copyId": "Копировать ID запуска",
+    "idCopied": "ID запуска скопирован",
+    "copyIdFailed": "Не удалось скопировать ID запуска. Повторите попытку.",
     "start": "Start Run",
     "resume": "Resume Run",
     "notStarted": "Not started",
@@ -365,13 +368,6 @@
     "notePlaceholder": "Optional note",
     "waitingDecision": "Waiting Run Decision",
     "submitDecision": "Submit Decision",
-    "proposalPending": {
-      "title": "Proposal awaiting confirmation",
-      "emptySummary": "Leader has prepared a proposal.",
-      "confirm": "Confirm and start",
-      "discuss": "Continue discussion",
-      "cancel": "Cancel"
-    },
     "dependencyMissing": {
       "title": "Перед продолжением запуска нужно обработать зависимости",
       "description": "Обязательные зависимости нельзя обойти. Установите отсутствующие Skill или настройте Tool, затем повторите проверку зависимостей.",

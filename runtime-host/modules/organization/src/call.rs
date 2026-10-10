@@ -233,7 +233,6 @@ enum OrganizationCallOutcome {
     Materialized,
     Created,
     Started,
-    Intake,
     WaitingForInput,
     ApprovalRequested,
     TerminalRecorded,
@@ -890,6 +889,7 @@ fn command_name(request: &Request, runtime_route: bool) -> Option<&'static str> 
                 Some("team.dependencyPlan") => "team.dependencyPlan",
                 Some("team.provisionAgents") => "team.provisionAgents",
                 Some("team.delete") => "team.delete",
+                Some("team.runStart") => "team.runStart",
                 Some("team.runCreate") => "team.runCreate",
                 Some("team.runList") => "team.runList",
                 Some("team.triggerList") => "team.triggerList",
@@ -901,13 +901,6 @@ fn command_name(request: &Request, runtime_route: bool) -> Option<&'static str> 
                 Some("team.graphExportYaml") => "team.graphExportYaml",
                 Some("team.graphImportYaml") => "team.graphImportYaml",
                 Some("team.triggerFire") => "team.triggerFire",
-                Some("team.runStartConfirm" | "team.proposalConfirm") => "team.runStartConfirm",
-                Some(
-                    "team.runStartContinue"
-                    | "team.proposalContinue"
-                    | "team.proposalCancel"
-                    | "team.runStartReject",
-                ) => "team.runStartContinue",
                 Some("team.nodePromptRetryDue") => "team.nodePromptRetryDue",
                 Some("team.nodeEvent") => "team.nodeEvent",
                 Some("team.runDiagnostics") => "team.runDiagnostics",
@@ -1040,12 +1033,7 @@ fn single_stage(request: &Request, runtime_route: bool) -> bool {
                 | "team.triggerFire"
                 | "team.nodeEvent"
                 | "team.runDecisionSubmit"
-                | "team.runStartConfirm"
-                | "team.proposalConfirm"
-                | "team.runStartContinue"
-                | "team.proposalContinue"
-                | "team.proposalCancel"
-                | "team.runStartReject"
+                | "team.runStart"
                 | "team.nodePromptRetryDue"
                 | "team.runDiagnostics"
                 | "team.approvalResolve"

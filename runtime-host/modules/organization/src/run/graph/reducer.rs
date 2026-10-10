@@ -63,6 +63,7 @@ pub enum ReduceError {
     TriggerNotArmed(NodeId),
     StaleGraphIdentity,
     InvalidGraphPatch,
+    InvalidDefinition(super::DefinitionError),
     InvalidSettlementEvent,
     StaleFence {
         node_id: NodeId,
@@ -306,7 +307,7 @@ fn apply_graph_patch(
         nodes,
         edges,
     )
-    .map_err(|_| ReduceError::InvalidGraphPatch)?;
+    .map_err(ReduceError::InvalidDefinition)?;
     let mut executions = BTreeMap::new();
     for node in definition.nodes() {
         let history = state

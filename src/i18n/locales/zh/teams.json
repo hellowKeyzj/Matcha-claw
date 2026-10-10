@@ -151,13 +151,11 @@
   },
   "design": {
     "start": "设计运行图",
-    "readyTitle": "运行图设计已就绪",
-    "readyDescription": "后台已校验当前图版本。确认启动将按此版本执行；继续调整会使本次提议失效。",
-    "confirm": "确认启动",
+    "run": "启动",
+    "starting": "启动中…",
     "discuss": "返回讨论",
-    "adjust": "继续设计调整",
     "discussion": "打开团队讨论",
-    "actionFailed": "设计操作未完成：{{error}}"
+    "actionFailed": "团队操作未完成：{{error}}"
   },
   "chat": {
     "teamNotFound": "团队不存在",
@@ -174,7 +172,11 @@
   "run": {
     "create": "新增 run",
     "delete": "删除 run",
-    "history": "Run 列表",
+    "history": "运行记录",
+    "unnamed": "新运行",
+    "copyId": "复制运行 ID",
+    "idCopied": "运行 ID 已复制",
+    "copyIdFailed": "运行 ID 复制失败，请重试。",
     "emptyRuns": "暂无 run。先新增 run，然后打开 leader session 发送消息即可运行。",
     "createFirstRunHint": "当前团队还没有 run。请先新增 run，再打开 leader session 发送消息。",
     "noActiveRun": "未选择 run",
@@ -199,6 +201,9 @@
       "zoomIn": "放大",
       "zoomOut": "缩小",
       "fitToView": "适应视图",
+      "autoLayout": "整理布局",
+      "layoutPending": "正在排版…",
+      "layoutFailed": "布局失败，请重试",
       "workflowCanvas": "工作流画布",
       "workflowEdges": "工作流连线",
       "nodePalette": "添加节点",
@@ -372,13 +377,6 @@
     "notePlaceholder": "可选备注",
     "waitingDecision": "等待运行决策",
     "submitDecision": "提交决策",
-    "proposalPending": {
-      "title": "方案待确认",
-      "emptySummary": "Leader 已准备好任务方案。",
-      "confirm": "确认并开始",
-      "discuss": "继续讨论",
-      "cancel": "取消"
-    },
     "dependencyMissing": {
       "title": "继续运行前需要处理依赖",
       "description": "必需依赖不能降级绕过。请安装缺失 Skill 或配置缺失 Tool，然后重试依赖检查。",

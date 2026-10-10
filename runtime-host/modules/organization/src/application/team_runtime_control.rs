@@ -3,7 +3,6 @@ use std::{
     path::PathBuf,
 };
 
-use crate::StoreFault;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -333,10 +332,13 @@ fn team_runtime_outcome_with_context(
     resolver: &dyn organization::RoleSessionIdentityResolver,
 ) -> TeamRuntimeProjectionOutcome {
     match outcome {
+        TeamRuntimeCommandOutcome::RunStart(result) => match result {
+            Ok(()) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({"success":true,"outcome":"started"}))),
+            Err(error) => TeamRuntimeProjectionOutcome::succeeded(super::team_mcp::design_rejected(error)),
+        },
         TeamRuntimeCommandOutcome::Design { result, .. } => match result {
             Ok(result) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(result)),
-            Err(StoreFault::CommitOutcomeUnknown(_) | StoreFault::RecoveryRequired) => TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({"outcome":"outcome-unknown"}))),
-            Err(_) => TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team workflow design request was rejected."),
+            Err(error) => TeamRuntimeProjectionOutcome::succeeded(super::team_mcp::design_rejected(error)),
         },
         TeamRuntimeCommandOutcome::PackageValidate(validation) => {
             TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(team_skill_package_validation_json(&validation)))
@@ -424,36 +426,6 @@ fn team_runtime_outcome_with_context(
         TeamRuntimeCommandOutcome::TriggerFire(result) => match result {
             Ok(result) => team_run_trigger_outcome(result),
             Err(_) => TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team trigger was rejected."),
-        },
-        TeamRuntimeCommandOutcome::RunStartConfirm(result) => match result {
-            Ok(organization::ConfirmRunStartOutcome::Started)
-            | Ok(organization::ConfirmRunStartOutcome::Replayed) => {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
-                    "success": true,
-                    "outcome": "started",
-                })))
-            }
-            Ok(organization::ConfirmRunStartOutcome::Intake)
-            | Ok(organization::ConfirmRunStartOutcome::ProposalMismatch) => TeamRuntimeProjectionOutcome::rejected(
-                TeamRuntimeProjectionRejection::Failed,
-                "Team run start proposal was rejected.",
-            ),
-            Err(_) => TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" }))),
-        },
-        TeamRuntimeCommandOutcome::RunStartContinue(result) => match result {
-            Ok(organization::ContinueRunDiscussionOutcome::Intake)
-            | Ok(organization::ContinueRunDiscussionOutcome::Replayed) => {
-                TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
-                    "success": true,
-                    "outcome": "intake",
-                })))
-            }
-            Ok(organization::ContinueRunDiscussionOutcome::AlreadyStarted)
-            | Ok(organization::ContinueRunDiscussionOutcome::ProposalMismatch) => TeamRuntimeProjectionOutcome::rejected(
-                TeamRuntimeProjectionRejection::Failed,
-                "Team run start proposal was rejected.",
-            ),
-            Err(_) => TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" }))),
         },
         TeamRuntimeCommandOutcome::RunSnapshotInvalidInput => invalid_input(),
         TeamRuntimeCommandOutcome::RunSnapshot {
@@ -1309,19 +1281,8 @@ fn team_public_diagnostics_legacy_json(
 fn team_run_start_gate_legacy_json(
     run: &organization::run::public_projection::TeamRunPublicRun,
 ) -> Value {
-    let proposal = match run.start_gate() {
-        organization::run::public_projection::TeamRunPublicStartGate::ProposalPending
-        | organization::run::public_projection::TeamRunPublicStartGate::DesignProposalPending => {
-            Some(json!({
-                "proposalId": run.proposal_id(),
-                "taskSummary": run.proposal_summary().unwrap_or_default(),
-            }))
-        }
-        _ => None,
-    };
     let mut gate = json!({
         "status": team_run_start_gate_status_name(run.start_gate()),
-        "proposal": proposal,
     });
     if let Some(epoch) = run.design_epoch() {
         gate["designEpoch"] = json!(epoch);
@@ -1335,14 +1296,8 @@ fn team_run_start_gate_status_name(
 ) -> &'static str {
     match status {
         organization::run::public_projection::TeamRunPublicStartGate::Intake => "intake",
-        organization::run::public_projection::TeamRunPublicStartGate::ProposalPending => {
-            "proposal_pending"
-        }
         organization::run::public_projection::TeamRunPublicStartGate::Started => "started",
         organization::run::public_projection::TeamRunPublicStartGate::Designing => "designing",
-        organization::run::public_projection::TeamRunPublicStartGate::DesignProposalPending => {
-            "design_proposal_pending"
-        }
     }
 }
 

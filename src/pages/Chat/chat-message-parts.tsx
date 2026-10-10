@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState, memo, type MouseEvent, type PointerEvent } from 'react';
 import { Copy, Check, ChevronDown, ChevronRight, CornerDownLeft, SquareTerminal, Code2, FileText, Film, Music, FileArchive, File, ZoomIn, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { invokeIpc } from '@/lib/api-client';
 import type { AttachedFileMeta } from '@/stores/chat';
 import type {
@@ -75,6 +76,7 @@ function ToolActivityTextBlock({
   copied?: boolean;
   onCopy?: () => void;
 }) {
+  const { t } = useTranslation('chat');
   const trimmedText = block.text.trim();
   if (!trimmedText) {
     return null;
@@ -99,7 +101,7 @@ function ToolActivityTextBlock({
           {onCopy ? (
             <button
               type="button"
-              aria-label={copied ? '已复制输入' : '复制输入'}
+              aria-label={t(copied ? 'toolActivity.inputCopied' : 'toolActivity.copyInput')}
               className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] text-muted-foreground transition-colors hover:bg-background/95 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
               onClick={onCopy}
             >
@@ -133,17 +135,17 @@ interface StructuredDetailRow {
 }
 
 const STRUCTURED_DETAIL_LABELS: Record<string, string> = {
-  changed: '已变更',
-  created: '已创建',
-  diff: '差异',
-  patch: '补丁',
-  truncation: '截断',
-  fullOutputPath: '完整输出',
-  exitCode: '退出码',
+  changed: 'toolActivity.detailLabels.changed',
+  created: 'toolActivity.detailLabels.created',
+  diff: 'toolActivity.detailLabels.diff',
+  patch: 'toolActivity.detailLabels.patch',
+  truncation: 'toolActivity.detailLabels.truncation',
+  fullOutputPath: 'toolActivity.detailLabels.fullOutputPath',
+  exitCode: 'toolActivity.detailLabels.exitCode',
 };
 
-function formatStructuredDetailLabel(key: string): string {
-  return STRUCTURED_DETAIL_LABELS[key] ?? key
+function formatStructuredDetailLabel(key: string, t: TFunction<'chat'>): string {
+  return STRUCTURED_DETAIL_LABELS[key] ? t(STRUCTURED_DETAIL_LABELS[key]) : key
     .replace(/([a-z])([A-Z])/g, '$1 $2')
     .replace(/[\s_-]+/g, ' ')
     .trim();
@@ -153,29 +155,30 @@ function isPublicDetailRecord(value: ToolActivityPublicDetailValue): value is Re
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function formatScalarDetailValue(value: ToolActivityPublicDetailValue): string | null {
+function formatScalarDetailValue(value: ToolActivityPublicDetailValue, t: TFunction<'chat'>): string | null {
   if (typeof value === 'string') return value.trim() || null;
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (typeof value === 'boolean') return t(value ? 'toolActivity.yes' : 'toolActivity.no');
   return null;
 }
 
-function collectPublicDetailRows(details: ToolActivityPublicDetails | undefined, maxRows = 12): StructuredDetailRow[] {
+function collectPublicDetailRows(details: ToolActivityPublicDetails | undefined, t: TFunction<'chat'>, maxRows = 12): StructuredDetailRow[] {
   const rows: StructuredDetailRow[] = [];
 
   const visit = (value: ToolActivityPublicDetailValue, label: string, depth: number) => {
     if (rows.length >= maxRows || depth > 3) return;
 
-    const scalar = formatScalarDetailValue(value);
+    const scalar = formatScalarDetailValue(value, t);
     if (scalar) {
       rows.push({ label, value: scalar });
       return;
     }
 
     if (Array.isArray(value)) {
-      const scalars = value.map(formatScalarDetailValue).filter((item): item is string => item != null);
+      const scalars = value.map((item) => formatScalarDetailValue(item, t)).filter((item): item is string => item != null);
       if (scalars.length === value.length && scalars.length > 0) {
-        rows.push({ label, value: scalars.slice(0, 4).join('、') + (scalars.length > 4 ? ` 等 ${scalars.length} 项` : '') });
+        const items = scalars.slice(0, 4).join(t('toolActivity.listSeparator'));
+        rows.push({ label, value: scalars.length > 4 ? t('toolActivity.listSummary', { items, count: scalars.length }) : items });
         return;
       }
       for (const [index, item] of value.slice(0, 4).entries()) {
@@ -187,18 +190,18 @@ function collectPublicDetailRows(details: ToolActivityPublicDetails | undefined,
     if (!isPublicDetailRecord(value)) return;
     for (const [key, item] of Object.entries(value)) {
       if (rows.length >= maxRows) return;
-      visit(item, label ? `${label} · ${formatStructuredDetailLabel(key)}` : formatStructuredDetailLabel(key), depth + 1);
+      visit(item, label ? `${label} · ${formatStructuredDetailLabel(key, t)}` : formatStructuredDetailLabel(key, t), depth + 1);
     }
   };
 
   for (const [key, value] of Object.entries(details ?? {})) {
-    visit(value, formatStructuredDetailLabel(key), 0);
+    visit(value, formatStructuredDetailLabel(key, t), 0);
   }
 
   return rows.filter((row) => row.label && row.value);
 }
 
-function hasToolActivityStructuredContent(activity: ToolActivityViewModel): boolean {
+function hasToolActivityStructuredContent(activity: ToolActivityViewModel, t: TFunction<'chat'>): boolean {
   return activity.canvasPreview != null
     || activity.browserTabPreview != null
     || (activity.approvalReviews?.length ?? 0) > 0
@@ -206,15 +209,15 @@ function hasToolActivityStructuredContent(activity: ToolActivityViewModel): bool
     || activity.diffStat != null
     || activity.liveDiffStat != null
     || activity.progressReceipt != null
-    || collectPublicDetailRows(activity.publicDetails, 1).length > 0;
+    || collectPublicDetailRows(activity.publicDetails, t, 1).length > 0;
 }
 
-function shouldHideRawDetailsBlock(activity: ToolActivityViewModel): boolean {
+function shouldHideRawDetailsBlock(activity: ToolActivityViewModel, t: TFunction<'chat'>): boolean {
   return activity.browserTabPreview != null
     || (activity.approvalReviews?.length ?? 0) > 0
     || activity.approvalReviewOutcome != null
     || activity.progressReceipt != null
-    || collectPublicDetailRows(activity.publicDetails, 1).length > 0;
+    || collectPublicDetailRows(activity.publicDetails, t, 1).length > 0;
 }
 
 function resolveCanvasFramePreview(activity: ToolActivityViewModel, showCanvasFrame: boolean): ToolActivityCanvasPreview | null {
@@ -223,12 +226,13 @@ function resolveCanvasFramePreview(activity: ToolActivityViewModel, showCanvasFr
 }
 
 function ToolActivityBrowserTabCard({ preview }: { preview?: ToolActivityBrowserTabPreview }) {
+  const { t } = useTranslation('chat');
   if (!preview) return null;
   return (
     <div className={COMPACT_STRUCTURED_CARD}>
       <div className="flex min-w-0 items-center gap-2 text-[12px] font-medium text-foreground">
         <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        <span className="truncate">{preview.title ?? '浏览器标签页'}</span>
+        <span className="truncate">{preview.title ?? t('toolActivity.browserTab')}</span>
       </div>
       {preview.url ? (
         <div className="mt-1 truncate font-mono text-[11px] leading-5 text-muted-foreground" title={preview.url}>{preview.url}</div>
@@ -250,12 +254,13 @@ function ToolActivityApprovalReviews({
   reviews: readonly ToolActivityApprovalReview[];
   outcome?: ToolActivityApprovalReviewOutcome;
 }) {
+  const { t } = useTranslation('chat');
   if (reviews.length === 0 && !outcome) return null;
 
   return (
     <div className={COMPACT_STRUCTURED_CARD}>
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[12px] font-medium text-foreground">审批复核</div>
+        <div className="text-[12px] font-medium text-foreground">{t('toolActivity.approvalReview')}</div>
         {outcome ? <span className={COMPACT_META_CHIP}>{outcome.status}</span> : null}
       </div>
       {reviews.length > 0 ? (
@@ -265,8 +270,8 @@ function ToolActivityApprovalReviews({
               <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                 <span className="truncate text-[12px] font-medium text-foreground">{review.label}</span>
                 <span className={COMPACT_META_CHIP}>{review.status}</span>
-                {review.riskLevel ? <span className={COMPACT_META_CHIP}>风险 {review.riskLevel}</span> : null}
-                {review.userAuthorization ? <span className={COMPACT_META_CHIP}>授权 {review.userAuthorization}</span> : null}
+                {review.riskLevel ? <span className={COMPACT_META_CHIP}>{t('toolActivity.risk', { value: review.riskLevel })}</span> : null}
+                {review.userAuthorization ? <span className={COMPACT_META_CHIP}>{t('toolActivity.authorization', { value: review.userAuthorization })}</span> : null}
               </div>
               {review.rationale ? <div className="mt-1 text-[11px] leading-5 text-muted-foreground">{review.rationale}</div> : null}
             </div>
@@ -284,6 +289,7 @@ function ToolActivityDiffStatCard({
   title: string;
   diffStat?: ToolActivityDiffStat;
 }) {
+  const { t } = useTranslation('chat');
   if (!diffStat) return null;
   const files = [...(diffStat.filesChanged ?? []), ...(diffStat.filesCreated ?? [])];
   const fileCount = diffStat.fileCount ?? files.length;
@@ -295,14 +301,14 @@ function ToolActivityDiffStatCard({
         <span className="text-[12px] font-medium text-foreground">{title}</span>
         {typeof diffStat.additions === 'number' ? <span className={`${COMPACT_META_CHIP} text-emerald-600`}>+{diffStat.additions}</span> : null}
         {typeof diffStat.deletions === 'number' ? <span className={`${COMPACT_META_CHIP} text-rose-600`}>-{diffStat.deletions}</span> : null}
-        {fileCount > 0 ? <span className={COMPACT_META_CHIP}>{fileCount} 个文件</span> : null}
+        {fileCount > 0 ? <span className={COMPACT_META_CHIP}>{t('toolActivity.files', { count: fileCount })}</span> : null}
       </div>
       {files.length > 0 ? (
         <div className="mt-2 space-y-1.5">
           {files.slice(0, 4).map((file) => (
             <div key={file} className="truncate font-mono text-[11px] leading-5 text-muted-foreground" title={file}>{file}</div>
           ))}
-          {files.length > 4 ? <div className="text-[11px] leading-5 text-muted-foreground">另有 {files.length - 4} 个文件</div> : null}
+          {files.length > 4 ? <div className="text-[11px] leading-5 text-muted-foreground">{t('toolActivity.moreFiles', { count: files.length - 4 })}</div> : null}
         </div>
       ) : null}
     </div>
@@ -326,13 +332,14 @@ function ToolActivityMarkdownSummary({ markdown }: { markdown: string }) {
 }
 
 function ToolActivityProgressReceiptCard({ receipt }: { receipt?: ToolActivityProgressReceipt }) {
+  const { t } = useTranslation('chat');
   if (!receipt) return null;
   const percent = receipt.totalCount > 0 ? Math.max(0, Math.min(100, (receipt.completedCount / receipt.totalCount) * 100)) : 0;
 
   return (
     <div className={COMPACT_STRUCTURED_CARD}>
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[12px] font-medium text-foreground">进度</div>
+        <div className="text-[12px] font-medium text-foreground">{t('toolActivity.progress')}</div>
         <span className={COMPACT_META_CHIP}>{receipt.completedCount}/{receipt.totalCount}</span>
       </div>
       {receipt.totalCount > 0 ? (
@@ -340,7 +347,7 @@ function ToolActivityProgressReceiptCard({ receipt }: { receipt?: ToolActivityPr
           <div className="h-full rounded-full bg-sky-500" style={{ width: `${percent}%` }} />
         </div>
       ) : null}
-      {receipt.currentItem ? <div className="mt-2 text-[11px] leading-5 text-muted-foreground">当前：{receipt.currentItem}</div> : null}
+      {receipt.currentItem ? <div className="mt-2 text-[11px] leading-5 text-muted-foreground">{t('toolActivity.currentItem', { name: receipt.currentItem })}</div> : null}
       {receipt.markdownSummary ? <ToolActivityMarkdownSummary markdown={receipt.markdownSummary} /> : null}
     </div>
   );
@@ -361,13 +368,14 @@ function StructuredDetailsRows({ rows }: { rows: StructuredDetailRow[] }) {
 }
 
 function ToolActivityStructuredDetails({ details }: { details?: ToolActivityPublicDetails }) {
-  const rows = collectPublicDetailRows(details);
+  const { t } = useTranslation('chat');
+  const rows = collectPublicDetailRows(details, t);
   if (rows.length === 0) return null;
 
   return (
     <details className={COMPACT_STRUCTURED_CARD}>
       <summary className="cursor-pointer select-none text-[12px] font-medium text-foreground marker:text-muted-foreground">
-        详情
+        {t('toolActivity.details')}
       </summary>
       <StructuredDetailsRows rows={rows} />
     </details>
@@ -375,13 +383,14 @@ function ToolActivityStructuredDetails({ details }: { details?: ToolActivityPubl
 }
 
 function ToolActivityStructuredContent({ activity }: { activity: ToolActivityViewModel }) {
+  const { t } = useTranslation('chat');
   const showDiffStatCard = activity.diffStatPlacement !== 'header';
   return (
     <>
       <ToolActivityBrowserTabCard preview={activity.browserTabPreview} />
       <ToolActivityApprovalReviews reviews={activity.approvalReviews ?? []} outcome={activity.approvalReviewOutcome} />
-      {showDiffStatCard ? <ToolActivityDiffStatCard title="实时变更" diffStat={activity.liveDiffStat} /> : null}
-      {showDiffStatCard && !activity.liveDiffStat ? <ToolActivityDiffStatCard title="文件变更" diffStat={activity.diffStat} /> : null}
+      {showDiffStatCard ? <ToolActivityDiffStatCard title={t('toolActivity.liveChanges')} diffStat={activity.liveDiffStat} /> : null}
+      {showDiffStatCard && !activity.liveDiffStat ? <ToolActivityDiffStatCard title={t('toolActivity.fileChanges')} diffStat={activity.diffStat} /> : null}
       <ToolActivityProgressReceiptCard receipt={activity.progressReceipt} />
       <ToolActivityStructuredDetails details={activity.publicDetails} />
     </>
@@ -694,6 +703,7 @@ function ToolActivityRail({
   railKind: 'tool' | 'embedded-tool-result';
   showCanvasFrame?: boolean;
 }) {
+  const { t } = useTranslation('chat');
   const [expanded, toggleExpanded] = useVersionedDisclosure(collapseVersion);
   const [copiedText, setCopiedText] = useState<string | null>(null);
   const copyBlockText = useCallback((text: string) => {
@@ -707,10 +717,10 @@ function ToolActivityRail({
   }, []);
 
   const canvasFrame = resolveCanvasFramePreview(activity, showCanvasFrame);
-  const hasStructuredContent = hasToolActivityStructuredContent(activity);
+  const hasStructuredContent = hasToolActivityStructuredContent(activity, t);
   const canExpand = activity.canExpand || hasStructuredContent;
-  const textBlocks = shouldHideRawDetailsBlock(activity)
-    ? activity.textBlocks.filter((block) => block.title?.trim() !== '详情' && block.title?.trim().toLowerCase() !== 'details')
+  const textBlocks = shouldHideRawDetailsBlock(activity, t)
+    ? activity.textBlocks.filter((block) => block.kind !== 'details')
     : activity.textBlocks;
 
   const renderTextBlocks = (blocks: ToolActivityViewModel['textBlocks']) => (
@@ -732,7 +742,7 @@ function ToolActivityRail({
       <button
         type="button"
         data-chat-local-geometry-anchor="true"
-        aria-label={expanded ? `收起${activity.title}` : `展开${activity.title}`}
+        aria-label={t(expanded ? 'toolActivity.collapse' : 'toolActivity.expand', { title: activity.title })}
         aria-expanded={expanded}
         disabled={!canExpand}
         className={`${COMPACT_SIDE_RAIL_HEADER} disabled:cursor-default disabled:hover:text-muted-foreground`}
@@ -785,7 +795,8 @@ function ToolCard({
   tool: SessionRenderToolCard;
   collapseVersion: number;
 }) {
-  const activity = useMemo(() => buildToolActivityViewModel(tool), [tool]);
+  const { t } = useTranslation('chat');
+  const activity = useMemo(() => buildToolActivityViewModel(tool, t), [tool, t]);
   return <ToolActivityRail activity={activity} collapseVersion={collapseVersion} railKind="tool" />;
 }
 
@@ -796,7 +807,8 @@ function AssistantEmbeddedToolResultCard({
   item: SessionRenderAssistantBubbleToolResult;
   collapseVersion: number;
 }) {
-  const activity = useMemo(() => buildCanvasActivityViewModel(item), [item]);
+  const { t } = useTranslation('chat');
+  const activity = useMemo(() => buildCanvasActivityViewModel(item, t), [item, t]);
   if (!activity) {
     return null;
   }

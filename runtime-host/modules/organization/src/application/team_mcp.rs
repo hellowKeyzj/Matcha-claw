@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 use super::{design::DesignOperation, team_runtime::decode_team_graph_patch_value};
 use crate::{
     ApprovalDecision, EvidenceId, EvidenceRecord, EvidenceReference, EvidenceReferenceKind,
-    GraphRunId, OrganizationHandle, RecordOutcome, RequestAdmissionClosed,
+    GraphPatchOperation, GraphRunId, OrganizationHandle, RecordOutcome, RequestAdmissionClosed,
     RoleSessionIdentityResolver, TeamDecisionCommand, TeamDecisionType, TeamGraphContextQuery,
     TeamGraphContextResult, TeamGraphContextView, TeamId, TeamNodeEvent, TeamNodeEventOutcome,
     TeamNodeEventProducer,
@@ -24,6 +24,7 @@ pub(crate) async fn execute(
     name: &str,
     args: Value,
     resolver: Arc<dyn RoleSessionIdentityResolver>,
+    scope: Option<crate::TeamRunExecutionScope>,
 ) -> Result<Value, RequestAdmissionClosed> {
     let Some(args) = args.as_object() else {
         return Ok(invalid());
@@ -36,14 +37,141 @@ pub(crate) async fn execute(
         return Ok(rejected());
     };
     match name {
-        "team_graph_context" => graph_context(owner, args, resolver).await,
-        "team_graph_patch" => graph_patch(owner, args, resolver).await,
+        "team_graph_context" if args.get("view").and_then(Value::as_str) == Some("run_prompts") => {
+            runtime_graph_context(owner, args, scope).await
+        }
+        "team_graph_patch" if !args.contains_key("designEpoch") && !args.contains_key("promptGeneration") => {
+            runtime_graph_patch(owner, args, scope, now).await
+        }
+        "team_graph_context" if scope.is_none() => graph_context(owner, args, resolver).await,
+        "team_graph_patch" if scope.is_none() => graph_patch(owner, args, resolver).await,
         "team_node_event" => node_event(owner, args, now).await,
         "team_approval_resolve" => approval_resolve(owner, args, now).await,
         "team_run_decision_submit" => decision_submit(owner, args, now).await,
         "team_evidence_record" => evidence_record(owner, args, now).await,
         _ => Ok(invalid()),
     }
+}
+
+async fn runtime_graph_context(
+    owner: &OrganizationHandle,
+    args: &Map<String, Value>,
+    scope: Option<crate::TeamRunExecutionScope>,
+) -> Result<Value, RequestAdmissionClosed> {
+    if require_exact_keys(args, &["teamId", "runId", "view"]).is_err() {
+        return Ok(invalid());
+    }
+    let scope = match execution_scope(args, scope) {
+        Ok(scope) => scope,
+        Err(error) => return Ok(error),
+    };
+    Ok(owner.runtime_graph_context(scope).await?.unwrap_or_else(runtime_graph_rejected))
+}
+
+async fn runtime_graph_patch(
+    owner: &OrganizationHandle,
+    args: &Map<String, Value>,
+    scope: Option<crate::TeamRunExecutionScope>,
+    now: u64,
+) -> Result<Value, RequestAdmissionClosed> {
+    let parsed = (|| {
+        require_exact_keys(args, &[
+            "teamId", "runId", "expectedGraphVersion", "commandId", "idempotencyKey", "operations",
+        ])?;
+        let version = required_string(args, "expectedGraphVersion")?;
+        if version.len() != 64 || !version.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+            return Err(());
+        }
+        let operations = args.get("operations").and_then(Value::as_array).ok_or(())?;
+        if operations.is_empty() {
+            return Err(());
+        }
+        let operations = operations.iter().map(|operation| {
+            let operation = operation.as_object().ok_or(())?;
+            require_exact_keys(operation, &["op", "nodeId", "prompt"])?;
+            if required_string(operation, "op")? != "set_node_prompt" {
+                return Err(());
+            }
+            Ok(crate::store::NodePromptPatch {
+                node_id: crate::NodeId::new(opaque(operation, "nodeId")?.as_str()),
+                prompt: required_string(operation, "prompt")?.to_owned(),
+            })
+        }).collect::<Result<Vec<_>, ()>>()?;
+        Ok(crate::store::RuntimePromptPatch {
+            command_id: opaque(args, "commandId")?,
+            idempotency_key: opaque(args, "idempotencyKey")?,
+            expected_graph_version: version.to_owned(),
+            operations,
+            created_at: now,
+        })
+    })();
+    let Ok(patch) = parsed else { return Ok(invalid()); };
+    let scope = match execution_scope(args, scope) {
+        Ok(scope) => scope,
+        Err(error) => return Ok(error),
+    };
+    Ok(owner.runtime_graph_patch(scope, patch).await?.unwrap_or_else(runtime_graph_rejected))
+}
+
+fn execution_scope(
+    args: &Map<String, Value>,
+    scope: Option<crate::TeamRunExecutionScope>,
+) -> Result<crate::TeamRunExecutionScope, Value> {
+    let team = required_string(args, "teamId").map_err(|_| invalid())?;
+    let run = required_string(args, "runId").map_err(|_| invalid())?;
+    let scope = scope.ok_or_else(|| design_error(
+        "execution_authority_required",
+        "Use executionAuthority from the current node's team_run_authority context; do not invent authorization.",
+        None, None,
+    ))?;
+    if scope.team_id.as_str() != team || scope.run_id.as_str() != run {
+        return Err(design_error(
+            "execution_authority_invalid",
+            "Execution authorization does not grant access to this team and run; use the exact current node context.",
+            None, None,
+        ));
+    }
+    Ok(scope)
+}
+
+fn runtime_graph_rejected(fault: crate::StoreFault) -> Value {
+    use crate::{StoreFault, store::RuntimeGraphError};
+    let (code, message, node) = match &fault {
+        StoreFault::RuntimeGraph(reason) => match reason {
+            RuntimeGraphError::UnknownRun | RuntimeGraphError::TeamMismatch => (
+                "execution_authority_invalid", "Execution authorization is no longer valid for this run; stop graph access.", None,
+            ),
+            RuntimeGraphError::RunInactive => (
+                "run_not_active", "The run is not active and started; stop runtime graph access.", None,
+            ),
+            RuntimeGraphError::ExecutionInactive => (
+                "execution_expired", "This node execution is no longer current and in flight; stop using its authorization.", None,
+            ),
+            RuntimeGraphError::StaleGraphVersion => (
+                "graph_version_mismatch", "The graph changed; read team_graph_context with view=run_prompts and recompute the patch using its graphVersion.", None,
+            ),
+            RuntimeGraphError::UnknownNode(node) => (
+                "node_not_found", "The target node does not exist; read the current runtime graph before editing.", Some(node.as_str()),
+            ),
+            RuntimeGraphError::InvalidNode(node) => (
+                "node_prompt_not_editable", "Only existing work and review task prompts may be changed; topology and bindings cannot be changed.", Some(node.as_str()),
+            ),
+            RuntimeGraphError::EmptyPrompt(node) => (
+                "empty_assignment_prompt", "The task prompt must contain non-whitespace text.", Some(node.as_str()),
+            ),
+        },
+        StoreFault::EventLedger(crate::RecordCommandError::IdempotencyConflict) => (
+            "idempotency_conflict", "Replay the exact original patch or use fresh commandId and idempotencyKey for a different patch.", None,
+        ),
+        StoreFault::EventLedger(crate::RecordCommandError::CommandIdConflict) => (
+            "command_id_conflict", "This commandId is already used; use fresh commandId and idempotencyKey for a new patch.", None,
+        ),
+        StoreFault::CommitOutcomeUnknown(_) | StoreFault::RecoveryRequired => (
+            "graph_outcome_unknown", "The patch outcome is unknown; read the current graph before deciding whether to retry.", None,
+        ),
+        _ => ("graph_unavailable", "The runtime graph operation could not be completed; read the current graph before retrying.", None),
+    };
+    design_error(code, message, node, None)
 }
 
 async fn graph_context(
@@ -98,7 +226,7 @@ async fn graph_context(
         return Ok(owner
             .design_operation(operation, resolver)
             .await?
-            .unwrap_or_else(|_| rejected()));
+            .unwrap_or_else(design_rejected));
     }
     Ok(context_result(
         owner
@@ -150,6 +278,13 @@ async fn graph_patch(
             opaque(args, "idempotencyKey")?,
         )
         .map_err(|_| ())?;
+        if patch
+            .operations
+            .iter()
+            .any(|operation| matches!(operation, GraphPatchOperation::SetNodePosition { .. }))
+        {
+            return Err(());
+        }
         Ok(DesignOperation::Patch {
             team_id,
             epoch,
@@ -164,7 +299,7 @@ async fn graph_patch(
     Ok(owner
         .design_operation(operation, resolver)
         .await?
-        .unwrap_or_else(|_| rejected()))
+        .unwrap_or_else(design_rejected))
 }
 
 async fn node_event(
@@ -394,6 +529,263 @@ fn invalid() -> Value {
 
 fn rejected() -> Value {
     json!({"success":false,"error":"Team tool request was rejected"})
+}
+
+pub(crate) fn design_rejected(fault: crate::StoreFault) -> Value {
+    use crate::{StoreFault, store::DesignError};
+    let (code, message, node) = match &fault {
+        StoreFault::Design(reason) => match reason {
+            DesignError::UnknownRun => (
+                "design_run_not_found",
+                "Run not found; use the teamId and runId from the current design context.",
+                None,
+            ),
+            DesignError::TeamMismatch => (
+                "design_team_mismatch",
+                "The run does not belong to this team; use the exact teamId and runId from the current design context.",
+                None,
+            ),
+            DesignError::NotDesigning => (
+                "not_designing",
+                "The run is not in a design phase; enter workflow design before changing or starting the workflow.",
+                None,
+            ),
+            DesignError::RunInactive => (
+                "run_not_active",
+                "The run is no longer active; select an active run before starting.",
+                None,
+            ),
+            DesignError::StaleEpoch => (
+                "stale_design_epoch",
+                "The design epoch is stale; stop using this authorization and use the latest leader design context.",
+                None,
+            ),
+            DesignError::StaleGeneration => (
+                "stale_prompt_generation",
+                "The prompt generation is no longer authorized; stop this patch sequence and use the latest leader design context.",
+                None,
+            ),
+            DesignError::StaleGraphVersion => (
+                "graph_version_mismatch",
+                "The graph changed; refresh the current graph and retry with its graphVersion.",
+                None,
+            ),
+            DesignError::UnknownTeam => (
+                "design_team_not_found",
+                "The design team is unavailable; reopen the team before continuing.",
+                None,
+            ),
+            DesignError::MissingStartOrEnd => (
+                "missing_start_or_end",
+                "The workflow needs a Start node and an End node; add the missing node before starting.",
+                None,
+            ),
+            DesignError::IncompletePath(node) => (
+                "incomplete_execution_path",
+                "The node needs a forward path from Start to End; connect the workflow before starting.",
+                Some(node.as_str()),
+            ),
+            DesignError::MissingAssignment(node) => (
+                "missing_assignment",
+                "The node needs an assignment; set roleId and a nonempty config.prompt with a matching config.sessionRef from the current context roles.",
+                Some(node.as_str()),
+            ),
+            DesignError::EmptyPrompt(node) => (
+                "empty_assignment_prompt",
+                "The node's assignment prompt is empty; provide a nonempty config.prompt.",
+                Some(node.as_str()),
+            ),
+            DesignError::UnknownRole(node) => (
+                "assignment_role_not_found",
+                "The node's roleId is not a team role; choose a roleId from the current context roles.",
+                Some(node.as_str()),
+            ),
+            DesignError::SessionBindingMismatch(node) => (
+                "assignment_session_mismatch",
+                "The node's roleId and config.sessionRef do not match a binding in this run; copy the matching pair from the current context roles.",
+                Some(node.as_str()),
+            ),
+        },
+        StoreFault::GraphPatch(source) => return graph_patch_rejected(source),
+        StoreFault::GraphPatchInput(_) => (
+            "invalid_patch_identity",
+            "The patch audit identity is invalid; use the current graphId/workflowPlanId and bounded opaque commandId/idempotencyKey.",
+            None,
+        ),
+        StoreFault::EventLedger(crate::RecordCommandError::IdempotencyConflict) => (
+            "idempotency_conflict",
+            "This idempotencyKey is already bound to a different command or payload; replay the exact original request or use fresh commandId and idempotencyKey for a new patch.",
+            None,
+        ),
+        StoreFault::EventLedger(crate::RecordCommandError::CommandIdConflict) => (
+            "command_id_conflict",
+            "This commandId is already used; use fresh commandId and idempotencyKey for a new patch.",
+            None,
+        ),
+        StoreFault::CommitOutcomeUnknown(_) | StoreFault::RecoveryRequired => (
+            "design_outcome_unknown",
+            "The design operation outcome is unknown; reopen and read the current graph before deciding whether to retry.",
+            None,
+        ),
+        _ => (
+            "design_unavailable",
+            "The design operation could not be completed; reopen and read the current graph before retrying.",
+            None,
+        ),
+    };
+    design_error(code, message, node, None)
+}
+
+fn graph_patch_rejected(reason: &crate::GraphPatchError) -> Value {
+    use crate::GraphPatchError;
+    let (code, message, node, edge) = match reason {
+        GraphPatchError::Definition(source) => return definition_rejected(source),
+        GraphPatchError::StaleRevision => (
+            "graph_base_mismatch",
+            "The patch base does not match this run; read team_graph_context and use its graphId and workflowPlanId.",
+            None,
+            None,
+        ),
+        GraphPatchError::UnknownRun => (
+            "design_run_not_found",
+            "Run not found; use the runId from the current design context.",
+            None,
+            None,
+        ),
+        GraphPatchError::EmptyPatch => (
+            "empty_graph_patch",
+            "The patch has no operations; provide at least one graph operation.",
+            None,
+            None,
+        ),
+        GraphPatchError::UnknownNode(node) => (
+            "node_not_found",
+            "The operation references a missing node; use an existing nodeId or add the node before referencing it.",
+            Some(node.as_str()),
+            None,
+        ),
+        GraphPatchError::NodeAlreadyExists(node) => (
+            "node_already_exists",
+            "The node already exists; use replace_node to edit it or choose a new nodeId.",
+            Some(node.as_str()),
+            None,
+        ),
+        GraphPatchError::NodeKindChanged(node) => (
+            "node_kind_changed",
+            "An existing node's kind cannot change; create a new node with a different nodeId.",
+            Some(node.as_str()),
+            None,
+        ),
+        GraphPatchError::UnknownEdge(edge) => (
+            "edge_not_found",
+            "The operation references a missing edge; use an existing edgeId or add the edge first.",
+            None,
+            Some(edge.as_str()),
+        ),
+        GraphPatchError::EdgeAlreadyExists(edge) => (
+            "edge_already_exists",
+            "The edge already exists; use replace_edge to edit it or choose a new edgeId.",
+            None,
+            Some(edge.as_str()),
+        ),
+        GraphPatchError::InvalidDefinition => (
+            "invalid_graph_patch",
+            "The graph patch violates a graph invariant; check the operation payloads against the current graph and tool schema.",
+            None,
+            None,
+        ),
+    };
+    design_error(code, message, node, edge)
+}
+
+fn definition_rejected(reason: &crate::run::graph::DefinitionError) -> Value {
+    use crate::run::graph::DefinitionError;
+    let (code, message, node, edge) = match reason {
+        DefinitionError::InvalidWorkEdgeSourcePort { edge_id, .. } => (
+            "invalid_work_source_port",
+            "The edge leaves a Work node; set sourcePort to 'completed'.",
+            None,
+            Some(edge_id.as_str()),
+        ),
+        DefinitionError::InvalidReviewEdgeSourcePort { edge_id, .. } => (
+            "invalid_review_source_port",
+            "The edge leaves an assigned Review node; use sourcePort 'completed' or 'rework'.",
+            None,
+            Some(edge_id.as_str()),
+        ),
+        DefinitionError::InvalidReworkEdgeAction(edge) => (
+            "invalid_rework_action",
+            "An edge with sourcePort 'rework' must use action 'rework'.",
+            None,
+            Some(edge.as_str()),
+        ),
+        DefinitionError::InvalidCompletedEdgeAction(edge) => (
+            "invalid_completed_action",
+            "An edge with sourcePort 'completed' cannot use action 'rework'; use a forward action, or the Review 'rework' outlet for rework.",
+            None,
+            Some(edge.as_str()),
+        ),
+        DefinitionError::UnknownEdgeSource { edge_id, node_id } => (
+            "edge_source_not_found",
+            "The edge sourceNodeId does not exist; use an existing nodeId or add the source node before the edge.",
+            Some(node_id.as_str()),
+            Some(edge_id.as_str()),
+        ),
+        DefinitionError::UnknownEdgeTarget { edge_id, node_id } => (
+            "edge_target_not_found",
+            "The edge targetNodeId does not exist; use an existing nodeId or add the target node before the edge.",
+            Some(node_id.as_str()),
+            Some(edge_id.as_str()),
+        ),
+        DefinitionError::InvalidWorkAssignment(node) => (
+            "invalid_work_assignment",
+            "The Work node needs a valid work assignment with nonempty taskId and roleId.",
+            Some(node.as_str()),
+            None,
+        ),
+        DefinitionError::InvalidReviewAssignment(node) => (
+            "invalid_review_assignment",
+            "The Review node needs a valid review assignment with nonempty roleId and config.prompt.",
+            Some(node.as_str()),
+            None,
+        ),
+        DefinitionError::ActivationCycle(node) => (
+            "activation_cycle",
+            "The graph has a forward-edge cycle at this node; remove the cycle and use Review rework edges for rework.",
+            Some(node.as_str()),
+            None,
+        ),
+        DefinitionError::UnreachableNode(node) => (
+            "unreachable_node",
+            "The node is unreachable; connect it to an execution root.",
+            Some(node.as_str()),
+            None,
+        ),
+        DefinitionError::NoNodes => (
+            "empty_graph",
+            "The patch would leave no nodes; retain or add at least one node.",
+            None,
+            None,
+        ),
+        _ => (
+            "invalid_graph_definition",
+            "The resulting graph violates a definition invariant; check node and edge definitions against the current graph and tool schema.",
+            None,
+            None,
+        ),
+    };
+    design_error(code, message, node, edge)
+}
+
+fn design_error(code: &str, message: &str, node: Option<&str>, edge: Option<&str>) -> Value {
+    let mut result = json!({"success":false,"error":message,"errorCode":code});
+    // Only bounded opaque graph identifiers may leave this error boundary, never raw paths or payloads.
+    for (field, id) in [("nodeId", node), ("edgeId", edge)] {
+        if let Some(id) = id.and_then(|id| OpaqueId::try_new(id).ok()) {
+            result[field] = json!(id.as_str());
+        }
+    }
+    result
 }
 
 fn context_result(outcome: TeamGraphContextResult) -> Value {

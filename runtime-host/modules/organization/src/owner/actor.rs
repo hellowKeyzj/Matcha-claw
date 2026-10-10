@@ -56,7 +56,6 @@ pub struct OrganizationShared {
     member_introductions: Option<Arc<dyn crate::TeamMemberIntroductions>>,
     store_path: PathBuf,
     command_target: Arc<OnceLock<OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>>>,
-    start_gate_prompts: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
 }
 
 pub struct OrganizationGlobalState {
@@ -98,7 +97,6 @@ impl OrganizationOwner {
                 member_introductions: input.member_introductions,
                 store_path: store_path.clone(),
                 command_target: Arc::new(OnceLock::new()),
-                start_gate_prompts: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             },
             global: OrganizationGlobalState {
                 store: input.store,
@@ -1427,9 +1425,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::RunCreateFromTeamTemplate { run_id, .. }
             | OrganizationCommand::RunCancel { run_id, .. }
             | OrganizationCommand::RunDelete { run_id, .. }
-            | OrganizationCommand::StartGateTerminalProposalSet { run_id, .. }
-            | OrganizationCommand::RunStartConfirm { run_id, .. }
-            | OrganizationCommand::RunStartContinue { run_id, .. }
+            | OrganizationCommand::RunStart { run_id, .. }
             | OrganizationCommand::NodeTerminalResolve { run_id, .. }
             | OrganizationCommand::TaskBoardMutate { run_id, .. }
             | OrganizationCommand::ScheduleReadyNodes { run_id, .. }
@@ -1437,6 +1433,9 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::SettleActivity { run_id, .. }
             | OrganizationCommand::NativeRunSettled { run_id, .. } => {
                 CommandRoute::Keyed(run_id.clone())
+            }
+            OrganizationCommand::RuntimeGraphPatch { scope, .. } => {
+                CommandRoute::Keyed(scope.run_id.clone())
             }
             OrganizationCommand::RecordEvidence { .. } => CommandRoute::Global,
             OrganizationCommand::Design { operation, .. } => {
@@ -1489,6 +1488,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::NodePromptRetryDue { run_id, .. } => {
                 QueryRoute::Keyed(run_id.clone())
             }
+            OrganizationQuery::RuntimeGraphContext { scope, .. } => QueryRoute::Keyed(scope.run_id.clone()),
             OrganizationQuery::GraphContext { query, .. } => QueryRoute::Keyed(query.run().clone()),
             OrganizationQuery::TeamSkillValidate { .. }
             | OrganizationQuery::TeamSkillDependencyPlan { .. }
@@ -1696,161 +1696,23 @@ impl OwnerSpec for OrganizationOwner {
                 });
                 let _ = reply.send(outcome).await;
             }
-            OrganizationCommand::Design {
-                operation,
-                resolver,
-                reply,
-            } => {
-                let run_id = operation.run_id().clone();
-                let exits = matches!(
-                    operation,
-                    crate::application::design::DesignOperation::Exit { .. }
-                );
-                let begins = matches!(
-                    operation,
-                    crate::application::design::DesignOperation::Begin { .. }
-                );
-                let ui_patch = matches!(
-                    operation,
-                    crate::application::design::DesignOperation::Patch {
-                        generation: None,
-                        ..
-                    }
-                );
-                let outcome = {
-                    let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
-                    state.open_store().and_then(|mut store| {
-                        if exits {
-                            let was_designing = store.facts().run(&run_id).is_some_and(|run| {
-                                matches!(
-                                    run.start_gate(),
-                                    crate::RunStartGate::Designing { .. }
-                                        | crate::RunStartGate::DesignProposalPending { .. }
-                                )
-                            });
-                            let result = crate::application::design::execute(
-                                &mut store,
-                                operation,
-                                resolver.as_ref(),
-                            )?;
-                            if was_designing {
-                                prompts.remove(run_id.as_str());
-                            }
-                            return Ok(result);
-                        }
-                        let before = store
-                            .facts()
-                            .run(&run_id)
-                            .map(|run| run.graph().definition().clone());
-                        let gate = store
-                            .facts()
-                            .run(&run_id)
-                            .map(|run| run.start_gate().clone());
-                        let result = crate::application::design::execute(
-                            &mut store,
-                            operation,
-                            resolver.as_ref(),
-                        )?;
-                        let changed = store
-                            .facts()
-                            .run(&run_id)
-                            .map(|run| run.graph().definition())
-                            != before.as_ref();
-                        let gate_changed =
-                            store.facts().run(&run_id).map(|run| run.start_gate()) != gate.as_ref();
-                        if (begins && gate_changed) || (ui_patch && changed) {
-                            prompts.remove(run_id.as_str());
-                        }
-                        Ok(result)
-                    })
-                };
+            OrganizationCommand::RunStart { team_id, run_id, epoch, version, reply } => {
+                let outcome = state.open_store().and_then(|mut store| {
+                    store.start_run(&team_id, &run_id, epoch.as_deref(), &version)
+                });
                 let _ = reply.send(outcome);
             }
-            OrganizationCommand::StartGateTerminalProposalSet {
-                run_id,
-                proposal_id,
-                source_delivery_id,
-                final_assistant_text,
-                generation,
-                design,
-                reply,
-            } => {
-                let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
-                if prompts.get(run_id.as_str()).map(String::as_str) != Some(generation.as_str()) {
-                    let _ = reply.send(Ok(None));
-                    return;
-                }
-                prompts.remove(run_id.as_str());
-                if design {
-                    let outcome = match crate::application::start_gate_control::design_ready(
-                        &final_assistant_text,
-                    ) {
-                        Some(summary) => state
-                            .open_store()
-                            .and_then(|mut store| {
-                                store.record_design_ready(
-                                    &run_id,
-                                    generation,
-                                    summary,
-                                    source_delivery_id,
-                                )
-                            })
-                            .map(|()| Some(crate::SetRunStartProposalOutcome::Recorded)),
-                        None => Ok(None),
-                    };
-                    let _ = reply.send(outcome);
-                    return;
-                }
-                let proposal = crate::application::start_gate_control::terminal_proposal(
-                    run_id,
-                    proposal_id,
-                    source_delivery_id,
-                    &final_assistant_text,
-                );
-                let outcome = match proposal {
-                    Some(proposal) => state.open_store().and_then(|mut store| {
-                        let (run_id, proposal_id, summary, source_delivery_id) =
-                            proposal.into_store_parts();
-                        store
-                            .set_run_start_proposal(
-                                &run_id,
-                                proposal_id,
-                                summary,
-                                source_delivery_id,
-                            )
-                            .map(Some)
-                    }),
-                    None => Ok(None),
-                };
-                drop(prompts);
+            OrganizationCommand::RuntimeGraphPatch { scope, patch, reply } => {
+                let outcome = state.open_store().and_then(|mut store| {
+                    store.runtime_graph_patch(&scope, patch)
+                });
                 let _ = reply.send(outcome);
             }
-            OrganizationCommand::RunStartConfirm {
-                run_id,
-                proposal_id,
-                reply,
-            } => {
-                let outcome = state
-                    .open_store()
-                    .and_then(|mut store| store.confirm_run_start(&run_id, &proposal_id));
-                let _ = reply.send(outcome).await;
-            }
-            OrganizationCommand::RunStartContinue {
-                run_id,
-                proposal_id,
-                reply,
-            } => {
-                let outcome = {
-                    let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
-                    let outcome = state
-                        .open_store()
-                        .and_then(|mut store| store.continue_run_discussion(&run_id, &proposal_id));
-                    if matches!(outcome, Ok(crate::ContinueRunDiscussionOutcome::Intake)) {
-                        prompts.remove(run_id.as_str());
-                    }
-                    outcome
-                };
-                let _ = reply.send(outcome).await;
+            OrganizationCommand::Design { operation, resolver, reply } => {
+                let outcome = state.open_store().and_then(|mut store| {
+                    crate::application::design::execute(&mut store, operation, resolver.as_ref())
+                });
+                let _ = reply.send(outcome);
             }
             OrganizationCommand::TriggerFire {
                 request,
@@ -1862,56 +1724,16 @@ impl OwnerSpec for OrganizationOwner {
                 });
                 let _ = reply.send(outcome).await;
             }
-            OrganizationCommand::GraphSave {
-                command,
-                definition,
-                reply,
-            } => {
-                let run_id = GraphRunId::new(command.run_id().as_str());
-                let outcome = {
-                    let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
-                    state.open_store().and_then(|mut store| {
-                        let before = store
-                            .facts()
-                            .run(&run_id)
-                            .map(|run| run.graph().definition().clone());
-                        let outcome = state
-                            .team_run
-                            .replace_graph(&mut store, command, definition)?;
-                        if store
-                            .facts()
-                            .run(&run_id)
-                            .map(|run| run.graph().definition())
-                            != before.as_ref()
-                        {
-                            prompts.remove(run_id.as_str());
-                        }
-                        Ok(outcome)
-                    })
-                };
+            OrganizationCommand::GraphSave { command, definition, reply } => {
+                let outcome = state.open_store().and_then(|mut store| {
+                    state.team_run.replace_graph(&mut store, command, definition)
+                });
                 let _ = reply.send(outcome).await;
             }
             OrganizationCommand::GraphPatch { patch, reply } => {
-                let run_id = patch.run_id.clone();
-                let outcome = {
-                    let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
-                    state.open_store().and_then(|mut store| {
-                        let before = store
-                            .facts()
-                            .run(&run_id)
-                            .map(|run| run.graph().definition().clone());
-                        let outcome = state.team_run.apply_graph_patch(&mut store, patch)?;
-                        if store
-                            .facts()
-                            .run(&run_id)
-                            .map(|run| run.graph().definition())
-                            != before.as_ref()
-                        {
-                            prompts.remove(run_id.as_str());
-                        }
-                        Ok(outcome)
-                    })
-                };
+                let outcome = state.open_store().and_then(|mut store| {
+                    state.team_run.apply_graph_patch(&mut store, patch)
+                });
                 let _ = reply.send(outcome).await;
             }
             OrganizationCommand::NodeEvent {
@@ -2371,9 +2193,8 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::RunCancel { .. }
             | OrganizationCommand::RunDelete { .. }
             | OrganizationCommand::Design { .. }
-            | OrganizationCommand::StartGateTerminalProposalSet { .. }
-            | OrganizationCommand::RunStartConfirm { .. }
-            | OrganizationCommand::RunStartContinue { .. }
+            | OrganizationCommand::RuntimeGraphPatch { .. }
+            | OrganizationCommand::RunStart { .. }
             | OrganizationCommand::TriggerFire { .. }
             | OrganizationCommand::GraphSave { .. }
             | OrganizationCommand::GraphPatch { .. }
@@ -2463,6 +2284,12 @@ impl OwnerSpec for OrganizationOwner {
                     },
                 );
                 let _ = reply.send(outcome).await;
+            }
+            OrganizationQuery::RuntimeGraphContext { scope, reply } => {
+                let outcome = state.open_store().and_then(|mut store| {
+                    store.runtime_graph_context(&scope)
+                });
+                let _ = reply.send(outcome);
             }
             OrganizationQuery::GraphContext { query, reply } => {
                 let outcome = state
@@ -2622,25 +2449,35 @@ impl OwnerSpec for OrganizationOwner {
             }
             OrganizationQuery::StartGatePromptPlan {
                 lookup,
-                proposal_id_seed,
-                requested_at,
+                resolver,
+                trace_id,
                 reply,
             } => {
-                let outcome = {
-                    let mut prompts = shared.start_gate_prompts.lock().expect("start gate lock");
+                let outcome = with_session_trace(trace_id, async {
                     let outcome = state.refresh().and_then(|()| {
                         crate::application::start_gate_control::prepare_prompt(
                             &mut state.store,
                             &lookup,
-                            proposal_id_seed.as_deref(),
-                            requested_at,
+                            resolver.as_ref(),
                         )
                     });
-                    if let Ok(Some(plan)) = &outcome {
-                        prompts.insert(plan.run_id().as_str().to_owned(), plan.generation.clone());
+                    match &outcome {
+                        Ok(Some(plan)) => {
+                            session_trace("runtime.start-gate.prompt", json!({
+                                "outcome": "prepared",
+                                "mode": if plan.design { "design" } else { "discussion" },
+                                "generationRegistered": plan.design,
+                                "designTokenPresent": plan.design,
+                            }));
+                        }
+                        Err(_) => session_trace("runtime.start-gate.prompt", json!({
+                            "outcome": "error", "reason": "store_or_prompt_failed",
+                        })),
+                        Ok(None) => {}
                     }
                     outcome
-                };
+                })
+                .await;
                 let _ = reply.send(outcome);
             }
             OrganizationQuery::TriggerList { team_id, reply } => {
@@ -2736,6 +2573,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::TeamRunPublicSnapshot { .. }
             | OrganizationQuery::TeamRunDiagnostics { .. }
             | OrganizationQuery::GraphContext { .. }
+            | OrganizationQuery::RuntimeGraphContext { .. }
             | OrganizationQuery::GraphDefinition { .. }
             | OrganizationQuery::GraphYaml { .. }
             | OrganizationQuery::TaskBoardRead { .. }
@@ -2796,6 +2634,9 @@ fn store_fault_label(error: &StoreFault) -> &'static str {
         StoreFault::CorruptRecord => "corrupt_record",
         StoreFault::UnsupportedSchemaVersion(_) => "unsupported_schema_version",
         StoreFault::InvalidFacts => "invalid_facts",
+        StoreFault::Design(_) => "design",
+        StoreFault::RuntimeGraph(_) => "runtime_graph",
+        StoreFault::GraphPatchInput(_) => "graph_patch_input",
         StoreFault::RuntimeReceipt(_) => "runtime_receipt",
         StoreFault::Evidence(_) => "evidence",
         StoreFault::ActivityTransition(_) => "activity_transition",
@@ -2995,7 +2836,7 @@ mod tests {
 
     fn native_text(decision: &str) -> String {
         format!(
-            r#"<team_message>{{"summary":"review feedback","decision":"{decision}","dispatch":[{{"role_id":"leader","task":"fix the reviewed issue"}}]}}</team_message>"#
+            r#"<team_message>{{"summary":"review feedback","decision":"{decision}"}}</team_message>"#
         )
     }
 
@@ -3054,10 +2895,6 @@ mod tests {
             panic!("terminal");
         };
         assert_eq!(observation.output().unwrap().summary(), "review feedback");
-        assert_eq!(
-            observation.output().unwrap().dispatch()[0].task(),
-            "fix the reviewed issue"
-        );
     }
 
     #[test]
@@ -3088,7 +2925,6 @@ mod tests {
                         panic!("agent");
                     };
                     assert!(prompt.contains("review feedback"));
-                    assert!(prompt.contains("fix the reviewed issue"));
                 }
                 store
                     .accept_native_terminal_context(
@@ -4265,7 +4101,6 @@ mod tests {
             member_introductions: None,
             store_path: PathBuf::new(),
             command_target: Arc::new(OnceLock::new()),
-            start_gate_prompts: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         }
     }
 

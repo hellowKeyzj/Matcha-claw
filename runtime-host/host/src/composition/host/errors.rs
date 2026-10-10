@@ -63,6 +63,7 @@ pub enum ConstructionError {
     CallLog(platform::call::CallLogError),
     ParentCallback(ParentCallbackConfigError),
     TeamSkillSelection,
+    TeamExecutionAuthority,
     ProviderAccounts,
     ProviderMigration,
     ProviderModels,
@@ -87,6 +88,9 @@ impl fmt::Display for ConstructionError {
             Self::ParentCallback(error) => error.fmt(formatter),
             Self::TeamSkillSelection => {
                 formatter.write_str("TeamSkill selection owner could not be constructed")
+            }
+            Self::TeamExecutionAuthority => {
+                formatter.write_str("TeamRun execution authority could not be loaded")
             }
             Self::ProviderAccounts => {
                 formatter.write_str("provider account owner could not be constructed")
@@ -129,6 +133,7 @@ impl std::error::Error for ConstructionError {
             Self::CallLog(error) => Some(error),
             Self::ParentCallback(error) => Some(error),
             Self::TeamSkillSelection
+            | Self::TeamExecutionAuthority
             | Self::ProviderAccounts
             | Self::ProviderMigration
             | Self::ProviderModels

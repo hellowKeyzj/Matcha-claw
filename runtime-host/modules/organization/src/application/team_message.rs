@@ -13,7 +13,6 @@ type TeamMessageRepairFuture<'a> = Pin<Box<dyn Future<Output = Option<String>> +
 pub(crate) struct TeamMessage {
     summary: String,
     decision: String,
-    dispatch: Vec<TeamMessageDispatch>,
 }
 
 impl TeamMessage {
@@ -23,26 +22,6 @@ impl TeamMessage {
 
     pub(crate) fn decision(&self) -> &str {
         &self.decision
-    }
-
-    pub(crate) fn dispatch(&self) -> &[TeamMessageDispatch] {
-        &self.dispatch
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TeamMessageDispatch {
-    role_id: String,
-    task: String,
-}
-
-impl TeamMessageDispatch {
-    pub(crate) fn role_id(&self) -> &str {
-        &self.role_id
-    }
-
-    pub(crate) fn task(&self) -> &str {
-        &self.task
     }
 }
 
@@ -273,7 +252,7 @@ pub(crate) fn validate_team_message(value: &Value) -> Result<TeamMessage, TeamMe
     };
     let mut errors = Vec::new();
     for field in object.keys() {
-        if !matches!(field.as_str(), "summary" | "decision" | "dispatch") {
+        if !matches!(field.as_str(), "summary" | "decision") {
             errors.push(TeamMessageValidationError::UnexpectedField(field.clone()));
         }
     }
@@ -282,14 +261,12 @@ pub(crate) fn validate_team_message(value: &Value) -> Result<TeamMessage, TeamMe
     if let Some(summary) = summary {
         validate_summary(summary, &mut errors);
     }
-    let dispatch = required_dispatch(object.get("dispatch"), &mut errors);
     if !errors.is_empty() {
         return Err(TeamMessageError::ErrorList(errors));
     }
     Ok(TeamMessage {
         summary: summary.expect("validated summary is present").to_owned(),
         decision: decision.expect("validated decision is present").to_owned(),
-        dispatch: dispatch.expect("validated dispatch is present"),
     })
 }
 
@@ -324,48 +301,6 @@ fn required_string_value<'a>(
             None
         }
     }
-}
-
-fn required_dispatch(
-    value: Option<&Value>,
-    errors: &mut Vec<TeamMessageValidationError>,
-) -> Option<Vec<TeamMessageDispatch>> {
-    let Some(Value::Array(items)) = value else {
-        match value {
-            Some(_) => errors.push(TeamMessageValidationError::FieldType {
-                field: "dispatch",
-                expected: "an array",
-            }),
-            None => errors.push(TeamMessageValidationError::MissingField("dispatch")),
-        }
-        return None;
-    };
-    let mut dispatch = Vec::with_capacity(items.len());
-    for item in items {
-        let Some(object) = item.as_object() else {
-            errors.push(TeamMessageValidationError::FieldType {
-                field: "dispatch",
-                expected: "an array of objects",
-            });
-            continue;
-        };
-        for field in object.keys() {
-            if !matches!(field.as_str(), "role_id" | "task") {
-                errors.push(TeamMessageValidationError::UnexpectedField(format!(
-                    "dispatch.{field}"
-                )));
-            }
-        }
-        let role_id = required_string(object, "role_id", errors);
-        let task = required_string(object, "task", errors);
-        if let (Some(role_id), Some(task)) = (role_id, task) {
-            dispatch.push(TeamMessageDispatch {
-                role_id: role_id.to_owned(),
-                task: task.to_owned(),
-            });
-        }
-    }
-    Some(dispatch)
 }
 
 fn validate_summary(summary: &str, errors: &mut Vec<TeamMessageValidationError>) {
@@ -438,7 +373,7 @@ fn build_team_message_repair_prompt<'a>(
     error: &TeamMessageError,
 ) -> TeamMessageRepairPrompt<'a> {
     let errors = error.repair_errors();
-    let correct_format = r#"<team_message>{"summary":"中文交付摘要","decision":"completed","dispatch":[]}</team_message>"#;
+    let correct_format = r#"<team_message>{"summary":"中文交付摘要","decision":"completed"}</team_message>"#;
     let prompt = format!(
         "<teamrun_message_repair>\n\
 你正在修复 TeamRun 节点最终回复中的 `<team_message>` 控制块。\n\n\
@@ -448,11 +383,9 @@ fn build_team_message_repair_prompt<'a>(
 校验错误：\n{}\n\n\
 目标结构：\n{correct_format}\n\n\
 修复规则：\n\
-- JSON 顶层只能包含 `summary`、`decision`、`dispatch`\n\
+- JSON 顶层只能包含 `summary`、`decision`\n\
 - `summary`：用中文概括原始输出里的完成内容、关键结论、产物/改动、风险、下游必要上下文\n\
 - `decision`：保留原始输出表达的后续流向；如果无法判断，填 `completed`\n\
-- `dispatch`：必须是数组；没有明确下游任务时填 `[]`\n\
-- `dispatch` 每项只能包含非空字符串字段 `role_id` 和 `task`\n\
 - JSON 字符串里的换行和引号必须正确转义\n\
 </teamrun_message_repair>",
         errors.join("\n")
@@ -475,11 +408,11 @@ mod tests {
 
     #[test]
     fn multiple_envelopes_extracts_last() {
-        let text = "noise <team_message>{\"summary\":\"旧摘要\",\"decision\":\"completed\",\"dispatch\":[]}</team_message> tail <team_message>{\"summary\":\"新摘要\",\"decision\":\"completed\",\"dispatch\":[]}</team_message>";
+        let text = "noise <team_message>{\"summary\":\"旧摘要\",\"decision\":\"completed\"}</team_message> tail <team_message>{\"summary\":\"新摘要\",\"decision\":\"completed\"}</team_message>";
 
         assert_eq!(
             extract_last_team_message(text).unwrap(),
-            "{\"summary\":\"新摘要\",\"decision\":\"completed\",\"dispatch\":[]}"
+            "{\"summary\":\"新摘要\",\"decision\":\"completed\"}"
         );
         assert_eq!(parse_team_message(text).unwrap().summary(), "新摘要");
     }
@@ -497,8 +430,7 @@ mod tests {
     fn schema_validation_collects_multiple_errors() {
         let error = validate_team_message(&json!({
             "summary": "bad\nsummary",
-            "decision": "",
-            "dispatch": [{"role_id": "", "task": false, "extra": true}]
+            "decision": ""
         }))
         .unwrap_err();
 
@@ -507,39 +439,35 @@ mod tests {
             TeamMessageError::ErrorList(vec![
                 TeamMessageValidationError::EmptyString("decision"),
                 TeamMessageValidationError::ControlCharacter("summary"),
-                TeamMessageValidationError::UnexpectedField("dispatch.extra".to_owned()),
-                TeamMessageValidationError::EmptyString("role_id"),
-                TeamMessageValidationError::FieldType {
-                    field: "task",
-                    expected: "a string"
-                },
             ])
         );
     }
 
     #[test]
-    fn dispatch_accepts_role_tasks() {
-        let message = parse_team_message(
+    fn dispatch_is_rejected() {
+        let error = parse_team_message(
             "<team_message>{\"summary\":\"已完成交付\",\"decision\":\"completed\",\"dispatch\":[{\"role_id\":\"reviewer\",\"task\":\"复核结果\"}]}</team_message>",
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(message.decision(), "completed");
-        assert_eq!(message.dispatch().len(), 1);
-        assert_eq!(message.dispatch()[0].role_id(), "reviewer");
-        assert_eq!(message.dispatch()[0].task(), "复核结果");
+        assert_eq!(
+            error,
+            TeamMessageError::ErrorList(vec![TeamMessageValidationError::UnexpectedField(
+                "dispatch".to_owned()
+            )])
+        );
     }
 
     #[test]
     fn normalize_wraps_bare_valid_json_only_after_validation() {
         let normalized = parse_or_normalize_team_message_text(
-            "before {\"summary\":\"已完成交付\",\"decision\":\"completed\",\"dispatch\":[]} after",
+            "before {\"summary\":\"已完成交付\",\"decision\":\"completed\"} after",
         )
         .unwrap();
 
         assert_eq!(
             normalized,
-            "<team_message>{\"summary\":\"已完成交付\",\"decision\":\"completed\",\"dispatch\":[]}</team_message>"
+            "<team_message>{\"summary\":\"已完成交付\",\"decision\":\"completed\"}</team_message>"
         );
 
         let error = parse_or_normalize_team_message_text(
@@ -555,7 +483,6 @@ mod tests {
         let error = validate_team_message(&json!({
             "summary": "已完成",
             "decision": "completed",
-            "dispatch": [],
             "extra": true
         }))
         .unwrap_err();
@@ -585,7 +512,7 @@ mod tests {
                 assert!(prompt.as_str().contains("不调用工具"));
                 assert!(prompt.as_str().contains("不重新执行任务"));
                 assert!(prompt.as_str().contains(
-                    "{\"summary\":\"中文交付摘要\",\"decision\":\"completed\",\"dispatch\":[]}"
+                    "{\"summary\":\"中文交付摘要\",\"decision\":\"completed\"}"
                 ));
                 assert_eq!(prompt.original_output, "broken");
                 Box::pin(async { Some("still broken".to_owned()) })

@@ -244,6 +244,7 @@ impl OpenClawDriver {
     }
 
     async fn restart_gateway_after_openclaw_receipt(&self) -> Result<(), ()> {
+        let _reservation = self.try_reserve_lifecycle().ok_or(())?;
         let supervisor = self.supervisor_handle();
         if supervisor.snapshot().phase() != SupervisorPhase::Running {
             channel_trace(

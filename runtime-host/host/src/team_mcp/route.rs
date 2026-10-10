@@ -24,6 +24,7 @@ pub(super) fn descriptor(
     owner: organization::OrganizationHandle,
     verifier: CapabilityDecisionVerifier,
     resolver: Arc<dyn organization::RoleSessionIdentityResolver>,
+    authority: super::ExecutionAuthority,
 ) -> ModuleDescriptor {
     let verifier = Arc::new(Mutex::new(verifier));
     ModuleDescriptor::new(
@@ -35,7 +36,12 @@ pub(super) fn descriptor(
                 let owner = owner.clone();
                 let verifier = verifier.clone();
                 let resolver = resolver.clone();
-                Box::pin(async move { handle(owner, verifier, resolver, request).await.into() })
+                let authority = authority.clone();
+                Box::pin(async move {
+                    handle(owner, verifier, resolver, authority, request)
+                        .await
+                        .into()
+                })
             },
         )],
     )
@@ -57,6 +63,7 @@ async fn handle(
     owner: organization::OrganizationHandle,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     resolver: Arc<dyn organization::RoleSessionIdentityResolver>,
+    authority: super::ExecutionAuthority,
     request: Request,
 ) -> Response {
     if request.method() != "POST" {
@@ -65,7 +72,7 @@ async fn handle(
     let Some(authorization) = request.bearer_authorization() else {
         return unauthorized();
     };
-    let Ok(tool) = serde_json::from_slice::<ToolRequest>(&request.body) else {
+    let Ok(mut tool) = serde_json::from_slice::<ToolRequest>(&request.body) else {
         return Response::bad_request();
     };
     if !is_tool(&tool.name) || !tool.arguments.is_object() {
@@ -85,8 +92,47 @@ async fn handle(
                 && decision.revision() == revision(&request.body) => {}
         _ => return unauthorized(),
     }
+    let arguments = tool
+        .arguments
+        .as_object_mut()
+        .expect("validated tool arguments");
+    let scope = match arguments.remove("executionAuthority") {
+        None => None,
+        Some(token) => {
+            if !matches!(
+                tool.name.as_str(),
+                "team_graph_context" | "team_graph_patch"
+            ) || arguments.contains_key("designEpoch")
+                || arguments.contains_key("promptGeneration")
+            {
+                return Response::json(
+                    400,
+                    serde_json::json!({
+                        "success": false, "errorCode": "invalid_params",
+                        "error": "Execution and design authorization cannot be combined."
+                    }),
+                );
+            }
+            let verified = token
+                .as_str()
+                .ok_or(())
+                .and_then(|token| authority.verify(token));
+            match verified {
+                Ok(scope) => Some(scope),
+                Err(()) => {
+                    return Response::json(
+                        200,
+                        serde_json::json!({
+                            "success": false, "errorCode": "execution_authority_invalid",
+                            "error": "Execution authorization is invalid; stop graph access and use only the authorization supplied with the current node task."
+                        }),
+                    );
+                }
+            }
+        }
+    };
     match owner
-        .execute_team_mcp(tool.name, tool.arguments, resolver)
+        .execute_team_mcp(tool.name, tool.arguments, resolver, scope)
         .await
     {
         Ok(result) if result.get("errorCode").and_then(Value::as_str) == Some("invalid_params") => {

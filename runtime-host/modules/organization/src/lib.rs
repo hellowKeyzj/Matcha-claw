@@ -185,7 +185,7 @@ pub mod run {
         InvalidAuthorizedGraphResolution, InvalidAuthorizedGraphResolutionReceipt,
         NativeDeliveryCorrelation, NativeRunOutputResolutionError, RegisterDeliveryError,
         RegisterOutcome, RestoreDeliveryError, RestoreLedgerError, TeamNodeOutput,
-        TeamNodeOutputDispatch, TeamNodeOutputError, TerminalObservationError,
+        TeamNodeOutputError, TerminalObservationError,
         TerminalObservationOutcome, begin_delivery, recover_interrupted_delivery,
         register_delivery, settle_delivery,
     };
@@ -290,8 +290,8 @@ pub use adapters::session_terminal::{
     TeamMessageRepairSessionOutcome, TeamMessageRepairSessionPort, TeamMessageRepairSessionRequest,
 };
 pub use adapters::start_gate_send_hook::{
-    PreparedStartGateSend, StartGateNativeEndpoint, StartGateRegistry, StartGateSendHook,
-    StartGateSendRequest, StartGateSendState,
+    PreparedStartGateSend, StartGateNativeEndpoint, StartGateSendHook,
+    StartGateSendRequest,
 };
 pub use api::{
     OrganizationModule, OrganizationOwnerInput, StartGatePromptPlan, StartGateRuntimeBindingLookup,
@@ -420,9 +420,9 @@ pub use run::{
     resolve_webhook_trigger, restore_oracle, settle_activity, settle_delivery,
 };
 pub use store::{
-    ConfirmRunStartOutcome, ContinueRunDiscussionOutcome, GraphRunFacts,
+    GraphRunFacts,
     NativeTerminalReceiptTarget, OrganizationFacts, OrganizationFactsError, OrganizationStore,
-    PendingWorkflowPlanAdmission, RunStartGate, SetRunStartProposalOutcome, StoreFault, TeamFacts,
+    PendingWorkflowPlanAdmission, RunStartGate, StoreFault, TeamFacts, TeamRunExecutionScope,
     TeamTombstoneOutcome, WorkflowPlanAdmissionOutcome, WorkflowPlanSubmitOutcome,
     WorkflowTemplateFacts,
 };

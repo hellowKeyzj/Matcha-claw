@@ -88,7 +88,7 @@ export function resolveSessionListLabel(
     return automaticLabel;
   }
   const displayName = normalizeAutomaticSessionTitle(meta.displayName);
-  if (displayName && displayName !== sessionKey) {
+  if (displayName && displayName !== sessionKey && displayName !== meta.sessionIdentity?.sessionKey) {
     return displayName;
   }
   const items = getSessionItems(state, sessionKey);

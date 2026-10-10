@@ -225,6 +225,9 @@ importers:
       electron-builder:
         specifier: ^26.8.1
         version: 26.8.1(electron-builder-squirrel-windows@26.8.1)
+      elkjs:
+        specifier: 0.12.0
+        version: 0.12.0
       eslint:
         specifier: ^10.0.0
         version: 10.0.0(jiti@1.21.7)
@@ -4976,6 +4979,9 @@ packages:
     resolution: {integrity: sha512-St9EV7F2VtYaYWD2qaAjBwUgKxx39eJOUsUJ5+/1113sqbVfNqv4Dbm/W1rN7qmYSPa+mWwR6yr+b7MfgjgVfQ==}
     engines: {node: '>= 22.12.0'}
     hasBin: true
+
+  elkjs@0.12.0:
+    resolution: {integrity: sha512-YZcKynxVxYoKIOEpywEPwCFdg+BTbxQRNf3pbwdDCvc8O3kQD8bmIwSxKU1eOTVc4Xo+VG9Te+575mlfvOrhEQ==}
 
   emoji-regex@8.0.0:
     resolution: {integrity: sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A==}
@@ -12815,6 +12821,8 @@ snapshots:
       '@types/node': 24.10.13
     transitivePeerDependencies:
       - supports-color
+
+  elkjs@0.12.0: {}
 
   emoji-regex@8.0.0: {}
 

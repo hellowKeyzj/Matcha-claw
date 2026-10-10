@@ -7,6 +7,36 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DesignError {
+    UnknownRun,
+    TeamMismatch,
+    NotDesigning,
+    RunInactive,
+    StaleEpoch,
+    StaleGeneration,
+    StaleGraphVersion,
+    UnknownTeam,
+    MissingStartOrEnd,
+    IncompletePath(crate::NodeId),
+    MissingAssignment(crate::NodeId),
+    EmptyPrompt(crate::NodeId),
+    UnknownRole(crate::NodeId),
+    SessionBindingMismatch(crate::NodeId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeGraphError {
+    UnknownRun,
+    TeamMismatch,
+    RunInactive,
+    ExecutionInactive,
+    StaleGraphVersion,
+    UnknownNode(crate::NodeId),
+    InvalidNode(crate::NodeId),
+    EmptyPrompt(crate::NodeId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoreFault {
     WriterBusy,
     Lock(io::ErrorKind),
@@ -21,6 +51,9 @@ pub enum StoreFault {
     CorruptRecord,
     UnsupportedSchemaVersion(u8),
     InvalidFacts,
+    Design(DesignError),
+    RuntimeGraph(RuntimeGraphError),
+    GraphPatchInput(crate::run::event::InvalidEventInput),
     RuntimeReceipt(crate::OrganizationFactsError),
     Evidence(crate::OrganizationFactsError),
     ActivityTransition(ActivityTransitionError),
@@ -70,6 +103,15 @@ impl fmt::Display for StoreFault {
                 .write_str("organization durable facts schema requires an explicit upgrade"),
             Self::InvalidFacts => {
                 formatter.write_str("organization durable facts violate domain invariants")
+            }
+            Self::Design(_) => {
+                formatter.write_str("organization design request violates design invariants")
+            }
+            Self::RuntimeGraph(_) => {
+                formatter.write_str("organization runtime graph request violates execution invariants")
+            }
+            Self::GraphPatchInput(_) => {
+                formatter.write_str("organization graph patch audit input is invalid")
             }
             Self::RuntimeReceipt(_) => formatter
                 .write_str("organization runtime receipt violates TeamRun durable invariants"),

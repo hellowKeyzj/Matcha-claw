@@ -1,3 +1,4 @@
+import { decodeRuntimeRepairSnapshot, type RuntimeRepairSnapshot } from '../../../../src/types/runtime-repair';
 import type { CallReceipt } from '../../../../src/types/call-log';
 import { decodeCallReceipt } from '../../../../src/types/call-log/receipt';
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
@@ -78,13 +79,15 @@ export type RuntimeControlUiUrlResponse = Readonly<{
 
 export type RuntimeControlTransportResponse<T, S extends 200 | 202 = 200> =
   | Readonly<{ status: S; body: T }>
-  | Readonly<{ status: 400 | 401 | 422 | 500 | 503; body: typeof RUNTIME_CONTROL_UNAVAILABLE }>;
+  | Readonly<{ status: 400 | 401 | 409 | 422 | 500 | 503; body: typeof RUNTIME_CONTROL_UNAVAILABLE }>;
 
 export interface RuntimeControlTransport {
   lifecycleStatus(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<RuntimeLifecycleResponse>>;
   lifecycleStart(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<CallReceipt, 202>>;
   lifecycleStop(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<CallReceipt, 202>>;
   lifecycleRestart(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<CallReceipt, 202>>;
+  lifecycleRepair(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<CallReceipt, 202>>;
+  repairStatus(endpoint?: RuntimeEndpointAddress): Promise<RuntimeControlTransportResponse<Readonly<{ result: RuntimeRepairSnapshot }>>>;
   logs(input?: Readonly<{ endpoint?: RuntimeEndpointAddress; cursor?: number }>): Promise<RuntimeControlTransportResponse<RuntimeLogsResponse>>;
   controlReady(input?: Readonly<{ endpoint?: RuntimeEndpointAddress; timeoutMs?: number }>): Promise<RuntimeControlTransportResponse<RuntimeControlReadyResponse>>;
   gatewayHealth(input?: Readonly<{ endpoint?: RuntimeEndpointAddress; probe?: boolean }>): Promise<RuntimeControlTransportResponse<RuntimeGatewayHealthResponse>>;
@@ -123,6 +126,18 @@ const operations = {
     scope: 'runtime-control:write',
     capability: 'runtime.lifecycle.restart',
     subject: 'runtime-lifecycle-restart',
+  },
+  lifecycleRepair: {
+    path: '/api/runtime-control/lifecycle/repair',
+    scope: 'runtime-control:write',
+    capability: 'runtime.lifecycle.repair',
+    subject: 'runtime-lifecycle-repair',
+  },
+  repairStatus: {
+    path: '/api/runtime-control/repair/status',
+    scope: 'runtime-control:read',
+    capability: 'runtime.repair.status',
+    subject: 'runtime-repair-status',
   },
   logs: {
     path: '/api/runtime-control/logs',
@@ -184,7 +199,7 @@ export function createRuntimeControlTransport(
       timeoutMs,
     });
     if (response?.status === status && validate(response.body)) return { status, body: response.body };
-    return { status: response?.status === 400 || response?.status === 401 || response?.status === 422 || response?.status === 500 ? response.status : 503, body: RUNTIME_CONTROL_UNAVAILABLE };
+    return { status: response?.status === 400 || response?.status === 401 || response?.status === 409 || response?.status === 422 || response?.status === 500 ? response.status : 503, body: RUNTIME_CONTROL_UNAVAILABLE };
   };
 
   return {
@@ -199,6 +214,12 @@ export function createRuntimeControlTransport(
     },
     lifecycleRestart(endpoint = OPEN_CLAW_RUNTIME_ENDPOINT) {
       return send(operations.lifecycleRestart, { endpoint }, isRuntimeControlCallReceipt, 202);
+    },
+    lifecycleRepair(endpoint = OPEN_CLAW_RUNTIME_ENDPOINT) {
+      return send(operations.lifecycleRepair, { endpoint }, isRuntimeControlCallReceipt, 202);
+    },
+    repairStatus(endpoint = OPEN_CLAW_RUNTIME_ENDPOINT) {
+      return send(operations.repairStatus, { endpoint }, isRuntimeRepairResponse, 200);
     },
     logs(input) {
       return send(operations.logs, body(input?.endpoint, { cursor: input?.cursor }), isRuntimeLogsResponse, 200);
@@ -237,6 +258,10 @@ function isRuntimeControlCallReceipt(value: unknown): value is CallReceipt {
   } catch {
     return false;
   }
+}
+
+function isRuntimeRepairResponse(value: unknown): value is Readonly<{ result: RuntimeRepairSnapshot }> {
+  return isRecord(value) && hasExactKeys(value, ['result']) && decodeRuntimeRepairSnapshot(value.result) !== null;
 }
 
 function isRuntimeLifecycleResponse(value: unknown): value is RuntimeLifecycleResponse {

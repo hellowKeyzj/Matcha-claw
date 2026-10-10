@@ -200,182 +200,20 @@ pub enum WorkflowPlanSubmitOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunStartGate {
     Intake,
-    ProposalPending {
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    },
     Designing {
         design_epoch: String,
         prompt_generation: Option<String>,
     },
-    DesignProposalPending {
-        design_epoch: String,
-        prompt_generation: String,
-        graph_version: String,
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    },
     Started,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SetRunStartProposalOutcome {
-    Recorded,
-    Replayed,
-    AlreadyStarted,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConfirmRunStartOutcome {
-    Started,
-    Replayed,
-    Intake,
-    ProposalMismatch,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ContinueRunDiscussionOutcome {
-    Intake,
-    Replayed,
-    AlreadyStarted,
-    ProposalMismatch,
 }
 
 impl RunStartGate {
-    pub fn proposal_id(&self) -> Option<&str> {
+    pub(super) fn exit_design(&mut self, epoch: &str) -> Result<bool, ()> {
         match self {
-            Self::ProposalPending { proposal_id, .. }
-            | Self::DesignProposalPending { proposal_id, .. } => Some(proposal_id),
-            Self::Intake | Self::Designing { .. } | Self::Started => None,
-        }
-    }
-
-    pub fn summary(&self) -> Option<&str> {
-        match self {
-            Self::ProposalPending { summary, .. } | Self::DesignProposalPending { summary, .. } => {
-                Some(summary)
-            }
-            Self::Intake | Self::Designing { .. } | Self::Started => None,
-        }
-    }
-
-    pub fn source_delivery_id(&self) -> Option<&str> {
-        match self {
-            Self::ProposalPending {
-                source_delivery_id, ..
-            }
-            | Self::DesignProposalPending {
-                source_delivery_id, ..
-            } => Some(source_delivery_id),
-            Self::Intake | Self::Designing { .. } | Self::Started => None,
-        }
-    }
-
-    pub(crate) fn proposal_pending(
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    ) -> Result<Self, ()> {
-        if proposal_id.trim().is_empty()
-            || summary.trim().is_empty()
-            || source_delivery_id.trim().is_empty()
-        {
-            return Err(());
-        }
-        Ok(Self::ProposalPending {
-            proposal_id,
-            summary,
-            source_delivery_id,
-        })
-    }
-
-    fn set_proposal(
-        &mut self,
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    ) -> Result<SetRunStartProposalOutcome, ()> {
-        let next = Self::proposal_pending(proposal_id, summary, source_delivery_id)?;
-        match self {
-            Self::Started => Ok(SetRunStartProposalOutcome::AlreadyStarted),
-            Self::Designing { .. } | Self::DesignProposalPending { .. } => Err(()),
-            current if *current == next => Ok(SetRunStartProposalOutcome::Replayed),
-            current => {
-                *current = next;
-                Ok(SetRunStartProposalOutcome::Recorded)
-            }
-        }
-    }
-
-    fn confirm_start(&mut self, proposal_id: &str) -> Result<ConfirmRunStartOutcome, ()> {
-        if proposal_id.trim().is_empty() {
-            return Err(());
-        }
-        match self {
-            Self::ProposalPending {
-                proposal_id: existing,
-                ..
-            } if existing == proposal_id => {
-                *self = Self::Started;
-                Ok(ConfirmRunStartOutcome::Started)
-            }
-            Self::DesignProposalPending {
-                proposal_id: existing,
-                ..
-            } if existing == proposal_id => {
-                *self = Self::Started;
-                Ok(ConfirmRunStartOutcome::Started)
-            }
-            Self::ProposalPending { .. } | Self::DesignProposalPending { .. } => {
-                Ok(ConfirmRunStartOutcome::ProposalMismatch)
-            }
-            Self::Intake | Self::Designing { .. } => Ok(ConfirmRunStartOutcome::Intake),
-            Self::Started => Ok(ConfirmRunStartOutcome::Replayed),
-        }
-    }
-
-    fn continue_discussion(
-        &mut self,
-        proposal_id: &str,
-    ) -> Result<ContinueRunDiscussionOutcome, ()> {
-        if proposal_id.trim().is_empty() {
-            return Err(());
-        }
-        match self {
-            Self::ProposalPending {
-                proposal_id: existing,
-                ..
-            } if existing == proposal_id => {
+            Self::Intake => Ok(false),
+            Self::Designing { design_epoch, .. } if design_epoch == epoch => {
                 *self = Self::Intake;
-                Ok(ContinueRunDiscussionOutcome::Intake)
-            }
-            Self::DesignProposalPending {
-                proposal_id: existing,
-                design_epoch,
-                ..
-            } if existing == proposal_id => {
-                let epoch = design_epoch.clone();
-                self.exit_design(&epoch)
-            }
-            Self::ProposalPending { .. } | Self::DesignProposalPending { .. } => {
-                Ok(ContinueRunDiscussionOutcome::ProposalMismatch)
-            }
-            Self::Intake | Self::Designing { .. } => Ok(ContinueRunDiscussionOutcome::Replayed),
-            Self::Started => Ok(ContinueRunDiscussionOutcome::AlreadyStarted),
-        }
-    }
-
-    pub(super) fn exit_design(&mut self, epoch: &str) -> Result<ContinueRunDiscussionOutcome, ()> {
-        match self {
-            Self::Intake => Ok(ContinueRunDiscussionOutcome::Replayed),
-            Self::Designing { design_epoch, .. }
-            | Self::DesignProposalPending { design_epoch, .. }
-                if design_epoch == epoch =>
-            {
-                *self = Self::Intake;
-                Ok(ContinueRunDiscussionOutcome::Intake)
+                Ok(true)
             }
             _ => Err(()),
         }
@@ -384,13 +222,6 @@ impl RunStartGate {
     pub(crate) fn valid(&self) -> bool {
         match self {
             Self::Intake | Self::Started => true,
-            Self::ProposalPending {
-                proposal_id,
-                summary,
-                source_delivery_id,
-            } => [proposal_id, summary, source_delivery_id]
-                .iter()
-                .all(|value| !value.trim().is_empty()),
             Self::Designing {
                 design_epoch,
                 prompt_generation,
@@ -400,31 +231,6 @@ impl RunStartGate {
                         .as_ref()
                         .is_none_or(|value| !value.trim().is_empty())
             }
-            Self::DesignProposalPending {
-                design_epoch,
-                prompt_generation,
-                graph_version,
-                proposal_id,
-                summary,
-                source_delivery_id,
-            } => {
-                [
-                    design_epoch,
-                    prompt_generation,
-                    proposal_id,
-                    source_delivery_id,
-                ]
-                .iter()
-                .all(|value| !value.trim().is_empty())
-                    && graph_version.len() == 64
-                    && graph_version
-                        .bytes()
-                        .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
-                    && !summary.trim().is_empty()
-                    && summary.lines().count() == 1
-                    && !summary.contains(['<', '>'])
-                    && proposal_id == prompt_generation
-            }
         }
     }
 
@@ -432,25 +238,15 @@ impl RunStartGate {
         if !self.valid() {
             return false;
         }
-        if matches!(
-            self,
-            Self::Designing { .. } | Self::DesignProposalPending { .. }
-        ) {
+        if matches!(self, Self::Designing { .. }) {
             return !matches!(previous, Self::Started);
         }
-        if matches!(
-            previous,
-            Self::Designing { .. } | Self::DesignProposalPending { .. }
-        ) {
+        if matches!(previous, Self::Designing { .. }) {
             return matches!(self, Self::Intake | Self::Started);
         }
         matches!(
             (previous, self),
-            (Self::Intake, Self::Intake | Self::ProposalPending { .. })
-                | (
-                    Self::ProposalPending { .. },
-                    Self::Intake | Self::ProposalPending { .. } | Self::Started,
-                )
+            (Self::Intake, Self::Intake | Self::Started)
                 | (Self::Started, Self::Started)
         )
     }
@@ -1685,55 +1481,6 @@ impl OrganizationFacts {
         self.runs.get_mut(run_id.as_str())
     }
 
-    pub(crate) fn set_run_start_proposal(
-        &mut self,
-        run_id: &GraphRunId,
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    ) -> Result<SetRunStartProposalOutcome, OrganizationFactsError> {
-        self.runs
-            .get_mut(run_id.as_str())
-            .ok_or(OrganizationFactsError::UnknownRun)?
-            .start_gate
-            .set_proposal(proposal_id, summary, source_delivery_id)
-            .map_err(|_| OrganizationFactsError::InvalidRunStartGate)
-    }
-
-    pub(crate) fn confirm_run_start(
-        &mut self,
-        run_id: &GraphRunId,
-        proposal_id: &str,
-    ) -> Result<ConfirmRunStartOutcome, OrganizationFactsError> {
-        let run = self
-            .runs
-            .get_mut(run_id.as_str())
-            .ok_or(OrganizationFactsError::UnknownRun)?;
-        if let RunStartGate::DesignProposalPending { graph_version, .. } = run.start_gate()
-            && crate::store::codec::graph_version(run.graph().definition())
-                .map_err(|_| OrganizationFactsError::InvalidRunStartGate)?
-                != *graph_version
-        {
-            return Err(OrganizationFactsError::InvalidRunStartGate);
-        }
-        run.start_gate
-            .confirm_start(proposal_id)
-            .map_err(|_| OrganizationFactsError::InvalidRunStartGate)
-    }
-
-    pub(crate) fn continue_run_discussion(
-        &mut self,
-        run_id: &GraphRunId,
-        proposal_id: &str,
-    ) -> Result<ContinueRunDiscussionOutcome, OrganizationFactsError> {
-        self.runs
-            .get_mut(run_id.as_str())
-            .ok_or(OrganizationFactsError::UnknownRun)?
-            .start_gate
-            .continue_discussion(proposal_id)
-            .map_err(|_| OrganizationFactsError::InvalidRunStartGate)
-    }
-
     pub(crate) fn purged_run_marker(&self, run_id: &GraphRunId) -> Option<&PurgedRunMarker> {
         self.purged_runs.get(run_id.as_str())
     }
@@ -2288,6 +2035,11 @@ impl OrganizationFacts {
             }
             validate_activity_transition(activity, current)?;
         }
+        for activity in self.activities.activities() {
+            if previous.activities.activity(&activity.facts().activity_id).is_none() {
+                validate_new_activity_prompt(&self.runs, activity.facts())?;
+            }
+        }
         for request in previous.triggers.requests() {
             if self
                 .triggers
@@ -2828,7 +2580,7 @@ impl OrganizationFacts {
         if changed
             && matches!(
                 run.start_gate(),
-                RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. }
+                RunStartGate::Designing { .. }
             )
         {
             crate::application::design::validate_definition(self, &run, graph.definition(), false)
@@ -2872,7 +2624,7 @@ impl OrganizationFacts {
         if changed
             && matches!(
                 current.start_gate(),
-                RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. }
+                RunStartGate::Designing { .. }
             )
         {
             crate::application::design::validate_definition(
@@ -2896,38 +2648,47 @@ impl OrganizationFacts {
         &mut self,
         command: crate::RunCommand,
         patch: &crate::GraphPatch,
-    ) -> Result<crate::CommandReceipt, crate::RecordCommandError> {
+    ) -> Result<crate::CommandReceipt, crate::StoreFault> {
         let run_id = GraphRunId::new(command.run_id().as_str());
         if let Some(existing) = self
             .events
             .command_by_idempotency(command.run_id(), command.idempotency_key())
         {
             if existing.command() != &command {
-                return Err(crate::RecordCommandError::IdempotencyConflict);
+                return Err(crate::StoreFault::EventLedger(
+                    crate::RecordCommandError::IdempotencyConflict,
+                ));
             }
-            return self.events.try_accept(command);
+            return self
+                .events
+                .try_accept(command)
+                .map_err(crate::StoreFault::EventLedger);
         }
-        let current = self
-            .runs
-            .get(run_id.as_str())
-            .cloned()
-            .ok_or(crate::RecordCommandError::InvalidEventId)?;
+        let current =
+            self.runs
+                .get(run_id.as_str())
+                .cloned()
+                .ok_or(crate::StoreFault::GraphPatch(
+                    crate::GraphPatchError::UnknownRun,
+                ))?;
         let graph = crate::apply_graph_patch(current.graph(), patch, command.created_at())
-            .map_err(|_| crate::RecordCommandError::InvalidEventId)?;
+            .map_err(crate::StoreFault::GraphPatch)?;
         let changed = graph.definition() != current.graph().definition();
         if matches!(
             current.start_gate(),
-            RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. }
+            RunStartGate::Designing { .. }
         ) {
             crate::application::design::validate_definition(
                 self,
                 &current,
                 graph.definition(),
                 false,
-            )
-            .map_err(|_| crate::RecordCommandError::InvalidEventId)?;
+            )?;
         }
-        let receipt = self.events.try_accept(command)?;
+        let receipt = self
+            .events
+            .try_accept(command)
+            .map_err(crate::StoreFault::EventLedger)?;
         let mut updated = GraphRunFacts { graph, ..current };
         if changed {
             super::design::invalidate_graph_design(&mut updated);
@@ -3433,6 +3194,14 @@ impl OrganizationFacts {
         request: ActivityRequest,
     ) -> Result<ActivityRegistrationOutcome, OrganizationFactsError> {
         validate_activity_request(&self.runs, &request)?;
+        if self.activities.activity(&request.activity_id).is_none()
+            && self.activities.activity_by_idempotency_key(
+                request.run_id.as_str(),
+                &request.idempotency_key,
+            ).is_none()
+        {
+            validate_new_activity_prompt(&self.runs, &request)?;
+        }
         self.activities
             .register(request)
             .map_err(|_| OrganizationFactsError::InvalidActivity)
@@ -4071,7 +3840,7 @@ fn validate_activity_request(
                 task_id,
                 role_id,
                 session_ref,
-                prompt,
+                ..
             },
             NodeKind::Work,
         ) => {
@@ -4081,7 +3850,6 @@ fn validate_activity_request(
             if work.task_id() != task_id
                 || work.role_id() != role_id
                 || work.session_ref().as_str() != session_ref
-                || !activity_prompt_matches(run.graph().definition(), node, work.prompt(), prompt)
             {
                 return Err(OrganizationFactsError::InvalidActivity);
             }
@@ -4091,7 +3859,6 @@ fn validate_activity_request(
             ActivityKind::AgentTask {
                 role_id,
                 session_ref,
-                prompt,
                 ..
             },
             NodeKind::Review,
@@ -4101,7 +3868,6 @@ fn validate_activity_request(
                 .ok_or(OrganizationFactsError::InvalidActivity)?;
             if review.role_id() != role_id
                 || review.session_ref().as_str() != session_ref
-                || !activity_prompt_matches(run.graph().definition(), node, review.prompt(), prompt)
             {
                 return Err(OrganizationFactsError::InvalidActivity);
             }
@@ -4112,26 +3878,45 @@ fn validate_activity_request(
     }
 }
 
-fn activity_prompt_matches(
-    definition: &GraphDefinition,
-    node: &crate::NodeDefinition,
-    base_prompt: &str,
-    prompt: &str,
-) -> bool {
-    let Some(composed) =
-        crate::run::scheduler::compose_agent_task_prompt(definition, node, base_prompt)
-    else {
-        return false;
+fn validate_new_activity_prompt(
+    runs: &BTreeMap<String, GraphRunFacts>,
+    request: &ActivityRequest,
+) -> Result<(), OrganizationFactsError> {
+    let ActivityKind::AgentTask { prompt, .. } = &request.activity_kind else {
+        return Ok(());
     };
-    if prompt == composed {
-        return true;
+    let run = runs
+        .get(request.run_id.as_str())
+        .ok_or(OrganizationFactsError::UnknownActivityRun)?;
+    let node = run.graph().definition().node(&request.node_id)
+        .ok_or(OrganizationFactsError::InvalidActivity)?;
+    let base_prompt = node.work_assignment().map(|work| work.prompt())
+        .or_else(|| node.review_assignment().map(|review| review.prompt()))
+        .ok_or(OrganizationFactsError::InvalidActivity)?;
+    let mut raw_request = request.clone();
+    if let ActivityKind::AgentTask { prompt, .. } = &mut raw_request.activity_kind {
+        *prompt = base_prompt.to_owned();
     }
-    let Some((prefix, suffix)) = composed.split_once("\n\n<teamrun_completion_protocol>") else {
-        return false;
+    let composed = crate::run::scheduler::compose_agent_task_prompt_with_upstream_context(
+        run.team(), node, &raw_request, &[],
+    ).ok_or(OrganizationFactsError::InvalidActivity)?;
+    if prompt == &composed {
+        return Ok(());
+    }
+    let Some((prefix, suffix)) = composed.rsplit_once("\n\n任务执行与调整：") else {
+        return Err(OrganizationFactsError::InvalidActivity);
     };
-    prompt.starts_with(prefix)
-        && prompt.contains("\n\n<teamrun_upstream_context>\n")
-        && prompt.ends_with(&format!("\n\n<teamrun_completion_protocol>{suffix}"))
+    let upstream = prompt.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(&format!("\n\n任务执行与调整：{suffix}")));
+    if upstream.is_some_and(|context| {
+        context.starts_with("\n\n<teamrun_upstream_context>\n")
+            && context.ends_with("\n</teamrun_upstream_context>")
+    })
+    {
+        Ok(())
+    } else {
+        Err(OrganizationFactsError::InvalidActivity)
+    }
 }
 
 fn validate_activity_target(

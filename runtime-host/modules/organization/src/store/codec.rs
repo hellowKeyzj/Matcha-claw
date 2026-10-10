@@ -37,7 +37,7 @@ use crate::{
         delivery::{
             AuthorizedGraphOutcome, AuthorizedGraphResolution, AuthorizedGraphResolutionReceipt,
             NativeRunReceiptReference, NativeTerminalStatus, TeamNodeOutput,
-            TeamNodeOutputDispatch, TerminalObservationResolution, TerminalObservationSnapshot,
+            TerminalObservationResolution, TerminalObservationSnapshot,
             TerminalObservationSnapshotInput,
         },
         event::{
@@ -842,7 +842,7 @@ fn encode_terminal_observation(
     match observation.output() {
         None => output.push(0),
         Some(team_output) => {
-            output.push(1);
+            output.push(2);
             encode_team_node_output(output, team_output)?;
         }
     }
@@ -855,13 +855,7 @@ fn encode_team_node_output(
 ) -> Result<(), StoreFault> {
     push_string(output, team_output.final_assistant_text())?;
     push_string(output, team_output.summary())?;
-    push_string(output, team_output.decision())?;
-    push_count(output, team_output.dispatch().len())?;
-    for dispatch in team_output.dispatch() {
-        push_string(output, dispatch.role_id())?;
-        push_string(output, dispatch.task())?;
-    }
-    Ok(())
+    push_string(output, team_output.decision())
 }
 
 fn encode_activities(
@@ -1648,16 +1642,6 @@ fn push_optional_u64(output: &mut Vec<u8>, value: Option<u64>) {
 fn encode_start_gate(output: &mut Vec<u8>, start_gate: &RunStartGate) -> Result<(), StoreFault> {
     match start_gate {
         RunStartGate::Intake => output.push(0),
-        RunStartGate::ProposalPending {
-            proposal_id,
-            summary,
-            source_delivery_id,
-        } => {
-            output.push(1);
-            push_string(output, proposal_id)?;
-            push_string(output, summary)?;
-            push_string(output, source_delivery_id)?;
-        }
         RunStartGate::Started => output.push(2),
         RunStartGate::Designing {
             design_epoch,
@@ -1666,26 +1650,6 @@ fn encode_start_gate(output: &mut Vec<u8>, start_gate: &RunStartGate) -> Result<
             output.push(3);
             push_string(output, design_epoch)?;
             push_optional_string(output, prompt_generation.as_deref())?;
-        }
-        RunStartGate::DesignProposalPending {
-            design_epoch,
-            prompt_generation,
-            graph_version,
-            proposal_id,
-            summary,
-            source_delivery_id,
-        } => {
-            output.push(4);
-            for value in [
-                design_epoch,
-                prompt_generation,
-                graph_version,
-                proposal_id,
-                summary,
-                source_delivery_id,
-            ] {
-                push_string(output, value)?;
-            }
         }
     }
     Ok(())
@@ -2429,7 +2393,19 @@ impl<'a> Reader<'a> {
         let observed_at = self.u64()?;
         let output = match self.byte()? {
             0 => None,
-            1 => Some(self.team_node_output()?),
+            1 => {
+                let output = self.team_node_output()?;
+                // Schema 25 tag 1 stored dispatch pairs after the immutable output snapshot.
+                for _ in 0..self.count()? {
+                    let role_id = self.string()?;
+                    let task = self.string()?;
+                    if role_id.trim().is_empty() || task.trim().is_empty() {
+                        return Err(StoreFault::InvalidFacts);
+                    }
+                }
+                Some(output)
+            }
+            2 => Some(self.team_node_output()?),
             _ => return Err(StoreFault::CorruptRecord),
         };
         let resolution = self.terminal_resolution()?;
@@ -2454,14 +2430,7 @@ impl<'a> Reader<'a> {
         let final_assistant_text = self.string()?;
         let summary = self.string()?;
         let decision = self.string()?;
-        let dispatch = (0..self.count()?)
-            .map(|_| {
-                let role_id = self.string()?;
-                let task = self.string()?;
-                TeamNodeOutputDispatch::new(role_id, task).map_err(|_| StoreFault::InvalidFacts)
-            })
-            .collect::<Result<Vec<_>, StoreFault>>()?;
-        TeamNodeOutput::restore(final_assistant_text, summary, decision, dispatch)
+        TeamNodeOutput::restore(final_assistant_text, summary, decision)
             .map_err(|_| StoreFault::InvalidFacts)
     }
 
@@ -2589,21 +2558,29 @@ impl<'a> Reader<'a> {
     fn start_gate(&mut self) -> Result<RunStartGate, StoreFault> {
         match self.byte()? {
             0 => Ok(RunStartGate::Intake),
-            1 => RunStartGate::proposal_pending(self.string()?, self.string()?, self.string()?)
-                .map_err(|_| StoreFault::InvalidFacts),
+            1 => {
+                // Retired proposal payload is consumed once when restoring existing facts.
+                for _ in 0..3 {
+                    self.string()?;
+                }
+                Ok(RunStartGate::Intake)
+            }
             2 => Ok(RunStartGate::Started),
             3 => Ok(RunStartGate::Designing {
                 design_epoch: self.string()?,
                 prompt_generation: self.optional_string()?,
             }),
-            4 => Ok(RunStartGate::DesignProposalPending {
-                design_epoch: self.string()?,
-                prompt_generation: self.string()?,
-                graph_version: self.string()?,
-                proposal_id: self.string()?,
-                summary: self.string()?,
-                source_delivery_id: self.string()?,
-            }),
+            4 => {
+                let design_epoch = self.string()?;
+                // Consume the retired proposal payload so existing facts logs remain readable.
+                for _ in 0..5 {
+                    self.string()?;
+                }
+                Ok(RunStartGate::Designing {
+                    design_epoch,
+                    prompt_generation: None,
+                })
+            }
             _ => Err(StoreFault::InvalidFacts),
         }
     }

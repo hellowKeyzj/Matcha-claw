@@ -1,5 +1,6 @@
-import type { SessionRenderToolCard, SessionRenderToolStatusKind } from '../../../types/session/tool-card';
-import type { ToolActivityTone, ToolActivityViewModel } from '../tool-activity-view-model';
+import type { TFunction } from 'i18next';
+import type { SessionRenderToolCard } from '../../../types/session/tool-card';
+import type { ToolActivityContent } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
 import { matchKnownToolName, normalizeToolName } from './types';
 
@@ -125,9 +126,9 @@ function readResultText(tool: SessionRenderToolCard): string | null {
   return null;
 }
 
-function basename(path: string | null): string {
+function basename(path: string | null, t: TFunction<'chat'>): string {
   if (!path) {
-    return '文件';
+    return t('toolActivity.fileLabel');
   }
   return path.replace(/[\\/]+$/g, '').split(/[\\/]/).pop() || path;
 }
@@ -410,30 +411,26 @@ function countContentLines(content: string | null): number | null {
   return content.split(/\r\n|\r|\n/).length;
 }
 
-function truncateText(text: string): string {
+function truncateText(text: string, t: TFunction<'chat'>): string {
   if (text.length <= MAX_EXPANDED_TEXT_LENGTH) {
     return text;
   }
-  return `${text.slice(0, MAX_EXPANDED_TEXT_LENGTH).trimEnd()}\n…已截断`;
+  return `${text.slice(0, MAX_EXPANDED_TEXT_LENGTH).trimEnd()}\n${t('toolActivity.truncated')}`;
 }
 
-function resolveToolTone(status: SessionRenderToolStatusKind): ToolActivityTone {
-  if (status === 'running') return 'running';
-  if (status === 'error') return 'danger';
-  if (status === 'missing_result') return 'muted';
-  return 'neutral';
-}
-
-function buildTitle(projection: FileToolProjection): string {
-  const verb = projection.operation === 'create' ? '写入' : '更新';
+function buildTitle(projection: FileToolProjection, t: TFunction<'chat'>): string {
   const fileCount = projection.diffScan?.fileCount ?? 0;
   if (fileCount > 1) {
-    return `${verb} ${fileCount} 个文件`;
+    return projection.operation === 'create'
+      ? t('toolActivity.file.writeFiles', { count: fileCount })
+      : t('toolActivity.file.updateFiles', { count: fileCount });
   }
-  return `${verb} ${basename(projection.filePath)}`;
+  return projection.operation === 'create'
+    ? t('toolActivity.file.write', { name: basename(projection.filePath, t) })
+    : t('toolActivity.file.update', { name: basename(projection.filePath, t) });
 }
 
-function pushDiffStatLabels(labels: ToolActivityViewModel['trailingLabels'], stat: DiffStat | null): void {
+function pushDiffStatLabels(labels: ToolActivityContent['trailingLabels'], stat: DiffStat | null): void {
   if (!stat) {
     return;
   }
@@ -445,11 +442,11 @@ function pushDiffStatLabels(labels: ToolActivityViewModel['trailingLabels'], sta
   }
 }
 
-function buildTrailingLabels(projection: FileToolProjection): ToolActivityViewModel['trailingLabels'] {
-  const labels: ToolActivityViewModel['trailingLabels'] = [];
+function buildTrailingLabels(projection: FileToolProjection, t: TFunction<'chat'>): ToolActivityContent['trailingLabels'] {
+  const labels: ToolActivityContent['trailingLabels'] = [];
   const fileCount = projection.diffScan?.fileCount ?? 0;
   if (fileCount > 1) {
-    labels.push({ text: `${fileCount} 个文件`, tone: 'muted' });
+    labels.push({ text: t('toolActivity.files', { count: fileCount }), tone: 'muted' });
   }
 
   pushDiffStatLabels(labels, projection.providedDiffStat ?? projection.diffScan);
@@ -465,7 +462,7 @@ function buildTrailingLabels(projection: FileToolProjection): ToolActivityViewMo
   return [];
 }
 
-function buildDiffFileList(projection: FileToolProjection): string | null {
+function buildDiffFileList(projection: FileToolProjection, t: TFunction<'chat'>): string | null {
   const diffScan = projection.diffScan;
   if (!diffScan || diffScan.fileCount <= 1 || diffScan.filePaths.length === 0) {
     return null;
@@ -473,24 +470,24 @@ function buildDiffFileList(projection: FileToolProjection): string | null {
   const filePaths = diffScan.filePaths.slice(0, MAX_DIFF_FILE_LIST_LENGTH);
   const omittedCount = Math.max(0, diffScan.fileCount - filePaths.length);
   return omittedCount > 0
-    ? `${filePaths.join('\n')}\n…另 ${omittedCount} 个文件`
+    ? `${filePaths.join('\n')}\n${t('toolActivity.file.moreFiles', { count: omittedCount })}`
     : filePaths.join('\n');
 }
 
-function buildTextBlocks(projection: FileToolProjection): ToolActivityViewModel['textBlocks'] {
-  const blocks: ToolActivityViewModel['textBlocks'] = [];
-  const diffFileList = buildDiffFileList(projection);
+function buildTextBlocks(projection: FileToolProjection, t: TFunction<'chat'>): ToolActivityContent['textBlocks'] {
+  const blocks: ToolActivityContent['textBlocks'] = [];
+  const diffFileList = buildDiffFileList(projection, t);
   if (diffFileList) {
     blocks.push({
       kind: 'input',
-      title: '文件',
+      title: t('toolActivity.fileLabel'),
       text: diffFileList,
       copyable: true,
     });
   } else if (projection.filePath) {
     blocks.push({
       kind: 'input',
-      title: '路径',
+      title: t('toolActivity.path'),
       text: projection.filePath,
       copyable: true,
     });
@@ -499,23 +496,23 @@ function buildTextBlocks(projection: FileToolProjection): ToolActivityViewModel[
   if (projection.diffText) {
     blocks.push({
       kind: 'output',
-      title: fileCount > 1 ? `差异（${fileCount} 个文件）` : '差异',
-      text: truncateText(projection.diffText),
+      title: fileCount > 1 ? t('toolActivity.file.diffFiles', { count: fileCount }) : t('toolActivity.file.diff'),
+      text: truncateText(projection.diffText, t),
       copyable: false,
     });
   } else if (projection.content != null) {
     blocks.push({
       kind: 'output',
-      title: projection.operation === 'update' ? '更新内容' : '内容',
-      text: truncateText(projection.content),
+      title: projection.operation === 'update' ? t('toolActivity.file.updatedContent') : t('toolActivity.content'),
+      text: truncateText(projection.content, t),
       copyable: false,
     });
   }
   if (projection.outputText && projection.outputText !== projection.content) {
     blocks.push({
       kind: 'output',
-      title: '结果',
-      text: truncateText(projection.outputText),
+      title: t('toolActivity.result'),
+      text: truncateText(projection.outputText, t),
       copyable: false,
     });
   }
@@ -529,19 +526,16 @@ export function isFileToolActivityName(name: string): boolean {
     || /^openclaw.*file.*(create|update|write|edit)/.test(normalized);
 }
 
-export function buildFileToolActivityViewModel(tool: SessionRenderToolCard): ToolActivityViewModel {
+export function buildFileToolActivityContent(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {
   const projection = buildProjection(tool);
-  const textBlocks = buildTextBlocks(projection);
+  const textBlocks = buildTextBlocks(projection, t);
   return {
-    title: buildTitle(projection),
-    tone: resolveToolTone(tool.status),
-    isRunning: tool.status === 'running',
-    isError: tool.status === 'error',
+    title: buildTitle(projection, t),
     canExpand: textBlocks.length > 0,
-    trailingLabels: buildTrailingLabels(projection),
+    trailingLabels: buildTrailingLabels(projection, t),
     textBlocks,
     diffStatPlacement: 'header',
   };
 }
 
-export const fileToolActivityRenderer = buildFileToolActivityViewModel;
+export const fileToolActivityRenderer = buildFileToolActivityContent;

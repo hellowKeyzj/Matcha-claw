@@ -10,8 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 anydoc.workspace = true
-arrow-array.workspace = true
-arrow-schema.workspace = true
 base64.workspace = true
 calamine.workspace = true
 chrono.workspace = true
@@ -21,7 +19,6 @@ foundation = { version = "0.1.0", path = "../../foundation" }
 futures-util.workspace = true
 html2text.workspace = true
 image.workspace = true
-lancedb.workspace = true
 mobi.workspace = true
 notify.workspace = true
 office_oxide.workspace = true
@@ -40,3 +37,14 @@ tokio.workspace = true
 tokio-util.workspace = true
 tokenizers.workspace = true
 zip.workspace = true
+
+# Newer LanceDB releases dropped Intel macOS support: lancedb/lancedb#2836.
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+arrow-array = "56.2"
+arrow-schema = "56.2"
+lancedb = { version = "=0.22.3", default-features = false }
+
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+lancedb.workspace = true

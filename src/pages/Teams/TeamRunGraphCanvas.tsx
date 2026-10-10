@@ -1,7 +1,9 @@
-import { useEffect, useId, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import { Bot, CheckCircle2, FileCode2, Flag, GitMerge, Maximize2, Minus, Plus, UserCheck, Zap, type LucideIcon } from 'lucide-react';
 import { StableScrollArea } from '@/components/scroll';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { createGraphLayoutEngine, routeGraphEdges } from './team-graph-layout';
+import type { GraphLayoutInput, GraphLayoutResult, GraphPoint } from './team-graph-layout-types';
 import type {
   TeamGraphEdgeAction,
   TeamGraphEdgeRecord,
@@ -29,6 +31,9 @@ export type TeamRunGraphCanvasLabels = {
   zoomIn?: string;
   zoomOut?: string;
   fitToView?: string;
+  autoLayout?: string;
+  layoutPending?: string;
+  layoutFailed?: string;
   workflowCanvas: string;
   workflowEdges: string;
   nodePalette: string;
@@ -198,8 +203,6 @@ type TeamGraphEdgeVisual = {
 
 const NODE_WIDTH = 220;
 const NODE_HEIGHT = 118;
-const COLUMN_GAP = 280;
-const ROW_GAP = 190;
 const CANVAS_PADDING = 72;
 const DRAG_THRESHOLD = 3;
 const START_CRON_PRESETS: Array<{ presetId: Exclude<TeamGraphCronPresetId, 'custom'>; cron: string }> = [
@@ -386,19 +389,94 @@ function edgeDisplayLabel(edge: TeamGraphEdgeRecord): string {
   return edge.sourcePort || edge.kind || edge.label || '';
 }
 
-function positionNodes(
-  nodes: TeamGraphNodeRecord[],
-  draftPositions: Record<string, { x: number; y: number }>,
-  layoutPositions: Record<string, { x: number; y: number }>,
-  columns: number,
-): PositionedNode[] {
-  return nodes.map((node, index) => {
-    const position = draftPositions[node.nodeId] ?? layoutPositions[node.nodeId] ?? {
-      x: CANVAS_PADDING + (index % columns) * COLUMN_GAP,
-      y: CANVAS_PADDING + Math.floor(index / columns) * ROW_GAP,
+function useGraphLayout(scope: string, input: GraphLayoutInput, measured: boolean, dragging: boolean) {
+  const [layout, setLayout] = useState<{ scope: string; shapeKey: string; result: GraphLayoutResult } | null>(null);
+  const [status, setStatus] = useState<'idle' | 'pending' | 'failed'>('idle');
+  const shapeKey = useMemo(() => JSON.stringify([input.nodes, input.edges]), [input]);
+  const contextRef = useRef({ scope, input, dragging, shapeKey });
+  const requestRef = useRef<((arrange: boolean) => Promise<GraphLayoutResult | null>) | null>(null);
+  const acceptRef = useRef<((result: GraphLayoutResult) => void) | null>(null);
+
+  useLayoutEffect(() => {
+    contextRef.current = { scope, input, dragging, shapeKey };
+  }, [scope, input, dragging, shapeKey]);
+
+  useEffect(() => {
+    const engine = createGraphLayoutEngine();
+    let disposed = false;
+    let running = false;
+    let previous: { scope: string; shapeKey: string; result: GraphLayoutResult } | null = null;
+    type Request = { arrange: boolean; context: typeof contextRef.current; resolve: (result: GraphLayoutResult | null) => void };
+    let pending: Request | null = null;
+    const drain = async () => {
+      if (running) return;
+      running = true;
+      while (pending && !disposed) {
+        const request = pending;
+        pending = null;
+        const { context } = request;
+        try {
+          const result = await engine.layout(request.arrange
+            ? { ...context.input, fixedPositions: {}, previousPositions: undefined }
+            : { ...context.input, previousPositions: previous?.scope === context.scope
+              ? { ...previous.result.positions, ...context.input.fixedPositions }
+              : undefined });
+          if (disposed || context !== contextRef.current || context.dragging) {
+            request.resolve(null);
+            continue;
+          }
+          if (!request.arrange) {
+            previous = { scope: context.scope, shapeKey: context.shapeKey, result };
+            setLayout({ scope: context.scope, shapeKey: context.shapeKey, result });
+          }
+          setStatus('idle');
+          request.resolve(result);
+        } catch (error) {
+          if (!disposed && context === contextRef.current) {
+            console.error('[team-graph:layout]', error);
+            setStatus('failed');
+          }
+          request.resolve(null);
+        }
+      }
+      running = false;
     };
-    return { ...node, x: position.x, y: position.y };
-  });
+    acceptRef.current = (result) => {
+      const context = contextRef.current;
+      previous = { scope: context.scope, shapeKey: context.shapeKey, result };
+      setLayout({ scope: context.scope, shapeKey: context.shapeKey, result });
+    };
+    requestRef.current = (arrange) => new Promise((resolve) => {
+      pending?.resolve(null);
+      pending = null;
+      const context = { ...contextRef.current };
+      contextRef.current = context;
+      if (!arrange && previous?.scope === context.scope && previous.shapeKey === context.shapeKey) {
+        setStatus('idle');
+        resolve(null);
+        return;
+      }
+      pending = { arrange, context, resolve };
+      setStatus('pending');
+      void drain();
+    });
+    return () => {
+      disposed = true;
+      pending?.resolve(null);
+      pending = null;
+      requestRef.current = null;
+      acceptRef.current = null;
+      engine.dispose();
+    };
+  }, []);
+
+  const requestLayout = useCallback((arrange = false) => requestRef.current?.(arrange) ?? Promise.resolve(null), []);
+  useEffect(() => {
+    if (measured && !dragging) void requestLayout();
+  }, [scope, input, measured, dragging, requestLayout]);
+
+  const acceptLayout = useCallback((result: GraphLayoutResult) => acceptRef.current?.(result), []);
+  return { layout: layout?.scope === scope ? layout : null, shapeKey, status, requestLayout, acceptLayout };
 }
 
 type NodePaletteControlProps = {
@@ -464,15 +542,6 @@ function NodePaletteControl({ labels, isOpen, isSaving, onToggle, onClose, onAdd
       </div>
     </div>
   );
-}
-
-function createEdgePath(source: PositionedNode, target: PositionedNode, sourceWidth: number, sourceHeight: number, targetHeight: number): string {
-  const startX = source.x + sourceWidth;
-  const startY = source.y + sourceHeight / 2;
-  const endX = target.x;
-  const endY = target.y + targetHeight / 2;
-  const controlOffset = Math.max(80, Math.abs(endX - startX) / 2);
-  return `M ${startX} ${startY} C ${startX + controlOffset} ${startY}, ${endX - controlOffset} ${endY}, ${endX} ${endY}`;
 }
 
 function parseJsonObject(value: string, fieldLabel: string, invalidJsonLabel: string): Record<string, unknown> {
@@ -920,6 +989,7 @@ export function TeamRunGraphCanvas({
   const canEdit = mode === 'editable' && Boolean(onPatchGraph);
   const canvasId = useId();
   const [zoom, setZoom] = useState<number | null>(null);
+  const [readyScope, setReadyScope] = useState<string | null>(null);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [configurationSheet, setConfigurationSheet] = useState<ConfigurationSheet>(null);
@@ -958,7 +1028,9 @@ export function TeamRunGraphCanvas({
   const [connectionDraft, setConnectionDraft] = useState<ConnectionDraft | null>(null);
   const [isNodePaletteOpen, setNodePaletteOpen] = useState(false);
   const [draftPositions, setDraftPositions] = useState<Record<string, { x: number; y: number }>>({});
-  const [dragState, setDragState] = useState<DragState | null>(null);
+  const [dragNodeId, setDragNodeId] = useState<string | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const dragFrameRef = useRef<number | null>(null);
   const [nodeSizes, setNodeSizes] = useState<Record<string, NodeSize>>({});
   const canvasScrollerRef = useRef<HTMLDivElement | null>(null);
   const nodeElementsRef = useRef<Record<string, HTMLDivElement | null>>({});
@@ -966,14 +1038,56 @@ export function TeamRunGraphCanvas({
 
   const effectiveGraph = useMemo<TeamGraphSnapshotRecord>(() => graph ?? EMPTY_TEAM_GRAPH, [graph]);
   const graphRunId = effectiveGraph.runId ?? '';
-  const layoutRunIdRef = useRef(graphRunId);
-  const draftRunId = layoutRunIdRef.current;
-  const positionedNodes = useMemo(() => positionNodes(
-    effectiveGraph.nodes,
-    canEdit && draftRunId === graphRunId ? draftPositions : {},
-    effectiveGraph.layout?.nodePositions ?? {},
-    compact ? 1 : 4,
-  ), [effectiveGraph.nodes, effectiveGraph.layout?.nodePositions, canEdit, draftRunId, graphRunId, draftPositions, compact]);
+  const layoutScope = JSON.stringify([graphRunId, effectiveGraph.graphId]);
+  const layoutScopeRef = useRef(layoutScope);
+  const [arrangedView, setArrangedView] = useState<{ scope: string; positions: Record<string, GraphPoint> } | null>(null);
+  const draftScope = layoutScopeRef.current;
+  const activeDrafts = useMemo(() => draftScope === layoutScope ? draftPositions : {}, [draftScope, layoutScope, draftPositions]);
+  const viewPositions = !canEdit && arrangedView?.scope === layoutScope ? arrangedView.positions : undefined;
+  const geometryKey = useMemo(() => {
+    const sourcePortsByNode = new Map(effectiveGraph.nodes.map((node) => [node.nodeId, connectionSourcesForNode(node).map((source) => source.sourcePort)]));
+    return JSON.stringify({
+      nodes: effectiveGraph.nodes.map((node) => ({
+        id: node.nodeId,
+        width: nodeSizes[node.nodeId]?.width ?? NODE_WIDTH,
+        height: nodeSizes[node.nodeId]?.height ?? NODE_HEIGHT,
+        sourcePorts: sourcePortsByNode.get(node.nodeId)!,
+      })).sort((a, b) => a.id.localeCompare(b.id)),
+      edges: effectiveGraph.edges.map((edge) => {
+        const ports = sourcePortsByNode.get(edge.sourceNodeId) ?? [];
+        return {
+          id: edge.edgeId, source: edge.sourceNodeId, target: edge.targetNodeId,
+          sourcePort: ports.includes(edge.sourcePort ?? '') ? edge.sourcePort! : ports[0] ?? 'completed',
+          rework: edge.action === 'rework' || edge.sourcePort === 'rework',
+        };
+      }).sort((a, b) => a.id.localeCompare(b.id)),
+      fixedPositions: Object.fromEntries(effectiveGraph.nodes.flatMap((node) => {
+        const position = viewPositions?.[node.nodeId] ?? effectiveGraph.layout?.nodePositions?.[node.nodeId];
+        return position ? [[node.nodeId, position]] : [];
+      }).sort(([a], [b]) => String(a).localeCompare(String(b)))),
+    });
+  }, [effectiveGraph.nodes, effectiveGraph.edges, effectiveGraph.layout?.nodePositions, nodeSizes, viewPositions]);
+  const layoutInput = useMemo(() => JSON.parse(geometryKey) as GraphLayoutInput, [geometryKey]);
+  const nodesMeasured = effectiveGraph.nodes.every((node) => Boolean(nodeSizes[node.nodeId]));
+  const currentGraphRef = useRef({ scope: layoutScope, input: layoutInput });
+  useLayoutEffect(() => { currentGraphRef.current = { scope: layoutScope, input: layoutInput }; }, [layoutScope, layoutInput]);
+  const { layout, shapeKey, status: layoutStatus, requestLayout, acceptLayout } = useGraphLayout(layoutScope, layoutInput, nodesMeasured, Boolean(dragNodeId) || isSaving);
+  const positions = useMemo(() => {
+    const next = { ...layout?.result.positions, ...layoutInput.fixedPositions, ...activeDrafts };
+    return layout && Object.entries(next).every(([id, point]) => point.x === layout.result.positions[id]?.x && point.y === layout.result.positions[id]?.y)
+      ? layout.result.positions : next;
+  }, [layout, layoutInput, activeDrafts]);
+  const positionedNodes = useMemo(() => effectiveGraph.nodes.map((node) => ({
+    ...node, ...(positions[node.nodeId] ?? { x: 0, y: 0 }),
+  })), [effectiveGraph.nodes, positions]);
+  const visibleGeometry = useMemo(() => {
+    if (layout?.shapeKey === shapeKey && positions === layout.result.positions) return layout.result;
+    return routeGraphEdges({
+      ...layoutInput,
+      nodes: layoutInput.nodes.filter((node) => positions[node.id]),
+      edges: layoutInput.edges.filter((edge) => positions[edge.source] && positions[edge.target]),
+    }, positions);
+  }, [layout, layoutInput, positions, shapeKey]);
   const nodeById = useMemo(
     () => new Map(positionedNodes.map((node) => [node.nodeId, node])),
     [positionedNodes],
@@ -995,37 +1109,83 @@ export function TeamRunGraphCanvas({
     selectedEdge ? effectiveGraph.edges.filter((edge) => edge.targetNodeId === selectedEdge.targetNodeId).length > 1 : false
   ), [effectiveGraph.edges, selectedEdge]);
   const selectedRole = roles.find((role) => role.roleId === readNodeRoleId(selectedNode) && (!graphRunId || role.runId === graphRunId));
-  const canvasWidth = Math.max(compact ? NODE_WIDTH + CANVAS_PADDING * 2 : 820, ...positionedNodes.map((node) => node.x + (nodeSizes[node.nodeId]?.width ?? NODE_WIDTH) + CANVAS_PADDING));
-  const canvasHeight = Math.max(compact ? NODE_HEIGHT + CANVAS_PADDING * 2 : 440, ...positionedNodes.map((node) => node.y + (nodeSizes[node.nodeId]?.height ?? NODE_HEIGHT) + CANVAS_PADDING));
-  const widthScale = viewportSize.width > 0 ? Math.min(1, viewportSize.width / canvasWidth) : 1;
-  const canvasScale = compact ? zoom ?? widthScale : 1;
-  const fitScale = Math.min(widthScale, viewportSize.height > 0 ? viewportSize.height / canvasHeight : 1);
+  const [origin, setOrigin] = useState({ scope: layoutScope, x: 0, y: 0 });
+  const canvasOrigin = {
+    x: Math.min(origin.scope === layoutScope ? origin.x : 0, visibleGeometry.bounds.x - CANVAS_PADDING),
+    y: Math.min(origin.scope === layoutScope ? origin.y : 0, visibleGeometry.bounds.y - CANVAS_PADDING),
+  };
+  const canvasWidth = Math.max(NODE_WIDTH + CANVAS_PADDING * 2, visibleGeometry.bounds.x + visibleGeometry.bounds.width + CANVAS_PADDING - canvasOrigin.x);
+  const canvasHeight = Math.max(NODE_HEIGHT + CANVAS_PADDING * 2, visibleGeometry.bounds.y + visibleGeometry.bounds.height + CANVAS_PADDING - canvasOrigin.y);
+  const fitScale = Math.min(1, viewportSize.width > 0 ? viewportSize.width / canvasWidth : 1, viewportSize.height > 0 ? viewportSize.height / canvasHeight : 1);
+  const canvasScale = zoom ?? fitScale;
+  const canvasReady = readyScope === layoutScope || effectiveGraph.nodes.length === 0;
   const webhookPublicUrl = buildWebhookPublicUrl(startWebhookPublicBaseUrl, startWebhookPath);
 
+  useLayoutEffect(() => {
+    const sameScope = origin.scope === layoutScope;
+    if (sameScope && origin.x === canvasOrigin.x && origin.y === canvasOrigin.y) return;
+    const scroller = canvasScrollerRef.current;
+    if (sameScope && scroller && zoom !== null) {
+      scroller.scrollLeft += (origin.x - canvasOrigin.x) * canvasScale;
+      scroller.scrollTop += (origin.y - canvasOrigin.y) * canvasScale;
+    }
+    setOrigin({ scope: layoutScope, x: canvasOrigin.x, y: canvasOrigin.y });
+  }, [origin, layoutScope, canvasOrigin.x, canvasOrigin.y, canvasScale, zoom]);
+
   useEffect(() => {
-    if (!compact || !canvasScrollerRef.current || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(([entry]) => {
-      if (entry) setViewportSize({ width: entry.contentRect.width, height: entry.contentRect.height });
-    });
-    observer.observe(canvasScrollerRef.current);
+    const element = canvasScrollerRef.current;
+    if (!element) return;
+    const measure = () => {
+      const style = getComputedStyle(element);
+      setViewportSize({
+        width: element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+        height: element.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+      });
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
     return () => observer.disconnect();
-  }, [compact]);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (layout?.shapeKey !== shapeKey || layoutStatus !== 'idle' || !nodesMeasured || layoutInput.nodes.length === 0 || viewportSize.width <= 0 || viewportSize.height <= 0) return;
+    if (zoom === null || readyScope !== layoutScope) setZoom(fitScale);
+    if (readyScope !== layoutScope) setReadyScope(layoutScope);
+  }, [zoom, layout, shapeKey, layoutStatus, nodesMeasured, layoutInput.nodes.length, viewportSize, fitScale, readyScope, layoutScope]);
+
+  const cancelDragFrame = useCallback(() => {
+    if (dragFrameRef.current !== null) cancelAnimationFrame(dragFrameRef.current);
+    dragFrameRef.current = null;
+  }, []);
+
+  useLayoutEffect(() => {
+    setDragNodeId(null);
+    setDraftPositions((current) => hasRecordEntries(current) ? {} : current);
+    return () => {
+      cancelDragFrame();
+      dragRef.current = null;
+    };
+  }, [layoutScope, canEdit, cancelDragFrame]);
 
   useEffect(() => {
     setZoom(null);
+    setReadyScope(null);
+    setIsSaving(false);
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
     setConfigurationSheet(null);
     setConnectionDraft(null);
-    setDragState(null);
     setNodePaletteOpen(false);
     setFormError(null);
-  }, [graphRunId, compact, canEdit]);
+  }, [layoutScope, canEdit]);
 
   useEffect(() => {
-    if (layoutRunIdRef.current !== graphRunId) {
-      layoutRunIdRef.current = graphRunId;
-      setDraftPositions((current) => (hasRecordEntries(current) ? {} : current));
+    if (layoutScopeRef.current !== layoutScope) {
+      layoutScopeRef.current = layoutScope;
+      setArrangedView(null);
+      setNodeSizes({});
       return;
     }
     setDraftPositions((current) => {
@@ -1033,7 +1193,8 @@ export function TeamRunGraphCanvas({
       let changed = false;
       const next: Record<string, { x: number; y: number }> = {};
       for (const [nodeId, position] of Object.entries(current)) {
-        if (activeNodeIds.has(nodeId)) {
+        const saved = effectiveGraph.layout?.nodePositions?.[nodeId];
+        if (activeNodeIds.has(nodeId) && (dragNodeId === nodeId || saved?.x !== position.x || saved?.y !== position.y)) {
           next[nodeId] = position;
         } else {
           changed = true;
@@ -1041,14 +1202,15 @@ export function TeamRunGraphCanvas({
       }
       return changed ? next : current;
     });
-  }, [effectiveGraph.nodes, graphRunId]);
+  }, [effectiveGraph.nodes, effectiveGraph.layout?.nodePositions, layoutScope, dragNodeId]);
 
+  const nodeIdsKey = useMemo(() => JSON.stringify(effectiveGraph.nodes.map((node) => node.nodeId).sort()), [effectiveGraph.nodes]);
   useEffect(() => {
-    const activeNodeIds = new Set(positionedNodes.map((node) => node.nodeId));
+    const activeNodeIds = new Set<string>(JSON.parse(nodeIdsKey));
     for (const nodeId of Object.keys(nodeElementsRef.current)) {
       if (!activeNodeIds.has(nodeId)) delete nodeElementsRef.current[nodeId];
     }
-  }, [positionedNodes]);
+  }, [nodeIdsKey]);
 
   useEffect(() => {
     if (typeof ResizeObserver === 'undefined') {
@@ -1074,7 +1236,9 @@ export function TeamRunGraphCanvas({
         for (const entry of entries) {
           const nodeId = entry.target.getAttribute('data-node-id');
           if (!nodeId) continue;
-          const size = { width: Math.ceil(entry.contentRect.width || NODE_WIDTH), height: Math.ceil(entry.contentRect.height || NODE_HEIGHT) };
+          const element = entry.target as HTMLDivElement;
+          const box = entry.borderBoxSize?.[0];
+          const size = { width: Math.ceil(box?.inlineSize || element.offsetWidth), height: Math.ceil(box?.blockSize || element.offsetHeight) };
           if (next[nodeId]?.width !== size.width || next[nodeId]?.height !== size.height) {
             next[nodeId] = size;
             changed = true;
@@ -1084,10 +1248,10 @@ export function TeamRunGraphCanvas({
       });
     });
     for (const element of Object.values(nodeElementsRef.current)) {
-      if (element) observer.observe(element);
+      if (element) observer.observe(element, { box: 'border-box' });
     }
     return () => observer.disconnect();
-  }, [positionedNodes]);
+  }, [nodeIdsKey, layoutScope]);
 
   useEffect(() => {
     setCopiedWebhookPublicUrl(false);
@@ -1157,16 +1321,41 @@ export function TeamRunGraphCanvas({
 
   const submitGraphPatch = async (operations: TeamGraphPatchOperation[]): Promise<boolean> => {
     if (!canEdit || !onPatchGraph || isSaving || mutationPending) return false;
+    const scope = currentGraphRef.current.scope;
     setIsSaving(true);
     setFormError(null);
     try {
       await onPatchGraph(operations);
-      return true;
+      return currentGraphRef.current.scope === scope;
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : String(error));
+      if (currentGraphRef.current.scope === scope) setFormError(error instanceof Error ? error.message : String(error));
       return false;
     } finally {
-      setIsSaving(false);
+      if (currentGraphRef.current.scope === scope) setIsSaving(false);
+    }
+  };
+
+  const handleAutoLayout = async (): Promise<void> => {
+    const context = currentGraphRef.current;
+    const result = await requestLayout(true);
+    if (!result || currentGraphRef.current !== context) return;
+    if (!canEdit) {
+      acceptLayout(result);
+      setArrangedView({ scope: layoutScope, positions: result.positions });
+      setOrigin({ scope: layoutScope, x: Math.min(0, result.bounds.x - CANVAS_PADDING), y: Math.min(0, result.bounds.y - CANVAS_PADDING) });
+      setZoom(null);
+      return;
+    }
+    setDraftPositions(result.positions);
+    const saved = await submitGraphPatch(Object.entries(result.positions).map(([nodeId, position]) => ({
+      op: 'set_node_position', nodeId, position,
+    })));
+    if (currentGraphRef.current.scope !== context.scope) return;
+    setDraftPositions({});
+    if (saved && JSON.stringify([context.input.nodes, context.input.edges]) === JSON.stringify([currentGraphRef.current.input.nodes, currentGraphRef.current.input.edges])) {
+      acceptLayout(result);
+      setOrigin({ scope: layoutScope, x: Math.min(0, result.bounds.x - CANVAS_PADDING), y: Math.min(0, result.bounds.y - CANVAS_PADDING) });
+      setZoom(null);
     }
   };
 
@@ -1379,8 +1568,8 @@ export function TeamRunGraphCanvas({
     const nodeId = createProjectionNodeId(kind);
     const viewport = readCanvasViewport(canvasScrollerRef.current);
     const rawPosition = nextNodePosition(positionedNodes, nodeSizes, viewport ? {
-      scrollLeft: viewport.scrollLeft / canvasScale,
-      scrollTop: viewport.scrollTop / canvasScale,
+      scrollLeft: viewport.scrollLeft / canvasScale + canvasOrigin.x,
+      scrollTop: viewport.scrollTop / canvasScale + canvasOrigin.y,
       clientWidth: viewport.clientWidth / canvasScale,
       clientHeight: viewport.clientHeight / canvasScale,
     } : null);
@@ -1400,7 +1589,6 @@ export function TeamRunGraphCanvas({
       { op: 'add_node', node: graphPatchNode(node) },
       { op: 'set_node_position', nodeId, position },
     ])) {
-      setDraftPositions((current) => ({ ...current, [nodeId]: position }));
       setSelectedNodeId(nodeId);
       setNodePaletteOpen(false);
     }
@@ -1408,9 +1596,9 @@ export function TeamRunGraphCanvas({
 
 
   const handleNodePointerDown = (event: PointerEvent<HTMLDivElement>, node: PositionedNode): void => {
-    if (!canEdit || isSaving || event.button !== 0) return;
+    if (!canEdit || isSaving || mutationPending || dragRef.current || event.button !== 0) return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    setDragState({
+    dragRef.current = {
       nodeId: node.nodeId,
       pointerId: event.pointerId,
       pointerStartX: event.clientX,
@@ -1420,32 +1608,59 @@ export function TeamRunGraphCanvas({
       currentX: node.x,
       currentY: node.y,
       moved: false,
-    });
+    };
+    setDragNodeId(node.nodeId);
+  };
+
+  const updateDragPosition = (event: PointerEvent<HTMLDivElement>): DragState | null => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return null;
+    const dx = event.clientX - drag.pointerStartX;
+    const dy = event.clientY - drag.pointerStartY;
+    drag.currentX = Math.max(Math.min(CANVAS_PADDING / 2, drag.nodeStartX), drag.nodeStartX + dx / canvasScale);
+    drag.currentY = Math.max(Math.min(CANVAS_PADDING / 2, drag.nodeStartY), drag.nodeStartY + dy / canvasScale);
+    drag.moved ||= Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD;
+    return drag;
   };
 
   const handleNodePointerMove = (event: PointerEvent<HTMLDivElement>): void => {
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
-    const dx = event.clientX - dragState.pointerStartX;
-    const dy = event.clientY - dragState.pointerStartY;
-    const nextX = Math.max(CANVAS_PADDING / 2, dragState.nodeStartX + dx / canvasScale);
-    const nextY = Math.max(CANVAS_PADDING / 2, dragState.nodeStartY + dy / canvasScale);
-    const moved = dragState.moved || Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD;
-    setDraftPositions((current) => ({ ...current, [dragState.nodeId]: { x: nextX, y: nextY } }));
-    setDragState({ ...dragState, currentX: nextX, currentY: nextY, moved });
+    const drag = updateDragPosition(event);
+    if (!drag?.moved || dragFrameRef.current !== null) return;
+    dragFrameRef.current = requestAnimationFrame(() => {
+      dragFrameRef.current = null;
+      const latest = dragRef.current!;
+      const position = { x: latest.currentX, y: latest.currentY };
+      setDraftPositions((current) => ({ ...current, [latest.nodeId]: position }));
+    });
   };
 
   const handleNodePointerUp = async (event: PointerEvent<HTMLDivElement>): Promise<void> => {
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    const finishedDrag = updateDragPosition(event);
+    if (!finishedDrag) return;
+    cancelDragFrame();
+    dragRef.current = null;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
-    const finishedDrag = dragState;
-    setDragState(null);
+    const scope = currentGraphRef.current.scope;
+    setDragNodeId(null);
     if (finishedDrag.moved) {
       const position = { x: Math.round(finishedDrag.currentX), y: Math.round(finishedDrag.currentY) };
       setDraftPositions((current) => ({ ...current, [finishedDrag.nodeId]: position }));
       suppressClickNodeIdRef.current = finishedDrag.nodeId;
       window.setTimeout(() => { suppressClickNodeIdRef.current = null; }, 0);
       await submitGraphPatch([{ op: 'set_node_position', nodeId: finishedDrag.nodeId, position }]);
+      if (currentGraphRef.current.scope === scope) {
+        setDraftPositions((current) => Object.fromEntries(Object.entries(current).filter(([nodeId]) => nodeId !== finishedDrag.nodeId)));
+      }
     }
+  };
+
+  const handleNodePointerCancel = (event: PointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    cancelDragFrame();
+    dragRef.current = null;
+    setDraftPositions((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== drag.nodeId)));
+    setDragNodeId(null);
   };
 
   const handleStartConnection = (event: MouseEvent<HTMLButtonElement>, node: TeamGraphNodeRecord, source: ConnectionSource): void => {
@@ -1506,9 +1721,15 @@ export function TeamRunGraphCanvas({
 
       {formError ? <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{formError}</div> : null}
 
-      <div className={compact ? 'relative flex min-h-0 flex-1 flex-col gap-2' : 'relative'}>
-        {compact ? (
-          <div className="flex items-center justify-end gap-1 text-xs">
+      <div className={compact ? 'relative flex min-h-0 flex-1 flex-col gap-2' : 'relative'} aria-busy={!canvasReady && layoutStatus !== 'failed'}>
+          {!canvasReady && layoutStatus !== 'failed' ? <span role="status" className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">{labels.layoutPending ?? 'Arranging…'}</span> : null}
+          <div className="flex items-center justify-end gap-1 pb-2 text-xs" style={{ visibility: canvasReady || layoutStatus === 'failed' ? 'visible' : 'hidden' }}>
+            {layoutStatus === 'pending' ? <span role="status" className="mr-2 text-muted-foreground">{labels.layoutPending ?? 'Arranging…'}</span> : null}
+            {layoutStatus === 'failed' ? <span role="alert" className="mr-2 text-destructive">{labels.layoutFailed ?? 'Layout failed. Try arranging again.'}</span> : null}
+            <button type="button" className="rounded border px-2 py-1.5 hover:bg-muted disabled:opacity-50" onClick={() => { void handleAutoLayout(); }} disabled={isSaving || mutationPending || Boolean(dragNodeId) || !nodesMeasured || effectiveGraph.nodes.length === 0}>
+              {labels.autoLayout ?? 'Auto layout'}
+            </button>
+            <div className="flex items-center gap-1" style={{ visibility: canvasReady ? 'visible' : 'hidden' }}>
             <button type="button" className="rounded border p-1.5 hover:bg-muted" aria-label={labels.zoomOut ?? '−'} title={labels.zoomOut} onClick={() => setZoom(canvasScale / 1.2)}>
               <Minus className="h-3.5 w-3.5" />
             </button>
@@ -1517,14 +1738,18 @@ export function TeamRunGraphCanvas({
               <Plus className="h-3.5 w-3.5" />
             </button>
             <button type="button" className="rounded border p-1.5 hover:bg-muted" aria-label={labels.fitToView ?? labels.workflowCanvas} title={labels.fitToView} onClick={() => {
-              setZoom(fitScale);
+              const x = Math.min(0, visibleGeometry.bounds.x - CANVAS_PADDING);
+              const y = Math.min(0, visibleGeometry.bounds.y - CANVAS_PADDING);
+              setOrigin({ scope: layoutScope, x, y });
+              setZoom(Math.min(1, viewportSize.width / (visibleGeometry.bounds.x + visibleGeometry.bounds.width + CANVAS_PADDING - x), viewportSize.height / (visibleGeometry.bounds.y + visibleGeometry.bounds.height + CANVAS_PADDING - y)));
               canvasScrollerRef.current?.scrollTo({ left: 0, top: 0 });
             }}>
               <Maximize2 className="h-3.5 w-3.5" />
             </button>
+            </div>
           </div>
-        ) : null}
-        <StableScrollArea ref={canvasScrollerRef} data-team-graph-canvas="true" className={`relative overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner ${compact ? 'min-h-[240px] max-h-[60vh] flex-1' : 'min-h-[520px]'}`}>
+        <div className={compact ? 'relative flex min-h-0 flex-1 flex-col' : 'relative'}>
+        <StableScrollArea ref={canvasScrollerRef} data-team-graph-canvas="true" inert={!canvasReady} style={{ opacity: canvasReady ? 1 : 0 }} className={`relative overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner ${compact ? 'min-h-[240px] max-h-[60vh] flex-1' : 'h-[520px]'}`}>
           <div className="overflow-hidden" style={{ width: canvasWidth * canvasScale, height: canvasHeight * canvasScale }}>
           <div
             aria-label={labels.workflowCanvas}
@@ -1544,7 +1769,7 @@ export function TeamRunGraphCanvas({
               backgroundSize: '22px 22px',
             }}
           >
-            <svg className="absolute inset-0" width={canvasWidth} height={canvasHeight} role="img" aria-label={labels.workflowEdges}>
+            <svg className="absolute inset-0" width={canvasWidth} height={canvasHeight} viewBox={`${canvasOrigin.x} ${canvasOrigin.y} ${canvasWidth} ${canvasHeight}`} role="img" aria-label={labels.workflowEdges}>
               <defs>
                 {[...Object.values(EDGE_VISUALS), FALLBACK_EDGE_VISUAL].map((visual) => (
                   <marker key={visual.markerId} id={`${canvasId}-${visual.markerId}`} markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
@@ -1558,14 +1783,11 @@ export function TeamRunGraphCanvas({
                 if (!source || !target) {
                   return null;
                 }
-                const sourceSize = nodeSizes[source.nodeId] ?? { width: NODE_WIDTH, height: NODE_HEIGHT };
-                const targetSize = nodeSizes[target.nodeId] ?? { width: NODE_WIDTH, height: NODE_HEIGHT };
-                const startX = source.x + sourceSize.width;
-                const startY = source.y + sourceSize.height / 2;
-                const endX = target.x;
-                const endY = target.y + targetSize.height / 2;
-                const labelX = (startX + endX) / 2;
-                const labelY = (startY + endY) / 2 - 12;
+                const route = visibleGeometry.routes[edge.edgeId];
+                if (!route || !nodesMeasured) return null;
+                const path = route.points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
+                const labelX = route.label.x;
+                const labelY = route.label.y;
                 const edgeVisual = edgeVisualForEdge(edge);
                 const edgeLabel = edgeDisplayLabel(edge);
                 const isSelectedEdge = selectedEdgeId === edge.edgeId;
@@ -1574,7 +1796,7 @@ export function TeamRunGraphCanvas({
                 return (
                   <g key={edge.edgeId} onMouseEnter={() => setHoveredEdgeId(edge.edgeId)} onMouseLeave={() => setHoveredEdgeId((current) => current === edge.edgeId ? null : current)}>
                     <path
-                      d={createEdgePath(source, target, sourceSize.width, sourceSize.height, targetSize.height)}
+                      d={path}
                       fill="none"
                       stroke="transparent"
                       strokeWidth="14"
@@ -1599,7 +1821,7 @@ export function TeamRunGraphCanvas({
                       }}
                     />
                     <path
-                      d={createEdgePath(source, target, sourceSize.width, sourceSize.height, targetSize.height)}
+                      d={path}
                       fill="none"
                       stroke={edgeVisual.stroke}
                       strokeWidth={isSelectedEdge ? '3.5' : '2.5'}
@@ -1665,10 +1887,11 @@ export function TeamRunGraphCanvas({
                   onPointerDown={(event) => handleNodePointerDown(event, node)}
                   onPointerMove={handleNodePointerMove}
                   onPointerUp={(event) => { void handleNodePointerUp(event); }}
-                  className={`absolute ${canEdit ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} overflow-hidden rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
-                  style={{ left: node.x, top: node.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT }}
+                  onPointerCancel={handleNodePointerCancel}
+                  className={`absolute ${canEdit ? 'cursor-grab active:cursor-grabbing touch-none' : 'cursor-pointer'} rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
+                  style={{ left: node.x - canvasOrigin.x, top: node.y - canvasOrigin.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT, visibility: positions[node.nodeId] && nodeSizes[node.nodeId] ? 'visible' : 'hidden' }}
                 >
-                  <div className={`h-1 w-full ${visual.accentClassName}`} />
+                  <div className={`h-1 w-full rounded-t-[17px] ${visual.accentClassName}`} />
                   {canEdit ? <>
                   <button
                     type="button"
@@ -1730,6 +1953,7 @@ export function TeamRunGraphCanvas({
           onClose={() => setNodePaletteOpen(false)}
           onAddNode={(kind) => { void handleAddNode(kind); }}
         /> : null}
+        </div>
       </div>
 
       <Sheet open={configurationSheet !== null} onOpenChange={(open) => { if (!open) setConfigurationSheet(null); }}>

@@ -22,6 +22,9 @@ pub(crate) enum PeerQuery {
     State {
         reply: oneshot::Sender<HostState>,
     },
+    OpenClawRepairStatus {
+        reply: oneshot::Sender<runtime_directory::RuntimeRepairSnapshot>,
+    },
     OpenClawStatus {
         reply: oneshot::Sender<RuntimeState>,
     },
@@ -121,7 +124,7 @@ pub(crate) enum PeerQuery {
 impl PeerQuery {
     pub(crate) fn route_query(&self) -> QueryRoute<PeerKey> {
         match self {
-            Self::State { .. } | Self::OpenClawStatus { .. } => QueryRoute::Direct,
+            Self::State { .. } | Self::OpenClawStatus { .. } | Self::OpenClawRepairStatus { .. } => QueryRoute::Direct,
             Self::RuntimeLogs { endpoint, .. }
             | Self::RuntimeControlReadiness { endpoint, .. }
             | Self::RuntimeGatewayHealth { endpoint, .. }

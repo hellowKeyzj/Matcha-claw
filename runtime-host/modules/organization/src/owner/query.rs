@@ -68,8 +68,8 @@ pub enum OrganizationQuery {
     },
     StartGatePromptPlan {
         lookup: StartGateRuntimeBindingLookup,
-        proposal_id_seed: Option<String>,
-        requested_at: u64,
+        resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
+        trace_id: Option<String>,
         reply: tokio::sync::oneshot::Sender<
             Result<Option<StartGatePromptPlan>, organization::StoreFault>,
         >,
@@ -77,6 +77,10 @@ pub enum OrganizationQuery {
     TriggerList {
         team_id: Option<TeamId>,
         reply: crate::call::CallReply<Vec<ArmedTrigger>>,
+    },
+    RuntimeGraphContext {
+        scope: crate::TeamRunExecutionScope,
+        reply: tokio::sync::oneshot::Sender<Result<serde_json::Value, crate::StoreFault>>,
     },
     GraphContext {
         query: TeamGraphContextQuery,

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use foundation::execution::{OwnerRuntimeHandle, OwnerRuntimeSendError};
+use foundation::execution::OwnerRuntimeHandle;
 use openclaw::gateway::request::{
     OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest,
     OpenClawQuestionListGatewayRequest, OpenClawQuestionResolveGatewayRequest,
@@ -25,6 +25,7 @@ use super::{PeerCommand, PeerQuery, RuntimeStopCommandError, command::RuntimeLif
 pub(crate) struct PeerHandle {
     owner: OwnerRuntimeHandle<PeerCommand, PeerQuery>,
     admission: Arc<crate::composition::admission::HostAdmission>,
+    open_claw: Arc<openclaw::driver::OpenClawDriver>,
     runtime_directory: Arc<crate::composition::runtime_ports::RuntimeDriverDirectory>,
 }
 
@@ -41,6 +42,7 @@ impl openclaw::plugins::OpenClawPluginsRestartPort for PeerHandle {
         Box::pin(async move {
             matches!(
                 self.request_command(|reply| PeerCommand::RestartOpenClawAfterPluginChange {
+                    reservation: None,
                     reply,
                 })
                 .await,
@@ -55,8 +57,9 @@ impl PeerHandle {
         owner: OwnerRuntimeHandle<PeerCommand, PeerQuery>,
         admission: Arc<crate::composition::admission::HostAdmission>,
         runtime_directory: Arc<crate::composition::runtime_ports::RuntimeDriverDirectory>,
+        open_claw: Arc<openclaw::driver::OpenClawDriver>,
     ) -> Self {
-        Self { owner, admission, runtime_directory }
+        Self { owner, admission, runtime_directory, open_claw }
     }
 
     pub(crate) async fn state(&self) -> Result<HostState, ()> {
@@ -86,7 +89,7 @@ impl PeerHandle {
             return Ok(());
         }
 
-        self.request_command(|reply| PeerCommand::AutostartOpenClaw { reply })
+        self.request_command(|reply| PeerCommand::AutostartOpenClaw { reply, reservation: None })
             .await
             .map_err(|_| super::AutostartOpenClawError::PeerUnavailable)?
             .map(|_| ())
@@ -105,6 +108,7 @@ impl PeerHandle {
         let call = RuntimeLifecycleCall::new(call);
         self.admit_runtime_command(
             PeerCommand::StartRuntime {
+                reservation: None,
                 endpoint,
                 call: call.clone(),
             },
@@ -121,6 +125,7 @@ impl PeerHandle {
         let call = RuntimeLifecycleCall::new(call);
         self.admit_runtime_command(
             PeerCommand::StopRuntime {
+                reservation: None,
                 endpoint,
                 call: Some(call.clone()),
                 reply: None,
@@ -138,6 +143,7 @@ impl PeerHandle {
         let call = RuntimeLifecycleCall::new(call);
         self.admit_runtime_command(
             PeerCommand::RestartRuntime {
+                reservation: None,
                 endpoint,
                 call: call.clone(),
             },
@@ -146,37 +152,68 @@ impl PeerHandle {
         .await
     }
 
+    pub(crate) async fn admit_runtime_repair(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        call: RuntimeControlCallContext,
+    ) -> Result<CallReceipt, RuntimeControlLifecycleError> {
+        let call = RuntimeLifecycleCall::new(call);
+        self.admit_runtime_command(
+            PeerCommand::RepairRuntime { endpoint, call: call.clone(), reservation: None },
+            call,
+        ).await
+    }
+
+    pub(crate) async fn runtime_repair_status(
+        &self,
+    ) -> Result<runtime_directory::RuntimeRepairSnapshot, ()> {
+        self.request_query(|reply| PeerQuery::OpenClawRepairStatus { reply }).await
+    }
+
     async fn admit_runtime_command(
         &self,
-        command: PeerCommand,
+        mut command: PeerCommand,
         call: RuntimeLifecycleCall,
     ) -> Result<CallReceipt, RuntimeControlLifecycleError> {
         let endpoint = match &command {
             PeerCommand::StartRuntime { endpoint, .. }
             | PeerCommand::StopRuntime { endpoint, .. }
-            | PeerCommand::RestartRuntime { endpoint, .. } => endpoint,
-            _ => unreachable!("manual admission only accepts lifecycle start/stop/restart"),
+            | PeerCommand::RestartRuntime { endpoint, .. }
+            | PeerCommand::RepairRuntime { endpoint, .. } => endpoint,
+            _ => unreachable!("manual admission only accepts lifecycle commands"),
         };
         let mut detail = runtime_directory::call::RuntimeControlCallDetail::new(endpoint);
-        let admission = self
-            .admission
-            .admit_request()
-            .map_err(|_| OwnerRuntimeSendError::Closed)
-            .and_then(|()| self.owner.try_send_command(command));
+        let admission = if matches!(&command, PeerCommand::RepairRuntime { endpoint, .. }
+            if *endpoint != runtime_directory::RuntimeDriverIdentity::open_claw().endpoint()) {
+            Err(RuntimeControlLifecycleError::Unsupported)
+        } else {
+            self.admission.admit_request()
+            .map_err(|_| RuntimeControlLifecycleError::Unavailable)
+            .and_then(|()| {
+                if !command.reserve_lifecycle(&self.open_claw) {
+                    return Err(RuntimeControlLifecycleError::Busy);
+                }
+                self.owner.try_send_command(command).map_err(|_| RuntimeControlLifecycleError::Unavailable)
+            })
+        };
         if let Err(error) = admission {
             eprintln!(
-                "[runtime-control] call_id={} enqueue rejected: {error}",
+                "[runtime-control] call_id={} enqueue rejected: {error:?}",
                 call.context.id().as_str()
             );
-            detail.result = Some(runtime_directory::call::RuntimeControlCallResult::Unavailable);
-            detail.error = Some(RuntimeControlLifecycleError::Unavailable);
+            detail.result = Some(if error == RuntimeControlLifecycleError::Unsupported {
+                runtime_directory::call::RuntimeControlCallResult::Unsupported
+            } else {
+                runtime_directory::call::RuntimeControlCallResult::Unavailable
+            });
+            detail.error = Some(error);
             runtime_directory::call::finish_runtime_control_call(
                 Some(call.context),
                 platform::call::CallStatus::Rejected,
                 &detail,
             )
             .await;
-            return Err(RuntimeControlLifecycleError::Unavailable);
+            return Err(error);
         }
         call.accepted().await.map_err(|error| {
             eprintln!(
@@ -193,6 +230,7 @@ impl PeerHandle {
         call: Option<runtime_directory::call::RuntimeControlCallContext>,
     ) -> Result<Result<RuntimeState, RuntimeStopCommandError>, ()> {
         self.request_command(|reply| PeerCommand::StopRuntime {
+            reservation: None,
             endpoint,
             call: call.map(RuntimeLifecycleCall::new),
             reply: Some(reply),
@@ -396,14 +434,15 @@ impl PeerHandle {
         command: impl FnOnce(oneshot::Sender<T>) -> PeerCommand,
     ) -> Result<T, ()> {
         let (reply, response) = oneshot::channel();
-        let command = command(reply);
+        let mut command = command(reply);
         let call = match &command {
             PeerCommand::StopRuntime { endpoint, call, .. } => {
                 call.clone().map(|call| (call, endpoint.clone()))
             }
             _ => None,
         };
-        if self.owner.send_command(command).await.is_err() {
+        if !command.reserve_lifecycle(&self.open_claw)
+            || self.owner.send_command(command).await.is_err() {
             if let Some((call, endpoint)) = call {
                 let mut detail = runtime_directory::call::RuntimeControlCallDetail::new(&endpoint);
                 detail.result =

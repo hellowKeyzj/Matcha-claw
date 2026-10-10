@@ -151,13 +151,11 @@
   },
   "design": {
     "start": "Design run graph",
-    "readyTitle": "Run graph design is ready",
-    "readyDescription": "The current graph version has been validated. Confirming starts this version; further edits invalidate this proposal.",
-    "confirm": "Confirm and start",
+    "run": "Start",
+    "starting": "Starting…",
     "discuss": "Return to discussion",
-    "adjust": "Continue designing",
     "discussion": "Open team discussion",
-    "actionFailed": "Design action did not complete: {{error}}"
+    "actionFailed": "Team action did not complete: {{error}}"
   },
   "chat": {
     "teamNotFound": "Team not found",
@@ -174,7 +172,11 @@
   "run": {
     "create": "New Run",
     "delete": "Delete Run",
-    "history": "Run List",
+    "history": "Run history",
+    "unnamed": "New run",
+    "copyId": "Copy run ID",
+    "idCopied": "Run ID copied",
+    "copyIdFailed": "Could not copy the run ID. Try again.",
     "emptyRuns": "No runs yet. Create a run, then open the leader session and send a message to run it.",
     "createFirstRunHint": "This team has no run yet. Create a run, then open the leader session and send a message.",
     "noActiveRun": "No run selected",
@@ -199,6 +201,9 @@
       "zoomIn": "Zoom in",
       "zoomOut": "Zoom out",
       "fitToView": "Fit to view",
+      "autoLayout": "Arrange layout",
+      "layoutPending": "Arranging layout…",
+      "layoutFailed": "Layout failed. Try again.",
       "workflowCanvas": "Workflow canvas",
       "workflowEdges": "Workflow edges",
       "nodePalette": "Add node",
@@ -372,13 +377,6 @@
     "notePlaceholder": "Optional note",
     "waitingDecision": "Waiting Run Decision",
     "submitDecision": "Submit Decision",
-    "proposalPending": {
-      "title": "Proposal ready",
-      "emptySummary": "The leader has prepared a proposal.",
-      "confirm": "Confirm and start",
-      "discuss": "Continue discussion",
-      "cancel": "Cancel"
-    },
     "dependencyMissing": {
       "title": "Dependencies required before this run can continue",
       "description": "Required dependencies cannot be bypassed. Install missing skills or configure missing tools, then retry the dependency check.",

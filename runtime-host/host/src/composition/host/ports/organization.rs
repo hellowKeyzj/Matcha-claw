@@ -1,13 +1,15 @@
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use organization::{ActivityExecutionOutcome, ActivityExecutionRequest, RoleSessionIdentityResolver};
+use platform::trace::{session_trace, with_session_trace};
 use runtime_directory::RuntimeDriverIdentity;
+use serde_json::json;
 use sessions_module::{
     SessionHandle, SessionRunTerminalSnapshot, SessionTerminalHook,
     command::SessionEnsureOutcome,
     send::{SessionDeliveryContext, SessionSendCommand, SessionSendOutcome},
     send_hook::{
-        SessionSendHook, SessionSendHookFuture, SessionSendHookPrepared, SessionSendHookState,
+        SessionSendHook, SessionSendHookFuture, SessionSendHookPrepared,
     },
     state::{RunPhase, SessionEndpoint, SessionIdentity, SessionProvider, SessionSourceBinding},
 };
@@ -93,10 +95,6 @@ impl OrganizationSessionTerminal {
         Self {
             inner: organization::OrganizationSessionTerminal::start(organization, observation),
         }
-    }
-
-    pub(crate) fn start_gate_registry(&self) -> Arc<organization::StartGateRegistry> {
-        self.inner.start_gate_registry()
     }
 
     pub(crate) fn bind_repair_session(
@@ -185,10 +183,10 @@ pub(crate) struct StartGateSessionSendHook {
 impl StartGateSessionSendHook {
     pub(crate) fn new(
         organization: organization::OrganizationHandle,
-        start_gate: Arc<organization::StartGateRegistry>,
+        resolver: Arc<dyn RoleSessionIdentityResolver>,
     ) -> Self {
         Self {
-            inner: organization::StartGateSendHook::new(organization, start_gate),
+            inner: organization::StartGateSendHook::new(organization, resolver),
         }
     }
 }
@@ -197,36 +195,29 @@ impl SessionSendHook for StartGateSessionSendHook {
     fn before_send<'a>(
         &'a self,
         command: SessionSendCommand,
-        now_millis: u64,
+        _now_millis: u64,
     ) -> SessionSendHookFuture<'a> {
-        Box::pin(async move {
+        Box::pin(with_session_trace(command.trace_id().map(str::to_owned), async move {
             let request = organization::StartGateSendRequest::new(
                 start_gate_native_endpoint(command.identity.provider()),
                 command.identity.session_key.clone(),
+                command.identity.agent_id.clone(),
                 command.endpoint_session_id.clone(),
-                command.run_id.clone(),
-                command.idempotency_key.clone(),
                 command.delivery_context.is_some(),
             );
-            let Some(prepared) = self.inner.prepare(request, now_millis).await? else {
+            let Some(prepared) = self.inner.prepare(request).await? else {
                 return Ok(SessionSendHookPrepared::unchanged(command));
             };
             let command = command
                 .with_system_provenance_receipt(prepared.system_provenance_receipt().to_owned())
-                .map_err(|_| ())?;
-            Ok(SessionSendHookPrepared::with_state(
-                command,
-                Box::new(StartGateSendState(prepared.into_state())),
-            ))
-        })
-    }
-}
-
-struct StartGateSendState(organization::StartGateSendState);
-
-impl SessionSendHookState for StartGateSendState {
-    fn after_queued(self: Box<Self>, _session: SessionHandle, native_run_id: String) {
-        self.0.after_queued(native_run_id);
+                .map_err(|_| {
+                    session_trace("runtime.start-gate.injected", json!({
+                        "outcome": "error", "reason": "invalid_provenance_receipt",
+                    }));
+                })?;
+            session_trace("runtime.start-gate.injected", json!({ "outcome": "injected" }));
+            Ok(SessionSendHookPrepared::unchanged(command))
+        }))
     }
 }
 
@@ -235,6 +226,7 @@ pub(in crate::composition::host) struct TeamSessionExecutor {
     admission: Arc<HostAdmission>,
     session: sessions_module::SessionHandle,
     runtime_directory: Arc<RuntimeDriverDirectory>,
+    execution_authority: crate::team_mcp::ExecutionAuthority,
 }
 
 impl TeamSessionExecutor {
@@ -242,11 +234,13 @@ impl TeamSessionExecutor {
         admission: Arc<HostAdmission>,
         session: sessions_module::SessionHandle,
         runtime_directory: Arc<RuntimeDriverDirectory>,
+        execution_authority: crate::team_mcp::ExecutionAuthority,
     ) -> Self {
         Self {
             admission,
             session,
             runtime_directory,
+            execution_authority,
         }
     }
 }
@@ -328,6 +322,7 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
     ) -> runtime_directory::OwnedRuntimeFuture<ActivityExecutionOutcome> {
         let session = self.session.clone();
         let runtime_directory = Arc::clone(&self.runtime_directory);
+        let execution_authority = self.execution_authority.clone();
         Box::pin(async move {
             let delivery = request.delivery_request().clone();
             let binding = request.binding().clone();
@@ -370,10 +365,20 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
                     return ActivityExecutionOutcome::Unknown;
                 }
             }
+            let Ok(authority) = execution_authority.sign(&delivery) else {
+                return ActivityExecutionOutcome::Rejected {
+                    rejection: organization::DeliveryRejection::Permanent,
+                };
+            };
+            let message = format!(
+                "{}\n\n<team_run_authority>\n{}\n</team_run_authority>",
+                delivery.message,
+                json!({ "executionAuthority": authority }),
+            );
             let command = match SessionSendCommand::try_new(
                 session_identity,
                 Some(binding.endpoint_session_id().as_str().to_owned()),
-                delivery.message,
+                message,
                 None,
                 Some(delivery.idempotency_key),
                 Some(true),

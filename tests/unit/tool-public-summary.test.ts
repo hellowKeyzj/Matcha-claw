@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest';
+import { createInstance } from 'i18next';
+import zh from '../../src/i18n/locales/zh/chat.json';
 
 import { buildToolActivityViewModel } from '../../src/pages/Chat/tool-activity-view-model';
 import type { SessionRenderToolCard } from '../../src/types/session/tool-card';
+
+const translations = createInstance();
+await translations.init({
+  lng: 'zh', fallbackLng: false, defaultNS: 'chat', resources: { zh: { chat: zh } },
+  interpolation: { escapeValue: false },
+});
+const t = translations.getFixedT('zh', 'chat');
 
 type ToolCardInput = Pick<SessionRenderToolCard, 'name' | 'input'> & Partial<SessionRenderToolCard> & { details?: unknown };
 
@@ -52,11 +61,11 @@ describe('chat tool public summaries', () => {
         payload: { privateField: 'raw output secret', values: [1, 2] },
       },
       result: textResult(JSON.stringify({ rawToolOutput: 'must not show' })),
-    }));
+    }), t);
     const text = expandedText(activity);
 
     expect(text).toContain('输入');
-    expect(text).toContain('对象：4 keys');
+    expect(text).toContain('对象：4 个字段');
     expect(text).toContain('items: 数组：3 项');
     expect(text).toContain('输出');
     expect(text).toContain('status: ok');
@@ -76,10 +85,10 @@ describe('chat tool public summaries', () => {
       input: 'plain public text',
       output: 'raw private token text',
       result: { kind: 'none', surface: 'tool-card' },
-    }));
+    }), t);
     const text = expandedText(activity);
 
-    expect(text).toContain('字符串：17 字符；preview: plain public text');
+    expect(text).toContain('字符串：17 字符；预览：plain public text');
     expect(text).toContain('字符串：22 字符');
     expect(text).not.toContain('raw private token text');
   });
@@ -95,7 +104,7 @@ describe('chat tool public summaries', () => {
         approvalReviews: [{ id: 'review-1', label: 'Reviewer', status: 'approved' }],
         diff: '+allowed only for generic detail text',
       },
-    }));
+    }), t);
     const text = expandedText(activity);
 
     expect(activity.browserTabPreview).toBeUndefined();

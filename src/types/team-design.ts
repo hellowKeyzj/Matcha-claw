@@ -78,19 +78,11 @@ export interface TeamGraphSnapshotRecord {
   metadata?: Record<string, unknown>;
 }
 
-export type TeamStartGateStatus = 'intake' | 'proposal_pending' | 'started';
+export type TeamStartGateStatus = 'intake' | 'designing' | 'started';
 
-export interface TeamRunProposalProjection {
-  proposalId?: string;
-  taskSummary: string;
-  detail?: string;
-  createdAt?: number;
-}
-
-export interface TeamRunStartGateProjection {
-  status: TeamStartGateStatus;
-  proposal?: TeamRunProposalProjection | null;
-}
+export type TeamRunStartGateProjection =
+  | { status: 'intake' | 'started' }
+  | { status: 'designing'; designEpoch: string; graphVersion: string };
 
 export type TeamGraphPatchOperation =
   | { op: 'add_node' | 'replace_node'; node: Record<string, unknown> }
@@ -105,13 +97,9 @@ export interface TeamDesignTarget {
   runId: string;
 }
 
-export type TeamDesignStartGate = TeamRunStartGateProjection
-  | { status: 'designing'; designEpoch: string; graphVersion: string; proposal: null }
-  | { status: 'design_proposal_pending'; designEpoch: string; graphVersion: string; proposal: { proposalId: string; taskSummary: string } };
-
 export interface TeamDesignSnapshot extends TeamDesignTarget {
   success: true;
-  startGate: TeamDesignStartGate;
+  startGate: TeamRunStartGateProjection;
   graphVersion: string;
   designEpoch: string | null;
   graph: TeamGraphSnapshotRecord;
@@ -125,7 +113,23 @@ export interface TeamDesignRecord {
   error: string | null;
 }
 
+export interface TeamDesignFailure {
+  success: false;
+  error: string;
+  errorCode: string;
+  nodeId?: string;
+  edgeId?: string;
+}
+
+export function isTeamDesignFailure(value: unknown): value is TeamDesignFailure {
+  return isRecord(value) && onlyKeys(value, ['success', 'error', 'errorCode', 'nodeId', 'edgeId'])
+    && value.success === false && isText(value.error) && value.error.length <= 4096 && !/[\0\p{Cc}]/u.test(value.error)
+    && typeof value.errorCode === 'string' && /^[a-z_]{1,128}$/.test(value.errorCode)
+    && [value.nodeId, value.edgeId].every((id) => id === undefined || (typeof id === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(id)));
+}
+
 export function decodeTeamDesignSnapshot(value: unknown, target: TeamDesignTarget): TeamDesignSnapshot {
+  if (isTeamDesignFailure(value)) throw new Error(value.error, { cause: value });
   if (!isRecord(value) || !exactKeys(value, ['success', 'teamId', 'runId', 'startGate', 'graphVersion', 'designEpoch', 'graph', 'roles'])
     || value.success !== true || value.teamId !== target.teamId || value.runId !== target.runId
     || !isTeamGraphVersion(value.graphVersion) || !(value.designEpoch === null || isText(value.designEpoch))
@@ -137,7 +141,8 @@ export function decodeTeamDesignSnapshot(value: unknown, target: TeamDesignTarge
   return value as unknown as TeamDesignSnapshot;
 }
 
-export function decodeTeamDesignMutation<T extends 'designing' | 'intake'>(value: unknown, outcome: T): { success: true; outcome: T } {
+export function decodeTeamDesignMutation<T extends 'designing' | 'intake' | 'started'>(value: unknown, outcome: T): { success: true; outcome: T } {
+  if (isTeamDesignFailure(value)) throw new Error(value.error, { cause: value });
   if (!isRecord(value) || !exactKeys(value, ['success', 'outcome']) || value.success !== true || value.outcome !== outcome) {
     throw new Error('Team design outcome is unavailable');
   }
@@ -150,18 +155,13 @@ export function isTeamGraphVersion(value: unknown): value is string {
 
 function isStartGate(value: unknown, epoch: unknown, version: string): boolean {
   if (!isRecord(value)) return false;
-  if (value.status === 'designing' || value.status === 'design_proposal_pending') {
-    return exactKeys(value, ['status', 'designEpoch', 'graphVersion', 'proposal'])
-      && isText(value.designEpoch) && value.designEpoch === epoch && value.graphVersion === version
-      && (value.status === 'designing' ? value.proposal === null : isProposal(value.proposal));
+  if (value.status === 'designing') {
+    return exactKeys(value, ['status', 'designEpoch', 'graphVersion'])
+      && typeof value.designEpoch === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value.designEpoch)
+      && value.designEpoch === epoch && value.graphVersion === version;
   }
-  return (value.status === 'intake' || value.status === 'proposal_pending' || value.status === 'started')
-    && Object.keys(value).every((key) => key === 'status' || key === 'proposal')
-    && (value.proposal === undefined || value.proposal === null || isProposal(value.proposal));
-}
-
-function isProposal(value: unknown): boolean {
-  return isRecord(value) && exactKeys(value, ['proposalId', 'taskSummary']) && isText(value.proposalId) && typeof value.taskSummary === 'string';
+  return (value.status === 'intake' || value.status === 'started')
+    && exactKeys(value, ['status']) && epoch === null;
 }
 
 export function isTeamDesignPatchOperation(value: unknown): value is TeamGraphPatchOperation {

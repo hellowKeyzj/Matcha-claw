@@ -33,12 +33,17 @@ impl SettingsOps for OpenClawDriver {
         let diagnostic_reporter = Arc::clone(&self.diagnostic_reporter);
         Box::pin(async move {
             let browser_mode = crate::surfaces::settings::browser_mode_projection(browser_mode);
-            match supervisor.snapshot().phase() {
-                SupervisorPhase::Idle => crate::surfaces::settings::apply_file_projection(
-                    state_dir,
-                    browser_mode,
-                    proxy_endpoint.as_deref(),
-                ),
+            let snapshot = supervisor.snapshot();
+            match snapshot.phase() {
+                SupervisorPhase::Idle | SupervisorPhase::OperationFailed
+                    if snapshot.process().is_none() && snapshot.active_operation().is_none() =>
+                {
+                    crate::surfaces::settings::apply_file_projection(
+                        state_dir,
+                        browser_mode,
+                        proxy_endpoint.as_deref(),
+                    )
+                }
                 SupervisorPhase::Running => {
                     if control_lease.snapshot_control().await != OpenClawControlReadiness::Ready {
                         return Err(::settings::ports::SettingsRuntimeFailure::Unknown);
@@ -56,10 +61,12 @@ impl SettingsOps for OpenClawDriver {
                         gateway_port,
                         plugins,
                         diagnostic_reporter,
+                        Arc::clone(&self.lifecycle_gate),
                     )
                     .await
                 }
-                SupervisorPhase::Starting
+                SupervisorPhase::Idle
+                | SupervisorPhase::Starting
                 | SupervisorPhase::Stopping
                 | SupervisorPhase::WaitingToRestart
                 | SupervisorPhase::OperationFailed
@@ -120,10 +127,14 @@ async fn project_settings_config_outcome(
     gateway_port: u16,
     plugins: crate::native_config::plugins::PluginProjection,
     diagnostic_reporter: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
+    lifecycle_gate: Arc<tokio::sync::Mutex<()>>,
 ) -> Result<::settings::ports::SettingsProjectionEffect, ::settings::ports::SettingsRuntimeFailure>
 {
     let effect = crate::surfaces::settings::project_config_outcome(outcome, artifact_changed)?;
     if effect == crate::surfaces::settings::SettingsConfigEffect::RestartRequired {
+        let _reservation = lifecycle_gate
+            .try_lock_owned()
+            .map_err(|_| ::settings::ports::SettingsRuntimeFailure::Unknown)?;
         restart_after_settings_projection(
             true,
             supervisor,

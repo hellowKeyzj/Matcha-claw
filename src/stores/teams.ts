@@ -14,9 +14,6 @@ import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types
 import { buildSessionIdentityKey, type SessionIdentity } from '../types/desktop/runtime-address';
 import {
   cancelTeamRun,
-  cancelTeamRunProposal,
-  confirmTeamRunProposal,
-  continueTeamRunProposal,
   createTeamRun,
   deleteTeamInstance,
   exportTeamRunGraphYaml,
@@ -27,7 +24,7 @@ import {
   readTeamRunSnapshot,
   readTeamDesignSnapshot,
   startTeamDesign,
-  continueTeamDesign,
+  startTeamRun,
   exitTeamDesign,
   patchTeamDesignGraph,
   resolveTeamApproval,
@@ -188,9 +185,8 @@ interface TeamsState {
   refreshDesignSnapshot: (target: TeamDesignTarget, options?: { invalidate?: boolean }) => Promise<void>;
   observeTeamDesign: (target: TeamDesignTarget) => () => void;
   startDesign: (target: TeamDesignTarget) => Promise<void>;
-  continueDesign: (target: TeamDesignTarget) => Promise<void>;
-  confirmDesign: (target: TeamDesignTarget) => Promise<void>;
-  continueDesignDiscussion: (target: TeamDesignTarget) => Promise<void>;
+  startRun: (target: TeamDesignTarget) => Promise<void>;
+  exitDesign: (target: TeamDesignTarget) => Promise<void>;
   submitRunGraphPatch: (target: TeamDesignTarget, operations: TeamGraphPatchOperation[]) => Promise<void>;
   createManualTeamWithProgress: (input: ManualTeamCandidate) => Promise<string>;
   resetManualTeamCreation: () => void;
@@ -208,9 +204,6 @@ interface TeamsState {
   importGraphYaml: (teamId: string, yaml: string) => Promise<TeamGraphYamlImportResult>;
   resumeRun: (teamId: string) => Promise<void>;
   cancelRun: (teamId: string, reason?: string) => Promise<void>;
-  confirmProposal: (teamId: string) => Promise<void>;
-  continueProposal: (teamId: string) => Promise<void>;
-  cancelProposal: (teamId: string) => Promise<void>;
   resolveApproval: (
     teamId: string,
     approvalId: string,
@@ -273,7 +266,7 @@ async function mutateTeamDesign(target: TeamDesignTarget, operation: string, act
     if (existing.operation !== operation || operation === 'run-graph-patch') throw new Error('Team run mutation is already pending');
     return existing.promise;
   }
-  const entry = { requestId: createRequestId(operation), operation, removed: false, promise: Promise.resolve() };
+  const entry = { requestId: createRequestId(operation.split(':', 1)[0]), operation, removed: false, promise: Promise.resolve() };
   entry.promise = Promise.resolve().then(async () => {
     if (entry.removed) return;
     try {
@@ -316,11 +309,6 @@ async function invalidateRunGraph(target: TeamDesignTarget): Promise<void> {
   if (useTeamsStore.getState().designByRunId[target.runId]) {
     await useTeamsStore.getState().refreshDesignSnapshot(target, { invalidate: true }).catch(() => {});
   }
-}
-
-function requireDesignProposal(snapshot: TeamDesignSnapshot | null | undefined, target: TeamDesignTarget): string {
-  if (snapshot?.teamId !== target.teamId || snapshot.runId !== target.runId || snapshot.startGate.status !== 'design_proposal_pending') throw new Error('Team design proposal is required');
-  return snapshot.startGate.proposal.proposalId;
 }
 
 const snapshotInFlightByTeamId = new Map<string, Promise<void>>();
@@ -1049,26 +1037,31 @@ export const useTeamsStore = create<TeamsState>()(
         const frozenTarget = { ...target };
         await mutateTeamDesign(frozenTarget, 'design-start', (requestId) => startTeamDesign({ ...frozenTarget, idempotencyKey: requestId }));
       },
-      continueDesign: async (target) => {
-        const frozenTarget = { ...target };
-        const proposalId = requireDesignProposal(get().designByRunId[target.runId]?.snapshot, frozenTarget);
-        await mutateTeamDesign(frozenTarget, `design-continue:${proposalId}`, (requestId) => continueTeamDesign({ ...frozenTarget, proposalId, idempotencyKey: requestId }));
-      },
-      confirmDesign: async (target) => {
-        const frozenTarget = { ...target };
-        const proposalId = requireDesignProposal(get().designByRunId[target.runId]?.snapshot, frozenTarget);
-        await mutateTeamDesign(frozenTarget, `design-confirm:${proposalId}`, (requestId) => confirmTeamRunProposal({ runId: frozenTarget.runId, proposalId, idempotencyKey: requestId }));
-      },
-      continueDesignDiscussion: async (target) => {
+      startRun: async (target) => {
         const frozenTarget = { ...target };
         const snapshot = get().designByRunId[frozenTarget.runId]?.snapshot;
         if (snapshot?.teamId !== frozenTarget.teamId || snapshot.runId !== frozenTarget.runId
-          || (snapshot.startGate.status !== 'designing' && snapshot.startGate.status !== 'design_proposal_pending')
+          || !(snapshot.startGate.status === 'intake' && snapshot.designEpoch === null
+            || snapshot.startGate.status === 'designing' && snapshot.startGate.designEpoch === snapshot.designEpoch
+              && snapshot.startGate.graphVersion === snapshot.graphVersion)) {
+          throw new Error('Team run start snapshot is required');
+        }
+        const designEpoch = snapshot.designEpoch;
+        const expectedGraphVersion = snapshot.graphVersion;
+        await mutateTeamDesign(frozenTarget, `run-start:${JSON.stringify([designEpoch, expectedGraphVersion])}`, (requestId) => startTeamRun({
+          ...frozenTarget, designEpoch, expectedGraphVersion, idempotencyKey: requestId,
+        }));
+      },
+      exitDesign: async (target) => {
+        const frozenTarget = { ...target };
+        const snapshot = get().designByRunId[frozenTarget.runId]?.snapshot;
+        if (snapshot?.teamId !== frozenTarget.teamId || snapshot.runId !== frozenTarget.runId
+          || snapshot.startGate.status !== 'designing'
           || !snapshot.designEpoch || snapshot.startGate.designEpoch !== snapshot.designEpoch) {
           throw new Error('Team design snapshot is required');
         }
         const designEpoch = snapshot.designEpoch;
-        await mutateTeamDesign(frozenTarget, `design-discussion:${designEpoch}`, () => exitTeamDesign({ ...frozenTarget, designEpoch }));
+        await mutateTeamDesign(frozenTarget, `design-exit:${designEpoch}`, () => exitTeamDesign({ ...frozenTarget, designEpoch }));
       },
       submitRunGraphPatch: async (target, operations) => {
         if (operations.length === 0) return;
@@ -1077,7 +1070,7 @@ export const useTeamsStore = create<TeamsState>()(
         if (!snapshot || snapshot.teamId !== target.teamId || snapshot.runId !== target.runId) {
           throw new Error('Team run snapshot is required');
         }
-        const designActive = snapshot.startGate.status === 'designing' || snapshot.startGate.status === 'design_proposal_pending';
+        const designActive = snapshot.startGate.status === 'designing';
         const designEpoch = snapshot.designEpoch;
         if (designActive && !designEpoch) throw new Error('Team design snapshot is required');
         await mutateTeamDesign(frozenTarget, 'run-graph-patch', async (requestId) => {
@@ -1762,63 +1755,6 @@ export const useTeamsStore = create<TeamsState>()(
           idempotencyKey: idempotencyKey(teamId, `cancel:${runId}`),
         });
         await get().refreshSnapshot(teamId, { force: true });
-      },
-      confirmProposal: async (teamId) => {
-        const state = get();
-        const runId = resolveActiveRunId(state, teamId);
-        const proposal = state.startGateByTeamId[teamId]?.proposal;
-        if (!proposal?.proposalId) {
-          throw new Error(`Team run proposal is required: ${teamId}`);
-        }
-        const actionKey = idempotencyKey(teamId, `proposal-confirm:${runId}:${proposal.proposalId}`);
-        const result = await confirmTeamRunProposal({
-          runId,
-          proposalId: proposal.proposalId,
-          idempotencyKey: actionKey,
-        });
-        if (result.snapshot) {
-          set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
-        } else {
-          await get().refreshSnapshot(teamId, { force: true });
-        }
-      },
-      continueProposal: async (teamId) => {
-        const state = get();
-        const runId = resolveActiveRunId(state, teamId);
-        const proposal = state.startGateByTeamId[teamId]?.proposal;
-        if (!proposal?.proposalId) {
-          throw new Error(`Team run proposal is required: ${teamId}`);
-        }
-        const actionKey = idempotencyKey(teamId, `proposal-continue:${runId}:${proposal.proposalId}`);
-        const result = await continueTeamRunProposal({
-          runId,
-          proposalId: proposal.proposalId,
-          idempotencyKey: actionKey,
-        });
-        if (result.snapshot) {
-          set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
-        } else {
-          await get().refreshSnapshot(teamId, { force: true });
-        }
-      },
-      cancelProposal: async (teamId) => {
-        const state = get();
-        const runId = resolveActiveRunId(state, teamId);
-        const proposal = state.startGateByTeamId[teamId]?.proposal;
-        if (!proposal?.proposalId) {
-          throw new Error(`Team run proposal is required: ${teamId}`);
-        }
-        const actionKey = idempotencyKey(teamId, `proposal-cancel:${runId}:${proposal.proposalId}`);
-        const result = await cancelTeamRunProposal({
-          runId,
-          proposalId: proposal.proposalId,
-          idempotencyKey: actionKey,
-        });
-        if (result.snapshot) {
-          set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
-        } else {
-          await get().refreshSnapshot(teamId, { force: true });
-        }
       },
       resolveApproval: async (teamId, approvalId, decision, note) => {
         const state = get();

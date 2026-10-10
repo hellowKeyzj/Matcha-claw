@@ -1,3 +1,5 @@
+import { decodeRuntimeRepairSnapshot, type RuntimeRepairSnapshot } from '../runtime-repair';
+
 export type RuntimeControlCallResult =
   | 'succeeded' | 'unsupported' | 'unavailable' | 'failed' | 'unknown';
 
@@ -31,7 +33,8 @@ export interface RuntimeControlCallDetail {
   healthy: boolean | null;
   failure: RuntimeControlLifecycleFailure | null;
   startupDiagnostic: RuntimeControlStartupDiagnostic | null;
-  error: 'unsupported' | 'unavailable' | 'commandFailed' | null;
+  error: 'unsupported' | 'unavailable' | 'commandFailed' | 'busy' | null;
+  repair?: RuntimeRepairSnapshot | null;
 }
 
 declare module '../call-log' {
@@ -79,7 +82,7 @@ export function decodeRuntimeDirectoryCallDetail(value: unknown): RuntimeDirecto
 }
 
 export function decodeRuntimeControlCallDetail(value: unknown): RuntimeControlCallDetail | undefined {
-  if (!record(value) || !exact(value, ['endpoint', 'lifecycle', 'result', 'count', 'ready', 'healthy', 'failure', 'startupDiagnostic', 'error'])
+  if (!record(value) || !exact(value, ['endpoint', 'lifecycle', 'result', 'count', 'ready', 'healthy', 'failure', 'startupDiagnostic', 'error', ...(Object.hasOwn(value, 'repair') ? ['repair'] : [])])
     || !(value.endpoint === null || (record(value.endpoint)
       && exact(value.endpoint, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
       && value.endpoint.kind === 'native-runtime' && value.endpoint.runtimeInstanceId === 'local'
@@ -90,7 +93,8 @@ export function decodeRuntimeControlCallDetail(value: unknown): RuntimeControlCa
     || !(value.healthy === null || typeof value.healthy === 'boolean')
     || !(value.failure === null || failures.includes(value.failure as RuntimeControlLifecycleFailure))
     || !(value.startupDiagnostic === null || startupDiagnostics.includes(value.startupDiagnostic as RuntimeControlStartupDiagnostic))
-    || !(value.error === null || value.error === 'unsupported' || value.error === 'unavailable' || value.error === 'commandFailed')) {
+    || !(Object.hasOwn(value, 'repair') === false || value.repair === null || decodeRuntimeRepairSnapshot(value.repair))
+    || !(value.error === null || value.error === 'unsupported' || value.error === 'unavailable' || value.error === 'commandFailed' || value.error === 'busy')) {
     return undefined;
   }
   return {
@@ -103,5 +107,6 @@ export function decodeRuntimeControlCallDetail(value: unknown): RuntimeControlCa
     failure: value.failure as RuntimeControlLifecycleFailure | null,
     startupDiagnostic: value.startupDiagnostic as RuntimeControlStartupDiagnostic | null,
     error: value.error as RuntimeControlCallDetail['error'],
+    ...(Object.hasOwn(value, 'repair') ? { repair: value.repair === null ? null : decodeRuntimeRepairSnapshot(value.repair)! } : {}),
   };
 }

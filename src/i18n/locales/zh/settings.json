@@ -200,6 +200,36 @@
     "matchaAgentAppServerStatus": "matcha-agent app-server 运行状态",
     "matchaAgentAppServerDescription": "查看 matcha-agent endpoint 就绪状态、app-server 进程状态与端口。",
     "matchaAgentAppServerRestartFailed": "重启 matcha-agent app-server 失败：{{error}}",
+    "repair": {
+      "action": "修复",
+      "confirmTitle": "修复 OpenClaw？",
+      "confirmDescription": "这将停止 OpenClaw 并运行原生修复，可能修改配置及迁移旧数据，随后重新准备并启动 OpenClaw。正在执行的任务会被中断。是否继续？",
+      "confirmAction": "停止并修复",
+      "automatic": "自动修复",
+      "manual": "手动修复",
+      "pending": "修复请求处理中",
+      "statusUnavailable": "暂时无法读取修复进度，请查看日志。",
+      "unknown": "本次修复结果尚未确认，请查看运行状态和日志后再操作。不会自动重试。",
+      "rejected": "运行时拒绝了本次修复请求，请等待当前操作结束后再检查。",
+      "phases": {
+        "idle": "未在修复",
+        "stopping": "正在停止",
+        "repairing": "正在修复",
+        "preparing": "正在准备",
+        "starting": "正在启动",
+        "succeeded": "修复完成",
+        "failed": "修复失败"
+      },
+      "failures": {
+        "stopFailed": "无法停止 OpenClaw，请查看日志。",
+        "doctorFailed": "OpenClaw 原生修复执行失败，请查看日志。",
+        "doctorTimedOut": "OpenClaw 原生修复执行超时，请查看日志。",
+        "doctorCancelled": "OpenClaw 原生修复已取消，请查看日志。",
+        "doctorSpawnFailed": "无法启动 OpenClaw 原生修复进程，请查看日志。",
+        "preparationFailed": "修复后无法完成 OpenClaw 启动准备，请查看日志。",
+        "startFailed": "修复后无法启动 OpenClaw，请查看日志。"
+      }
+    },
     "tabs": {
       "general": "通用",
       "browser": "浏览器"
