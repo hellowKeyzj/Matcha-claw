@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 
 const env = {
   ...process.env,
-  MATCHA_AGENT_RUN_TRACE: '1',
+  MATCHACLAW_TRACE: '1',
 };
 
 function run(command, args) {

@@ -101,15 +101,16 @@ impl Operations {
                 results.remove(context.id()).await;
                 let _ = context.finish(CallStatus::Failed, &call.detail).await;
             } else {
-                let importing = matches!(
-                    call.command,
-                    "skills.import.markdown"
-                        | "skills.import.bundle"
-                        | "skills.importBundles"
-                        | "skills.bundles.import"
-                );
-                let started = std::time::Instant::now();
-                if importing {
+                let started = (platform::trace::enabled()
+                    && matches!(
+                        call.command,
+                        "skills.import.markdown"
+                            | "skills.import.bundle"
+                            | "skills.importBundles"
+                            | "skills.bundles.import"
+                    ))
+                .then(std::time::Instant::now);
+                if started.is_some() {
                     eprintln!(
                         "[startup-trace] source=skills-import phase=running callIdHigh={} callIdLow={} command={}",
                         &context.id().as_str()[..16],
@@ -119,7 +120,7 @@ impl Operations {
                 }
                 let response = operation.await;
                 let (status, detail) = call::terminal(call.detail, &response);
-                if importing {
+                if let Some(started) = started {
                     eprintln!(
                         "[startup-trace] source=skills-import phase=terminal callIdHigh={} callIdLow={} command={} status={} httpStatus={} elapsedMs={}",
                         &context.id().as_str()[..16],

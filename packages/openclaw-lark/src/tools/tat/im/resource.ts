@@ -150,7 +150,7 @@ export function registerFeishuImBotImageTool(api: OpenClawPluginApi): boolean {
         try {
           const client = getClient();
 
-          log.info(`download: message_id="${p.message_id}", file_key="${p.file_key}", type="${p.type}"`);
+          log.trace(() => `download: message_id="${p.message_id}", file_key="${p.file_key}", type="${p.type}"`);
 
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const res: any = await client.im.messageResource.get({

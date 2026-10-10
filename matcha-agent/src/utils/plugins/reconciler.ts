@@ -191,7 +191,8 @@ export async function reconcileMarketplaces(
   }
 
   logForDebugging(
-    `[reconcile] ${toProcess.length} marketplace(s): ${toProcess.map(w => `${w.name}(${w.action})`).join(', ')}`,
+    () =>
+      `[reconcile] ${toProcess.length} marketplace(s): ${toProcess.map(w => `${w.name}(${w.action})`).join(', ')}`,
   )
 
   const installed: string[] = []

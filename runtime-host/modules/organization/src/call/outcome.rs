@@ -33,6 +33,8 @@ impl AuditFailure for crate::StoreFault {
         match self {
             CommitOutcomeUnknown(_) | RecoveryRequired => Outcome::OutcomeUnknown,
             InvalidFacts
+            | Design(_)
+            | GraphPatchInput(_)
             | RuntimeReceipt(_)
             | Evidence(_)
             | ActivityTransition(_)
@@ -262,26 +264,6 @@ impl AuditOutcome for crate::TeamTriggerFireOutcome {
     }
 }
 
-impl AuditOutcome for crate::ConfirmRunStartOutcome {
-    fn summarize(&self, detail: &mut OrganizationCallDetail) {
-        detail.set_outcome(match self {
-            Self::Started | Self::Replayed => Outcome::Started,
-            Self::Intake => Outcome::Intake,
-            Self::ProposalMismatch => Outcome::Rejected,
-        });
-    }
-}
-
-impl AuditOutcome for crate::ContinueRunDiscussionOutcome {
-    fn summarize(&self, detail: &mut OrganizationCallDetail) {
-        detail.set_outcome(match self {
-            Self::Intake | Self::Replayed => Outcome::Intake,
-            Self::AlreadyStarted => Outcome::Started,
-            Self::ProposalMismatch => Outcome::Rejected,
-        });
-    }
-}
-
 impl AuditOutcome for crate::TeamNodeEventOutcome {
     fn summarize(&self, detail: &mut OrganizationCallDetail) {
         detail.set_outcome(match self {
@@ -309,6 +291,12 @@ committed!(
     crate::TeamDecisionReceipt,
     MutationResult
 );
+
+impl AuditOutcome for crate::TeamRunListEntry {
+    fn summarize(&self, detail: &mut OrganizationCallDetail) {
+        detail.set_outcome(Outcome::Read);
+    }
+}
 
 impl AuditOutcome for crate::TeamRunQueryOutcome {
     fn summarize(&self, detail: &mut OrganizationCallDetail) {
@@ -470,6 +458,7 @@ impl AuditOutcome for crate::TeamRuntimeCommandOutcome {
         match self {
             Design { read, result } => detail.set_outcome(match result {
                 Ok(_) if *read => Outcome::Read,
+                Ok(result) if result.get("outcome").and_then(serde_json::Value::as_str) == Some("started") => Outcome::Started,
                 Ok(_) => Outcome::CommandCommitted,
                 Err(error) => error.outcome(),
             }),
@@ -489,13 +478,18 @@ impl AuditOutcome for crate::TeamRuntimeCommandOutcome {
             GraphContext(value) => value.summarize(detail),
             GraphExportYaml(value) => value.summarize(detail),
             TriggerFire(value) => value.summarize(detail),
-            RunStartConfirm(value) => value.summarize(detail),
-            RunStartContinue(value) => value.summarize(detail),
+            RunStart(result) => detail.set_outcome(match result {
+                Ok(()) => Outcome::Started,
+                Err(error) => error.outcome(),
+            }),
             NodePromptRetryDue(value) => value.summarize(detail),
             NodeEvent(value) => value.summarize(detail),
             RunDiagnostics(value) => value.summarize(detail),
             RunDecisionSubmit(value) => value.summarize(detail),
-            Resume { outcomes, .. } => outcomes.summarize(detail),
+            Resume { outcomes, runs, .. } => {
+                outcomes.summarize(detail);
+                runs.summarize(detail);
+            }
             ApprovalResolve(value) => value.summarize(detail),
             RunCancel(value) => value.summarize(detail),
             RunDelete(value) => value.summarize(detail),

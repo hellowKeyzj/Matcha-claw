@@ -29,12 +29,8 @@ import {
   resetReconnectBackoff,
 } from './lib/cdp/index.js'
 import { RelayState } from './lib/constants.js'
-import { createLogger, setDebug } from './lib/logger.js'
+import { createLogger } from './lib/logger.js'
 import { getBrowserInstanceId } from './lib/browser-instance.js'
-
-const ENABLE_BROWSER_RELAY_EXTENSION_DEBUG_LOGS = false
-
-setDebug(ENABLE_BROWSER_RELAY_EXTENSION_DEBUG_LOGS)
 
 const log = createLogger('bg')
 
@@ -263,17 +259,17 @@ initRelay({
     }
   },
   async onShutdown() {
-    log.info('onShutdown callback: disabled')
+    log.info(() => ['onShutdown callback: disabled'])
     await mgr.shutdown()
-    log.info('onShutdown: done')
+    log.info(() => ['onShutdown: done'])
   },
   async onTransportClosed() {
-    log.info('onTransportClosed callback')
+    log.info(() => ['onTransportClosed callback'])
     mgr.handleTransportClosed()
   },
   async onConnected() {
     await ensureRuntimeReady()
-    log.info('onConnected callback: restoring + announcing tracked tabs')
+    log.info(() => ['onConnected callback: restoring + announcing tracked tabs'])
     await mgr.refreshAfterTransportReady()
     mgr.startSessionIndicators()
     void mgr.discoverAll(isRelayConnected)
@@ -288,7 +284,7 @@ initRelay({
       mgr.onDebuggerEvent(source, method, params)
     })
     chrome.debugger.onDetach.addListener((source, reason) => {
-      log.info('chrome.debugger.onDetach:', source.tabId, reason)
+      log.info(() => ['chrome.debugger.onDetach:', source.tabId, reason])
       if (reason === 'canceled_by_user') {
         const entry = Number.isInteger(source?.tabId) ? mgr.get(source.tabId) : null
         if (entry?.windowId != null && isSelectedWindow(entry.windowId)) {
@@ -309,13 +305,13 @@ void mgr.restoreState()
 // ── Helpers ──
 
 async function handleToggle() {
-  log.info('handleToggle: state =', getRelayState())
+  log.info(() => ['handleToggle: state =', getRelayState()])
   if (getRelayState() === RelayState.DISABLED) {
     await toggle()
   } else {
     await disconnect()
   }
-  log.info('handleToggle: done, state =', getRelayState())
+  log.info(() => ['handleToggle: done, state =', getRelayState()])
 }
 
 // ── Event listeners ──
@@ -439,7 +435,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
         await initFromStorage()
       }
       if (await isRelayEnabled()) {
-        log.info('alarm: relay enabled but disconnected, attempting reconnect')
+        log.info(() => ['alarm: relay enabled but disconnected, attempting reconnect'])
         resetReconnectBackoff()
         await connectAndAttach()
       }
@@ -453,7 +449,7 @@ chrome.runtime.onStartup.addListener(() => {
     await mgr.restoreState()
     await initFromStorage()
     if (!(await isRelayEnabled())) return
-    console.info('[matchaclaw-relay] browser started with relay enabled, attempting connection')
+    log.info(() => ['browser started with relay enabled, attempting connection'])
     await connectAndAttach()
   })()
 })
@@ -561,7 +557,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     ;(async () => {
       try {
         await ensureRuntimeReady()
-        log.info('attachTab request:', tabId)
+        log.info(() => ['attachTab request:', tabId])
         let attached = null
 
         try {
@@ -597,7 +593,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return
         }
 
-        log.info('attachTab done:', tabId, attached.targetId)
+        log.info(() => ['attachTab done:', tabId, attached.targetId])
         sendResponse({ ok: true, attached })
       } catch (error) {
         log.error('attachTab failed:', tabId, error)
@@ -621,7 +617,7 @@ chrome.runtime.onInstalled.addListener((details) => {
       void chrome.runtime.openOptionsPage()
     }
     ensureKeepAliveAlarm()
-    log.info('onInstalled:', details.reason, '— attempting connection')
+    log.info(() => ['onInstalled:', details.reason, '— attempting connection'])
     await connectAndAttach()
   })()
 })

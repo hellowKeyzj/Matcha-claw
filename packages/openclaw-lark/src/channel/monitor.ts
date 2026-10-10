@@ -14,7 +14,7 @@ import type { RuntimeEnv } from 'openclaw/plugin-sdk/runtime-env';
 import type { HistoryEntry } from 'openclaw/plugin-sdk/reply-history';
 import { getEnabledLarkAccounts, getLarkAccount } from '../core/accounts';
 import { LarkClient } from '../core/lark-client';
-import { larkLogger } from '../core/lark-logger';
+import { isTraceEnabled, larkLogger } from '../core/lark-logger';
 import { drainShutdownHooks } from '../core/shutdown-hooks';
 import { MessageDedup } from '../messaging/inbound/dedup';
 import type { MonitorContext, MonitorFeishuOpts } from './types';
@@ -67,11 +67,11 @@ async function monitorSingleAccount(params: {
     ttlMs: dedupCfg?.ttlMs,
     maxEntries: dedupCfg?.maxEntries,
   });
-  log(
-    `feishu[${accountId}]: message dedup enabled (ttl=${messageDedup['ttlMs']}ms, max=${messageDedup['maxEntries']})`,
-  );
+  if (isTraceEnabled()) {
+    log(`feishu[${accountId}]: message dedup enabled (ttl=${messageDedup['ttlMs']}ms, max=${messageDedup['maxEntries']})`);
+  }
 
-  log(`feishu[${accountId}]: starting WebSocket connection...`);
+  if (isTraceEnabled()) log(`feishu[${accountId}]: starting WebSocket connection...`);
 
   // Create LarkClient instance — manages SDK client, WS, and bot identity.
   const lark = LarkClient.fromAccount(account);
@@ -122,9 +122,9 @@ async function monitorSingleAccount(params: {
   });
 
   // startWS resolves when abortSignal fires — probe result is logged inside startWS.
-  log(`feishu[${accountId}]: bot open_id resolved: ${lark.botOpenId ?? 'unknown'}`);
-  log(`feishu[${accountId}]: WebSocket client started`);
-  mlog.info(`websocket started for account ${accountId}`);
+  if (isTraceEnabled()) log(`feishu[${accountId}]: bot open_id resolved: ${lark.botOpenId ?? 'unknown'}`);
+  if (isTraceEnabled()) log(`feishu[${accountId}]: WebSocket client started`);
+  mlog.trace(() => `websocket started for account ${accountId}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ export async function monitorFeishuProvider(opts: MonitorFeishuOpts = {}): Promi
     throw new Error('No enabled Feishu accounts configured');
   }
 
-  log(`feishu: starting ${accounts.length} account(s): ${accounts.map((a) => a.accountId).join(', ')}`);
+  if (isTraceEnabled()) log(`feishu: starting ${accounts.length} account(s): ${accounts.map((a) => a.accountId).join(', ')}`);
 
   await Promise.all(
     accounts.map((account) =>

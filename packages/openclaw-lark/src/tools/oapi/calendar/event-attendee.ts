@@ -136,7 +136,7 @@ export function registerFeishuCalendarEventAttendeeTool(api: OpenClawPluginApi):
                 });
               }
 
-              log.info(
+              log.trace(() =>
                 `create: calendar_id=${p.calendar_id}, event_id=${p.event_id}, attendees_count=${p.attendees.length}`,
               );
 
@@ -193,7 +193,7 @@ export function registerFeishuCalendarEventAttendeeTool(api: OpenClawPluginApi):
             // LIST ATTENDEES
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: calendar_id=${p.calendar_id}, event_id=${p.event_id}, page_size=${p.page_size ?? 50}`);
+              log.trace(() => `list: calendar_id=${p.calendar_id}, event_id=${p.event_id}, page_size=${p.page_size ?? 50}`);
 
               const res = await client.invoke(
                 'feishu_calendar_event_attendee.list',

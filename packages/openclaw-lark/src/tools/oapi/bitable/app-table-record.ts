@@ -301,7 +301,7 @@ export function registerFeishuBitableAppTableRecordTool(api: OpenClawPluginApi):
                 });
               }
 
-              log.info(`create: app_token=${p.app_token}, table_id=${p.table_id}`);
+              log.trace(() => `create: app_token=${p.app_token}, table_id=${p.table_id}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table_record.create',
@@ -353,7 +353,7 @@ export function registerFeishuBitableAppTableRecordTool(api: OpenClawPluginApi):
                 });
               }
 
-              log.info(`update: app_token=${p.app_token}, table_id=${p.table_id}, record_id=${p.record_id}`);
+              log.trace(() => `update: app_token=${p.app_token}, table_id=${p.table_id}, record_id=${p.record_id}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table_record.update',
@@ -389,7 +389,7 @@ export function registerFeishuBitableAppTableRecordTool(api: OpenClawPluginApi):
             // DELETE
             // -----------------------------------------------------------------
             case 'delete': {
-              log.info(`delete: app_token=${p.app_token}, table_id=${p.table_id}, record_id=${p.record_id}`);
+              log.trace(() => `delete: app_token=${p.app_token}, table_id=${p.table_id}, record_id=${p.record_id}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table_record.delete',
@@ -449,7 +449,7 @@ export function registerFeishuBitableAppTableRecordTool(api: OpenClawPluginApi):
                 });
               }
 
-              log.info(
+              log.trace(() =>
                 `batch_create: app_token=${p.app_token}, table_id=${p.table_id}, records_count=${p.records.length}`,
               );
 
@@ -516,7 +516,7 @@ export function registerFeishuBitableAppTableRecordTool(api: OpenClawPluginApi):
                 });
               }
 
-              log.info(
+              log.trace(() =>
                 `batch_update: app_token=${p.app_token}, table_id=${p.table_id}, records_count=${p.records.length}`,
               );
 
@@ -565,7 +565,7 @@ export function registerFeishuBitableAppTableRecordTool(api: OpenClawPluginApi):
                 });
               }
 
-              log.info(
+              log.trace(() =>
                 `batch_delete: app_token=${p.app_token}, table_id=${p.table_id}, record_ids_count=${p.record_ids.length}`,
               );
 
@@ -599,7 +599,7 @@ export function registerFeishuBitableAppTableRecordTool(api: OpenClawPluginApi):
             // LIST (P0) - 使用 search API（旧 list API 已废弃）
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(
+              log.trace(() =>
                 `list: app_token=${p.app_token}, table_id=${p.table_id}, view_id=${p.view_id ?? 'none'}, field_names=${p.field_names?.length ?? 0}, filter=${p.filter ? 'yes' : 'no'}`,
               );
 

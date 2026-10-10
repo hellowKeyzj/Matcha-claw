@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ComponentProps } from 'react';
+import type { LicenseGateSnapshot } from '@/lib/license';
 import App from '@/App';
 import { AuthPage } from '@/pages/Auth';
 import i18n from '@/i18n';
@@ -32,6 +33,23 @@ const accountState = vi.hoisted(() => ({
   clearError: vi.fn(),
 }));
 
+const licenseState = vi.hoisted(() => ({
+  snapshot: null as LicenseGateSnapshot | null,
+  error: null as string | null,
+  subscribe: vi.fn(),
+}));
+
+const grantedLicense: LicenseGateSnapshot = {
+  state: 'granted',
+  reason: 'validated',
+  checkedAtMs: 1,
+  hasStoredKey: true,
+  hasUsableCache: true,
+  nextRevalidateAtMs: null,
+  lastValidation: null,
+  renewalAlert: null,
+};
+
 const settingsState = vi.hoisted(() => ({
   theme: 'system',
   language: 'zh-CN',
@@ -61,6 +79,11 @@ vi.mock('@/stores/account', () => ({
   ),
 }));
 
+vi.mock('@/stores/license', () => ({
+  useLicenseStore: (selector: (state: typeof licenseState) => unknown) => selector(licenseState),
+  useLocalLicenseLocked: () => accountState.status !== 'signedIn' && licenseState.snapshot?.state !== 'granted',
+}));
+
 vi.mock('@/stores/settings', () => ({
   useSettingsStore: (selector: (state: typeof settingsState) => unknown) => selector(settingsState),
 }));
@@ -79,7 +102,10 @@ vi.mock('@/stores/update', () => ({
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-  hostToolchainPrepare: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@/lib/toolchain', () => ({
+  prepareToolchain: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('@/components/layout/MainLayout', async () => {
@@ -119,12 +145,13 @@ vi.mock('@/lib/route-preload', () => {
     PluginsRoute: () => <MockRoute name="plugins" />,
     ExternalConnectorsRoute: () => <MockRoute name="connectors" />,
     RemoteFleetRoute: () => <MockRoute name="remote-fleet" />,
+    WikiRoute: () => <MockRoute name="wiki" />,
   };
 });
 
 function LocationEcho() {
   const location = useLocation();
-  return <div data-testid="location-echo">{location.pathname}</div>;
+  return <div data-testid="location-echo">{location.pathname}{location.search}</div>;
 }
 
 function renderAuthRoute() {
@@ -193,6 +220,9 @@ describe('auth route gate', () => {
     vi.clearAllMocks();
     i18n.changeLanguage('zh');
     resetAccountState();
+    licenseState.snapshot = null;
+    licenseState.error = null;
+    licenseState.subscribe.mockReset().mockReturnValue(vi.fn());
     settingsState.theme = 'system';
     settingsState.language = 'zh-CN';
     settingsState.initialized = true;
@@ -207,32 +237,42 @@ describe('auth route gate', () => {
     resetAccountState('checking');
     renderAppRoute(['/']);
 
-    expect(await screen.findByText('正在初始化工作区')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /游客进入/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '正在检查登录状态' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /本地进入/ })).not.toBeInTheDocument();
     expect(screen.queryByTestId('main-layout')).not.toBeInTheDocument();
   });
 
-  it('signedOut root waits for guest entry before mounting the main route', async () => {
+  it('signedOut root waits for licensed local entry before mounting the main route', async () => {
     resetAccountState('signedOut');
-    renderAppRoute(['/']);
+    const view = renderAppRoute(['/']);
 
-    expect(await screen.findByText('登录 Matcha')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /游客进入/ })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '登录', exact: true })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /本地进入/ })).toBeInTheDocument();
     expect(screen.queryByTestId('main-layout')).not.toBeInTheDocument();
+    expect(licenseState.subscribe).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole('button', { name: /游客进入/ }));
+    fireEvent.click(screen.getByRole('button', { name: /本地进入/ }));
+
+    expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/$/);
+    expect(screen.queryByTestId('main-layout')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('settings-route')).not.toBeInTheDocument();
+
+    licenseState.snapshot = grantedLicense;
+    view.rerender(<MemoryRouter><App /><LocationEcho /></MemoryRouter>);
 
     await waitFor(() => {
-      expect(screen.getByTestId('location-echo')).toHaveTextContent('/');
+      expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/$/);
       expect(screen.getByTestId('main-layout')).toBeInTheDocument();
+      expect(screen.queryByTestId('settings-route')).not.toBeInTheDocument();
     });
   });
 
-  it('offline root waits for offline entry before mounting the main route', async () => {
+  it('offline root waits for licensed offline entry before mounting the main route', async () => {
     resetAccountState('offline');
+    licenseState.snapshot = grantedLicense;
     renderAppRoute(['/']);
 
-    expect(await screen.findByText('暂时无法登录')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '无法登录' })).toBeInTheDocument();
     expect(screen.queryByLabelText('邮箱')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /离线进入/ })).toBeInTheDocument();
     expect(screen.queryByTestId('main-layout')).not.toBeInTheDocument();
@@ -240,19 +280,107 @@ describe('auth route gate', () => {
     fireEvent.click(screen.getByRole('button', { name: /离线进入/ }));
 
     await waitFor(() => {
-      expect(screen.getByTestId('location-echo')).toHaveTextContent('/');
+      expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/$/);
       expect(screen.getByTestId('main-layout')).toBeInTheDocument();
     });
+  });
+
+  it.each([
+    ['signedOut', '/', /本地进入/, 'blocked'],
+    ['offline', '/', /离线进入/, 'blocked'],
+    ['signedOut', '/login', /本地进入/, 'blocked'],
+    ['signedOut', '/', /本地进入/, 'error'],
+  ] as const)('%s local entry from %s waits before activation on %s (%s)', async (status, path, label, result) => {
+    resetAccountState(status);
+    const view = renderAppRoute([path]);
+    expect(licenseState.subscribe).not.toHaveBeenCalled();
+
+    fireEvent.click(await screen.findByRole('button', { name: label }));
+
+    expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/$/);
+    expect(screen.queryByTestId('main-layout')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('settings-route')).not.toBeInTheDocument();
+
+    if (result === 'error') {
+      licenseState.error = 'License refresh failed';
+    } else {
+      licenseState.snapshot = { ...grantedLicense, state: 'blocked' };
+    }
+    view.rerender(<MemoryRouter><App /><LocationEcho /></MemoryRouter>);
+
+    expect(await screen.findByTestId('settings-route')).toBeInTheDocument();
+    expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/settings\?section=license$/);
+    expect(licenseState.subscribe).toHaveBeenCalledOnce();
+    const unsubscribe = licenseState.subscribe.mock.results[0].value;
+    view.unmount();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it.each([null, 'checking', 'blocked'] as const)('local entry with a %s license cannot open a protected route', async (state) => {
+    licenseState.snapshot = state === null ? null : { ...grantedLicense, state };
+    const view = renderAppRoute([{ pathname: '/dashboard', search: '?source=local', state: { accountEntry: 'local' } }]);
+
+    expect(screen.queryByTestId('dashboard-route')).not.toBeInTheDocument();
+    if (state === 'blocked') {
+      expect(await screen.findByTestId('settings-route')).toBeInTheDocument();
+      expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/settings\?section=license$/);
+    } else {
+      expect(await screen.findByText('加载中...')).toBeInTheDocument();
+      expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/dashboard\?source=local$/);
+      expect(screen.queryByTestId('main-layout')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('settings-route')).not.toBeInTheDocument();
+
+      licenseState.snapshot = grantedLicense;
+      view.rerender(<MemoryRouter><App /><LocationEcho /></MemoryRouter>);
+
+      expect(await screen.findByTestId('dashboard-route')).toBeInTheDocument();
+      expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/dashboard\?source=local$/);
+      expect(screen.queryByTestId('settings-route')).not.toBeInTheDocument();
+    }
+  });
+
+  it.each([
+    ['/login', '', '登录'],
+    ['/register', '', '创建账号'],
+    ['/settings', '?section=license', null],
+  ] as const)('unlicensed local entry keeps %s reachable', async (path, search, title) => {
+    const view = renderAppRoute([{ pathname: path, search, state: { accountEntry: 'local' } }]);
+
+    if (title) {
+      expect(await screen.findByRole('heading', { name: title, exact: true })).toBeInTheDocument();
+      expect(screen.queryByTestId('settings-route')).not.toBeInTheDocument();
+    } else {
+      expect(await screen.findByTestId('settings-route')).toBeInTheDocument();
+      expect(screen.getByTestId('location-echo').textContent).toBe(path + search);
+      licenseState.snapshot = grantedLicense;
+      view.rerender(<MemoryRouter><App /><LocationEcho /></MemoryRouter>);
+      expect(screen.getByTestId('settings-route')).toBeInTheDocument();
+    }
+    expect(screen.getByTestId('location-echo').textContent).toBe(path + search);
+  });
+
+  it('revoked license redirects an active local session to activation', async () => {
+    licenseState.snapshot = grantedLicense;
+    const view = renderAppRoute([{ pathname: '/dashboard', state: { accountEntry: 'local' } }]);
+    expect(await screen.findByTestId('dashboard-route')).toBeInTheDocument();
+
+    licenseState.snapshot = { ...grantedLicense, state: 'blocked' };
+    view.rerender(<MemoryRouter><App /><LocationEcho /></MemoryRouter>);
+
+    expect(await screen.findByTestId('settings-route')).toBeInTheDocument();
+    expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/settings\?section=license$/);
+    expect(screen.queryByTestId('dashboard-route')).not.toBeInTheDocument();
+    expect(licenseState.subscribe).toHaveBeenCalledOnce();
   });
 
   it('signedOut login page shows guest entry and enters the main route', async () => {
     resetAccountState('signedOut');
     renderAuthRoute();
 
-    fireEvent.click(await screen.findByRole('button', { name: /游客进入/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /本地进入/ }));
 
     await waitFor(() => {
-      expect(screen.getByTestId('location-echo')).toHaveTextContent('/');
+      expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/$/);
       expect(screen.getByTestId('main-entry')).toBeInTheDocument();
     });
   });
@@ -264,25 +392,28 @@ describe('auth route gate', () => {
     fireEvent.click(await screen.findByRole('button', { name: /离线进入/ }));
 
     await waitFor(() => {
-      expect(screen.getByTestId('location-echo')).toHaveTextContent('/');
+      expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/$/);
       expect(screen.getByTestId('main-entry')).toBeInTheDocument();
     });
   });
 
-  it('signedIn still redirects from login to the main app', async () => {
+  it.each([null, 'checking', 'blocked', 'error'] as const)('signedIn bypasses a %s machine license and redirects from login to the main app', async (state) => {
     resetAccountState('signedIn');
+    licenseState.snapshot = state === null || state === 'error' ? null : { ...grantedLicense, state };
+    licenseState.error = state === 'error' ? 'License refresh failed' : null;
 
     render(
-      <MemoryRouter initialEntries={['/login']}>
+      <MemoryRouter initialEntries={[{ pathname: '/login', state: { accountEntry: 'local' } }]}>
         <App />
         <LocationEcho />
       </MemoryRouter>,
     );
 
     await waitFor(() => {
-      expect(screen.getByTestId('location-echo')).toHaveTextContent('/');
+      expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/$/);
       expect(screen.getByTestId('main-layout')).toBeInTheDocument();
     });
+    expect(licenseState.subscribe).not.toHaveBeenCalled();
   });
 
   it('login success still navigates to the main route', async () => {
@@ -312,7 +443,7 @@ describe('auth route gate', () => {
 
     await waitFor(() => {
       expect(accountState.login).toHaveBeenCalledWith({ email: 'matcha@example.com', password: 'password' });
-      expect(screen.getByTestId('location-echo')).toHaveTextContent('/');
+      expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/$/);
       expect(screen.getByTestId('main-entry')).toBeInTheDocument();
     });
   });

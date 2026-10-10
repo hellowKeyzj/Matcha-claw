@@ -203,7 +203,7 @@ impl GraphRunLifecycle {
 
     pub(crate) fn begin_cancellation(
         &mut self,
-        run: &GraphRunFacts,
+        plan: CancellationPlan,
         idempotency_key: &str,
         requested_at: u64,
     ) -> BeginCancellationOutcome {
@@ -213,13 +213,13 @@ impl GraphRunLifecycle {
                     idempotency_key: idempotency_key.to_owned(),
                     requested_at,
                 };
-                BeginCancellationOutcome::Started(cancellation_plan(run))
+                BeginCancellationOutcome::Started(plan)
             }
             GraphRunLifecycleState::Cancelling {
                 idempotency_key: existing,
                 ..
             } if existing == idempotency_key => {
-                BeginCancellationOutcome::Replayed(cancellation_plan(run))
+                BeginCancellationOutcome::Replayed(plan)
             }
             GraphRunLifecycleState::Cancelling { .. }
             | GraphRunLifecycleState::OutcomeUnknown { .. } => {
@@ -282,7 +282,7 @@ impl GraphRunLifecycle {
 
     pub(crate) fn tombstone(
         &mut self,
-        run: &GraphRunFacts,
+        plan: CancellationPlan,
         idempotency_key: &str,
         tombstoned_at: u64,
     ) -> TombstoneOutcome {
@@ -301,13 +301,13 @@ impl GraphRunLifecycle {
             GraphRunLifecycleState::Tombstoned { .. }
             | GraphRunLifecycleState::OutcomeUnknown { .. } => TombstoneOutcome::OutcomeUnknown,
             GraphRunLifecycleState::Active | GraphRunLifecycleState::Cancelling { .. } => {
-                TombstoneOutcome::CancellationRequired(cancellation_plan(run))
+                TombstoneOutcome::CancellationRequired(plan)
             }
         }
     }
 }
 
-fn cancellation_plan(run: &GraphRunFacts) -> CancellationPlan {
+pub(crate) fn cancellation_plan(run: &GraphRunFacts) -> CancellationPlan {
     CancellationPlan::new(
         run.run_id().clone(),
         run.runtime()

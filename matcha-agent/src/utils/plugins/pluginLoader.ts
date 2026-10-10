@@ -927,7 +927,8 @@ export async function cachePlugin(
 
   try {
     logForDebugging(
-      `Caching plugin from source: ${jsonStringify(source)} to temporary path ${tempPath}`,
+      () =>
+        `Caching plugin from source: ${jsonStringify(source)} to temporary path ${tempPath}`,
     )
 
     shouldCleanup = true
@@ -2200,7 +2201,8 @@ async function loadPluginFromMarketplaceEntry(
   installedVersion?: string,
 ): Promise<LoadedPlugin | null> {
   logForDebugging(
-    `Loading plugin ${entry.name} from source: ${jsonStringify(entry.source)}`,
+    () =>
+      `Loading plugin ${entry.name} from source: ${jsonStringify(entry.source)}`,
   )
   let pluginPath: string
 
@@ -3292,7 +3294,8 @@ export function cachePluginSettings(plugins: LoadedPlugin[]): void {
   if (settings && Object.keys(settings).length > 0) {
     resetSettingsCache()
     logForDebugging(
-      `Cached plugin settings with keys: ${Object.keys(settings).join(', ')}`,
+      () =>
+        `Cached plugin settings with keys: ${Object.keys(settings).join(', ')}`,
     )
   }
 }

@@ -231,7 +231,7 @@ impl ChannelLoginOperation {
                         let progress = progress.into_public();
                         channel_trace(
                             "login.start-decode",
-                            &format!(
+                            || format!(
                                 "outcome={:?} accountPresent={}",
                                 progress.status(),
                                 progress.account_id().is_some()
@@ -240,7 +240,7 @@ impl ChannelLoginOperation {
                         WebLoginStartEffect::Progress(progress)
                     }
                     Err(_) => {
-                        channel_trace("login.start-decode", "outcome=unknown error=protocol");
+                        channel_trace("login.start-decode", || "outcome=unknown error=protocol");
                         WebLoginStartEffect::Unknown
                     }
                 }
@@ -289,7 +289,7 @@ impl ChannelLoginOperation {
                         let progress = progress.into_public();
                         channel_trace(
                             "login.wait-decode",
-                            &format!(
+                            || format!(
                                 "outcome={:?} accountPresent={}",
                                 progress.status(),
                                 progress.account_id().is_some()
@@ -298,7 +298,7 @@ impl ChannelLoginOperation {
                         WebLoginWaitEffect::Progress(progress)
                     }
                     Err(_) => {
-                        channel_trace("login.wait-decode", "outcome=unknown error=protocol");
+                        channel_trace("login.wait-decode", || "outcome=unknown error=protocol");
                         WebLoginWaitEffect::Unknown
                     }
                 }
@@ -307,8 +307,8 @@ impl ChannelLoginOperation {
     }
 
     async fn exchange_login(&self, request: wire::RpcRequest) -> LoginExchange {
-        let started = std::time::Instant::now();
-        channel_trace("login.gateway", "event=begin");
+        let started = platform::trace::enabled().then(std::time::Instant::now);
+        channel_trace("login.gateway", || "event=begin");
         let (effect, delivery) = match self.gateway.rpc_mutation(request).await {
             MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
                 (LoginExchange::Rejected, "Rejected")
@@ -319,9 +319,9 @@ impl ChannelLoginOperation {
         };
         channel_trace(
             "login.gateway",
-            &format!(
+            || format!(
                 "event=end delivery={delivery} elapsedMs={}",
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         effect

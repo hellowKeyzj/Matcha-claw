@@ -56,12 +56,12 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
   }, [createdAt, itemKey, largeTextContent.text]);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
-    logSessionTrace('session.assistant-markdown.committed', 'session-assistant-markdown-boundary', {
+    logSessionTrace('session.assistant-markdown.committed', 'session-assistant-markdown-boundary', () => ({
       identity: summarizeSessionIdentity(sessionIdentity), markdownKeyHash: summarizeIdentifier(itemKey).hash,
       input: summarizeText(text), markdownInput: summarizeText(largeTextContent.text),
       output: markdownHtml === null ? null : summarizeText(markdownHtml), mode: markdownHtml ? 'html' : 'plain-text', isStreaming,
       ...(largeText ? { loadedBytes: largeText.loadedBytes, totalBytes: largeText.totalBytes } : {}),
-    });
+    }));
   }, [isStreaming, itemKey, largeText, largeTextContent.text, markdownHtml, sessionIdentity, text]);
   const handleOpenFileHint = useCallback(async (hintPath: string) => {
     if (!hintPath) {

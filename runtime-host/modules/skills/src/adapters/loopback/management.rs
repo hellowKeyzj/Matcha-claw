@@ -61,10 +61,12 @@ pub(super) async fn handle_status(
         .map_err(|_| RequestError::Invalid)?
     {
         crate::status::Outcome::Available(catalog) => {
-            eprintln!(
-                "[startup-trace] source=skills-status phase=transport detail=available entries={}",
-                catalog.entries.len()
-            );
+            if platform::trace::enabled() {
+                eprintln!(
+                    "[startup-trace] source=skills-status phase=transport detail=available entries={}",
+                    catalog.entries.len()
+                );
+            }
             Ok(crate::projection::status::project(&catalog))
         }
         crate::status::Outcome::Unavailable => {

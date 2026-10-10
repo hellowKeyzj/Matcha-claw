@@ -1,10 +1,11 @@
+import type { TFunction } from 'i18next';
 import type {
   SessionRenderToolCard,
   SessionRenderToolRuntimeAdapterId,
 } from '../../../types/session/tool-card';
 import type { ToolActivityViewModel } from '../tool-activity-view-model';
 import { agentToolActivityRenderer, isAgentToolActivityTool } from './agent';
-import { buildFileToolActivityViewModel, isFileToolActivityName } from './file';
+import { buildFileToolActivityContent, isFileToolActivityName } from './file';
 import { genericToolActivityRenderer } from './generic';
 import { canRenderSearchToolActivity, renderSearchToolActivity } from './search';
 import { isShellToolCard, shellToolActivityRenderer } from './shell';
@@ -18,43 +19,43 @@ const FILE_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
   matches: (tool, context) => matchesKnownToolName(context, 'file')
     || isFileToolActivityName(tool.name)
     || isFileToolActivityName(tool.displayTitle),
-  buildViewModel: (tool) => buildFileToolActivityViewModel(tool),
+  buildContent: buildFileToolActivityContent,
 };
 
 const SHELL_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
   name: 'shell',
   matches: (tool, context) => matchesKnownToolName(context, 'shell') || isShellToolCard(tool),
-  buildViewModel: (tool) => shellToolActivityRenderer(tool),
+  buildContent: shellToolActivityRenderer,
 };
 
 const SEARCH_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
   name: 'search',
   matches: (tool, context) => matchesKnownToolName(context, 'search') || canRenderSearchToolActivity(tool),
-  buildViewModel: (tool) => renderSearchToolActivity(tool),
+  buildContent: renderSearchToolActivity,
 };
 
 const SKILL_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
   name: 'skill',
   matches: (tool, context) => matchesKnownToolName(context, 'skill') || isSkillToolActivity(tool),
-  buildViewModel: (tool) => skillToolActivityRenderer(tool),
+  buildContent: skillToolActivityRenderer,
 };
 
 const AGENT_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
   name: 'agent',
   matches: (tool, context) => matchesKnownToolName(context, 'agent') || isAgentToolActivityTool(tool),
-  buildViewModel: (tool) => agentToolActivityRenderer(tool),
+  buildContent: agentToolActivityRenderer,
 };
 
 const WEB_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
   name: 'web',
   matches: (tool, context) => matchesKnownToolName(context, 'web') || canRenderWebToolActivity(tool),
-  buildViewModel: (tool) => renderWebToolActivity(tool),
+  buildContent: renderWebToolActivity,
 };
 
 const PROGRESS_CARD_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
   name: 'progress_card',
   matches: (_tool, context) => context.runtimeAdapterId === 'openclaw' && matchesKnownToolName(context, 'progress_card'),
-  buildViewModel: (tool) => genericToolActivityRenderer(tool),
+  buildContent: genericToolActivityRenderer,
 };
 
 const OPENCLAW_TOOL_ACTIVITY_RENDERERS = [
@@ -84,7 +85,7 @@ const TOOL_ACTIVITY_RENDERERS_BY_RUNTIME: Readonly<Record<SessionRenderToolRunti
 const GENERIC_TOOL_ACTIVITY_RENDERER: GenericToolActivityRenderer = {
   name: 'generic',
   matches: () => true,
-  buildViewModel: (tool) => genericToolActivityRenderer(tool),
+  buildContent: genericToolActivityRenderer,
 };
 
 function toolActivityRenderersForContext(context: ToolRendererContext): readonly ToolActivityRenderer[] {
@@ -105,7 +106,20 @@ export function resolveToolActivityRenderer(tool: SessionRenderToolCard): ToolAc
   return resolveToolActivityRendererForContext(tool, createToolRendererContext(tool));
 }
 
-export function buildToolActivityViewModelFromRegistry(tool: SessionRenderToolCard): ToolActivityViewModel {
+export function buildToolActivityViewModelFromRegistry(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityViewModel {
   const context = createToolRendererContext(tool);
-  return resolveToolActivityRendererForContext(tool, context).buildViewModel(tool, context);
+  const { hasOutputError, ...content } = resolveToolActivityRendererForContext(tool, context).buildContent(tool, t);
+  const isRunning = tool.status === 'running';
+  const isError = tool.status === 'error' || (tool.status === 'completed' && hasOutputError === true);
+  const status = isError ? 'error' : tool.status;
+  const statusLabel = status === 'completed' ? '' : t(`toolStatus.${status}`);
+  return {
+    ...content,
+    tone: isError ? 'danger' : isRunning ? 'running' : tool.status === 'missing_result' || tool.status === 'unknown' ? 'muted' : 'neutral',
+    isRunning,
+    isError,
+    trailingLabels: statusLabel
+      ? [{ text: statusLabel, tone: 'muted' }, ...content.trailingLabels]
+      : content.trailingLabels,
+  };
 }

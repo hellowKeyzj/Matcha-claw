@@ -35,7 +35,7 @@ const taskCenterRefreshPromises = new Map<string, {
   dirty: boolean;
 }>();
 
-function logTaskPipeline(event: string, payload: Record<string, unknown>): void {
+function logTaskPipeline(event: string, payload: () => Record<string, unknown>): void {
   logRendererDebug(`[task-pipeline] task-center.${event}`, payload);
 }
 
@@ -182,22 +182,22 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
           do {
             refresh.dirty = false;
             try {
-              logTaskPipeline('refresh.start', { sessionKey: resolvedSessionKey, identityKey, teamKey: teamKey ?? null, background });
+              logTaskPipeline('refresh.start', () => ({ sessionKey: resolvedSessionKey, identityKey, teamKey: teamKey ?? null, background }));
               const available = await isTaskManagementAvailable(sessionIdentity);
               const snapshot = available
                 ? await listTaskSnapshot({ sessionKey: sessionIdentity.sessionKey, sessionIdentity, ...(teamKey ? { teamKey } : {}) })
                 : null;
               // Discard results superseded by a terminal tool change or a new epoch.
               if (refresh.dirty) continue;
-              logTaskPipeline(snapshot ? 'refresh.result' : 'refresh.unsupported', {
+              logTaskPipeline(snapshot ? 'refresh.result' : 'refresh.unsupported', () => ({
                 sessionKey: resolvedSessionKey,
                 identityKey,
                 tasksCount: snapshot?.tasks.length,
                 todosCount: snapshot?.todos.length,
-              });
+              }));
               return snapshot;
             } catch (error) {
-              logTaskPipeline('refresh.failed', { sessionKey: resolvedSessionKey, identityKey, error: error instanceof Error ? error.message : String(error) });
+              logTaskPipeline('refresh.failed', () => ({ sessionKey: resolvedSessionKey, identityKey, error: error instanceof Error ? error.message : String(error) }));
               if (!refresh.dirty) throw error;
             }
           } while (refresh.dirty);

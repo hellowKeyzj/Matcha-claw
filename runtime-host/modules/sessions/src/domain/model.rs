@@ -1433,15 +1433,20 @@ impl SessionState {
         }
     }
 
-    pub fn assistant_text_for_run_id(&self, run_id: &str) -> Option<String> {
-        match assistant_turn_for_run_id(&self.items, run_id)? {
-            SessionItem::AssistantTurn {
-                status: ItemStatus::Final,
-                text,
-                ..
-            } => Some(text.clone()),
-            _ => None,
-        }
+    pub fn assistant_texts_for_run_id(&self, run_id: &str) -> Vec<String> {
+        items_fact_slice(&self.items)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| match item {
+                SessionItem::AssistantTurn {
+                    run_id: Some(candidate_run),
+                    status: ItemStatus::Final,
+                    text,
+                    ..
+                } if candidate_run == run_id => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn final_assistant_texts_by_run(&self) -> Vec<(String, String)> {
@@ -1877,7 +1882,7 @@ impl SessionState {
         match sync.cut {
             SessionSyncCut::Snapshot => {
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.reconcile_sync.cut", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.reconcile_sync.cut", || serde_json::json!({
                         "cut": "snapshot", "sourceEpochChanged": next.native_source_epoch != sync.source_epoch,
                         "decision": if next.native_source_epoch != sync.source_epoch { "reset_frontier" } else { "preserve_frontier" },
                         "reason": "snapshot_not_consumed_frontier", "nativeCursorBefore": next.native_cursor,
@@ -1895,7 +1900,7 @@ impl SessionState {
             }
             SessionSyncCut::EventFrontier { cursor, .. } => {
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.reconcile_sync.cut", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.reconcile_sync.cut", || serde_json::json!({
                         "cut": "event_frontier", "sourceEpochChanged": next.native_source_epoch != sync.source_epoch,
                         "decision": if next.native_source_epoch != sync.source_epoch { "replace_frontier" } else { "advance_frontier" },
                         "reason": "consumed_frontier", "nativeCursorBefore": next.native_cursor, "incomingCursor": cursor,
@@ -2721,7 +2726,7 @@ fn reconcile_list<T: Clone + Eq>(
                     .filter(|item| {
                         let keep = !retired.iter().any(|key| key == id(item));
                         if trace_enabled {
-                            crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                            crate::trace::log_unscoped("sessions.reconcile_list.decision", || serde_json::json!({
                                 "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
                                 "decision": if keep { "preserve_missing" } else { "retire" },
                                 "reason": if keep { "incoming_unknown_or_unavailable" } else { "explicit_retirement" },
@@ -2742,7 +2747,7 @@ fn reconcile_list<T: Clone + Eq>(
                     .filter(|item| {
                         let keep = !retired.iter().any(|key| key == id(item));
                         if trace_enabled {
-                            crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                            crate::trace::log_unscoped("sessions.reconcile_list.decision", || serde_json::json!({
                                 "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
                                 "decision": if keep { "preserve_missing" } else { "retire" },
                                 "reason": if keep { "incoming_unknown_or_unavailable" } else { "explicit_retirement" },
@@ -2773,7 +2778,7 @@ fn reconcile_list<T: Clone + Eq>(
                 && !current_values.iter().any(|current| id(current) == id(item)));
         if trace_enabled {
             let explicit_retired = retired.iter().any(|key| key == id(item));
-            crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+            crate::trace::log_unscoped("sessions.reconcile_list.decision", || serde_json::json!({
                 "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
                 "decision": if keep { "keep_incoming" } else { "retire" },
                 "reason": if keep { "incoming_candidate" } else if explicit_retired { "explicit_retirement" } else { "concurrent_removal" },
@@ -2787,7 +2792,7 @@ fn reconcile_list<T: Clone + Eq>(
     for item in current_values {
         if retired.iter().any(|key| key == id(item)) {
             if trace_enabled {
-                crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                crate::trace::log_unscoped("sessions.reconcile_list.decision", || serde_json::json!({
                     "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
                     "decision": "retire", "reason": "explicit_retirement",
                     "incomingPresent": list_values(incoming).iter().any(|new| id(new) == id(item)),
@@ -2803,7 +2808,7 @@ fn reconcile_list<T: Clone + Eq>(
                 result[index] = item.clone();
             }
             if trace_enabled {
-                crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                crate::trace::log_unscoped("sessions.reconcile_list.decision", || serde_json::json!({
                     "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
                     "decision": if changed { "keep_concurrent" } else { "update" },
                     "reason": if changed { "current_changed_since_baseline" } else { "incoming_update" },
@@ -2817,7 +2822,7 @@ fn reconcile_list<T: Clone + Eq>(
             // Preserve current relative order using the nearest surviving predecessor.
             let index = previous.map_or(0, |index| index + 1);
             if trace_enabled {
-                crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                crate::trace::log_unscoped("sessions.reconcile_list.decision", || serde_json::json!({
                     "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
                     "decision": "preserve_missing", "reason": "missing_is_not_retirement",
                     "incomingPresent": false, "currentPresent": true, "baselinePresent": old.is_some(),
@@ -2839,7 +2844,7 @@ fn reconcile_list<T: Clone + Eq>(
                 && baseline_item(item) == Some(item)
             {
                 if trace_enabled {
-                    crate::trace::log_unscoped("sessions.reconcile_list.decision", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.reconcile_list.decision", || serde_json::json!({
                         "collection": collection, "itemHash": crate::trace::fingerprint(id(item)),
                         "decision": "evict_window", "reason": "unchanged_outside_window",
                         "incomingPresent": false, "currentPresent": true, "baselinePresent": true,

@@ -91,7 +91,7 @@ process.on('exit', flushBufferSync);
 export function initLogger(): void {
   try {
     // In production, default to INFO to reduce log volume and overhead.
-    if (app.isPackaged && currentLevel < LogLevel.INFO) {
+    if (app.isPackaged && currentLevel < LogLevel.INFO && process.env.MATCHACLAW_TRACE !== '1') {
       currentLevel = LogLevel.INFO;
     }
 
@@ -177,12 +177,16 @@ function writeLog(formatted: string): void {
 
 // ── Public log methods ───────────────────────────────────────────
 
-export function debug(message: string, ...args: unknown[]): void {
-  if (currentLevel <= LogLevel.DEBUG) {
-    const formatted = formatMessage('DEBUG', message, ...args);
-    console.debug(formatted);
-    writeLog(formatted);
-  }
+export type DebugMessage = string | (() => string | [string, ...unknown[]]);
+
+export function debug(message: DebugMessage, ...args: unknown[]): void {
+  if (currentLevel > LogLevel.DEBUG || process.env.MATCHACLAW_TRACE !== '1') return;
+  const resolved = typeof message === 'function' ? message() : message;
+  const formatted = typeof resolved === 'string'
+    ? formatMessage('DEBUG', resolved, ...args)
+    : formatMessage('DEBUG', ...resolved);
+  console.debug(formatted);
+  writeLog(formatted);
 }
 
 export function info(message: string, ...args: unknown[]): void {

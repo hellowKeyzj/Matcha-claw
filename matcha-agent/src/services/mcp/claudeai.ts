@@ -65,7 +65,8 @@ export const fetchClaudeAIMcpConfigsIfEligible = memoize(
       // with both API keys and OAuth tokens to access claude.ai MCPs in print mode.
       if (!tokens.scopes?.includes('user:mcp_servers')) {
         logForDebugging(
-          `[claudeai-mcp] Missing user:mcp_servers scope (scopes=${tokens.scopes?.join(',') || 'none'})`,
+          () =>
+            `[claudeai-mcp] Missing user:mcp_servers scope (scopes=${tokens.scopes?.join(',') || 'none'})`,
         )
         logEvent('tengu_claudeai_mcp_eligibility', {
           state:
@@ -119,7 +120,7 @@ export const fetchClaudeAIMcpConfigsIfEligible = memoize(
       }
 
       logForDebugging(
-        `[claudeai-mcp] Fetched ${Object.keys(configs).length} servers`,
+        () => `[claudeai-mcp] Fetched ${Object.keys(configs).length} servers`,
       )
       logEvent('tengu_claudeai_mcp_eligibility', {
         state:

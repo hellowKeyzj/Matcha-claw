@@ -6,6 +6,8 @@ const projection = {
   runId: 'run:one',
   approvals: [{
     approvalId: 'approval:one',
+    subject: 'stage',
+    nodeId: null,
     stageId: 'stage:one',
     roleId: 'writer',
     reason: 'Review required',

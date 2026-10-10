@@ -77,7 +77,8 @@ export function createLSPServerManager(): LSPServerManager {
       const result = await getAllLspServers()
       serverConfigs = result.servers
       logForDebugging(
-        `[LSP SERVER MANAGER] getAllLspServers returned ${Object.keys(serverConfigs).length} server(s)`,
+        () =>
+          `[LSP SERVER MANAGER] getAllLspServers returned ${Object.keys(serverConfigs).length} server(s)`,
       )
     } catch (error) {
       const err = error as Error

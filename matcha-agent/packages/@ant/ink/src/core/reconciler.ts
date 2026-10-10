@@ -1,6 +1,7 @@
 /* eslint-disable custom-rules/no-top-level-side-effects */
 
 import createReconciler from 'react-reconciler'
+import { isTraceEnabled } from '../../../../../src/utils/trace.js'
 import { getYogaCounters } from './yoga-layout/index.js'
 import {
   appendChildNode,
@@ -187,20 +188,15 @@ export function getOwnerChain(fiber: unknown): string[] {
   return chain
 }
 
-let debugRepaints: boolean | undefined
 export function isDebugRepaintsEnabled(): boolean {
-  if (debugRepaints === undefined) {
-    debugRepaints = process.env.CLAUDE_CODE_DEBUG_REPAINTS === '1'
-  }
-  return debugRepaints
+  return isTraceEnabled()
 }
 
 export const dispatcher = new Dispatcher()
 
 // --- COMMIT INSTRUMENTATION (debug logging) ---
 // Uses console.warn instead of fs.appendFileSync to avoid filesystem dependencies.
-// Set CLAUDE_CODE_COMMIT_LOG=1 to enable debug logging to stderr.
-const COMMIT_LOG = process.env.CLAUDE_CODE_COMMIT_LOG
+const COMMIT_LOG = isTraceEnabled()
 let _commits = 0
 let _lastLog = 0
 let _lastCommitAt = 0

@@ -161,9 +161,9 @@ async function requestConfigure<T extends ChannelConfigureForm | ChannelConfigur
     errorCode = response === null ? 'UNAVAILABLE' : 'INVALID_RESPONSE';
   } catch (error) {
     outcome = UNAVAILABLE;
-    errorCode = channelTraceError(error);
+    if (finish) errorCode = channelTraceError(error);
   } finally {
-    finish(status, outcome, errorCode);
+    finish?.(status, outcome, errorCode);
   }
   return { status: 503, body: UNAVAILABLE };
 }

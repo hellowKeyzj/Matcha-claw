@@ -7,6 +7,7 @@
  */
 
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/core';
+import { isTraceEnabled } from '../../../core/lark-logger';
 import { registerFeishuImBotImageTool } from './resource';
 
 /**
@@ -17,6 +18,6 @@ import { registerFeishuImBotImageTool } from './resource';
  */
 export function registerFeishuImTools(api: OpenClawPluginApi): void {
   if (registerFeishuImBotImageTool(api)) {
-    api.logger.debug?.('feishu_im: Registered feishu_im_bot_image');
+    if (isTraceEnabled()) api.logger.debug?.('feishu_im: Registered feishu_im_bot_image');
   }
 }

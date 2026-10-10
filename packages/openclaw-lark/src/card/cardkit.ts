@@ -44,7 +44,7 @@ interface CardKitResponse {
 function logCardKitResponse(params: { resp: CardKitResponse; api: string; context: string }): void {
   const { resp, api, context } = params;
   const { code, msg } = resp;
-  log.info(`cardkit ${api} response`, { code, msg, context });
+  log.trace(() => `cardkit ${api} response`, { code, msg, context });
   if (code && code !== 0) {
     log.warn(`cardkit ${api} FAILED`, {
       code,

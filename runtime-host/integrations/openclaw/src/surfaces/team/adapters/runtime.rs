@@ -189,17 +189,17 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
     > {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move {
-            let started = Instant::now();
-            session_trace("runtime.team.profile.gateway-lock.request", json!({}));
+            let started = platform::trace::enabled().then(Instant::now);
+            session_trace("runtime.team.profile.gateway-lock.request", || json!({}));
             let client = gateway.lock().await.client();
             session_trace(
                 "runtime.team.profile.gateway-lock.end",
-                json!({"elapsedMs":started.elapsed().as_millis()}),
+                || json!({"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             let result = crate::surfaces::team::member_profiles::read(client, agents).await;
             session_trace(
                 "runtime.team.profile.runtime.end",
-                json!({"outcome":if result.is_ok() {"Succeeded"} else {"Unavailable"},"elapsedMs":started.elapsed().as_millis()}),
+                || json!({"outcome":if result.is_ok() {"Succeeded"} else {"Unavailable"},"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             result
         })
@@ -219,19 +219,19 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
     ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move {
-            let started = Instant::now();
-            session_trace("runtime.team.materialize.gateway-lock.request", json!({}));
+            let started = platform::trace::enabled().then(Instant::now);
+            session_trace("runtime.team.materialize.gateway-lock.request", || json!({}));
             let mut gateway = gateway.lock().await;
             session_trace(
                 "runtime.team.materialize.gateway-lock.end",
-                json!({"elapsedMs":started.elapsed().as_millis()}),
+                || json!({"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             let outcome = crate::surfaces::team::OpenClawTeamNativeEffects::new(&mut gateway)
                 .materialize_observed(request, observer)
                 .await;
             session_trace(
                 "runtime.team.materialize.runtime.end",
-                json!({"outcome":match &outcome { organization::MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", organization::MaterializationOperationOutcome::Rejected { .. } => "Rejected", _ => "OutcomeUnknown" },"elapsedMs":started.elapsed().as_millis()}),
+                || json!({"outcome":match &outcome { organization::MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", organization::MaterializationOperationOutcome::Rejected { .. } => "Rejected", _ => "OutcomeUnknown" },"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             outcome
         })
@@ -256,10 +256,10 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
     ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move {
-            let started = Instant::now();
+            let started = platform::trace::enabled().then(Instant::now);
             session_trace(
                 "runtime.team.unconfirmed-remove.gateway-lock.request",
-                json!({}),
+                || json!({}),
             );
             let mut gateway = gateway.lock().await;
             let outcome = crate::surfaces::team::OpenClawTeamNativeEffects::new(&mut gateway)
@@ -267,7 +267,7 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
                 .await;
             session_trace(
                 "runtime.team.unconfirmed-remove.runtime.end",
-                json!({"outcome":match &outcome { organization::MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", _ => "OutcomeUnknown" },"reason":"native-result","elapsedMs":started.elapsed().as_millis()}),
+                || json!({"outcome":match &outcome { organization::MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", _ => "OutcomeUnknown" },"reason":"native-result","elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             outcome
         })
@@ -279,19 +279,19 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
     ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move {
-            let started = Instant::now();
-            session_trace("runtime.team.recovery.gateway-lock.request", json!({}));
+            let started = platform::trace::enabled().then(Instant::now);
+            session_trace("runtime.team.recovery.gateway-lock.request", || json!({}));
             let mut gateway = gateway.lock().await;
             session_trace(
                 "runtime.team.recovery.gateway-lock.end",
-                json!({"elapsedMs":started.elapsed().as_millis()}),
+                || json!({"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             let outcome = crate::surfaces::team::OpenClawTeamNativeEffects::new(&mut gateway)
                 .recover_materialization(request)
                 .await;
             session_trace(
                 "runtime.team.recovery.runtime.end",
-                json!({"outcome":match &outcome { organization::MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", organization::MaterializationOperationOutcome::Rejected { .. } => "Rejected", _ => "OutcomeUnknown" },"elapsedMs":started.elapsed().as_millis()}),
+                || json!({"outcome":match &outcome { organization::MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", organization::MaterializationOperationOutcome::Rejected { .. } => "Rejected", _ => "OutcomeUnknown" },"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             outcome
         })

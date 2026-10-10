@@ -7,7 +7,9 @@ use std::{
 
 use foundation::execution::{OperationHandle, TraceContext};
 use organization::{ActivityId, DeliveryId, GraphRunId};
+use platform::trace::{identifier_hash, runtime_trace};
 use runtime_directory::OwnedRuntimeFuture;
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use crate::ports::{ActivityExecutionOutcome, ActivityExecutionRequest};
@@ -56,10 +58,11 @@ impl TeamRunActors {
             let Some(actor) = self.actors.get_mut(&run_id) else {
                 continue;
             };
-            actor.wake_ready_nodes(input, now).await;
-            actor
-                .start_dirty_activities(input, now, &mut capacity)
-                .await;
+            if actor.wake_ready_nodes(input, now).await {
+                actor
+                    .start_dirty_activities(input, now, &mut capacity)
+                    .await;
+            }
         }
     }
 
@@ -211,27 +214,58 @@ impl TeamRunActor {
         }
     }
 
-    async fn wake_ready_nodes(&mut self, input: &TeamRunCoordinatorInput, now: u64) {
+    async fn wake_ready_nodes(&mut self, input: &TeamRunCoordinatorInput, now: u64) -> bool {
         let run_id = self.run_id.clone();
         let organization = input.organization.clone();
         let mut operation = spawn_ready_nodes_operation(input, move |_| async move {
-            let mut activity_ids = organization
+            runtime_trace("runtime.team_run.schedule.begin", || json!({
+                "runHash": identifier_hash(run_id.as_str()),
+                "schedulerNow": now,
+            }));
+            let activity_ids = organization
                 .pending_run_activity_ids(run_id.clone(), now)
                 .await
-                .unwrap_or_default();
-            activity_ids.extend(
-                organization
-                    .schedule_ready_nodes(run_id, now)
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .unwrap_or_default(),
-            );
-            activity_ids
+                .inspect_err(|_| {
+                    runtime_trace("runtime.team_run.pending.result", || json!({
+                        "runHash": identifier_hash(run_id.as_str()),
+                        "outcome": "owner_unavailable",
+                    }));
+                })?;
+            let scheduled = organization.schedule_ready_nodes(run_id.clone(), now).await;
+            runtime_trace("runtime.team_run.schedule.result", || json!({
+                "runHash": identifier_hash(run_id.as_str()),
+                "pendingCount": activity_ids.len(),
+                "outcome": match &scheduled {
+                    Ok(Ok(_)) => "succeeded",
+                    Ok(Err(organization::StoreFault::InvalidFacts)) => "invalid_facts",
+                    Ok(Err(_)) => "store_fault",
+                    Err(_) => "owner_unavailable",
+                },
+                "scheduledCount": scheduled.as_ref().ok().and_then(|result| result.as_ref().ok()).map(Vec::len),
+            }));
+            Ok(scheduled?.map(|scheduled| activity_ids.into_iter().chain(scheduled).collect()))
         });
-        if let Ok(activity_ids) = operation.join().await {
-            for activity_id in activity_ids {
-                self.activity_execution.dirty(activity_id);
+        match operation.join().await {
+            Ok(Ok(Ok(activity_ids))) => {
+                for activity_id in activity_ids {
+                    self.activity_execution.dirty(activity_id);
+                }
+                true
+            }
+            Ok(Ok(Err(_))) => false,
+            Ok(Err(_)) => {
+                runtime_trace("runtime.team_run.schedule.join", || json!({
+                    "runHash": identifier_hash(self.run_id.as_str()),
+                    "outcome": "owner_unavailable",
+                }));
+                false
+            }
+            Err(_) => {
+                runtime_trace("runtime.team_run.schedule.join", || json!({
+                    "runHash": identifier_hash(self.run_id.as_str()),
+                    "outcome": "task_failed",
+                }));
+                false
             }
         }
     }
@@ -242,6 +276,13 @@ impl TeamRunActor {
         now: u64,
         capacity: &mut usize,
     ) {
+        runtime_trace("runtime.team_run.activities.ready", || json!({
+            "runHash": identifier_hash(self.run_id.as_str()),
+            "dirtyCount": self.activity_execution.dirty.len(),
+            "deferredCount": self.activity_execution.deferred.len(),
+            "processingCount": self.activity_execution.processing_len(),
+            "capacity": *capacity,
+        }));
         if *capacity == 0 {
             return;
         }
@@ -346,6 +387,11 @@ async fn start_activity_execution(
     delivery_id: DeliveryId,
     claimed_at: u64,
 ) -> OperationHandle<ActivityExecutionCompletion> {
+    runtime_trace("runtime.team_run.activity.begin", || json!({
+        "runHash": identifier_hash(run_id.as_str()),
+        "activityHash": identifier_hash(activity_id.as_str()),
+        "claimedAt": claimed_at,
+    }));
     let target = match input
         .organization
         .activity_target(activity_id.clone())
@@ -362,6 +408,14 @@ async fn start_activity_execution(
             );
         }
     };
+    runtime_trace("runtime.team_run.activity.target", || json!({
+        "runHash": identifier_hash(run_id.as_str()),
+        "activityHash": identifier_hash(activity_id.as_str()),
+        "runtime": match &target {
+            TeamRunActivityTarget::OpenClaw { .. } => "openclaw",
+            TeamRunActivityTarget::Matcha { .. } => "matcha",
+        },
+    }));
     let target_run_id = match &target {
         TeamRunActivityTarget::OpenClaw { run_id } | TeamRunActivityTarget::Matcha { run_id } => {
             run_id
@@ -414,6 +468,10 @@ async fn start_activity_execution(
     };
     match start {
         TeamRunActivityStart::Claimed { claim, request } => {
+            runtime_trace("runtime.team_run.activity.claimed", || json!({
+                "runHash": identifier_hash(run_id.as_str()),
+                "activityHash": identifier_hash(activity_id.as_str()),
+            }));
             let operation = execute_team_activity(input, request);
             spawn_activity_operation(
                 input,
@@ -462,10 +520,18 @@ fn observed_activity_execution(
 fn spawn_ready_nodes_operation<F, U>(
     input: &TeamRunCoordinatorInput,
     future: F,
-) -> OperationHandle<Vec<ActivityId>>
+) -> OperationHandle<
+    Result<Result<Vec<ActivityId>, organization::StoreFault>, crate::RequestAdmissionClosed>,
+>
 where
     F: FnOnce(CancellationToken) -> U + Send + 'static,
-    U: Future<Output = Vec<ActivityId>> + Send + 'static,
+    U: Future<
+            Output = Result<
+                Result<Vec<ActivityId>, organization::StoreFault>,
+                crate::RequestAdmissionClosed,
+            >,
+        > + Send
+        + 'static,
 {
     if input.observation.is_enabled() {
         OperationHandle::spawn_observed(
@@ -669,13 +735,10 @@ mod tests {
                 .unwrap(),
             },
         );
-        let (_admission, admission_changes) =
-            tokio::sync::watch::channel(super::super::coordinator::AdmissionState::Changed);
         let input = TeamRunCoordinatorInput {
             admission: Arc::new(NoRuntime),
             organization: module.handle().clone(),
             activity_executor: Arc::new(NoRuntime),
-            admission_changes,
             observation: ObservationSink::disabled(),
         };
         let mut actors = TeamRunActors::default();

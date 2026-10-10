@@ -38,11 +38,11 @@ export function handleDialogEvent(method, tabId, params, _ctx) {
   }
 
   if (method === 'Page.javascriptDialogClosed') {
-    log.debug(
+    log.debug(() => [
       'dialog closed:', tabId,
       'result:', params?.result,
       'userInput:', params?.userInput ? `"${truncate(params.userInput, 40)}"` : '(none)',
-    )
+    ])
   }
 }
 
@@ -52,12 +52,12 @@ function handleDialogOpening(tabId, params) {
   const defaultPrompt = params?.defaultPrompt || ''
   const hasBrowserHandler = params?.hasBrowserHandler
 
-  log.info(
+  log.info(() => [
     'dialog opening:', tabId,
     `type=${type}`,
     `hasBrowserHandler=${hasBrowserHandler}`,
     `message="${truncate(message, 100)}"`,
-  )
+  ])
 
   switch (type) {
     case 'beforeunload':
@@ -90,7 +90,7 @@ function acceptDialog(tabId, accept, promptText) {
 
   chrome.debugger
     .sendCommand({ tabId }, 'Page.handleJavaScriptDialog', cmdParams)
-    .then(() => log.debug('dialog handled:', tabId, accept ? 'accepted' : 'dismissed'))
+    .then(() => log.debug(() => ['dialog handled:', tabId, accept ? 'accepted' : 'dismissed']))
     .catch((err) => log.warn('dialog handle failed:', tabId, err?.message || err))
 }
 

@@ -5,7 +5,7 @@ use std::{
 
 use super::{
     DependencyMetadata, EdgeAction, EdgeDefinition, EdgeId, EdgePayloadPolicy, ExecutorPolicy,
-    GraphDefinition, GraphRunId, GroupId, NodeDefinition, NodeId, WorkAssignment,
+    GraphDefinition, GraphRunId, NodeDefinition, NodeId, WorkAssignment,
 };
 
 /// Typed workflow facts consumed by the TeamRun graph compiler.
@@ -15,7 +15,6 @@ pub struct WorkflowPlan {
     run_id: String,
     title: String,
     status: String,
-    groups: Vec<WorkflowGroup>,
     tasks: Vec<WorkflowTask>,
     idempotency_key: String,
     created_at: u64,
@@ -27,7 +26,6 @@ impl WorkflowPlan {
         run_id: impl Into<String>,
         title: impl Into<String>,
         status: impl Into<String>,
-        groups: Vec<WorkflowGroup>,
         tasks: Vec<WorkflowTask>,
         idempotency_key: impl Into<String>,
         created_at: u64,
@@ -37,7 +35,6 @@ impl WorkflowPlan {
             run_id: run_id.into(),
             title: title.into(),
             status: status.into(),
-            groups,
             tasks,
             idempotency_key: idempotency_key.into(),
             created_at,
@@ -55,9 +52,6 @@ impl WorkflowPlan {
     }
     pub fn status(&self) -> &str {
         &self.status
-    }
-    pub fn groups(&self) -> &[WorkflowGroup] {
-        &self.groups
     }
     pub fn tasks(&self) -> &[WorkflowTask] {
         &self.tasks
@@ -119,75 +113,10 @@ impl WorkflowTask {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkflowGroup {
-    group_id: String,
-    title: String,
-    task_ids: Vec<String>,
-    join: WorkflowJoinPolicy,
-}
-
-impl WorkflowGroup {
-    pub fn new(
-        group_id: impl Into<String>,
-        title: impl Into<String>,
-        task_ids: Vec<String>,
-        join: WorkflowJoinPolicy,
-    ) -> Self {
-        Self {
-            group_id: group_id.into(),
-            title: title.into(),
-            task_ids,
-            join,
-        }
-    }
-
-    pub fn group_id(&self) -> &str {
-        &self.group_id
-    }
-    pub fn title(&self) -> &str {
-        &self.title
-    }
-    pub fn task_ids(&self) -> &[String] {
-        &self.task_ids
-    }
-    pub const fn join(&self) -> &WorkflowJoinPolicy {
-        &self.join
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WorkflowJoinPolicy {
-    require_completed: bool,
-    allow_failed: bool,
-    retry_limit: u32,
-}
-
-impl WorkflowJoinPolicy {
-    pub const fn new(require_completed: bool, allow_failed: bool, retry_limit: u32) -> Self {
-        Self {
-            require_completed,
-            allow_failed,
-            retry_limit,
-        }
-    }
-
-    pub const fn require_completed(&self) -> bool {
-        self.require_completed
-    }
-    pub const fn allow_failed(&self) -> bool {
-        self.allow_failed
-    }
-    pub const fn retry_limit(&self) -> u32 {
-        self.retry_limit
-    }
-}
-
 /// The compiled graph plus plan facts that are not part of `GraphDefinition`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowPlanCompilation {
     definition: GraphDefinition,
-    groups: Vec<WorkflowGroup>,
     status: String,
     idempotency_key: String,
     created_at: u64,
@@ -196,9 +125,6 @@ pub struct WorkflowPlanCompilation {
 impl WorkflowPlanCompilation {
     pub fn definition(&self) -> &GraphDefinition {
         &self.definition
-    }
-    pub fn groups(&self) -> &[WorkflowGroup] {
-        &self.groups
     }
     pub fn status(&self) -> &str {
         &self.status
@@ -224,21 +150,6 @@ pub enum WorkflowPlanCompileError {
     EmptyTaskPrompt,
     EmptyOutputArtifactKind,
     DuplicateTaskId(String),
-    EmptyGroupId,
-    EmptyGroupTitle,
-    EmptyGroupTaskId,
-    DuplicateGroupId(String),
-    UnknownGroupTask {
-        group_id: String,
-        task_id: String,
-    },
-    DuplicateGroupTask {
-        group_id: String,
-        task_id: String,
-    },
-    TaskAssignedToMultipleGroups {
-        task_id: String,
-    },
     UnknownDependency {
         task_id: String,
         dependency_task_id: String,
@@ -271,27 +182,6 @@ impl fmt::Display for WorkflowPlanCompileError {
                 formatter,
                 "workflow plan contains duplicate task ID {task_id:?}"
             ),
-            Self::EmptyGroupId => formatter.write_str("workflow group ID must not be empty"),
-            Self::EmptyGroupTitle => formatter.write_str("workflow group title must not be empty"),
-            Self::EmptyGroupTaskId => {
-                formatter.write_str("workflow group task ID must not be empty")
-            }
-            Self::DuplicateGroupId(group_id) => write!(
-                formatter,
-                "workflow plan contains duplicate group ID {group_id:?}"
-            ),
-            Self::UnknownGroupTask { group_id, task_id } => write!(
-                formatter,
-                "workflow group {group_id:?} references unknown task {task_id:?}"
-            ),
-            Self::DuplicateGroupTask { group_id, task_id } => write!(
-                formatter,
-                "workflow group {group_id:?} repeats task {task_id:?}"
-            ),
-            Self::TaskAssignedToMultipleGroups { task_id } => write!(
-                formatter,
-                "workflow task {task_id:?} belongs to multiple groups"
-            ),
             Self::UnknownDependency {
                 task_id,
                 dependency_task_id,
@@ -322,17 +212,12 @@ pub fn compile_workflow_plan(
     validate_plan_scalars(plan)?;
 
     let tasks_by_id = build_tasks_by_id(&plan.tasks)?;
-    let group_by_task_id = build_group_membership(&plan.groups, &tasks_by_id)?;
     validate_dependencies(&plan.tasks, &tasks_by_id)?;
 
     let nodes = plan
         .tasks
         .iter()
         .map(|task| {
-            let group_id = group_by_task_id
-                .get(task.task_id())
-                .cloned()
-                .map(GroupId::new);
             NodeDefinition::work(
                 NodeId::new(workflow_task_node_id(task.task_id())),
                 task.title().to_owned(),
@@ -342,7 +227,6 @@ pub fn compile_workflow_plan(
                     task.prompt().to_owned(),
                     ExecutorPolicy::team_role(task.role_id().to_owned()),
                     task.output_artifact_kind().map(ToOwned::to_owned),
-                    group_id,
                 ),
             )
         })
@@ -381,7 +265,6 @@ pub fn compile_workflow_plan(
 
     Ok(WorkflowPlanCompilation {
         definition,
-        groups: plan.groups.clone(),
         status: plan.status.clone(),
         idempotency_key: plan.idempotency_key.clone(),
         created_at: plan.created_at,
@@ -448,52 +331,6 @@ fn build_tasks_by_id(
     Ok(tasks_by_id)
 }
 
-fn build_group_membership(
-    groups: &[WorkflowGroup],
-    tasks_by_id: &BTreeMap<String, &WorkflowTask>,
-) -> Result<BTreeMap<String, String>, WorkflowPlanCompileError> {
-    let mut groups_by_id = BTreeMap::new();
-    let mut group_by_task_id = BTreeMap::new();
-    for group in groups {
-        if group.group_id.trim().is_empty() {
-            return Err(WorkflowPlanCompileError::EmptyGroupId);
-        }
-        if group.title.trim().is_empty() {
-            return Err(WorkflowPlanCompileError::EmptyGroupTitle);
-        }
-        if groups_by_id.insert(group.group_id.clone(), group).is_some() {
-            return Err(WorkflowPlanCompileError::DuplicateGroupId(
-                group.group_id.clone(),
-            ));
-        }
-        for task_id in &group.task_ids {
-            if task_id.trim().is_empty() {
-                return Err(WorkflowPlanCompileError::EmptyGroupTaskId);
-            }
-            if !tasks_by_id.contains_key(task_id) {
-                return Err(WorkflowPlanCompileError::UnknownGroupTask {
-                    group_id: group.group_id.clone(),
-                    task_id: task_id.clone(),
-                });
-            }
-            if let Some(previous_group_id) =
-                group_by_task_id.insert(task_id.clone(), group.group_id.clone())
-            {
-                if previous_group_id == group.group_id {
-                    return Err(WorkflowPlanCompileError::DuplicateGroupTask {
-                        group_id: group.group_id.clone(),
-                        task_id: task_id.clone(),
-                    });
-                }
-                return Err(WorkflowPlanCompileError::TaskAssignedToMultipleGroups {
-                    task_id: task_id.clone(),
-                });
-            }
-        }
-    }
-    Ok(group_by_task_id)
-}
-
 fn validate_dependencies(
     tasks: &[WorkflowTask],
     tasks_by_id: &BTreeMap<String, &WorkflowTask>,
@@ -548,12 +385,6 @@ mod tests {
             "run-1",
             "Workflow",
             "active",
-            vec![WorkflowGroup::new(
-                "group-1",
-                "First",
-                vec!["task-a".into(), "task-b".into()],
-                WorkflowJoinPolicy::new(true, false, 2),
-            )],
             vec![
                 task("task-a", &[]),
                 task("task-b", &["task-a"]),
@@ -587,7 +418,6 @@ mod tests {
         assert_eq!(compilation.status(), "active");
         assert_eq!(compilation.idempotency_key(), "idem-1");
         assert_eq!(compilation.created_at(), 42);
-        assert_eq!(compilation.groups()[0].join().retry_limit(), 2);
     }
 
     #[test]
@@ -605,7 +435,6 @@ mod tests {
             "run",
             "title",
             "active",
-            vec![],
             vec![task("a", &[]), task("a", &[])],
             "idem",
             1,
@@ -615,35 +444,11 @@ mod tests {
             Err(WorkflowPlanCompileError::DuplicateTaskId("a".into()))
         );
 
-        let unknown_group = WorkflowPlan::new(
-            "plan",
-            "run",
-            "title",
-            "active",
-            vec![WorkflowGroup::new(
-                "g",
-                "G",
-                vec!["missing".into()],
-                WorkflowJoinPolicy::new(true, false, 0),
-            )],
-            vec![task("a", &[])],
-            "idem",
-            1,
-        );
-        assert_eq!(
-            compile_workflow_plan(&unknown_group),
-            Err(WorkflowPlanCompileError::UnknownGroupTask {
-                group_id: "g".into(),
-                task_id: "missing".into()
-            })
-        );
-
         let unknown_dependency = WorkflowPlan::new(
             "plan",
             "run",
             "title",
             "active",
-            vec![],
             vec![task("a", &["missing"])],
             "idem",
             1,
@@ -661,7 +466,6 @@ mod tests {
             "run",
             "title",
             "active",
-            vec![],
             vec![task("a", &[]), task("b", &["a", "a"])],
             "idem",
             1,

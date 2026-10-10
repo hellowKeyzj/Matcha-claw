@@ -3,6 +3,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter } from 'react-router-dom';
 import { Settings } from '@/pages/Settings';
 import { useSettingsStore } from '@/stores/settings';
+import { useAccountStore } from '@/stores/account';
+import { useLicenseStore } from '@/stores/license';
 import { useRuntimeHostStore } from '@/stores/gateway';
 import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { useUpdateStore } from '@/stores/update';
@@ -149,6 +151,8 @@ describe('settings page section switch', () => {
       revisionByRuntimeScopeKey: {},
     });
     i18n.changeLanguage('en');
+    useAccountStore.setState({ status: 'signedIn' });
+    useLicenseStore.setState({ snapshot: null, error: null });
 
     useSettingsStore.setState((state) => ({
       ...state,

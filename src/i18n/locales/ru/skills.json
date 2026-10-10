@@ -112,7 +112,6 @@
     "packageActions": "Действия с пакетом навыков",
     "viewCloudPackages": "Просмотреть облачные пакеты",
     "installedDescription": "Управляйте локально установленными пакетами навыков.",
-    "marketDescription": "Находите и устанавливайте пакеты навыков из облака.",
     "search": "Поиск пакетов навыков",
     "packageInstalled": "Установлен",
     "packageAvailable": "Не установлен",
@@ -130,7 +129,7 @@
       "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "Эту версию нельзя опубликовать. Обновите список своих пакетов."
     },
     "cloudTitle": "Маркет облачных пакетов навыков",
-    "cloudEmpty": "Облачных пакетов навыков пока нет.",
+    "cloudEmpty": "Облачных пакетов навыков пока нет",
     "cloudAvailable": "Доступен в облаке",
     "cloudInstalled": "Установлен",
     "packageSize": "{{size}} байт",

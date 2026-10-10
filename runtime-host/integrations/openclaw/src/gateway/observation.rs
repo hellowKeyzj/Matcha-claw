@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::{Arc, Mutex as StdMutex, atomic::{AtomicU64, Ordering}}};
 
-use sessions_module::{ports::{RuntimeOperationFailure, SessionObservationRequest, SessionSync}, state::SessionIdentity};
-use tokio::sync::{Mutex, oneshot};
+use sessions_module::{command::SessionIngressEvent, ports::{RuntimeOperationFailure, SessionObservationRequest, SessionSync}, state::SessionIdentity};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::session::{trace, window::{PageRequest, SessionWindow}};
 
@@ -22,6 +22,7 @@ pub(crate) struct Observation {
     pub(crate) cursor: Option<String>,
     pub(crate) cursor_page: Option<PageRequest>,
     pub(crate) paused: bool,
+    pub(crate) ingress_receipt: Option<oneshot::Receiver<bool>>,
 }
 
 pub(crate) enum OrderedContext {
@@ -48,7 +49,7 @@ impl Observations {
         let mut entries = self.entries.lock().expect("observation registry lock poisoned");
         if entries.contains_key(&key) {
             if trace::enabled() {
-                trace::log_unscoped("runtime.openclaw.observation.prepare.rejected", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.prepare.rejected", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&request.identity), "generation": request.generation,
                     "reason": "already_prepared" }));
             }
@@ -56,12 +57,12 @@ impl Observations {
         }
         let epoch = self.current_epoch.load(Ordering::Acquire);
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.prepare.install", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.prepare.install", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(&request.identity), "generation": request.generation,
                 "sourceEpoch": (epoch != 0).then_some(epoch), "subscribedEpoch": null, "cursorPresent": false, "paused": false }));
         }
         entries.insert(key, Observation { identity: request.identity, generation: request.generation,
-            source_epoch: (epoch != 0).then_some(epoch), subscribed_epoch: None, cursor: None, cursor_page: None, paused: false });
+            source_epoch: (epoch != 0).then_some(epoch), subscribed_epoch: None, cursor: None, cursor_page: None, paused: false, ingress_receipt: None });
         Ok(())
     }
 
@@ -69,7 +70,7 @@ impl Observations {
         let mut entries = self.entries.lock().expect("observation registry lock poisoned");
         let entry = entries.get_mut(&identity_key(identity)).filter(|entry| entry.generation == generation).ok_or(RuntimeOperationFailure::Unavailable)?;
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.restart.registry", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.restart.registry", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "nextGeneration": next_generation,
                 "previousSourceEpoch": entry.source_epoch, "sourceEpoch": null,
                 "previousSubscribedEpoch": entry.subscribed_epoch, "cursorPresent": entry.cursor.is_some(),
@@ -81,6 +82,7 @@ impl Observations {
         entry.subscribed_epoch = None;
         entry.cursor = None;
         entry.cursor_page = None;
+        entry.ingress_receipt = None;
         entry.paused = true;
         Ok(())
     }
@@ -88,14 +90,15 @@ impl Observations {
     pub(crate) fn activate(&self, epoch: u64) {
         let mut entries = self.entries.lock().expect("observation registry lock poisoned");
         self.current_epoch.store(epoch, Ordering::Release);
-        for entry in entries.values_mut().filter(|entry| entry.source_epoch.is_none()) {
-            entry.source_epoch = Some(epoch);
+        for entry in entries.values_mut() {
+            if entry.source_epoch != Some(epoch) { entry.ingress_receipt = None; }
+            if entry.source_epoch.is_none() { entry.source_epoch = Some(epoch); }
         }
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.source.activate", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.source.activate", || serde_json::json!({
                 "sourceEpoch": epoch, "observationCount": entries.len() }));
             for entry in entries.values() {
-                trace::log_unscoped("runtime.openclaw.observation.source.binding", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.source.binding", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&entry.identity), "generation": entry.generation,
                     "sourceEpoch": entry.source_epoch, "activeSourceEpoch": epoch, "subscribedEpoch": entry.subscribed_epoch,
                     "cursorPresent": entry.cursor.is_some(), "cursorHash": entry.cursor.as_deref().map(sessions_module::trace::fingerprint), "paused": entry.paused }));
@@ -107,9 +110,44 @@ impl Observations {
         let _entries = self.entries.lock().expect("observation registry lock poisoned");
         let result = self.current_epoch.compare_exchange(epoch, 0, Ordering::AcqRel, Ordering::Acquire);
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.source.deactivate", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.source.deactivate", || serde_json::json!({
                 "sourceEpoch": epoch, "deactivated": result.is_ok(), "activeSourceEpoch": result.err() }));
         }
+    }
+
+    pub(crate) async fn enqueue_ingress(&self, sender: &mpsc::Sender<SessionIngressEvent>, event: SessionIngressEvent) -> Result<(), RuntimeOperationFailure> {
+        let (identity, event) = event.into_parts();
+        let key = identity_key(&identity);
+        let generation = event.binding.generation();
+        let epoch = event.binding.source_epoch();
+        let (event, receipt) = SessionIngressEvent::new(identity, event).with_receipt();
+        sender.send(event).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        let mut entries = self.entries.lock().expect("observation registry lock poisoned");
+        if let Some(entry) = entries.get_mut(&key).filter(|entry|
+            Some(entry.generation) == generation && entry.source_epoch == epoch
+                && epoch == Some(self.current_epoch.load(Ordering::Acquire)))
+        {
+            // Host drains this FIFO serially; the last receipt covers earlier deliveries.
+            entry.ingress_receipt = Some(receipt);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn await_ingress(&self, identity: &SessionIdentity, generation: u64, epoch: u64) -> Result<(), RuntimeOperationFailure> {
+        let receipt = {
+            let mut entries = self.entries.lock().expect("observation registry lock poisoned");
+            let entry = entries.get_mut(&identity_key(identity)).filter(|entry|
+                entry.generation == generation && entry.source_epoch == Some(epoch) && !entry.paused
+                    && self.current_epoch.load(Ordering::Acquire) == epoch)
+                .ok_or(RuntimeOperationFailure::Unavailable)?;
+            entry.ingress_receipt.take()
+        };
+        if let Some(receipt) = receipt {
+            // Rejection also completes processing; history recovery must not require acceptance.
+            let _ = receipt.await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        }
+        if !self.is_active(identity, generation, epoch) { return Err(RuntimeOperationFailure::Unavailable); }
+        Ok(())
     }
 
     pub(crate) fn is_active(&self, identity: &SessionIdentity, generation: u64, epoch: u64) -> bool {

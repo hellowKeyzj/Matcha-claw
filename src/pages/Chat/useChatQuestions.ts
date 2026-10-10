@@ -11,7 +11,7 @@ type QuestionProjection = {
   scopeKey: string;
   questions: OpenClawPendingQuestionRecord[];
   confirmed: boolean;
-  error: string | null;
+  error: 'questions.loadFailed' | null;
   submittingId: string | null;
 };
 
@@ -89,7 +89,7 @@ export function useChatQuestions(
         }
       } catch {
         if (isCurrent() && revision === readRevision) {
-          publish({ confirmed: false, error: '无法确认待答问题，请重试' });
+          publish({ confirmed: false, error: 'questions.loadFailed' });
         }
       } finally {
         inFlight = false;

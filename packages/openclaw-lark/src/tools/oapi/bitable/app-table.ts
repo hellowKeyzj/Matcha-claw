@@ -147,7 +147,7 @@ export function registerFeishuBitableAppTableTool(api: OpenClawPluginApi): void 
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.info(
+              log.trace(() =>
                 `create: app_token=${p.app_token}, table_name=${p.table.name}, fields_count=${p.table.fields?.length ?? 0}`,
               );
 
@@ -201,7 +201,7 @@ export function registerFeishuBitableAppTableTool(api: OpenClawPluginApi): void 
             // LIST
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: app_token=${p.app_token}, page_size=${p.page_size ?? 50}`);
+              log.trace(() => `list: app_token=${p.app_token}, page_size=${p.page_size ?? 50}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table.list',
@@ -237,7 +237,7 @@ export function registerFeishuBitableAppTableTool(api: OpenClawPluginApi): void 
             // PATCH
             // -----------------------------------------------------------------
             case 'patch': {
-              log.info(`patch: app_token=${p.app_token}, table_id=${p.table_id}, name=${p.name}`);
+              log.trace(() => `patch: app_token=${p.app_token}, table_id=${p.table_id}, name=${p.name}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table.patch',
@@ -275,7 +275,7 @@ export function registerFeishuBitableAppTableTool(api: OpenClawPluginApi): void 
                 });
               }
 
-              log.info(`batch_create: app_token=${p.app_token}, tables_count=${p.tables.length}`);
+              log.trace(() => `batch_create: app_token=${p.app_token}, tables_count=${p.tables.length}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table.batch_create',

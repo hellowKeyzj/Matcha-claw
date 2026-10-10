@@ -751,18 +751,16 @@ export const connectToServer = memoize(
           ...combinedHeaders,
         }
 
-        // Redact sensitive headers before logging
-        const wsHeadersForLogging = mapValues(wsHeaders, (value, key) =>
-          key.toLowerCase() === 'authorization' ? '[REDACTED]' : value,
-        )
-
         logMCPDebug(
           name,
-          `WebSocket transport options: ${jsonStringify({
-            url: serverRef.url,
-            headers: wsHeadersForLogging,
-            hasSessionAuth: !!sessionIngressToken,
-          })}`,
+          () =>
+            `WebSocket transport options: ${jsonStringify({
+              url: serverRef.url,
+              headers: mapValues(wsHeaders, (value, key) =>
+                key.toLowerCase() === 'authorization' ? '[REDACTED]' : value,
+              ),
+              hasSessionAuth: !!sessionIngressToken,
+            })}`,
         )
 
         let wsClient: WsClientLike
@@ -791,13 +789,14 @@ export const connectToServer = memoize(
         )
         logMCPDebug(
           name,
-          `Environment: ${jsonStringify({
-            NODE_OPTIONS: process.env.NODE_OPTIONS || 'not set',
-            UV_THREADPOOL_SIZE: process.env.UV_THREADPOOL_SIZE || 'default',
-            HTTP_PROXY: process.env.HTTP_PROXY || 'not set',
-            HTTPS_PROXY: process.env.HTTPS_PROXY || 'not set',
-            NO_PROXY: process.env.NO_PROXY || 'not set',
-          })}`,
+          () =>
+            `Environment: ${jsonStringify({
+              NODE_OPTIONS: process.env.NODE_OPTIONS || 'not set',
+              UV_THREADPOOL_SIZE: process.env.UV_THREADPOOL_SIZE || 'default',
+              HTTP_PROXY: process.env.HTTP_PROXY || 'not set',
+              HTTPS_PROXY: process.env.HTTPS_PROXY || 'not set',
+              NO_PROXY: process.env.NO_PROXY || 'not set',
+            })}`,
         )
 
         // Create an auth provider for this server
@@ -841,23 +840,26 @@ export const connectToServer = memoize(
           },
         }
 
-        // Redact sensitive headers before logging
-        const headersForLogging = transportOptions.requestInit?.headers
-          ? mapValues(
-              transportOptions.requestInit.headers as Record<string, string>,
-              (value, key) =>
-                key.toLowerCase() === 'authorization' ? '[REDACTED]' : value,
-            )
-          : undefined
-
         logMCPDebug(
           name,
-          `HTTP transport options: ${jsonStringify({
-            url: serverRef.url,
-            headers: headersForLogging,
-            hasAuthProvider: !!authProvider,
-            timeoutMs: MCP_REQUEST_TIMEOUT_MS,
-          })}`,
+          () =>
+            `HTTP transport options: ${jsonStringify({
+              url: serverRef.url,
+              headers: transportOptions.requestInit?.headers
+                ? mapValues(
+                    transportOptions.requestInit.headers as Record<
+                      string,
+                      string
+                    >,
+                    (value, key) =>
+                      key.toLowerCase() === 'authorization'
+                        ? '[REDACTED]'
+                        : value,
+                  )
+                : undefined,
+              hasAuthProvider: !!authProvider,
+              timeoutMs: MCP_REQUEST_TIMEOUT_MS,
+            })}`,
         )
 
         transport = new StreamableHTTPClientTransport(
@@ -1106,12 +1108,13 @@ export const connectToServer = memoize(
         if (serverRef.type === 'sse' && error instanceof Error) {
           logMCPDebug(
             name,
-            `SSE Connection failed after ${elapsed}ms: ${jsonStringify({
-              url: serverRef.url,
-              error: error.message,
-              errorType: error.constructor.name,
-              stack: error.stack,
-            })}`,
+            () =>
+              `SSE Connection failed after ${elapsed}ms: ${jsonStringify({
+                url: serverRef.url,
+                error: error.message,
+                errorType: error.constructor.name,
+                stack: error.stack,
+              })}`,
           )
           logMCPError(name, error)
 
@@ -1186,13 +1189,14 @@ export const connectToServer = memoize(
       // Log successful connection details
       logMCPDebug(
         name,
-        `Connection established with capabilities: ${jsonStringify({
-          hasTools: !!capabilities?.tools,
-          hasPrompts: !!capabilities?.prompts,
-          hasResources: !!capabilities?.resources,
-          hasResourceSubscribe: !!capabilities?.resources?.subscribe,
-          serverVersion: serverVersion || 'unknown',
-        })}`,
+        () =>
+          `Connection established with capabilities: ${jsonStringify({
+            hasTools: !!capabilities?.tools,
+            hasPrompts: !!capabilities?.prompts,
+            hasResources: !!capabilities?.resources,
+            hasResourceSubscribe: !!capabilities?.resources?.subscribe,
+            serverVersion: serverVersion || 'unknown',
+          })}`,
       )
       logForDebugging(
         `[MCP] Server "${name}" connected with subscribe=${!!capabilities?.resources?.subscribe}`,
@@ -1204,7 +1208,8 @@ export const connectToServer = memoize(
       client.setRequestHandler(ElicitRequestSchema, async request => {
         logMCPDebug(
           name,
-          `Elicitation request received during initialization: ${jsonStringify(request)}`,
+          () =>
+            `Elicitation request received during initialization: ${jsonStringify(request)}`,
         )
         return { action: 'cancel' as const }
       })
@@ -3019,7 +3024,8 @@ export async function callMCPToolWithUrlElicitationRetry({
         if (hookResponse) {
           logMCPDebug(
             serverName,
-            `URL elicitation ${elicitationId} resolved by hook: ${jsonStringify(hookResponse)}`,
+            () =>
+              `URL elicitation ${elicitationId} resolved by hook: ${jsonStringify(hookResponse)}`,
           )
           if (hookResponse.action !== 'accept') {
             return {

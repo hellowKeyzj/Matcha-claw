@@ -1,3 +1,4 @@
+import { isTraceEnabled } from '@/lib/trace-logger';
 import {
   forwardRef,
   memo,
@@ -367,7 +368,7 @@ const ChatListContent = memo(function ChatListContent({
   let contentElementsBuildElapsedMs: number | null = null;
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
-    logSessionTrace('session.chat-list.committed', 'session-chat-list-boundary', {
+    logSessionTrace('session.chat-list.committed', 'session-chat-list-boundary', () => ({
       identity: summarizeSessionIdentity(sessionIdentity), showThinking,
       metadataBuildElapsedMs, contentElementsBuildElapsedMs,
       rendered: !showBlockingLoading && !showBlockingError && !isEmptyState,
@@ -375,7 +376,7 @@ const ChatListContent = memo(function ChatListContent({
       items: summarizeRenderItems(items),
       routes: items.slice(0, 200).map((item, itemIndex) => ({ itemIndex, renderKeyHash: summarizeIdentifier(item.key).hash,
         component: item.kind === 'assistant-turn' ? 'ChatAssistantTurn' : item.kind === 'execution-graph' ? 'ExecutionGraphCard' : item.kind === 'system' ? 'SystemInfoRow' : 'ChatMessage' })),
-    });
+    }));
   }, [isEmptyState, items, sessionIdentity, showBlockingError, showBlockingLoading, showThinking]);
 
   if (showBlockingLoading) {
@@ -643,7 +644,8 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
   const contentSignal = `${items.length}|${lastItemSignal}|${viewport.windowEndOffset}|${viewport.totalItemCount}|${viewport.isAtLatest ? '1' : '0'}|${viewport.hasMore ? '1' : '0'}|${viewport.hasNewer ? '1' : '0'}`;
 
   useLayoutEffect(() => {
-    if (!currentSessionKey
+    if (!isTraceEnabled()
+      || !currentSessionKey
       || tracedFirstPaintSessionKeys.has(currentSessionKey)
       || items.length === 0
       || liveView.isEmptyState

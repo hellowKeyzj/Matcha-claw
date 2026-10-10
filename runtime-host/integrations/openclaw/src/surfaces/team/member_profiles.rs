@@ -25,26 +25,26 @@ pub(super) async fn read(
     if requested.is_empty() {
         session_trace(
             "runtime.team.profile.end",
-            json!({"outcome":"Succeeded","count":0}),
+            || json!({"outcome":"Succeeded","count":0}),
         );
         return Ok(Vec::new());
     }
-    let started = Instant::now();
+    let started = platform::trace::enabled().then(Instant::now);
     let agents = OpenClawAgents::new(Arc::clone(&gateway));
     session_trace(
         "runtime.team.profile.native-list.request",
-        json!({"count":requested.len()}),
+        || json!({"count":requested.len()}),
     );
     let native = agents
         .list()
         .await
-        .inspect(|native| session_trace("runtime.team.profile.native-list.end", json!({"outcome":"Succeeded","count":native.agents.len(),"elapsedMs":started.elapsed().as_millis()})))
+        .inspect(|native| session_trace("runtime.team.profile.native-list.end", || json!({"outcome":"Succeeded","count":native.agents.len(),"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()})))
         .map_err(|error| {
-            session_trace("runtime.team.profile.native-list.end", json!({"outcome":format!("{:?}", ReadFailure::from(error)),"elapsedMs":started.elapsed().as_millis()}));
+            session_trace("runtime.team.profile.native-list.end", || json!({"outcome":format!("{:?}", ReadFailure::from(error)),"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
             MemberIntroductionError::Unavailable
         })?;
     for (index, requested) in requested.iter().enumerate() {
-        let agent_hash = identifier_hash(requested.as_str());
+        let agent_hash = || identifier_hash(requested.as_str());
         let mut matching = native
             .agents
             .iter()
@@ -52,7 +52,7 @@ pub(super) async fn read(
         let agent = matching.next().ok_or_else(|| {
             session_trace(
                 "runtime.team.profile.native-check",
-                json!({"index":index,"agentHash":agent_hash,"exists":false}),
+                || json!({"index":index,"agentHash":agent_hash(),"exists":false}),
             );
             MemberIntroductionError::Unavailable
         })?;
@@ -66,17 +66,17 @@ pub(super) async fn read(
         });
         session_trace(
             "runtime.team.profile.native-check",
-            json!({"index":index,"agentHash":agent_hash,"exists":true,"duplicate":duplicate,"workspacePresent":workspace_present}),
+            || json!({"index":index,"agentHash":agent_hash(),"exists":true,"duplicate":duplicate,"workspacePresent":workspace_present}),
         );
         if duplicate || workspace_present == Some(false) {
             return Err(MemberIntroductionError::Unavailable);
         }
     }
-    session_trace("runtime.team.profile.config-get.request", json!({}));
-    let config_started = Instant::now();
+    session_trace("runtime.team.profile.config-get.request", || json!({}));
+    let config_started = platform::trace::enabled().then(Instant::now);
     let request = wire::team::config_get_request(next_request_id("member-profiles-config"))
         .map_err(|_| {
-            session_trace("runtime.team.profile.config-get.end", json!({"reason":"request-shape","outcome":"Protocol","elapsedMs":config_started.elapsed().as_millis()}));
+            session_trace("runtime.team.profile.config-get.end", || json!({"reason":"request-shape","outcome":"Protocol","elapsedMs":config_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
             MemberIntroductionError::Unavailable
         })?;
     let response = gateway
@@ -84,31 +84,31 @@ pub(super) async fn read(
         .await
         .map_err(|error| {
             let class = match error { GatewayClientError::Protocol | GatewayClientError::RpcFailed => "Protocol", _ => "Unavailable" };
-            session_trace("runtime.team.profile.config-get.end", json!({"reason":"transport","outcome":class,"elapsedMs":config_started.elapsed().as_millis()}));
+            session_trace("runtime.team.profile.config-get.end", || json!({"reason":"transport","outcome":class,"elapsedMs":config_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
             MemberIntroductionError::Unavailable
         })?;
     let valid_shape = matches!(&response, GatewayResponse::Success { payload: Some(payload), .. }
         if payload.get("valid") == Some(&Value::Bool(true)));
     session_trace(
         "runtime.team.profile.config-get.rpc-end",
-        json!({"successValidShape":valid_shape,"outcome":if matches!(&response, GatewayResponse::Failure { .. }) {"Rejected"} else {"Succeeded"},"elapsedMs":config_started.elapsed().as_millis()}),
+        || json!({"successValidShape":valid_shape,"outcome":if matches!(&response, GatewayResponse::Failure { .. }) {"Rejected"} else {"Succeeded"},"elapsedMs":config_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
     );
     if !valid_shape {
         session_trace(
             "runtime.team.profile.config-get.end",
-            json!({"reason":"success-validshape","outcome":"Unavailable","elapsedMs":config_started.elapsed().as_millis()}),
+            || json!({"reason":"success-validshape","outcome":"Unavailable","elapsedMs":config_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
         );
         return Err(MemberIntroductionError::Unavailable);
     }
     let (_, document, _) = wire::team::decode_config_get(response)
         .map_err(|_| {
-            session_trace("runtime.team.profile.config-get.end", json!({"reason":"decode","outcome":"Protocol","elapsedMs":config_started.elapsed().as_millis()}));
+            session_trace("runtime.team.profile.config-get.end", || json!({"reason":"decode","outcome":"Protocol","elapsedMs":config_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
             MemberIntroductionError::Unavailable
         })?
         .into_source_and_runtime_config_parts();
     session_trace(
         "runtime.team.profile.config-get.end",
-        json!({"reason":"decode","outcome":"Succeeded","elapsedMs":config_started.elapsed().as_millis()}),
+        || json!({"reason":"decode","outcome":"Succeeded","elapsedMs":config_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
     );
     let descriptions = requested
         .iter()
@@ -124,16 +124,16 @@ pub(super) async fn read(
             .map(|(index, (agent, description))| {
                 let agents = &agents;
                 async move {
-                    let agent_hash = identifier_hash(agent.as_str());
+                    let agent_hash = || identifier_hash(agent.as_str());
                     let read_file = |name, file: &'static str| {
                         let agent = &agent;
                         let agent_hash = &agent_hash;
                         async move {
-                            let file_started = Instant::now();
-                            session_trace("runtime.team.profile.file.request", json!({"index":index,"agentHash":agent_hash,"file":file}));
+                            let file_started = platform::trace::enabled().then(Instant::now);
+                            session_trace("runtime.team.profile.file.request", || json!({"index":index,"agentHash":agent_hash(),"file":file}));
                             agents.files_get(agent.as_str().to_owned(), name).await
-                                .inspect(|content| session_trace("runtime.team.profile.file.end", json!({"index":index,"agentHash":agent_hash,"file":file,"outcome":"Succeeded","missing":content.missing,"contentBytes":content.content.as_ref().map(String::len),"elapsedMs":file_started.elapsed().as_millis()})))
-                                .inspect_err(|error| session_trace("runtime.team.profile.file.end", json!({"index":index,"agentHash":agent_hash,"file":file,"outcome":format!("{:?}", ReadFailure::from(*error)),"elapsedMs":file_started.elapsed().as_millis()})))
+                                .inspect(|content| session_trace("runtime.team.profile.file.end", || json!({"index":index,"agentHash":agent_hash(),"file":file,"outcome":"Succeeded","missing":content.missing,"contentBytes":content.content.as_ref().map(String::len),"elapsedMs":file_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()})))
+                                .inspect_err(|error| session_trace("runtime.team.profile.file.end", || json!({"index":index,"agentHash":agent_hash(),"file":file,"outcome":format!("{:?}", ReadFailure::from(*error)),"elapsedMs":file_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()})))
                         }
                     };
                     let (agents_file, soul_file) = tokio::try_join!(
@@ -143,8 +143,8 @@ pub(super) async fn read(
                     .map_err(|_| MemberIntroductionError::Unavailable)?;
                     Ok(MemberProfile {
                         description,
-                        agents_markdown: markdown(agents_file, index, &agent_hash, "AGENTS")?,
-                        soul_markdown: markdown(soul_file, index, &agent_hash, "SOUL")?,
+                        agents_markdown: markdown(agents_file, index, agent.as_str(), "AGENTS")?,
+                        soul_markdown: markdown(soul_file, index, agent.as_str(), "SOUL")?,
                     })
                 }
             }),
@@ -154,7 +154,7 @@ pub(super) async fn read(
     .await;
     session_trace(
         "runtime.team.profile.end",
-        json!({"outcome":if result.is_ok() {"Succeeded"} else {"Unavailable"},"elapsedMs":started.elapsed().as_millis()}),
+        || json!({"outcome":if result.is_ok() {"Succeeded"} else {"Unavailable"},"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
     );
     result
 }
@@ -164,18 +164,18 @@ fn description(
     agent_id: &str,
     index: usize,
 ) -> Result<Option<String>, MemberIntroductionError> {
-    let agent_hash = identifier_hash(agent_id);
+    let agent_hash = || identifier_hash(agent_id);
     let unavailable = |reason| {
         session_trace(
             "runtime.team.profile.description.end",
-            json!({"index":index,"agentHash":agent_hash,"outcome":"Unavailable","reason":reason}),
+            || json!({"index":index,"agentHash":agent_hash(),"outcome":"Unavailable","reason":reason}),
         );
         MemberIntroductionError::Unavailable
     };
     let Some(agents) = document.get("agents") else {
         session_trace(
             "runtime.team.profile.description.end",
-            json!({"index":index,"agentHash":agent_hash,"outcome":"Succeeded","reason":"agents-missing"}),
+            || json!({"index":index,"agentHash":agent_hash(),"outcome":"Succeeded","reason":"agents-missing"}),
         );
         return Ok(None);
     };
@@ -205,7 +205,7 @@ fn description(
     let Some(entry) = entry else {
         session_trace(
             "runtime.team.profile.description.end",
-            json!({"index":index,"agentHash":agent_hash,"outcome":"Succeeded","reason":"entry-missing"}),
+            || json!({"index":index,"agentHash":agent_hash(),"outcome":"Succeeded","reason":"entry-missing"}),
         );
         return Ok(None);
     };
@@ -214,11 +214,11 @@ fn description(
         .ok_or_else(|| unavailable("entry-shape"))?;
     match entry.get("description") {
         None | Some(Value::Null) => {
-            session_trace("runtime.team.profile.description.end", json!({"index":index,"agentHash":agent_hash,"outcome":"Succeeded","reason":"description-missing"}));
+            session_trace("runtime.team.profile.description.end", || json!({"index":index,"agentHash":agent_hash(),"outcome":"Succeeded","reason":"description-missing"}));
             Ok(None)
         }
         Some(Value::String(content)) => strip_teamrun_blocks(content)
-            .inspect(|stripped| session_trace("runtime.team.profile.description.end", json!({"index":index,"agentHash":agent_hash,"outcome":"Succeeded","contentBytes":content.len(),"strippedBytes":stripped.len()})))
+            .inspect(|stripped| session_trace("runtime.team.profile.description.end", || json!({"index":index,"agentHash":agent_hash(),"outcome":"Succeeded","contentBytes":content.len(),"strippedBytes":stripped.len()})))
             .map(Some)
             .map_err(|_| unavailable("strip-error")),
         Some(_) => Err(unavailable("description-shape")),
@@ -228,21 +228,21 @@ fn description(
 fn markdown(
     file: AgentFile,
     index: usize,
-    agent_hash: &str,
+    agent_id: &str,
     name: &'static str,
 ) -> Result<Option<String>, MemberIntroductionError> {
     if file.missing {
         return Ok(None);
     }
     let content = file.content.ok_or_else(|| {
-        session_trace("runtime.team.profile.file.strip-end", json!({"index":index,"agentHash":agent_hash,"file":name,"outcome":"Unavailable","reason":"content-missing"}));
+        session_trace("runtime.team.profile.file.strip-end", || json!({"index":index,"agentHash":identifier_hash(agent_id),"file":name,"outcome":"Unavailable","reason":"content-missing"}));
         MemberIntroductionError::Unavailable
     })?;
     strip_teamrun_blocks(&content)
-        .inspect(|stripped| session_trace("runtime.team.profile.file.strip-end", json!({"index":index,"agentHash":agent_hash,"file":name,"outcome":"Succeeded","strippedBytes":stripped.len()})))
+        .inspect(|stripped| session_trace("runtime.team.profile.file.strip-end", || json!({"index":index,"agentHash":identifier_hash(agent_id),"file":name,"outcome":"Succeeded","strippedBytes":stripped.len()})))
         .map(Some)
         .map_err(|_| {
-            session_trace("runtime.team.profile.file.strip-end", json!({"index":index,"agentHash":agent_hash,"file":name,"outcome":"Unavailable","reason":"strip-error"}));
+            session_trace("runtime.team.profile.file.strip-end", || json!({"index":index,"agentHash":identifier_hash(agent_id),"file":name,"outcome":"Unavailable","reason":"strip-error"}));
             MemberIntroductionError::Unavailable
         })
 }

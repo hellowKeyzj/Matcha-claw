@@ -182,15 +182,17 @@ impl ProviderNativeConfigurationOperation {
         auth_state_refresh_required: bool,
         now_millis: u64,
     ) -> ProviderNativeConfigurationEvidence {
-        eprintln!(
-            "[startup-trace] source=openclaw-provider-config phase=start detail=reconcile-provider-config config_path={} accounts={} retired={} routing={} required_auth={} auth_refresh={}",
-            self.config_path(),
-            accounts.len(),
-            retired.len(),
-            routing.is_some(),
-            required_auth_accounts.len(),
-            auth_state_refresh_required
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=openclaw-provider-config phase=start detail=reconcile-provider-config config_path={} accounts={} retired={} routing={} required_auth={} auth_refresh={}",
+                self.config_path(),
+                accounts.len(),
+                retired.len(),
+                routing.is_some(),
+                required_auth_accounts.len(),
+                auth_state_refresh_required
+            );
+        }
         let provider_keys = match canonical_provider_keys(accounts, retired) {
             Ok(keys) => keys,
             Err(_) => {
@@ -246,12 +248,14 @@ impl ProviderNativeConfigurationOperation {
         ) {
             Ok(changed) => changed,
             Err(failure) => {
-                eprintln!(
-                    "[startup-trace] source=openclaw-provider-config phase=build-projection detail=failed reason={} expected_path={} detail_len={}",
-                    failure.reason(),
-                    failure.expected_path().unwrap_or("none"),
-                    failure.detail_len()
-                );
+                if platform::trace::enabled() {
+                    eprintln!(
+                        "[startup-trace] source=openclaw-provider-config phase=build-projection detail=failed reason={} expected_path={} detail_len={}",
+                        failure.reason(),
+                        failure.expected_path().unwrap_or("none"),
+                        failure.detail_len()
+                    );
+                }
                 zeroize_value(&mut source_document);
                 zeroize_value(&mut runtime_document);
                 return self.unavailable_evidence_at(
@@ -263,10 +267,12 @@ impl ProviderNativeConfigurationOperation {
                 );
             }
         };
-        eprintln!(
-            "[startup-trace] source=openclaw-provider-config phase=build-projection detail=ok changed={}",
-            projection_changed
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=openclaw-provider-config phase=build-projection detail=ok changed={}",
+                projection_changed
+            );
+        }
         let mut expected_document = expected.as_value();
         let expected_view = canonical_provider_configuration(&expected_document, &provider_keys);
         let mut patch = merge_patch(&source_document, &expected_document);
@@ -277,19 +283,23 @@ impl ProviderNativeConfigurationOperation {
             &patch,
         );
         let changed = !patch.as_object().is_some_and(|object| object.is_empty());
-        eprintln!(
-            "[startup-trace] source=openclaw-provider-config phase=diff detail=patch-built changed={} patch_keys={} replace_paths={} base_hash_present={}",
-            changed,
-            patch.as_object().map(|object| object.len()).unwrap_or(0),
-            replace_paths.len(),
-            base_hash.is_some()
-        );
-        eprintln!(
-            "[startup-trace] source=openclaw-provider-config phase=diff detail=patch-shape top_keys={} patch_paths={} replace_paths={}",
-            patch_top_level_keys(&patch),
-            patch_leaf_paths(&patch),
-            safe_trace_path_list(&replace_paths)
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=openclaw-provider-config phase=diff detail=patch-built changed={} patch_keys={} replace_paths={} base_hash_present={}",
+                changed,
+                patch.as_object().map(|object| object.len()).unwrap_or(0),
+                replace_paths.len(),
+                base_hash.is_some()
+            );
+        }
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=openclaw-provider-config phase=diff detail=patch-shape top_keys={} patch_paths={} replace_paths={}",
+                patch_top_level_keys(&patch),
+                patch_leaf_paths(&patch),
+                safe_trace_path_list(&replace_paths)
+            );
+        }
         zeroize_value(&mut source_document);
         zeroize_value(&mut runtime_document);
 
@@ -338,18 +348,22 @@ impl ProviderNativeConfigurationOperation {
                     );
                 }
             };
-            eprintln!(
-                "[startup-trace] source=openclaw-provider-config phase=config.patch detail=write-request config_path={}",
-                self.config_path()
-            );
+            if platform::trace::enabled() {
+                eprintln!(
+                    "[startup-trace] source=openclaw-provider-config phase=config.patch detail=write-request config_path={}",
+                    self.config_path()
+                );
+            }
             let (status, outcome) = self.write_patch(request).await;
             let selected_method = "config.patch";
-            eprintln!(
-                "[startup-trace] source=openclaw-provider-config phase={} detail=write-outcome applied={:?} outcome={}",
-                selected_method,
-                status,
-                outcome.reason()
-            );
+            if platform::trace::enabled() {
+                eprintln!(
+                    "[startup-trace] source=openclaw-provider-config phase={} detail=write-outcome applied={:?} outcome={}",
+                    selected_method,
+                    status,
+                    outcome.reason()
+                );
+            }
             applied = status;
             write_outcome = outcome;
             method = selected_method;
@@ -372,18 +386,22 @@ impl ProviderNativeConfigurationOperation {
                     remove_unowned_model_metadata(&mut view, &expected_view);
                     remove_runtime_only_provider_overlay_defaults(&mut view, &expected_view);
                     let status = if view == expected_view {
-                        eprintln!(
-                            "[startup-trace] source=openclaw-provider-config phase=readback detail=config-readback-matches config_path={} method={}",
-                            self.config_path(),
-                            method
-                        );
+                        if platform::trace::enabled() {
+                            eprintln!(
+                                "[startup-trace] source=openclaw-provider-config phase=readback detail=config-readback-matches config_path={} method={}",
+                                self.config_path(),
+                                method
+                            );
+                        }
                         ObservedStatus::Matches
                     } else {
-                        eprintln!(
-                            "[startup-trace] source=openclaw-provider-config phase=readback detail=config-readback-mismatch config_path={} method={}",
-                            self.config_path(),
-                            method
-                        );
+                        if platform::trace::enabled() {
+                            eprintln!(
+                                "[startup-trace] source=openclaw-provider-config phase=readback detail=config-readback-mismatch config_path={} method={}",
+                                self.config_path(),
+                                method
+                            );
+                        }
                         diagnostic = Some(ProviderNativeConfigurationDiagnostic::new(
                             "readback",
                             "config-readback-mismatch",
@@ -401,11 +419,13 @@ impl ProviderNativeConfigurationOperation {
                     status
                 }
                 Err(readback_diagnostic) => {
-                    eprintln!(
-                        "[startup-trace] source=openclaw-provider-config phase=readback detail=config-readback-unavailable config_path={} method={}",
-                        self.config_path(),
-                        method
-                    );
+                    if platform::trace::enabled() {
+                        eprintln!(
+                            "[startup-trace] source=openclaw-provider-config phase=readback detail=config-readback-unavailable config_path={} method={}",
+                            self.config_path(),
+                            method
+                        );
+                    }
                     diagnostic = Some(readback_diagnostic);
                     ObservedStatus::Unavailable
                 }
@@ -438,13 +458,17 @@ impl ProviderNativeConfigurationOperation {
         )) {
             Ok(request) => request,
             Err(_) => {
-                eprintln!(
-                    "[startup-trace] source=openclaw-provider-auth phase=refresh detail=request-build-failed"
-                );
+                if platform::trace::enabled() {
+                    eprintln!(
+                        "[startup-trace] source=openclaw-provider-auth phase=refresh detail=request-build-failed"
+                    );
+                }
                 return;
             }
         };
-        eprintln!("[startup-trace] source=openclaw-provider-auth phase=refresh detail=request");
+        if platform::trace::enabled() {
+            eprintln!("[startup-trace] source=openclaw-provider-auth phase=refresh detail=request");
+        }
         let outcome = match self
             .gateway
             .rpc_query_with_deadline(request, AUTH_STATUS_REFRESH_DEADLINE)
@@ -454,7 +478,9 @@ impl ProviderNativeConfigurationOperation {
             Ok(GatewayResponse::Failure { .. }) => "rejected",
             Err(_) => "unavailable",
         };
-        eprintln!("[startup-trace] source=openclaw-provider-auth phase=refresh detail={outcome}");
+        if platform::trace::enabled() {
+            eprintln!("[startup-trace] source=openclaw-provider-auth phase=refresh detail={outcome}");
+        }
     }
 
     fn config_path(&self) -> String {
@@ -507,11 +533,13 @@ impl ProviderNativeConfigurationOperation {
         phase: &'static str,
         reason: &'static str,
     ) -> Result<NativeConfigSnapshot, ProviderNativeConfigurationDiagnostic> {
-        eprintln!(
-            "[startup-trace] source=openclaw-provider-config phase={} detail=config-get-request config_path={}",
-            phase,
-            self.config_path()
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=openclaw-provider-config phase={} detail=config-get-request config_path={}",
+                phase,
+                self.config_path()
+            );
+        }
         let request = wire::team::config_get_request(next_request_id("provider-config-get"))
             .map_err(|_| {
                 self.config_get_diagnostic(phase, reason, Some("request-build-failed".to_owned()))
@@ -541,12 +569,14 @@ impl ProviderNativeConfigurationOperation {
                 Some("config.get returned a non-object document".to_owned()),
             ));
         }
-        eprintln!(
-            "[startup-trace] source=openclaw-provider-config phase={} detail=config-get-success config_path={} base_hash_present={}",
-            phase,
-            self.config_path(),
-            base_hash.is_some()
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=openclaw-provider-config phase={} detail=config-get-success config_path={} base_hash_present={}",
+                phase,
+                self.config_path(),
+                base_hash.is_some()
+            );
+        }
         Ok(NativeConfigSnapshot {
             source_document,
             runtime_document,
@@ -560,13 +590,15 @@ impl ProviderNativeConfigurationOperation {
         reason: &'static str,
         detail: Option<String>,
     ) -> ProviderNativeConfigurationDiagnostic {
-        eprintln!(
-            "[startup-trace] source=openclaw-provider-config phase={} detail={} config_path={} error={}",
-            phase,
-            reason,
-            self.config_path(),
-            detail.as_deref().unwrap_or("none")
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=openclaw-provider-config phase={} detail={} config_path={} error={}",
+                phase,
+                reason,
+                self.config_path(),
+                detail.as_deref().unwrap_or("none")
+            );
+        }
         ProviderNativeConfigurationDiagnostic::new(
             phase,
             reason,
@@ -588,7 +620,9 @@ impl ProviderNativeConfigurationOperation {
                 match request.encode() {
                     Ok(encoded) => encoded,
                     Err(_) => {
-                        eprintln!("[startup-trace] source=openclaw-provider-config phase=config.patch detail=request-encode-failed");
+                        if platform::trace::enabled() {
+                            eprintln!("[startup-trace] source=openclaw-provider-config phase=config.patch detail=request-encode-failed");
+                        }
                         return (
                             AppliedStatus::Unknown,
                             WriteOutcome::Rejected(Some("request-encode-failed".to_owned())),
@@ -600,11 +634,13 @@ impl ProviderNativeConfigurationOperation {
         {
             MutationDelivery::Response(response) => match response {
                 GatewayResponse::Failure { error, .. } => {
-                    eprintln!(
-                        "[startup-trace] source=openclaw-provider-config phase=config.patch detail=gateway-failure code={} message_len={}",
-                        safe_gateway_error_text(error.code()),
-                        error.message().len()
-                    );
+                    if platform::trace::enabled() {
+                        eprintln!(
+                            "[startup-trace] source=openclaw-provider-config phase=config.patch detail=gateway-failure code={} message_len={}",
+                            safe_gateway_error_text(error.code()),
+                            error.message().len()
+                        );
+                    }
                     (
                         AppliedStatus::Unknown,
                         WriteOutcome::Rejected(Some(gateway_error_detail(&error))),
@@ -612,11 +648,15 @@ impl ProviderNativeConfigurationOperation {
                 }
                 response => match wire::team::decode_config_patch(response) {
                     Ok(_) => {
-                        eprintln!("[startup-trace] source=openclaw-provider-config phase=config.patch detail=gateway-success");
+                        if platform::trace::enabled() {
+                            eprintln!("[startup-trace] source=openclaw-provider-config phase=config.patch detail=gateway-success");
+                        }
                         (AppliedStatus::Confirmed, WriteOutcome::Confirmed)
                     }
                     Err(_) => {
-                        eprintln!("[startup-trace] source=openclaw-provider-config phase=config.patch detail=invalid-response");
+                        if platform::trace::enabled() {
+                            eprintln!("[startup-trace] source=openclaw-provider-config phase=config.patch detail=invalid-response");
+                        }
                         (
                             AppliedStatus::Unknown,
                             WriteOutcome::Unknown(Some("invalid config.patch response".to_owned())),
@@ -625,14 +665,18 @@ impl ProviderNativeConfigurationOperation {
                 },
             },
             MutationDelivery::NotWritten(_) => {
-                eprintln!("[startup-trace] source=openclaw-provider-config phase=config.patch detail=gateway-not-written");
+                if platform::trace::enabled() {
+                    eprintln!("[startup-trace] source=openclaw-provider-config phase=config.patch detail=gateway-not-written");
+                }
                 (
                     AppliedStatus::Unknown,
                     WriteOutcome::Rejected(Some("gateway-not-written".to_owned())),
                 )
             }
             MutationDelivery::MayHaveReached(_) => {
-                eprintln!("[startup-trace] source=openclaw-provider-config phase=config.patch detail=gateway-may-have-reached");
+                if platform::trace::enabled() {
+                    eprintln!("[startup-trace] source=openclaw-provider-config phase=config.patch detail=gateway-may-have-reached");
+                }
                 (
                     AppliedStatus::Unknown,
                     WriteOutcome::Unknown(Some("gateway-may-have-reached".to_owned())),

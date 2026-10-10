@@ -90,7 +90,7 @@ impl OpenClawGateway {
         let Some(state_dir) = self.team_state_dir.clone() else {
             platform::trace::session_trace(
                 "runtime.team.unconfirmed-remove.end",
-                serde_json::json!({"outcome":"OutcomeUnknown","reason":"state-dir-missing"}),
+                || serde_json::json!({"outcome":"OutcomeUnknown","reason":"state-dir-missing"}),
             );
             return MaterializationOperationOutcome::OutcomeUnknown;
         };

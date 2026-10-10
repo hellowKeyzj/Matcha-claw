@@ -19,7 +19,7 @@
  * See lib/cdp/events/ for comprehensive event handling across all domains.
  */
 
-import { createLogger } from '../../logger.js'
+import { createLogger, isTraceEnabled } from '../../logger.js'
 
 const log = createLogger('dbg')
 
@@ -31,11 +31,11 @@ const log = createLogger('dbg')
  * @throws {Error} If attachment fails
  */
 export async function attachDebugger(tabId) {
-  const t0 = performance.now()
+  const t0 = isTraceEnabled() ? performance.now() : 0
   const debuggee = { tabId }
 
   await chrome.debugger.attach(debuggee, '1.3')
-  log.debug('attach took', (performance.now() - t0).toFixed(1), 'ms', tabId)
+  log.debug(() => ['attach took', (performance.now() - t0).toFixed(1), 'ms', tabId])
 
   await chrome.debugger.sendCommand(debuggee, 'Page.enable').catch((err) => {
     log.warn('Page.enable failed', tabId, err)
@@ -46,7 +46,7 @@ export async function attachDebugger(tabId) {
   )
   const realTargetId = String(info?.targetInfo?.targetId || '').trim()
 
-  log.debug('attached', tabId, 'targetId:', realTargetId, 'in', (performance.now() - t0).toFixed(1), 'ms')
+  log.debug(() => ['attached', tabId, 'targetId:', realTargetId, 'in', (performance.now() - t0).toFixed(1), 'ms'])
   return { realTargetId }
 }
 
@@ -78,8 +78,8 @@ export async function detachDebugger(tabId) {
 export function detachAll(tabIds) {
   const promises = tabIds.map(
     (tabId) => chrome.debugger.detach({ tabId })
-      .then(() => log.debug('detachAll: OK', tabId))
-      .catch((err) => log.debug('detachAll: failed', tabId, err)),
+      .then(() => log.debug(() => ['detachAll: OK', tabId]))
+      .catch((err) => log.debug(() => ['detachAll: failed', tabId, err])),
   )
   return Promise.allSettled(promises)
 }

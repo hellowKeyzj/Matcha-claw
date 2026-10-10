@@ -184,7 +184,7 @@ impl SessionHandle {
         &self,
         command: SessionAbortCommand,
     ) -> Result<SessionAbortOutcome, ()> {
-        crate::trace::log("runtime.abort.api.submit", command.trace_id(), serde_json::json!({}));
+        crate::trace::log("runtime.abort.api.submit", command.trace_id(), || serde_json::json!({}));
         self.request_query(|reply| SessionQuery::Abort { command, reply })
         .await
     }
@@ -302,25 +302,25 @@ impl SessionHandle {
         let (reply, response) = oneshot::channel();
         let query = query(reply);
         let abort_trace_id = match &query {
-            SessionQuery::Abort { command, .. } => command.trace_id().map(str::to_owned),
+            SessionQuery::Abort { command, .. } => command.trace_id().filter(|_| crate::trace::enabled()).map(str::to_owned),
             _ => None,
         };
-        let started = std::time::Instant::now();
+        let started = abort_trace_id.as_ref().map(|_| std::time::Instant::now());
         let call = self.begin_call(query.call_detail()).await.map_err(|()| {
-            crate::trace::log("runtime.abort.api.audit-failed", abort_trace_id.as_deref(), serde_json::json!({ "elapsedMs": started.elapsed().as_millis() }));
+            crate::trace::log("runtime.abort.api.audit-failed", abort_trace_id.as_deref(), || serde_json::json!({ "elapsedMs": started.map(|started| started.elapsed().as_millis()) }));
         })?;
         let query = match &call {
             Some(call) => SessionQuery::Audited { query: Box::new(query), call: call.clone() },
             None => query,
         };
-        crate::trace::log("runtime.abort.api.dispatch", abort_trace_id.as_deref(), serde_json::json!({ "elapsedMs": started.elapsed().as_millis() }));
+        crate::trace::log("runtime.abort.api.dispatch", abort_trace_id.as_deref(), || serde_json::json!({ "elapsedMs": started.map(|started| started.elapsed().as_millis()) }));
         if self.owner.send_query(query).await.is_err() {
             if let Some(call) = call { call.rejected().await; }
-            crate::trace::log("runtime.abort.api.dispatch-failed", abort_trace_id.as_deref(), serde_json::json!({ "elapsedMs": started.elapsed().as_millis() }));
+            crate::trace::log("runtime.abort.api.dispatch-failed", abort_trace_id.as_deref(), || serde_json::json!({ "elapsedMs": started.map(|started| started.elapsed().as_millis()) }));
             return Err(());
         }
         let outcome = response.await.map_err(|_| ());
-        crate::trace::log("runtime.abort.api.response", abort_trace_id.as_deref(), serde_json::json!({ "received": outcome.is_ok(), "elapsedMs": started.elapsed().as_millis() }));
+        crate::trace::log("runtime.abort.api.response", abort_trace_id.as_deref(), || serde_json::json!({ "received": outcome.is_ok(), "elapsedMs": started.map(|started| started.elapsed().as_millis()) }));
         outcome
     }
 

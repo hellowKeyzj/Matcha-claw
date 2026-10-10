@@ -20,7 +20,10 @@ export type TeamPendingApproval = Readonly<{
   reason: string;
   requestedAction: string;
   createdAt: number;
-}>;
+}> & (
+  | Readonly<{ subject: 'stage'; nodeId: null }>
+  | Readonly<{ subject: 'work_node' | 'human_decision'; nodeId: string }>
+);
 
 export type TeamPendingApprovals = Readonly<{
   teamId: string;
@@ -85,7 +88,10 @@ function isProjection(value: unknown): value is TeamPendingApprovals {
 
 function isApproval(value: unknown): value is TeamPendingApproval {
   return isRecord(value)
-    && hasExactKeys(value, ['approvalId', 'stageId', 'roleId', 'reason', 'requestedAction', 'createdAt'])
+    && hasExactKeys(value, ['approvalId', 'subject', 'nodeId', 'stageId', 'roleId', 'reason', 'requestedAction', 'createdAt'])
+    && (value.subject === 'stage'
+      ? value.nodeId === null
+      : (value.subject === 'work_node' || value.subject === 'human_decision') && isNonEmptyBoundedText(value.nodeId))
     && isNonEmptyBoundedText(value.approvalId)
     && isNonEmptyBoundedText(value.stageId)
     && isNonEmptyBoundedText(value.roleId)

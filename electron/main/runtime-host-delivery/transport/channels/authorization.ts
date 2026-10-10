@@ -221,7 +221,7 @@ export function createChannelAuthorizationTransport(
   return {
     async authorize(input, traceId): Promise<ChannelAuthorizationTransportResponse> {
       if (!isRequest(input)) return { status: 400, body: { outcome: 'rejected' } };
-      const finish = beginChannelTrace(`transport.authorization.${input.action}`, traceId);
+      const finish = beginChannelTrace(() => `transport.authorization.${input.action}`, traceId);
       let response!: ChannelAuthorizationTransportResponse;
       let errorCode: ReturnType<typeof channelTraceError> | 'INVALID_RESPONSE' | undefined;
 
@@ -253,10 +253,10 @@ export function createChannelAuthorizationTransport(
           }
         }
       } catch (error) {
-        errorCode = channelTraceError(error);
+        if (finish) errorCode = channelTraceError(error);
         response = { status: 503, body: { ...UNKNOWN, channel: input.channel } };
       } finally {
-        finish(response.status, response.body, errorCode);
+        finish?.(response.status, response.body, errorCode);
       }
       return response;
     },

@@ -226,8 +226,8 @@ pub(super) async fn select_session_model_with_handle(
     session: MatchaPeerSessionHandle,
     command: ResolvedSessionModelSelection,
 ) -> SessionModelSelectionOutcome {
-    let trace_id = command.trace_id.clone();
-    let diagnostic = command.diagnostic.clone();
+    let trace_id = command.trace_id.as_deref();
+    let diagnostic = &command.diagnostic;
     let session_id = match session_adapter::matcha_native_session_id(
         command.endpoint_session_id.as_deref(),
     ) {
@@ -235,8 +235,8 @@ pub(super) async fn select_session_model_with_handle(
         Err(()) => {
             session_trace::log(
                 "runtime.matcha.model-selection.set-model.rejected",
-                trace_id.as_deref(),
-                serde_json::json!({
+                trace_id,
+                || serde_json::json!({
                     "reason": SessionModelSelectionRejection::InvalidSessionKey.as_str(),
                     "sessionKey": session_trace::id_shape(Some(&command.session_key)),
                     "endpointSessionId": session_trace::id_shape(command.endpoint_session_id.as_deref()),
@@ -255,8 +255,8 @@ pub(super) async fn select_session_model_with_handle(
     else {
         session_trace::log(
             "runtime.matcha.model-selection.set-model.rejected",
-            trace_id.as_deref(),
-            serde_json::json!({
+            trace_id,
+            || serde_json::json!({
                 "reason": SessionModelSelectionRejection::BindingMismatch.as_str(),
                 "sessionId": session_trace::id_shape(Some(session_id.as_str())),
             }),
@@ -265,12 +265,12 @@ pub(super) async fn select_session_model_with_handle(
             SessionModelSelectionRejection::BindingMismatch,
         );
     };
-    let session_id_shape = session_trace::id_shape(Some(session_id.as_str()));
+    let session_id_shape = || session_trace::id_shape(command.endpoint_session_id.as_deref());
     session_trace::log(
         "runtime.matcha.model-selection.set-model.dispatch",
-        trace_id.as_deref(),
-        serde_json::json!({
-            "sessionId": session_id_shape.clone(),
+        trace_id,
+        || serde_json::json!({
+            "sessionId": session_id_shape(),
             "model": &model,
             "modelSelectionId": session_trace::id_shape(Some(&command.model_selection_id)),
             "providerFingerprint": session_trace::id_shape(Some(&provider_fingerprint)),
@@ -290,10 +290,10 @@ pub(super) async fn select_session_model_with_handle(
             Err(_) => {
                 session_trace::log(
                     "runtime.matcha.model-selection.set-model.rejected",
-                    trace_id.as_deref(),
-                    serde_json::json!({
+                    trace_id,
+                    || serde_json::json!({
                         "reason": SessionModelSelectionRejection::InvalidModel.as_str(),
-                        "sessionId": session_id_shape,
+                        "sessionId": session_id_shape(),
                         "model": model,
                     }),
                 );
@@ -323,9 +323,9 @@ pub(super) async fn select_session_model_with_handle(
     };
     session_trace::log(
         "runtime.matcha.model-selection.set-model.outcome",
-        trace_id.as_deref(),
-        serde_json::json!({
-            "sessionId": session_id_shape,
+        trace_id,
+        || serde_json::json!({
+            "sessionId": session_id_shape(),
             "model": model,
             "outcome": session_adapter::session_model_selection_outcome_label(&outcome),
             "rejectionReason": outcome.rejection_reason(),
@@ -514,7 +514,9 @@ pub(super) async fn send_session_with_handle(
     if command.intent.is_some() {
         return SessionSendOutcome::Unsupported;
     }
-    let trace_id = command.trace_id().map(str::to_owned);
+    let trace_id = platform::trace::enabled()
+        .then(|| command.trace_id().map(str::to_owned))
+        .flatten();
     let session_id = match session_adapter::matcha_native_session_id(command.endpoint_session_id.as_deref()) {
         Ok(session_id) => session_id,
         Err(()) => return SessionSendOutcome::Rejected,
@@ -530,7 +532,7 @@ pub(super) async fn send_session_with_handle(
         },
         InvocationOutcome::TargetRejected(error) => {
             session_trace::log("runtime.matcha.send.prompt-rejected", trace_id.as_deref(),
-                serde_json::json!({ "error": session_adapter::app_server_client_error_kind(error) }));
+                || serde_json::json!({ "error": session_adapter::app_server_client_error_kind(error) }));
             SessionSendOutcome::Rejected
         }
         InvocationOutcome::Cancelled | InvocationOutcome::Unknown => SessionSendOutcome::Unknown,

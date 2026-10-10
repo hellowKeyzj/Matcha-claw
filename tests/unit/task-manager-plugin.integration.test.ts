@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -131,6 +131,7 @@ describe('task-manager semantics', () => {
   const tempDirs: string[] = []
 
   afterEach(() => {
+    vi.unstubAllEnvs()
     while (tempDirs.length > 0) {
       rmSync(tempDirs.pop() as string, { recursive: true, force: true })
     }
@@ -174,6 +175,7 @@ describe('task-manager semantics', () => {
   })
 
   it('debug logs retain only operation counts, never private task context', async () => {
+    vi.stubEnv('MATCHACLAW_TRACE', '1')
     const harness = createPluginHarness()
     const workspaceDir = mkdtempSync(join(tmpdir(), 'task-manager-private-workspace-'))
     tempDirs.push(workspaceDir)

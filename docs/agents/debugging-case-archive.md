@@ -91,6 +91,76 @@ DP-xxx 或 `none`
 
 ## 6. 当前归档案例
 
+## Case: TeamRun terminal 已到达，但持久化容量耗尽阻断结算
+
+### Status
+
+archived
+
+### Linked pattern
+
+`none`；沿真实最小闭环定位失败边界，执行约束沿用 `CODING_CONSTITUTION.md` 的 Final-form 最小改动，不新增同义规则。
+
+### Source incident
+
+2026-10-12，两个 Work 已有模型最终回复，后继 Review 持续 Pending。
+
+### Symptom
+
+用户看到角色已回答，但节点未完成、调度器没有进入 Review。
+
+### Surface path
+
+模型正文 → Sessions terminal snapshot → Organization terminal settlement → scheduler ready queue。
+
+### Real minimum loop
+
+native terminal 已接收，Sessions final candidates 已形成；Organization 在 `terminal.store.accept_context` 的 commit 阶段报 `log_full`，尚未解析最终控制块，`terminal.wake` 的 `published=false`，调度检查得到 `readyQueueCount=0`。
+
+### Wrong path taken
+
+把“有回复但不推进”继续归为 JSON 修复或调度唤醒问题；只扩大文件上限或更换文件格式，也无法消除每次写入完整 OrganizationFacts 的增长机制。
+
+### Missed first probe
+
+直接比较终态接收、事实提交、唤醒发布三个边界，不用 UI 完成表象推断持久化成功。
+
+### Root cause
+
+旧日志为每次提交追加全组织快照，设置 16,777,216 字节总预算；现场文件 16,609,259 字节，剩余空间不足追加下一帧。不是磁盘空间不足，也不是单字符串限制。
+
+### Root cause boundary
+
+Organization durable store 的提交机制。
+
+### Correct first-round plan
+
+核 native terminal 与 final candidates，定位第一处 StoreFault，再核持久化布局和文件大小；不重放 native effect，不改 scheduler 来跳过未提交状态。
+
+### Fix boundary
+
+Organization 内改为单 SQLite 的逐记录事务和 Team/Run 不可变正文；按真实 mutation keys 编码与回滚。旧日志仅显式离线迁移，不保留生产双写、快照 BLOB 或全量 diff。
+
+### Verification closure
+
+根因由日志与文件大小确认；初轮 Organization 436 通过 / 20 失败。用户授权适配测试后，旧日志物理断言改为 SQLite 事务事实，提示词仍全文比较，最终 Organization 456/456 全通过、Host 编译检查通过；两处迁移业务回归的原用例通过。2026-10-12 使用用户新构建的 CLI 完成真实离线迁移并无覆盖发布 canonical 目录：185 条记录、82 个正文文件，完整事实等价、正文哈希、SQLite 完整性及发布前后文件清单均通过，源日志和额外备份保持原哈希。未重启应用或重放 native effect，现场旧 Run 恢复仍未验证。
+
+### Reusable rule
+
+存储迁移不仅检查新介质，还要检查正常写路径是否仍复制、校验、编码整个历史；事务必须覆盖真实跨记录结算，成功提交后才发布原有唤醒。
+
+### Applies to
+
+终态已到达但事实提交失败，以及用新数据库替换追加全量快照的迁移。
+
+### Does not apply to
+
+已证明提交成功、仅订阅丢失或前端投影陈旧的故障。
+
+### Archive note
+
+通用归因和 final-form 规则已存在；这里保存容量增长机制与现场证据，不另增长期编码口号。
+
 ## Case: OpenClaw MCP status timeout
 
 ### Status
@@ -382,6 +452,10 @@ TeamChat 只读 exact 完整 snapshot；两页共享原 store flight/mutationPen
 
 前轮已查到该归属缺陷，却仅改入口样式/构建，未修真实失败边界，也缺当前加载会话的状态观测；这是既有 P3/P4/P6/P7 与宪法 §26 执行失败，不是规则缺失。修复仅由 writer 独占 Host reader/composition，复用既有 resolver 从 receipt 生成 OpenClaw 完整 sessionKey，按 endpoint/agent/sessionKey 关联；Matcha 保持 native ID 关联并忽略 default agent。不改 public DTO、reducer 或前端 fallback。writer 两文件已落盘且文档代理已读取当前源码核实；Host bins 离线 cargo check exit0，Windows x64 MSVC Host/MCP locked offline release 构建 exit0。Host/MCP 均已替换，Host SHA256 与构建来源一致；主代理未终止或重启进程，已通知用户可自行启动。Host lib 最终 79 PASS /6 FAIL（85 项，exit101）：两项源码文本断言、一项 recovery 次数差异、三项 service 5 秒 timeout；失败不在 reader/constructor，但未复跑修改前基线，不能称与修复无关或全通过，未新增、修改测试。修后 live 待启动观察，仍 OPEN，不把源码修复、编译或替换成功写成验收。[VERIFY: runtime-host/host/src/composition/host/ports/organization.rs:20-79] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:381-392] [VERIFY: runtime-host/host/src/composition/runtime_ports.rs:286-295] 详见 [Session / Chat 验证账](../architecture-knowledge/modules/session-chat/dev.md#2026-10-08-teamleader-设计入口--归属根因已确认修复验证-open)。
 
+2026-10-10，用户提供已显示“运行图设计中”但 MCP 拒绝改图的导出。源码核对发现发送 hook 仍以 OpenClaw native sessionId 对比 Organization receipt 的地址 suffix；先前 ownership reader 修正没有覆盖发送注入入口。导出中的 generation `1`、占位 base IDs 和全零版本不足以区分具体拒绝原因，也不能证明 Run 不在 Designing。主代理未取得该次发送的实际匹配输入和 hook 结果，却把源码推断表述为现场确定事实；这是既有 P3/P4/P6/P7 与 DP-001 的执行失败，不是规则缺失。后续修复与调测须分别记录：身份解析代码是否纠正、同 trace 的匹配和注入结果、模型工具是否真正落图；不能用前两项替代第三项。
+
+2026-10-10，后续导出已显示携真实设计凭据的完整读图成功，不能继续沿用“hook 未注入”的解释。实际 patch 分别包含 work 的 `out` 出端口、带任务 review 的 `approve` 出端口，以及未创建的连线目标；这些与当前领域规则直接冲突。MCP 端口 schema 只有字符串类型，空图没有可复制的端口示例，领域错误又被压成通用拒绝，模型因此无法纠正请求。主代理再次将“请求静态不合法”简写成“现场因此被拒”，经用户追问后澄清：请求缺陷确定，但缺少现场具体分支日志，不能断言首先命中哪条 guard。已有 P3/P4 与宪法 §14/§17 已覆盖，属于执行失败，不新增同义规则；修复落在工具说明与原校验错误的传递，不放宽 gate、不增加旁路预校验。
+
 ### Reusable rule
 
 执行已有 P3/P4/P6/P7、DP-001、宪法 §26 与 code reviewer：沿真实 producer/consumer 核身份字段与当前产品状态，在已证明的失败边界收束最终形态并验证原行为恢复；本案不增加规则、兼容层或新的审计流程。
@@ -397,6 +471,80 @@ TeamChat 只读 exact 完整 snapshot；两页共享原 store flight/mutationPen
 ### Archive note
 
 既有规则已明确，归档只承认本轮执行及旧 review 漏查边界，保存已证明事故与修复，不建立重复规则。
+
+## Case: TeamRun Started 但 admission 通知源已关闭
+
+### Status
+
+archived
+
+### Linked pattern
+
+DP-001；既有 P1/P5/P6 与 `CODING_CONSTITUTION.md` §26 Final-form 已覆盖，不新增规则。
+
+### Source incident
+
+2026-10-11，TeamRun 用户启动 bugfix：Started 后未推进执行，Chat 又把整个启动前入口隐藏，无法从原位置重开运行图。
+
+### Symptom
+
+启动可返回 started，但没有后续调度消费；图入口随 Started 消失。两者是后端生命周期接线与前端展示边界的不同问题。
+
+### Surface path
+
+Chat → store `startRun` → Organization RunStart → Started commit / RunStarted wake → supervisor → scheduler / Session send。
+
+### Real minimum loop
+
+同 exact team/run 启动提交后，存活 supervisor 消费 wake、派发 ready node 到原 Session owner，native terminal 回流推进图，当前 Leader UI 可查看同一运行图。
+
+### Wrong path taken
+
+旧接线新建无 producer 的 admission watch 并立即丢 sender；独立 RunStart 仍可成功，门禁响应掩盖了消费者退出。只保留 sender、吞关闭错误或把 Started 标为运行中，都不能补回真实 Host readiness 通知。
+
+### Missed first probe
+
+未沿 admission 的实际 sender 生命周期核对 subscribe → ready → reconcile → wake consumer，而把 Started 落盘与调度推进连成了未经验证的结论。
+
+### Root cause
+
+旧 Host owners 在创建 watch 后立即 `drop(admission_changes_tx)`；Organization supervisor 对 `changed()` 的 Err 执行 Shutdown。RunStart 独立提交 Started 并发 wake，不要求 supervisor 存活。Chat 另以 Started 隐藏整个入口，而非只隐藏启动/设计动作。[VERIFY: runtime-host/modules/organization/src/owner/supervisor.rs:119-155] [VERIFY: runtime-host/modules/organization/src/store/durable.rs:336-379] [VERIFY: runtime-host/modules/organization/src/owner/handle.rs:588-604]
+
+### Root cause boundary
+
+Host admission 通知与 Organization coordinator 生命周期接线；查看入口另在 Chat gate 投影，不是模型、图合法性或 native runtime 已失败的证据。
+
+### Correct first-round plan
+
+先核真实通知 producer、supervisor 退出与同 run 提交/wake；修原通知来源，再分别验证节点调度和 UI 查看，不用展示状态代替执行事实。
+
+### Fix boundary
+
+已核修后源码：`spawn<T: Send + Sync + 'static>(input, watch::Receiver<T>)` 直接接 HostAdmission.subscribe，删除无 producer 的 AdmissionState / input.admission_changes，不新建 watch 或转发 task；ready reconcile 与真实 shutdown cancel/join 沿原路径。Chat 用既有 gate union，Started 仅查看图；启动成功且 context 未变才自动开图。[VERIFY: runtime-host/host/src/composition/admission.rs:164-173] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:72-101] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:489-498] [VERIFY: runtime-host/modules/organization/src/owner/coordinator.rs:47-100] [VERIFY: runtime-host/modules/organization/src/owner/supervisor.rs:55-155] [VERIFY: src/pages/Chat/ChatInput.tsx:1361-1438] [VERIFY: src/pages/Chat/index.tsx:873-890]
+
+### Verification closure
+
+当前只确认源码修复；本轮最终检查由主代理补 [模块验证账](../architecture-knowledge/modules/team-task-organization/dev.md#2026-10-11-started-后未调度与查看图入口)。无既有 coordinator spawn 整链用例，未实测 ready → active Run → native；实机加载二进制、真实模型/终态及 UI 自动开图、重开和切 context 均 OPEN，不以构建或 Started 回读宣称恢复。
+
+2026-10-11 后续现场证明 coordinator 已被 RunStarted 唤醒，实际失败为 `OutputPortDoesNotMatchEdge`。初版日志未记录失败 node/edge，凭 Start 仍 Ready 推断 Start 边错误属于代理执行失误：planner 在克隆图上连续推进，后续控制节点失败也会整体不提交。补充 canonical/UI/DOM/request/commit/snapshot/control-check 的 hash 与端口对照；在实际检查点记录期望值，不复制执行规则推导。后续直接读取本机应用日志确认：2026-10-11T07:25:17.920Z，runHash `cc0bfb25` 的 Start `652b04df`、唯一出边 `11dc48fa` 在真实 `control.port_check` 返回 mismatched（expected completed，actual hash ab1a365f/length 3）；随后的 `schedule.result` 为 invalid_facts。原始日志第59301–59305行完整，截断仅发生于用户粘贴。既有日志落盘规则已覆盖此场景，代理未执行而反复让用户贴日志是执行失误，不需新增同义规则。具体端口不匹配已确认，UI默认显示分支及修复后闭环仍未验证。[VERIFY: runtime-host/modules/organization/src/run/control/executor.rs]
+
+后续只读走查确认两个独立缺陷：旧表单保留未知 sourcePort，React select 无匹配项时显示首个 option，保存仍取 state；后端 Start 缺端口约束，工具说明还指导填写 out/in。但原截图选的是 Review→End，不能作为同一条 Start 边的 DOM/state 不一致现场证据，也不能仅凭工具说明断言该次错误值的生成来源。修复范围由用户扩大并批准为所有节点的统一端口契约，不能只给 Start 加特判；实现与验证结果见模块验证账。诊断证据分层和 Final-form 规则早已存在，本次偏差属于执行失败，不另增同义规则。[VERIFY: runtime-host/modules/organization/src/run/graph/definition.rs:84] [VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs:64]
+
+### Reusable rule
+
+执行既有 P1/P5/P6 与 Final-form：先证明真实 producer/consumer 生命周期，在原通知来源收口，业务恢复证据到真实调度和产品结果。
+
+### Applies to
+
+提交成功但异步消费者退出、watch 生命周期接线、启动门禁与实际执行状态分离。
+
+### Does not apply to
+
+未经同次执行证据确认的模型/native 拒绝，或只需调整样式的 UI 问题。
+
+### Archive note
+
+本卡保存已证根因、修复落点与尚未闭合的验收；现有规则已完整覆盖，不增同义 pattern，也不把归档状态当成 live 验收通过。
 
 ## Case: Goal 原生窗口 ID 被会话地址替代
 

@@ -2,7 +2,7 @@ import type { SessionGoalReceipt, SessionSendIntent } from '../../../../../src/t
 import { decodeSessionGoalReceipt, isGoalIdentifier, isGoalObjective, isSessionSendIntent } from './goal';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
-import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 
 const ROUTE_PATH = '/api/sessions/send';
 const MAX_ATTACHMENTS = 16;
@@ -108,13 +108,13 @@ function e2eAttachmentShape(request: SessionSendRequest): NonNullable<
 }
 
 function publishE2ESessionSendBoundary(
-  boundary: NonNullable<E2EProcess['__matchaclawE2ESessionSendBoundary']>,
+  boundary: () => NonNullable<E2EProcess['__matchaclawE2ESessionSendBoundary']>,
 ): void {
   if (process.env.MATCHACLAW_E2E !== '1') return;
   Object.defineProperty(process as E2EProcess, '__matchaclawE2ESessionSendBoundary', {
     configurable: true,
     enumerable: false,
-    value: Object.freeze(boundary),
+    value: Object.freeze(boundary()),
     writable: false,
   });
 }
@@ -136,19 +136,19 @@ export function createSessionSendTransport(
   return {
     async send(request: unknown, traceId?: string | null): Promise<SessionSendTransportResponse> {
       if (!isSessionSendRequest(request)) {
-        publishE2ESessionSendBoundary({ stage: 'rejected-request' });
-        logSessionTrace('electron.send.rejected', traceId, {});
+        publishE2ESessionSendBoundary(() => ({ stage: 'rejected-request' }));
+        logSessionTrace('electron.send.rejected', traceId);
         return { status: 503, body: UNAVAILABLE };
       }
-      const startedAt = Date.now();
-      logSessionTrace('electron.send.request', traceId, {
+      const startedAt = (traceId && isSessionTraceEnabled()) || process.env.MATCHACLAW_E2E === '1' ? Date.now() : 0;
+      logSessionTrace('electron.send.request', traceId, () => ({
         adapter: request.input.identity.endpoint.runtimeAdapterId,
         sessionKey: summarizeIdentifier(request.input.identity.sessionKey),
         endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
         runId: summarizeIdentifier(request.input.runId),
         idempotencyKey: summarizeIdentifier(request.input.idempotencyKey),
         attachmentCount: request.input.attachments.length,
-      });
+      }));
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: ROUTE_PATH,
@@ -165,28 +165,28 @@ export function createSessionSendTransport(
         headers: traceHeader(traceId),
       });
       if (response === null) {
-        publishE2ESessionSendBoundary({ stage: 'transport-failure' });
-        logSessionTrace('electron.send.failure', traceId, {
+        publishE2ESessionSendBoundary(() => ({ stage: 'transport-failure' }));
+        logSessionTrace('electron.send.failure', traceId, () => ({
           elapsedMs: Date.now() - startedAt,
-        });
+        }));
         return request.input.intent === undefined
           ? { status: 503, body: UNAVAILABLE }
           : { status: 200, body: { outcome: 'unknown' } };
       }
       const body = response.body;
-      publishE2ESessionSendBoundary({
+      publishE2ESessionSendBoundary(() => ({
         stage: 'http-response',
         status: response.status,
         elapsedMs: Date.now() - startedAt,
         contract: isRustSessionSendResponse(body, request) ? 'valid' : 'invalid',
         attachmentShape: e2eAttachmentShape(request),
-      });
-      logSessionTrace('electron.send.response', traceId, {
+      }));
+      logSessionTrace('electron.send.response', traceId, () => ({
         status: response.status,
         contract: isRustSessionSendResponse(body, request) ? 'valid' : 'invalid',
         outcome: isRustSessionSendResponse(body, request) ? body.outcome : null,
         elapsedMs: Date.now() - startedAt,
-      });
+      }));
       if (response.status === 202
         && request.scope.identity.endpoint.runtimeAdapterId === 'openclaw'
         && isRustSessionSendResponse(body, request)

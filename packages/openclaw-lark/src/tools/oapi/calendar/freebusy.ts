@@ -71,7 +71,7 @@ export function registerFeishuCalendarFreebusyTool(api: OpenClawPluginApi): void
       async execute(_toolCallId, params) {
         const p = params as FeishuCalendarFreebusyParams;
 
-        log.info(`[FREEBUSY] Execute called with params: ${JSON.stringify(p)}`);
+        log.trace(() => `[FREEBUSY] Execute called with params: ${JSON.stringify(p)}`);
 
         try {
           const client = toolClient();
@@ -96,7 +96,7 @@ export function registerFeishuCalendarFreebusyTool(api: OpenClawPluginApi): void
             });
           }
 
-          log.info(`[FREEBUSY] Validation passed, user_ids count: ${p.user_ids.length}`);
+          log.trace(() => `[FREEBUSY] Validation passed, user_ids count: ${p.user_ids.length}`);
 
           // Convert time strings to RFC 3339 format (required by freebusy API)
           const timeMin = parseTimeToRFC3339(p.time_min);
@@ -112,7 +112,7 @@ export function registerFeishuCalendarFreebusyTool(api: OpenClawPluginApi): void
             });
           }
 
-          log.info(
+          log.trace(() =>
             `[FREEBUSY] Calling batch API: time_min=${p.time_min} -> ${timeMin}, time_max=${p.time_max} -> ${timeMax}, user_ids=${p.user_ids.length}`,
           );
 

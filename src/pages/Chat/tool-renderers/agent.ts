@@ -1,9 +1,9 @@
-import type { SessionRenderToolCard, SessionRenderToolStatusKind } from '../../../types/session/tool-card';
+import type { TFunction } from 'i18next';
+import type { SessionRenderToolCard } from '../../../types/session/tool-card';
 import type {
   ToolActivityTextBlock,
-  ToolActivityTone,
   ToolActivityTrailingLabel,
-  ToolActivityViewModel,
+  ToolActivityContent,
 } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
 
@@ -221,55 +221,36 @@ function formatToolDuration(durationMs?: number): string | null {
   return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
-function formatStatus(status: string): string {
+function formatStatus(status: string, t: TFunction<'chat'>): string {
   const normalized = normalizeToolName(status);
-  if (normalized === 'running' || normalized === 'inprogress' || normalized === 'pending') return '运行中';
-  if (normalized === 'completed' || normalized === 'complete' || normalized === 'success' || normalized === 'succeeded') return '完成';
-  if (normalized === 'failed' || normalized === 'error') return '失败';
-  if (normalized === 'stopped' || normalized === 'cancelled' || normalized === 'canceled') return '已停止';
+  if (normalized === 'running' || normalized === 'inprogress' || normalized === 'pending') return t('toolStatus.running');
+  if (normalized === 'completed' || normalized === 'complete' || normalized === 'success' || normalized === 'succeeded') return t('toolActivity.agent.completed');
+  if (normalized === 'failed' || normalized === 'error') return t('toolStatus.error');
+  if (normalized === 'stopped' || normalized === 'cancelled' || normalized === 'canceled') return t('toolActivity.agent.stopped');
   return status;
-}
-
-function isRunningStatus(status?: string): boolean {
-  if (!status) return false;
-  const normalized = normalizeToolName(status);
-  return normalized === 'running' || normalized === 'inprogress' || normalized === 'pending';
-}
-
-function isErrorStatus(status?: string): boolean {
-  if (!status) return false;
-  const normalized = normalizeToolName(status);
-  return normalized === 'failed' || normalized === 'error';
-}
-
-function resolveToolTone(toolStatus: SessionRenderToolStatusKind, outputStatus?: string): ToolActivityTone {
-  if (toolStatus === 'running' || isRunningStatus(outputStatus)) return 'running';
-  if (toolStatus === 'error' || isErrorStatus(outputStatus)) return 'danger';
-  if (toolStatus === 'missing_result') return 'muted';
-  return 'neutral';
 }
 
 function resolveAgentLabel(input: AgentToolInputFields, output: AgentToolOutputFields): string | null {
   return output.name ?? input.to ?? output.agentId ?? input.taskId ?? input.subagentType ?? null;
 }
 
-function resolveTitle(kind: AgentToolKind, input: AgentToolInputFields, output: AgentToolOutputFields): string {
+function resolveTitle(kind: AgentToolKind, input: AgentToolInputFields, output: AgentToolOutputFields, t: TFunction<'chat'>): string {
   const agent = resolveAgentLabel(input, output);
 
   if (kind === 'sendMessage') {
-    return agent ? `发送给 ${truncateText(agent, TITLE_TEXT_LIMIT)}` : '发送消息';
+    return agent ? t('toolActivity.agent.sendTo', { name: truncateText(agent, TITLE_TEXT_LIMIT) }) : t('toolActivity.agent.send');
   }
 
   if (kind === 'taskOutput') {
-    return '读取任务输出';
+    return t('toolActivity.agent.readOutput');
   }
 
   if (kind === 'taskStop') {
-    return agent ? `停止 ${truncateText(agent, TITLE_TEXT_LIMIT)}` : '停止任务';
+    return agent ? t('toolActivity.agent.stop', { name: truncateText(agent, TITLE_TEXT_LIMIT) }) : t('toolActivity.agent.stopTask');
   }
 
   const description = input.description ?? input.prompt ?? agent;
-  return description ? `分派 ${truncateText(description, TITLE_TEXT_LIMIT)}` : '分派任务';
+  return description ? t('toolActivity.agent.dispatch', { name: truncateText(description, TITLE_TEXT_LIMIT) }) : t('toolActivity.agent.dispatchTask');
 }
 
 function addTextBlock(
@@ -293,41 +274,43 @@ function addInfoBlock(
   textBlocks: ToolActivityTextBlock[],
   input: AgentToolInputFields,
   output: AgentToolOutputFields,
+  t: TFunction<'chat'>,
 ): void {
   const rows = [
-    input.subagentType ? `类型：${input.subagentType}` : null,
-    input.model ? `模型：${input.model}` : null,
-    output.name ? `名称：${output.name}` : null,
-    output.agentId ? `代理：${output.agentId}` : null,
-    input.taskId ? `任务：${input.taskId}` : null,
-    input.to ? `目标：${input.to}` : null,
+    input.subagentType ? t('toolActivity.field', { label: t('toolActivity.type'), value: input.subagentType }) : null,
+    input.model ? t('toolActivity.field', { label: t('toolActivity.model'), value: input.model }) : null,
+    output.name ? t('toolActivity.field', { label: t('toolActivity.name'), value: output.name }) : null,
+    output.agentId ? t('toolActivity.field', { label: t('toolActivity.agent.agent'), value: output.agentId }) : null,
+    input.taskId ? t('toolActivity.field', { label: t('toolActivity.agent.task'), value: input.taskId }) : null,
+    input.to ? t('toolActivity.field', { label: t('toolActivity.target'), value: input.to }) : null,
   ].filter((row): row is string => row !== null);
 
   if (rows.length === 0) return;
-  addTextBlock(textBlocks, 'notice', '任务信息', rows.join('\n'));
+  addTextBlock(textBlocks, 'notice', t('toolActivity.agent.info'), rows.join('\n'));
 }
 
 function buildTextBlocks(
   kind: AgentToolKind,
   input: AgentToolInputFields,
   output: AgentToolOutputFields,
+  t: TFunction<'chat'>,
 ): ToolActivityTextBlock[] {
   const textBlocks: ToolActivityTextBlock[] = [];
 
   if (kind === 'sendMessage') {
-    addTextBlock(textBlocks, 'input', '消息', input.message);
+    addTextBlock(textBlocks, 'input', t('toolActivity.agent.message'), input.message);
   } else if (kind === 'dispatch') {
-    addTextBlock(textBlocks, 'input', '任务描述', input.description);
-    addTextBlock(textBlocks, 'input', '目标', input.prompt);
+    addTextBlock(textBlocks, 'input', t('toolActivity.agent.description'), input.description);
+    addTextBlock(textBlocks, 'input', t('toolActivity.target'), input.prompt);
   }
 
-  addInfoBlock(textBlocks, input, output);
-  addTextBlock(textBlocks, 'output', '结果摘要', output.summary);
+  addInfoBlock(textBlocks, input, output, t);
+  addTextBlock(textBlocks, 'output', t('toolActivity.resultSummary'), output.summary);
   if (output.result !== output.summary) {
-    addTextBlock(textBlocks, 'output', '结果', output.result);
+    addTextBlock(textBlocks, 'output', t('toolActivity.result'), output.result);
   }
   if (output.status && !output.summary && !output.result) {
-    addTextBlock(textBlocks, 'notice', '状态', formatStatus(output.status));
+    addTextBlock(textBlocks, 'notice', t('toolActivity.status'), formatStatus(output.status, t));
   }
 
   return textBlocks;
@@ -340,16 +323,6 @@ function buildTrailingLabels(
   output: AgentToolOutputFields,
 ): ToolActivityTrailingLabel[] {
   const labels: ToolActivityTrailingLabel[] = [];
-  if (output.status) {
-    const status = formatStatus(output.status);
-    if (status !== title) labels.push({ text: status, tone: 'muted' });
-  }
-  if (tool.status === 'running' && title !== '运行中' && !isRunningStatus(output.status)) {
-    labels.push({ text: '运行中', tone: 'muted' });
-  }
-  if (tool.status === 'missing_result' && title !== '无结果') {
-    labels.push({ text: '无结果', tone: 'muted' });
-  }
   const agent = resolveAgentLabel(input, output);
   if (agent && !title.includes(agent)) {
     labels.push({ text: truncateText(agent, TITLE_TEXT_LIMIT), tone: 'muted' });
@@ -365,19 +338,16 @@ export function isAgentToolActivityTool(tool: SessionRenderToolCard): boolean {
   return resolveAgentToolKind(tool.name) !== null;
 }
 
-export const agentToolActivityRenderer = (tool: SessionRenderToolCard): ToolActivityViewModel => {
+export const agentToolActivityRenderer = (tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent => {
   const kind = resolveAgentToolKind(tool.name) ?? 'dispatch';
   const input = readAgentToolInput(tool);
   const output = readAgentToolOutput(tool);
-  const title = resolveTitle(kind, input, output);
-  const textBlocks = buildTextBlocks(kind, input, output);
-  const tone = resolveToolTone(tool.status, output.status);
+  const title = resolveTitle(kind, input, output, t);
+  const textBlocks = buildTextBlocks(kind, input, output, t);
 
   return {
     title,
-    tone,
-    isRunning: tone === 'running',
-    isError: tone === 'danger',
+    hasOutputError: ['failed', 'error'].includes(normalizeToolName(output.status ?? '')),
     canExpand: textBlocks.length > 0,
     trailingLabels: buildTrailingLabels(tool, title, input, output),
     textBlocks,

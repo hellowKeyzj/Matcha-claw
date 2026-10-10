@@ -1,3 +1,4 @@
+import { isTraceEnabled } from '../utils/trace.js'
 import { type ChildProcess, spawn } from 'child_process'
 import { createWriteStream, type WriteStream } from 'fs'
 import { tmpdir } from 'os'
@@ -375,9 +376,10 @@ export function createSessionSpawner(deps: SessionSpawnerDeps): SessionSpawner {
           }
 
           // Log all messages flowing from the child CLI to the bridge
-          deps.onDebug(
-            `[bridge:ws] sessionId=${opts.sessionId} <<< ${debugTruncate(line)}`,
-          )
+          if (isTraceEnabled())
+            deps.onDebug(
+              `[bridge:ws] sessionId=${opts.sessionId} <<< ${debugTruncate(line)}`,
+            )
 
           // In verbose mode, forward raw output to stderr
           if (deps.verbose) {
@@ -518,9 +520,10 @@ export function createSessionSpawner(deps: SessionSpawnerDeps): SessionSpawner {
         },
         writeStdin(data: string): void {
           if (child.stdin && !child.stdin.destroyed) {
-            deps.onDebug(
-              `[bridge:ws] sessionId=${opts.sessionId} >>> ${debugTruncate(data)}`,
-            )
+            if (isTraceEnabled())
+              deps.onDebug(
+                `[bridge:ws] sessionId=${opts.sessionId} >>> ${debugTruncate(data)}`,
+              )
             child.stdin.write(data)
           }
         },

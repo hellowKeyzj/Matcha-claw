@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 import type {
   SessionRenderAssistantBubbleToolResult,
   SessionRenderToolCard,
@@ -27,7 +28,7 @@ export interface ToolActivityTrailingLabel {
 }
 
 export interface ToolActivityTextBlock {
-  kind: 'input' | 'output' | 'notice';
+  kind: 'input' | 'output' | 'notice' | 'details';
   title?: string;
   text: string;
   copyable: boolean;
@@ -90,6 +91,10 @@ export interface ToolActivityViewModel {
   diffStat?: ToolActivityDiffStat;
   liveDiffStat?: ToolActivityDiffStat;
 }
+
+export type ToolActivityContent = Omit<ToolActivityViewModel, 'tone' | 'isRunning' | 'isError'> & {
+  hasOutputError?: boolean;
+};
 
 type JsonRecord = Record<string, unknown>;
 type ToolActivityCanvasPreview = NonNullable<ToolActivityViewModel['canvasPreview']>;
@@ -254,9 +259,9 @@ function readPublicDetails(details: unknown): Record<string, ToolActivityPublicD
   return Object.keys(publicDetails).length > 0 ? publicDetails : undefined;
 }
 
-function readReviewOutcome(details: unknown): ToolActivityApprovalReviewOutcome | undefined {
+function readReviewOutcome(details: unknown, t: TFunction<'chat'>): ToolActivityApprovalReviewOutcome | undefined {
   const status = readApprovalReviewOutcome(details);
-  return status ? { label: '结果', status } : undefined;
+  return status ? { label: t('toolActivity.result'), status } : undefined;
 }
 
 function readProgressView(tool: SessionRenderToolCard): ToolActivityProgressReceipt | undefined {
@@ -272,11 +277,11 @@ function readProgressView(tool: SessionRenderToolCard): ToolActivityProgressRece
   };
 }
 
-function progressTextBlocks(receipt: ToolActivityProgressReceipt): ToolActivityTextBlock[] {
+function progressTextBlocks(receipt: ToolActivityProgressReceipt, t: TFunction<'chat'>): ToolActivityTextBlock[] {
   const lines = [`${receipt.completedCount}/${receipt.totalCount}`];
-  if (receipt.currentItem) lines.push(`当前：${receipt.currentItem}`);
+  if (receipt.currentItem) lines.push(t('toolActivity.currentItem', { name: receipt.currentItem }));
   if (receipt.markdownSummary) lines.push(receipt.markdownSummary);
-  return [{ kind: 'notice', title: '进度', text: lines.join('\n'), copyable: false }];
+  return [{ kind: 'notice', title: t('toolActivity.progress'), text: lines.join('\n'), copyable: false }];
 }
 
 function mergeCanvasPreview(
@@ -314,16 +319,16 @@ function hasStructuredProjection(input: {
     || input.liveDiffStat != null;
 }
 
-function mergeOpenClawDetails(tool: SessionRenderToolCard, viewModel: ToolActivityViewModel): ToolActivityViewModel {
+function mergeOpenClawDetails(tool: SessionRenderToolCard, viewModel: ToolActivityViewModel, t: TFunction<'chat'>): ToolActivityViewModel {
   const canvasPreview = readCanvasPreview(tool.details);
   const browserTabPreview = readBrowserTabPreview(tool.details);
   const approvalReviews = readApprovalReviews(tool.details);
-  const approvalReviewOutcome = readReviewOutcome(tool.details);
+  const approvalReviewOutcome = readReviewOutcome(tool.details, t);
   const progressReceipt = readProgressView(tool);
   const publicDetails = readPublicDetails(tool.details);
   const diffStat = readDiffStat(tool.details);
   const liveDiffStat = readLiveDiffStat(tool.details);
-  const textBlocks = progressReceipt ? progressTextBlocks(progressReceipt) : viewModel.textBlocks;
+  const textBlocks = progressReceipt ? progressTextBlocks(progressReceipt, t) : viewModel.textBlocks;
   const mergedCanvasPreview = mergeCanvasPreview(viewModel.canvasPreview, canvasPreview);
   const hasStructured = hasStructuredProjection({
     canvasPreview: mergedCanvasPreview,
@@ -338,7 +343,7 @@ function mergeOpenClawDetails(tool: SessionRenderToolCard, viewModel: ToolActivi
 
   return {
     ...viewModel,
-    title: progressReceipt ? '进度' : viewModel.title,
+    title: progressReceipt ? t('toolActivity.progress') : viewModel.title,
     textBlocks,
     canvasPreview: mergedCanvasPreview,
     canExpand: textBlocks.length > 0 || hasStructured,
@@ -352,12 +357,12 @@ function mergeOpenClawDetails(tool: SessionRenderToolCard, viewModel: ToolActivi
   };
 }
 
-export function buildToolActivityViewModel(tool: SessionRenderToolCard): ToolActivityViewModel {
-  const viewModel = buildToolActivityViewModelFromRegistry(tool);
-  return isOpenClawTool(tool) ? mergeOpenClawDetails(tool, viewModel) : viewModel;
+export function buildToolActivityViewModel(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityViewModel {
+  const viewModel = buildToolActivityViewModelFromRegistry(tool, t);
+  return isOpenClawTool(tool) ? mergeOpenClawDetails(tool, viewModel, t) : viewModel;
 }
 
-export function buildCanvasActivityViewModel(item: SessionRenderAssistantBubbleToolResult): ToolActivityViewModel | null {
+export function buildCanvasActivityViewModel(item: SessionRenderAssistantBubbleToolResult, t: TFunction<'chat'>): ToolActivityViewModel | null {
   if (item.preview.kind !== 'canvas') {
     return null;
   }
@@ -369,7 +374,7 @@ export function buildCanvasActivityViewModel(item: SessionRenderAssistantBubbleT
     isRunning: false,
     isError: false,
     canExpand: rawText.length > 0,
-    trailingLabels: [{ text: '画布', tone: 'muted' }],
+    trailingLabels: [{ text: t('toolActivity.canvas'), tone: 'muted' }],
     textBlocks: rawText ? [{ kind: 'output', text: rawText, copyable: false }] : [],
     canvasPreview: {
       title: item.preview.title?.trim() || item.toolName,

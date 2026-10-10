@@ -39,12 +39,46 @@ impl fmt::Display for RestoreTriggerLedgerError {
 
 impl std::error::Error for RestoreTriggerLedgerError {}
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct TriggerLedger {
     requests_by_run_and_idempotency_key: BTreeMap<(String, String), TriggerFireRequest>,
+    transaction: Option<BTreeMap<(String, String), Option<TriggerFireRequest>>>,
 }
 
+impl PartialEq for TriggerLedger {
+    fn eq(&self, other: &Self) -> bool {
+        self.requests_by_run_and_idempotency_key == other.requests_by_run_and_idempotency_key
+    }
+}
+impl Eq for TriggerLedger {}
+
 impl TriggerLedger {
+    pub(crate) fn begin_transaction(&mut self) {
+        if self.transaction.is_none() { self.transaction = Some(BTreeMap::new()); }
+    }
+    pub(crate) fn commit_transaction(&mut self) { self.transaction = None; }
+    pub(crate) fn rollback_transaction(&mut self) {
+        if let Some(transaction) = self.transaction.take() {
+            for (key, previous) in transaction {
+                match previous {
+                    Some(value) => { self.requests_by_run_and_idempotency_key.insert(key, value); }
+                    None => { self.requests_by_run_and_idempotency_key.remove(&key); }
+                }
+            }
+        }
+    }
+    pub(crate) fn changed_keys(&self) -> impl Iterator<Item = &(String, String)> {
+        self.transaction.iter().flat_map(|transaction| transaction.keys())
+    }
+    pub(crate) fn previous(&self, run: &str, key: &str) -> Option<&TriggerFireRequest> {
+        self.transaction.as_ref()?.get(&(run.to_owned(), key.to_owned()))?.as_ref()
+    }
+    pub(crate) fn import_record(&mut self, request: TriggerFireRequest) {
+        self.requests_by_run_and_idempotency_key.insert(request_key(&request), request);
+    }
+    pub(crate) fn remove_record(&mut self, run: &str, key: &str) {
+        self.requests_by_run_and_idempotency_key.remove(&(run.to_owned(), key.to_owned()));
+    }
     pub fn restore(
         requests: impl IntoIterator<Item = TriggerFireRequest>,
     ) -> Result<Self, RestoreTriggerLedgerError> {
@@ -86,6 +120,7 @@ impl TriggerLedger {
             };
         }
 
+        if let Some(transaction) = &mut self.transaction { transaction.entry(request_key(&request)).or_insert(None); }
         self.requests_by_run_and_idempotency_key
             .insert(request_key(&request), request.clone());
         Ok(TriggerRegistration::Recorded(request))
@@ -101,8 +136,13 @@ impl TriggerLedger {
     }
 
     pub(crate) fn retain_without_run(&mut self, run_id: &str) {
-        self.requests_by_run_and_idempotency_key
-            .retain(|(candidate, _), _| candidate != run_id);
+        self.requests_by_run_and_idempotency_key.retain(|key, request| {
+            if key.0 != run_id { return true; }
+            if let Some(transaction) = &mut self.transaction {
+                transaction.entry(key.clone()).or_insert_with(|| Some(request.clone()));
+            }
+            false
+        });
     }
 }
 

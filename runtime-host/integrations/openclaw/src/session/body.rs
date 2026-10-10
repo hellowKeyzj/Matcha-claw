@@ -127,7 +127,7 @@ impl Stream {
 impl Body {
     pub(super) fn trace_committed(&self, stage: &str) {
         if trace::enabled() {
-            trace::log_unscoped(stage, serde_json::json!({
+            trace::log_unscoped(stage, || serde_json::json!({
                 "commitState": "committed", "items": trace::items_shape(&self.items), "persistedCount": self.persisted.len(),
                 "streamsTotal": self.streams.len(), "streamsSummarized": self.streams.len().min(200), "streamsTruncated": self.streams.len() > 200,
                 "streams": self.streams.iter().take(200).map(|(run, stream)| serde_json::json!({
@@ -258,7 +258,7 @@ impl Body {
                     }
                     let status = self.status(run_id.as_str());
                     if trace::enabled() {
-                        trace::log_unscoped("oc.body.terminal", serde_json::json!({ "commitState": "candidate_only",
+                        trace::log_unscoped("oc.body.terminal", || serde_json::json!({ "commitState": "candidate_only",
                             "runHash": trace::fingerprint(run_id.as_str()), "phase": phase, "status": status,
                             "finalMessagePresent": final_message.is_some(),
                             "noMessageBranch": final_message.is_none().then(|| if *outcome == super::events::TerminalOutcome::Completed
@@ -296,7 +296,7 @@ impl Body {
             || (message.identity_message_id().is_none() && message.identity_sequence().is_none() && !message.has_send_identity())
         {
             if trace::enabled() {
-                trace::log_unscoped("oc.body.live_message.rejected", serde_json::json!({
+                trace::log_unscoped("oc.body.live_message.rejected", || serde_json::json!({
                     "reason": "missing_sdk_identity", "sdkSequencePresent": message.identity_sequence().is_some(),
                     "runHash": message.identity_run_id().map(trace::fingerprint), "activeRunHash": self.live_run().map(trace::fingerprint),
                     "compatMessageIdPresent": message.message_id().is_some(), "text": trace::text_shape(message.text()) }));
@@ -323,7 +323,7 @@ impl Body {
         if super::trace::enabled() {
             let live_match = message.run_id().is_some_and(|run| self.live_run() == Some(run));
             let provisional = message.run_id().is_some_and(|run| self.streams.get(run).is_some_and(|stream| !stream.provisional.is_empty()));
-            super::trace::log_unscoped("runtime.openclaw.body.message.marker_admission", serde_json::json!({ "commitState": "candidate_only",
+            super::trace::log_unscoped("runtime.openclaw.body.message.marker_admission", || serde_json::json!({ "commitState": "candidate_only",
                 "runHash": message.run_id().map(trace::fingerprint), "messageHash": message.message_id().map(trace::fingerprint),
                 "hasActiveRun": message.has_active_run(), "runPresent": message.run_id().is_some(),
                 "assistant": message.role() == MessageRole::Assistant, "imported": message.is_imported(),
@@ -341,7 +341,7 @@ impl Body {
         self.remember_terminal(message);
         let checked = self.check();
         if super::trace::enabled() {
-            super::trace::log_unscoped("runtime.openclaw.body.message.marker_result", serde_json::json!({ "commitState": "candidate_only",
+            super::trace::log_unscoped("runtime.openclaw.body.message.marker_result", || serde_json::json!({ "commitState": "candidate_only",
                 "markerSet": marker_set, "checkPassed": checked.is_some(), "pendingBefore": pending_before,
                 "pendingAfter": self.needs_terminal_history(), "terminalMarkerPresence": self.terminal_marker.is_some(),
                 "markerRunHash": self.terminal_marker.as_ref().map(|marker| trace::fingerprint(&marker.run_id)),
@@ -359,7 +359,7 @@ impl Body {
     pub(super) fn apply_message(&mut self, message: &Message, live: bool, cache: &OpenClawReplayProjection) -> Option<Option<String>> {
         self.reconcile_tool_refs(cache);
         if trace::enabled() {
-            trace::log_unscoped("oc.body.message.input", serde_json::json!({ "commitState": "candidate_only",
+            trace::log_unscoped("oc.body.message.input", || serde_json::json!({ "commitState": "candidate_only",
                 "role": format!("{:?}", message.role()), "text": trace::text_shape(message.text()),
                 "messageHash": message.message_id().map(trace::fingerprint), "displayItemHash": message.display_item_id().map(trace::fingerprint),
                 "runHash": message.run_id().map(trace::fingerprint), "sequence": message.sequence(), "hasOrigin": message.origin().is_some(),
@@ -410,7 +410,7 @@ impl Body {
         }
         let projected_id = item.as_ref().map(|item| item.item_id().to_owned());
         if trace::enabled() {
-            trace::log_unscoped("oc.body.message.projection", serde_json::json!({ "commitState": "candidate_only",
+            trace::log_unscoped("oc.body.message.projection", || serde_json::json!({ "commitState": "candidate_only",
                 "item": item.as_ref().map(trace::item_shape), "projected": item.is_some(),
                 "existingIndex": item.as_ref().and_then(|item| self.items.iter().position(|old| old.item_id() == item.item_id())),
                 "reason": if item.is_some() { "projected" } else if message.role() == MessageRole::ToolResult { "tool_result_no_display" } else { "content_segment_budget" } }));
@@ -438,7 +438,7 @@ impl Body {
                     {
                         first = Some(first.map_or(index, |first: usize| first.min(index)));
                         if trace::enabled() {
-                            trace::log_unscoped("oc.body.message.tool_retired", serde_json::json!({ "commitState": "candidate_only",
+                            trace::log_unscoped("oc.body.message.tool_retired", || serde_json::json!({ "commitState": "candidate_only",
                                 "toolItemHash": trace::fingerprint(&tool_id), "replacementItemHash": trace::fingerprint(&id),
                                 "index": index, "oldItem": trace::item_shape(&self.items[index]), "alreadyRetired": self.retired.contains(&tool_id) }));
                         }
@@ -475,7 +475,7 @@ impl Body {
             } else { self.persisted.push(row); }
             self.persisted.sort_by_key(|row| row.sequence());
             if trace::enabled() {
-                trace::log_unscoped("oc.body.message.persisted", serde_json::json!({ "commitState": "candidate_only",
+                trace::log_unscoped("oc.body.message.persisted", || serde_json::json!({ "commitState": "candidate_only",
                     "messageHash": message.message_id().map(trace::fingerprint), "runHash": message.run_id().map(trace::fingerprint),
                     "sequence": message.sequence(), "persistedCount": self.persisted.len() }));
             }
@@ -491,7 +491,7 @@ impl Body {
             if self.terminal.iter().any(|(id, _)| id == run) {
                 let status = self.status(run);
                 if trace::enabled() {
-                    trace::log_unscoped("oc.body.message.terminal", serde_json::json!({ "commitState": "candidate_only",
+                    trace::log_unscoped("oc.body.message.terminal", || serde_json::json!({ "commitState": "candidate_only",
                         "runHash": trace::fingerprint(run), "status": status, "decision": "preserve_terminal_fence" }));
                 }
                 for item in &mut self.items {
@@ -509,7 +509,7 @@ impl Body {
         if trace::enabled() {
             let previous = self.streams.get(run).map_or("", |stream| stream.text().unwrap_or(""));
             let terminal = self.terminal.iter().any(|(id, _)| id == run);
-            trace::log_unscoped("oc.body.cumulative.input", serde_json::json!({ "commitState": "candidate_only",
+            trace::log_unscoped("oc.body.cumulative.input", || serde_json::json!({ "commitState": "candidate_only",
                 "runHash": trace::fingerprint(run), "input": trace::text_shape(text), "baseline": trace::text_shape(previous),
                 "terminal": terminal, "empty": text.is_empty(), "shorter": text.len() < previous.len(), "equal": text == previous,
                 "prefix": text.starts_with(previous), "tail": text.strip_prefix(previous).map(trace::text_shape),
@@ -538,7 +538,7 @@ impl Body {
         let status = self.status(run);
         if trace::enabled() {
             let stream = self.streams.get(run);
-            trace::log_unscoped("oc.body.chunk.input", serde_json::json!({ "commitState": "candidate_only",
+            trace::log_unscoped("oc.body.chunk.input", || serde_json::json!({ "commitState": "candidate_only",
                 "runHash": trace::fingerprint(run), "kind": format!("{kind:?}"), "replace": replace, "status": status,
                 "input": trace::text_shape(text), "baseline": stream.and_then(Stream::text).map(trace::text_shape),
                 "currentBaseline": stream.and_then(|stream| stream.text.as_deref()).map(trace::text_shape),
@@ -646,7 +646,7 @@ impl Body {
         status: super::projection::AssistantTurnStatus) -> Option<()> {
         if trace::enabled() {
             let existing = self.items.iter().position(|item| item.item_id() == id);
-            trace::log_unscoped("oc.body.keyed_chunk.input", serde_json::json!({ "commitState": "candidate_only",
+            trace::log_unscoped("oc.body.keyed_chunk.input", || serde_json::json!({ "commitState": "candidate_only",
                 "runHash": trace::fingerprint(run), "itemHash": trace::fingerprint(id), "kind": format!("{kind:?}"),
                 "replace": replace, "status": format!("{status:?}"), "input": trace::text_shape(text), "empty": text.is_empty(),
                 "index": existing, "baselineItem": existing.map(|index| trace::item_shape(&self.items[index])) }));
@@ -668,7 +668,7 @@ impl Body {
                 }
                 _ => "reject_item_shape",
             };
-            trace::log_unscoped("oc.body.keyed_chunk.admission", serde_json::json!({ "commitState": "candidate_only",
+            trace::log_unscoped("oc.body.keyed_chunk.admission", || serde_json::json!({ "commitState": "candidate_only",
                 "runHash": trace::fingerprint(run), "itemHash": trace::fingerprint(id), "index": index, "decision": decision }));
         }
         let SessionItem::AssistantTurn { run_id: Some(owner), message_id: Some(message), text: current, segments, status: current_status, .. }
@@ -713,7 +713,7 @@ impl Body {
             }
         }
         if trace::enabled() {
-            trace::log_unscoped("oc.body.keyed_chunk.baseline", serde_json::json!({ "commitState": "candidate_only",
+            trace::log_unscoped("oc.body.keyed_chunk.baseline", || serde_json::json!({ "commitState": "candidate_only",
                 "runHash": trace::fingerprint(run), "itemHash": trace::fingerprint(id), "candidateItem": trace::item_shape(&self.items[index]) }));
         }
         Some(())
@@ -800,7 +800,7 @@ impl Body {
                     SessionItem::UserMessage { status, .. } | SessionItem::System { status, .. } => matches!(status, ItemStatus::Final | ItemStatus::Error | ItemStatus::Aborted),
                 });
                 if !available {
-                    trace::log_unscoped("oc.body.check.failed", serde_json::json!({ "commitState": "candidate_only",
+                    trace::log_unscoped("oc.body.check.failed", || serde_json::json!({ "commitState": "candidate_only",
                         "reason": "no_evictable_item", "itemsCount": self.items.len(), "items": trace::items_shape(&self.items) }));
                 }
             }
@@ -810,7 +810,7 @@ impl Body {
                 SessionItem::UserMessage { status, .. } | SessionItem::System { status, .. } => matches!(status, ItemStatus::Final | ItemStatus::Error | ItemStatus::Aborted),
             })?;
             if trace::enabled() {
-                trace::log_unscoped("oc.body.check.evicted", serde_json::json!({ "commitState": "candidate_only",
+                trace::log_unscoped("oc.body.check.evicted", || serde_json::json!({ "commitState": "candidate_only",
                     "index": index, "item": trace::item_shape(&self.items[index]), "itemsCount": self.items.len() }));
             }
             let item = self.items.remove(index);
@@ -830,7 +830,7 @@ impl Body {
                 && stream.anchors.iter().any(|id| self.retired.contains(id))));
         while self.terminal.len() > 200 {
             if trace::enabled() && !self.terminal.iter().any(|(run, _)| !visible.iter().any(|item| matches!(item, SessionItem::AssistantTurn { run_id: Some(id), .. } if id == run))) {
-                trace::log_unscoped("oc.body.check.failed", serde_json::json!({ "commitState": "candidate_only",
+                trace::log_unscoped("oc.body.check.failed", || serde_json::json!({ "commitState": "candidate_only",
                     "reason": "no_evictable_terminal", "terminalCount": self.terminal.len(), "itemsCount": visible.len() }));
             }
             let index = self.terminal.iter().position(|(run, _)| !visible.iter().any(|item| matches!(item, SessionItem::AssistantTurn { run_id: Some(id), .. } if id == run)))?;
@@ -843,7 +843,7 @@ impl Body {
             let valid = self.items.len() <= 200 && self.persisted.len() <= 200 && self.streams.len() <= 200
                 && self.terminal.len() <= 200 && self.retired.len() <= 200
                 && self.streams.values().all(|stream| stream.part_count() <= 200 && stream.anchors.len() <= 200                    && stream.text_bytes() <= 1_000_000 && stream.thinking.len() <= 1_000_000);
-            trace::log_unscoped(if valid { "oc.body.check.accepted" } else { "oc.body.check.failed" }, serde_json::json!({ "commitState": "candidate_only",
+            trace::log_unscoped(if valid { "oc.body.check.accepted" } else { "oc.body.check.failed" }, || serde_json::json!({ "commitState": "candidate_only",
                 "reason": if valid { "within_budget" } else { "budget_exceeded" }, "itemsCount": self.items.len(),
                 "persistedCount": self.persisted.len(), "streamsCount": self.streams.len(), "terminalCount": self.terminal.len(), "retiredCount": self.retired.len(),
                 "itemsExceeded": self.items.len() > 200, "persistedExceeded": self.persisted.len() > 200, "streamsExceeded": self.streams.len() > 200,
@@ -877,7 +877,7 @@ impl Body {
         let items = self.items[prefix..self.items.len() - suffix].to_vec();
         if trace::enabled() {
             let old_item_ids_count = old_item_ids.len();
-            trace::log_unscoped("oc.body.replacement", serde_json::json!({ "commitState": "candidate_only",
+            trace::log_unscoped("oc.body.replacement", || serde_json::json!({ "commitState": "candidate_only",
                 "anchor": match &anchor { ItemAnchor::Start => "start", ItemAnchor::After { .. } => "after" },
                 "anchorHash": match &anchor { ItemAnchor::Start => None, ItemAnchor::After { item_id } => Some(trace::fingerprint(item_id)) },
                 "changed": !old_item_ids.is_empty() || !items.is_empty(),

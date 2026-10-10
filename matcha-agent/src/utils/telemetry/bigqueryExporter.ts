@@ -134,7 +134,7 @@ export class BigQueryMetricsExporter implements PushMetricExporter {
 
       logForDebugging('BigQuery metrics exported successfully')
       logForDebugging(
-        `BigQuery API Response: ${jsonStringify(response.data, null, 2)}`,
+        () => `BigQuery API Response: ${jsonStringify(response.data, null, 2)}`,
       )
       resultCallback({ code: ExportResultCode.SUCCESS })
     } catch (error) {

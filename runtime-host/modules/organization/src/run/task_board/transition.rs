@@ -24,25 +24,44 @@ pub fn upsert_plan(
     if fingerprint.trim().is_empty() {
         return Err(TaskBoardError::ConflictingCommand);
     }
-    let mut candidate = board.clone();
+    let mut pending = std::collections::BTreeMap::new();
+    let mut records = Vec::new();
     let mut ids = Vec::new();
     for input in plan {
         let id = input.task_id.clone();
-        if let Some(old) = candidate.tasks_mut().iter_mut().find(|t| {
-            t.team_id() == &input.team_id && t.run_id() == &input.run_id && t.task_id() == &id
-        }) {
+        if let Some(old) = board.task(&input.team_id, &input.run_id, &id) {
             if old.command_fingerprint() != fingerprint {
                 return Err(TaskBoardError::ConflictingCommand);
             }
-            ids.push(id);
-            continue;
+        } else {
+            let key = (
+                input.team_id.as_str().to_owned(),
+                input.run_id.as_str().to_owned(),
+                id.clone(),
+            );
+            if let std::collections::btree_map::Entry::Vacant(entry) = pending.entry(key) {
+                let task = TaskRecord::new(input, now, fingerprint.to_owned())?;
+                entry.insert(records.len());
+                records.push(task);
+            }
         }
-        let task = TaskRecord::new(input, now, fingerprint.to_owned())?;
-        candidate.tasks_mut().push(task);
         ids.push(id);
     }
-    candidate.validate()?;
-    *board = candidate;
+    for task in &records {
+        if task.depends_on().iter().any(|dependency| {
+            board
+                .task(task.team_id(), task.run_id(), dependency)
+                .is_none()
+                && !pending.contains_key(&(
+                    task.team_id().as_str().to_owned(),
+                    task.run_id().as_str().to_owned(),
+                    dependency.clone(),
+                ))
+        }) {
+            return Err(TaskBoardError::UnknownDependency);
+        }
+    }
+    board.append_tasks(records)?;
     Ok(ids)
 }
 
@@ -60,19 +79,23 @@ pub fn claim_next(
         .filter(|t| t.team_id() == team && t.run_id() == run && t.status() == TaskStatus::Done)
         .map(|t| t.task_id().clone())
         .collect();
-    let index = board.tasks().enumerate().find_map(|(i, t)| {
+    let task_id = board.tasks().find_map(|t| {
         (t.team_id() == team
             && t.run_id() == run
             && t.status() == TaskStatus::Todo
             && t.depends_on().iter().all(|d| done.contains(d)))
-        .then_some(i)
+        .then(|| t.task_id().clone())
     });
     if agent.trim().is_empty() || session.trim().is_empty() {
         return Err(TaskBoardError::InvalidIdentity);
     }
-    let Some(index) = index else { return Ok(None) };
+    let Some(task_id) = task_id else {
+        return Ok(None);
+    };
     let until = lease(now, lease_seconds)?;
-    let task = &mut board.tasks_mut()[index];
+    let task = board
+        .task_mut(team.as_str(), run.as_str(), task_id.as_str())
+        .unwrap();
     *task.status_mut() = TaskStatus::Claimed;
     let (owner, claim, claimed, expiry) = task.owner_mut();
     *owner = Some(agent.to_owned());
@@ -94,9 +117,7 @@ pub fn heartbeat(
     now: u64,
 ) -> Result<(), TaskBoardError> {
     let task = board
-        .tasks_mut()
-        .iter_mut()
-        .find(|t| t.team_id() == team && t.run_id() == run && t.task_id() == task_id)
+        .task_mut(team.as_str(), run.as_str(), task_id.as_str())
         .ok_or(TaskBoardError::UnknownTask)?;
     owned(task, agent, session, now)?;
     *task.owner_mut().3 = Some(lease(now, lease_seconds)?);
@@ -113,9 +134,7 @@ pub fn release(
     now: u64,
 ) -> Result<(), TaskBoardError> {
     let task = board
-        .tasks_mut()
-        .iter_mut()
-        .find(|t| t.team_id() == team && t.run_id() == run && t.task_id() == task_id)
+        .task_mut(team.as_str(), run.as_str(), task_id.as_str())
         .ok_or(TaskBoardError::UnknownTask)?;
     owned(task, agent, session, now)?;
     let (o, s, c, l) = task.owner_mut();
@@ -141,9 +160,7 @@ pub fn transition(
     now: u64,
 ) -> Result<(), TaskBoardError> {
     let task = board
-        .tasks_mut()
-        .iter_mut()
-        .find(|t| t.team_id() == team && t.run_id() == run && t.task_id() == task_id)
+        .task_mut(team.as_str(), run.as_str(), task_id.as_str())
         .ok_or(TaskBoardError::UnknownTask)?;
     if let Some((a, s)) = agent {
         owned(task, a, s, now)?
@@ -197,10 +214,7 @@ pub fn start_runner(
     session: &str,
     now: u64,
 ) -> Result<(), TaskBoardError> {
-    let r = board
-        .runners_mut()
-        .iter_mut()
-        .find(|r| r.team_id() == team && r.run_id() == run && r.runner_id() == runner);
+    let r = board.runner_mut(team.as_str(), run.as_str(), runner);
     if let Some(r) = r {
         if r.session() != session {
             return Err(TaskBoardError::NotOwner);
@@ -219,7 +233,7 @@ pub fn start_runner(
         now,
     )?;
     r.set_status(RunnerStatus::Active, now);
-    board.runners_mut().push(r);
+    board.append_runner(r)?;
     Ok(())
 }
 pub fn pause_runner(
@@ -252,9 +266,7 @@ fn runner_status(
     now: u64,
 ) -> Result<(), TaskBoardError> {
     let r = board
-        .runners_mut()
-        .iter_mut()
-        .find(|r| r.team_id() == team && r.run_id() == run && r.runner_id() == runner)
+        .runner_mut(team.as_str(), run.as_str(), runner)
         .ok_or(TaskBoardError::UnknownRunner)?;
     if r.session() != session {
         return Err(TaskBoardError::NotOwner);
@@ -266,13 +278,7 @@ fn runner_status(
     Ok(())
 }
 pub fn reclaim_expired(board: &mut TaskBoardFacts, now: u64) -> usize {
-    let mut count = 0;
-    for task in board.tasks_mut() {
-        if reclaim_expired_task(task, now) {
-            count += 1;
-        }
-    }
-    count
+    reclaim_matching(board, now, |_, _| true)
 }
 
 pub fn reclaim_expired_for_run(
@@ -281,13 +287,40 @@ pub fn reclaim_expired_for_run(
     run: &GraphRunId,
     now: u64,
 ) -> usize {
-    let mut count = 0;
-    for task in board.tasks_mut() {
-        if task.team_id() == team && task.run_id() == run && reclaim_expired_task(task, now) {
-            count += 1;
-        }
+    reclaim_matching(board, now, |task_team, task_run| {
+        task_team == team && task_run == run
+    })
+}
+
+fn reclaim_matching(
+    board: &mut TaskBoardFacts,
+    now: u64,
+    matches_scope: impl Fn(&TeamId, &GraphRunId) -> bool,
+) -> usize {
+    let keys: Vec<_> = board
+        .tasks()
+        .filter(|task| {
+            matches_scope(task.team_id(), task.run_id())
+                && task.lease_until().is_some_and(|expiry| expiry <= now)
+                && matches!(task.status(), TaskStatus::Claimed | TaskStatus::Running)
+        })
+        .map(|task| {
+            (
+                task.team_id().clone(),
+                task.run_id().clone(),
+                task.task_id().clone(),
+            )
+        })
+        .collect();
+    for (team, run, id) in &keys {
+        reclaim_expired_task(
+            board
+                .task_mut(team.as_str(), run.as_str(), id.as_str())
+                .unwrap(),
+            now,
+        );
     }
-    count
+    keys.len()
 }
 
 fn reclaim_expired_task(task: &mut TaskRecord, now: u64) -> bool {

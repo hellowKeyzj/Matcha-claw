@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::{
-    definition::{EdgeAction, EdgeDefinition, GraphDefinition, NodeDefinition, NodeId},
+    definition::{EdgeAction, EdgeDefinition, GraphDefinition, NodeDefinition, NodeId, NodeKind},
     patch::GraphPatchOperation,
     state::{
         AttemptReason, AttemptStatus, ExecutionFence, GraphState, InputReceipt, NodeAttempt,
@@ -63,7 +63,9 @@ pub enum ReduceError {
     TriggerNotArmed(NodeId),
     StaleGraphIdentity,
     InvalidGraphPatch,
+    InvalidDefinition(super::DefinitionError),
     InvalidSettlementEvent,
+    InvalidOutputPort { node_id: NodeId },
     StaleFence {
         node_id: NodeId,
     },
@@ -78,6 +80,11 @@ pub enum ReduceError {
 }
 
 pub fn reduce(mut state: GraphState, event: GraphEvent) -> Result<GraphState, ReduceError> {
+    reduce_in_place(&mut state, event)?;
+    Ok(state)
+}
+
+pub(super) fn reduce_in_place(mut state: &mut GraphState, event: GraphEvent) -> Result<(), ReduceError> {
     match event {
         GraphEvent::AttemptStarted {
             node_id,
@@ -160,7 +167,7 @@ pub fn reduce(mut state: GraphState, event: GraphEvent) -> Result<GraphState, Re
             patched_at,
         )?,
     }
-    Ok(state)
+    Ok(())
 }
 
 /// Records a trusted native terminal fact without advancing the current graph.
@@ -169,6 +176,11 @@ pub fn settle_superseded_attempt(
     mut state: GraphState,
     event: GraphEvent,
 ) -> Result<GraphState, ReduceError> {
+    settle_superseded_in_place(&mut state, event)?;
+    Ok(state)
+}
+
+pub(super) fn settle_superseded_in_place(state: &mut GraphState, event: GraphEvent) -> Result<(), ReduceError> {
     let (node_id, fence, status, output_port, now) = match event {
         GraphEvent::NodeCompleted {
             node_id,
@@ -220,7 +232,7 @@ pub fn settle_superseded_attempt(
     } else {
         attempt.transition_to(status, now);
     }
-    Ok(state)
+    Ok(())
 }
 
 fn apply_graph_patch(
@@ -238,9 +250,12 @@ fn apply_graph_patch(
     if operations.is_empty() {
         return Err(ReduceError::InvalidGraphPatch);
     }
-    let definition = state.definition();
-    let mut nodes = definition.nodes().to_vec();
-    let mut edges = definition.edges().to_vec();
+    let graph_id = state.definition().graph_id().to_owned();
+    let plan_id = state.definition().workflow_plan_id().to_owned();
+    let run_id = state.definition().run_id().clone();
+    let title = state.definition().title().to_owned();
+    let mut nodes = state.definition().nodes().to_vec();
+    let mut edges = state.definition().edges().to_vec();
     let mut metadata = state.metadata().clone();
     let mut layout = state.layout().clone();
     for operation in operations {
@@ -266,6 +281,7 @@ fn apply_graph_patch(
                 edges.retain(|edge| {
                     edge.source_node_id() != node_id && edge.target_node_id() != node_id
                 });
+                if layout.node_positions().contains_key(node_id) { state.remember_position(node_id); }
                 layout.remove_node(node_id);
             }
             GraphPatchOperation::AddEdge(edge) => {
@@ -291,46 +307,54 @@ fn apply_graph_patch(
                 if !nodes.iter().any(|node| node.id() == node_id) {
                     return Err(ReduceError::InvalidGraphPatch);
                 }
+                if layout.node_positions().get(node_id) != Some(position) { state.remember_position(node_id); }
                 layout.set_node_position(node_id.clone(), *position);
             }
             GraphPatchOperation::SetMetadata { key, value } => {
+                if metadata.get(key) != Some(value) { state.remember_metadata(key); }
                 metadata.insert(key.clone(), value.clone());
             }
         }
     }
     let definition = GraphDefinition::new(
-        definition.graph_id(),
-        definition.workflow_plan_id(),
-        definition.run_id().clone(),
-        definition.title(),
+        graph_id,
+        plan_id,
+        run_id,
+        title,
         nodes,
         edges,
     )
-    .map_err(|_| ReduceError::InvalidGraphPatch)?;
+    .map_err(ReduceError::InvalidDefinition)?;
+    let root_ids = definition.execution_root_ids();
     let mut executions = BTreeMap::new();
     for node in definition.nodes() {
-        let history = state
-            .executions()
-            .get(node.id())
-            .cloned()
-            .unwrap_or_else(|| {
-                let status = if definition.execution_root_ids().contains(node.id())
-                    && !node.is_armed_start()
-                {
-                    AttemptStatus::Ready
-                } else {
-                    AttemptStatus::Pending
-                };
-                NodeExecutionHistory::initial(NodeAttempt::create(
-                    node.id().clone(),
-                    node.kind(),
-                    NonZeroU32::MIN,
-                    status,
-                    AttemptReason::Initial,
-                    Vec::new(),
-                    patched_at,
-                ))
-            });
+        let initial_status = if root_ids.contains(node.id()) && !node.is_armed_start() {
+            AttemptStatus::Ready
+        } else {
+            AttemptStatus::Pending
+        };
+        if node.kind() == NodeKind::Start
+            && state
+                .definition()
+                .node(node.id())
+                .is_some_and(|previous| previous.trigger() != node.trigger())
+            && state.executions().get(node.id()).is_some_and(|history| {
+                history.attempts().len() == 1
+                    && matches!(history.current().reason(), AttemptReason::Initial)
+                    && matches!(history.current().status(), AttemptStatus::Pending | AttemptStatus::Ready)
+                    && history.current().status() != initial_status
+            })
+        {
+            state.current_attempt_mut(node.id()).expect("existing start attempt")
+                .transition_to(initial_status, patched_at);
+        }
+        let history = state.take_history(node.id()).unwrap_or_else(|| {
+            state.remember_new_history(node.id());
+            NodeExecutionHistory::initial(NodeAttempt::create(
+                node.id().clone(), node.kind(), NonZeroU32::MIN, initial_status,
+                AttemptReason::Initial, Vec::new(), patched_at,
+            ))
+        });
         executions.insert(node.id().clone(), history);
     }
 
@@ -363,7 +387,7 @@ fn apply_graph_patch(
             .cmp(&right.enqueued_at())
             .then_with(|| left.node_id().cmp(right.node_id()))
     });
-    *state = GraphState::from_durable(definition, metadata, layout, executions, ready_queue);
+    state.finish_patch(definition, metadata, layout, executions, ready_queue);
     Ok(())
 }
 
@@ -405,6 +429,11 @@ fn resolve_outcome(
                 node_id,
                 status: attempt.status(),
             });
+        }
+        if terminal_status == AttemptStatus::Completed
+            && !source_node.kind().accepts_completed_output(&output_port)
+        {
+            return Err(ReduceError::InvalidOutputPort { node_id });
         }
         attempt.resolve(terminal_status, output_port.clone(), now);
     }
@@ -571,7 +600,8 @@ fn activate_gate_if_satisfied(
         .iter()
         .map(|edge| {
             let source = state.current_attempt(edge.source_node_id())?;
-            (source.status().is_terminal() && source.output_port() == Some(edge.source_port()))
+            (source.status() == AttemptStatus::Completed
+                && source.output_port() == Some(edge.source_port()))
                 .then(|| receipt_for(edge, source, now))
         })
         .collect::<Option<Vec<_>>>();

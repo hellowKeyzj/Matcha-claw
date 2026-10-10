@@ -64,17 +64,21 @@ impl OpenClawSkillProvider {
     pub async fn status(&self) -> skills_module::status::Outcome {
         match self.skill_status_catalog().await {
             Ok(catalog) => {
-                eprintln!(
-                    "[startup-trace] source=skills-status phase=host detail=available entries={}",
-                    catalog.entries().len()
-                );
+                if platform::trace::enabled() {
+                    eprintln!(
+                        "[startup-trace] source=skills-status phase=host detail=available entries={}",
+                        catalog.entries().len()
+                    );
+                }
                 skills_module::status::Outcome::Available(project_status(&catalog))
             }
             Err(error) => {
-                eprintln!(
-                    "[startup-trace] source=skills-status phase=host detail=unavailable error={:?}",
-                    error
-                );
+                if platform::trace::enabled() {
+                    eprintln!(
+                        "[startup-trace] source=skills-status phase=host detail=unavailable error={:?}",
+                        error
+                    );
+                }
                 skills_module::status::Outcome::Unavailable
             }
         }

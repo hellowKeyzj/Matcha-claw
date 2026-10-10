@@ -5,11 +5,21 @@ use super::{
     RestoreActivityError,
 };
 
-#[derive(Clone, Default, Eq, PartialEq)]
+#[derive(Clone, Default)]
 pub struct ActivityLedger {
     activities: BTreeMap<ActivityId, Activity>,
     activity_ids_by_run_and_idempotency_key: BTreeMap<(String, String), ActivityId>,
+    undo: Option<BTreeMap<ActivityId, Option<Activity>>>,
 }
+
+impl PartialEq for ActivityLedger {
+    fn eq(&self, other: &Self) -> bool {
+        self.activities == other.activities
+            && self.activity_ids_by_run_and_idempotency_key
+                == other.activity_ids_by_run_and_idempotency_key
+    }
+}
+impl Eq for ActivityLedger {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ActivityRegistrationOutcome {
@@ -133,6 +143,10 @@ impl ActivityLedger {
         }
 
         let activity = Activity::request(request)?;
+        if let Some(undo) = &mut self.undo {
+            undo.entry(activity.facts().activity_id.clone())
+                .or_insert(None);
+        }
         self.activity_ids_by_run_and_idempotency_key.insert(
             activity_key(activity.facts()),
             activity.facts().activity_id.clone(),
@@ -157,7 +171,76 @@ impl ActivityLedger {
     }
 
     pub fn activity_mut(&mut self, activity_id: &ActivityId) -> Option<&mut Activity> {
-        self.activities.get_mut(activity_id)
+        let activity = self.activities.get_mut(activity_id)?;
+        if let Some(undo) = &mut self.undo {
+            undo.entry(activity_id.clone())
+                .or_insert_with(|| Some(activity.clone()));
+        }
+        Some(activity)
+    }
+
+    pub(crate) fn restore_record(
+        &mut self,
+        activity: Activity,
+    ) -> Result<(), RestoreActivityLedgerError> {
+        let id = activity.facts().activity_id.clone();
+        let key = activity_key(activity.facts());
+        if self
+            .activity_ids_by_run_and_idempotency_key
+            .get(&key)
+            .is_some_and(|existing| existing != &id)
+        {
+            return Err(RestoreActivityLedgerError::DuplicateIdempotencyKey);
+        }
+        self.remove_record(&id);
+        if let Some(undo) = &mut self.undo {
+            undo.entry(id.clone()).or_insert(None);
+        }
+        self.activity_ids_by_run_and_idempotency_key
+            .insert(key, id.clone());
+        self.activities.insert(id, activity);
+        Ok(())
+    }
+
+    pub(crate) fn remove_record(&mut self, id: &ActivityId) {
+        if let Some(activity) = self.activities.remove(id) {
+            self.activity_ids_by_run_and_idempotency_key
+                .remove(&activity_key(activity.facts()));
+            if let Some(undo) = &mut self.undo {
+                undo.entry(id.clone()).or_insert(Some(activity));
+            }
+        }
+    }
+
+    pub(crate) fn begin_transaction(&mut self) {
+        assert!(self.undo.is_none(), "activity transaction already active");
+        self.undo = Some(BTreeMap::new());
+    }
+
+    pub(crate) fn previous(&self, id: &ActivityId) -> Option<&Activity> {
+        self.undo.as_ref()?.get(id)?.as_ref()
+    }
+
+    pub(crate) fn changed_ids(&self) -> impl Iterator<Item = &ActivityId> {
+        self.undo.iter().flat_map(|undo| undo.keys())
+    }
+
+    pub(crate) fn commit_transaction(&mut self) {
+        self.undo = None;
+    }
+
+    pub(crate) fn rollback_transaction(&mut self) {
+        for (id, previous) in self.undo.take().into_iter().flatten() {
+            if let Some(current) = self.activities.remove(&id) {
+                self.activity_ids_by_run_and_idempotency_key
+                    .remove(&activity_key(current.facts()));
+            }
+            if let Some(activity) = previous {
+                self.activity_ids_by_run_and_idempotency_key
+                    .insert(activity_key(activity.facts()), id.clone());
+                self.activities.insert(id, activity);
+            }
+        }
     }
 
     pub fn activities(&self) -> impl Iterator<Item = &Activity> {
@@ -165,8 +248,16 @@ impl ActivityLedger {
     }
 
     pub fn retain_without_run(&mut self, run_id: &str) {
-        self.activities
-            .retain(|_, activity| activity.facts().run_id.as_str() != run_id);
+        self.activities.retain(|id, activity| {
+            if activity.facts().run_id.as_str() != run_id {
+                return true;
+            }
+            if let Some(undo) = &mut self.undo {
+                undo.entry(id.clone())
+                    .or_insert_with(|| Some(activity.clone()));
+            }
+            false
+        });
         self.activity_ids_by_run_and_idempotency_key
             .retain(|_, activity_id| self.activities.contains_key(activity_id));
     }

@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { AgentSessionsPane } from './AgentSessionsPane';
 import { Chat } from '@/pages/Chat';
+import { isTraceEnabled } from '@/lib/trace-logger';
 
 interface ChatWorkspaceHostProps {
   takeoverMode: 'none' | 'artifact-workbench';
@@ -14,6 +15,7 @@ export function ChatWorkspaceHost({
   const artifactWorkbenchFullscreen = takeoverMode === 'artifact-workbench';
 
   useEffect(() => {
+    if (!isTraceEnabled()) return;
     console.info(JSON.stringify({
       prefix: STARTUP_TRACE_PREFIX,
       traceScope: 'renderer-boundary',

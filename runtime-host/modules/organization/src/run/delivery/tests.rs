@@ -99,7 +99,7 @@ fn graph_with_edge() -> GraphState {
             source.clone(),
             "completed",
             target,
-            "done",
+            "input",
             EdgeAction::Finish,
         )],
     )

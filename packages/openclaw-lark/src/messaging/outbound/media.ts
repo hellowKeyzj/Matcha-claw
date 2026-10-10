@@ -818,9 +818,9 @@ export async function uploadAndSendMediaLark(params: {
   const { cfg, to, mediaUrl, mediaBuffer, fileName, replyToMessageId, replyInThread, accountId, mediaLocalRoots } =
     params;
 
-  log.info(
-    `uploadAndSendMediaLark: target=${to}, ` +
-      `source=${mediaBuffer ? 'buffer' : (mediaUrl ?? '(none)')}, fileName=${fileName ?? '(auto)'}`,
+  log.trace(
+    () => (`uploadAndSendMediaLark: target=${to}, ` +
+      `source=${mediaBuffer ? 'buffer' : (mediaUrl ?? '(none)')}, fileName=${fileName ?? '(auto)'}`),
   );
 
   // Resolve the media to a Buffer.
@@ -829,10 +829,10 @@ export async function uploadAndSendMediaLark(params: {
 
   if (mediaBuffer) {
     buffer = mediaBuffer;
-    log.debug(`using provided buffer: ${buffer.length} bytes`);
+    log.debug(() => (`using provided buffer: ${buffer.length} bytes`));
   } else if (mediaUrl) {
     buffer = await fetchMediaBuffer(mediaUrl, mediaLocalRoots);
-    log.debug(`fetched media: ${buffer.length} bytes from "${mediaUrl}"`);
+    log.debug(() => (`fetched media: ${buffer.length} bytes from "${mediaUrl}"`));
 
     // Derive a file name from the URL if none was provided.
     if (!fileName) {
@@ -850,7 +850,7 @@ export async function uploadAndSendMediaLark(params: {
 
   // Decide whether to send as image or file based on the extension.
   const isImage = isImageFileName(resolvedFileName);
-  log.info(`resolved: fileName="${resolvedFileName}", ` + `type=${isImage ? 'image' : 'file'}, size=${buffer.length}`);
+  log.trace(() => (`resolved: fileName="${resolvedFileName}", ` + `type=${isImage ? 'image' : 'file'}, size=${buffer.length}`));
 
   if (isImage) {
     // Upload as image, then send image message.
@@ -860,7 +860,7 @@ export async function uploadAndSendMediaLark(params: {
       imageType: 'message',
       accountId,
     });
-    log.debug(`image uploaded: imageKey=${imageKey}`);
+    log.debug(() => (`image uploaded: imageKey=${imageKey}`));
 
     return sendImageLark({
       cfg,
@@ -887,8 +887,8 @@ export async function uploadAndSendMediaLark(params: {
     accountId,
   });
   log.debug(
-    `file uploaded: fileKey=${fileKey}, ` +
-      `fileType=${fileType}${isAudio || isVideo ? `, duration=${duration ?? 'unknown'}ms` : ''}`,
+    () => (`file uploaded: fileKey=${fileKey}, ` +
+      `fileType=${fileType}${isAudio || isVideo ? `, duration=${duration ?? 'unknown'}ms` : ''}`),
   );
 
   if (isAudio) {
@@ -1029,7 +1029,7 @@ async function fetchMediaBuffer(urlOrPath: string, localRoots?: readonly string[
     }
 
     const buf = fs.readFileSync(filePath);
-    log.debug(`local file read: "${filePath}", ${buf.length} bytes`);
+    log.debug(() => (`local file read: "${filePath}", ${buf.length} bytes`));
     return buf;
   }
 
@@ -1037,7 +1037,7 @@ async function fetchMediaBuffer(urlOrPath: string, localRoots?: readonly string[
   await validateRemoteUrl(raw);
 
   const FETCH_TIMEOUT_MS = 30_000;
-  log.info(`fetching remote media: ${raw}`);
+  log.trace(() => (`fetching remote media: ${raw}`));
 
   // Retry transient server errors (502/503/504) with bounded backoff.
   const arrayBuffer = await withRetry(async () => {
@@ -1055,6 +1055,6 @@ async function fetchMediaBuffer(urlOrPath: string, localRoots?: readonly string[
     return response.arrayBuffer();
   }, `fetchMedia(${raw})`);
 
-  log.debug(`remote media fetched: ${raw}, ${arrayBuffer.byteLength} bytes`);
+  log.debug(() => (`remote media fetched: ${raw}, ${arrayBuffer.byteLength} bytes`));
   return Buffer.from(arrayBuffer);
 }

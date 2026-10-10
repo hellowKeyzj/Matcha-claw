@@ -115,7 +115,7 @@ export async function getAppGrantedScopes(
 
     // 3. 写缓存（缓存完整数据，包含 token_types 和原始 app 对象）
     cache.set(appId, { rawScopes: validScopes, rawApp: app, fetchedAt: Date.now() });
-    log.info(`fetched ${validScopes.length} scopes for app ${appId}`);
+    log.trace(() => `fetched ${validScopes.length} scopes for app ${appId}`);
 
     // 4. 根据 tokenType 过滤
     const scopes = validScopes
@@ -127,7 +127,7 @@ export async function getAppGrantedScopes(
       })
       .map((s) => s.scope);
 
-    log.info(`returning ${scopes.length} scopes${tokenType ? ` for ${tokenType} token` : ''}`);
+    log.trace(() => `returning ${scopes.length} scopes${tokenType ? ` for ${tokenType} token` : ''}`);
 
     return scopes;
   } catch (err) {

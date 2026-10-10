@@ -56,7 +56,7 @@ async fn handle_request(
     session_trace::log(
         "runtime.send.request",
         trace_id,
-        serde_json::json!({ "method": &request.method, "path": &request.path }),
+        || serde_json::json!({ "method": &request.method, "path": &request.path }),
     );
     let Some(authorization) = request
         .headers
@@ -64,13 +64,13 @@ async fn handle_request(
         .find(|(name, _)| name == AUTHORIZATION_HEADER)
         .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
     else {
-        session_trace::log("runtime.send.unauthorized", trace_id, serde_json::json!({}));
+        session_trace::log("runtime.send.unauthorized", trace_id, || serde_json::json!({}));
         return Response::unauthorized();
     };
     let value = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
         Err(_) => {
-            session_trace::log("runtime.send.bad-json", trace_id, serde_json::json!({}));
+            session_trace::log("runtime.send.bad-json", trace_id, || serde_json::json!({}));
             return Response::bad_request();
         }
     };
@@ -83,7 +83,7 @@ async fn handle_request(
             session_trace::log(
                 "runtime.send.decode-unauthorized",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::unauthorized();
         }
@@ -91,7 +91,7 @@ async fn handle_request(
             session_trace::log(
                 "runtime.send.decode-invalid",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::bad_request();
         }
@@ -102,16 +102,16 @@ async fn handle_request(
             session_trace::log(
                 "runtime.send.command-invalid",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::bad_request();
         }
     };
-    let trace_id = command.trace_id().map(str::to_owned);
+    let trace_id = command.trace_id().filter(|_| session_trace::enabled()).map(str::to_owned);
     session_trace::log(
         "runtime.send.command",
         trace_id.as_deref(),
-        serde_json::json!({
+        || serde_json::json!({
             "endpoint": command.identity.provider().as_str(),
             "sessionKey": session_trace::id_shape(Some(command.identity.session_key())),
             "endpointSessionId": session_trace::id_shape(command.endpoint_session_id.as_deref()),
@@ -128,7 +128,7 @@ async fn handle_request(
             session_trace::log(
                 "runtime.send.owner-unavailable",
                 trace_id.as_deref(),
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::unavailable();
         }
@@ -141,7 +141,7 @@ async fn handle_request(
             session_trace::log(
                 "runtime.send.owner-unavailable",
                 trace_id.as_deref(),
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::unavailable();
         }
@@ -160,7 +160,7 @@ async fn handle_request(
     session_trace::log(
         "runtime.send.outcome",
         trace_id.as_deref(),
-        serde_json::json!({
+        || serde_json::json!({
             "outcome": match &outcome {
                 SessionSendOutcome::Queued { .. } => "queued",
                 SessionSendOutcome::Succeeded { .. } => "succeeded",

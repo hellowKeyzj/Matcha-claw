@@ -1,3 +1,5 @@
+import { traceLog } from './trace-logger';
+
 type TelemetryPayload = Record<string, unknown>;
 export type UiTelemetryEntry = {
   id: number;
@@ -95,14 +97,8 @@ export function trackUiEvent(event: string, payload: TelemetryPayload = {}): voi
   }
   listeners.forEach((listener) => listener(entry));
 
-  const logPayload = {
-    ...normalizedPayload,
-    count,
-    ts,
-  };
-
-  // Local-only telemetry for UX diagnostics.
-  console.info(`[ui-metric] ${event} ${safeStringify(logPayload)}`);
+  // Keep the diagnostics history available independently of console tracing.
+  traceLog(() => [`[ui-metric] ${event} ${safeStringify({ ...normalizedPayload, count, ts })}`]);
 }
 
 export function getUiCounter(event: string): number {

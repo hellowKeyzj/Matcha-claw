@@ -352,7 +352,7 @@ impl TeamDecisionEventSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct TeamDecisionState {
-    decisions: BTreeMap<(String, String), TeamDecision>,
+    pub(super) decisions: BTreeMap<(String, String), TeamDecision>,
 }
 
 impl TeamDecisionState {

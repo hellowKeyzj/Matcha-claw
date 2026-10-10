@@ -176,13 +176,16 @@ pub enum TeamTriggerFireResolution {
 pub(crate) enum CronReconciliation {
     AwaitingSlot,
     Due(DueCronTriggerPlan),
-    InvalidSchedule,
+    InvalidSchedule {
+        run_id: GraphRunId,
+        start_node_id: String,
+    },
     OutcomeUnknown,
 }
 
 #[derive(Default)]
 pub(crate) struct TeamTriggerCron {
-    slots: BTreeMap<(String, String), u64>,
+    slots: BTreeMap<(String, String), (String, u64)>,
 }
 
 impl TeamTriggerCron {
@@ -199,12 +202,17 @@ impl TeamTriggerCron {
                 continue;
             };
             let key = (trigger.run_id.as_str().to_owned(), trigger.start_node_id);
-            let next_slot_at = match self.slots.get(&key).copied() {
-                Some(slot) => slot,
+            let next_slot_at = match self.slots.get(&key)
+                .filter(|(scheduled_expression, _)| scheduled_expression == &expression)
+            {
+                Some((_, slot)) => *slot,
                 None => match next_cron_slot_after(&expression, now) {
                     Ok(slot) => slot,
                     Err(CronScheduleError::InvalidExpression | CronScheduleError::NoFutureSlot) => {
-                        reconciliations.push(CronReconciliation::InvalidSchedule);
+                        reconciliations.push(CronReconciliation::InvalidSchedule {
+                            run_id: GraphRunId::new(key.0.clone()),
+                            start_node_id: key.1.clone(),
+                        });
                         continue;
                     }
                     Err(CronScheduleError::InvalidTimestamp) => {
@@ -223,7 +231,10 @@ impl TeamTriggerCron {
                     Ok(slot) => Some(slot),
                     Err(CronScheduleError::NoFutureSlot) => None,
                     Err(CronScheduleError::InvalidExpression) => {
-                        reconciliations.push(CronReconciliation::InvalidSchedule);
+                        reconciliations.push(CronReconciliation::InvalidSchedule {
+                            run_id: GraphRunId::new(key.0.clone()),
+                            start_node_id: key.1.clone(),
+                        });
                         continue;
                     }
                     Err(CronScheduleError::InvalidTimestamp) => {
@@ -247,7 +258,7 @@ impl TeamTriggerCron {
                 Ok(Some(plan)) => {
                     match plan.next_slot_at {
                         Some(slot) => {
-                            self.slots.insert(key, slot);
+                            self.slots.insert(key, (expression, slot));
                         }
                         None => {
                             self.slots.remove(&key);
@@ -256,11 +267,14 @@ impl TeamTriggerCron {
                     reconciliations.push(CronReconciliation::Due(plan));
                 }
                 Ok(None) => {
-                    self.slots.insert(key, next_slot_at);
+                    self.slots.insert(key, (expression, next_slot_at));
                     reconciliations.push(CronReconciliation::AwaitingSlot);
                 }
                 Err(CronTriggerScheduleError::InvalidTrigger(_)) => {
-                    reconciliations.push(CronReconciliation::InvalidSchedule);
+                    reconciliations.push(CronReconciliation::InvalidSchedule {
+                        run_id: GraphRunId::new(key.0.clone()),
+                        start_node_id: key.1.clone(),
+                    });
                 }
                 Err(CronTriggerScheduleError::NonAdvancingNextSlot) => {
                     reconciliations.push(CronReconciliation::OutcomeUnknown);
@@ -477,24 +491,8 @@ impl TeamRunOwner {
         &self,
         store: &OrganizationStore,
         team_id: &TeamId,
-    ) -> Vec<TeamRunQueryOutcome> {
-        store
-            .facts()
-            .runs()
-            .filter(|run| {
-                run.team() == team_id
-                    && !matches!(
-                        run.lifecycle().state(),
-                        GraphRunLifecycleState::Tombstoned { .. }
-                    )
-            })
-            .map(|run| {
-                self.query(
-                    store,
-                    &TeamRunQuery::get(team_id.clone(), run.run_id().clone()),
-                )
-            })
-            .collect()
+    ) -> Vec<organization::run::query::TeamRunListEntry> {
+        organization::run::query::query_team_run_list(store.facts(), team_id)
     }
 
     pub(crate) fn resume(&self, store: &OrganizationStore, team_id: &TeamId) -> Vec<ResumeOutcome> {
@@ -596,15 +594,7 @@ impl TeamRunOwner {
         patch: crate::TeamGraphPatchDraft,
     ) -> Result<TeamRunCommandOutcome, StoreFault> {
         let run_id = patch.run_id.clone();
-        let Some(current) = store.facts().run(&run_id).cloned() else {
-            return Err(StoreFault::EventLedger(
-                organization::RecordCommandError::InvalidEventId,
-            ));
-        };
-        let (command, patch) = patch
-            .resolve(current.graph().definition())
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        store.team_graph_patch(command, patch)?;
+        store.apply_graph_patch_draft(patch)?;
         let team = store
             .facts()
             .run(&run_id)
@@ -1206,59 +1196,21 @@ pub(crate) fn resolve_native_settled_output(
         .native_terminal_target(delivery_id)
         .filter(|target| target.graph_run_id() == run_id)
         .ok_or(StoreFault::InvalidFacts)?;
-    if settled.status == NativeTerminalStatus::Cancelled {
-        return Ok(TeamNodeTerminalResult::Recorded);
-    }
-    let resolved_at = store
-        .facts()
-        .deliveries()
-        .delivery(delivery_id)
-        .and_then(|delivery| match delivery.phase() {
-            DeliveryPhase::TerminalObserved { observation } => match observation.resolution() {
-                organization::run::delivery::TerminalObservationResolution::GraphResolved(
-                    resolution,
-                ) => Some(resolution.resolved_at()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .unwrap_or(resolved_at);
-    let receipt = organization::AuthorizedGraphResolutionReceipt::try_new(format!(
-        "native-settled:{}",
-        delivery_id.as_str()
-    ))
-    .map_err(|_| StoreFault::InvalidFacts)?;
-    let outcome = match settled.final_assistant_text {
-        Some(text) => store.resolve_native_run_output(target, receipt, text, resolved_at)?,
-        None if matches!(
-            settled.status,
-            NativeTerminalStatus::Failed | NativeTerminalStatus::Interrupted
-        ) =>
-        {
-            let resolution = organization::AuthorizedGraphResolution::new(
-                receipt,
-                delivery_id.clone(),
-                run_id.as_str(),
-                match store
-                    .facts()
-                    .deliveries()
-                    .delivery(delivery_id)
-                    .map(|delivery| delivery.phase())
-                {
-                    Some(DeliveryPhase::TerminalObserved { observation }) => {
-                        observation.fence().clone()
-                    }
-                    _ => return Err(StoreFault::InvalidFacts),
-                },
-                organization::AuthorizedGraphOutcome::Failed,
-                "failed",
-                resolved_at,
-            )
-            .map_err(|_| StoreFault::InvalidFacts)?;
-            store.apply_authorized_graph_resolution(resolution)?
-        }
-        None => return Err(StoreFault::InvalidFacts),
+    let output = if settled.status == NativeTerminalStatus::Completed {
+        let graph = store.facts().run(run_id).ok_or(StoreFault::InvalidFacts)?.graph();
+        let delivery = store.facts().deliveries().delivery(delivery_id).ok_or(StoreFault::InvalidFacts)?;
+        let node_id = organization::NodeId::new(&delivery.facts().node_id);
+        settled.final_assistant_text.ok_or(organization::TeamNodeOutputError::MissingEnvelope)
+            .and_then(organization::TeamNodeOutput::parse)
+            .and_then(|output| {
+                output.validate_decision_for(graph, &node_id)?;
+                Ok(Some(output))
+            })
+            .map_err(|_| crate::application::team_message::TeamMessageFailure::InvalidOutput)
+    } else {
+        Ok(None)
     };
+    let outcome = store.settle_native_terminal(target, settled.status, output, resolved_at)?;
     Ok(match outcome {
         organization::AuthorizedGraphResolutionOutcome::Recorded => {
             TeamNodeTerminalResult::Recorded
@@ -1380,7 +1332,7 @@ fn instantiate_graph_template(
     if idempotency_key.trim().is_empty() {
         return Err(StoreFault::InvalidFacts);
     }
-    GraphDefinition::new(
+    GraphDefinition::from_durable(
         format!("team-graph:{}", run_id.as_str()),
         format!("graph-{idempotency_key}"),
         run_id,
@@ -1553,34 +1505,57 @@ mod tests {
     }
 
     #[test]
-    fn native_settled_missing_final_text_is_invalid_without_parsing_empty_text() {
+    fn native_settled_missing_final_text_fails_without_awaiting_resolution() {
+        use crate::owner::actor::tests::{claim_native_activity, native_cycle_graph, store_with_graph};
+
+        let (_temp, mut store) = store_with_graph(native_cycle_graph(2));
+        let (_, delivery_id, session) = claim_native_activity(&mut store, 3);
+        store
+            .accept_native_terminal_context(&delivery_id, session, "native:one".into())
+            .unwrap();
         let settled = NativeRunSettled {
             status: NativeTerminalStatus::Completed,
             final_assistant_text: None,
         };
 
         assert_eq!(
-            settled.final_assistant_text.ok_or(StoreFault::InvalidFacts),
-            Err(StoreFault::InvalidFacts)
+            resolve_native_settled_output(
+                &mut store, &GraphRunId::new("run:one"), &delivery_id, settled, 5,
+            ),
+            Ok(TeamNodeTerminalResult::Recorded)
         );
+        assert_eq!(
+            store.facts().run(&GraphRunId::new("run:one")).unwrap()
+                .graph().current_attempt(&NodeId::new("work")).unwrap().status(),
+            organization::AttemptStatus::Failed
+        );
+        let organization::DeliveryPhase::TerminalObserved { observation } =
+            store.facts().deliveries().delivery(&delivery_id).unwrap().phase()
+        else {
+            panic!("missing final text must retain the native terminal fact");
+        };
+        assert!(matches!(
+            observation.resolution(),
+            crate::run::delivery::TerminalObservationResolution::GraphResolved(resolution)
+                if resolution.outcome() == organization::AuthorizedGraphOutcome::Failed
+                    && resolution.output_port() == "failed"
+        ));
     }
 
     #[test]
-    fn native_settled_uses_last_team_message() {
+    fn native_settled_rejects_multiple_team_messages() {
         let settled = NativeRunSettled {
             status: NativeTerminalStatus::Completed,
             final_assistant_text: Some(
-                "<team_message>{\"summary\":\"旧摘要\",\"decision\":\"old\",\"dispatch\":[]}</team_message><team_message>{\"summary\":\"新摘要\",\"decision\":\"done\",\"dispatch\":[]}</team_message>"
+                "<team_message>{\"summary\":\"旧摘要\",\"decision\":\"old\"}</team_message><team_message>{\"summary\":\"新摘要\",\"decision\":\"done\"}</team_message>"
                     .to_owned(),
             ),
         };
 
-        let message =
-            organization::TeamNodeOutput::parse(settled.final_assistant_text.unwrap()).unwrap();
-
-        assert_eq!(message.summary(), "新摘要");
-        assert_eq!(message.decision(), "done");
-        assert_eq!(message.dispatch(), &[]);
+        assert_eq!(
+            organization::TeamNodeOutput::parse(settled.final_assistant_text.unwrap()),
+            Err(organization::TeamNodeOutputError::InvalidEnvelope)
+        );
     }
 
     fn facts(materialization: Option<MaterializationReceipt>) -> OrganizationFacts {

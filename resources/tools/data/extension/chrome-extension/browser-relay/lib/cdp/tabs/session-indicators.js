@@ -89,7 +89,7 @@ export class SessionIndicators {
       if (now - lastCmd > IDLE_DETACH_MS) toDetach.push(tabId)
     }
     for (const tabId of toDetach) {
-      log.info('idle timeout: detaching tab', tabId, 'after', IDLE_DETACH_MS / 1000, 's')
+      log.info(() => ['idle timeout: detaching tab', tabId, 'after', IDLE_DETACH_MS / 1000, 's'])
       this.#detachTab(tabId, 'idle_timeout')
     }
   }

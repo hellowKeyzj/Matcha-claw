@@ -1,4 +1,5 @@
 import { trackUiEvent } from './telemetry';
+import { isTraceEnabled, traceLog } from './trace-logger';
 import {
   AppError,
   type AppErrorCode,
@@ -8,14 +9,6 @@ export { AppError } from './error-model';
 
 const SLOW_REQUEST_THRESHOLD_MS = 800;
 
-function shouldLogApiRequests(): boolean {
-  try {
-    return import.meta.env.DEV || window.localStorage.getItem('matchaclaw:api-log') === '1';
-  } catch {
-    return !!import.meta.env.DEV;
-  }
-}
-
 function logApiAttempt(entry: {
   requestId: string;
   channel: string;
@@ -23,10 +16,10 @@ function logApiAttempt(entry: {
   ok: boolean;
   error?: unknown;
 }): void {
-  if (!shouldLogApiRequests()) return;
+  if (entry.ok && !isTraceEnabled()) return;
   const base = `[api-client] id=${entry.requestId} channel=${entry.channel} transport=ipc durationMs=${entry.durationMs}`;
   if (entry.ok) {
-    console.info(`${base} result=ok`);
+    traceLog(() => [`${base} result=ok`]);
   } else {
     console.warn(`${base} result=error`, entry.error);
   }

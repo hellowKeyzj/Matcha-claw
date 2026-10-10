@@ -22,24 +22,24 @@ export async function handleChannelAuthorizationRoutes(
   try {
     body = await parseJsonBody(req);
   } catch {
-    beginChannelTrace('route.authorization.invalid', traceId)(400, INVALID);
+    beginChannelTrace('route.authorization.invalid', traceId)?.(400, INVALID);
     sendJson(res, 400, INVALID);
     return true;
   }
 
   if (!isRequest(body)) {
-    beginChannelTrace('route.authorization.invalid', traceId)(400, INVALID);
+    beginChannelTrace('route.authorization.invalid', traceId)?.(400, INVALID);
     sendJson(res, 400, INVALID);
     return true;
   }
 
-  const finish = beginChannelTrace(`route.authorization.${body.action}`, traceId);
+  const finish = beginChannelTrace(() => `route.authorization.${body.action}`, traceId);
   try {
     const response = await transport.authorize(body, traceId);
-    finish(response.status, response.body);
+    finish?.(response.status, response.body);
     sendJson(res, response.status, response.body);
   } catch (error) {
-    finish(503, UNKNOWN, channelTraceError(error));
+    finish?.(503, UNKNOWN, channelTraceError(error));
     sendJson(res, 503, { ...UNKNOWN, channel: body.channel });
   }
   return true;

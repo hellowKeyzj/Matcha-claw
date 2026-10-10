@@ -434,39 +434,41 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     text,
     attachmentCount,
   });
-  logSessionTrace('send.start', traceId, {
+  logSessionTrace('send.start', traceId, () => ({
     currentSessionKey: summarizeIdentifier(stateBeforeSend.currentSessionKey),
     canSend: gate.canSend,
     reason: gate.canSend ? null : gate.reason,
     messageLength: trimmed.length,
     attachmentCount,
-  });
+  }));
   if (!gate.canSend) {
-    logSessionTrace('send.rejected', traceId, {
+    logSessionTrace('send.rejected', traceId, () => ({
       reason: gate.reason,
       currentSessionKey: summarizeIdentifier(stateBeforeSend.currentSessionKey),
       messageLength: trimmed.length,
       attachmentCount,
-    });
+    }));
     return { accepted: false, reason: gate.reason, error: gate.error };
   }
   if (gate.kind !== 'session') {
-    logSessionTrace('send.rejected', traceId, {
+    logSessionTrace('send.rejected', traceId, () => ({
       reason: 'missing-session',
       currentSessionKey: summarizeIdentifier(stateBeforeSend.currentSessionKey),
       gateKind: gate.kind,
-    });
+    }));
     return { accepted: false, reason: 'missing-session' };
   }
   const { sessionKey, endpointSessionId, sessionIdentity } = gate;
   const currentSessionKey = sessionKey;
-  const runtimeBeforeSend = getSessionRuntime(stateBeforeSend, currentSessionKey);
-  logSessionTrace('send.target.resolved', traceId, {
-    sessionKey: summarizeIdentifier(sessionKey),
-    endpointSessionId: summarizeIdentifier(endpointSessionId),
-    sessionIdentity: summarizeSessionIdentity(sessionIdentity),
-    runPhase: runtimeBeforeSend.runPhase,
-    activeRunId: summarizeIdentifier(runtimeBeforeSend.activeRunId),
+  logSessionTrace('send.target.resolved', traceId, () => {
+    const runtimeBeforeSend = getSessionRuntime(stateBeforeSend, currentSessionKey);
+    return {
+      sessionKey: summarizeIdentifier(sessionKey),
+      endpointSessionId: summarizeIdentifier(endpointSessionId),
+      sessionIdentity: summarizeSessionIdentity(sessionIdentity),
+      runPhase: runtimeBeforeSend.runPhase,
+      activeRunId: summarizeIdentifier(runtimeBeforeSend.activeRunId),
+    };
   });
   const nowMs = Date.now();
   const clientMessageId = params.operationId ?? crypto.randomUUID();
@@ -531,10 +533,10 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
 
     if (!sendResult.ok) {
       const errorMsg = sendResult.error;
-      logSessionTrace('send.result.error', traceId, {
+      logSessionTrace('send.result.error', traceId, () => ({
         category: isRecoverableChatSendTimeout(errorMsg) ? 'recoverable-timeout' : 'transport-error',
         attachmentReselectionRequired: Boolean(attachmentReselectionRequired(attachments)),
-      });
+      }));
       if (sendResult.outcome === 'unknown' || !sendResult.outcome && isRecoverableChatSendTimeout(errorMsg)) return reconcileUnknown(errorMsg);
       removeOptimisticSendItems({
         set,
@@ -554,12 +556,12 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       };
     }
 
-    logSessionTrace('send.result.accepted', traceId, {
+    logSessionTrace('send.result.accepted', traceId, () => ({
       outcome: sendResult.outcome,
       status: sendResult.outcome === 'succeeded' ? sendResult.status : null,
       runId: summarizeIdentifier(sendResult.runId),
       hasProjection: Boolean(sendResult.projection),
-    });
+    }));
     if (sendResult.replayed) {
       removeOptimisticSendItems({ set, sessionKey: currentSessionKey, clientId: clientMessageId });
       void get().loadHistory({ sessionKey: currentSessionKey, mode: 'quiet', scope: 'background', reason: 'manual_refresh' });
@@ -599,10 +601,10 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       return { accepted: false, reason: 'error', error: 'Send result superseded' };
     }
     const errorMsg = String(error);
-    logSessionTrace('send.exception', traceId, {
+    logSessionTrace('send.exception', traceId, () => ({
       errorName: error instanceof Error ? error.name : typeof error,
       timeoutSignal: hasTimeoutSignal(error),
-    });
+    }));
     if (params.intent || isRecoverableChatSendTimeout(errorMsg) || hasTimeoutSignal(error)) return reconcileUnknown(errorMsg);
     removeOptimisticSendItems({
       set,

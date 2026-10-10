@@ -113,7 +113,6 @@
         "packageActions": "技能包操作",
         "viewCloudPackages": "查看云端包",
         "installedDescription": "管理本地安装的技能包。",
-        "marketDescription": "从云端发现并安装技能包。",
         "search": "搜索技能包",
         "runtimeLabel": "Runtime: {{runtime}}",
         "runtimeAny": "不限",
@@ -135,7 +134,7 @@
             "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "该版本不能发布，请刷新我的云端包。"
         },
         "cloudTitle": "云端技能包市场",
-        "cloudEmpty": "暂无云端技能包。",
+        "cloudEmpty": "暂无云端技能包",
         "cloudUnavailableTitle": "云端技能包暂不可用",
         "cloudUnavailableDescription": "无法连接后端平台，请稍后刷新。",
         "cloudAvailable": "云端可用",

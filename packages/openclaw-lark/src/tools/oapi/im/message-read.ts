@@ -13,6 +13,7 @@
 
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/core';
 import { Type } from '@sinclair/typebox';
+import { isTraceEnabled } from '../../../core/lark-logger';
 import type { ToolClient } from '../helpers';
 import { StringEnum, assertLarkOk, createToolContext, getFirstAccount, handleInvokeErrorWithAutoAuth, json, registerTool } from '../helpers';
 import { dateTimeToSecondsString, parseTimeRangeToSeconds } from './time-utils';
@@ -50,7 +51,7 @@ async function resolveP2PChatId(
     throw new Error(`no 1-on-1 chat found with open_id=${openId}. You may not have chat history with this user.`);
   }
 
-  log.info(`batch_query: resolved chat_id=${chats[0].chat_id}`);
+  if (isTraceEnabled()) log.info(`batch_query: resolved chat_id=${chats[0].chat_id}`);
   return chats[0].chat_id;
 }
 
@@ -61,7 +62,7 @@ function resolveTimeRange(
 ): { start?: string; end?: string } {
   if (p.relative_time) {
     const range = parseTimeRangeToSeconds(p.relative_time);
-    logInfo(`relative_time="${p.relative_time}" → start=${range.start}, end=${range.end}`);
+    if (isTraceEnabled()) logInfo(`relative_time="${p.relative_time}" → start=${range.start}, end=${range.end}`);
     return range;
   }
   return {
@@ -179,12 +180,12 @@ function registerGetMessages(api: OpenClawPluginApi): boolean {
 
           let chatId = p.chat_id ?? '';
           if (p.open_id) {
-            log.info(`resolving P2P chat for open_id=${p.open_id}`);
+            log.trace(() => `resolving P2P chat for open_id=${p.open_id}`);
             chatId = await resolveP2PChatId(client, p.open_id, log);
           }
 
           const time = resolveTimeRange(p, log.info);
-          log.info(
+          log.trace(() =>
             `list: chat_id=${chatId}, sort=${p.sort_rule ?? 'create_time_desc'}, page_size=${p.page_size ?? 50}`,
           );
 
@@ -266,7 +267,7 @@ function registerGetThreadMessages(api: OpenClawPluginApi): boolean {
         const p = params as GetThreadMessagesParams;
         try {
           const client = toolClient();
-          log.info(
+          log.trace(() =>
             `list: thread_id=${p.thread_id}, sort=${p.sort_rule ?? 'create_time_desc'}, page_size=${p.page_size ?? 50}`,
           );
 
@@ -400,7 +401,7 @@ async function fetchChatContexts(
   if (chatIds.length === 0) return map;
 
   try {
-    logInfo(`batch_query: requesting ${chatIds.length} chat_ids: ${chatIds.join(', ')}`);
+    if (isTraceEnabled()) logInfo(`batch_query: requesting ${chatIds.length} chat_ids: ${chatIds.join(', ')}`);
     const res = await client.invokeByPath<{
       code?: number;
       msg?: string;
@@ -418,7 +419,7 @@ async function fetchChatContexts(
       query: { user_id_type: 'open_id' },
       as: 'user',
     });
-    logInfo(`batch_query: response code=${res.code}, msg=${res.msg}, items=${res.data?.items?.length ?? 0}`);
+    if (isTraceEnabled()) logInfo(`batch_query: response code=${res.code}, msg=${res.msg}, items=${res.data?.items?.length ?? 0}`);
     if (res.code !== 0) {
       logWarn(`batch_query: API returned error code=${res.code}, msg=${res.msg}`);
     }
@@ -524,7 +525,7 @@ function registerSearchMessages(api: OpenClawPluginApi): boolean {
             start: time.start ?? '978307200',
             end: time.end ?? Math.floor(Date.now() / 1000).toString(),
           });
-          log.info(`search: query="${p.query ?? ''}", page_size=${p.page_size ?? 50}`);
+          log.trace(() => `search: query="${p.query ?? ''}", page_size=${p.page_size ?? 50}`);
 
           const searchRes = await client.invoke(
             'feishu_im_user_search_messages.default',
@@ -567,15 +568,17 @@ function registerSearchMessages(api: OpenClawPluginApi): boolean {
             as: 'user',
           });
           const items = mgetRes.data?.items ?? [];
-          log.info(`mget: ${items.length} details`);
+          log.trace(() => `mget: ${items.length} details`);
 
           // 3. 批量获取会话信息
           const chatIds = [
             ...new Set(items.map((i: any) => i.chat_id as string | undefined).filter(Boolean)),
           ] as string[];
           const chatMap = await fetchChatContexts(client, chatIds, log.info, log.warn);
-          const p2pChats = [...chatMap.entries()].filter(([, v]) => v.chat_mode === 'p2p');
-          log.info(`chats: ${chatMap.size}/${chatIds.length} resolved, p2p=${p2pChats.length}`);
+          log.trace(() => {
+            const p2pChats = [...chatMap.entries()].filter(([, v]) => v.chat_mode === 'p2p');
+            return `chats: ${chatMap.size}/${chatIds.length} resolved, p2p=${p2pChats.length}`;
+          });
 
           // 4. 格式化消息（填充 sender 名字缓存，使用 UAT）
           const messages = await formatMessageList(items, account, logFn, client);

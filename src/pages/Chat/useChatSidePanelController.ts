@@ -163,7 +163,6 @@ export function useChatSidePanelController(
   const activePreferredWidth = clampChatSidePanelWidth(
     activeStoredWidth,
     Number.POSITIVE_INFINITY,
-    activeWidthPolicy,
   );
   const artifactWorkbenchFullscreen = (
     panelState.open
@@ -171,8 +170,8 @@ export function useChatSidePanelController(
     && chatTakeoverMode === 'artifact-workbench'
   );
   const layout = useMemo(
-    () => resolveChatSidePanelLayout(panelState.open, containerWidth, activePreferredWidth, activeWidthPolicy),
-    [activePreferredWidth, activeWidthPolicy, containerWidth, panelState.open],
+    () => resolveChatSidePanelLayout(panelState.open, containerWidth, activePreferredWidth),
+    [activePreferredWidth, containerWidth, panelState.open],
   );
 
   useEffect(() => {
@@ -315,7 +314,7 @@ export function useChatSidePanelController(
   const setSidePanelWidth = useCallback((nextWidth: number) => {
     setPanelState((prev) => {
       const nextPolicy = resolveSidePanelWidthPolicy(prev.activeTab);
-      const clamped = clampChatSidePanelWidth(nextWidth, readContainerWidth(chatLayoutRef), nextPolicy);
+      const clamped = clampChatSidePanelWidth(nextWidth, readContainerWidth(chatLayoutRef));
       if (nextPolicy === 'artifacts') {
         if (prev.artifactWidth === clamped) {
           return prev;
@@ -357,7 +356,6 @@ export function useChatSidePanelController(
         ? activePreferredWidth
         : layout.sidePanelWidth,
     sidePanelPreferredWidth: activePreferredWidth,
-    sidePanelWidthPolicy: activeWidthPolicy,
     activeSidePanelTab: panelState.activeTab,
     teamGraphSurface,
     artifactWorkbenchFullscreen,

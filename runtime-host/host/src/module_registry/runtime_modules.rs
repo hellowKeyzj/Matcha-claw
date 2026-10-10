@@ -16,10 +16,12 @@ pub(crate) fn runtime_module_install_plan(
     Vec<ModuleDescriptor>,
     [ModuleDescriptor; 2],
 ) {
+    let role_session_identity: Arc<dyn RoleSessionIdentityResolver> =
+        handles.runtime_directory.clone();
     let send_hooks = sessions_module::SessionSendHookSet::new(vec![Arc::new(
         crate::composition::host::ports::organization::StartGateSessionSendHook::new(
             handles.organization.clone(),
-            handles.start_gate_registry.clone(),
+            Arc::clone(&role_session_identity),
         ),
     )]);
     let runtime_directory_source: Arc<dyn runtime_directory::RuntimeEndpointDirectorySource> =
@@ -32,8 +34,6 @@ pub(crate) fn runtime_module_install_plan(
     let openclaw_platform_admission: Arc<
         dyn openclaw::platform_runtime::loopback::OpenClawPlatformAdmissionPort,
     > = handles.admission.clone();
-    let role_session_identity: Arc<dyn RoleSessionIdentityResolver> =
-        handles.runtime_directory.clone();
 
     (
         vec![

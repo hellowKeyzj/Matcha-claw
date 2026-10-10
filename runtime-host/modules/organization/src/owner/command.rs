@@ -140,30 +140,22 @@ pub enum OrganizationCommand {
         reply:
             tokio::sync::oneshot::Sender<Result<crate::run::evidence::RecordOutcome, StoreFault>>,
     },
+    RunStart {
+        team_id: TeamId,
+        run_id: GraphRunId,
+        epoch: Option<String>,
+        version: String,
+        reply: tokio::sync::oneshot::Sender<Result<bool, StoreFault>>,
+    },
+    RuntimeGraphPatch {
+        scope: crate::TeamRunExecutionScope,
+        patch: crate::store::RuntimePromptPatch,
+        reply: tokio::sync::oneshot::Sender<Result<serde_json::Value, StoreFault>>,
+    },
     Design {
         operation: crate::application::design::DesignOperation,
         resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
-        reply: tokio::sync::oneshot::Sender<Result<serde_json::Value, StoreFault>>,
-    },
-    StartGateTerminalProposalSet {
-        run_id: GraphRunId,
-        proposal_id: String,
-        source_delivery_id: String,
-        final_assistant_text: String,
-        generation: String,
-        design: bool,
-        reply:
-            tokio::sync::oneshot::Sender<Result<Option<organization::SetRunStartProposalOutcome>, StoreFault>>,
-    },
-    RunStartConfirm {
-        run_id: GraphRunId,
-        proposal_id: String,
-        reply: crate::call::CallReply<Result<organization::ConfirmRunStartOutcome, StoreFault>>,
-    },
-    RunStartContinue {
-        run_id: GraphRunId,
-        proposal_id: String,
-        reply: crate::call::CallReply<Result<organization::ContinueRunDiscussionOutcome, StoreFault>>,
+        reply: tokio::sync::oneshot::Sender<Result<(serde_json::Value, bool), StoreFault>>,
     },
     NodeEvent {
         command: RunCommand,
@@ -198,7 +190,7 @@ pub enum OrganizationCommand {
     ScheduleReadyNodes {
         run_id: GraphRunId,
         now: u64,
-        reply: tokio::sync::oneshot::Sender<Result<Vec<ActivityId>, StoreFault>>,
+        reply: tokio::sync::oneshot::Sender<(Result<Vec<ActivityId>, StoreFault>, bool)>,
     },
     ClaimActivity {
         run_id: GraphRunId,
@@ -223,7 +215,7 @@ pub enum OrganizationCommand {
         native_run_id: String,
         delivery_context: Option<(DeliveryId, crate::EndpointSessionId)>,
         status: organization::NativeTerminalStatus,
-        final_assistant_text: Option<String>,
+        assistant_texts: Vec<String>,
         settled_at: u64,
         reply: tokio::sync::oneshot::Sender<Result<organization::TeamMessageTerminalObservation, StoreFault>>,
     },
@@ -262,8 +254,6 @@ impl OrganizationCommand {
             Self::WebhookTriggerFire { reply, .. } => reply.running().await,
             Self::GraphSave { reply, .. } => reply.running().await,
             Self::GraphPatch { reply, .. } => reply.running().await,
-            Self::RunStartConfirm { reply, .. } => reply.running().await,
-            Self::RunStartContinue { reply, .. } => reply.running().await,
             Self::NodeEvent { reply, .. } => reply.running().await,
             Self::NodeTerminalResolve { reply, .. } => reply.running().await,
             Self::ApprovalResolve { reply, .. } => reply.running().await,

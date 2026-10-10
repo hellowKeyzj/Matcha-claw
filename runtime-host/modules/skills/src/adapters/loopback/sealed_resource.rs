@@ -216,16 +216,20 @@ fn export(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestErro
         }
     };
     let skill_key = request.skill_key;
-    eprintln!(
-        "[startup-trace] source=sealed-skills-export phase=runtime detail=request skillKey={}",
-        skill_key
-    );
+    if platform::trace::enabled() {
+        eprintln!(
+            "[startup-trace] source=sealed-skills-export phase=runtime detail=request skillKey={}",
+            skill_key
+        );
+    }
     match handle.export_sealed_skill_package(skill_key.clone()) {
         Ok(entry) => {
-            eprintln!(
-                "[startup-trace] source=sealed-skills-export phase=runtime detail=accepted skillKey={}",
-                entry.skill_key()
-            );
+            if platform::trace::enabled() {
+                eprintln!(
+                    "[startup-trace] source=sealed-skills-export phase=runtime detail=accepted skillKey={}",
+                    entry.skill_key()
+                );
+            }
             Ok((
                 200,
                 json!({ "outcome": "accepted", "skillKey": entry.skill_key() }),

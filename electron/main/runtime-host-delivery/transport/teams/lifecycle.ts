@@ -8,12 +8,6 @@ export type WorkflowPlan = Readonly<{
   runId: string;
   title: string;
   status: string;
-  groups: readonly Readonly<{
-    groupId: string;
-    title: string;
-    taskIds: readonly string[];
-    join: Readonly<{ requireCompleted: boolean; allowFailed: boolean; retryLimit: number }>;
-  }>[];
   tasks: readonly Readonly<{
     taskId: string;
     roleId: string;
@@ -167,20 +161,10 @@ function isRequest(value: Record<string, unknown>): boolean {
 }
 
 function isWorkflowPlan(value: unknown): value is WorkflowPlan {
-  if (!isRecord(value) || !hasExactKeys(value, ['workflowPlanId', 'runId', 'title', 'status', 'groups', 'tasks', 'idempotencyKey', 'createdAt'])) return false;
+  if (!isRecord(value) || !hasExactKeys(value, ['workflowPlanId', 'runId', 'title', 'status', 'tasks', 'idempotencyKey', 'createdAt'])) return false;
   return isIdentifier(value.workflowPlanId) && isIdentifier(value.runId) && isIdentifier(value.title)
     && isIdentifier(value.status) && isOpaque(value.idempotencyKey) && isSafeNonNegativeInteger(value.createdAt)
-    && Array.isArray(value.groups) && value.groups.every(isWorkflowGroup)
     && Array.isArray(value.tasks) && value.tasks.every(isWorkflowTask);
-}
-function isWorkflowGroup(value: unknown): boolean {
-  if (!isRecord(value) || !hasExactKeys(value, ['groupId', 'title', 'taskIds', 'join'])) return false;
-  const join = value.join;
-  return isIdentifier(value.groupId) && isIdentifier(value.title) && Array.isArray(value.taskIds)
-    && value.taskIds.every(isIdentifier) && isRecord(join)
-    && hasExactKeys(join, ['requireCompleted', 'allowFailed', 'retryLimit'])
-    && typeof join.requireCompleted === 'boolean' && typeof join.allowFailed === 'boolean'
-    && isSafeNonNegativeInteger(join.retryLimit);
 }
 function isWorkflowTask(value: unknown): boolean {
   if (!isRecord(value) || !hasExactKeys(value, ['taskId', 'roleId', 'title', 'prompt', 'dependsOnTaskIds', 'outputArtifactKind'])) return false;

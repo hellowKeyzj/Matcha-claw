@@ -2,23 +2,19 @@ use super::model::*;
 use crate::{GraphRunId, TeamId};
 
 pub fn post(board: &mut TaskBoardFacts, message: MailboxMessage) -> Result<bool, TaskBoardError> {
-    if let Some(existing) = board.mailbox().find(|m| {
-        m.team_id() == message.team_id()
-            && m.run_id() == message.run_id()
-            && m.msg_id() == message.msg_id()
-    }) {
+    if let Some((_, existing)) = board.mailbox_record(
+        message.team_id().as_str(),
+        message.run_id().as_str(),
+        message.msg_id(),
+    ) {
         return if existing == &message {
             Ok(false)
         } else {
             Err(TaskBoardError::ConflictingMessage)
         };
     }
-    board.mailbox_mut().push(message);
-    board.mailbox_mut().sort_by(|a, b| {
-        a.created_at()
-            .cmp(&b.created_at())
-            .then_with(|| a.msg_id().cmp(b.msg_id()))
-    });
+    board.append_mailbox(message)?;
+    board.sort_mailbox();
     Ok(true)
 }
 

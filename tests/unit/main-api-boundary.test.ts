@@ -20,6 +20,11 @@ describe('main api boundary', () => {
     expect(isMainOwnedRoute('/api/logs/files')).toBe(true);
     expect(isMainOwnedRoute('/api/openclaw/logs')).toBe(true);
     expect(isMainOwnedRoute('/api/openclaw/logs/dir')).toBe(true);
+    expect(isMainOwnedRoute('/api/license/gate')).toBe(true);
+    expect(isMainOwnedRoute('/api/license/stored-key')).toBe(true);
+    expect(isMainOwnedRoute('/api/license/validate')).toBe(true);
+    expect(isMainOwnedRoute('/api/license/revalidate')).toBe(true);
+    expect(isMainOwnedRoute('/api/license/clear')).toBe(true);
     expect(isMainOwnedRoute('/api/gateway/status')).toBe(true);
     expect(isMainOwnedRoute('/api/gateway/restart')).toBe(true);
     expect(isMainOwnedRoute('/api/matcha-agent/app-server/status')).toBe(true);
@@ -38,6 +43,7 @@ describe('main api boundary', () => {
     const snapshot = getMainApiBoundarySnapshot();
     expect(snapshot.allowedRouteFiles).toEqual(expect.arrayContaining([
       'gateway.ts',
+      'license.ts',
       'logs.ts',
       'runtime-host-process.ts',
     ]));
@@ -48,6 +54,11 @@ describe('main api boundary', () => {
     expect(snapshot.mainOwnedExactRoutes).toEqual(expect.arrayContaining([
       '/api/files/save-image',
       '/api/diagnostics/memory',
+      '/api/license/gate',
+      '/api/license/stored-key',
+      '/api/license/validate',
+      '/api/license/revalidate',
+      '/api/license/clear',
       '/api/logs',
       '/api/logs/dir',
       '/api/logs/files',
@@ -92,9 +103,16 @@ describe('main api boundary', () => {
     expect(isHostApiRequestAllowed('GET', '/api/plugins/configuration')).toBe(false);
     expect(isHostApiRequestAllowed('GET', '/api/files/save-image')).toBe(false);
     expect(isHostApiRequestAllowed('POST', '/api/files/save-image')).toBe(true);
-    expect(isHostApiRequestAllowed('GET', '/api/license/gate')).toBe(false);
-    expect(isHostApiRequestAllowed('GET', '/api/license/stored-key')).toBe(false);
-    expect(isHostApiRequestAllowed('POST', '/api/license/validate')).toBe(false);
+    expect(isHostApiRequestAllowed('GET', '/api/license/gate')).toBe(true);
+    expect(isHostApiRequestAllowed('POST', '/api/license/gate')).toBe(false);
+    expect(isHostApiRequestAllowed('GET', '/api/license/stored-key')).toBe(true);
+    expect(isHostApiRequestAllowed('POST', '/api/license/stored-key')).toBe(false);
+    expect(isHostApiRequestAllowed('POST', '/api/license/validate')).toBe(true);
+    expect(isHostApiRequestAllowed('GET', '/api/license/validate')).toBe(false);
+    expect(isHostApiRequestAllowed('POST', '/api/license/revalidate')).toBe(true);
+    expect(isHostApiRequestAllowed('GET', '/api/license/revalidate')).toBe(false);
+    expect(isHostApiRequestAllowed('POST', '/api/license/clear')).toBe(true);
+    expect(isHostApiRequestAllowed('GET', '/api/license/clear')).toBe(false);
     expect(isHostApiRequestAllowed('GET', '/api/logs')).toBe(true);
     expect(isHostApiRequestAllowed('POST', '/api/logs')).toBe(false);
     expect(isHostApiRequestAllowed('GET', '/api/logs/dir')).toBe(true);
@@ -192,6 +210,7 @@ describe('main api boundary', () => {
       .map((entry) => entry.name));
     const retainedProductHandlers = [
       'gateway.ts',
+      'license.ts',
       'logs.ts',
       'runtime-host-process.ts',
     ];

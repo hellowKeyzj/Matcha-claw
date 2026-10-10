@@ -1,8 +1,8 @@
+import { traceDebug, isTraceEnabled } from '../../utils/trace-logger';
 import {
   spawn,
   type ChildProcessWithoutNullStreams,
 } from 'node:child_process';
-import { logger } from '../../utils/logger';
 import {
   RuntimeHostControlClient,
   RuntimeHostControlError,
@@ -125,12 +125,12 @@ export async function launchDirectRuntimeHost(
 ): Promise<DirectRuntimeHost> {
   const readyTimeoutMs = resolveReadyTimeoutMs(dependencies.readyTimeoutMs);
   const child = spawnDirectRuntimeHost(launch, dependencies.spawn ?? directRuntimeHostSpawn);
-  console.info('[startup-trace]', {
+  traceDebug(() => ['[startup-trace]', {
     source: 'runtime-host',
     phase: 'spawn',
     detail: 'process spawned',
     ...(child.pid === undefined ? {} : { pid: child.pid }),
-  });
+  }]);
   const stderr = captureLaunchStderr(child.stderr);
   streamRuntimeHostStartupTrace(child.stderr);
   const cronProviderTrace = captureE2ECronProviderTrace(child.stderr);
@@ -147,12 +147,12 @@ export async function launchDirectRuntimeHost(
   try {
     await writeBootstrapFrame(child.stdin, frameBootstrapBytes(launch.bootstrapBytes));
     await waitUntilReady(controlClient, exit, readyTimeoutMs);
-    console.info('[startup-trace]', {
+    traceDebug(() => ['[startup-trace]', {
       source: 'runtime-host',
       phase: 'ready',
       detail: 'control channel ready',
       ...(child.pid === undefined ? {} : { pid: child.pid }),
-    });
+    }]);
   } catch (error) {
     await terminateFailedLaunch(child, exit);
     if (error instanceof DirectRuntimeHostDeliveryError) throw error;
@@ -197,11 +197,11 @@ function spawnDirectRuntimeHost(
       stdio: 'pipe',
     });
   } catch {
-    console.info('[startup-trace]', {
+    traceDebug(() => ['[startup-trace]', {
       source: 'runtime-host',
       phase: 'spawn',
       detail: 'process spawn failed',
-    });
+    }]);
     throw new DirectRuntimeHostDeliveryError('SPAWN_FAILED');
   }
 }
@@ -245,22 +245,22 @@ function monitorChildExit(
   };
   child.once('exit', (code, signal) => {
     const abnormalExit = code !== 0 || signal !== null;
-    console.info('[startup-trace]', {
+    traceDebug(() => ['[startup-trace]', {
       source: 'runtime-host',
       phase: 'exit',
       detail: 'process exited',
       code,
       signal,
       ...(abnormalExit ? { stderr: stderr() } : {}),
-    });
+    }]);
     finish({ kind: 'exited', code, signal });
   });
   child.once('error', () => {
-    console.info('[startup-trace]', {
+    traceDebug(() => ['[startup-trace]', {
       source: 'runtime-host',
       phase: 'exit',
       detail: 'process failed',
-    });
+    }]);
     finish({ kind: 'failed' });
   });
   return {
@@ -422,18 +422,22 @@ function captureLaunchStderr(output: RuntimeHostControlOutput): () => string {
 }
 
 function streamRuntimeHostStartupTrace(output: RuntimeHostControlOutput): void {
+  if (!isTraceEnabled()) return;
   let buffered = '';
   output.on('data', (chunk: unknown) => {
+    if (!isTraceEnabled()) return;
     buffered += Buffer.from(chunk as Uint8Array).toString('utf8');
     const lines = buffered.split(/\r?\n/);
     buffered = lines.pop() ?? '';
     for (const line of lines) {
-      if (line.includes('[startup-trace]') || line.includes('"prefix":"session-trace"')) {
+      const sessionTrace = line.includes('"prefix":"session-trace"');
+      if (!sessionTrace && !line.includes('[startup-trace]')) continue;
+      traceDebug(() => {
         const trace = /^\[startup-trace\] source=openclaw-channel traceId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?= )/i.exec(line);
-        logger.info(trace
+        return trace
           ? `${trace[0]}${redactLaunchStderr(line.slice(trace[0].length))}`
-          : redactLaunchStderr(line, line.includes('"prefix":"session-trace"')));
-      }
+          : redactLaunchStderr(line, sessionTrace);
+      });
     }
   });
 }

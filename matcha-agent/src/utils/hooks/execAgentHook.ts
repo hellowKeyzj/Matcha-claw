@@ -237,7 +237,8 @@ When done, return your result using the ${SYNTHETIC_OUTPUT_TOOL_NAME} tool with:
           if (parsed.success) {
             structuredOutputResult = parsed.data
             logForDebugging(
-              `Hooks: Got structured output: ${jsonStringify(structuredOutputResult)}`,
+              () =>
+                `Hooks: Got structured output: ${jsonStringify(structuredOutputResult)}`,
             )
             // Got structured output, abort and exit
             hookAbortController.abort()

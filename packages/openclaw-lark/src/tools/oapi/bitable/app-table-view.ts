@@ -132,7 +132,7 @@ export function registerFeishuBitableAppTableViewTool(api: OpenClawPluginApi): v
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.info(
+              log.trace(() =>
                 `create: app_token=${p.app_token}, table_id=${p.table_id}, view_name=${p.view_name}, view_type=${p.view_type ?? 'grid'}`,
               );
 
@@ -168,7 +168,7 @@ export function registerFeishuBitableAppTableViewTool(api: OpenClawPluginApi): v
             // GET
             // -----------------------------------------------------------------
             case 'get': {
-              log.info(`get: app_token=${p.app_token}, table_id=${p.table_id}, view_id=${p.view_id}`);
+              log.trace(() => `get: app_token=${p.app_token}, table_id=${p.table_id}, view_id=${p.view_id}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table_view.get',
@@ -198,7 +198,7 @@ export function registerFeishuBitableAppTableViewTool(api: OpenClawPluginApi): v
             // LIST
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: app_token=${p.app_token}, table_id=${p.table_id}`);
+              log.trace(() => `list: app_token=${p.app_token}, table_id=${p.table_id}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table_view.list',
@@ -235,7 +235,7 @@ export function registerFeishuBitableAppTableViewTool(api: OpenClawPluginApi): v
             // PATCH
             // -----------------------------------------------------------------
             case 'patch': {
-              log.info(
+              log.trace(() =>
                 `patch: app_token=${p.app_token}, table_id=${p.table_id}, view_id=${p.view_id}, view_name=${p.view_name}`,
               );
 

@@ -85,6 +85,7 @@ pub struct TeamGraphContext {
     nodes: Vec<ContextNode>,
     edges: Vec<ContextEdge>,
     pending_approval_ids: Vec<String>,
+    approvals: Vec<ContextApproval>,
     recent_event_ids: Vec<String>,
 }
 
@@ -113,8 +114,38 @@ impl TeamGraphContext {
         &self.pending_approval_ids
     }
 
+    pub fn approvals(&self) -> &[ContextApproval] {
+        &self.approvals
+    }
+
     pub fn recent_event_ids(&self) -> &[String] {
         &self.recent_event_ids
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextApproval {
+    approval_id: String,
+    subject: crate::ApprovalSubject,
+    status: ApprovalStatus,
+    decision: Option<crate::ApprovalDecision>,
+}
+
+impl ContextApproval {
+    pub fn approval_id(&self) -> &str {
+        &self.approval_id
+    }
+
+    pub fn subject(&self) -> &crate::ApprovalSubject {
+        &self.subject
+    }
+
+    pub fn status(&self) -> ApprovalStatus {
+        self.status
+    }
+
+    pub fn decision(&self) -> Option<crate::ApprovalDecision> {
+        self.decision
     }
 }
 
@@ -271,6 +302,33 @@ pub fn query_team_graph_context(
         .take(MAX_CONTEXT_APPROVALS)
         .map(|approval| approval.facts().approval_id.clone())
         .collect();
+    let approvals = if query.view == TeamGraphContextView::CurrentNode {
+        facts
+            .approvals()
+            .filter(|approval| {
+                let facts = approval.facts();
+                facts.run_id == query.run.as_str()
+                    && facts.execution_fence.as_deref() == query.node_execution_id()
+                    && is_safe_context_identifier(&facts.approval_id)
+                    && match &facts.subject {
+                        crate::ApprovalSubject::WorkNode { node_id }
+                        | crate::ApprovalSubject::HumanDecision { node_id } => {
+                            selected_ids.contains(&node_id.as_str())
+                        }
+                        crate::ApprovalSubject::Stage { .. } => false,
+                    }
+            })
+            .take(MAX_CONTEXT_APPROVALS)
+            .map(|approval| ContextApproval {
+                approval_id: approval.facts().approval_id.clone(),
+                subject: approval.facts().subject.clone(),
+                status: approval.status(),
+                decision: approval.resolution().map(|resolution| resolution.decision),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut recent_event_ids = facts
         .events_for_run(query.run.as_str())
         .into_iter()
@@ -288,6 +346,7 @@ pub fn query_team_graph_context(
         nodes,
         edges,
         pending_approval_ids,
+        approvals,
         recent_event_ids,
     })
 }

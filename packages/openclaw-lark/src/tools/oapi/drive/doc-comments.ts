@@ -190,7 +190,7 @@ async function assembleCommentsWithReplies(
         }
 
         assembled.reply_list = { replies };
-        log.info(`Assembled ${replies.length} replies for comment ${comment.comment_id}`);
+        log.trace(() => `Assembled ${replies.length} replies for comment ${comment.comment_id}`);
       } catch (err) {
         log.warn(`Failed to fetch replies for comment ${comment.comment_id}: ${err}`);
         // 保留原始回复数据
@@ -238,7 +238,7 @@ export function registerDocCommentsTool(api: OpenClawPluginApi): boolean {
           let actualFileType = p.file_type;
 
           if (p.file_type === 'wiki') {
-            log.info(`doc_comments: detected wiki token="${p.file_token}", converting to obj_token...`);
+            log.trace(() => `doc_comments: detected wiki token="${p.file_token}", converting to obj_token...`);
 
             try {
               const wikiNodeRes = await client.invoke(
@@ -268,7 +268,7 @@ export function registerDocCommentsTool(api: OpenClawPluginApi): boolean {
               actualFileToken = node.obj_token;
               actualFileType = node.obj_type;
 
-              log.info(
+              log.trace(() =>
                 `doc_comments: wiki token converted, obj_type="${actualFileType}"`,
               );
             } catch (err) {
@@ -281,7 +281,7 @@ export function registerDocCommentsTool(api: OpenClawPluginApi): boolean {
 
           // Action: list - 获取评论列表
           if (p.action === 'list') {
-            log.info(`doc_comments.list: file_type=${actualFileType}`);
+            log.trace(() => `doc_comments.list: file_type=${actualFileType}`);
 
             const res = await client.invoke(
               'feishu_doc_comments.list',
@@ -330,7 +330,7 @@ export function registerDocCommentsTool(api: OpenClawPluginApi): boolean {
               return json({ error: 'comment_id 参数必填' });
             }
 
-            log.info(
+            log.trace(() =>
               `doc_comments.list_replies: comment_id="${p.comment_id}"`,
             );
 
@@ -376,7 +376,7 @@ export function registerDocCommentsTool(api: OpenClawPluginApi): boolean {
               });
             }
 
-            log.info(`doc_comments.create: file_type=${actualFileType}, elements=${p.elements.length}`);
+            log.trace(() => `doc_comments.create: file_type=${actualFileType}, elements=${p.elements?.length}`);
 
             const sdkElements = convertElementsToSDKFormat(p.elements);
 
@@ -424,8 +424,8 @@ export function registerDocCommentsTool(api: OpenClawPluginApi): boolean {
               return json({ error: 'elements 参数必填且不能为空' });
             }
 
-            log.info(
-              `doc_comments.reply: comment_id="${p.comment_id}", elements=${p.elements.length}`,
+            log.trace(() =>
+              `doc_comments.reply: comment_id="${p.comment_id}", elements=${p.elements?.length}`,
             );
 
             const sdkElements = convertElementsToSDKFormat(p.elements);
@@ -480,7 +480,7 @@ export function registerDocCommentsTool(api: OpenClawPluginApi): boolean {
               });
             }
 
-            log.info(`doc_comments.patch: comment_id="${p.comment_id}", is_solved=${p.is_solved_value}`);
+            log.trace(() => `doc_comments.patch: comment_id="${p.comment_id}", is_solved=${p.is_solved_value}`);
 
             const res = await client.invoke(
               'feishu_doc_comments.patch',

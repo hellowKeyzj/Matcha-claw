@@ -57,19 +57,19 @@ function ensureIpcBridge(hub: HostEventHub, ipc: IpcRendererLike): void {
     const traceId = createSessionTraceId('host-events-boundary');
     const envelope = raw as HostEventEnvelope<unknown> | null;
     if (!envelope || typeof envelope.eventName !== 'string') {
-      logSessionTrace('host.event.received', traceId, {
+      logSessionTrace('host.event.received', traceId, () => ({
         envelopeValid: false,
         eventName: null,
         listenerCount: 0,
-      });
+      }));
       return;
     }
     const handlers = hub.listenersByEvent.get(envelope.eventName);
-    logSessionTrace('host.event.received', traceId, {
+    logSessionTrace('host.event.received', traceId, () => ({
       envelopeValid: true,
       eventName: envelope.eventName,
       listenerCount: handlers?.size ?? 0,
-    });
+    }));
     if (!handlers || handlers.size === 0) {
       return;
     }

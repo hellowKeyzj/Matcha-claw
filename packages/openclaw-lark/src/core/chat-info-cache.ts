@@ -181,7 +181,7 @@ export async function getChatInfo(params: {
     };
 
     cache.set(chatId, info);
-    log.info(`resolved ${chatId} → chat_mode=${chatMode}, group_message_type=${groupMessageType ?? 'N/A'}`);
+    log.trace(() => `resolved ${chatId} → chat_mode=${chatMode}, group_message_type=${groupMessageType ?? 'N/A'}`);
     return info;
   } catch (err) {
     log.error(`failed to get chat info for ${chatId}: ${String(err)}`);

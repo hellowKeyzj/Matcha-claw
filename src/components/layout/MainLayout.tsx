@@ -12,6 +12,7 @@ import { resolveChatWorkspaceLayout } from './chat-workspace-layout';
 import { invokeIpc } from '@/lib/api-client';
 import { StableScrollArea } from '@/components/scroll';
 import { useLayoutStore } from '@/stores/layout';
+import { useLocalLicenseLocked } from '@/stores/license';
 
 type PageViewportMode = 'document' | 'workspace';
 
@@ -39,7 +40,8 @@ export function MainLayout() {
   const [containerWidth, setContainerWidth] = useState<number>(() => window.innerWidth);
   const layoutRef = useRef<HTMLDivElement>(null);
   const resizeRafRef = useRef<number | null>(null);
-  const isChatRoute = location.pathname === '/';
+  const licenseLocked = useLocalLicenseLocked();
+  const isChatRoute = !licenseLocked && location.pathname === '/';
   const pageViewportMode = resolvePageViewportMode(location.pathname);
   const chatTakeoverActive = isChatRoute && chatTakeoverMode !== 'none';
   const activeRightDockLayout = isChatRoute ? chatWindowRightDockLayout : null;

@@ -44,7 +44,9 @@ impl RuntimeControlRouteFragment for MatchaRuntimeControlRoute {
             RuntimeControlOperation::LifecycleRestart => {
                 Some(lifecycle_restart(Arc::clone(&self.lifecycle), request))
             }
-            RuntimeControlOperation::Logs
+            RuntimeControlOperation::LifecycleRepair
+            | RuntimeControlOperation::RepairStatus
+            | RuntimeControlOperation::Logs
             | RuntimeControlOperation::ControlReady
             | RuntimeControlOperation::GatewayHealth
             | RuntimeControlOperation::GatewayStatus

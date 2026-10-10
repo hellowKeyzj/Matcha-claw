@@ -124,8 +124,12 @@ jobs:
       - name: Validate OpenClaw plugin source inputs
         run: pnpm run check:openclaw-plugin-inputs
 
-      - name: Download bundled MiniLM model
-        run: pnpm run download:minilm-model
+      - name: Download Wiki assets for packaged architectures
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm run download:wiki-assets -- --arch x64
+          pnpm run download:wiki-assets -- --arch arm64
 
       - name: Download uv binaries for macOS
         if: matrix.platform == 'mac'
@@ -200,7 +204,8 @@ jobs:
           ulimit -n 65536
           echo "File descriptor limit: $(ulimit -n)"
 
-          node scripts/build-runtime-host-native.mjs --platform darwin --arch x64
+          # Intel Mac builds are temporarily paused due to the Lance native-link failure.
+          # node scripts/build-runtime-host-native.mjs --platform darwin --arch x64
           node scripts/build-runtime-host-native.mjs --platform darwin --arch arm64
           pnpm run build:vite
           pnpm run build:matcha-agent
@@ -382,15 +387,17 @@ jobs:
             done
           }
 
-          pnpm exec electron-builder --mac dir --x64 --arm64 --publish never -c.mac.notarize=false
+          # Restore --x64 alongside --arm64 when Intel Mac builds resume.
+          # pnpm exec electron-builder --mac dir --x64 --arm64 --publish never -c.mac.notarize=false
+          pnpm exec electron-builder --mac dir --arm64 --publish never -c.mac.notarize=false
 
-          submit_notary x64 "release/mac/MatchaClaw.app"
+          # submit_notary x64 "release/mac/MatchaClaw.app"
           submit_notary arm64 "release/mac-arm64/MatchaClaw.app"
 
-          wait_notary x64 "release/mac/MatchaClaw.app"
+          # wait_notary x64 "release/mac/MatchaClaw.app"
           wait_notary arm64 "release/mac-arm64/MatchaClaw.app"
 
-          pnpm exec electron-builder --mac dmg zip --x64 --prepackaged "release/mac/MatchaClaw.app" --publish never -c.mac.notarize=false
+          # pnpm exec electron-builder --mac dmg zip --x64 --prepackaged "release/mac/MatchaClaw.app" --publish never -c.mac.notarize=false
           pnpm exec electron-builder --mac dmg zip --arm64 --prepackaged "release/mac-arm64/MatchaClaw.app" --publish never -c.mac.notarize=false
 
       - name: Prove macOS arm64 mounted package runtime host
@@ -756,7 +763,9 @@ jobs:
 
   prove-macos-x64-packages:
     needs: release
-    if: github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'mac'
+    # Temporarily paused with Intel Mac builds; keep the job for restoration.
+    # if: github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'mac'
+    if: ${{ false }}
     runs-on: macos-13
     steps:
       - name: Require macOS x64 native package-proof runner
@@ -1213,7 +1222,7 @@ jobs:
             
             #### macOS
             - **Apple Silicon (M1/M2/M3/M4)**: `MatchaClaw-*-mac-arm64.dmg`
-            - **Intel (x64)**: `MatchaClaw-*-mac-x64.dmg`
+            - **Intel (x64)**: Builds temporarily paused.
             
             #### Windows
             - **Installer (x64)**: `MatchaClaw-*-win-x64.exe`

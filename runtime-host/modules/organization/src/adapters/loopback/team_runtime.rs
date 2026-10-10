@@ -46,14 +46,12 @@ pub(crate) async fn handle_loopback(
     };
     let request = match crate::decode_team_runtime_capability_request(value) {
         Ok(request) => request,
-        Err(crate::TeamRuntimeDecodeError::InvalidInput) => return invalid_request(),
-        Err(crate::TeamRuntimeDecodeError::Unavailable) => return unavailable(),
+        Err(error) => return decode_error(error),
     };
     if matches!(request.operation_id(), "team.provisionAgents" | "team.delete" | "team.runDelete") {
         return match owner.admit_team_capability(resolver, request).await {
             Ok(receipt) => Response::json(202, json!(receipt)),
-            Err(crate::TeamRuntimeDecodeError::InvalidInput) => invalid_request(),
-            Err(crate::TeamRuntimeDecodeError::Unavailable) => unavailable(),
+            Err(error) => decode_error(error),
         };
     }
     let outcome = match owner
@@ -61,8 +59,7 @@ pub(crate) async fn handle_loopback(
         .await
     {
         Ok((_, outcome)) => outcome,
-        Err(crate::TeamRuntimeDecodeError::InvalidInput) => return invalid_request(),
-        Err(crate::TeamRuntimeDecodeError::Unavailable) => return unavailable(),
+        Err(error) => return decode_error(error),
     };
     project_outcome(outcome)
 }
@@ -74,6 +71,20 @@ fn project_outcome(outcome: crate::TeamRuntimeControlOutcome) -> Response {
         crate::TeamRuntimeControlOutcome::Unavailable => unavailable(),
         crate::TeamRuntimeControlOutcome::InvalidInput => invalid_request(),
         crate::TeamRuntimeControlOutcome::Failed(message) => failed(message),
+    }
+}
+
+fn decode_error(error: crate::TeamRuntimeDecodeError) -> Response {
+    match error {
+        crate::TeamRuntimeDecodeError::InvalidInput
+        | crate::TeamRuntimeDecodeError::InvalidField { .. } => invalid_request(),
+        crate::TeamRuntimeDecodeError::Unavailable => unavailable(),
+        crate::TeamRuntimeDecodeError::GraphDefinition(error) => Response::json(
+            200,
+            crate::application::team_mcp::design_rejected(crate::StoreFault::GraphPatch(
+                crate::GraphPatchError::Definition(error),
+            )),
+        ),
     }
 }
 

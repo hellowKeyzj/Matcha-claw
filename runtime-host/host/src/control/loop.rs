@@ -49,22 +49,29 @@ where
     {
         return Err(error);
     }
-    eprintln!(
-        "[startup-trace] source=runtime-host phase=ready detail=control-channel-ready gateway_auto_start={gateway_auto_start}"
-    );
+    if platform::trace::enabled() {
+        eprintln!(
+            "[startup-trace] source=runtime-host phase=ready detail=control-channel-ready gateway_auto_start={gateway_auto_start}"
+        );
+    }
     let peer_autostart = tokio::spawn({
         let peer = peer.clone();
         async move {
-            eprintln!(
-                "[startup-trace] source=runtime-host phase=openclaw-autostart-request detail=requesting-peer-autostart gateway_auto_start={gateway_auto_start}"
-            );
-            match peer.request_peer_autostart(gateway_auto_start).await {
-                Ok(()) => eprintln!(
-                    "[startup-trace] source=runtime-host phase=openclaw-autostart-result detail=peer-autostart-finished success=true error="
-                ),
-                Err(error) => eprintln!(
-                    "[startup-trace] source=runtime-host phase=openclaw-autostart-result detail=peer-autostart-finished success=false error={error:?}"
-                ),
+            if platform::trace::enabled() {
+                eprintln!(
+                    "[startup-trace] source=runtime-host phase=openclaw-autostart-request detail=requesting-peer-autostart gateway_auto_start={gateway_auto_start}"
+                );
+            }
+            let result = peer.request_peer_autostart(gateway_auto_start).await;
+            if platform::trace::enabled() {
+                match result {
+                    Ok(()) => eprintln!(
+                        "[startup-trace] source=runtime-host phase=openclaw-autostart-result detail=peer-autostart-finished success=true error="
+                    ),
+                    Err(error) => eprintln!(
+                        "[startup-trace] source=runtime-host phase=openclaw-autostart-result detail=peer-autostart-finished success=false error={error:?}"
+                    ),
+                }
             }
         }
     });

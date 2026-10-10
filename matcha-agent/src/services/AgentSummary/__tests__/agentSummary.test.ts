@@ -64,7 +64,7 @@ describe('startAgentSummarization', () => {
           )
         },
         logForDebugging: message => {
-          debugLogs.push(message)
+          debugLogs.push(typeof message === 'function' ? message() : message)
         },
         runForkedAgent: async (args: ForkCall) => {
           forkCalls.push(args)

@@ -51,7 +51,7 @@ export function createSessionObservationTransport(issuer: RuntimeHostDeliveryIss
   const execute = async (request: unknown, operation: SessionObservationRequest['operationId'], traceId?: string | null): Promise<SessionObservationResponse> => {
     if (!isSessionObservationRequest(request, operation)) return { status: 400, body: INVALID };
     const tracing = isSessionTraceEnabled();
-    const correlation = tracing ? { identity: summarizeSessionIdentity(request.scope.identity), leaseHash: summarizeIdentifier(request.input.leaseId).hash, operation } : {};
+    const correlation = tracing ? { identity: summarizeSessionIdentity(request.scope.identity), leaseHash: summarizeIdentifier(request.input.leaseId).hash, operation } : undefined;
     if (tracing) logSessionTrace('electron.session.observation.request', traceId ?? 'session-observation-boundary', { ...correlation, limit: request.input.limit ?? null });
     const endpoint = operation === 'sessions.observe' ? '/api/sessions/observe' : '/api/sessions/release';
     const response = await sendLoopbackJson({

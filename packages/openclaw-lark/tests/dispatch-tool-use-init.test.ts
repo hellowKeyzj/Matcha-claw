@@ -104,8 +104,9 @@ vi.mock('../src/channel/abort-detect', () => ({
   isConversationStopIntent: vi.fn(() => false),
 }));
 
-vi.mock('../src/core/lark-logger', () => ({
-  larkLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
+vi.mock('../src/core/lark-logger', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/core/lark-logger')>()),
+  larkLogger: () => ({ trace: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
 }));
 
 vi.mock('../src/core/lark-ticket', () => ({

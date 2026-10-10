@@ -116,7 +116,7 @@ async function sendImMessage(params: {
 
   // --- Reply path ---
   if (replyToMessageId) {
-    log.info(`replying to message ${replyToMessageId} ` + `(msg_type=${msgType}, thread=${replyInThread ?? false})`);
+    log.trace(() => (`replying to message ${replyToMessageId} ` + `(msg_type=${msgType}, thread=${replyInThread ?? false})`));
     const response = await client.im.message.reply({
       path: { message_id: replyToMessageId },
       data: { content, msg_type: msgType, reply_in_thread: replyInThread },
@@ -126,7 +126,7 @@ async function sendImMessage(params: {
       messageId: response?.data?.message_id ?? '',
       chatId: response?.data?.chat_id ?? '',
     };
-    log.debug(`reply sent: messageId=${result.messageId}`);
+    log.debug(() => (`reply sent: messageId=${result.messageId}`));
     return result;
   }
 
@@ -139,7 +139,7 @@ async function sendImMessage(params: {
   }
 
   const receiveIdType = resolveReceiveIdType(target);
-  log.info(`creating message to ${target} (msg_type=${msgType})`);
+  log.trace(() => (`creating message to ${target} (msg_type=${msgType})`));
 
   const response = await client.im.message.create({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -151,7 +151,7 @@ async function sendImMessage(params: {
     messageId: response?.data?.message_id ?? '',
     chatId: response?.data?.chat_id ?? '',
   };
-  log.debug(`message created: messageId=${result.messageId}`);
+  log.debug(() => (`message created: messageId=${result.messageId}`));
   return result;
 }
 
@@ -268,11 +268,11 @@ export async function sendTextLark(params: SendTextLarkParams): Promise<FeishuSe
   const card = detectCardJson(text);
   if (card) {
     const version = card.schema === '2.0' ? 'v2' : 'v1';
-    log.info(`detected ${version} card JSON in text (target=${to}), routing to sendCardLark`);
+    log.trace(() => (`detected ${version} card JSON in text (target=${to}), routing to sendCardLark`));
     return sendCardLark({ cfg, to, card, replyToMessageId, replyInThread, accountId });
   }
 
-  log.info(`sendTextLark: target=${to}, textLength=${text.length}`);
+  log.trace(() => (`sendTextLark: target=${to}, textLength=${text.length}`));
   const client = LarkClient.fromCfg(cfg, accountId).sdk;
   const prepared = await prepareTextForLark(cfg, text, to, accountId);
   const content = buildPostContent(prepared.text);
@@ -351,7 +351,7 @@ export async function sendCardLark(params: SendCardLarkParams): Promise<FeishuSe
   const { cfg, to, card, replyToMessageId, replyInThread, accountId } = params;
 
   const version = card.schema === '2.0' ? 'v2' : 'v1';
-  log.info(`sendCardLark: target=${to}, cardVersion=${version}`);
+  log.trace(() => (`sendCardLark: target=${to}, cardVersion=${version}`));
 
   const client = LarkClient.fromCfg(cfg, accountId).sdk;
   const content = JSON.stringify(card);
@@ -424,7 +424,7 @@ export interface SendMediaLarkParams {
 export async function sendMediaLark(params: SendMediaLarkParams): Promise<FeishuSendResult> {
   const { cfg, to, mediaUrl, replyToMessageId, replyInThread, accountId, mediaLocalRoots } = params;
 
-  log.info(`sendMediaLark: target=${to}, mediaUrl=${mediaUrl}`);
+  log.trace(() => (`sendMediaLark: target=${to}, mediaUrl=${mediaUrl}`));
 
   try {
     const result = await uploadAndSendMediaLark({
@@ -503,8 +503,8 @@ export async function sendCommentReplyLark(params: SendCommentReplyLarkParams): 
     throw new Error(`Not a valid comment target: "${to}"`);
   }
 
-  log.info(
-    `sendCommentReplyLark: mode=${target.deliveryMode}, comment=${target.commentId}, textLength=${text.length}`,
+  log.trace(
+    () => (`sendCommentReplyLark: mode=${target.deliveryMode}, comment=${target.commentId}, textLength=${text.length}`),
   );
 
   const client = LarkClient.fromCfg(cfg, accountId);

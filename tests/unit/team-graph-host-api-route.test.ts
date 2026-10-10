@@ -37,10 +37,10 @@ const graph = {
       work: {
         taskId: 'task-1',
         roleId: 'role-1',
+        sessionRef: 'rs1',
         prompt: 'Do the work',
         executor: { kind: 'team-role', roleId: 'role-1' },
         outputArtifactKind: 'report',
-        groupId: 'group-1',
       },
     },
     {
@@ -48,10 +48,6 @@ const graph = {
       kind: 'join',
       title: 'Join',
       maxAttempts: 1,
-      group: {
-        groupId: 'group-1',
-        join: { requireCompleted: true, allowFailed: false, retryLimit: 1 },
-      },
     },
     { id: 'end', kind: 'end', title: 'End', maxAttempts: 1 },
   ],

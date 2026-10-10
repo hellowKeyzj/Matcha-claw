@@ -41,12 +41,20 @@ pub enum ApprovalEffect {
     RouteDecisionPorts,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Approval {
     facts: ApprovalRequest,
     status: ApprovalStatus,
     resolutions: Vec<ApprovalResolution>,
+    transaction: Option<(ApprovalStatus, usize)>,
 }
+
+impl PartialEq for Approval {
+    fn eq(&self, other: &Self) -> bool {
+        self.facts == other.facts && self.status == other.status && self.resolutions == other.resolutions
+    }
+}
+impl Eq for Approval {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalDurableSnapshot {
@@ -97,11 +105,48 @@ pub enum ApprovalRestoreError {
 }
 
 impl Approval {
+    pub(crate) fn begin_transaction(&mut self) {
+        self.transaction.get_or_insert((self.status, self.resolutions.len()));
+    }
+    pub(crate) fn commit_transaction(&mut self) { self.transaction = None; }
+    pub(crate) fn rollback_transaction(&mut self) {
+        if let Some((status, len)) = self.transaction.take() {
+            self.status = status;
+            self.resolutions.truncate(len);
+        }
+    }
+    pub(crate) fn new_resolutions(&self) -> &[ApprovalResolution] {
+        &self.resolutions[self.transaction.map_or(0, |(_, len)| len)..]
+    }
+    pub(crate) fn import_header(&mut self, facts: ApprovalRequest, status: ApprovalStatus) -> Result<(), ApprovalRestoreError> {
+        if self.facts != facts || !facts_are_canonical(&facts) {
+            return Err(ApprovalRestoreError::InvalidSnapshot);
+        }
+        self.status = status;
+        Ok(())
+    }
+    pub(crate) fn import_resolution(&mut self, ordinal: u64, resolution: ApprovalResolution) -> Result<(), ApprovalRestoreError> {
+        let index = usize::try_from(ordinal).map_err(|_| ApprovalRestoreError::InvalidSnapshot)?;
+        if index < self.resolutions.len() {
+            return if self.resolutions[index] == resolution { Ok(()) } else { Err(ApprovalRestoreError::InvalidSnapshot) };
+        }
+        if index != self.resolutions.len()
+            || !is_bounded_fact(&resolution.idempotency_key)
+            || resolution.note.as_ref().is_some_and(|note| !is_note(note))
+            || resolution.resolved_at < self.facts.requested_at
+            || self.resolution_for_idempotency(&resolution.idempotency_key).is_some()
+        {
+            return Err(ApprovalRestoreError::InvalidSnapshot);
+        }
+        self.resolutions.push(resolution);
+        Ok(())
+    }
     pub fn request(facts: ApprovalRequest) -> Self {
         Self {
             facts,
             status: ApprovalStatus::Pending,
             resolutions: Vec::new(),
+            transaction: None,
         }
     }
 
@@ -257,6 +302,7 @@ impl Approval {
             facts: snapshot.facts,
             status: snapshot.status,
             resolutions: snapshot.resolutions,
+            transaction: None,
         })
     }
 }

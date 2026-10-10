@@ -1,9 +1,7 @@
 {
   "title": "設定",
-  "subtitle": "MatchaClaw の体験をカスタマイズ",
   "appearance": {
     "title": "通用",
-    "description": "外観とスタイルをカスタマイズ",
     "theme": "テーマ",
     "light": "ライト",
     "dark": "ダーク",
@@ -11,7 +9,6 @@
     "language": "言語",
     "launchAtStartup": "システム起動時に自動起動",
     "userAvatar": "ユーザーアバター",
-    "userAvatarDesc": "写真をアップロードしてチャットのユーザーアバターに設定します",
     "userAvatarPreviewAlt": "ユーザーアバタープレビュー",
     "uploadAvatarInputLabel": "ユーザーアバターをアップロード",
     "uploadAvatar": "アバターをアップロード",
@@ -166,6 +163,53 @@
       }
     }
   },
+  "license": {
+    "title": "Lisence",
+    "description": "クラウドアカウントでログインする場合、有効化は不要です",
+    "gateState": {
+      "checking": "確認中",
+      "granted": "許可",
+      "blocked": "ブロック",
+      "unavailable": "取得不可"
+    },
+    "renewAlert": {
+      "near_expiry_renew_failed": "期限間近の更新に失敗、再検証してください"
+    },
+    "inputLabel": "ライセンスキー",
+    "placeholder": "ライセンスキーを入力",
+    "showKey": "ライセンスキーを表示",
+    "hideKey": "ライセンスキーを隠す",
+    "validate": "有効化",
+    "revalidate": "再検証",
+    "clear": "ライセンスをクリア",
+    "replaceKey": "ライセンスキーを変更",
+    "saveAndValidate": "保存して検証",
+    "clearTitle": "ライセンスをクリアしますか？",
+    "clearDescription": "クリア後、ローカルで利用するには再度有効化が必要です",
+    "messages": {
+      "valid": "検証済み",
+      "cache_grace_valid": "オフラインライセンスは有効",
+      "empty": "ライセンスキーを入力してください",
+      "format_invalid": "ライセンスキーの形式が不正",
+      "service_unconfigured": "ライセンスサービスが未設定",
+      "network_error": "接続できません、ネットワークを確認してください",
+      "server_rejected": "ライセンスキーが拒否されました",
+      "expired": "ライセンスの期限切れ",
+      "device_mismatch": "ライセンスの端末が不一致",
+      "not_allowed": "このライセンスキーは許可されていません",
+      "checksum_invalid": "ライセンスキーのチェックサムが不正です",
+      "unknown": "検証に失敗"
+    },
+    "toast": {
+      "cleared": "ライセンスをクリアしました"
+    },
+    "expiresAt": "有効期限：{{time}}",
+    "offlineGraceUntil": "オフライン利用期限：{{time}}",
+    "loadFailed": "状態を取得できません、再読み込みしてください",
+    "storedKeyFailed": "キーを取得できません、再読み込みしてください",
+    "operationFailed": "検証未完了、再試行してください",
+    "clearFailed": "クリアに失敗、再試行してください"
+  },
   "diagnostics": {
     "title": "診断",
     "description": "トラブルシュート用のローカル診断バンドルを収集します",
@@ -199,6 +243,36 @@
     "matchaAgentAppServerStatus": "matcha-agent app-server 状態",
     "matchaAgentAppServerDescription": "matcha-agent app-server のプロセス状態とポートを確認します。",
     "matchaAgentAppServerRestartFailed": "matcha-agent app-server の再起動に失敗しました: {{error}}",
+    "repair": {
+      "action": "修復",
+      "confirmTitle": "OpenClaw を修復しますか？",
+      "confirmDescription": "OpenClaw を停止し、標準の修復ツールを実行します。設定の変更や旧データの移行が行われる場合があります。その後、起動準備をやり直して OpenClaw を起動します。実行中のタスクは中断されます。続行しますか？",
+      "confirmAction": "停止して修復",
+      "automatic": "自動修復",
+      "manual": "手動修復",
+      "pending": "修復リクエストを処理中",
+      "statusUnavailable": "修復の進捗を一時的に取得できません。ログを確認してください。",
+      "unknown": "今回の修復結果はまだ確認できていません。動作状況とログを確認してから操作してください。自動で再試行することはありません。",
+      "rejected": "ランタイムが今回の修復リクエストを拒否しました。現在の操作が完了してから、再度確認してください。",
+      "phases": {
+        "idle": "待機中",
+        "stopping": "停止中",
+        "repairing": "修復中",
+        "preparing": "準備中",
+        "starting": "起動中",
+        "succeeded": "修復完了",
+        "failed": "修復失敗"
+      },
+      "failures": {
+        "stopFailed": "OpenClaw を停止できませんでした。ログを確認してください。",
+        "doctorFailed": "OpenClaw の標準修復ツールによる修復に失敗しました。ログを確認してください。",
+        "doctorTimedOut": "OpenClaw の標準修復ツールの実行がタイムアウトしました。ログを確認してください。",
+        "doctorCancelled": "OpenClaw の標準修復ツールの実行がキャンセルされました。ログを確認してください。",
+        "doctorSpawnFailed": "OpenClaw の標準修復ツールのプロセスを起動できませんでした。ログを確認してください。",
+        "preparationFailed": "修復後の OpenClaw の起動準備に失敗しました。ログを確認してください。",
+        "startFailed": "修復後に OpenClaw を起動できませんでした。ログを確認してください。"
+      }
+    },
     "tabs": {
       "general": "一般",
       "browser": "ブラウザ"
@@ -224,9 +298,7 @@
     "proxySaveFailed": "プロキシ設定の保存に失敗しました",
     "browser": {
       "title": "ブラウザ",
-      "description": "MatchaClaw が使うブラウザ経路を選択します",
       "modeLabel": "ブラウザモード",
-      "modeDescription": "現在使うブラウザ経路を選択します。",
       "currentMode": "現在",
       "modeSaving": "ブラウザモードを適用し、Gateway を再起動しています...",
       "modeSaved": "ブラウザモードを保存しました",
@@ -234,15 +306,15 @@
       "modes": {
         "relay": {
           "title": "Browser Relay",
-          "description": "MatchaClaw Browser Relay プラグインとブラウザ拡張を使います。"
+          "description": "拡張機能でブラウザに接続"
         },
         "native": {
           "title": "Native Browser",
-          "description": "拡張なしで OpenClaw 内蔵の browser プラグインを使います。"
+          "description": "ブラウザ拡張機能は不要"
         },
         "off": {
           "title": "オフ",
-          "description": "ブラウザ機能をすべて無効にします。"
+          "description": "ブラウザ機能を無効化"
         }
       },
       "nativeModeTitle": "Native Browser を使用中",

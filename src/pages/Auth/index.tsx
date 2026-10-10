@@ -73,15 +73,10 @@ function AuthPageContent({ forcedMode, onLocalEntry }: AuthPageContentProps) {
     : requires2fa ? t('auth.title.twoFactor') : isRegister ? t('auth.title.register') : t('auth.title.login');
   const description = showOfflinePanel
     ? t('auth.offline.description')
-    : requires2fa
-      ? t('auth.description.twoFactor')
-      : isRegister
-        ? t('auth.description.register')
-        : t('auth.description.login');
+    : requires2fa ? t('auth.description.twoFactor') : null;
   const submitLabel = requires2fa ? t('auth.submit.twoFactor') : isRegister ? t('auth.submit.register') : t('auth.submit.login');
   const localEntryAvailable = status === 'signedOut' || status === 'offline';
-  const localEntryLabel = status === 'offline' ? t('auth.localEntry.offline') : t('auth.localEntry.guest');
-  const localEntryDescription = t('auth.localEntry.guestDescription');
+  const localEntryLabel = status === 'offline' ? t('auth.localEntry.offline') : t('auth.localEntry.local');
 
   const canSubmit = useMemo(() => {
     if (loading || submitting || sendingVerifyCode) {
@@ -193,7 +188,7 @@ function AuthPageContent({ forcedMode, onLocalEntry }: AuthPageContentProps) {
 
       <section className="relative flex min-h-[100dvh] items-center px-6 py-10 sm:px-10 lg:px-16">
         <div className="mx-auto grid w-full max-w-6xl items-center gap-12 md:grid-cols-[minmax(0,1fr)_minmax(360px,420px)] md:gap-16 lg:gap-24">
-          <AccountGatePreview offline={isOffline} />
+          <AccountGatePreview />
 
           <div className="flex w-full justify-center md:justify-end">
             <div className="w-full max-w-md">
@@ -204,7 +199,7 @@ function AuthPageContent({ forcedMode, onLocalEntry }: AuthPageContentProps) {
 
               <div className="mb-8">
                 <h2 className="text-3xl font-semibold tracking-[-0.04em] text-foreground">{title}</h2>
-                <p className="mt-3 text-sm leading-6 text-muted-foreground">{description}</p>
+                {description ? <p className="mt-3 text-sm leading-6 text-muted-foreground">{description}</p> : null}
               </div>
 
               {isRegister && !registrationEnabled ? (
@@ -333,17 +328,12 @@ function AuthPageContent({ forcedMode, onLocalEntry }: AuthPageContentProps) {
                       {t('auth.offline.retry')}
                     </Button>
                   ) : null}
-                  {!showOfflinePanel ? (
-                    <p className="text-center text-xs leading-5 text-muted-foreground">
-                      {localEntryDescription}
-                    </p>
-                  ) : null}
                 </div>
               ) : null}
 
               {!requires2fa && !showOfflinePanel ? (
                 <div className="mt-6 text-center text-sm text-muted-foreground">
-                  {isRegister ? t('auth.switch.hasAccount') : t('auth.switch.noAccount')}{' '}
+                  {isRegister ? t('auth.switch.hasAccount') : registrationEnabled ? t('auth.switch.noAccount') : null}{' '}
                   {isRegister ? (
                     <Link className="font-medium text-ring underline-offset-4 hover:text-foreground hover:underline" to="/login">
                       {t('auth.switch.login')}
@@ -379,23 +369,16 @@ function AuthPageContent({ forcedMode, onLocalEntry }: AuthPageContentProps) {
   );
 }
 
-function AccountGatePreview({ offline }: { offline: boolean }) {
-  const { t } = useTranslation('common');
-
+function AccountGatePreview() {
   return (
     <div className="relative hidden min-h-[560px] flex-col items-center justify-center md:flex">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_48%,hsl(var(--ring)/0.10),transparent_34%)]" />
 
       <div className="relative grid place-items-center text-center">
         <AccountOrbitCore size="hero" />
-        <div className="mt-10 max-w-sm">
-          <h1 className="text-4xl font-semibold leading-tight tracking-[-0.04em] text-foreground">
-            {offline ? t('auth.preview.offlineHeading') : t('auth.preview.heading')}
-          </h1>
-          <p className="mt-4 text-sm leading-6 text-muted-foreground">
-            {offline ? t('auth.preview.offlineCopy') : t('auth.preview.copy')}
-          </p>
-        </div>
+        <h1 className="mt-10 text-4xl font-semibold leading-tight tracking-[-0.04em] text-foreground">
+          MatchaClaw
+        </h1>
       </div>
     </div>
   );

@@ -9,7 +9,6 @@
  *   - @wecom/wecom-openclaw-plugin -> build/openclaw-plugins/wecom
  *   - @tencent-weixin/openclaw-weixin -> build/openclaw-plugins/openclaw-weixin
  *   - @openclaw/qqbot -> build/openclaw-plugins/qqbot
- *   - memory-lancedb-pro -> build/openclaw-plugins/memory-lancedb-pro
  *
  * The output plugin directory contains:
  *   - plugin runtime files (dist/, openclaw.plugin.json, package.json, ...)
@@ -30,16 +29,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUT_ROOT = path.join(ROOT, 'build', 'openclaw-plugins');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
-const LOCAL_MINILM_MODEL_ONNX = path.join(
-  ROOT,
-  'packages',
-  'memory-lancedb-pro',
-  'models',
-  'Xenova',
-  'all-MiniLM-L6-v2',
-  'onnx',
-  'model.onnx',
-);
 
 // On Windows, pnpm virtual store paths can exceed MAX_PATH (260 chars).
 // Adding \\?\ prefix bypasses the limit for Win32 fs calls.
@@ -338,21 +327,6 @@ function patchPluginId(pluginDir, expectedId) {
   }
 }
 
-function ensureBundledLocalMiniLmModel() {
-  if (fs.existsSync(LOCAL_MINILM_MODEL_ONNX)) {
-    echo`📦 Bundled MiniLM model ready: ${LOCAL_MINILM_MODEL_ONNX}`;
-    return;
-  }
-
-  throw new Error(
-    [
-      'Bundled MiniLM model is missing for memory-lancedb-pro.',
-      'Run "pnpm run download:minilm-model" before bundling plugins.',
-      'If Hugging Face direct access is blocked, set HF_ENDPOINT=https://hf-mirror.com and retry.',
-    ].join(' '),
-  );
-}
-
 function copyLocalPluginRuntimeFiles(sourceDir, outputDir, runtimeFiles) {
   for (const relativePath of runtimeFiles) {
     const sourcePath = path.join(sourceDir, relativePath);
@@ -398,7 +372,6 @@ function bundleLocalPlugin({ localPath, pluginId, runtimeFiles }) {
   echo`   ✅ ${pluginId}: copied local runtime + ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
 }
 
-ensureBundledLocalMiniLmModel();
 await buildManagedOpenClawPlugins({ rootDir: ROOT, refreshMirrors: false });
 
 echo`📦 Bundling OpenClaw plugin mirrors...`;

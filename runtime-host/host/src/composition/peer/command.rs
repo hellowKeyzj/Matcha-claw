@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use platform::call::{CallLogError, CallReceipt};
 use runtime_directory::call::RuntimeControlCallContext;
-use tokio::sync::{OnceCell, oneshot};
+use tokio::sync::{OnceCell, OwnedMutexGuard, oneshot};
 
 use foundation::execution::CommandRoute;
 
@@ -58,27 +58,57 @@ impl RuntimeLifecycleCall {
 pub(crate) enum PeerCommand {
     AutostartMatcha,
     AutostartOpenClaw {
+        reservation: Option<OwnedMutexGuard<()>>,
         reply: oneshot::Sender<Result<RuntimeState, AutostartOpenClawError>>,
     },
     StartRuntime {
+        reservation: Option<OwnedMutexGuard<()>>,
         endpoint: PeerKey,
         call: RuntimeLifecycleCall,
     },
     StopRuntime {
+        reservation: Option<OwnedMutexGuard<()>>,
         endpoint: PeerKey,
         call: Option<RuntimeLifecycleCall>,
         reply: Option<oneshot::Sender<Result<RuntimeState, RuntimeStopCommandError>>>,
     },
     RestartRuntime {
+        reservation: Option<OwnedMutexGuard<()>>,
         endpoint: PeerKey,
         call: RuntimeLifecycleCall,
     },
+    RepairRuntime {
+        endpoint: PeerKey,
+        call: RuntimeLifecycleCall,
+        reservation: Option<OwnedMutexGuard<()>>,
+    },
     RestartOpenClawAfterPluginChange {
+        reservation: Option<OwnedMutexGuard<()>>,
         reply: oneshot::Sender<Result<RuntimeState, RuntimeRestartCommandError>>,
     },
 }
 
 impl PeerCommand {
+    pub(super) fn reserve_lifecycle(&mut self, driver: &openclaw::driver::OpenClawDriver) -> bool {
+        if !matches!(self.route_command(), CommandRoute::Keyed(key) if key == RuntimeDriverIdentity::open_claw().endpoint()) {
+            return true;
+        }
+        let Some(permit) = driver.try_reserve_lifecycle() else {
+            return false;
+        };
+        let reservation = match self {
+            Self::AutostartOpenClaw { reservation, .. }
+            | Self::StartRuntime { reservation, .. }
+            | Self::StopRuntime { reservation, .. }
+            | Self::RestartRuntime { reservation, .. }
+            | Self::RepairRuntime { reservation, .. }
+            | Self::RestartOpenClawAfterPluginChange { reservation, .. } => reservation,
+            Self::AutostartMatcha => unreachable!("Matcha has no OpenClaw reservation"),
+        };
+        *reservation = Some(permit);
+        true
+    }
+
     pub(crate) fn route_command(&self) -> CommandRoute<PeerKey> {
         match self {
             Self::AutostartMatcha => {
@@ -89,7 +119,8 @@ impl PeerCommand {
             }
             Self::StartRuntime { endpoint, .. }
             | Self::StopRuntime { endpoint, .. }
-            | Self::RestartRuntime { endpoint, .. } => CommandRoute::Keyed(endpoint.clone()),
+            | Self::RestartRuntime { endpoint, .. }
+            | Self::RepairRuntime { endpoint, .. } => CommandRoute::Keyed(endpoint.clone()),
         }
     }
 }

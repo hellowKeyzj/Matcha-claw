@@ -1,3 +1,4 @@
+import { traceLog } from './trace-logger';
 import { hostApiFetch, hostApiFetchDecoded } from '@/lib/host-api';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
 import type { ChannelType } from '@/types/channel';
@@ -20,10 +21,10 @@ export function channelErrorCode(error: unknown): string {
 export function logChannelTrace(
   phase: string,
   traceId: string | undefined,
-  detail: { outcome?: string; durationMs?: number; accountPresent?: boolean; errorCode?: string; gatewayOperational?: boolean } = {},
+  detail?: () => { outcome?: string; durationMs?: number; accountPresent?: boolean; errorCode?: string; gatewayOperational?: boolean },
 ): void {
   if (!traceId) return;
-  console.info(`[startup-trace] ${JSON.stringify({ source: 'channel-renderer', traceId, phase, at: Date.now(), ...detail })}`);
+  traceLog(() => [`[startup-trace] ${JSON.stringify({ source: 'channel-renderer', traceId, phase, at: Date.now(), ...detail?.() })}`]);
 }
 
 export interface ChannelSnapshotFetchResult {

@@ -156,7 +156,7 @@ async fn drain_output(
     report_diagnostic: Arc<DiagnosticCallback>,
 ) -> std::io::Result<()> {
     let mut classifier = StartupOutputClassifier::new(stream);
-    let mut forwarder = SessionTraceForwarder::new();
+    let mut forwarder = platform::trace::enabled().then(SessionTraceForwarder::new);
     let mut chunk = [0; READ_CHUNK_BYTES];
 
     loop {
@@ -165,11 +165,15 @@ async fn drain_output(
             if let Some(diagnostic) = classifier.finish() {
                 report_diagnostic(diagnostic);
             }
-            forwarder.finish();
+            if let Some(forwarder) = &mut forwarder {
+                forwarder.finish();
+            }
             return Ok(());
         }
         let bytes = &chunk[..read];
-        forwarder.push(bytes);
+        if let Some(forwarder) = &mut forwarder {
+            forwarder.push(bytes);
+        }
         classifier.push(bytes, |diagnostic| report_diagnostic(diagnostic));
     }
 }

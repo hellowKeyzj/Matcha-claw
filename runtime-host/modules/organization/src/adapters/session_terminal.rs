@@ -9,9 +9,10 @@ use foundation::execution::{
     OperationObservation, OperationReason, OperationStage, TraceContext,
 };
 use platform::endpoint::runtime_address::SessionIdentity;
+use platform::trace::{identifier_hash, runtime_trace};
+use serde_json::json;
 use tokio::{sync::mpsc, task::JoinError};
 
-use super::start_gate_send_hook::StartGateRegistry;
 use crate::{OrganizationHandle, TeamMessageRepairDispatch, TeamMessageTerminalObservation};
 
 const SESSION_TERMINAL_CAPACITY: usize = 256;
@@ -44,7 +45,7 @@ pub struct OrganizationRunTerminalSnapshot<SourceBinding> {
     pub native_run_id: String,
     pub delivery_context: Option<(crate::DeliveryId, crate::EndpointSessionId)>,
     pub phase: OrganizationRunPhase,
-    pub final_assistant_text: Option<String>,
+    pub assistant_texts: Vec<String>,
 }
 
 pub struct TeamMessageRepairSessionRequest<SourceBinding> {
@@ -59,6 +60,7 @@ pub struct TeamMessageRepairSessionRequest<SourceBinding> {
 pub enum TeamMessageRepairSessionOutcome {
     Queued { native_run_id: String },
     Rejected,
+    Unknown,
 }
 
 /// Consumes sessions run-terminal snapshots for the organization owner.
@@ -66,7 +68,6 @@ pub enum TeamMessageRepairSessionOutcome {
 /// `run_terminal` is synchronous on the sessions lane, so it only enqueues; every settlement call
 /// happens on the task started by [`OrganizationSessionTerminal::start`].
 pub struct OrganizationSessionTerminal<SourceBinding> {
-    start_gate: Arc<StartGateRegistry>,
     repair_session: Arc<Mutex<Option<Arc<dyn TeamMessageRepairSessionPort<SourceBinding>>>>>,
     snapshots: Mutex<Option<mpsc::Sender<OrganizationRunTerminalSnapshot<SourceBinding>>>>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -85,27 +86,20 @@ where
     SourceBinding: Clone + Send + 'static,
 {
     pub fn start(organization: OrganizationHandle, observation: ObservationSink) -> Self {
-        let start_gate = Arc::new(StartGateRegistry::new());
         let repair_session = Arc::new(Mutex::new(None));
         let (snapshots, receiver) = mpsc::channel(SESSION_TERMINAL_CAPACITY);
         let task = tokio::spawn(consume(
             organization,
-            Arc::clone(&start_gate),
             Arc::clone(&repair_session),
             receiver,
             observation.clone(),
         ));
         Self {
-            start_gate,
             repair_session,
             snapshots: Mutex::new(Some(snapshots)),
             task: Mutex::new(Some(task)),
             observation,
         }
-    }
-
-    pub fn start_gate_registry(&self) -> Arc<StartGateRegistry> {
-        Arc::clone(&self.start_gate)
     }
 
     pub fn bind_repair_session(
@@ -119,23 +113,45 @@ where
     }
 
     pub fn run_terminal(&self, snapshot: OrganizationRunTerminalSnapshot<SourceBinding>) {
+        let trace = platform::trace::enabled().then(|| (
+            identifier_hash(&snapshot.native_run_id),
+            snapshot.delivery_context.as_ref().map(|(delivery, _)| identifier_hash(delivery.as_str())),
+            snapshot.phase,
+            snapshot.assistant_texts.len(),
+        ));
         let snapshots = self
             .snapshots
             .lock()
             .expect("session terminal sender mutex poisoned")
             .clone();
-        match snapshots {
-            Some(sender) => {
-                if let Err(error) = sender.try_send(snapshot) {
+        let outcome = match snapshots {
+            Some(sender) => match sender.try_send(snapshot) {
+                Ok(()) => "accepted",
+                Err(error) => {
                     observe_enqueue_failure(&self.observation, &error);
+                    match error {
+                        mpsc::error::TrySendError::Full(_) => "full",
+                        mpsc::error::TrySendError::Closed(_) => "closed",
+                    }
                 }
+            },
+            None => {
+                observe_event(
+                    &self.observation,
+                    EventStage::Drop,
+                    Some(EventReason::SinkClosed),
+                );
+                "closed"
             }
-            None => observe_event(
-                &self.observation,
-                EventStage::Drop,
-                Some(EventReason::SinkClosed),
-            ),
-        }
+        };
+        runtime_trace("runtime.team_run.terminal.enqueue", || {
+            let (native_run_hash, delivery_hash, phase, candidate_count) = trace.as_ref().expect("trace enabled");
+            json!({
+                "nativeRunHash": native_run_hash, "deliveryHash": delivery_hash,
+                "phase": format!("{phase:?}"), "candidateCount": candidate_count,
+                "hasDeliveryContext": delivery_hash.is_some(), "outcome": outcome,
+            })
+        });
     }
 
     pub async fn close_and_join(&self) -> Result<(), JoinError> {
@@ -183,7 +199,6 @@ where
 
 async fn consume<SourceBinding>(
     organization: OrganizationHandle,
-    start_gate: Arc<StartGateRegistry>,
     repair_session: Arc<Mutex<Option<Arc<dyn TeamMessageRepairSessionPort<SourceBinding>>>>>,
     mut snapshots: mpsc::Receiver<OrganizationRunTerminalSnapshot<SourceBinding>>,
     observation: ObservationSink,
@@ -192,12 +207,18 @@ async fn consume<SourceBinding>(
 {
     observe_operation(&observation, OperationStage::Start, None);
     while let Some(snapshot) = snapshots.recv().await {
+        runtime_trace("runtime.team_run.terminal.dequeue", || json!({
+            "nativeRunHash": identifier_hash(&snapshot.native_run_id),
+            "deliveryHash": snapshot.delivery_context.as_ref().map(|(delivery, _)| identifier_hash(delivery.as_str())),
+            "phase": format!("{:?}", snapshot.phase),
+            "candidateCount": snapshot.assistant_texts.len(),
+            "hasDeliveryContext": snapshot.delivery_context.is_some(),
+        }));
         settle(
             &organization,
-            &start_gate,
             &repair_session,
             snapshot,
-            settlement_timestamp_seconds(),
+            settlement_timestamp_millis(),
             &observation,
         )
         .await;
@@ -206,7 +227,6 @@ async fn consume<SourceBinding>(
 
 async fn settle<SourceBinding>(
     organization: &OrganizationHandle,
-    start_gate: &StartGateRegistry,
     repair_session: &Arc<Mutex<Option<Arc<dyn TeamMessageRepairSessionPort<SourceBinding>>>>>,
     snapshot: OrganizationRunTerminalSnapshot<SourceBinding>,
     settled_at: u64,
@@ -220,32 +240,45 @@ async fn settle<SourceBinding>(
         native_run_id,
         delivery_context,
         phase,
-        final_assistant_text,
+        assistant_texts,
     } = snapshot;
-    settle_start_gate_proposal(
-        organization,
-        start_gate,
-        &native_run_id,
-        phase,
-        final_assistant_text.as_deref(),
-        observation,
-    )
-    .await;
     let Some(status) = native_terminal_status(phase) else {
+        runtime_trace("runtime.team_run.terminal.owner.reply", || json!({
+            "nativeRunHash": identifier_hash(&native_run_id), "outcome": "non_terminal_phase",
+            "phase": format!("{phase:?}"),
+        }));
         return;
     };
+    let started = platform::trace::enabled().then(std::time::Instant::now);
+    let native_run_hash = platform::trace::enabled().then(|| identifier_hash(&native_run_id));
     let observation_outcome = match organization
         .team_message_terminal_observed(
             native_run_id,
             delivery_context,
             status,
-            final_assistant_text,
+            assistant_texts,
             settled_at,
         )
         .await
     {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(_)) => {
+        Ok(Ok(outcome)) => {
+            runtime_trace("runtime.team_run.terminal.owner.reply", || json!({
+                "nativeRunHash": native_run_hash,
+                "outcome": match &outcome {
+                    TeamMessageTerminalObservation::Ignored => "ignored",
+                    TeamMessageTerminalObservation::Repair(_) => "repair",
+                    TeamMessageTerminalObservation::Settled => "settled",
+                },
+                "elapsedMs": started.map(|start| start.elapsed().as_millis()),
+            }));
+            outcome
+        }
+        Ok(Err(error)) => {
+            runtime_trace("runtime.team_run.terminal.owner.reply", || json!({
+                "nativeRunHash": native_run_hash, "outcome": "store_error",
+                "error": crate::trace::terminal_error(&error),
+                "elapsedMs": started.map(|start| start.elapsed().as_millis()),
+            }));
             observe_event(
                 observation,
                 EventStage::Drop,
@@ -254,6 +287,10 @@ async fn settle<SourceBinding>(
             return;
         }
         Err(_) => {
+            runtime_trace("runtime.team_run.terminal.owner.reply", || json!({
+                "nativeRunHash": native_run_hash, "outcome": "admission_or_reply_closed",
+                "elapsedMs": started.map(|start| start.elapsed().as_millis()),
+            }));
             observe_event(observation, EventStage::Drop, Some(EventReason::SinkClosed));
             return;
         }
@@ -282,9 +319,17 @@ async fn schedule_repair<SourceBinding>(
         .expect("session repair handle mutex poisoned")
         .clone();
     let Some(session) = session else {
+        runtime_trace("runtime.team_run.repair.dispatch", || json!({
+            "nativeRunHash": identifier_hash(dispatch.requested_run_id()),
+            "attempt": dispatch.attempt(), "outcome": "session_unbound",
+        }));
         settle_rejected_repair(organization, dispatch, observation).await;
         return;
     };
+    runtime_trace("runtime.team_run.repair.dispatch", || json!({
+        "nativeRunHash": identifier_hash(dispatch.requested_run_id()),
+        "attempt": dispatch.attempt(), "outcome": "sending",
+    }));
     let native_run_id = match session
         .send_repair(TeamMessageRepairSessionRequest {
             identity: repair.identity,
@@ -295,17 +340,37 @@ async fn schedule_repair<SourceBinding>(
         })
         .await
     {
-        TeamMessageRepairSessionOutcome::Queued { native_run_id } => native_run_id,
+        TeamMessageRepairSessionOutcome::Queued { native_run_id } => {
+            runtime_trace("runtime.team_run.repair.dispatch", || json!({
+                "nativeRunHash": identifier_hash(dispatch.requested_run_id()),
+                "actualNativeRunHash": identifier_hash(&native_run_id),
+                "attempt": dispatch.attempt(), "outcome": "queued",
+            }));
+            native_run_id
+        }
         TeamMessageRepairSessionOutcome::Rejected => {
+            runtime_trace("runtime.team_run.repair.dispatch", || json!({
+                "nativeRunHash": identifier_hash(dispatch.requested_run_id()),
+                "attempt": dispatch.attempt(), "outcome": "rejected",
+            }));
             settle_rejected_repair(organization, dispatch, observation).await;
             return;
         }
+        TeamMessageRepairSessionOutcome::Unknown => {
+            runtime_trace("runtime.team_run.repair.dispatch", || json!({
+                "nativeRunHash": identifier_hash(dispatch.requested_run_id()), "attempt": dispatch.attempt(),
+                "outcome": "unknown", "pendingRetained": true,
+            }));
+            return;
+        }
     };
-    if organization
-        .team_message_repair_queued(native_run_id, dispatch)
-        .await
-        .is_err()
-    {
+    let native_run_hash = platform::trace::enabled().then(|| identifier_hash(&native_run_id));
+    let result = organization.team_message_repair_queued(native_run_id, dispatch).await;
+    runtime_trace("runtime.team_run.repair.queued.reply", || json!({
+        "nativeRunHash": native_run_hash,
+        "outcome": if result.is_ok() { "accepted" } else { "admission_or_reply_closed" },
+    }));
+    if result.is_err() {
         observe_event(observation, EventStage::Drop, Some(EventReason::SinkClosed));
     }
 }
@@ -315,46 +380,19 @@ async fn settle_rejected_repair(
     dispatch: TeamMessageRepairDispatch,
     observation: &ObservationSink,
 ) {
-    match organization.team_message_repair_rejected(dispatch).await {
+    let native_run_hash = platform::trace::enabled().then(|| identifier_hash(dispatch.requested_run_id()));
+    let result = organization.team_message_repair_rejected(dispatch).await;
+    runtime_trace("runtime.team_run.repair.rejected.reply", || json!({
+        "nativeRunHash": native_run_hash,
+        "outcome": match &result {
+            Ok(Ok(())) => "processed",
+            Ok(Err(_)) => "store_error",
+            Err(_) => "admission_or_reply_closed",
+        },
+        "error": result.as_ref().ok().and_then(|result| result.as_ref().err()).map(crate::trace::terminal_error),
+    }));
+    match result {
         Ok(Ok(())) => {}
-        Ok(Err(_)) => observe_event(
-            observation,
-            EventStage::Drop,
-            Some(EventReason::ValidationRejected),
-        ),
-        Err(_) => observe_event(observation, EventStage::Drop, Some(EventReason::SinkClosed)),
-    }
-}
-
-async fn settle_start_gate_proposal(
-    organization: &OrganizationHandle,
-    start_gate: &StartGateRegistry,
-    native_run_id: &str,
-    phase: OrganizationRunPhase,
-    final_assistant_text: Option<&str>,
-    observation: &ObservationSink,
-) {
-    let Some((run_id, proposal_id, generation, design)) = start_gate.take(native_run_id) else {
-        return;
-    };
-    if phase != OrganizationRunPhase::Completed {
-        return;
-    }
-    let Some(text) = final_assistant_text else {
-        return;
-    };
-    match organization
-        .start_gate_terminal_proposal_set(
-            run_id,
-            proposal_id,
-            native_run_id.to_owned(),
-            text.to_owned(),
-            generation,
-            design,
-        )
-        .await
-    {
-        Ok(Ok(_)) => {}
         Ok(Err(_)) => observe_event(
             observation,
             EventStage::Drop,
@@ -412,9 +450,11 @@ fn observe_operation(
     }));
 }
 
-fn settlement_timestamp_seconds() -> u64 {
+fn settlement_timestamp_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }

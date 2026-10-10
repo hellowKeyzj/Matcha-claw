@@ -62,17 +62,17 @@ export function createChannelConfigReadTransport(
         status = response.status;
         body = response.body;
         if (response.status === 200 && isProjection(body)) {
-          finish(status, body);
+          finish?.(status, body);
           return { values: body.values, agentId: body.agentId };
         }
         if ((response.status === 400 || response.status === 503) && isPublicError(body)) {
-          finish(status, body);
+          finish?.(status, body);
           return null;
         }
         body = UNAVAILABLE;
         errorCode = 'INVALID_RESPONSE';
       }
-      finish(status, body, errorCode);
+      finish?.(status, body, errorCode);
       return null;
     },
   };

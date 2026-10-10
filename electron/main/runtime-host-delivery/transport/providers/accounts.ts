@@ -1,3 +1,4 @@
+import { traceDebug, isTraceEnabled } from '../../../../utils/trace-logger';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 import type { CallReceipt } from '../../../../../src/types/call-log';
@@ -85,13 +86,13 @@ const PROVIDER_ACCOUNT_KEYS: readonly string[] = [
   'id', 'provider', 'label', 'enabled', 'kind', 'endpoint', 'protocol', 'mediaProtocol', 'authMode', 'revision',
 ];
 
-function providerAccountsTransportTrace(phase: string, payload: Record<string, unknown> = {}): void {
-  console.info(JSON.stringify({
+function providerAccountsTransportTrace(phase: string, payload: () => Record<string, unknown> = () => ({})): void {
+  traceDebug(() => JSON.stringify({
     prefix: '[startup-trace]',
     source: 'provider-accounts-transport',
     phase,
     at: Date.now(),
-    ...payload,
+    ...payload(),
   }));
 }
 
@@ -141,7 +142,7 @@ export function createProviderAccountsTransport(
   return {
     async execute(request: unknown): Promise<ProviderAccountsTransportResponse> {
       if (!isRequest(request)) {
-        providerAccountsTransportTrace('request.rejected', { detail: 'invalid-request' });
+        providerAccountsTransportTrace('request.rejected', () => ({ detail: 'invalid-request' }));
         return { status: 400, body: INVALID_REQUEST };
       }
       return executeRequest(request, issuer, runtimeHostTransportPort, fetcher);
@@ -155,8 +156,8 @@ async function executeRequest(
   port: number,
   fetcher: typeof fetch,
 ): Promise<ProviderAccountsTransportResponse> {
-  const trace = requestTrace(request);
-  providerAccountsTransportTrace('request.start', trace);
+  const trace = isTraceEnabled() ? requestTrace(request) : undefined;
+  providerAccountsTransportTrace('request.start', () => ({ ...trace }));
   const response = await sendLoopbackJson({
     port,
     path: PROVIDER_ACCOUNTS_PATH,
@@ -172,10 +173,10 @@ async function executeRequest(
     body: request,
   });
   if (response === null) {
-    providerAccountsTransportTrace('response.rejected', { ...trace, status: 503, detail: 'loopback-unavailable' });
+    providerAccountsTransportTrace('response.rejected', () => ({ ...trace, status: 503, detail: 'loopback-unavailable' }));
     return { status: 503, body: UNAVAILABLE };
   }
-  providerAccountsTransportTrace('response.http', { ...trace, httpStatus: response.status });
+  providerAccountsTransportTrace('response.http', () => ({ ...trace, httpStatus: response.status }));
   const body = response.body;
   const mutation = request.operationId === 'providerAccounts.replace' || request.operationId === 'providerAccounts.delete';
   if (mutation && response.status === 202) {
@@ -191,25 +192,25 @@ async function executeRequest(
     return { status: 503, body: NOT_ADMITTED };
   }
   if (response.status === 400) {
-    providerAccountsTransportTrace('response.rejected', { ...trace, status: 400 });
+    providerAccountsTransportTrace('response.rejected', () => ({ ...trace, status: 400 }));
     return { status: 400, body: INVALID_REQUEST };
   }
   if (response.status === 404) {
     const status = request.operationId === 'providerAccounts.get' ? 404 : 503;
-    providerAccountsTransportTrace('response.rejected', { ...trace, status });
+    providerAccountsTransportTrace('response.rejected', () => ({ ...trace, status }));
     return request.operationId === 'providerAccounts.get'
       ? { status: 404, body: MISSING }
       : { status: 503, body: UNAVAILABLE };
   }
   if (response.status === 422) {
-    providerAccountsTransportTrace('response.rejected', { ...trace, status: 422 });
+    providerAccountsTransportTrace('response.rejected', () => ({ ...trace, status: 422 }));
     return { status: 422, body: REJECTED };
   }
   if (response.status === 503) {
-    providerAccountsTransportTrace('response.rejected', { ...trace, status: 503 });
+    providerAccountsTransportTrace('response.rejected', () => ({ ...trace, status: 503 }));
     return { status: 503, body: UNAVAILABLE };
   }
-  providerAccountsTransportTrace('response.rejected', { ...trace, status: 503, detail: 'fallback-unavailable' });
+  providerAccountsTransportTrace('response.rejected', () => ({ ...trace, status: 503, detail: 'fallback-unavailable' }));
   return { status: 503, body: UNAVAILABLE };
 }
 

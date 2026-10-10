@@ -13,22 +13,34 @@ export interface TeamRoleBindingRecord {
   sessionIdentity: SessionIdentity;
 }
 
+export type TeamScriptReviewRule = 'pass_through' | 'assert_all_upstream_completed' | 'assert_no_blocking_gate' | 'assert_artifact_exists';
+
+export interface TeamGraphNodeConfigRecord {
+  rule?: TeamScriptReviewRule;
+  prompt?: string;
+  outputArtifactKind?: string;
+  sessionRef?: string;
+  trigger?: { mode: 'webhook'; path: string } | { mode: 'cron'; cron: string };
+}
+
 export interface TeamGraphNodeRecord {
   nodeId: string;
   kind?: string;
   title?: string;
   roleId?: string | null;
-  groupId?: string | null;
   taskId?: string | null;
   stageId?: string;
   status?: string;
   statusReason?: string | null;
+  sourcePorts?: string[];
+  targetPorts?: string[];
+  sourcePortActions: Record<string, TeamGraphEdgeAction[]>;
   maxAttempts?: number;
   createdAt?: number;
   completedAt?: number;
   artifactId?: string;
   executor?: Record<string, unknown>;
-  config?: Record<string, unknown>;
+  config?: TeamGraphNodeConfigRecord;
   metadata?: Record<string, unknown>;
 }
 
@@ -78,19 +90,11 @@ export interface TeamGraphSnapshotRecord {
   metadata?: Record<string, unknown>;
 }
 
-export type TeamStartGateStatus = 'intake' | 'proposal_pending' | 'started';
+export type TeamStartGateStatus = 'intake' | 'designing' | 'started';
 
-export interface TeamRunProposalProjection {
-  proposalId?: string;
-  taskSummary: string;
-  detail?: string;
-  createdAt?: number;
-}
-
-export interface TeamRunStartGateProjection {
-  status: TeamStartGateStatus;
-  proposal?: TeamRunProposalProjection | null;
-}
+export type TeamRunStartGateProjection =
+  | { status: 'intake' | 'started' }
+  | { status: 'designing'; designEpoch: string; graphVersion: string };
 
 export type TeamGraphPatchOperation =
   | { op: 'add_node' | 'replace_node'; node: Record<string, unknown> }
@@ -105,17 +109,14 @@ export interface TeamDesignTarget {
   runId: string;
 }
 
-export type TeamDesignStartGate = TeamRunStartGateProjection
-  | { status: 'designing'; designEpoch: string; graphVersion: string; proposal: null }
-  | { status: 'design_proposal_pending'; designEpoch: string; graphVersion: string; proposal: { proposalId: string; taskSummary: string } };
-
 export interface TeamDesignSnapshot extends TeamDesignTarget {
   success: true;
-  startGate: TeamDesignStartGate;
+  startGate: TeamRunStartGateProjection;
   graphVersion: string;
   designEpoch: string | null;
   graph: TeamGraphSnapshotRecord;
   roles: TeamRoleBindingRecord[];
+  runtimeError: TeamDesignFailure | null;
 }
 
 export interface TeamDesignRecord {
@@ -125,19 +126,37 @@ export interface TeamDesignRecord {
   error: string | null;
 }
 
+export interface TeamDesignFailure {
+  success: false;
+  error: string;
+  errorCode: string;
+  nodeId?: string;
+  edgeId?: string;
+}
+
+export function isTeamDesignFailure(value: unknown): value is TeamDesignFailure {
+  return isRecord(value) && onlyKeys(value, ['success', 'error', 'errorCode', 'nodeId', 'edgeId'])
+    && value.success === false && isText(value.error) && value.error.length <= 4096 && !/[\0\p{Cc}]/u.test(value.error)
+    && typeof value.errorCode === 'string' && /^[a-z_]{1,128}$/.test(value.errorCode)
+    && [value.nodeId, value.edgeId].every((id) => id === undefined || (typeof id === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(id)));
+}
+
 export function decodeTeamDesignSnapshot(value: unknown, target: TeamDesignTarget): TeamDesignSnapshot {
-  if (!isRecord(value) || !exactKeys(value, ['success', 'teamId', 'runId', 'startGate', 'graphVersion', 'designEpoch', 'graph', 'roles'])
+  if (isTeamDesignFailure(value)) throw new Error(value.error, { cause: value });
+  if (!isRecord(value) || !exactKeys(value, ['success', 'teamId', 'runId', 'startGate', 'graphVersion', 'designEpoch', 'graph', 'roles', 'runtimeError'])
     || value.success !== true || value.teamId !== target.teamId || value.runId !== target.runId
     || !isTeamGraphVersion(value.graphVersion) || !(value.designEpoch === null || isText(value.designEpoch))
     || !isStartGate(value.startGate, value.designEpoch, value.graphVersion)
     || !isGraph(value.graph, target.runId) || !Array.isArray(value.roles)
-    || !value.roles.every((role) => isRole(role, target))) {
+    || !value.roles.every((role) => isRole(role, target))
+    || !(value.runtimeError === null || isTeamDesignFailure(value.runtimeError))) {
     throw new Error('Team design snapshot is unavailable');
   }
   return value as unknown as TeamDesignSnapshot;
 }
 
-export function decodeTeamDesignMutation<T extends 'designing' | 'intake'>(value: unknown, outcome: T): { success: true; outcome: T } {
+export function decodeTeamDesignMutation<T extends 'designing' | 'intake' | 'started'>(value: unknown, outcome: T): { success: true; outcome: T } {
+  if (isTeamDesignFailure(value)) throw new Error(value.error, { cause: value });
   if (!isRecord(value) || !exactKeys(value, ['success', 'outcome']) || value.success !== true || value.outcome !== outcome) {
     throw new Error('Team design outcome is unavailable');
   }
@@ -150,18 +169,13 @@ export function isTeamGraphVersion(value: unknown): value is string {
 
 function isStartGate(value: unknown, epoch: unknown, version: string): boolean {
   if (!isRecord(value)) return false;
-  if (value.status === 'designing' || value.status === 'design_proposal_pending') {
-    return exactKeys(value, ['status', 'designEpoch', 'graphVersion', 'proposal'])
-      && isText(value.designEpoch) && value.designEpoch === epoch && value.graphVersion === version
-      && (value.status === 'designing' ? value.proposal === null : isProposal(value.proposal));
+  if (value.status === 'designing') {
+    return exactKeys(value, ['status', 'designEpoch', 'graphVersion'])
+      && typeof value.designEpoch === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value.designEpoch)
+      && value.designEpoch === epoch && value.graphVersion === version;
   }
-  return (value.status === 'intake' || value.status === 'proposal_pending' || value.status === 'started')
-    && Object.keys(value).every((key) => key === 'status' || key === 'proposal')
-    && (value.proposal === undefined || value.proposal === null || isProposal(value.proposal));
-}
-
-function isProposal(value: unknown): boolean {
-  return isRecord(value) && exactKeys(value, ['proposalId', 'taskSummary']) && isText(value.proposalId) && typeof value.taskSummary === 'string';
+  return (value.status === 'intake' || value.status === 'started')
+    && exactKeys(value, ['status']) && epoch === null;
 }
 
 export function isTeamDesignPatchOperation(value: unknown): value is TeamGraphPatchOperation {
@@ -188,15 +202,18 @@ function isGraph(value: unknown, runId: string): boolean {
 }
 
 function isNode(value: unknown): boolean {
-  return isRecord(value) && exactKeys(value, ['nodeId', 'kind', 'title', 'roleId', 'taskId', 'groupId', 'maxAttempts', 'status', 'statusReason', 'config'])
+  return isRecord(value) && exactKeys(value, ['nodeId', 'kind', 'title', 'roleId', 'taskId', 'maxAttempts', 'status', 'statusReason', 'config', 'sourcePorts', 'targetPorts', 'sourcePortActions'])
+    && isTeamGraphSourcePortActions(value.sourcePortActions, value.sourcePorts)
+    && Array.isArray(value.targetPorts) && value.targetPorts.every(isText)
     && isText(value.nodeId) && ['start', 'work', 'review', 'human_decision', 'script_review', 'join', 'end'].includes(String(value.kind))
-    && typeof value.title === 'string' && nullableText(value.roleId) && nullableText(value.taskId) && nullableText(value.groupId)
+    && typeof value.title === 'string' && nullableText(value.roleId) && nullableText(value.taskId)
     && typeof value.maxAttempts === 'number' && Number.isSafeInteger(value.maxAttempts) && value.maxAttempts > 0
     && typeof value.status === 'string' && nullableText(value.statusReason) && isNodeConfig(value.config);
 }
 
 function isNodeConfig(value: unknown): boolean {
-  if (!isRecord(value) || !onlyKeys(value, ['prompt', 'outputArtifactKind', 'sessionRef', 'trigger', 'join'])) return false;
+  if (!isRecord(value) || !onlyKeys(value, ['prompt', 'outputArtifactKind', 'sessionRef', 'trigger', 'rule'])) return false;
+  if (value.rule !== undefined && (typeof value.rule !== 'string' || !['pass_through', 'assert_all_upstream_completed', 'assert_no_blocking_gate', 'assert_artifact_exists'].includes(value.rule))) return false;
   if (value.prompt !== undefined && typeof value.prompt !== 'string') return false;
   if (value.outputArtifactKind !== undefined && !isText(value.outputArtifactKind)) return false;
   if (value.sessionRef !== undefined && !isText(value.sessionRef)) return false;
@@ -206,19 +223,23 @@ function isNodeConfig(value: unknown): boolean {
       ? exactKeys(trigger, ['mode', 'path']) && typeof trigger.path === 'string'
       : trigger.mode === 'cron' && exactKeys(trigger, ['mode', 'cron']) && isText(trigger.cron))) return false;
   }
-  if (value.join !== undefined) {
-    const join = value.join;
-    if (!isRecord(join) || !exactKeys(join, ['requireCompleted', 'allowFailed', 'retryLimit'])
-      || typeof join.requireCompleted !== 'boolean' || typeof join.allowFailed !== 'boolean'
-      || typeof join.retryLimit !== 'number' || !Number.isSafeInteger(join.retryLimit) || join.retryLimit < 0) return false;
-  }
   return true;
+}
+
+export function isTeamGraphSourcePortActions(value: unknown, sourcePorts: unknown): value is TeamGraphNodeRecord['sourcePortActions'] {
+  return Array.isArray(sourcePorts) && sourcePorts.every(isText)
+    && isRecord(value) && exactKeys(value, sourcePorts)
+    && Object.values(value).every((actions) => Array.isArray(actions) && actions.length > 0 && actions.every(isEdgeAction));
+}
+
+function isEdgeAction(value: unknown): value is TeamGraphEdgeAction {
+  return typeof value === 'string' && ['activate', 'rework', 'gate', 'finish'].includes(value);
 }
 
 function isEdge(value: unknown): boolean {
   return isRecord(value) && exactKeys(value, ['edgeId', 'sourceNodeId', 'targetNodeId', 'sourcePort', 'targetPort', 'action', 'payload', 'dependency', 'status'])
     && isText(value.edgeId) && isText(value.sourceNodeId) && isText(value.targetNodeId)
-    && isText(value.sourcePort) && isText(value.targetPort) && ['activate', 'rework', 'gate', 'finish'].includes(String(value.action))
+    && isText(value.sourcePort) && isText(value.targetPort) && isEdgeAction(value.action)
     && isRecord(value.payload) && exactKeys(value.payload, ['includeUpstreamResult']) && typeof value.payload.includeUpstreamResult === 'boolean'
     && (value.dependency === null || (isRecord(value.dependency) && exactKeys(value.dependency, ['dependencyTaskId', 'taskId'])
       && isText(value.dependency.dependencyTaskId) && isText(value.dependency.taskId))) && typeof value.status === 'string';

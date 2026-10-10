@@ -129,7 +129,7 @@ impl SessionOperation {
     pub(crate) async fn goal_start(&self, params: ChatSendParams) -> Result<InvocationOutcome<sessions_module::goal::SessionGoalReceipt, OperationError>, sessions_module::ports::RuntimeOperationFailure> {
         let request_id = next_request_id("chat-goal-start").map_err(|_| sessions_module::ports::RuntimeOperationFailure::Unavailable)?;
         if super::trace::enabled() {
-            super::trace::log_unscoped("openclaw.goal.request", serde_json::json!({
+            super::trace::log_unscoped("openclaw.goal.request", || serde_json::json!({
                 "requestHash": sessions_module::trace::fingerprint(&request_id),
                 "sessionKey": sessions_module::trace::id_shape(Some(params.session_key().as_str())),
                 "operationId": sessions_module::trace::id_shape(Some(params.idempotency_key().as_str())),
@@ -144,7 +144,7 @@ impl SessionOperation {
         let (method, params) = super::goal::mutation_params(command);
         let request_id = next_request_id("sessions-goal").map_err(|_| sessions_module::ports::RuntimeOperationFailure::Unavailable)?;
         if super::trace::enabled() {
-            super::trace::log_unscoped("openclaw.goal.request", serde_json::json!({
+            super::trace::log_unscoped("openclaw.goal.request", || serde_json::json!({
                 "requestHash": sessions_module::trace::fingerprint(&request_id),
                 "identity": sessions_module::trace::identity_shape(&command.identity),
                 "endpointSessionId": sessions_module::trace::id_shape(Some(&command.endpoint_session_id)),
@@ -170,7 +170,7 @@ impl SessionOperation {
                     } else {
                         "native_rejected"
                     };
-                    super::trace::log_unscoped("openclaw.goal.rejected", serde_json::json!({
+                    super::trace::log_unscoped("openclaw.goal.rejected", || serde_json::json!({
                         "requestHash": sessions_module::trace::fingerprint(&request_id),
                         "rejection": rejection,
                         "errorCode": match error.code() {

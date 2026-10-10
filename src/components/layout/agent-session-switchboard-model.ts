@@ -22,6 +22,7 @@ export interface AgentSessionSwitchboardTeamRoleInput {
 
 export interface AgentSessionSwitchboardTeamRunInput {
   runId: string;
+  label: string;
   createdAt?: number | null;
   updatedAt?: number | null;
   leader?: AgentSessionSwitchboardTeamRoleInput | null;
@@ -68,6 +69,7 @@ export interface AgentSessionSwitchboardTeamRoleResult {
 
 export interface AgentSessionSwitchboardTeamRunResult {
   runId: string;
+  label: string;
   isActive: boolean;
   leader: AgentSessionSwitchboardTeamRoleResult | null;
   roles: AgentSessionSwitchboardTeamRoleResult[];
@@ -312,6 +314,7 @@ function buildTeamResults(teams: readonly AgentSessionSwitchboardTeamInput[]): A
     activeRunId: normalizeText(team.activeRunId),
     runs: team.runs.map((run) => ({
       runId: run.runId,
+      label: run.label,
       isActive: team.activeRunId === run.runId,
       leader: run.leader ? buildTeamRoleResult(team, run, run.leader) : null,
       roles: run.roles.map((role) => buildTeamRoleResult(team, run, role)),

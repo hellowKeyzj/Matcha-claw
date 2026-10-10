@@ -760,7 +760,7 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
         ProviderQuery::GenerateText { diagnostic_trace, .. } => {
             with_session_trace(diagnostic_trace.clone(), async {
                 ProviderCall::start(&mut call).await.map_err(|_| {
-                    session_trace("provider-generation.call-start-failed", json!({
+                    session_trace("provider-generation.call-start-failed", || json!({
                         "providerCallHash": call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str())),
                     }));
                 })
@@ -835,9 +835,9 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
             ..
         } => {
             with_session_trace(diagnostic_trace, async {
-                let started = Instant::now();
-                let provider_call_hash = call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str()));
-                session_trace("provider-generation.direct-started", json!({
+                let started = platform::trace::enabled().then(Instant::now);
+                let provider_call_hash = platform::trace::enabled().then(|| call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str()))).flatten();
+                session_trace("provider-generation.direct-started", || json!({
                     "providerCallHash": provider_call_hash, "streaming": stream.is_some(),
                 }));
                 let snapshot = shared.snapshot.load_full();
@@ -869,7 +869,7 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
                         crate::ProviderTextGenerationOutcome::Unavailable
                     }
                 };
-                session_trace("provider-generation.direct-completed", json!({
+                session_trace("provider-generation.direct-completed", || json!({
                     "providerCallHash": provider_call_hash,
                     "category": match &outcome {
                         crate::ProviderTextGenerationOutcome::Generated { .. } => "Generated",
@@ -877,7 +877,7 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
                         crate::ProviderTextGenerationOutcome::Unavailable => "Unavailable",
                         crate::ProviderTextGenerationOutcome::Cancelled => "Cancelled",
                     },
-                    "elapsedMs": started.elapsed().as_millis() as u64,
+                    "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
                 }));
                 drop(stream);
                 send_reply(call, reply, outcome).await;
@@ -919,7 +919,7 @@ fn log_provider_native_effect(phase: &str, native: &ProviderNativeConfigurationE
                     diagnostic.expected_path().unwrap_or("none"),
                     diagnostic.detail().map(str::len).unwrap_or(0)
                 );
-            } else {
+            } else if platform::trace::enabled() {
                 eprintln!(
                     "[startup-trace] source=provider-owner phase={phase} detail=reconcile-outcome changed={} applied={:?} observed={:?}",
                     evidence.changed(),

@@ -7,8 +7,8 @@ use std::{
 };
 
 use arrow_array::{
-    ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray,
-    UInt32Array,
+    ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
+    RecordBatchReader, StringArray, UInt32Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use chrono::Duration;
@@ -186,7 +186,9 @@ async fn upsert_batch(
             .await
             .map_err(|err| format!("Atomic page upsert failed: {err}"))?;
     } else {
-        db.create_table(TABLE_CHUNKS_V2, vec![batch])
+        let data: Box<dyn RecordBatchReader + Send> =
+            Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema));
+        db.create_table(TABLE_CHUNKS_V2, data)
             .execute()
             .await
             .map_err(|err| format!("Create table error: {err}"))?;
@@ -231,7 +233,7 @@ pub(crate) async fn replace_pages(
     project_path: &Path,
     pages: Vec<crate::index::PreparedPageEmbedding>,
 ) -> Result<usize, String> {
-    let (_, prepared) = prepare_batches(pages)?;
+    let (schema, prepared) = prepare_batches(pages)?;
     let lock = db_lock(project_path);
     let _guard = lock.write().await;
     let db = connect(&db_uri(project_path))
@@ -268,7 +270,11 @@ pub(crate) async fn replace_pages(
         .iter()
         .map(|(_, _, batch)| batch.clone())
         .collect::<Vec<_>>();
-    db.create_table(TABLE_CHUNKS_V2, batches)
+    let data: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+        batches.into_iter().map(Ok),
+        schema,
+    ));
+    db.create_table(TABLE_CHUNKS_V2, data)
         .mode(CreateTableMode::Overwrite)
         .execute()
         .await

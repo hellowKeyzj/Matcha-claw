@@ -134,7 +134,7 @@ export async function readE2EOpenClawState(electronApp: ElectronApplication): Pr
 
 export async function enterLocalWorkspace(page: Page): Promise<void> {
   const chatHeading = page.getByRole('heading', { name: /MatchaClaw 聊天|MatchaClaw Chat/i });
-  const localEntry = page.getByRole('button', { name: /游客进入|离线进入|Enter as guest|Enter offline/i }).first();
+  const localEntry = page.getByRole('button', { name: /本地进入|离线进入|Continue locally|Continue with local features/i }).first();
   await expect(chatHeading.or(localEntry)).toBeVisible({ timeout: 45_000 });
 
   if (await localEntry.isVisible().catch(() => false)) {

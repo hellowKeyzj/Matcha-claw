@@ -10,62 +10,16 @@ import {
   parseDebugFilter,
   shouldShowDebugMessage,
 } from './debugFilter.js'
-import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
+import { getClaudeConfigHomeDir } from './envUtils.js'
+import { isTraceEnabled } from './trace.js'
 import { getFsImplementation } from './fsOperations.js'
 import { writeToStderr } from './process.js'
 import { jsonStringify } from './slowOperations.js'
 
 export type DebugLogLevel = 'verbose' | 'debug' | 'info' | 'warn' | 'error'
 
-const LEVEL_ORDER: Record<DebugLogLevel, number> = {
-  verbose: 0,
-  debug: 1,
-  info: 2,
-  warn: 3,
-  error: 4,
-}
-
-/**
- * Minimum log level to include in debug output. Defaults to 'debug', which
- * filters out 'verbose' messages. Set CLAUDE_CODE_DEBUG_LOG_LEVEL=verbose to
- * include high-volume diagnostics (e.g. full statusLine command, shell, cwd,
- * stdout/stderr) that would otherwise drown out useful debug output.
- */
-export const getMinDebugLogLevel = memoize((): DebugLogLevel => {
-  const raw = process.env.CLAUDE_CODE_DEBUG_LOG_LEVEL?.toLowerCase().trim()
-  if (raw && Object.hasOwn(LEVEL_ORDER, raw)) {
-    return raw as DebugLogLevel
-  }
-  return 'debug'
-})
-
-let runtimeDebugEnabled = false
-
-export const isDebugMode = memoize((): boolean => {
-  return (
-    runtimeDebugEnabled ||
-    isEnvTruthy(process.env.DEBUG) ||
-    isEnvTruthy(process.env.DEBUG_SDK) ||
-    process.argv.includes('--debug') ||
-    process.argv.includes('-d') ||
-    isDebugToStdErr() ||
-    // Also check for --debug=pattern syntax
-    process.argv.some(arg => arg.startsWith('--debug=')) ||
-    // --debug-file implicitly enables debug mode
-    getDebugFilePath() !== null
-  )
-})
-
-/**
- * Enables debug logging mid-session (e.g. via /debug). Non-ants don't write
- * debug logs by default, so this lets them start capturing without restarting
- * with --debug. Returns true if logging was already active.
- */
-export function enableDebugLogging(): boolean {
-  const wasActive = isDebugMode() || process.env.USER_TYPE === 'ant'
-  runtimeDebugEnabled = true
-  isDebugMode.cache.clear?.()
-  return wasActive
+export function isDebugMode(): boolean {
+  return isTraceEnabled()
 }
 
 // Extract and parse debug filter from command line arguments
@@ -82,9 +36,9 @@ export const getDebugFilter = memoize((): DebugFilter | null => {
   return parseDebugFilter(filterPattern)
 })
 
-export const isDebugToStdErr = memoize((): boolean => {
-  return process.argv.includes('--debug-to-stderr')
-})
+export function isDebugToStdErr(): boolean {
+  return isTraceEnabled() && process.argv.includes('--debug-to-stderr')
+}
 
 export const getDebugFilePath = memoize((): string | null => {
   for (let i = 0; i < process.argv.length; i++) {
@@ -101,12 +55,6 @@ export const getDebugFilePath = memoize((): string | null => {
 
 function shouldLogDebugMessage(message: string): boolean {
   if (process.env.NODE_ENV === 'test' && !isDebugToStdErr()) {
-    return false
-  }
-
-  // Non-ants only write debug logs when debug mode is active (via --debug at
-  // startup or /debug mid-session). Ants always log for /share, bug reports.
-  if (process.env.USER_TYPE !== 'ant' && !isDebugMode()) {
     return false
   }
 
@@ -174,7 +122,7 @@ function getDebugWriter(): BufferedWriter {
           void updateLatestDebugLogSymlink()
           return
         }
-        // Buffered path (ants without --debug): flushes ~1/sec so chain
+        // Buffered warning/error path (trace disabled): flushes ~1/sec so chain
         // depth stays ~1. .bind over a closure so only the bound args are
         // retained, not this scope.
         pendingWrite = pendingWrite
@@ -199,14 +147,13 @@ export async function flushDebugLogs(): Promise<void> {
 }
 
 export function logForDebugging(
-  message: string,
+  message: string | (() => string),
   { level }: { level: DebugLogLevel } = {
     level: 'debug',
   },
 ): void {
-  if (LEVEL_ORDER[level] < LEVEL_ORDER[getMinDebugLogLevel()]) {
-    return
-  }
+  if (!isTraceEnabled() && level !== 'warn' && level !== 'error') return
+  message = typeof message === 'function' ? message() : message
   if (!shouldLogDebugMessage(message)) {
     return
   }

@@ -4,8 +4,10 @@
  */
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
+import { isTraceEnabled } from '@/lib/trace-logger';
 import { waitForCall } from '@/lib/call-log-await';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
+import { runGatewayRepair, type GatewayRepairOutcome } from '@/lib/gateway-repair';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { TaskSnapshotEvent } from '../types/session/task-snapshot';
 import {
@@ -96,7 +98,7 @@ function traceSessionDeltaBoundary(
   extra: Record<string, unknown> = {},
 ): void {
   if (!traceId || !isSessionTraceEnabled()) return;
-  logSessionTrace(stage, traceId, {
+  logSessionTrace(stage, traceId, () => ({
     identity: summarizeSessionIdentity(delta.identity),
     mappedChanges: summarizeSessionChanges(delta.changes),
     sessionKey: summarizeIdentifier(delta.sessionKey),
@@ -108,7 +110,7 @@ function traceSessionDeltaBoundary(
     changeCount: delta.changes.length,
     textLength: sessionDeltaTextLength(delta.changes),
     ...extra,
-  });
+  }));
 }
 
 type RuntimeHostObservedStatus =
@@ -211,6 +213,9 @@ interface GatewayState {
   start: () => Promise<void>;
   stop: () => Promise<void>;
   restart: () => Promise<void>;
+  lifecycleOperation: 'restart' | 'repair' | null;
+  repairOutcome: GatewayRepairOutcome | null;
+  repair: () => Promise<void>;
   refreshRuntimeHostStatus: () => Promise<void>;
   checkHealth: () => Promise<GatewayHealth>;
   setStatus: (status: GatewayStatus) => void;
@@ -220,7 +225,7 @@ interface GatewayState {
 async function fetchGatewayStatusSnapshot(): Promise<GatewayStatus> {
   try {
     const status = await hostApiFetch<GatewayStatus>('/api/gateway/status');
-    console.info(JSON.stringify({
+    if (isTraceEnabled()) console.info(JSON.stringify({
       prefix: STARTUP_TRACE_PREFIX,
       ...gatewayStartupTraceSummary('gateway-store', 'gateway-status-snapshot-success', status),
     }));
@@ -328,6 +333,8 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
   },
   isInitialized: false,
   lastError: null,
+  lifecycleOperation: null,
+  repairOutcome: null,
 
   init: async () => {
     if (get().isInitialized) return;
@@ -342,7 +349,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         if (!gatewayEventUnsubscribers) {
           const unsubscribers: Array<() => void> = [];
           unsubscribers.push(subscribeHostEvent<GatewayStatus>('gateway:status', (payload) => {
-            console.info(JSON.stringify({
+            if (isTraceEnabled()) console.info(JSON.stringify({
               prefix: STARTUP_TRACE_PREFIX,
               ...gatewayStartupTraceSummary('gateway-store', 'gateway-status-event', payload),
             }));
@@ -369,22 +376,22 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
           unsubscribers.push(subscribeHostEvent<unknown>('session.resync', (payload) => {
             void useChatStore.getState().resyncSession(payload).catch((error) => {
               console.warn('[session.resync]', summarizeError(error));
-              if (isSessionTraceEnabled()) logSessionTrace('session.resync.failed', 'session-resync-boundary', summarizeError(error));
+              logSessionTrace('session.resync.failed', 'session-resync-boundary', () => summarizeError(error));
             });
           }));
           unsubscribers.push(subscribeHostEvent<unknown>('session.delta', (payload) => {
             const traceId = createSessionTraceId('session.delta-boundary');
-            logSessionTrace('session.delta.received', traceId, {
+            logSessionTrace('session.delta.received', traceId, () => ({
               payloadType: payload && typeof payload === 'object' ? 'object' : typeof payload,
-            });
+            }));
             let delta;
             try {
               delta = decodeSessionDelta(payload);
             } catch (error) {
-              logSessionTrace('session.delta.decode', traceId, {
+              logSessionTrace('session.delta.decode', traceId, () => ({
                 decoded: false,
                 ...summarizeError(error),
-              });
+              }));
               return;
             }
             traceSessionDeltaBoundary('session.delta.decode', traceId, delta);
@@ -392,7 +399,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               set: useChatStore.setState,
               get: useChatStore.getState,
             }, delta);
-            traceSessionDeltaBoundary('session.delta.apply', traceId, delta, {
+            if (isSessionTraceEnabled()) traceSessionDeltaBoundary('session.delta.apply', traceId, delta, {
               status: applyResult.status,
               reason: 'reason' in applyResult ? summarizeIdentifier(applyResult.reason) : null,
             });
@@ -400,7 +407,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               void useChatStore.getState().resyncSession({ identity: delta.identity, epoch: delta.epoch, seq: delta.seq })
                 .catch((error) => {
                   console.warn('[session.resync]', summarizeError(error));
-                  if (isSessionTraceEnabled()) logSessionTrace('session.resync.failed', 'session-resync-boundary', summarizeError(error));
+                  logSessionTrace('session.resync.failed', 'session-resync-boundary', () => summarizeError(error));
                 });
             }
           }));
@@ -552,8 +559,9 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
   },
 
   restart: async () => {
+    if (get().lifecycleOperation) return;
+    set({ lifecycleOperation: 'restart', lastError: null });
     try {
-      set({ lastError: null });
       const error = await runGatewayLifecycle('restart');
       if (error) {
         set({ lastError: error });
@@ -563,6 +571,18 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
       set((state) => (isCurrentGatewayStatus(state.status, status) ? { status } : {}));
     } catch (error) {
       set({ lastError: String(error) });
+    } finally {
+      set({ lifecycleOperation: null });
+    }
+  },
+
+  repair: async () => {
+    if (get().lifecycleOperation) return;
+    set({ lifecycleOperation: 'repair', repairOutcome: null });
+    try {
+      set({ repairOutcome: await runGatewayRepair() });
+    } finally {
+      set({ lifecycleOperation: null });
     }
   },
 

@@ -32,6 +32,8 @@ pub struct RuntimeControlCallDetail {
     pub count: Option<usize>,
     pub ready: Option<bool>,
     pub healthy: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair: Option<crate::RuntimeRepairSnapshot>,
 }
 
 impl CallDetail for RuntimeControlCallDetail {
@@ -96,6 +98,9 @@ impl RuntimeControlCallDetail {
                     // A returned lifecycle snapshot is not proof that the requested effect settled.
                     (CallStatus::Unknown, RuntimeControlCallResult::Unknown)
                 }
+            }
+            Err(RuntimeControlLifecycleError::Busy) => {
+                (CallStatus::Rejected, RuntimeControlCallResult::Unavailable)
             }
             Err(RuntimeControlLifecycleError::Unsupported) => {
                 (CallStatus::Rejected, RuntimeControlCallResult::Unsupported)

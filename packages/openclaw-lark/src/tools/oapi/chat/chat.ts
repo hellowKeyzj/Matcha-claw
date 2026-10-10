@@ -107,7 +107,7 @@ export function registerChatSearchTool(api: OpenClawPluginApi): boolean {
             // SEARCH
             // -----------------------------------------------------------------
             case 'search': {
-              log.info(`search: query="${p.query}", page_size=${p.page_size ?? 20}`);
+              log.trace(() => `search: query="${p.query}", page_size=${p.page_size ?? 20}`);
 
               const res = await client.invoke(
                 'feishu_chat.search',
@@ -142,7 +142,7 @@ export function registerChatSearchTool(api: OpenClawPluginApi): boolean {
             // GET
             // -----------------------------------------------------------------
             case 'get': {
-              log.info(`get: chat_id=${p.chat_id}, user_id_type=${p.user_id_type ?? 'open_id'}`);
+              log.trace(() => `get: chat_id=${p.chat_id}, user_id_type=${p.user_id_type ?? 'open_id'}`);
 
               const res = await client.invoke(
                 'feishu_chat.get',

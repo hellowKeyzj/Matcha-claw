@@ -5,7 +5,6 @@ use crate::run::graph::ExecutionFence;
 const MAX_REVIEW_ID_BYTES: usize = 256;
 const MAX_REVIEW_FACT_BYTES: usize = 256;
 const MAX_REVIEW_PROMPT_BYTES: usize = 64 * 1024;
-const MAX_REVIEW_SUMMARY_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ReviewerRequest {
@@ -183,7 +182,7 @@ impl ReviewVerdictReceipt {
         {
             return Err(ReviewVerdictError::InvalidIdempotencyKey);
         }
-        if self.summary.trim().is_empty() || self.summary.len() > MAX_REVIEW_SUMMARY_BYTES {
+        if self.summary.trim().is_empty() || self.summary.len() > crate::run::MAX_SUMMARY_BYTES {
             return Err(ReviewVerdictError::InvalidSummary);
         }
         if self.resolved_at < request.requested_at {

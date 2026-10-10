@@ -341,11 +341,17 @@ mod tests {
                 "workflow:review",
                 run_id.clone(),
                 "review",
-                vec![NodeDefinition::control(
+                vec![NodeDefinition::review(
                     node_id.clone(),
-                    NodeKind::Review,
                     "Release review",
                     NonZeroU32::new(2).unwrap(),
+                    organization::ReviewAssignment::with_executor(
+                        organization::ExecutorPolicy::team_role_session(
+                            "reviewer",
+                            organization::RoleSessionRef::try_new("rs0").unwrap(),
+                        ),
+                        "Check the release artifact.",
+                    ),
                 )],
                 Vec::new(),
             )

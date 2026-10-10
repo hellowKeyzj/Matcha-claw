@@ -24,7 +24,7 @@ export interface SessionRenderImage {
 
 export type SessionRenderToolRuntimeAdapterId = 'openclaw' | 'matcha-agent';
 
-export type SessionRenderToolStatusKind = 'running' | 'completed' | 'error' | 'missing_result';
+export type SessionRenderToolStatusKind = 'running' | 'completed' | 'error' | 'cancelled' | 'missing_result' | 'unknown';
 
 export interface SessionRenderToolPreviewCanvas {
   kind: 'canvas';

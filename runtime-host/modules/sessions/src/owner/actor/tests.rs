@@ -358,7 +358,7 @@ async fn send_binds_actual_native_run_before_early_terminal_and_preserves_option
                 assert_eq!(terminals[0].native_run_id, NATIVE_RUN);
                 assert_eq!(terminals[0].delivery_context, Some(context()));
                 assert_eq!(terminals[0].phase, phase);
-                assert_eq!(terminals[0].final_assistant_text.as_deref(), text);
+                assert_eq!(terminals[0].assistant_texts, text.into_iter().collect::<Vec<_>>());
             }
             assert!(harness.state().run_delivery_contexts.is_empty());
             assert!(matches!(
@@ -446,8 +446,8 @@ fn hydrated_terminal_uses_pending_context_once_and_history_keeps_none() {
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].delivery_context, Some(context()));
     assert_eq!(
-        first[0].final_assistant_text.as_deref(),
-        Some("hydrated answer")
+        first[0].assistant_texts,
+        vec!["hydrated answer"]
     );
     assert!(state.run_delivery_contexts.is_empty());
     let history = SessionShared::hydrated_terminal_snapshots(&mut state);

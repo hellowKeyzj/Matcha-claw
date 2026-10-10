@@ -1,8 +1,9 @@
 use super::team_runtime::TeamGraphPatchDraft;
 use crate::{
     GraphRunFacts, GraphRunId, OrganizationFacts, OrganizationStore, RunStartGate, StoreFault,
-    TeamId,
+    TeamId, store::DesignError,
 };
+use platform::trace::{identifier_hash, runtime_trace};
 use serde_json::{Value, json};
 
 pub enum DesignOperation {
@@ -10,7 +11,6 @@ pub enum DesignOperation {
         team_id: TeamId,
         run_id: GraphRunId,
         epoch: String,
-        proposal_id: Option<String>,
     },
     Exit {
         team_id: TeamId,
@@ -71,7 +71,6 @@ pub(crate) fn decode(
         "team.designSnapshot" => &["teamId", "runId"],
         "team.designExit" => &["teamId", "runId", "designEpoch"],
         "team.designStart" => &["teamId", "runId", "idempotencyKey"],
-        "team.designContinue" => &["teamId", "runId", "idempotencyKey", "proposalId"],
         "team.designGraphPatch" => &[
             "teamId",
             "runId",
@@ -96,18 +95,13 @@ pub(crate) fn decode(
                 .as_str()
                 .to_owned(),
         },
-        "team.designStart" | "team.designContinue" => {
+        "team.designStart" => {
             let epoch = field("idempotencyKey")?;
             crate::run::event::OpaqueId::try_new(epoch.clone()).map_err(|_| InvalidInput)?;
             DesignOperation::Begin {
                 team_id,
                 run_id,
                 epoch,
-                proposal_id: if operation == "team.designContinue" {
-                    Some(field("proposalId")?)
-                } else {
-                    None
-                },
             }
         }
         _ => {
@@ -136,16 +130,15 @@ pub(crate) fn execute(
     store: &mut OrganizationStore,
     operation: DesignOperation,
     resolver: &dyn crate::RoleSessionIdentityResolver,
-) -> Result<Value, StoreFault> {
+) -> Result<(Value, bool), StoreFault> {
     match operation {
         DesignOperation::Begin {
             team_id,
             run_id,
             epoch,
-            proposal_id,
         } => {
-            store.begin_design(&team_id, &run_id, epoch, proposal_id.as_deref())?;
-            Ok(json!({"success":true,"outcome":"designing"}))
+            store.begin_design(&team_id, &run_id, epoch)?;
+            Ok((json!({"success":true,"outcome":"designing"}), true))
         }
         DesignOperation::Exit {
             team_id,
@@ -153,10 +146,44 @@ pub(crate) fn execute(
             epoch,
         } => {
             store.exit_design(&team_id, &run_id, &epoch)?;
-            Ok(json!({"success":true,"outcome":"intake"}))
+            Ok((json!({"success":true,"outcome":"intake"}), true))
         }
         DesignOperation::Snapshot { team_id, run_id } => {
-            snapshot(store.facts(), &team_id, &run_id, resolver)
+            let result = snapshot(store.facts(), &team_id, &run_id, resolver);
+            if result.is_ok() {
+                runtime_trace("runtime.team_run.design_snapshot", || {
+                    let run = store.facts().run(&run_id).filter(|run| run.team() == &team_id);
+                    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+                    if let Some(run) = run {
+                        for node in run.graph().definition().nodes() {
+                            if let Some(attempt) = run.graph().current_attempt(node.id()) {
+                                let status = match attempt.status() {
+                                    crate::AttemptStatus::Pending => "pending",
+                                    crate::AttemptStatus::Ready => "ready",
+                                    crate::AttemptStatus::Running => "running",
+                                    crate::AttemptStatus::Waiting => "waiting",
+                                    crate::AttemptStatus::Completed => "completed",
+                                    crate::AttemptStatus::Failed => "failed",
+                                    crate::AttemptStatus::Cancelled => "cancelled",
+                                };
+                                *counts.entry(status).or_default() += 1;
+                            }
+                        }
+                    }
+                    json!({
+                        "runHash": identifier_hash(run_id.as_str()),
+                        "outcome": "success",
+                        "startGate": run.map(|run| match run.start_gate() {
+                            RunStartGate::Intake => "intake",
+                            RunStartGate::Designing { .. } => "designing",
+                            RunStartGate::Started => "started",
+                        }),
+                        "nodeStateCounts": counts,
+                        "graph": run.map(|run| crate::trace::graph(run.graph())),
+                    })
+                });
+            }
+            result.map(|result| (result, false))
         }
         DesignOperation::Context {
             team_id,
@@ -172,7 +199,7 @@ pub(crate) fn execute(
                 Some(&generation),
                 None,
             )?;
-            snapshot(store.facts(), &team_id, &run_id, resolver)
+            snapshot(store.facts(), &team_id, &run_id, resolver).map(|result| (result, false))
         }
         DesignOperation::Patch {
             team_id,
@@ -183,7 +210,7 @@ pub(crate) fn execute(
         } => {
             let run_id = patch.run_id.clone();
             store.design_patch(&team_id, &epoch, generation.as_deref(), &version, patch)?;
-            snapshot(store.facts(), &team_id, &run_id, resolver)
+            snapshot(store.facts(), &team_id, &run_id, resolver).map(|result| (result, true))
         }
     }
 }
@@ -196,32 +223,29 @@ pub(crate) fn guard(
     generation: Option<&str>,
     version: Option<&str>,
 ) -> Result<(), StoreFault> {
-    let run = facts.run(run_id).ok_or(StoreFault::InvalidFacts)?;
+    let run = facts
+        .run(run_id)
+        .ok_or(StoreFault::Design(DesignError::UnknownRun))?;
     if run.team() != team_id {
-        return Err(StoreFault::InvalidFacts);
+        return Err(StoreFault::Design(DesignError::TeamMismatch));
     }
     let (current_epoch, current_generation) = match run.start_gate() {
         RunStartGate::Designing {
             design_epoch,
             prompt_generation,
         } => (design_epoch.as_str(), prompt_generation.as_deref()),
-        RunStartGate::DesignProposalPending {
-            design_epoch,
-            prompt_generation,
-            ..
-        } => (design_epoch.as_str(), Some(prompt_generation.as_str())),
-        _ => return Err(StoreFault::InvalidFacts),
+        _ => return Err(StoreFault::Design(DesignError::NotDesigning)),
     };
-    if current_epoch != epoch
-        || generation.is_some_and(|value| Some(value) != current_generation)
-        || version.is_some_and(|value| {
-            crate::store::codec::graph_version(run.graph().definition())
-                .ok()
-                .as_deref()
-                != Some(value)
-        })
-    {
-        return Err(StoreFault::InvalidFacts);
+    if current_epoch != epoch {
+        return Err(StoreFault::Design(DesignError::StaleEpoch));
+    }
+    if generation.is_some_and(|value| Some(value) != current_generation) {
+        return Err(StoreFault::Design(DesignError::StaleGeneration));
+    }
+    if let Some(version) = version {
+        if crate::store::codec::graph_version(run.graph().definition())? != version {
+            return Err(StoreFault::Design(DesignError::StaleGraphVersion));
+        }
     }
     Ok(())
 }
@@ -239,7 +263,10 @@ pub(crate) fn validate_definition(
     graph: &crate::GraphDefinition,
     complete: bool,
 ) -> Result<(), StoreFault> {
-    let team = facts.team(run.team()).ok_or(StoreFault::InvalidFacts)?;
+    graph
+        .validate_ports()
+        .and_then(|()| graph.validate_node_configuration())
+        .map_err(|error| StoreFault::GraphPatch(crate::GraphPatchError::Definition(error)))?;
     if complete
         && (!graph
             .nodes()
@@ -250,36 +277,12 @@ pub(crate) fn validate_definition(
                 .iter()
                 .any(|node| node.kind() == crate::NodeKind::End))
     {
-        return Err(StoreFault::InvalidFacts);
+        return Err(StoreFault::Design(DesignError::MissingStartOrEnd));
     }
-    for node in graph.nodes() {
-        let assignment = node
-            .work_assignment()
-            .map(|work| (work.role_id(), work.session_ref(), work.prompt()))
-            .or_else(|| {
-                node.review_assignment()
-                    .map(|review| (review.role_id(), review.session_ref(), review.prompt()))
-            });
-        if let Some((role, session_ref, prompt)) = assignment {
-            if prompt.trim().is_empty()
-                || !team
-                    .definition()
-                    .roles()
-                    .iter()
-                    .any(|item| item.role_id().as_str() == role)
-                || !run.runtime().is_some_and(|runtime| {
-                    runtime.bindings().iter().any(|binding| {
-                        binding.role().as_str() == role && binding.session_ref() == session_ref
-                    })
-                })
-            {
-                return Err(StoreFault::InvalidFacts);
-            }
-        } else if matches!(node.kind(), crate::NodeKind::Work | crate::NodeKind::Review) {
-            return Err(StoreFault::InvalidFacts);
-        }
-    }
+    validate_assignments(facts, run, graph, None)?;
     if complete {
+        graph.validate_join_inputs()
+            .map_err(|error| StoreFault::GraphPatch(crate::GraphPatchError::Definition(error)))?;
         let mut reachable = graph
             .nodes()
             .iter()
@@ -310,12 +313,74 @@ pub(crate) fn validate_definition(
                 break;
             }
         }
-        if graph
+        if let Some(node) = graph
             .nodes()
             .iter()
-            .any(|node| !reachable.contains(node.id()) || !finishing.contains(node.id()))
+            .find(|node| !reachable.contains(node.id()) || !finishing.contains(node.id()))
         {
-            return Err(StoreFault::InvalidFacts);
+            return Err(StoreFault::Design(DesignError::IncompletePath(
+                node.id().clone(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_assignments(
+    facts: &OrganizationFacts,
+    run: &GraphRunFacts,
+    graph: &crate::GraphDefinition,
+    previous: Option<&crate::GraphDefinition>,
+) -> Result<(), StoreFault> {
+    let team = facts
+        .team(run.team())
+        .ok_or(StoreFault::Design(DesignError::UnknownTeam))?;
+    let previous = previous.into_iter().flat_map(|graph| graph.nodes())
+        .map(|node| (node.id(), node)).collect::<std::collections::BTreeMap<_, _>>();
+    for node in graph.nodes() {
+        if previous.get(node.id()).is_some_and(|prior| {
+            prior.work_assignment() == node.work_assignment()
+                && prior.review_assignment() == node.review_assignment()
+                && prior.kind() == node.kind()
+        }) {
+            continue;
+        }
+        let assignment = node
+            .work_assignment()
+            .map(|work| (work.role_id(), work.session_ref(), work.prompt()))
+            .or_else(|| {
+                node.review_assignment()
+                    .map(|review| (review.role_id(), review.session_ref(), review.prompt()))
+            });
+        if let Some((role, session_ref, prompt)) = assignment {
+            if prompt.trim().is_empty() {
+                return Err(StoreFault::Design(DesignError::EmptyPrompt(
+                    node.id().clone(),
+                )));
+            }
+            if !team
+                .definition()
+                .roles()
+                .iter()
+                .any(|item| item.role_id().as_str() == role)
+            {
+                return Err(StoreFault::Design(DesignError::UnknownRole(
+                    node.id().clone(),
+                )));
+            }
+            if !run.runtime().is_some_and(|runtime| {
+                runtime.bindings().iter().any(|binding| {
+                    binding.role().as_str() == role && binding.session_ref() == session_ref
+                })
+            }) {
+                return Err(StoreFault::Design(DesignError::SessionBindingMismatch(
+                    node.id().clone(),
+                )));
+            }
+        } else if matches!(node.kind(), crate::NodeKind::Work | crate::NodeKind::Review) {
+            return Err(StoreFault::Design(DesignError::MissingAssignment(
+                node.id().clone(),
+            )));
         }
     }
     Ok(())
@@ -324,26 +389,10 @@ pub(crate) fn validate_definition(
 pub(crate) fn start_gate_json(run: &GraphRunFacts) -> Result<Value, StoreFault> {
     let version = crate::store::codec::graph_version(run.graph().definition())?;
     Ok(match run.start_gate() {
-        RunStartGate::Intake => json!({"status":"intake","proposal":null}),
-        RunStartGate::Started => json!({"status":"started","proposal":null}),
-        RunStartGate::ProposalPending {
-            proposal_id,
-            summary,
-            ..
-        } => {
-            json!({"status":"proposal_pending","proposal":{"proposalId":proposal_id,"taskSummary":summary}})
-        }
+        RunStartGate::Intake => json!({"status":"intake"}),
+        RunStartGate::Started => json!({"status":"started"}),
         RunStartGate::Designing { design_epoch, .. } => {
-            json!({"status":"designing","designEpoch":design_epoch,"graphVersion":version,"proposal":null})
-        }
-        RunStartGate::DesignProposalPending {
-            design_epoch,
-            proposal_id,
-            summary,
-            graph_version,
-            ..
-        } => {
-            json!({"status":"design_proposal_pending","designEpoch":design_epoch,"graphVersion":graph_version,"proposal":{"proposalId":proposal_id,"taskSummary":summary}})
+            json!({"status":"designing","designEpoch":design_epoch,"graphVersion":version})
         }
     })
 }
@@ -373,7 +422,7 @@ pub(crate) fn snapshot(
     let definition = run.graph().definition();
     let nodes = definition.nodes().iter().zip(graph["nodes"].as_array().expect("graph node projection")).map(|(node, projected)| {
         let prompt = node.work_assignment().map(|work| work.prompt()).or_else(|| node.review_assignment().map(|review| review.prompt()));
-        let mut config = json!({});
+        let mut config = projected["config"].clone();
         if let Some(prompt) = prompt { config["prompt"] = json!(prompt); }
         if let Some(work) = node.work_assignment() {
             if let Some(kind) = work.output_artifact_kind() { config["outputArtifactKind"] = json!(kind); }
@@ -381,11 +430,9 @@ pub(crate) fn snapshot(
         }
         if let Some(review) = node.review_assignment() { config["sessionRef"] = json!(review.session_ref().as_str()); }
         if let Some(trigger) = node.trigger() { config["trigger"] = match trigger { crate::StartTrigger::Webhook { path } => json!({"mode":"webhook","path":path}), crate::StartTrigger::Cron { expression } => json!({"mode":"cron","cron":expression}) }; }
-        if let Some(group) = node.work_group() { config["join"] = json!({"requireCompleted":group.join_policy().require_completed(),"allowFailed":group.join_policy().allow_failed(),"retryLimit":group.join_policy().retry_limit()}); }
         let mut projected = projected.clone();
         projected["config"] = config;
         projected["roleId"] = json!(node.work_assignment().map(|work|work.role_id()).or_else(||node.review_assignment().map(|review|review.role_id())));
-        projected["groupId"] = json!(node.work_assignment().and_then(|work|work.group_id()).or_else(||node.work_group().map(|group|group.id())).map(|group|group.as_str()));
         projected
     }).collect::<Vec<_>>();
     let edges = definition.edges().iter().zip(graph["edges"].as_array().expect("graph edge projection")).map(|(edge, projected)| {
@@ -397,11 +444,14 @@ pub(crate) fn snapshot(
     graph["nodes"] = json!(nodes);
     graph["edges"] = json!(edges);
     let epoch = match run.start_gate() {
-        RunStartGate::Designing { design_epoch, .. }
-        | RunStartGate::DesignProposalPending { design_epoch, .. } => Some(design_epoch),
+        RunStartGate::Designing { design_epoch, .. } => Some(design_epoch),
         _ => None,
     };
+    let runtime_error = super::team_message::terminal_failure(facts, run_id)
+        .map(|(node_id, code, message)| {
+            json!({"success":false,"error":message,"errorCode":code,"nodeId":node_id.as_str()})
+        });
     Ok(
-        json!({"success":true,"teamId":team_id.as_str(),"runId":run_id.as_str(),"startGate":start_gate_json(run)?,"graphVersion":crate::store::codec::graph_version(definition)?,"designEpoch":epoch,"graph":graph,"roles":roles}),
+        json!({"success":true,"runtimeError":runtime_error,"teamId":team_id.as_str(),"runId":run_id.as_str(),"startGate":start_gate_json(run)?,"graphVersion":crate::store::codec::graph_version(definition)?,"designEpoch":epoch,"graph":graph,"roles":roles}),
     )
 }

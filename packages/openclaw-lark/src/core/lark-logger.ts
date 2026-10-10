@@ -21,9 +21,17 @@ import { tryGetLarkRuntime } from './runtime-store';
 // Public interface
 // ---------------------------------------------------------------------------
 
+type LogMessage = string | (() => string);
+type LogMeta = Record<string, unknown> | (() => Record<string, unknown>);
+
+export function isTraceEnabled(): boolean {
+  return process.env.MATCHACLAW_TRACE === '1';
+}
+
 export interface LarkLogger {
   readonly subsystem: string;
-  debug(message: string, meta?: Record<string, unknown>): void;
+  trace(message: LogMessage, meta?: LogMeta): void;
+  debug(message: LogMessage, meta?: LogMeta): void;
   info(message: string, meta?: Record<string, unknown>): void;
   warn(message: string, meta?: Record<string, unknown>): void;
   error(message: string, meta?: Record<string, unknown>): void;
@@ -152,8 +160,17 @@ function createLarkLogger(subsystem: string): LarkLogger {
 
   return {
     subsystem,
-    debug(message: string, meta?: Record<string, unknown>): void {
-      getLogger().debug?.(formatMessage(message, meta), enrichMeta(meta));
+    trace(message: LogMessage, meta?: LogMeta): void {
+      if (!isTraceEnabled()) return;
+      const text = typeof message === 'function' ? message() : message;
+      const fields = typeof meta === 'function' ? meta() : meta;
+      getLogger().info(formatMessage(text, fields), enrichMeta(fields));
+    },
+    debug(message: LogMessage, meta?: LogMeta): void {
+      if (!isTraceEnabled()) return;
+      const text = typeof message === 'function' ? message() : message;
+      const fields = typeof meta === 'function' ? meta() : meta;
+      getLogger().debug?.(formatMessage(text, fields), enrichMeta(fields));
     },
     info(message: string, meta?: Record<string, unknown>): void {
       getLogger().info(formatMessage(message, meta), enrichMeta(meta));

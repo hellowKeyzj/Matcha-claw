@@ -10,7 +10,6 @@ pub(super) struct HostHandleInput {
     pub(super) clawhub_registry: clawhub::ClawHubRegistryClient,
     pub(super) runtime_observation: ::diagnostics::RuntimeFlightRecorder,
     pub(super) session_delta_source: sessions_module::SessionDeltaSource,
-    pub(super) start_gate_registry: Arc<organization::StartGateRegistry>,
 }
 
 pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> HostHandles {
@@ -22,7 +21,6 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> H
         clawhub_registry,
         runtime_observation,
         session_delta_source,
-        start_gate_registry,
     } = input;
     let runtime_directory = Arc::clone(&owners.runtime_directory);
     let toolchain_handle = owners.toolchain.clone();
@@ -83,7 +81,6 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> H
         diagnostics: diagnostics_handle,
         observation: runtime_observation.sink(),
         session_delta_source,
-        start_gate_registry,
         runtime_directory,
     }
 }

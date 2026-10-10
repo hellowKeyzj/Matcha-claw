@@ -5,6 +5,7 @@ mod terminal_observation;
 use super::trigger::{TriggerFireRequest, TriggerFireRequestError, TriggerSource};
 
 pub use cron::{CronScheduleError, next_cron_slot_after};
+pub(crate) use cron::validate_cron_expression;
 pub use retry_due::{
     NodePromptRetryDueInvalidReason, NodePromptRetryDueItem, NodePromptRetryDuePlan,
     NodePromptRetryDueQuery, NodePromptRetryDueQueryError, NodePromptRetryDueQueryOutcome,
@@ -15,7 +16,7 @@ pub use terminal_observation::{TerminalObservationPlan, plan_terminal_observatio
 
 use super::{
     activity::{ActivityId, ActivityKind, ActivityRequest, ActivityRequestError, ActivityTarget},
-    graph::{AttemptStatus, ExecutionFence, GraphRunId, GraphState, GroupId, NodeId, NodeKind},
+    graph::{AttemptStatus, ExecutionFence, GraphRunId, GraphState, NodeId, NodeKind},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,7 +27,6 @@ pub struct ReadyNodeSchedule {
     fence: ExecutionFence,
     activity_kind: ActivityKind,
     idempotency_key: String,
-    group_id: Option<GroupId>,
 }
 
 impl ReadyNodeSchedule {
@@ -75,10 +75,6 @@ impl ReadyNodeSchedule {
         request.validate()?;
         Ok(request)
     }
-
-    pub fn group_id(&self) -> Option<&GroupId> {
-        self.group_id.as_ref()
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,8 +87,7 @@ pub enum ReadyScheduleError {
 /// Selects a deterministic bounded scheduling wave from the graph's durable ready facts.
 ///
 /// The scheduler does not infer ports from native terminal observations and does not mutate the
-/// graph. Group membership is read only from typed work assignments; join readiness is owned by
-/// the graph reducer.
+/// graph. Join readiness is owned by the graph reducer.
 pub fn schedule_ready_nodes(
     graph: &GraphState,
     max_parallel: usize,
@@ -119,16 +114,12 @@ pub fn schedule_ready_nodes(
         let Some(node) = graph.definition().node(item.node_id()) else {
             return Err(ReadyScheduleError::StaleReadyQueue(item.node_id().clone()));
         };
-        let Some(activity_kind) = activity_kind_for_ready_node(graph.definition(), node) else {
+        let Some(activity_kind) = activity_kind_for_ready_node(node) else {
             continue;
         };
         let idempotency_key = activity_idempotency_key(graph.definition().run_id(), item.fence());
         let activity_id = ActivityId::new(idempotency_key.clone())
             .map_err(|_| ReadyScheduleError::StaleReadyQueue(item.node_id().clone()))?;
-        let group_id = node
-            .work_assignment()
-            .and_then(|work| work.group_id())
-            .cloned();
         scheduled.push(ReadyNodeSchedule {
             activity_id,
             run_id: graph.definition().run_id().clone(),
@@ -136,16 +127,12 @@ pub fn schedule_ready_nodes(
             fence: item.fence().clone(),
             activity_kind,
             idempotency_key,
-            group_id,
         });
     }
     Ok(scheduled)
 }
 
-fn activity_kind_for_ready_node(
-    definition: &crate::GraphDefinition,
-    node: &crate::NodeDefinition,
-) -> Option<ActivityKind> {
+fn activity_kind_for_ready_node(node: &crate::NodeDefinition) -> Option<ActivityKind> {
     match node.kind() {
         NodeKind::Work => {
             let work = node.work_assignment()?;
@@ -156,7 +143,7 @@ fn activity_kind_for_ready_node(
                 task_id: work.task_id().to_owned(),
                 role_id: work.role_id().to_owned(),
                 session_ref: work.session_ref().as_str().to_owned(),
-                prompt: compose_agent_task_prompt(definition, node, work.prompt())?,
+                prompt: work.prompt().to_owned(),
             })
         }
         NodeKind::Review => {
@@ -168,7 +155,7 @@ fn activity_kind_for_ready_node(
                 task_id: node.id().as_str().to_owned(),
                 role_id: review.role_id().to_owned(),
                 session_ref: review.session_ref().as_str().to_owned(),
-                prompt: compose_agent_task_prompt(definition, node, review.prompt())?,
+                prompt: review.prompt().to_owned(),
             })
         }
         NodeKind::Start
@@ -179,38 +166,40 @@ fn activity_kind_for_ready_node(
     }
 }
 
-pub(crate) fn compose_agent_task_prompt(
-    definition: &crate::GraphDefinition,
-    node: &crate::NodeDefinition,
-    base_prompt: &str,
-) -> Option<String> {
-    compose_agent_task_prompt_with_upstream_context(definition, node, base_prompt, &[])
-}
-
 pub(crate) struct UpstreamPromptContext<'a> {
     pub(crate) summary: &'a str,
-    pub(crate) tasks: Vec<&'a str>,
 }
 
 pub(crate) fn compose_agent_task_prompt_with_upstream_context(
-    definition: &crate::GraphDefinition,
+    team_id: &crate::TeamId,
     node: &crate::NodeDefinition,
-    base_prompt: &str,
+    request: &ActivityRequest,
     upstream: &[UpstreamPromptContext<'_>],
 ) -> Option<String> {
-    let (decisions, source_ports) = match node.kind() {
-        NodeKind::Work => (work_decisions(), work_decision_ports()),
-        NodeKind::Review => (review_decisions(), review_decision_ports()),
+    let ActivityKind::AgentTask { prompt, .. } = &request.activity_kind else {
+        return None;
+    };
+    let decisions = match node.kind() {
+        NodeKind::Work => work_decisions(),
+        NodeKind::Review => review_decisions(),
         NodeKind::Start
         | NodeKind::HumanDecision
         | NodeKind::ScriptReview
         | NodeKind::Join
         | NodeKind::End => return None,
     };
+    let context = serde_json::json!({
+        "teamId": team_id.as_str(),
+        "runId": request.run_id.as_str(),
+        "nodeId": request.node_id.as_str(),
+        "nodeExecutionId": request.node_execution_id.as_str(),
+    });
+    let prompt = format!(
+        "<team_run_context>{context}</team_run_context>\n\n<node_task>{prompt}</node_task>"
+    );
     Some(append_completion_protocol(
-        &append_upstream_context(base_prompt, upstream),
+        &append_upstream_context(&prompt, upstream),
         decisions,
-        allowed_role_ids(definition, node, source_ports),
     ))
 }
 
@@ -223,23 +212,14 @@ fn append_upstream_context(prompt: &str, upstream: &[UpstreamPromptContext<'_>])
     for context in upstream {
         composed.push_str("\n- summary: ");
         composed.push_str(context.summary);
-        for task in &context.tasks {
-            composed.push_str("\n  task: ");
-            composed.push_str(task);
-        }
     }
     composed.push_str("\n</teamrun_upstream_context>");
     composed
 }
 
-fn append_completion_protocol(
-    prompt: &str,
-    decisions: &'static str,
-    allowed_role_ids: Vec<String>,
-) -> String {
+fn append_completion_protocol(prompt: &str, decisions: &'static str) -> String {
     format!(
-        "{prompt}\n\n<teamrun_completion_protocol>\n你处于 TeamRun 团队模式。完成当前节点任务后，在最终回复末尾追加一个 `<team_message>` 控制块\n\n`<team_message>` 控制块内必须是合法 JSON，结构如下：\n<team_message>{{\"summary\":\"\",\"decision\":\"\",\"dispatch\":[]}}</team_message>\n\n字段：\n- `summary`：中文写本节点交付摘要；包含完成内容、关键结论、产物/改动、风险、下游节点必要上下文\n- `decision`：选择当前节点的一个后续流向。只能选择下面列出的值：\n{decisions}\n- `dispatch`：给下游节点 role 的具体任务；没有任务时填 `[]`。每项包含：\n  - `role_id`：下游 role id，只能选择以下团队role：\n{}\n  - `task`：给该 role 的具体任务。\n\n要求：\n- 整条最终回复只能出现一个 `<team_message>`\n- 不要新增未说明字段\n</teamrun_completion_protocol>",
-        format_allowed_role_ids(&allowed_role_ids)
+        "{prompt}\n\n任务执行与调整：\n- 按本次派发的任务正文执行，将上游结果作为任务输入；不以修改节点提示词代替完成当前任务。\n- 需要调整节点任务时，先用 team_graph_context（view=run_prompts）读取运行图任务正文；已经适用则不改，否则用 team_graph_patch 的 set_node_prompt（op/nodeId/prompt 同层）保存完整正文，不用设计期 replace_node。\n- 根据实际结果修改不适用或缺失的内容，保留仍有效的目标、约束和验收标准；写清所需输入、产出及必要的产物引用，使执行者无需依赖本轮聊天即可开展工作。\n- 调用参数遵循工具说明，外层 teamId/runId/nodeId/nodeExecutionId 原样取自 <team_run_context>，其中 nodeId 是当前执行节点；operations 中的 nodeId 是读取结果中的目标节点，expectedGraphVersion 取自返回的 graphVersion；版本冲突时重读后重新判断，不直接覆盖。\n- 以工具确认的保存结果为准；必要修改未保存时，说明具体阻塞，不宣告依赖该修改的交接已完成。\n- 提示词修改仅对后续派发生效，不改变已派发任务，也不触发启动、中断或重跑。\n\n<teamrun_completion_protocol>\n你处于 TeamRun 团队模式。完成当前节点任务后，在最终回复末尾追加一个 `<team_message>` 控制块\n\n`<team_message>` 控制块内必须是合法 JSON，结构如下：\n<team_message>{{\"summary\":\"\",\"decision\":\"\"}}</team_message>\n\n字段：\n- `summary`：中文写本节点交付摘要；包含完成内容、关键结论、产物/改动、风险、下游节点必要上下文；非空，不超过 512 UTF-8 字节，不含控制字符\n- `decision`：选择当前节点的一个后续流向。只能选择下面列出的值：\n{decisions}\n\n要求：\n- 最终回复末尾只追加一个完整控制块，不用 Markdown 代码围栏包裹；结束标签后不再输出内容，字段值中不写控制块标签\n- 块内直接写一个 JSON 对象，不写数组或把整个对象编码成字符串；只含 `summary`、`decision`，各出现一次，值均为非空字符串，不用 null、数字、布尔值或嵌套对象代替\n- JSON 结构使用英文双引号、冒号和逗号；不用单引号或中文标点代替，不写注释、省略号或尾逗号\n- `summary` 内容中的引用优先用中文引号，如“不可核实”；JSON 键名和字符串值的包围符仍用英文双引号\n- 字符串值内部的英文双引号写为 `\\\"`，反斜杠写为 `\\\\`；不要用 HTML 实体代替 JSON 转义\n- 摘要写成单段，用空格或分号分隔，不含换行、制表符等控制字符，即使写成 JSON 转义也不允许；超长时精简内容，不截断 JSON\n- 提交前检查对象与字符串闭合、转义和字段类型；`decision` 原样使用允许的值，不翻译、不加空格或解释\n- 摘要只报告实际结果；任务分派或调整通过 MCP 保存到目标节点提示词，不在摘要中另行下达任务\n</teamrun_completion_protocol>"
     )
 }
 
@@ -251,57 +231,7 @@ fn review_decisions() -> &'static str {
     "- `completed`：审查/验收通过，继续正常后续节点。\n- `rework`：审查/验收不通过，返回返工路径。"
 }
 
-fn work_decision_ports() -> &'static [&'static str] {
-    &["completed"]
-}
-
-fn review_decision_ports() -> &'static [&'static str] {
-    &["completed", "rework"]
-}
-
-fn allowed_role_ids(
-    definition: &crate::GraphDefinition,
-    node: &crate::NodeDefinition,
-    source_ports: &[&str],
-) -> Vec<String> {
-    let mut role_ids: Vec<String> = Vec::new();
-    for edge in definition
-        .outgoing_edges(node.id())
-        .filter(|edge| source_ports.contains(&edge.source_port()))
-    {
-        let Some(target) = definition.node(edge.target_node_id()) else {
-            continue;
-        };
-        let role_id = match target.kind() {
-            NodeKind::Work => target.work_assignment().map(|work| work.role_id()),
-            NodeKind::Review => target.review_assignment().map(|review| review.role_id()),
-            NodeKind::Start
-            | NodeKind::HumanDecision
-            | NodeKind::ScriptReview
-            | NodeKind::Join
-            | NodeKind::End => None,
-        };
-        if let Some(role_id) = role_id {
-            if !role_ids.iter().any(|existing| existing.as_str() == role_id) {
-                role_ids.push(role_id.to_owned());
-            }
-        }
-    }
-    role_ids
-}
-
-fn format_allowed_role_ids(role_ids: &[String]) -> String {
-    if role_ids.is_empty() {
-        return "- 无".to_owned();
-    }
-    role_ids
-        .iter()
-        .map(|role_id| format!("- `{role_id}`"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn activity_idempotency_key(run_id: &GraphRunId, fence: &ExecutionFence) -> String {
+pub(crate) fn activity_idempotency_key(run_id: &GraphRunId, fence: &ExecutionFence) -> String {
     format!(
         "team-graph-activity:{}:{}",
         run_id.as_str(),
@@ -370,9 +300,15 @@ mod tests {
         }
     }
 
-    fn expected_prompt(prompt: &str, decisions: &str, allowed_role_ids: &str) -> String {
+    fn expected_prompt(prompt: &str, decisions: &str, node_id: &str) -> String {
+        let context = serde_json::json!({
+            "teamId": "team-1",
+            "runId": "run-1",
+            "nodeId": node_id,
+            "nodeExecutionId": format!("{node_id}:attempt:1"),
+        });
         format!(
-            "{prompt}\n\n<teamrun_completion_protocol>\n你处于 TeamRun 团队模式。完成当前节点任务后，在最终回复末尾追加一个 `<team_message>` 控制块\n\n`<team_message>` 控制块内必须是合法 JSON，结构如下：\n<team_message>{{\"summary\":\"\",\"decision\":\"\",\"dispatch\":[]}}</team_message>\n\n字段：\n- `summary`：中文写本节点交付摘要；包含完成内容、关键结论、产物/改动、风险、下游节点必要上下文\n- `decision`：选择当前节点的一个后续流向。只能选择下面列出的值：\n{decisions}\n- `dispatch`：给下游节点 role 的具体任务；没有任务时填 `[]`。每项包含：\n  - `role_id`：下游 role id，只能选择以下团队role：\n{allowed_role_ids}\n  - `task`：给该 role 的具体任务。\n\n要求：\n- 整条最终回复只能出现一个 `<team_message>`\n- 不要新增未说明字段\n</teamrun_completion_protocol>"
+            "<team_run_context>{context}</team_run_context>\n\n<node_task>{prompt}</node_task>\n\n任务执行与调整：\n- 按本次派发的任务正文执行，将上游结果作为任务输入；不以修改节点提示词代替完成当前任务。\n- 需要调整节点任务时，先用 team_graph_context（view=run_prompts）读取运行图任务正文；已经适用则不改，否则用 team_graph_patch 的 set_node_prompt（op/nodeId/prompt 同层）保存完整正文，不用设计期 replace_node。\n- 根据实际结果修改不适用或缺失的内容，保留仍有效的目标、约束和验收标准；写清所需输入、产出及必要的产物引用，使执行者无需依赖本轮聊天即可开展工作。\n- 调用参数遵循工具说明，外层 teamId/runId/nodeId/nodeExecutionId 原样取自 <team_run_context>，其中 nodeId 是当前执行节点；operations 中的 nodeId 是读取结果中的目标节点，expectedGraphVersion 取自返回的 graphVersion；版本冲突时重读后重新判断，不直接覆盖。\n- 以工具确认的保存结果为准；必要修改未保存时，说明具体阻塞，不宣告依赖该修改的交接已完成。\n- 提示词修改仅对后续派发生效，不改变已派发任务，也不触发启动、中断或重跑。\n\n<teamrun_completion_protocol>\n你处于 TeamRun 团队模式。完成当前节点任务后，在最终回复末尾追加一个 `<team_message>` 控制块\n\n`<team_message>` 控制块内必须是合法 JSON，结构如下：\n<team_message>{{\"summary\":\"\",\"decision\":\"\"}}</team_message>\n\n字段：\n- `summary`：中文写本节点交付摘要；包含完成内容、关键结论、产物/改动、风险、下游节点必要上下文；非空，不超过 512 UTF-8 字节，不含控制字符\n- `decision`：选择当前节点的一个后续流向。只能选择下面列出的值：\n{decisions}\n\n要求：\n- 最终回复末尾只追加一个完整控制块，不用 Markdown 代码围栏包裹；结束标签后不再输出内容，字段值中不写控制块标签\n- 块内直接写一个 JSON 对象，不写数组或把整个对象编码成字符串；只含 `summary`、`decision`，各出现一次，值均为非空字符串，不用 null、数字、布尔值或嵌套对象代替\n- JSON 结构使用英文双引号、冒号和逗号；不用单引号或中文标点代替，不写注释、省略号或尾逗号\n- `summary` 内容中的引用优先用中文引号，如“不可核实”；JSON 键名和字符串值的包围符仍用英文双引号\n- 字符串值内部的英文双引号写为 `\\\"`，反斜杠写为 `\\\\`；不要用 HTML 实体代替 JSON 转义\n- 摘要写成单段，用空格或分号分隔，不含换行、制表符等控制字符，即使写成 JSON 转义也不允许；超长时精简内容，不截断 JSON\n- 提交前检查对象与字符串闭合、转义和字段类型；`decision` 原样使用允许的值，不翻译、不加空格或解释\n- 摘要只报告实际结果；任务分派或调整通过 MCP 保存到目标节点提示词，不在摘要中另行下达任务\n</teamrun_completion_protocol>"
         )
     }
 
@@ -428,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn schedule_ready_nodes_uses_typed_group_facts_and_parallel_capacity() {
+    fn schedule_ready_nodes_uses_typed_work_facts_and_parallel_capacity() {
         use crate::run::graph::{
             EdgeAction, EdgeDefinition, EdgeId, ExecutorPolicy, GraphDefinition, GraphRunId,
             NodeDefinition, NodeId, WorkAssignment,
@@ -453,7 +389,6 @@ mod tests {
                             "prompt",
                             ExecutorPolicy::team_role("role-a"),
                             None,
-                            Some(GroupId::new("group-a")),
                         ),
                     ),
                     NodeDefinition::work(
@@ -464,7 +399,6 @@ mod tests {
                             "task-b",
                             "next prompt",
                             ExecutorPolicy::team_role("role-b"),
-                            None,
                             None,
                         ),
                     ),
@@ -493,18 +427,13 @@ mod tests {
         );
         assert_eq!(selected[0].run_id().as_str(), "run-1");
         assert_eq!(selected[0].node_id().as_str(), "work-a");
-        assert_eq!(selected[0].group_id().map(GroupId::as_str), Some("group-a"));
         assert!(matches!(
             selected[0].activity_kind(),
             ActivityKind::AgentTask { task_id, role_id, session_ref, prompt }
                 if task_id == "task-a"
                     && role_id == "role-a"
                     && session_ref == "rs0"
-                    && prompt == &expected_prompt(
-                        "prompt",
-                        work_decisions(),
-                        "- `role-b`",
-                    )
+                    && prompt == "prompt"
         ));
         let request = selected[0]
             .bind_activity_target(ActivityTarget::new("session-a").unwrap(), 3, 1)
@@ -545,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn work_prompt_lists_no_allowed_roles_without_downstream_agent_nodes() {
+    fn work_prompt_uses_run_context_and_completion_protocol() {
         use crate::run::graph::{
             ExecutorPolicy, GraphDefinition, GraphRunId, NodeDefinition, NodeId, WorkAssignment,
         };
@@ -566,7 +495,6 @@ mod tests {
                         "solo prompt",
                         ExecutorPolicy::team_role("role"),
                         None,
-                        None,
                     ),
                 )],
                 Vec::new(),
@@ -577,15 +505,22 @@ mod tests {
 
         let selected = schedule_ready_nodes(&graph, 1, 0).unwrap();
 
-        assert!(matches!(
-            selected[0].activity_kind(),
-            ActivityKind::AgentTask { prompt, .. }
-                if prompt == &expected_prompt("solo prompt", work_decisions(), "- 无")
-        ));
+        let request = selected[0]
+            .bind_activity_target(ActivityTarget::new("rs0").unwrap(), 1, 1)
+            .unwrap();
+        assert_eq!(
+            compose_agent_task_prompt_with_upstream_context(
+                &crate::TeamId::try_new("team-1").unwrap(),
+                graph.definition().node(selected[0].node_id()).unwrap(),
+                &request,
+                &[],
+            ),
+            Some(expected_prompt("solo prompt", work_decisions(), "work"))
+        );
     }
 
     #[test]
-    fn review_prompt_lists_completed_and_rework_decisions_with_downstream_roles() {
+    fn review_prompt_lists_completed_and_rework_decisions() {
         use crate::run::graph::{
             EdgeAction, EdgeDefinition, EdgeId, ExecutorPolicy, GraphDefinition, GraphRunId,
             NodeDefinition, NodeId, ReviewAssignment, WorkAssignment,
@@ -617,7 +552,6 @@ mod tests {
                             "accepted prompt",
                             ExecutorPolicy::team_role("role-accepted"),
                             None,
-                            None,
                         ),
                     ),
                     NodeDefinition::work(
@@ -628,7 +562,6 @@ mod tests {
                             "task-rework",
                             "rework prompt",
                             ExecutorPolicy::team_role("role-rework"),
-                            None,
                             None,
                         ),
                     ),
@@ -659,15 +592,22 @@ mod tests {
         let selected = schedule_ready_nodes(&graph, 1, 0).unwrap();
 
         assert_eq!(selected[0].node_id(), &review);
-        assert!(matches!(
-            selected[0].activity_kind(),
-            ActivityKind::AgentTask { prompt, .. }
-                if prompt == &expected_prompt(
-                    "review prompt",
-                    review_decisions(),
-                    "- `role-accepted`\n- `role-rework`",
-                )
-        ));
+        let request = selected[0]
+            .bind_activity_target(ActivityTarget::new("rs0").unwrap(), 1, 1)
+            .unwrap();
+        assert_eq!(
+            compose_agent_task_prompt_with_upstream_context(
+                &crate::TeamId::try_new("team-1").unwrap(),
+                graph.definition().node(&review).unwrap(),
+                &request,
+                &[],
+            ),
+            Some(expected_prompt(
+                "review prompt",
+                review_decisions(),
+                "review"
+            ))
+        );
     }
 
     #[test]
@@ -696,7 +636,6 @@ mod tests {
                             "task-work",
                             "work prompt",
                             ExecutorPolicy::team_role("builder"),
-                            None,
                             None,
                         ),
                     ),
@@ -834,7 +773,6 @@ mod tests {
                         "prompt",
                         crate::ExecutorPolicy::team_role("role"),
                         None,
-                        None,
                     ),
                 ),
             ],
@@ -889,7 +827,6 @@ mod tests {
                         "task",
                         "prompt",
                         crate::ExecutorPolicy::team_role("role"),
-                        None,
                         None,
                     ),
                 )],

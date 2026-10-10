@@ -90,16 +90,17 @@ function isRequest(value: unknown): value is TeamGraphRequest {
 }
 
 function isGraphDefinition(value: unknown): value is TeamGraphDefinition {
-  return isRecord(value)
-    && hasExactKeys(value, ['graphId', 'workflowPlanId', 'runId', 'title', 'nodes', 'edges'])
-    && isIdentifier(value.graphId)
-    && isIdentifier(value.workflowPlanId)
-    && isIdentifier(value.runId)
-    && isIdentifier(value.title)
-    && Array.isArray(value.nodes)
-    && value.nodes.every(isGraphNode)
-    && Array.isArray(value.edges)
-    && value.edges.every(isGraphEdge);
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['graphId', 'workflowPlanId', 'runId', 'title', 'nodes', 'edges'])
+    || !isIdentifier(value.graphId)
+    || !isIdentifier(value.workflowPlanId)
+    || !isIdentifier(value.runId)
+    || !isIdentifier(value.title)
+    || !Array.isArray(value.nodes)
+    || !value.nodes.every(isGraphNode)
+    || !Array.isArray(value.edges)) return false;
+  const joins = new Set(value.nodes.filter((node) => node.kind === 'join').map((node) => node.id));
+  return value.edges.every((edge) => isGraphEdge(edge, joins));
 }
 
 function isGraphNode(value: unknown): value is TeamGraphNode {
@@ -116,11 +117,25 @@ function isGraphNode(value: unknown): value is TeamGraphNode {
   if (value.kind === 'work') {
     return hasExactKeys(value, ['id', 'kind', 'title', 'maxAttempts', 'work']) && isWork(value.work);
   }
-  if (value.kind === 'join') {
-    return hasExactKeys(value, ['id', 'kind', 'title', 'maxAttempts', 'group']) && isGroup(value.group);
+  if (value.kind === 'review') {
+    return hasExactKeys(value, ['id', 'kind', 'title', 'maxAttempts', 'review'])
+      && isRecord(value.review)
+      && hasExactKeys(value.review, ['roleId', 'sessionRef', 'prompt'])
+      && isIdentifier(value.review.roleId)
+      && isIdentifier(value.review.sessionRef) && /^rs[0-9]+$/.test(value.review.sessionRef)
+      && typeof value.review.prompt === 'string';
+  }
+  if (value.kind === 'scriptReview') {
+    return hasExactKeys(value, ['id', 'kind', 'title', 'maxAttempts', 'scriptReview'])
+      && isRecord(value.scriptReview)
+      && hasExactKeys(value.scriptReview, ['rule'])
+      && (value.scriptReview.rule === 'pass_through'
+        || value.scriptReview.rule === 'assert_all_upstream_completed'
+        || value.scriptReview.rule === 'assert_no_blocking_gate'
+        || value.scriptReview.rule === 'assert_artifact_exists');
   }
   return hasExactKeys(value, ['id', 'kind', 'title', 'maxAttempts'])
-    && (value.kind === 'review' || value.kind === 'humanDecision' || value.kind === 'scriptReview' || value.kind === 'end');
+    && (value.kind === 'humanDecision' || value.kind === 'join' || value.kind === 'end');
 }
 
 function isTrigger(value: unknown): boolean {
@@ -131,29 +146,18 @@ function isTrigger(value: unknown): boolean {
 }
 
 function isWork(value: unknown): boolean {
-  if (!isRecord(value) || !isIdentifier(value.taskId) || !isIdentifier(value.roleId)) return false;
-  if (!hasOnlyKeys(value, ['taskId', 'roleId', 'prompt', 'executor', 'outputArtifactKind', 'groupId'])) return false;
-  return (value.prompt === undefined || isIdentifier(value.prompt))
+  if (!isRecord(value) || !isIdentifier(value.taskId) || !isIdentifier(value.roleId)
+    || !isIdentifier(value.sessionRef) || !/^rs[0-9]+$/.test(value.sessionRef)) return false;
+  if (!hasOnlyKeys(value, ['taskId', 'roleId', 'sessionRef', 'prompt', 'executor', 'outputArtifactKind'])) return false;
+  return (value.prompt === undefined || typeof value.prompt === 'string')
     && (value.outputArtifactKind === undefined || isIdentifier(value.outputArtifactKind))
-    && (value.groupId === undefined || isIdentifier(value.groupId))
     && (value.executor === undefined || (isRecord(value.executor)
       && hasExactKeys(value.executor, ['kind', 'roleId'])
       && value.executor.kind === 'team-role'
       && value.executor.roleId === value.roleId));
 }
 
-function isGroup(value: unknown): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, ['groupId', 'join'])
-    && isIdentifier(value.groupId)
-    && isRecord(value.join)
-    && hasExactKeys(value.join, ['requireCompleted', 'allowFailed', 'retryLimit'])
-    && typeof value.join.requireCompleted === 'boolean'
-    && typeof value.join.allowFailed === 'boolean'
-    && isUint(value.join.retryLimit);
-}
-
-function isGraphEdge(value: unknown): boolean {
+function isGraphEdge(value: unknown, joins: ReadonlySet<string>): boolean {
   if (!isRecord(value)
     || !hasOnlyKeys(value, ['id', 'from', 'sourcePort', 'to', 'targetPort', 'action', 'payload', 'dependency'])
     || !isIdentifier(value.id)
@@ -161,7 +165,7 @@ function isGraphEdge(value: unknown): boolean {
     || !isIdentifier(value.sourcePort)
     || !isIdentifier(value.to)
     || !isIdentifier(value.targetPort)
-    || !isEdgeAction(value.action)) {
+    || !(joins.has(value.to) ? value.action === undefined || value.action === 'gate' : isEdgeAction(value.action))) {
     return false;
   }
   return (value.payload === undefined || (isRecord(value.payload)

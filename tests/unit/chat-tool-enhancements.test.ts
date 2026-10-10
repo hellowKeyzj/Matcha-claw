@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest';
+import { createInstance } from 'i18next';
+import zh from '../../src/i18n/locales/zh/chat.json';
 
 import { buildToolActivityViewModel } from '../../src/pages/Chat/tool-activity-view-model';
 import type { SessionRenderToolCard } from '../../src/types/session/tool-card';
+
+const translations = createInstance();
+await translations.init({
+  lng: 'zh', fallbackLng: false, defaultNS: 'chat', resources: { zh: { chat: zh } },
+  interpolation: { escapeValue: false },
+});
+const t = translations.getFixedT('zh', 'chat');
 
 type ToolCardInput = Pick<SessionRenderToolCard, 'name' | 'input'> & Partial<SessionRenderToolCard> & { details?: unknown };
 
@@ -66,7 +75,7 @@ describe('chat tool detail enhancements', () => {
       input: { file_path: 'E:/repo/src/one.ts' },
       result: textResult('Updated 2 files'),
       details: { patch },
-    }));
+    }), t);
     const expanded = expandedText(activity);
     const visible = visibleText(activity);
 
@@ -87,7 +96,7 @@ describe('chat tool detail enhancements', () => {
       status: 'running',
       input: { file_path: `E:/repo/src/${name.toLowerCase()}-live.ts` },
       details,
-    }));
+    }), t);
     const visible = visibleText(activity);
 
     expect(visible).toContain(`+${added}`);
@@ -99,7 +108,7 @@ describe('chat tool detail enhancements', () => {
       name: 'Edit',
       status: 'running',
       input: { file_path: 'E:/repo/src/no-live-stat.ts' },
-    }));
+    }), t);
 
     expect(visibleText(activity)).not.toMatch(/[+-]\d+/);
   });
@@ -123,7 +132,7 @@ describe('chat tool detail enhancements', () => {
         browserTab: { title: 'browser-tab-noise', url: 'https://browser.local/tab' },
         approvalReviews: [{ id: 'approval-review-noise', decision: 'approved' }],
       },
-    }));
+    }), t);
     const expanded = expandedText(activity);
     const text = allText(activity);
 
@@ -150,16 +159,16 @@ describe('chat tool detail enhancements', () => {
       output: { stdout: 'partial stdout', exitCode: 0 },
       result: textResult(JSON.stringify({ stdout: 'partial stdout', exitCode: 0 })),
       details: { exitCode: 7, truncation: true, fullOutputPath: 'E:/repo/.matcha/shell/full-output.log' },
-    }));
+    }), t);
     const text = allText(activity);
 
     expect(activity.tone).toBe('danger');
     expect(activity.isError).toBe(true);
     expect(text).toContain('partial stdout');
-    expect(text).toContain('exit 7');
+    expect(text).toContain('退出码 7');
     expect(text).toContain('输出已截断');
     expect(text).toContain('E:/repo/.matcha/shell/full-output.log');
-    expect(text).not.toContain('exit 0');
+    expect(text).not.toContain('退出码 0');
     expect(text).not.toContain('"exitCode"');
     expect(text).not.toContain('"truncation"');
     expect(text).not.toContain('"fullOutputPath"');

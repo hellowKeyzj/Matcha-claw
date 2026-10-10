@@ -75,7 +75,7 @@ export async function createSSHSession(
   } else {
     // 1. Probe remote host
     const probe = await probeRemote(host, onProgress)
-    logForDebugging(`[SSH] probe result: ${JSON.stringify(probe)}`)
+    logForDebugging(() => `[SSH] probe result: ${JSON.stringify(probe)}`)
     defaultCwd = probe.defaultCwd
 
     // 2. Deploy if binary missing or version mismatch
@@ -154,7 +154,7 @@ export async function createSSHSession(
   sshArgs.push(host, remoteCli.join(' '))
 
   onProgress?.('Starting remote session…')
-  logForDebugging(`[SSH] spawning: ${sshArgs.join(' ')}`)
+  logForDebugging(() => `[SSH] spawning: ${sshArgs.join(' ')}`)
 
   let proc: Subprocess
   try {

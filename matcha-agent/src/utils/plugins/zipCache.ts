@@ -223,7 +223,8 @@ export async function createZipFromDirectory(
   const { zipSync } = await import('fflate')
   const zipData = zipSync(files, { level: 6 })
   logForDebugging(
-    `Created ZIP from ${sourceDir}: ${Object.keys(files).length} files, ${zipData.length} bytes`,
+    () =>
+      `Created ZIP from ${sourceDir}: ${Object.keys(files).length} files, ${zipData.length} bytes`,
   )
   return zipData
 }
@@ -359,7 +360,7 @@ export async function extractZipToDirectory(
   }
 
   logForDebugging(
-    `Extracted ZIP to ${targetDir}: ${Object.keys(files).length} entries`,
+    () => `Extracted ZIP to ${targetDir}: ${Object.keys(files).length} entries`,
   )
 }
 

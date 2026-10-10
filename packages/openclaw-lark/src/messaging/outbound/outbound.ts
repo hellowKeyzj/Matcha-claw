@@ -166,7 +166,7 @@ function resolveFeishuSendContext(params: {
   const replyInThread = Boolean(explicitThreadId ?? routeTarget.threadId);
 
   if (!explicitReplyToId && routeTarget.replyToMessageId) {
-    log.info('resolved reply target from encoded originating route');
+    log.trace('resolved reply target from encoded originating route');
   }
 
   return {
@@ -193,19 +193,19 @@ export const feishuOutbound: ChannelOutboundAdapter = {
   textChunkLimit: 15000,
 
   sendText: async ({ cfg, to, text, accountId, replyToId, threadId }) => {
-    log.info(`sendText: target=${to}, textLength=${text.length}`);
+    log.trace(() => (`sendText: target=${to}, textLength=${text.length}`));
 
     // Synthetic targets (e.g. VC meeting-invited) have no real IM peer —
     // drop the send silently so the agent pipeline stays uniform without
     // producing unsolicited DMs. See core/synthetic-target.ts.
     if (isSyntheticTarget(to)) {
-      log.debug(`sendText: synthetic target ${to}, dropping outbound IM send`);
+      log.debug(() => (`sendText: synthetic target ${to}, dropping outbound IM send`));
       return { channel: 'feishu', messageId: '', chatId: to };
     }
 
     // Comment thread routing — route replies through Drive comment API
     if (isCommentTarget(to)) {
-      log.info(`sendText: detected comment target, routing through Drive comment API`);
+      log.trace(`sendText: detected comment target, routing through Drive comment API`);
       const result = await sendCommentReplyLark({ cfg, to, text, accountId: accountId ?? undefined });
       return { channel: 'feishu', ...result };
     }
@@ -217,17 +217,17 @@ export const feishuOutbound: ChannelOutboundAdapter = {
   },
 
   sendMedia: async ({ cfg, to, text, mediaUrl, mediaLocalRoots, accountId, replyToId, threadId }) => {
-    log.info(`sendMedia: target=${to}, ` + `hasText=${Boolean(text?.trim())}, mediaUrl=${mediaUrl ?? '(none)'}`);
+    log.trace(() => (`sendMedia: target=${to}, ` + `hasText=${Boolean(text?.trim())}, mediaUrl=${mediaUrl ?? '(none)'}`));
 
     // Synthetic targets — drop silently (see sendText for rationale).
     if (isSyntheticTarget(to)) {
-      log.debug(`sendMedia: synthetic target ${to}, dropping outbound IM send`);
+      log.debug(() => (`sendMedia: synthetic target ${to}, dropping outbound IM send`));
       return { channel: 'feishu', messageId: '', chatId: to };
     }
 
     // Comment thread routing — send text (with media URL appended) via Drive comment API
     if (isCommentTarget(to)) {
-      log.info(`sendMedia: detected comment target, routing through Drive comment API`);
+      log.trace(`sendMedia: detected comment target, routing through Drive comment API`);
       const parts: string[] = [];
       if (text?.trim()) parts.push(text.trim());
       if (mediaUrl) parts.push(`📎 ${mediaUrl}`);
@@ -270,7 +270,7 @@ export const feishuOutbound: ChannelOutboundAdapter = {
   sendPayload: async ({ cfg, to, payload, mediaLocalRoots, accountId, replyToId, threadId }) => {
     // Synthetic targets — drop silently (see sendText for rationale).
     if (isSyntheticTarget(to)) {
-      log.debug(`sendPayload: synthetic target ${to}, dropping outbound IM send`);
+      log.debug(() => (`sendPayload: synthetic target ${to}, dropping outbound IM send`));
       return { channel: 'feishu', messageId: '', chatId: to };
     }
 
@@ -283,10 +283,10 @@ export const feishuOutbound: ChannelOutboundAdapter = {
     const text = payload.text ?? '';
     const mediaUrls = payload.mediaUrls?.length ? payload.mediaUrls : payload.mediaUrl ? [payload.mediaUrl] : [];
 
-    log.info(
-      `sendPayload: target=${to}, ` +
+    log.trace(
+      () => (`sendPayload: target=${to}, ` +
         `textLength=${text.length}, mediaCount=${mediaUrls.length}, ` +
-        `hasCard=${Boolean(feishuData?.card)}`,
+        `hasCard=${Boolean(feishuData?.card)}`),
     );
 
     // --- channelData.feishu.card: card message path ---

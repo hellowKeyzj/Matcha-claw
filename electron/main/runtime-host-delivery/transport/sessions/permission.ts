@@ -1,6 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
-import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 const ENDPOINT = '/api/sessions/permission';
 const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_AGENT_ID_BYTES = 256;
@@ -88,18 +88,18 @@ export function createSessionPermissionTransport(
   ): Promise<SessionPermissionTransportResponse> => {
     const request = decodeSessionPermissionRequest(value);
     if (!request || request.operationId !== operationId) {
-      logSessionTrace('electron.permission.rejected', traceId, { operationId });
+      logSessionTrace('electron.permission.rejected', traceId, () => ({ operationId }));
       return { status: 503, body: UNAVAILABLE };
     }
-    const startedAt = Date.now();
-    logSessionTrace('electron.permission.request', traceId, {
+    const startedAt = traceId && isSessionTraceEnabled() ? Date.now() : 0;
+    logSessionTrace('electron.permission.request', traceId, () => ({
       operationId,
       adapter: request.input.sessionIdentity.endpoint.runtimeAdapterId,
       sessionKey: summarizeIdentifier(request.input.sessionKey),
       permissionMode: request.operationId === 'sessions.permission.set'
         ? request.input.permissionMode
         : null,
-    });
+    }));
     const response = await sendLoopbackJson({
       port: runtimeHostTransportPort,
       path: ENDPOINT,
@@ -116,20 +116,20 @@ export function createSessionPermissionTransport(
       headers: traceHeader(traceId),
     });
     if (response === null) {
-      logSessionTrace('electron.permission.failure', traceId, {
+      logSessionTrace('electron.permission.failure', traceId, () => ({
         operationId,
         elapsedMs: Date.now() - startedAt,
-      });
+      }));
       return { status: 503, body: UNAVAILABLE };
     }
     const body = response.body;
     const projection = response.status === 200 ? decodeSessionPermissionProjection(body) : null;
-    logSessionTrace('electron.permission.response', traceId, {
+    logSessionTrace('electron.permission.response', traceId, () => ({
       operationId,
       status: response.status,
       contract: projection ? 'valid' : isUnavailable(body) ? 'unavailable' : 'invalid',
       elapsedMs: Date.now() - startedAt,
-    });
+    }));
     if (response.status === 200 && projection) {
       return { status: 200, body: projection };
     }

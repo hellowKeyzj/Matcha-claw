@@ -827,7 +827,7 @@ fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
         )
     );
     assert!(owners.contains("TeamRunCoordinator::spawn"));
-    assert!(owners.contains("tokio::sync::watch::channel(organization::AdmissionState::Changed)"));
+    assert!(owners.contains("admission.subscribe()"));
     assert!(!host.contains("team_run_coordinator: organization::TeamRunCoordinatorHandle"));
     assert!(!host.contains("self.team_run_coordinator.wake()"));
     assert!(!host.contains("PeerMaintenanceHandle"));

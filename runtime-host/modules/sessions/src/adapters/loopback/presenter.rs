@@ -9,7 +9,7 @@ use crate::state::{
 
 pub(crate) fn session_view(view: &SessionView) -> Value {
     if crate::trace::enabled() {
-        crate::trace::log_unscoped("sessions.public.view", crate::trace::view_shape(view));
+        crate::trace::log_unscoped("sessions.public.view", || crate::trace::view_shape(view));
     }
     json!({
         "sessionKey": &view.session_key,

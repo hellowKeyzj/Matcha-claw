@@ -42,14 +42,14 @@ pub async fn stream_generate(
     request: LlmRequest,
     sink: &mut dyn LlmStreamSink,
 ) -> Result<(), LlmClientError> {
-    let started = Instant::now();
+    let started = platform::trace::enabled().then(Instant::now);
     let response = request_builder(http, &openai_request(request, true))
         .send()
         .await?;
     let status = response.status();
-    session_trace("runtime.team.provider.http.response", json!({
+    session_trace("runtime.team.provider.http.response", || json!({
         "protocol": "open_ai_completions", "statusCode": status.as_u16(), "streaming": true,
-        "elapsedMs": started.elapsed().as_millis() as u64,
+        "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
     }));
     if !status.is_success() {
         let text = response.text().await?;
@@ -161,19 +161,16 @@ async fn send_json(
     http: &reqwest::Client,
     request: OpenAiChatRequest,
 ) -> Result<Value, LlmClientError> {
-    let started = Instant::now();
+    let started = platform::trace::enabled().then(Instant::now);
     let response = request_builder(http, &request).send().await?;
     let status = response.status();
-    session_trace("runtime.team.provider.http.response", json!({
+    session_trace("runtime.team.provider.http.response", || json!({
         "protocol": "open_ai_completions", "statusCode": status.as_u16(), "streaming": false,
-        "elapsedMs": started.elapsed().as_millis() as u64,
+        "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
     }));
     let text = response.text().await?;
     let payload = serde_json::from_str::<Value>(&text).map_err(|error| {
-        session_trace("runtime.team.provider.http.parse-failed", json!({
-            "protocol": "open_ai_completions", "class": "JsonDecode", "statusCode": status.as_u16(),
-            "elapsedMs": started.elapsed().as_millis() as u64,
-        }));
+        eprintln!("[provider] phase=runtime.team.provider.http.parse-failed protocol=open_ai_completions class=JsonDecode");
         LlmClientError::Protocol(format!("invalid OpenAI chat JSON response: {error}"))
     })?;
     if status.is_success() {

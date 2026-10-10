@@ -1,8 +1,6 @@
-import type {
-  SessionRenderToolCard,
-  SessionRenderToolStatusKind,
-} from '../../../types/session/tool-card';
-import type { ToolActivityTextBlock, ToolActivityTrailingLabel, ToolActivityViewModel } from '../tool-activity-view-model';
+import type { TFunction } from 'i18next';
+import type { SessionRenderToolCard } from '../../../types/session/tool-card';
+import type { ToolActivityTextBlock, ToolActivityTrailingLabel, ToolActivityContent } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
 
 const NON_ACTIVITY_TITLE_TEXT = new Set([
@@ -69,10 +67,10 @@ function parseStructuredText(text: string): unknown {
   return parseToolResultJson(text);
 }
 
-function truncateText(text: string, limit: number): string {
+function truncateText(text: string, limit: number, t: TFunction<'chat'>): string {
   const trimmed = text.trim();
   if (trimmed.length <= limit) return trimmed;
-  return `${trimmed.slice(0, limit).trimEnd()}\n… 已截断 ${trimmed.length - limit} 字符`;
+  return `${trimmed.slice(0, limit).trimEnd()}\n${t('toolActivity.generic.truncated', { count: trimmed.length - limit })}`;
 }
 
 function publicKeys(value: JsonRecord): string[] {
@@ -95,25 +93,25 @@ function stringPreview(text: string): string | null {
   return preview.length <= STRING_PREVIEW_LIMIT ? preview : `${preview.slice(0, STRING_PREVIEW_LIMIT - 1).trimEnd()}…`;
 }
 
-function summarizeString(text: string): string | null {
+function summarizeString(text: string, t: TFunction<'chat'>): string | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
   const parsed = parseStructuredText(trimmed);
-  if (isRecord(parsed) || Array.isArray(parsed)) return summarizePublicValue(parsed);
+  if (isRecord(parsed) || Array.isArray(parsed)) return summarizePublicValue(parsed, t);
   const preview = stringPreview(trimmed);
-  return preview ? `字符串：${trimmed.length} 字符；preview: ${preview}` : `字符串：${trimmed.length} 字符`;
+  return preview ? t('toolActivity.generic.stringPreview', { count: trimmed.length, preview }) : t('toolActivity.generic.string', { count: trimmed.length });
 }
 
-function summarizeArray(value: unknown[]): string {
-  return `数组：${value.length} 项`;
+function summarizeArray(value: unknown[], t: TFunction<'chat'>): string {
+  return t('toolActivity.generic.array', { count: value.length });
 }
 
-function summarizeRecordShape(value: JsonRecord): string | null {
+function summarizeRecordShape(value: JsonRecord, t: TFunction<'chat'>): string | null {
   const keys = publicKeys(value);
   if (keys.length === 0) return null;
   const visibleKeys = keys.slice(0, MAX_PUBLIC_SUMMARY_KEYS).map((key) => JSON.stringify(key));
   const suffix = keys.length > visibleKeys.length ? `, +${keys.length - visibleKeys.length}` : '';
-  return `对象：${keys.length} keys（${visibleKeys.join(', ')}${suffix}）`;
+  return t('toolActivity.generic.object', { count: keys.length, keys: `${visibleKeys.join(', ')}${suffix}` });
 }
 
 function normalizePublicFieldKey(key: string): string {
@@ -144,34 +142,34 @@ function isAllowedPublicFieldKey(key: string): boolean {
     || normalized.endsWith('reference');
 }
 
-function summarizeFieldValue(value: unknown, includeStringPreview: boolean): string | null {
+function summarizeFieldValue(value: unknown, includeStringPreview: boolean, t: TFunction<'chat'>): string | null {
   if (value === null) return null;
   if (typeof value === 'string') {
     const trimmed = value.trim();
     if (!trimmed) return null;
-    if (!includeStringPreview) return `字符串：${trimmed.length} 字符`;
+    if (!includeStringPreview) return t('toolActivity.generic.string', { count: trimmed.length });
     const preview = stringPreview(trimmed);
-    return preview ?? `字符串：${trimmed.length} 字符`;
+    return preview ?? t('toolActivity.generic.string', { count: trimmed.length });
   }
   if (typeof value === 'number') return Number.isFinite(value) ? String(value) : null;
   if (typeof value === 'boolean') return value ? 'true' : 'false';
-  if (Array.isArray(value)) return summarizeArray(value);
-  if (isRecord(value)) return summarizeRecordShape(value);
+  if (Array.isArray(value)) return summarizeArray(value, t);
+  if (isRecord(value)) return summarizeRecordShape(value, t);
   return null;
 }
 
-function summarizePublicValue(value: unknown): string | null {
-  if (typeof value === 'string') return summarizeString(value);
+function summarizePublicValue(value: unknown, t: TFunction<'chat'>): string | null {
+  if (typeof value === 'string') return summarizeString(value, t);
   const contentBlockText = extractToolResultContentBlockText(value);
-  if (contentBlockText) return summarizeString(contentBlockText);
-  if (Array.isArray(value)) return summarizeArray(value);
-  if (!isRecord(value)) return summarizeFieldValue(value, true);
+  if (contentBlockText) return summarizeString(contentBlockText, t);
+  if (Array.isArray(value)) return summarizeArray(value, t);
+  if (!isRecord(value)) return summarizeFieldValue(value, true, t);
 
-  const lines = [summarizeRecordShape(value)].filter((line): line is string => line != null);
+  const lines = [summarizeRecordShape(value, t)].filter((line): line is string => line != null);
   let fieldCount = 0;
   for (const [key, field] of Object.entries(value)) {
     if (fieldCount >= MAX_PUBLIC_SUMMARY_FIELDS || isBlockedDetailKey(key)) continue;
-    const valueSummary = summarizeFieldValue(field, isAllowedPublicFieldKey(key));
+    const valueSummary = summarizeFieldValue(field, isAllowedPublicFieldKey(key), t);
     if (!valueSummary) continue;
     lines.push(`${key}: ${valueSummary}`);
     fieldCount += 1;
@@ -179,9 +177,9 @@ function summarizePublicValue(value: unknown): string | null {
   return lines.length > 0 ? lines.slice(0, MAX_PUBLIC_SUMMARY_LINES).join('\n') : null;
 }
 
-function serializePublicSummary(value: unknown, limit: number): string | null {
-  const summary = summarizePublicValue(value);
-  return summary ? truncateText(summary, limit) : null;
+function serializePublicSummary(value: unknown, limit: number, t: TFunction<'chat'>): string | null {
+  const summary = summarizePublicValue(value, t);
+  return summary ? truncateText(summary, limit, t) : null;
 }
 
 function isBlockedDetailKey(key: string): boolean {
@@ -223,10 +221,10 @@ function hasDetailsContent(value: unknown): boolean {
   return value != null;
 }
 
-function serializeDetails(value: unknown): string | null {
+function serializeDetails(value: unknown, t: TFunction<'chat'>): string | null {
   const details = projectPublicDetails(value);
   if (!hasDetailsContent(details)) return null;
-  return serializePublicSummary(details, DETAILS_TEXT_LIMIT);
+  return serializePublicSummary(details, DETAILS_TEXT_LIMIT, t);
 }
 
 function isMeaningfulActivityText(text: string): boolean {
@@ -243,81 +241,72 @@ function resolveActivityTitle(input: {
   primaryTitle: string;
   detailTitle: string;
   summary?: string;
-}): string {
+}, t: TFunction<'chat'>): string {
   const detailTitle = input.detailTitle.trim();
   if (detailTitle !== input.primaryTitle && isMeaningfulActivityText(detailTitle)) return detailTitle;
 
   const summary = input.summary?.trim() ?? '';
   if (summary.length <= 96 && isMeaningfulActivityText(summary)) return summary;
 
-  if (isMeaningfulToolName(input.primaryTitle)) return `调用 ${input.primaryTitle.trim()}`;
-  return '工具调用';
+  if (isMeaningfulToolName(input.primaryTitle)) return t('toolActivity.generic.call', { name: input.primaryTitle.trim() });
+  return t('toolActivity.generic.toolCall');
 }
 
-function resolveToolTone(status: SessionRenderToolStatusKind): ToolActivityViewModel['tone'] {
-  if (status === 'running') return 'running';
-  if (status === 'error') return 'danger';
-  if (status === 'missing_result') return 'muted';
-  return 'neutral';
-}
-
-function buildTrailingLabels(tool: SessionRenderToolCard, title: string): ToolActivityTrailingLabel[] {
+function buildTrailingLabels(tool: SessionRenderToolCard): ToolActivityTrailingLabel[] {
   const labels: ToolActivityTrailingLabel[] = [];
-  if (tool.status === 'running' && title !== '运行中') labels.push({ text: '运行中', tone: 'muted' });
-  if (tool.status === 'missing_result' && title !== '无结果') labels.push({ text: '无结果', tone: 'muted' });
   const durationLabel = formatToolDuration(tool.durationMs);
   if (durationLabel) labels.push({ text: durationLabel, tone: 'muted' });
   return labels;
 }
 
-function readOutputText(tool: SessionRenderToolCard): string | null {
-  const outputSummary = serializePublicSummary(tool.output, BLOCK_TEXT_LIMIT);
+function readOutputText(tool: SessionRenderToolCard, t: TFunction<'chat'>): string | null {
+  const outputSummary = serializePublicSummary(tool.output, BLOCK_TEXT_LIMIT, t);
   if (outputSummary) return outputSummary;
   const result = tool.result;
   if (result.kind === 'text' || result.kind === 'json') {
-    return serializePublicSummary(parseToolResultJson(result.bodyText) ?? result.bodyText, BLOCK_TEXT_LIMIT)
-      ?? serializePublicSummary(result.collapsedPreview, BLOCK_TEXT_LIMIT);
+    return serializePublicSummary(parseToolResultJson(result.bodyText) ?? result.bodyText, BLOCK_TEXT_LIMIT, t)
+      ?? serializePublicSummary(result.collapsedPreview, BLOCK_TEXT_LIMIT, t);
   }
   if (result.kind === 'canvas') {
-    return serializePublicSummary(parseToolResultJson(result.rawText) ?? result.rawText, BLOCK_TEXT_LIMIT);
+    return serializePublicSummary(parseToolResultJson(result.rawText) ?? result.rawText, BLOCK_TEXT_LIMIT, t);
   }
   return null;
 }
 
-function readDetailsText(tool: SessionRenderToolCard): string | null {
-  return serializeDetails((tool as ToolCardWithDetails).details);
+function readDetailsText(tool: SessionRenderToolCard, t: TFunction<'chat'>): string | null {
+  return serializeDetails((tool as ToolCardWithDetails).details, t);
 }
 
-function buildTextBlocks(tool: SessionRenderToolCard, hasAssistantCanvas: boolean): ToolActivityTextBlock[] {
+function buildTextBlocks(tool: SessionRenderToolCard, hasAssistantCanvas: boolean, t: TFunction<'chat'>): ToolActivityTextBlock[] {
   const blocks: ToolActivityTextBlock[] = [];
-  const inputText = serializePublicSummary(tool.input, BLOCK_TEXT_LIMIT)
-    ?? serializePublicSummary(parseStructuredText(tool.inputText ?? ''), BLOCK_TEXT_LIMIT)
-    ?? serializePublicSummary(tool.inputText ?? '', BLOCK_TEXT_LIMIT);
-  if (inputText) blocks.push({ kind: 'input', title: '输入', text: inputText, copyable: true });
+  const inputText = serializePublicSummary(tool.input, BLOCK_TEXT_LIMIT, t)
+    ?? serializePublicSummary(parseStructuredText(tool.inputText ?? ''), BLOCK_TEXT_LIMIT, t)
+    ?? serializePublicSummary(tool.inputText ?? '', BLOCK_TEXT_LIMIT, t);
+  if (inputText) blocks.push({ kind: 'input', title: t('toolActivity.input'), text: inputText, copyable: true });
 
   if (hasAssistantCanvas) {
     blocks.push({
       kind: 'notice',
-      text: '预览已显示在助手消息里。',
+      text: t('toolActivity.generic.assistantPreview'),
       copyable: false,
     });
   }
 
-  const outputText = readOutputText(tool);
+  const outputText = readOutputText(tool, t);
   if (outputText) {
     blocks.push({
       kind: 'output',
-      title: '输出',
-      text: truncateText(outputText, BLOCK_TEXT_LIMIT),
+      title: t('toolActivity.output'),
+      text: truncateText(outputText, BLOCK_TEXT_LIMIT, t),
       copyable: false,
     });
   }
 
-  const detailsText = readDetailsText(tool);
+  const detailsText = readDetailsText(tool, t);
   if (detailsText) {
     blocks.push({
-      kind: 'output',
-      title: '详情',
+      kind: 'details',
+      title: t('toolActivity.details'),
       text: detailsText,
       copyable: false,
     });
@@ -326,13 +315,13 @@ function buildTextBlocks(tool: SessionRenderToolCard, hasAssistantCanvas: boolea
   return blocks;
 }
 
-export function genericToolActivityRenderer(tool: SessionRenderToolCard): ToolActivityViewModel {
+export function genericToolActivityRenderer(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {
   const primaryTitle = tool.displayTitle?.trim() || tool.name?.trim() || '';
   const title = resolveActivityTitle({
     primaryTitle,
     detailTitle: tool.displayDetail?.trim() ?? '',
     summary: tool.summary,
-  });
+  }, t);
   const result = tool.result;
   const hasAssistantCanvas = result.kind === 'canvas' && result.preview.kind === 'canvas' && !!result.preview.url;
   const canvasPreview = hasAssistantCanvas
@@ -340,18 +329,15 @@ export function genericToolActivityRenderer(tool: SessionRenderToolCard): ToolAc
       title: result.preview.title?.trim() || tool.name || title,
       url: result.preview.url,
       preferredHeight: result.preview.preferredHeight,
-      rawText: result.rawText?.trim() ? truncateText(result.rawText, BLOCK_TEXT_LIMIT) : undefined,
+      rawText: result.rawText?.trim() ? truncateText(result.rawText, BLOCK_TEXT_LIMIT, t) : undefined,
     }
     : undefined;
-  const textBlocks = buildTextBlocks(tool, hasAssistantCanvas);
+  const textBlocks = buildTextBlocks(tool, hasAssistantCanvas, t);
 
   return {
     title,
-    tone: resolveToolTone(tool.status),
-    isRunning: tool.status === 'running',
-    isError: tool.status === 'error',
     canExpand: textBlocks.length > 0 || canvasPreview != null,
-    trailingLabels: buildTrailingLabels(tool, title),
+    trailingLabels: buildTrailingLabels(tool),
     textBlocks,
     canvasPreview,
   };

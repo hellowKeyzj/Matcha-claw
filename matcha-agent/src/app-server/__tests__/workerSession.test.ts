@@ -15,7 +15,7 @@ import type {
 const restores: (() => void)[] = []
 const tempRoots: string[] = []
 const originalCwd = process.cwd()
-const originalRunTraceEnv = process.env.MATCHA_AGENT_RUN_TRACE
+const originalRunTraceEnv = process.env.MATCHACLAW_TRACE
 const PROVIDER_ENV_KEYS = [
   'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
   'CLAUDE_CODE_USE_BEDROCK',
@@ -301,9 +301,9 @@ afterAll(async () => {
   process.chdir(originalCwd)
   restoreProviderEnv()
   if (originalRunTraceEnv === undefined) {
-    delete process.env.MATCHA_AGENT_RUN_TRACE
+    delete process.env.MATCHACLAW_TRACE
   } else {
-    process.env.MATCHA_AGENT_RUN_TRACE = originalRunTraceEnv
+    process.env.MATCHACLAW_TRACE = originalRunTraceEnv
   }
   for (const root of tempRoots.splice(0)) {
     await rm(root, { recursive: true, force: true })
@@ -330,11 +330,7 @@ beforeEach(() => {
   getClaudeCodeMcpConfigsMock.mockClear()
   getMcpToolsCommandsAndResourcesMock.mockClear()
   restoreProviderEnv()
-  if (originalRunTraceEnv === undefined) {
-    delete process.env.MATCHA_AGENT_RUN_TRACE
-  } else {
-    process.env.MATCHA_AGENT_RUN_TRACE = originalRunTraceEnv
-  }
+  delete process.env.MATCHACLAW_TRACE
 })
 
 describe('createWorkerSession', () => {
@@ -730,7 +726,7 @@ describe('createWorkerSession', () => {
   })
 
   test('emits scalar run.trace events when trace env is enabled', async () => {
-    process.env.MATCHA_AGENT_RUN_TRACE = '1'
+    process.env.MATCHACLAW_TRACE = '1'
     queryEngineSubmitMessages.push({
       type: 'result',
       subtype: 'success',
@@ -764,7 +760,7 @@ describe('createWorkerSession', () => {
   })
 
   test('emits a sanitized error trace before worker failure frame', async () => {
-    process.env.MATCHA_AGENT_RUN_TRACE = '1'
+    process.env.MATCHACLAW_TRACE = '1'
     queryEngineSubmitError = new Error('provider secret should not be logged')
     const emit = mock((_frame: unknown) => {})
     const { session } = await createInitializedSession(emit)

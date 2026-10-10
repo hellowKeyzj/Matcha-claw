@@ -1,3 +1,4 @@
+import { isTraceEnabled } from '../../../../src/utils/trace.js'
 import type { WSContext } from 'hono/ws'
 import { getEventBus } from './event-bus'
 import type { SessionEvent } from './event-bus'
@@ -40,7 +41,7 @@ function toSDKMessage(event: SessionEvent): string {
 export function handleWebSocketOpen(ws: WSContext, sessionId: string) {
   const openTime = Date.now()
   const lastClientActivity = Date.now()
-  log(`[RC-DEBUG] [WS] Open session=${sessionId}`)
+  if (isTraceEnabled()) log(`[RC-DEBUG] [WS] Open session=${sessionId}`)
   activeConnections.add(ws)
 
   // If there's an existing connection for this session, clean it up first
@@ -74,9 +75,10 @@ export function handleWebSocketOpen(ws: WSContext, sessionId: string) {
     if (event.direction !== 'outbound') return
     try {
       const sdkMsg = toSDKMessage(event)
-      log(
-        `[RC-DEBUG] [WS] -> bridge (outbound): type=${event.type} len=${sdkMsg.length} msg=${sdkMsg.slice(0, 300)}`,
-      )
+      if (isTraceEnabled())
+        log(
+          `[RC-DEBUG] [WS] -> bridge (outbound): type=${event.type} len=${sdkMsg.length} msg=${sdkMsg.slice(0, 300)}`,
+        )
       ws.send(sdkMsg)
     } catch (err) {
       logError('[RC-DEBUG] [WS] send error:', err)
@@ -199,9 +201,10 @@ export function ingestBridgeMessage(
 
   const eventType = deriveEventType(msg)
 
-  log(
-    `[RC-DEBUG] [WS] <- bridge (inbound): sessionId=${sessionId} type=${eventType}${msg.uuid ? ` uuid=${msg.uuid}` : ''} msg=${JSON.stringify(msg).slice(0, 300)}`,
-  )
+  if (isTraceEnabled())
+    log(
+      `[RC-DEBUG] [WS] <- bridge (inbound): sessionId=${sessionId} type=${eventType}${msg.uuid ? ` uuid=${msg.uuid}` : ''} msg=${JSON.stringify(msg).slice(0, 300)}`,
+    )
 
   let payload: unknown
 

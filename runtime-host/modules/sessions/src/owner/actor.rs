@@ -199,14 +199,23 @@ impl SessionShared {
                 if !crate::state::terminal_run_phase(*phase) {
                     return None;
                 }
-                Some(SessionRunTerminalSnapshot {
+                let snapshot = SessionRunTerminalSnapshot {
                     identity: state.identity().clone(),
                     source_binding: state.source_binding().clone(),
                     native_run_id: run_id.clone(),
                     delivery_context: state.run_delivery_contexts.remove(run_id),
                     phase: *phase,
-                    final_assistant_text: state.assistant_text_for_run_id(run_id),
-                })
+                    assistant_texts: state.assistant_texts_for_run_id(run_id),
+                };
+                crate::trace::log_unscoped("sessions.terminal.snapshot", || serde_json::json!({
+                    "identity": crate::trace::identity_shape(state.identity()),
+                    "nativeRunIdHash": crate::trace::fingerprint(run_id), "phase": phase,
+                    "epoch": delta.epoch, "seq": delta.seq, "cursor": delta.cursor,
+                    "candidateCount": snapshot.assistant_texts.len(),
+                    "candidates": snapshot.assistant_texts.iter().map(|text| crate::trace::text_shape(text)).collect::<Vec<_>>(),
+                    "hasDeliveryContext": snapshot.delivery_context.is_some(),
+                }));
+                Some(snapshot)
             })
             .collect()
     }
@@ -219,6 +228,17 @@ impl SessionShared {
     }
 
     pub(super) fn emit_terminals(&self, terminals: Vec<SessionRunTerminalSnapshot>) {
+        if crate::trace::enabled() {
+            for terminal in &terminals {
+                crate::trace::log_unscoped("sessions.terminal.emit", || serde_json::json!({
+                    "nativeRunIdHash": crate::trace::fingerprint(&terminal.native_run_id),
+                    "phase": terminal.phase, "hookPresent": self.terminal_hook.is_some(),
+                    "hasDeliveryContext": terminal.delivery_context.is_some(),
+                    "candidateCount": terminal.assistant_texts.len(),
+                    "candidates": terminal.assistant_texts.iter().map(|text| crate::trace::text_shape(text)).collect::<Vec<_>>(),
+                }));
+            }
+        }
         if let Some(hook) = &self.terminal_hook {
             for terminal in terminals {
                 hook.run_terminal(terminal);
@@ -838,7 +858,7 @@ impl SessionLane {
     ) -> SessionIngestOutcome {
         let session_key = event.binding.session_key().to_owned();
         if crate::trace::enabled() {
-            crate::trace::log_unscoped("sessions.ingest.input", serde_json::json!({
+            crate::trace::log_unscoped("sessions.ingest.input", || serde_json::json!({
                 "identity": crate::trace::identity_shape(&identity),
                 "bindingIdentity": crate::trace::identity_shape(event.binding.identity()),
                 "generation": event.binding.generation(), "currentGeneration": shared.observation_generation(&identity),
@@ -852,7 +872,7 @@ impl SessionLane {
         if session_identity_lane_key(&identity) != key || event.binding.identity() != &identity
             || event.binding.generation().is_some_and(|generation| shared.observation_generation(&identity) != Some(generation)) {
             if crate::trace::enabled() {
-                crate::trace::log_unscoped("sessions.ingest.reject", serde_json::json!({
+                crate::trace::log_unscoped("sessions.ingest.reject", || serde_json::json!({
                     "identity": crate::trace::identity_shape(&identity), "reason": "identity_or_generation_mismatch",
                     "laneMatches": session_identity_lane_key(&identity) == key,
                     "bindingMatches": event.binding.identity() == &identity,
@@ -870,7 +890,7 @@ impl SessionLane {
         if let Some(state) = &self.state {
             if state.identity().provider() != provider {
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.ingest.reject", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.ingest.reject", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "reason": "provider_mismatch",
                     }));
                 }
@@ -901,7 +921,7 @@ impl SessionLane {
         if let Some(state) = &self.state {
             if state.native_source_epoch_changed(&event.binding) {
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.ingest.source_boundary", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.ingest.source_boundary", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "reason": "source_epoch_changed",
                         "generation": event.binding.generation(), "sourceEpoch": event.binding.source_epoch(),
                         "nativeCursor": event.cursor, "before": crate::trace::view_shape(&state.view()),
@@ -949,7 +969,7 @@ impl SessionLane {
                 shared.receive_event(&identity, &receive_changes);
                 let refresh = history_refresh || receive_changes.iter().any(|change| matches!(change, SessionChange::RunPhaseChanged { phase, .. } if crate::state::terminal_run_phase(*phase)));
                 if let Some((generation, source_epoch, native_cursor)) = trace_source.filter(|_| refresh) {
-                    crate::trace::log_unscoped("sessions.ingest.history_refresh", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.ingest.history_refresh", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "historyRefresh": history_refresh,
                         "generation": generation, "sourceEpoch": source_epoch, "nativeCursor": native_cursor,
                         "applyResult": if matches!(&result, crate::state::SessionApplyResult::Applied(_)) { "applied" } else { "consumed" },
@@ -1020,7 +1040,7 @@ impl SessionLane {
         }
 
         if crate::trace::enabled() {
-            crate::trace::log_unscoped("sessions.ingest.after", serde_json::json!({
+            crate::trace::log_unscoped("sessions.ingest.after", || serde_json::json!({
                 "identity": crate::trace::identity_shape(identity), "evicted": evicted,
                 "committed": matches!(&result, crate::state::SessionApplyResult::Applied(_) | crate::state::SessionApplyResult::Consumed { .. }),
                 "after": self.state.as_ref().map(|state| crate::trace::view_shape(&state.view())),
@@ -1057,7 +1077,7 @@ impl SessionLane {
             shared.emit_session_delta(delta, terminals);
         }
         if crate::trace::enabled() {
-            crate::trace::log_unscoped("sessions.ingest.recovery_after", serde_json::json!({
+            crate::trace::log_unscoped("sessions.ingest.recovery_after", || serde_json::json!({
                 "identity": crate::trace::identity_shape(identity), "reason": reason,
                 "committed": matches!(&result, crate::state::SessionApplyResult::Applied(_)),
                 "after": self.state.as_ref().map(|state| crate::trace::view_shape(&state.view())),
@@ -1126,7 +1146,7 @@ impl SessionLane {
                     SessionApplyRejection::EventSinkUnavailable => "event_sink_unavailable",
                 } }),
             };
-            crate::trace::log_unscoped("sessions.ingest.outcome", serde_json::json!({
+            crate::trace::log_unscoped("sessions.ingest.outcome", || serde_json::json!({
                 "identity": crate::trace::identity_shape(identity), "result": summary,
             }));
         }
@@ -1318,7 +1338,7 @@ impl SessionLane {
         }
     }
 
-    async fn start_send(
+    pub(super) async fn resume_send(
         &mut self,
         shared: &SessionShared,
         command: crate::send::SessionSendCommand,
@@ -1365,7 +1385,7 @@ impl SessionLane {
 
         let receive_identity = command.identity.clone();
         if crate::trace::enabled() {
-            crate::trace::log_unscoped("sessions.send.receive_demand", serde_json::json!({
+            crate::trace::log_unscoped("sessions.send.receive_demand", || serde_json::json!({
                 "identity": crate::trace::identity_shape(&receive_identity),
                 "traceIdHash": command.trace_id().map(crate::trace::fingerprint),
                 "requestedRunHash": requested_run_id.as_deref().map(crate::trace::fingerprint),
@@ -1461,7 +1481,7 @@ impl SessionLane {
             self.send_receive_outcome(shared, &identity, requested.as_deref(), receive_demand_added, receive_outcome);
         }
         if crate::trace::enabled() {
-            crate::trace::log_unscoped("sessions.send.completed", serde_json::json!({
+            crate::trace::log_unscoped("sessions.send.completed", || serde_json::json!({
                 "identity": crate::trace::identity_shape(&identity), "traceIdHash": command.trace_id().map(crate::trace::fingerprint),
                 "requestedRunHash": requested.as_deref().map(crate::trace::fingerprint),
                 "returnedRunHash": match outcome {
@@ -1864,19 +1884,10 @@ impl OwnerSpec for SessionOwner {
 }
 
 fn log_session_catalog_model_reconciled(session_count: usize, corrected_count: usize) {
-    if std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
-        return;
-    }
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "prefix": "session-trace",
-            "source": "runtime-host",
-            "stage": "runtime.session-catalog.model-reconciled",
-            "sessionCount": session_count,
-            "correctedCount": corrected_count,
-        })
-    );
+    crate::trace::log_unscoped("runtime.session-catalog.model-reconciled", || serde_json::json!({
+        "sessionCount": session_count,
+        "correctedCount": corrected_count,
+    }));
 }
 
 fn send_driver_failure(failure: RuntimeOperationFailure) -> SessionSendOutcome {

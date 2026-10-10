@@ -178,5 +178,10 @@ fn edge_satisfied(state: &GraphState, edge: &super::definition::EdgeDefinition) 
     let Some(source) = state.current_attempt(edge.source_node_id()) else {
         return false;
     };
-    source.status().is_terminal() && source.output_port() == Some(edge.source_port())
+    let satisfied = if edge.action() == super::definition::EdgeAction::Gate {
+        source.status() == AttemptStatus::Completed
+    } else {
+        source.status().is_terminal()
+    };
+    satisfied && source.output_port() == Some(edge.source_port())
 }

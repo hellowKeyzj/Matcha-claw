@@ -9,9 +9,16 @@ pub enum CronScheduleError {
     NoFutureSlot,
 }
 
+pub(crate) fn validate_cron_expression(expression: &str) -> Result<(), CronScheduleError> {
+    parse_schedule(expression).map(|_| ())
+}
+
+fn parse_schedule(expression: &str) -> Result<Schedule, CronScheduleError> {
+    Schedule::from_str(&cron_pattern(expression)?).map_err(|_| CronScheduleError::InvalidExpression)
+}
+
 pub fn next_cron_slot_after(expression: &str, after: u64) -> Result<u64, CronScheduleError> {
-    let schedule = Schedule::from_str(&cron_pattern(expression)?)
-        .map_err(|_| CronScheduleError::InvalidExpression)?;
+    let schedule = parse_schedule(expression)?;
     let after = i64::try_from(after).map_err(|_| CronScheduleError::InvalidTimestamp)?;
     let after =
         chrono::DateTime::from_timestamp(after, 0).ok_or(CronScheduleError::InvalidTimestamp)?;

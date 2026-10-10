@@ -1310,7 +1310,8 @@ function runHeadlessStreaming(
           async (request, extra) => {
             logMCPDebug(
               serverName,
-              `Elicitation request received in print mode: ${jsonStringify(request)}`,
+              () =>
+                `Elicitation request received in print mode: ${jsonStringify(request)}`,
             )
 
             const mode = request.params.mode === 'url' ? 'url' : 'form'
@@ -1328,7 +1329,8 @@ function runHeadlessStreaming(
             if (hookResponse) {
               logMCPDebug(
                 serverName,
-                `Elicitation resolved by hook: ${jsonStringify(hookResponse)}`,
+                () =>
+                  `Elicitation resolved by hook: ${jsonStringify(hookResponse)}`,
               )
               logEvent('tengu_mcp_elicitation_response', {
                 mode: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,

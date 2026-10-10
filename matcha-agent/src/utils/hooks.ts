@@ -1255,7 +1255,7 @@ async function execCommandHook(
       try {
         const parsed = jsonParse(firstLine)
         logForDebugging(
-          `Hooks: Parsed initial response: ${jsonStringify(parsed)}`,
+          () => `Hooks: Parsed initial response: ${jsonStringify(parsed)}`,
         )
         if (isAsyncHookJSONOutput(parsed) && !forceSyncExecution) {
           const processId = `async_hook_${child.pid}`
@@ -2993,7 +2993,8 @@ async function* executeHooks({
           : undefined
       if (updatedInput) {
         logForDebugging(
-          `Hook ${hookEvent} (${getHookDisplayText(result.hook)}) modified tool input keys: [${Object.keys(updatedInput).join(', ')}]`,
+          () =>
+            `Hook ${hookEvent} (${getHookDisplayText(result.hook)}) modified tool input keys: [${Object.keys(updatedInput).join(', ')}]`,
         )
       }
       yield {
@@ -3008,8 +3009,10 @@ async function* executeHooks({
     // This allows hooks to modify input without making a permission decision
     // Note: Check result.permissionBehavior (this hook's behavior), not the aggregated permissionBehavior
     if (result.updatedInput && result.permissionBehavior === undefined) {
+      const updatedInput = result.updatedInput
       logForDebugging(
-        `Hook ${hookEvent} (${getHookDisplayText(result.hook)}) modified tool input keys: [${Object.keys(result.updatedInput).join(', ')}]`,
+        () =>
+          `Hook ${hookEvent} (${getHookDisplayText(result.hook)}) modified tool input keys: [${Object.keys(updatedInput).join(', ')}]`,
       )
       yield {
         updatedInput: result.updatedInput,
@@ -3368,7 +3371,8 @@ async function executeHooksOutsideREPL({
           }
           if (httpJson && !isAsyncHookJSONOutput(httpJson)) {
             logForDebugging(
-              `Parsed JSON output from HTTP hook: ${jsonStringify(httpJson)}`,
+              () =>
+                `Parsed JSON output from HTTP hook: ${jsonStringify(httpJson)}`,
               { level: 'verbose' },
             )
           }
@@ -3460,7 +3464,7 @@ async function executeHooksOutsideREPL({
         }
         if (json && !isAsyncHookJSONOutput(json)) {
           logForDebugging(
-            `Parsed JSON output from hook: ${jsonStringify(json)}`,
+            () => `Parsed JSON output from hook: ${jsonStringify(json)}`,
             { level: 'verbose' },
           )
         }

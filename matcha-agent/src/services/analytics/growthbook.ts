@@ -176,7 +176,8 @@ function getEnvOverrides(): Record<string, unknown> | null {
         try {
           envOverrides = JSON.parse(raw) as Record<string, unknown>
           logForDebugging(
-            `GrowthBook: Using env var overrides for ${Object.keys(envOverrides!).length} features: ${Object.keys(envOverrides!).join(', ')}`,
+            () =>
+              `GrowthBook: Using env var overrides for ${Object.keys(envOverrides!).length} features: ${Object.keys(envOverrides!).join(', ')}`,
           )
         } catch {
           logError(
@@ -580,7 +581,8 @@ const getGrowthBookClient = memoize(
     )
     if (process.env.USER_TYPE === 'ant') {
       logForDebugging(
-        `GrowthBook: Creating client with clientKey=${clientKey}, attributes: ${jsonStringify(attributes)}`,
+        () =>
+          `GrowthBook: Creating client with clientKey=${clientKey}, attributes: ${jsonStringify(attributes)}`,
       )
     }
 
@@ -621,7 +623,7 @@ const getGrowthBookClient = memoize(
       ...(process.env.USER_TYPE === 'ant'
         ? {
             log: (msg: string, ctx: Record<string, unknown>) => {
-              logForDebugging(`GrowthBook: ${msg} ${jsonStringify(ctx)}`)
+              logForDebugging(() => `GrowthBook: ${msg} ${jsonStringify(ctx)}`)
             },
           }
         : {}),
@@ -678,7 +680,8 @@ const getGrowthBookClient = memoize(
           if (features) {
             const featureKeys = Object.keys(features)
             logForDebugging(
-              `GrowthBook loaded ${featureKeys.length} features: ${featureKeys.slice(0, 10).join(', ')}${featureKeys.length > 10 ? '...' : ''}`,
+              () =>
+                `GrowthBook loaded ${featureKeys.length} features: ${featureKeys.slice(0, 10).join(', ')}${featureKeys.length > 10 ? '...' : ''}`,
             )
           }
         }
@@ -791,7 +794,8 @@ async function getFeatureValueInternal<T>(
 
   if (process.env.USER_TYPE === 'ant') {
     logForDebugging(
-      `GrowthBook: getFeatureValue("${feature}") = ${jsonStringify(result)}`,
+      () =>
+        `GrowthBook: getFeatureValue("${feature}") = ${jsonStringify(result)}`,
     )
   }
   return result

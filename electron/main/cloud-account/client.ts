@@ -37,7 +37,7 @@ import type {
   UserSubscription,
 } from './types';
 
-const DEFAULT_CLOUD_BASE_URL = 'http://localhost:8999/api/v1';
+const DEFAULT_CLOUD_BASE_URL = 'http://47.251.94.80:8080/api/v1';
 const REQUEST_TIMEOUT_MS = 30_000;
 
 type HttpMethod = 'GET' | 'POST';

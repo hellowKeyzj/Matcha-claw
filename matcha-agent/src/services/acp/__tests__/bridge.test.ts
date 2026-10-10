@@ -1556,6 +1556,8 @@ describe('forwardSessionUpdates', () => {
   test('ignores unknown message types without crashing', async () => {
     const conn = makeConn()
     const debug = console.debug
+    const trace = process.env.MATCHACLAW_TRACE
+    process.env.MATCHACLAW_TRACE = '1'
     const debugMock = mock(() => {})
     console.debug = debugMock as typeof console.debug
 
@@ -1572,6 +1574,8 @@ describe('forwardSessionUpdates', () => {
       expect(debugMock).toHaveBeenCalled()
     } finally {
       console.debug = debug
+      if (trace === undefined) delete process.env.MATCHACLAW_TRACE
+      else process.env.MATCHACLAW_TRACE = trace
     }
   })
 

@@ -207,7 +207,7 @@ export function registerFeishuSearchDocWikiTool(api: OpenClawPluginApi): boolean
               // query 为可选参数，默认使用空字符串（表示空搜）
               const query = p.query ?? '';
 
-              log.info(`search: query="${query}", has_filter=${!!p.filter}, page_size=${p.page_size ?? 15}`);
+              log.trace(() => `search: query="${query}", has_filter=${!!p.filter}, page_size=${p.page_size ?? 15}`);
 
               // 构建请求体
               const requestData: any = {
@@ -232,14 +232,14 @@ export function registerFeishuSearchDocWikiTool(api: OpenClawPluginApi): boolean
                 requestData.doc_filter = { ...filter };
                 requestData.wiki_filter = { ...filter };
 
-                log.info(
+                log.trace(() =>
                   `search: applying filter to both doc and wiki: doc_types=${filter.doc_types?.join(',') || 'all'}, only_title=${filter.only_title ?? false}`,
                 );
               } else {
                 // 即使没有筛选条件，也必须传空对象（否则 API 不返回内容）
                 requestData.doc_filter = {};
                 requestData.wiki_filter = {};
-                log.info(`search: no filter provided, using empty filters (required by API)`);
+                log.trace(() => `search: no filter provided, using empty filters (required by API)`);
               }
 
               // 使用 client.invoke 统一封装底层 request 调用
@@ -274,7 +274,7 @@ export function registerFeishuSearchDocWikiTool(api: OpenClawPluginApi): boolean
               );
               const converted = { count: 0 };
               const normalizedResults = normalizeSearchResultTimeFields(data.res_units, converted);
-              log.info(`search: normalized ${converted.count} timestamp fields to ISO8601`);
+              log.trace(() => `search: normalized ${converted.count} timestamp fields to ISO8601`);
 
               return json({
                 total: data.total,

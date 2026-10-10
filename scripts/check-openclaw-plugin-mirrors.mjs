@@ -32,17 +32,6 @@ const REQUIRED_PLUGIN_MIRRORS = [
     scanSdkImports: true,
   },
   {
-    pluginId: 'memory-lancedb-pro',
-    dir: 'memory-lancedb-pro',
-    scanSdkImports: true,
-    requiredFiles: [
-      'models/Xenova/all-MiniLM-L6-v2/config.json',
-      'models/Xenova/all-MiniLM-L6-v2/tokenizer.json',
-      'models/Xenova/all-MiniLM-L6-v2/tokenizer_config.json',
-      'models/Xenova/all-MiniLM-L6-v2/onnx/model.onnx',
-    ],
-  },
-  {
     pluginId: 'dingtalk',
     dir: 'dingtalk',
   },

@@ -3,7 +3,7 @@ mod model;
 mod transition;
 
 pub use mailbox::{post, pull};
-pub(crate) use model::TaskRestoreInput;
+pub(crate) use model::{TaskBoardKey, TaskRestoreInput};
 pub use model::{
     AutoRunnerFacts, MailboxKind, MailboxMessage, RunnerStatus, TaskBoardError, TaskBoardFacts,
     TaskId, TaskPlanInput, TaskRecord, TaskStatus,

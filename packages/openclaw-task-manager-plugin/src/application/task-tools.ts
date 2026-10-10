@@ -3,6 +3,7 @@ import type { TaskItem, TodoItem } from '../domain/task-item.js'
 import { taskCreateParameters } from '../schemas/task-create-schema.js'
 import { taskGetParameters, taskListParameters, todoGetParameters, todoWriteParameters } from '../schemas/task-store-schema.js'
 import { taskUpdateParameters } from '../schemas/task-update-schema.js'
+import { logTaskPipeline } from '../shared/debug-logging.js'
 import { TaskStoreError } from '../shared/errors.js'
 import { toNonEmptyString } from '../shared/params.js'
 import { parseTaskCreateInput, parseTaskUpdateInput } from './task-inputs.js'
@@ -14,10 +15,6 @@ type ToolParams = Record<string, unknown>
 type ToolContext = {
   workspaceDir?: string
   sessionKey?: string
-}
-
-function logTaskPipeline(api: OpenClawPluginApi, event: string, count: number): void {
-  api.logger?.debug?.(`[task-pipeline] plugin.${event} count=${count}`)
 }
 
 function asJsonText(value: unknown): string {

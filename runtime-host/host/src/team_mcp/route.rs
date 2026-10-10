@@ -35,7 +35,11 @@ pub(super) fn descriptor(
                 let owner = owner.clone();
                 let verifier = verifier.clone();
                 let resolver = resolver.clone();
-                Box::pin(async move { handle(owner, verifier, resolver, request).await.into() })
+                Box::pin(async move {
+                    handle(owner, verifier, resolver, request)
+                        .await
+                        .into()
+                })
             },
         )],
     )
@@ -89,9 +93,6 @@ async fn handle(
         .execute_team_mcp(tool.name, tool.arguments, resolver)
         .await
     {
-        Ok(result) if result.get("errorCode").and_then(Value::as_str) == Some("invalid_params") => {
-            Response::json(400, result)
-        }
         Ok(result) => Response::json(200, result),
         Err(_) => unavailable(),
     }

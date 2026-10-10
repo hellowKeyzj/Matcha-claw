@@ -429,6 +429,26 @@ impl openclaw::gateway::loopback::OpenClawGatewayCapabilityPort for PeerHandle {
 }
 
 impl RuntimeControlLifecyclePort for PeerHandle {
+    fn repair_status<'a>(
+        &'a self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> RuntimeControlLifecycleFuture<'a, Result<runtime_directory::RuntimeRepairSnapshot, RuntimeControlLifecycleError>> {
+        Box::pin(async move {
+            if endpoint != runtime_directory::RuntimeDriverIdentity::open_claw().endpoint() {
+                return Err(RuntimeControlLifecycleError::Unsupported);
+            }
+            self.runtime_repair_status().await.map_err(|_| RuntimeControlLifecycleError::Unavailable)
+        })
+    }
+
+    fn admit_lifecycle_repair<'a>(
+        &'a self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        call: runtime_directory::call::RuntimeControlCallContext,
+    ) -> RuntimeControlLifecycleFuture<'a, Result<platform::call::CallReceipt, RuntimeControlLifecycleError>> {
+        Box::pin(self.admit_runtime_repair(endpoint, call))
+    }
+
     fn lifecycle_status<'a>(
         &'a self,
         endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,

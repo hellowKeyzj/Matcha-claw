@@ -200,17 +200,21 @@ impl SealedSkillStore {
     pub(crate) fn cloud_packages(
         &self,
     ) -> Result<Vec<SealedCloudPackageEntry>, SealedResourceError> {
-        let started = Instant::now();
-        eprintln!(
-            "[startup-trace] source=sealed-resource phase=cloud-package-scan stage=start kind=skill"
-        );
+        let started = platform::trace::enabled().then(Instant::now);
+        if started.is_some() {
+            eprintln!(
+                "[startup-trace] source=sealed-resource phase=cloud-package-scan stage=start kind=skill"
+            );
+        }
         let mut lock_wait_ms = 0;
         let mut package_count = 0usize;
         let mut total_bytes = 0u64;
         let result = (|| {
-            let lock_started = Instant::now();
+            let lock_started = started.map(|_| Instant::now());
             let guard = self.operation_lock.lock();
-            lock_wait_ms = lock_started.elapsed().as_millis();
+            if let Some(lock_started) = lock_started {
+                lock_wait_ms = lock_started.elapsed().as_millis();
+            }
             let _guard = guard.map_err(|_| SealedResourceError::Unknown)?;
             let Some(root) = existing_skills_directory(self.root.skills_directory())? else {
                 return Ok(Vec::new());
@@ -222,8 +226,10 @@ impl SealedSkillStore {
                     continue;
                 }
                 let bytes = read_package_file(&path, SealedResourceError::Unknown)?;
-                package_count += 1;
-                total_bytes += bytes.len() as u64;
+                if started.is_some() {
+                    package_count += 1;
+                    total_bytes += bytes.len() as u64;
+                }
                 let package_sha256 = hex_digest(&bytes);
                 let Some(metadata) = self.cloud_metadata(&package_sha256)? else {
                     continue;
@@ -235,11 +241,13 @@ impl SealedSkillStore {
             }
             Ok(packages)
         })();
-        eprintln!(
-            "[startup-trace] source=sealed-resource phase=cloud-package-scan stage=end kind=skill duration_ms={} lock_wait_ms={lock_wait_ms} package_count={package_count} total_bytes={total_bytes} outcome={}",
-            started.elapsed().as_millis(),
-            if result.is_ok() { "success" } else { "failed" }
-        );
+        if let Some(started) = started {
+            eprintln!(
+                "[startup-trace] source=sealed-resource phase=cloud-package-scan stage=end kind=skill duration_ms={} lock_wait_ms={lock_wait_ms} package_count={package_count} total_bytes={total_bytes} outcome={}",
+                started.elapsed().as_millis(),
+                if result.is_ok() { "success" } else { "failed" }
+            );
+        }
         result
     }
 
@@ -297,10 +305,12 @@ impl SealedSkillStore {
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        eprintln!(
-            "[startup-trace] source=sealed-skills-export phase=store detail=start skillKey={}",
-            skill_key.as_str()
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=sealed-skills-export phase=store detail=start skillKey={}",
+                skill_key.as_str()
+            );
+        }
         let root = match ensure_skills_directory(self.root.skills_directory()) {
             Ok(root) => root,
             Err(error) => {
@@ -320,11 +330,13 @@ impl SealedSkillStore {
                 return Err(error);
             }
         };
-        eprintln!(
-            "[startup-trace] source=sealed-skills-export phase=store detail=collected skillKey={} files={}",
-            skill_key.as_str(),
-            files.len()
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=sealed-skills-export phase=store detail=collected skillKey={} files={}",
+                skill_key.as_str(),
+                files.len()
+            );
+        }
         let receipt = match SealedSkillPackage::seal_with_cloud_key(
             skill_key.clone(),
             self.root.target(),
@@ -363,10 +375,12 @@ impl SealedSkillStore {
             trace_export_error("cleanup", &skill_key, error);
             return Err(error);
         }
-        eprintln!(
-            "[startup-trace] source=sealed-skills-export phase=store detail=accepted skillKey={}",
-            skill_key.as_str()
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=sealed-skills-export phase=store detail=accepted skillKey={}",
+                skill_key.as_str()
+            );
+        }
         Ok(SealedSkillPackageExport {
             entry: SealedSkillCatalogEntry {
                 skill_key,

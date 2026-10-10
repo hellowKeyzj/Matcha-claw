@@ -1,4 +1,5 @@
 import { hostApiFetch } from '@/lib/host-api';
+import { isTraceEnabled } from '@/lib/trace-logger';
 import { nativeProjectionError } from '@/lib/provider-projection-errors';
 import { isProviderMutationCommitted, waitForProviderMutation } from '@/lib/provider-call';
 import { decodeProviderCallDetail, type ProviderCallDetail } from '@/types/call-log/provider';
@@ -221,7 +222,7 @@ export async function persistProviderModels(
   models: readonly ProviderModelDraft[],
 ): Promise<ProviderModelsReplaceResult> {
   try {
-    logProviderConfigTrace('request-start', { accountId: summarizeIdentifier(accountId), modelCount: models.length });
+    if (isTraceEnabled()) logProviderConfigTrace('request-start', { accountId: summarizeIdentifier(accountId), modelCount: models.length });
     const result = await hostApiFetch<unknown>('/api/provider-models', {
       method: 'POST',
       body: JSON.stringify({
@@ -233,7 +234,7 @@ export async function persistProviderModels(
       }),
     });
     const receipt = await waitForProviderMutation(result, 'providerModels.replace', { accountId });
-    logProviderConfigTrace('request-finished', providerProjectionTrace(receipt));
+    if (isTraceEnabled()) logProviderConfigTrace('request-finished', providerProjectionTrace(receipt));
     if (!isProviderMutationCommitted(receipt, 'stored')) {
       if (receipt.outcome === 'rejected' || receipt.outcome === 'missing') {
         throw new Error('Provider model request was rejected');
@@ -247,7 +248,7 @@ export async function persistProviderModels(
     const warning = nativeProjectionError(receipt);
     return { receipt, ...(warning ? { warning } : {}) };
   } catch (error) {
-    logProviderConfigTrace('request-failed', {
+    if (isTraceEnabled()) logProviderConfigTrace('request-failed', {
       errorName: error instanceof Error ? error.name : typeof error,
     });
     throw error;

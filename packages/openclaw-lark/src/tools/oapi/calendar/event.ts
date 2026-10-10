@@ -514,7 +514,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
     const data = primaryRes.data as CalendarPrimaryData | undefined;
     const cid = data?.calendars?.[0]?.calendar?.calendar_id;
     if (cid) {
-      log.info(`resolveCalendarId: primary() returned calendar_id=${cid}`);
+      log.trace(() => `resolveCalendarId: primary() returned calendar_id=${cid}`);
       return cid;
     }
     return null;
@@ -562,7 +562,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                   received_end: p.end_time,
                 });
 
-              log.info(
+              log.trace(() =>
                 `create: summary=${p.summary}, start_time=${p.start_time} -> ts=${startTs}, end_time=${p.end_time} -> ts=${endTs}, user_open_id=${p.user_open_id ?? 'MISSING'}, attendees=${JSON.stringify(p.attendees ?? [])}, vchat=${p.vchat?.vc_type ?? 'auto'}, location=${p.location?.name ?? 'none'}`,
               );
 
@@ -634,7 +634,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                 }
               }
 
-              log.info(`allAttendees=${JSON.stringify(allAttendees)}`);
+              log.trace(() => `allAttendees=${JSON.stringify(allAttendees)}`);
               let attendeeError: string | undefined;
 
               const operateId = p.user_open_id ?? p.attendees?.find((a) => a.type === 'user')?.id;
@@ -670,7 +670,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                     { as: 'user' },
                   );
                   assertLarkOk(attendeeRes);
-                  log.info(`attendee API response: ${JSON.stringify(attendeeRes.data)}`);
+                  log.trace(() => `attendee API response: ${JSON.stringify(attendeeRes.data)}`);
                 } catch (attendeeErr) {
                   attendeeError = formatLarkError(attendeeErr);
                   log.info(`attendee add FAILED: ${attendeeError}`);
@@ -736,7 +736,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
 
               const calendarId = await resolveCalendarIdOrFail(p.calendar_id, client);
 
-              log.info(
+              log.trace(() =>
                 `list: calendar_id=${calendarId}, start_time=${startTs}, end_time=${endTs} (using instance_view)`,
               );
 
@@ -776,7 +776,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
 
               const calendarId = await resolveCalendarIdOrFail(p.calendar_id, client);
 
-              log.info(`get: calendar_id=${calendarId}, event_id=${p.event_id}`);
+              log.trace(() => `get: calendar_id=${calendarId}, event_id=${p.event_id}`);
 
               const res = await client.invoke(
                 'feishu_calendar_event.get',
@@ -835,7 +835,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
               if (p.description) updateData.description = p.description;
               if (p.location) updateData.location = { name: p.location };
 
-              log.info(
+              log.trace(() =>
                 `patch: calendar_id=${calendarId}, event_id=${p.event_id}, fields=${Object.keys(updateData).join(',')}`,
               );
 
@@ -868,7 +868,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
 
               const calendarId = await resolveCalendarIdOrFail(p.calendar_id, client);
 
-              log.info(
+              log.trace(() =>
                 `delete: calendar_id=${calendarId}, event_id=${p.event_id}, notify=${p.need_notification ?? true}`,
               );
 
@@ -904,7 +904,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
 
               const calendarId = await resolveCalendarIdOrFail(p.calendar_id, client);
 
-              log.info(`search: calendar_id=${calendarId}, query=${p.query}, page_size=${p.page_size ?? 50}`);
+              log.trace(() => `search: calendar_id=${calendarId}, query=${p.query}, page_size=${p.page_size ?? 50}`);
 
               const res = await client.invoke(
                 'feishu_calendar_event.search',
@@ -945,7 +945,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
 
               const calendarId = await resolveCalendarIdOrFail(p.calendar_id, client);
 
-              log.info(`reply: calendar_id=${calendarId}, event_id=${p.event_id}, rsvp=${p.rsvp_status}`);
+              log.trace(() => `reply: calendar_id=${calendarId}, event_id=${p.event_id}, rsvp=${p.rsvp_status}`);
 
               const res = await client.invoke(
                 'feishu_calendar_event.reply',
@@ -993,7 +993,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                   received_end: p.end_time,
                 });
 
-              log.info(`instances: calendar_id=${calendarId}, event_id=${p.event_id}, start=${startTs}, end=${endTs}`);
+              log.trace(() => `instances: calendar_id=${calendarId}, event_id=${p.event_id}, start=${startTs}, end=${endTs}`);
 
               const res = await client.invoke(
                 'feishu_calendar_event.instances',
@@ -1044,7 +1044,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                   received_end: p.end_time,
                 });
 
-              log.info(`instance_view: calendar_id=${calendarId}, start=${startTs}, end=${endTs}`);
+              log.trace(() => `instance_view: calendar_id=${calendarId}, start=${startTs}, end=${endTs}`);
 
               const res = await client.invoke(
                 'feishu_calendar_event.instance_view',

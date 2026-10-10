@@ -103,12 +103,12 @@ export async function addTypingIndicator(params: {
     state.reactionId = response?.data?.reaction_id ?? null;
   } catch (error) {
     if (isMessageUnavailableError(error)) {
-      log.debug(`Skip add typing indicator for unavailable message`, { messageId: normalizedId });
+      log.debug(`Skip add typing indicator for unavailable message`, () => ({ messageId: normalizedId }));
       return state;
     }
     // Silently swallow the error. The typing indicator is a best-effort
     // visual cue and must not interfere with message processing.
-    log.debug(`Failed to add typing indicator`, {
+    log.warn(`Failed to add typing indicator`, {
       messageId,
       error: error instanceof Error ? error.message : error,
     });
@@ -162,13 +162,13 @@ export async function removeTypingIndicator(params: {
     });
   } catch (error) {
     if (isMessageUnavailableError(error)) {
-      log.debug(`Skip remove typing indicator for unavailable message`, { messageId: state.messageId });
+      log.debug(`Skip remove typing indicator for unavailable message`, () => ({ messageId: state.messageId }));
       return;
     }
     // Silently swallow the error. A leftover reaction is acceptable;
     // it will not confuse the user and will disappear if the message
     // is deleted or the reaction is manually removed.
-    log.debug(`Failed to remove typing indicator`, {
+    log.warn(`Failed to remove typing indicator`, {
       messageId: state.messageId,
       error: error instanceof Error ? error.message : error,
     });

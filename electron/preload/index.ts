@@ -90,6 +90,7 @@ const electronAPI = {
    */
   writeFleetCredential: (input: unknown) => ipcRenderer.invoke('fleet:writeCredential', input),
   platform: process.platform,
+  traceEnabled: process.env.MATCHACLAW_TRACE === '1',
 
   /**
    * Check if running in development

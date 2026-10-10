@@ -17,8 +17,7 @@ pub use actor::{OrganizationOwner, OrganizationOwnerInput};
 pub use admission::{OrganizationPhase, RequestAdmissionClosed};
 pub use command::OrganizationCommand;
 pub use coordinator::{
-    AdmissionState, TeamRunAdmission, TeamRunCoordinator, TeamRunCoordinatorHandle,
-    TeamRunCoordinatorInput,
+    TeamRunAdmission, TeamRunCoordinator, TeamRunCoordinatorHandle, TeamRunCoordinatorInput,
 };
 pub use handle::OrganizationHandle;
 pub use query::OrganizationQuery;

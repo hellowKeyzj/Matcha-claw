@@ -5,11 +5,20 @@ use super::{
     RestoreDeliveryError,
 };
 
-#[derive(Clone, Default, Eq, PartialEq)]
+#[derive(Clone, Default)]
 pub struct DeliveryLedger {
     deliveries: BTreeMap<DeliveryId, Delivery>,
     delivery_ids_by_idempotency_key: BTreeMap<String, DeliveryId>,
+    undo: Option<BTreeMap<DeliveryId, Option<Delivery>>>,
 }
+
+impl PartialEq for DeliveryLedger {
+    fn eq(&self, other: &Self) -> bool {
+        self.deliveries == other.deliveries
+            && self.delivery_ids_by_idempotency_key == other.delivery_ids_by_idempotency_key
+    }
+}
+impl Eq for DeliveryLedger {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegisterOutcome {
@@ -136,6 +145,10 @@ impl DeliveryLedger {
         }
 
         let delivery = Delivery::request(request)?;
+        if let Some(undo) = &mut self.undo {
+            undo.entry(delivery.facts().delivery_id.clone())
+                .or_insert(None);
+        }
         self.delivery_ids_by_idempotency_key.insert(
             delivery.facts().idempotency_key.clone(),
             delivery.facts().delivery_id.clone(),
@@ -156,7 +169,72 @@ impl DeliveryLedger {
     }
 
     pub fn delivery_mut(&mut self, delivery_id: &DeliveryId) -> Option<&mut Delivery> {
-        self.deliveries.get_mut(delivery_id)
+        let delivery = self.deliveries.get_mut(delivery_id)?;
+        if let Some(undo) = &mut self.undo {
+            undo.entry(delivery_id.clone())
+                .or_insert_with(|| Some(delivery.clone()));
+        }
+        Some(delivery)
+    }
+
+    pub(crate) fn restore_record(&mut self, delivery: Delivery) -> Result<(), RestoreLedgerError> {
+        let id = delivery.facts().delivery_id.clone();
+        let key = delivery.facts().idempotency_key.clone();
+        if self
+            .delivery_ids_by_idempotency_key
+            .get(&key)
+            .is_some_and(|existing| existing != &id)
+        {
+            return Err(RestoreLedgerError::DuplicateIdempotencyKey(key));
+        }
+        self.remove_record(&id);
+        if let Some(undo) = &mut self.undo {
+            undo.entry(id.clone()).or_insert(None);
+        }
+        self.delivery_ids_by_idempotency_key.insert(key, id.clone());
+        self.deliveries.insert(id, delivery);
+        Ok(())
+    }
+
+    pub(crate) fn remove_record(&mut self, id: &DeliveryId) {
+        if let Some(delivery) = self.deliveries.remove(id) {
+            self.delivery_ids_by_idempotency_key
+                .remove(&delivery.facts().idempotency_key);
+            if let Some(undo) = &mut self.undo {
+                undo.entry(id.clone()).or_insert(Some(delivery));
+            }
+        }
+    }
+
+    pub(crate) fn begin_transaction(&mut self) {
+        assert!(self.undo.is_none(), "delivery transaction already active");
+        self.undo = Some(BTreeMap::new());
+    }
+
+    pub(crate) fn previous(&self, id: &DeliveryId) -> Option<&Delivery> {
+        self.undo.as_ref()?.get(id)?.as_ref()
+    }
+
+    pub(crate) fn changed_ids(&self) -> impl Iterator<Item = &DeliveryId> {
+        self.undo.iter().flat_map(|undo| undo.keys())
+    }
+
+    pub(crate) fn commit_transaction(&mut self) {
+        self.undo = None;
+    }
+
+    pub(crate) fn rollback_transaction(&mut self) {
+        for (id, previous) in self.undo.take().into_iter().flatten() {
+            if let Some(current) = self.deliveries.remove(&id) {
+                self.delivery_ids_by_idempotency_key
+                    .remove(&current.facts().idempotency_key);
+            }
+            if let Some(delivery) = previous {
+                self.delivery_ids_by_idempotency_key
+                    .insert(delivery.facts().idempotency_key.clone(), id.clone());
+                self.deliveries.insert(id, delivery);
+            }
+        }
     }
 
     pub fn deliveries(&self) -> impl Iterator<Item = &Delivery> {
@@ -164,8 +242,16 @@ impl DeliveryLedger {
     }
 
     pub(crate) fn retain_without_run(&mut self, run_id: &str) {
-        self.deliveries
-            .retain(|_, delivery| delivery.facts().run_id != run_id);
+        self.deliveries.retain(|id, delivery| {
+            if delivery.facts().run_id != run_id {
+                return true;
+            }
+            if let Some(undo) = &mut self.undo {
+                undo.entry(id.clone())
+                    .or_insert_with(|| Some(delivery.clone()));
+            }
+            false
+        });
         self.delivery_ids_by_idempotency_key
             .retain(|_, delivery_id| self.deliveries.contains_key(delivery_id));
     }

@@ -1,8 +1,9 @@
+import type { TFunction } from 'i18next';
 import type {
   SessionRenderToolCard,
   SessionRenderToolRuntimeAdapterId,
 } from '../../../types/session/tool-card';
-import type { ToolActivityViewModel } from '../tool-activity-view-model';
+import type { ToolActivityContent } from '../tool-activity-view-model';
 
 export const KNOWN_TOOL_NAMES = [
   'file',
@@ -26,7 +27,7 @@ export interface ToolRendererContext {
 export interface ToolActivityRenderer {
   readonly name: KnownToolName;
   readonly matches: (tool: SessionRenderToolCard, context: ToolRendererContext) => boolean;
-  readonly buildViewModel: (tool: SessionRenderToolCard, context: ToolRendererContext) => ToolActivityViewModel;
+  readonly buildContent: (tool: SessionRenderToolCard, t: TFunction<'chat'>) => ToolActivityContent;
 }
 
 export type GenericToolActivityRenderer = ToolActivityRenderer & {

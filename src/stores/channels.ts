@@ -1,3 +1,4 @@
+import { isTraceEnabled } from '@/lib/trace-logger';
 /**
  * Channels State Store
  * Manages messaging channel state
@@ -298,8 +299,8 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
   },
 
   deleteChannel: async (channelId, options) => {
-    const traceId = options?.traceId ?? crypto.randomUUID();
-    const startedAt = Date.now();
+    const traceId = isTraceEnabled() ? options?.traceId ?? crypto.randomUUID() : undefined;
+    const startedAt = isTraceEnabled() ? Date.now() : 0;
     logChannelTrace('delete.store.start', traceId);
     set((state) => {
       const next = incrementMutatingChannel(state.mutatingByChannelId, channelId);
@@ -313,7 +314,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     const placeholderMatch = channelId.match(/^(.*)-default$/);
     const channelType = channelTypeFromState ?? (placeholderMatch?.[1] as ChannelType | undefined);
     if (!channelType) {
-      logChannelTrace('delete.store.end', traceId, { outcome: 'noop', durationMs: Date.now() - startedAt });
+      logChannelTrace('delete.store.end', traceId, () => ({ outcome: 'noop', durationMs: Date.now() - startedAt }));
       set((state) => {
         const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
         return {
@@ -326,10 +327,10 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
 
     let outcome: 'confirmed' | 'target_rejected' | 'unknown' | 'error' | undefined;
     try {
-      logChannelTrace('delete.config.start', traceId, { accountPresent: Boolean(channel?.accountId) });
+      logChannelTrace('delete.config.start', traceId, () => ({ accountPresent: Boolean(channel?.accountId) }));
       const result = await hostChannelsDeleteConfig(channelType, channel?.accountId, { traceId });
       outcome = ['confirmed', 'target_rejected'].includes(result.outcome) ? result.outcome : 'unknown';
-      logChannelTrace('delete.config.end', traceId, { outcome, durationMs: Date.now() - startedAt });
+      logChannelTrace('delete.config.end', traceId, () => ({ outcome, durationMs: Date.now() - startedAt }));
       if (result.outcome !== 'confirmed') {
         const error = `Channel deletion outcome was ${result.outcome}`;
         set((state) => ({
@@ -344,14 +345,14 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
       return true;
     } catch (error) {
       outcome = 'error';
-      logChannelTrace('delete.config.end', traceId, { outcome, errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt });
+      logChannelTrace('delete.config.end', traceId, () => ({ outcome, errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt }));
       const message = error instanceof Error ? error.message : String(error);
       set((state) => ({
         channels: state.channels.map((item) => item.id === channelId ? { ...item, error: message } : item),
       }));
       return false;
     } finally {
-      logChannelTrace('delete.store.end', traceId, { outcome, durationMs: Date.now() - startedAt });
+      logChannelTrace('delete.store.end', traceId, () => ({ outcome, durationMs: Date.now() - startedAt }));
       set((state) => {
         const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
         return {

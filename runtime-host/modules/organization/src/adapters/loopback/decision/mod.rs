@@ -43,10 +43,10 @@ impl Delivery {
             Self::Recorded => json!({ "success": true, "outcome": "recorded" }),
             Self::Replayed => json!({ "success": true, "outcome": "replayed" }),
             Self::OutcomeUnknown => {
-                json!({ "success": false, "outcome": "outcome-unknown", "error": "Team human decision outcome is unknown" })
+                json!({ "success": false, "outcome": "outcome-unknown", "error": "Team approval outcome is unknown" })
             }
             Self::Rejected => {
-                json!({ "success": false, "error": "Team human decision was rejected" })
+                json!({ "success": false, "error": "Team approval was rejected" })
             }
         }
     }
@@ -127,6 +127,7 @@ pub(crate) async fn handle(
     match owner.approval_resolve(command).await {
         Ok(Ok(organization::run::approval::HumanDecisionOutcome::Recorded)) => Delivery::Recorded,
         Ok(Ok(organization::run::approval::HumanDecisionOutcome::Replayed)) => Delivery::Replayed,
+        Ok(Err(organization::StoreFault::InvalidFacts)) => Delivery::Rejected,
         Ok(Err(_)) => Delivery::OutcomeUnknown,
         Err(_) => Delivery::OutcomeUnknown,
     }

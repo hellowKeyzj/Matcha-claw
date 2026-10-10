@@ -415,7 +415,7 @@ export class LarkClient {
     }
     this._wsClient = null;
     if (this.messageDedup) {
-      log.info(`disposing message dedup`, { accountId: this.accountId, size: this.messageDedup.size });
+      log.trace(`disposing message dedup`, { accountId: this.accountId, size: this.messageDedup.size });
       this.messageDedup.dispose();
       this.messageDedup = null;
     }

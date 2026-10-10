@@ -19,6 +19,7 @@ import {
   resolveProviderModelCapabilities,
 } from '@/lib/provider-model-capabilities';
 import { cn } from '@/lib/utils';
+import styles from './ProviderCredentialModelsEditor.module.css';
 
 interface ModelDraftRow {
   modelId: string;
@@ -451,7 +452,7 @@ function ProviderCredentialModelsEditorInner(props: {
           ) : rows.length === 0 ? (
             <p className="px-3 py-4 text-xs text-muted-foreground">{t('providerModels.group.empty')}</p>
           ) : (
-            <StableScrollArea className="max-h-[360px] overflow-y-auto overscroll-contain bg-[hsl(var(--shell-surface))] [scrollbar-gutter:stable]">
+            <StableScrollArea className={cn(styles.list, 'max-h-[360px] overflow-y-auto overscroll-contain bg-[hsl(var(--shell-surface))] [scrollbar-gutter:stable]')}>
               {rows.map((row, index) => (
                 <ProviderModelDraftRow
                   key={`${credential.id}-${index}`}
@@ -626,9 +627,9 @@ function ProviderModelDraftRow(props: {
   const showImageGeneration = hasImageGenerationFields(row);
   const hasTuningFields = showTextTuning || showImageGeneration;
   return (
-    <div className="grid grid-cols-1 gap-2 border-b border-border/60 px-3 py-2.5 last:border-b-0 xl:grid-cols-[minmax(12rem,1fr)_minmax(14rem,1.1fr)_auto_2.25rem] xl:items-start">
-      <div className="min-w-0">
-        <label className="mb-1 block text-[11px] font-medium text-muted-foreground xl:hidden">
+    <div className={cn(styles.row, 'gap-2 border-b border-border/60 px-3 py-2.5 last:border-b-0')}>
+      <div className={cn(styles.model, 'min-w-0')}>
+        <label className={cn(styles.label, 'mb-1 text-[11px] font-medium text-muted-foreground')}>
           {t('providerModels.row.modelIdLabel')}
         </label>
         <Input
@@ -642,7 +643,7 @@ function ProviderModelDraftRow(props: {
         />
       </div>
       <div className="min-w-0">
-        <label className="mb-1 block text-[11px] font-medium text-muted-foreground xl:hidden">
+        <label className={cn(styles.label, 'mb-1 text-[11px] font-medium text-muted-foreground')}>
           {t('providerModels.row.capabilitiesLabel', 'Capabilities')}
         </label>
         <div className="flex flex-wrap gap-1">
@@ -664,30 +665,32 @@ function ProviderModelDraftRow(props: {
           ))}
         </div>
       </div>
-      <Button
-        variant="ghost"
-        size="sm"
-        className="h-8 justify-self-start px-2 text-xs text-muted-foreground xl:justify-self-end"
-        onClick={onAdvancedToggle}
-        disabled={disabled || !hasTuningFields}
-        aria-expanded={advancedOpen}
-      >
-        {t('providerModels.row.advanced')}
-        {advancedOpen ? <ChevronDown className="ml-1 h-3.5 w-3.5" /> : <ChevronRight className="ml-1 h-3.5 w-3.5" />}
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        className={cn('h-8 w-8 justify-self-start text-muted-foreground hover:text-destructive xl:justify-self-end')}
-        onClick={onRemove}
-        disabled={disabled}
-        aria-label={t('providerModels.row.remove')}
-        title={t('providerModels.row.remove')}
-      >
-        <Trash2 className="h-4 w-4" />
-      </Button>
+      <div className="flex items-center gap-1 justify-self-end">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 shrink-0 px-2 text-xs text-muted-foreground"
+          onClick={onAdvancedToggle}
+          disabled={disabled || !hasTuningFields}
+          aria-expanded={advancedOpen}
+        >
+          {t('providerModels.row.advanced')}
+          {advancedOpen ? <ChevronDown className="ml-1 h-3.5 w-3.5" /> : <ChevronRight className="ml-1 h-3.5 w-3.5" />}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+          onClick={onRemove}
+          disabled={disabled}
+          aria-label={t('providerModels.row.remove')}
+          title={t('providerModels.row.remove')}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </div>
       {hasTuningFields && advancedOpen ? (
-        <div className="grid grid-cols-1 gap-2 rounded-md bg-muted/30 p-2 sm:grid-cols-2 lg:grid-cols-4 xl:col-span-4">
+        <div className="col-span-full grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-2 rounded-md bg-muted/30 p-2">
           {showTextTuning ? (
             <>
               <LabeledModelField label={t('providerModels.row.contextWindowLabel')}>

@@ -1,8 +1,10 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Check, ChevronDown, ChevronRight, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
+import { useTeamRunLabels } from '@/hooks/use-team-run-labels';
 import { useSubagentsStore } from '@/stores/subagents';
 import {
   resolveTeamRoleChatTargetFromProbe,
@@ -398,7 +400,7 @@ const TeamListSection = memo(function TeamListSection({
                             onPick?.();
                           }}
                         >
-                          <span className="block truncate">{run.runId}</span>
+                          <span className="block truncate" title={run.runId}>{run.label}</span>
                         </button>
                       </div>
                       {runExpanded ? (
@@ -915,6 +917,7 @@ const HoverPeek = memo(function HoverPeek({
 
 export const AgentSessionsPane = memo(function AgentSessionsPane() {
   const { t, i18n } = useTranslation();
+  const navigate = useNavigate();
   const subagentManagementAgentsResource = useSubagentsStore((state) => state.agentsResource);
   const subagentManagementAgents = Array.isArray(subagentManagementAgentsResource.data) ? subagentManagementAgentsResource.data : [];
   const {
@@ -934,6 +937,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
   } = useChatStore(useShallow(selectAgentSessionsPaneState));
   const teams = useTeamsStore((state) => state.teams);
   const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
+  const runLabels = useTeamRunLabels();
   const teamRoleChatTargetIndex = useTeamsStore(selectTeamRoleChatTargetIndex);
   const createRun = useTeamsStore((state) => state.createRun);
   const setActiveRun = useTeamsStore((state) => state.setActiveRun);
@@ -1002,6 +1006,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
       const leader = sessions.find((role) => role.roleId === 'leader');
       return {
         runId: run.runId,
+        label: runLabels[run.runId] ?? t('teams:run.unnamed'),
         createdAt: run.createdAt,
         updatedAt: run.updatedAt,
         leader: leader ? toRoleInput(leader) : null,
@@ -1010,7 +1015,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
           .map(toRoleInput),
       };
     }),
-  })), [runListByTeamId, teamRoleChatTargetIndex, teams]);
+  })), [runLabels, runListByTeamId, t, teamRoleChatTargetIndex, teams]);
   const endpointByRuntimeScopeKey = useMemo(
     () => new Map(runtimeEndpoints.map((endpoint) => [endpoint.runtimeScopeKey, endpoint] as const)),
     [runtimeEndpoints],
@@ -1144,8 +1149,11 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
   const selectTeamRole = useCallback((teamId: string, runId: string, role: AgentSessionSwitchboardTeamRoleResult) => {
     setActiveRun(teamId, runId);
     openSessionIdentity({ sessionIdentity: role.sessionIdentity });
+    navigate('/', { state: { teamDesignSurface: {
+      kind: 'team-graph', sourceSessionIdentity: role.sessionIdentity, teamId, runId,
+    } } });
     void refreshSnapshot(teamId, { force: true });
-  }, [openSessionIdentity, refreshSnapshot, setActiveRun]);
+  }, [navigate, openSessionIdentity, refreshSnapshot, setActiveRun]);
 
   const toggleTeam = useCallback((teamId: string) => {
     setExpandedTeamIds((current) => ({ ...current, [teamId]: current[teamId] !== true }));
@@ -1159,9 +1167,12 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
     setActiveRun(teamId, run.runId);
     if (run.leader) {
       openSessionIdentity({ sessionIdentity: run.leader.sessionIdentity });
+      navigate('/', { state: { teamDesignSurface: {
+        kind: 'team-graph', sourceSessionIdentity: run.leader.sessionIdentity, teamId, runId: run.runId,
+      } } });
     }
     void refreshSnapshot(teamId, { force: true });
-  }, [openSessionIdentity, refreshSnapshot, setActiveRun]);
+  }, [navigate, openSessionIdentity, refreshSnapshot, setActiveRun]);
 
   const handleCreateRunForTeam = useCallback((teamId: string) => {
     void createRun(teamId);

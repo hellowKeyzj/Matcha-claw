@@ -34,7 +34,7 @@ async function enableRuntime(debuggerSession) {
     await chrome.debugger.sendCommand(debuggerSession, 'Runtime.disable')
     await delay(RUNTIME_ENABLE_DELAY)
   } catch (err) {
-    log.debug('Target.createTarget Runtime.disable pre-step failed', err)
+    log.debug(() => ['Target.createTarget Runtime.disable pre-step failed', err])
   }
   await withTimeout(
     chrome.debugger.sendCommand(debuggerSession, 'Runtime.enable'),
@@ -157,13 +157,13 @@ export function createTargetOps(mgr) {
       throw new Error(`Cannot retain: already at max (${maxRetained}). Close retained tabs or set retain=false.`)
     }
 
-    log.info('Target.createTarget start', {
+    log.info(() => ['Target.createTarget start', {
       requestedUrl,
       creationUrl,
       createInWindow,
       retain,
       maxRetained,
-    })
+    }])
 
     let tab
     if (createInWindow) {
@@ -179,12 +179,12 @@ export function createTargetOps(mgr) {
       })
       if (!tab.id) throw new Error('Failed to create tab')
     }
-    log.info('Target.createTarget chrome.tabs/windows created', {
+    log.info(() => ['Target.createTarget chrome.tabs/windows created', {
       tabId: tab.id,
       windowId: tab.windowId ?? null,
       requestedUrl,
       pendingUrl: tab.url ?? creationUrl,
-    })
+    }])
     mgr.markAgent(tab.id, retain)
     await new Promise((r) => setTimeout(r, TARGET_CREATE_DELAY))
     const attached = await mgr.attach(tab.id, { manual: true })
@@ -194,22 +194,22 @@ export function createTargetOps(mgr) {
       await chrome.tabs.remove(tab.id).catch(() => {})
       throw new Error('Failed to attach debugger to new tab')
     }
-    log.info('Target.createTarget attached', {
+    log.info(() => ['Target.createTarget attached', {
       tabId: tab.id,
       sessionId: attached.sessionId,
       targetId: attached.targetId,
       requestedUrl,
       attachedUrl: attached.url ?? creationUrl,
       retain,
-    })
+    }])
 
     const entry = mgr.get?.(tab.id)
-    log.info('Target.createTarget bootstrap start', {
+    log.info(() => ['Target.createTarget bootstrap start', {
       tabId: tab.id,
       sessionId: entry?.sessionId ?? attached.sessionId,
       targetId: entry?.targetId ?? attached.targetId,
       requestedUrl,
-    })
+    }])
 
     const ready = await navigateAttachedTab(tab.id, requestedUrl)
     const currentTab = typeof chrome.tabs.get === 'function'
@@ -240,14 +240,14 @@ export function createTargetOps(mgr) {
       },
     )
     mgr.announceCurrentTarget?.(tab.id)
-    log.info('Target.createTarget ready', {
+    log.info(() => ['Target.createTarget ready', {
       tabId: tab.id,
       sessionId: entry?.sessionId ?? attached.sessionId,
       targetId: entry?.targetId ?? attached.targetId,
       requestedUrl,
       readyUrl: currentTab?.url ?? ready.mainFrameUrl,
       readyState: ready.readyState,
-    })
+    }])
 
     return { targetId: attached.targetId, retained: retain }
   }

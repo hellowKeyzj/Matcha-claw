@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -11,14 +11,14 @@ use organization::{
     GraphPatch, GraphPatchOperation, GraphRunId, GraphRunPurgeOutcome, IdempotencyKey, NodeKind,
     ResumeOutcome, RunCommand, StoreFault, TeamDecisionReceipt, TeamDecisionType,
     TeamGraphContextResult, TeamGraphContextView, TeamId, TeamNodeEventOutcome,
-    TeamRunDiagnosticsQueryOutcome, TeamRunQueryOutcome, TeamTriggerFireOutcome,
+    TeamRunDiagnosticsQueryOutcome, TeamRunListEntry, TeamTriggerFireOutcome,
     TriggerFireRequest,
     package::{TeamSkillDependencyPlanResult, TeamSkillPackageValidation},
     run::{
         approval::{HumanDecisionCommand, HumanDecisionOutcome},
         event::{
             GraphEdgeAction, GraphNodeKind, GraphPatch as EventGraphPatch,
-            GraphPatchOperation as EventGraphPatchOperation, InvalidEventInput, OpaqueId,
+            GraphPatchOperation as EventGraphPatchOperation, OpaqueId,
         },
         graph::NodePosition,
         public_projection::TeamRunPublicSnapshotQueryOutcome,
@@ -59,6 +59,194 @@ pub struct ManualTeamProvision {
     pub roles: Vec<organization::ManualTeamRoleBinding>,
 }
 
+pub(crate) enum GraphPatchDraftOperation {
+    Graph(GraphPatchOperation),
+    AddNode(NodeDraft),
+    ReplaceNode(NodeDraft),
+    AddEdge(EdgeDraft),
+    ReplaceEdge(EdgeDraft),
+}
+
+pub(crate) struct NodeDraft {
+    pub(crate) id: organization::NodeId,
+    pub(crate) title: String,
+    pub(crate) max_attempts: std::num::NonZeroU32,
+    pub(crate) role_id: String,
+    pub(crate) prompt: String,
+    pub(crate) assignment: NodeAssignmentDraft,
+}
+
+pub(crate) enum NodeAssignmentDraft {
+    Work { task_id: String, output_artifact_kind: Option<String> },
+    Review,
+}
+
+enum DecodedNode {
+    Defined(organization::NodeDefinition),
+    Unbound(NodeDraft),
+}
+
+impl NodeDraft {
+    fn kind(&self) -> NodeKind {
+        match self.assignment {
+            NodeAssignmentDraft::Work { .. } => NodeKind::Work,
+            NodeAssignmentDraft::Review => NodeKind::Review,
+        }
+    }
+
+    fn bind(self, session: organization::RoleSessionRef) -> organization::NodeDefinition {
+        let executor = organization::ExecutorPolicy::team_role_session(self.role_id, session);
+        match self.assignment {
+            NodeAssignmentDraft::Work { task_id, output_artifact_kind } => {
+                organization::NodeDefinition::work(self.id, self.title, self.max_attempts,
+                    organization::WorkAssignment::typed(task_id, self.prompt, executor, output_artifact_kind))
+            }
+            NodeAssignmentDraft::Review => organization::NodeDefinition::review(
+                self.id, self.title, self.max_attempts,
+                organization::ReviewAssignment::with_executor(executor, self.prompt),
+            ),
+        }
+    }
+
+    fn resolve(self, bindings: &[organization::RoleSessionReceipt]) -> Result<organization::NodeDefinition, StoreFault> {
+        let mut candidates = bindings.iter().filter(|binding| binding.role().as_str() == self.role_id);
+        let session = candidates.next().ok_or_else(|| {
+            StoreFault::Design(crate::store::DesignError::SessionBindingMismatch(self.id.clone()))
+        })?;
+        if candidates.next().is_some() {
+            return Err(StoreFault::Design(crate::store::DesignError::SessionBindingAmbiguous(self.id)));
+        }
+        Ok(self.bind(session.session_ref().clone()))
+    }
+}
+
+pub(crate) struct EdgeDraft {
+    pub(crate) id: organization::EdgeId,
+    pub(crate) source_node_id: organization::NodeId,
+    pub(crate) source_port: Option<String>,
+    pub(crate) target_node_id: organization::NodeId,
+    pub(crate) target_port: Option<String>,
+    pub(crate) action: Option<EdgeAction>,
+    pub(crate) payload: organization::EdgePayloadPolicy,
+    pub(crate) dependency: Option<DependencyDraft>,
+}
+
+pub(crate) struct DependencyDraft {
+    pub(crate) dependency_task_id: Option<String>,
+    pub(crate) task_id: Option<String>,
+}
+
+impl From<organization::EdgeDefinition> for EdgeDraft {
+    fn from(edge: organization::EdgeDefinition) -> Self {
+        Self {
+            id: edge.id().clone(),
+            source_node_id: edge.source_node_id().clone(),
+            source_port: Some(edge.source_port().to_owned()),
+            target_node_id: edge.target_node_id().clone(),
+            target_port: Some(edge.target_port().to_owned()),
+            action: Some(edge.action()),
+            payload: edge.payload(),
+            dependency: edge.dependency().map(|dependency| DependencyDraft {
+                dependency_task_id: Some(dependency.dependency_task_id().to_owned()),
+                task_id: Some(dependency.task_id().to_owned()),
+            }),
+        }
+    }
+}
+
+impl From<GraphPatchOperation> for GraphPatchDraftOperation {
+    fn from(operation: GraphPatchOperation) -> Self {
+        match operation {
+            GraphPatchOperation::AddEdge(edge) => Self::AddEdge(edge.into()),
+            GraphPatchOperation::ReplaceEdge(edge) => Self::ReplaceEdge(edge.into()),
+            operation => Self::Graph(operation),
+        }
+    }
+}
+
+impl EdgeDraft {
+    fn resolve(
+        self,
+        nodes: &BTreeMap<organization::NodeId, organization::NodeDefinition>,
+    ) -> Result<organization::EdgeDefinition, organization::run::graph::DefinitionError> {
+        use organization::run::graph::DefinitionError;
+        let source =
+            nodes
+                .get(&self.source_node_id)
+                .ok_or_else(|| DefinitionError::UnknownEdgeSource {
+                    edge_id: self.id.clone(),
+                    node_id: self.source_node_id.clone(),
+                })?;
+        let target =
+            nodes
+                .get(&self.target_node_id)
+                .ok_or_else(|| DefinitionError::UnknownEdgeTarget {
+                    edge_id: self.id.clone(),
+                    node_id: self.target_node_id.clone(),
+                })?;
+        let source_port = source
+            .kind()
+            .resolve_source_port(self.source_port.as_deref())
+            .ok_or_else(|| match self.source_port {
+                Some(source_port) => DefinitionError::InvalidEdgeSourcePort {
+                    edge_id: self.id.clone(),
+                    node_id: self.source_node_id.clone(),
+                    source_port,
+                },
+                None => DefinitionError::MissingEdgeSourcePort {
+                    edge_id: self.id.clone(),
+                    node_id: self.source_node_id.clone(),
+                },
+            })?;
+        let target_port = target
+            .kind()
+            .resolve_target_port(self.target_port.as_deref())
+            .ok_or_else(|| match self.target_port {
+                Some(target_port) => DefinitionError::InvalidEdgeTargetPort {
+                    edge_id: self.id.clone(),
+                    node_id: self.target_node_id.clone(),
+                    target_port,
+                },
+                None => DefinitionError::MissingEdgeTargetPort {
+                    edge_id: self.id.clone(),
+                    node_id: self.target_node_id.clone(),
+                },
+            })?;
+        let action = match self.action {
+            Some(action) => action,
+            None => {
+                let mut actions = source.kind().source_port_actions(source_port).iter().copied()
+                    .filter(|action| target.kind() != NodeKind::Join || *action == EdgeAction::Gate);
+                match (actions.next(), actions.next()) {
+                    (Some(action), None) => action,
+                    (Some(_), Some(_)) => return Err(DefinitionError::AmbiguousEdgeAction(self.id)),
+                    (None, _) => return Err(DefinitionError::InvalidEdgeAction(self.id)),
+                }
+            }
+        };
+        let dependency = self.dependency.map(|dependency| {
+            let tasks = source.work_assignment().zip(target.work_assignment());
+            let dependency_task_id = dependency.dependency_task_id
+                .or_else(|| tasks.map(|(source, _)| source.task_id().to_owned()))
+                .ok_or_else(|| DefinitionError::MissingDependencyTask(self.id.clone()))?;
+            let task_id = dependency.task_id
+                .or_else(|| tasks.map(|(_, target)| target.task_id().to_owned()))
+                .ok_or_else(|| DefinitionError::MissingDependencyTask(self.id.clone()))?;
+            Ok::<_, DefinitionError>(organization::DependencyMetadata::new(dependency_task_id, task_id))
+        }).transpose()?;
+        Ok(organization::EdgeDefinition::new(
+            self.id,
+            self.source_node_id,
+            source_port,
+            self.target_node_id,
+            target_port,
+            action,
+        )
+        .with_payload(self.payload)
+        .with_dependency_opt(dependency))
+    }
+}
+
 pub struct TeamGraphPatchDraft {
     pub(crate) run_id: GraphRunId,
     pub(crate) audit_run_id: OpaqueId,
@@ -66,12 +254,8 @@ pub struct TeamGraphPatchDraft {
     pub(crate) idempotency_key: OpaqueId,
     pub(crate) base_graph_id: Option<String>,
     pub(crate) base_workflow_plan_id: Option<String>,
-    pub(crate) operations: Vec<GraphPatchOperation>,
+    pub(crate) operations: Vec<GraphPatchDraftOperation>,
     pub(crate) created_at: u64,
-}
-
-pub(crate) enum TeamGraphPatchResolveError {
-    InvalidInput,
 }
 
 impl TeamGraphPatchDraft {
@@ -92,56 +276,130 @@ impl TeamGraphPatchDraft {
             idempotency_key,
             base_graph_id,
             base_workflow_plan_id,
-            operations,
+            operations: operations.into_iter().map(Into::into).collect(),
             created_at,
         }
+    }
+
+    pub(crate) fn command(&self, current: &GraphDefinition) -> Result<RunCommand, StoreFault> {
+        let base_graph_id = self.base_graph_id.as_deref().unwrap_or(current.graph_id());
+        let base_workflow_plan_id = self
+            .base_workflow_plan_id
+            .as_deref()
+            .unwrap_or(current.workflow_plan_id());
+        let command_patch = EventGraphPatch::try_new(
+            base_graph_id,
+            base_workflow_plan_id,
+            self.operations
+                .iter()
+                .map(|operation| match operation {
+                    GraphPatchDraftOperation::Graph(operation) => {
+                        team_event_graph_patch_operation(operation)
+                    }
+                    GraphPatchDraftOperation::AddNode(node) => EventGraphPatchOperation::AddNode {
+                        node_id: node.id.as_str().to_owned(),
+                        kind: team_event_graph_node_kind(node.kind()),
+                        role_id: Some(node.role_id.clone()),
+                    },
+                    GraphPatchDraftOperation::ReplaceNode(node) => EventGraphPatchOperation::ReplaceNode {
+                        node_id: node.id.as_str().to_owned(),
+                        kind: team_event_graph_node_kind(node.kind()),
+                        role_id: Some(node.role_id.clone()),
+                    },
+                    GraphPatchDraftOperation::AddEdge(edge) => EventGraphPatchOperation::AddEdge {
+                        edge_id: edge.id.as_str().to_owned(),
+                        source_node_id: edge.source_node_id.as_str().to_owned(),
+                        target_node_id: edge.target_node_id.as_str().to_owned(),
+                        action: edge.action.map(team_event_graph_edge_action),
+                    },
+                    GraphPatchDraftOperation::ReplaceEdge(edge) => {
+                        EventGraphPatchOperation::ReplaceEdge {
+                            edge_id: edge.id.as_str().to_owned(),
+                            source_node_id: edge.source_node_id.as_str().to_owned(),
+                            target_node_id: edge.target_node_id.as_str().to_owned(),
+                            action: edge.action.map(team_event_graph_edge_action),
+                        }
+                    }
+                })
+                .collect(),
+        )
+        .map_err(StoreFault::GraphPatchInput)?
+        .with_content_fingerprint(crate::store::codec::graph_patch_draft_fingerprint(
+            base_graph_id,
+            base_workflow_plan_id,
+            &self.operations,
+        )?);
+        Ok(RunCommand::new(
+            self.audit_run_id.clone(),
+            self.command_id.clone(),
+            self.idempotency_key.clone(),
+            CommandPayload::GraphPatch(command_patch),
+            self.created_at,
+        ))
     }
 
     pub(crate) fn resolve(
         self,
         current: &GraphDefinition,
-    ) -> Result<(RunCommand, GraphPatch), TeamGraphPatchResolveError> {
-        let base_graph_id = self
-            .base_graph_id
-            .unwrap_or_else(|| current.graph_id().to_owned());
-        let base_workflow_plan_id = self
-            .base_workflow_plan_id
-            .unwrap_or_else(|| current.workflow_plan_id().to_owned());
-        let patch = GraphPatch::new(
-            base_graph_id.clone(),
-            base_workflow_plan_id.clone(),
-            self.operations,
+        bindings: &[organization::RoleSessionReceipt],
+    ) -> Result<GraphPatch, StoreFault> {
+        let draft_operations = self.operations.into_iter().map(|operation| {
+            Ok(match operation {
+                GraphPatchDraftOperation::AddNode(node) => {
+                    GraphPatchDraftOperation::Graph(GraphPatchOperation::AddNode(node.resolve(bindings)?))
+                }
+                GraphPatchDraftOperation::ReplaceNode(node) => {
+                    GraphPatchDraftOperation::Graph(GraphPatchOperation::ReplaceNode(node.resolve(bindings)?))
+                }
+                operation => operation,
+            })
+        }).collect::<Result<Vec<_>, StoreFault>>()?;
+        let mut nodes = current
+            .nodes()
+            .iter()
+            .map(|node| (node.id().clone(), node.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for operation in &draft_operations {
+            match operation {
+                GraphPatchDraftOperation::Graph(GraphPatchOperation::AddNode(node)
+                    | GraphPatchOperation::ReplaceNode(node)) => {
+                    nodes.insert(node.id().clone(), node.clone());
+                }
+                GraphPatchDraftOperation::Graph(GraphPatchOperation::RemoveNode(node_id)) => {
+                    nodes.remove(node_id);
+                }
+                _ => {}
+            }
+        }
+        let mut operations = Vec::with_capacity(draft_operations.len());
+        for operation in draft_operations {
+            let operation = match operation {
+                GraphPatchDraftOperation::Graph(operation) => operation,
+                GraphPatchDraftOperation::AddNode(_) | GraphPatchDraftOperation::ReplaceNode(_) => {
+                    unreachable!("node assignments resolved before edge resolution")
+                }
+                GraphPatchDraftOperation::AddEdge(edge) => {
+                    GraphPatchOperation::AddEdge(edge.resolve(&nodes).map_err(|error| {
+                        StoreFault::GraphPatch(organization::GraphPatchError::Definition(error))
+                    })?)
+                }
+                GraphPatchDraftOperation::ReplaceEdge(edge) => {
+                    GraphPatchOperation::ReplaceEdge(edge.resolve(&nodes).map_err(|error| {
+                        StoreFault::GraphPatch(organization::GraphPatchError::Definition(error))
+                    })?)
+                }
+            };
+            operations.push(operation);
+        }
+        GraphPatch::new(
+            self.base_graph_id
+                .unwrap_or_else(|| current.graph_id().to_owned()),
+            self.base_workflow_plan_id
+                .unwrap_or_else(|| current.workflow_plan_id().to_owned()),
+            operations,
         )
-        .map_err(|_| TeamGraphPatchResolveError::InvalidInput)?;
-        let command_patch = EventGraphPatch::try_new(
-            base_graph_id,
-            base_workflow_plan_id,
-            patch
-                .operations()
-                .iter()
-                .map(team_event_graph_patch_operation)
-                .collect::<Vec<_>>(),
-        )
-        .map_err(map_event_input)?
-        .with_content_fingerprint(
-            crate::store::codec::graph_patch_fingerprint(&patch)
-                .map_err(|_| TeamGraphPatchResolveError::InvalidInput)?,
-        );
-        Ok((
-            RunCommand::new(
-                self.audit_run_id,
-                self.command_id,
-                self.idempotency_key,
-                CommandPayload::GraphPatch(command_patch),
-                self.created_at,
-            ),
-            patch,
-        ))
+        .map_err(StoreFault::GraphPatch)
     }
-}
-
-fn map_event_input(_: InvalidEventInput) -> TeamGraphPatchResolveError {
-    TeamGraphPatchResolveError::InvalidInput
 }
 
 fn team_event_graph_patch_operation(operation: &GraphPatchOperation) -> EventGraphPatchOperation {
@@ -163,13 +421,13 @@ fn team_event_graph_patch_operation(operation: &GraphPatchOperation) -> EventGra
             edge_id: edge.id().as_str().to_owned(),
             source_node_id: edge.source_node_id().as_str().to_owned(),
             target_node_id: edge.target_node_id().as_str().to_owned(),
-            action: team_event_graph_edge_action(edge.action()),
+            action: Some(team_event_graph_edge_action(edge.action())),
         },
         GraphPatchOperation::ReplaceEdge(edge) => EventGraphPatchOperation::ReplaceEdge {
             edge_id: edge.id().as_str().to_owned(),
             source_node_id: edge.source_node_id().as_str().to_owned(),
             target_node_id: edge.target_node_id().as_str().to_owned(),
-            action: team_event_graph_edge_action(edge.action()),
+            action: Some(team_event_graph_edge_action(edge.action())),
         },
         GraphPatchOperation::RemoveEdge(edge_id) => EventGraphPatchOperation::RemoveEdge {
             edge_id: edge_id.as_str().to_owned(),
@@ -220,6 +478,12 @@ fn team_event_graph_node_role_id(node: &organization::NodeDefinition) -> Option<
 }
 
 pub enum TeamRuntimeCommand {
+    RunStart {
+        team_id: TeamId,
+        run_id: GraphRunId,
+        epoch: Option<String>,
+        version: String,
+    },
     Design {
         operation: crate::application::design::DesignOperation,
     },
@@ -290,14 +554,6 @@ pub enum TeamRuntimeCommand {
         request: TriggerFireRequest,
         fired_at: u64,
     },
-    RunStartConfirm {
-        run_id: GraphRunId,
-        proposal_id: String,
-    },
-    RunStartContinue {
-        run_id: GraphRunId,
-        proposal_id: String,
-    },
     NodePromptRetryDue {
         run_id: GraphRunId,
     },
@@ -350,7 +606,7 @@ pub enum TeamRuntimeCommandOutcome {
     ProvisionAgents(TeamMaterializationCommandOutcome),
     Delete(Result<TeamDeleteOutcome, StoreFault>),
     RunCreate(Result<CreateGraphRunOutcome, TeamRuntimeStatus>),
-    RunList(Vec<TeamRunQueryOutcome>),
+    RunList(Result<Vec<TeamRunListEntry>, StoreFault>),
     TriggerList(Vec<ArmedTrigger>),
     WebhookTriggerFire(Result<TeamTriggerFireOutcome, TeamRuntimeStatus>),
     RunSnapshot {
@@ -364,8 +620,7 @@ pub enum TeamRuntimeCommandOutcome {
     GraphExportYaml(Result<String, TeamRuntimeStatus>),
     GraphImportYaml(Result<TeamRunCommandOutcome, StoreFault>),
     TriggerFire(Result<TeamRunTriggerOutcome, StoreFault>),
-    RunStartConfirm(Result<organization::ConfirmRunStartOutcome, StoreFault>),
-    RunStartContinue(Result<organization::ContinueRunDiscussionOutcome, StoreFault>),
+    RunStart(Result<(), StoreFault>),
     NodePromptRetryDue(NodePromptRetryDueQueryOutcome),
     NodeEvent(Result<TeamNodeEventCommandOutcome, TeamRuntimeStatus>),
     RunDiagnostics(TeamRunDiagnosticsQueryOutcome),
@@ -373,7 +628,7 @@ pub enum TeamRuntimeCommandOutcome {
     Resume {
         team_id: TeamId,
         outcomes: Vec<ResumeOutcome>,
-        runs: Vec<TeamRunQueryOutcome>,
+        runs: Result<Vec<TeamRunListEntry>, StoreFault>,
     },
     ApprovalResolve(Result<HumanDecisionOutcome, StoreFault>),
     RunCancel(Result<BeginCancellationOutcome, StoreFault>),
@@ -397,10 +652,28 @@ impl RunCommandIdentityKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TeamRuntimeDecodeError {
     InvalidInput,
+    InvalidField { field_path: String, message: &'static str },
     Unavailable,
+    GraphDefinition(organization::run::graph::DefinitionError),
+}
+
+impl TeamRuntimeDecodeError {
+    fn field(field: impl Into<String>, message: &'static str) -> Self {
+        Self::InvalidField { field_path: field.into(), message }
+    }
+
+    fn at(self, parent: &str) -> Self {
+        match self {
+            Self::InvalidField { field_path, message } => Self::field(
+                if field_path.is_empty() { parent.to_owned() } else { format!("{parent}.{field_path}") },
+                message,
+            ),
+            error => error,
+        }
+    }
 }
 pub fn decode_team_runtime_command(
     operation_id: &str,
@@ -473,10 +746,10 @@ pub fn decode_team_runtime_command(
             Ok(TeamRuntimeCommand::TriggerList { team_id })
         }
         "team.designStart"
-        | "team.designContinue"
         | "team.designExit"
         | "team.designSnapshot"
         | "team.designGraphPatch" => super::design::decode(operation_id, input, target),
+        "team.runStart" => decode_team_run_start(input, target),
         "team.runCreate" => decode_team_run_create(input, target),
         "team.webhookTriggerFire" => decode_team_webhook_trigger(input, target),
         "team.graphSave" => decode_team_graph_save(input, target),
@@ -489,13 +762,6 @@ pub fn decode_team_runtime_command(
         "team.graphExportYaml" => decode_team_graph_export(input, target),
         "team.graphImportYaml" => decode_team_graph_import(input, target),
         "team.runDiagnostics" => decode_team_run_diagnostics(input, target),
-        "team.proposalConfirm" | "team.runStartConfirm" => {
-            decode_team_run_start_confirm(input, target)
-        }
-        "team.proposalContinue"
-        | "team.proposalCancel"
-        | "team.runStartContinue"
-        | "team.runStartReject" => decode_team_run_start_continue(input, target),
         "team.triggerFire" => decode_team_trigger(input, target),
         "team.approvalResolve" => decode_team_approval(input, target),
         "team.runCancel" => decode_team_run_cancel(input, target),
@@ -503,47 +769,34 @@ pub fn decode_team_runtime_command(
     }
 }
 
-fn decode_team_run_start_confirm(
+fn decode_team_run_start(
     input: &serde_json::Map<String, Value>,
     target: &Value,
 ) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
-    let (_, run_id) = decode_team_target(target, input, false)?;
-    let proposal_id = decode_start_proposal_id(input)?;
-    Ok(TeamRuntimeCommand::RunStartConfirm {
-        run_id,
-        proposal_id,
-    })
-}
-
-fn decode_team_run_start_continue(
-    input: &serde_json::Map<String, Value>,
-    target: &Value,
-) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
-    let (_, run_id) = decode_team_target(target, input, false)?;
-    let proposal_id = decode_start_proposal_id(input)?;
-    Ok(TeamRuntimeCommand::RunStartContinue {
-        run_id,
-        proposal_id,
-    })
-}
-
-fn decode_start_proposal_id(
-    input: &serde_json::Map<String, Value>,
-) -> Result<String, TeamRuntimeDecodeError> {
-    if !input.keys().all(|key| {
-        matches!(
-            key.as_str(),
-            "runId" | "teamId" | "proposalId" | "idempotencyKey"
-        )
-    }) {
-        return Err(TeamRuntimeDecodeError::InvalidInput);
+    use TeamRuntimeDecodeError::InvalidInput;
+    let fields = ["teamId", "runId", "designEpoch", "expectedGraphVersion", "idempotencyKey"];
+    if input.len() != fields.len() || input.keys().any(|key| !fields.contains(&key.as_str())) {
+        return Err(InvalidInput);
     }
-    input
-        .get("proposalId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned)
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)
+    let field = |key| input.get(key).and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty()).ok_or(InvalidInput);
+    let team_id = TeamId::try_new(field("teamId")?).map_err(|_| InvalidInput)?;
+    if target != &json!({"kind":"team","teamId":team_id.as_str()}) {
+        return Err(InvalidInput);
+    }
+    let run_id = GraphRunId::new(field("runId")?);
+    OpaqueId::try_new(field("idempotencyKey")?).map_err(|_| InvalidInput)?;
+    let epoch = match input.get("designEpoch") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(OpaqueId::try_new(value.clone())
+            .map_err(|_| InvalidInput)?.as_str().to_owned()),
+        _ => return Err(InvalidInput),
+    };
+    let version = field("expectedGraphVersion")?;
+    if version.len() != 64 || !version.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return Err(InvalidInput);
+    }
+    Ok(TeamRuntimeCommand::RunStart { team_id, run_id, epoch, version: version.to_owned() })
 }
 
 fn decode_team_run_cancel(
@@ -1581,6 +1834,7 @@ fn decode_team_graph_definition(
         graph
             .get("edges")
             .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+        &nodes,
     )?;
     organization::GraphDefinition::new(
         graph_id,
@@ -1590,7 +1844,7 @@ fn decode_team_graph_definition(
         nodes,
         edges,
     )
-    .map_err(|_| TeamRuntimeDecodeError::InvalidInput)
+    .map_err(TeamRuntimeDecodeError::GraphDefinition)
 }
 
 fn default_team_graph_id(run_id: &organization::GraphRunId) -> String {
@@ -1633,130 +1887,128 @@ fn decode_team_graph_nodes(
 fn decode_team_graph_node(
     value: &Value,
 ) -> Result<organization::NodeDefinition, TeamRuntimeDecodeError> {
+    match decode_team_graph_node_draft(value)? {
+        DecodedNode::Defined(node) => Ok(node),
+        DecodedNode::Unbound(node) => Err(TeamRuntimeDecodeError::GraphDefinition(
+            organization::run::graph::DefinitionError::MissingAssignmentSession(node.id))),
+    }
+}
+
+fn decode_team_graph_node_draft(value: &Value) -> Result<DecodedNode, TeamRuntimeDecodeError> {
     let node = value
         .as_object()
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+        .ok_or_else(|| TeamRuntimeDecodeError::field("", "Provide a node object."))?;
     let node_id = graph_string_field(node, "nodeId")
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?
+        .ok_or_else(|| TeamRuntimeDecodeError::field("nodeId", "Provide a nonempty node identifier."))?
         .to_owned();
     let id = organization::NodeId::new(node_id.clone());
     let title = graph_string_field(node, "title")
         .unwrap_or(node_id.as_str())
         .to_owned();
-    let config = node.get("config").and_then(Value::as_object);
-    let max_attempts = decode_team_graph_node_max_attempts(node, config)?;
+    let config = node.get("config").map(|value| {
+        value.as_object().ok_or_else(|| TeamRuntimeDecodeError::field("config", "Provide a configuration object for this node kind."))
+    }).transpose()?;
+    let max_attempts = decode_team_graph_node_max_attempts(node)?;
     let kind =
         decode_team_graph_node_kind(node.get("kind").and_then(Value::as_str).unwrap_or("work"))?;
-    match kind {
-        organization::NodeKind::Start => Ok(organization::NodeDefinition::start(
+    for field in ["groupId", "group"] {
+        if node.contains_key(field) {
+            return Err(TeamRuntimeDecodeError::field(field, "Groups are retired; Join waits for its gate inputs without group configuration."));
+        }
+    }
+    if config.is_some_and(|config| config.contains_key("join")) {
+        return Err(TeamRuntimeDecodeError::field("config.join", "Join policy is retired; use gate edges into Join."));
+    }
+    if node.contains_key("executor") {
+        return Err(TeamRuntimeDecodeError::field("executor", "Remove executor; use roleId and config.sessionRef."));
+    }
+    if config.is_some_and(|config| config.keys().any(|key| {
+        !match kind {
+            organization::NodeKind::Start => key == "trigger",
+            organization::NodeKind::Work => matches!(key.as_str(), "prompt" | "sessionRef" | "outputArtifactKind"),
+            organization::NodeKind::Review => matches!(key.as_str(), "prompt" | "sessionRef"),
+            organization::NodeKind::ScriptReview => key == "rule",
+            _ => false,
+        }
+    })) {
+        return Err(TeamRuntimeDecodeError::field("config", "Remove unsupported config fields; use the fields for this node kind and top-level maxAttempts."));
+    }
+    for field in ["roleId", "taskId"] {
+        if node.get(field).is_some_and(|value| !value.is_null() && graph_string_field(node, field).is_none()) {
+            return Err(TeamRuntimeDecodeError::field(field, "Provide a nonempty identifier or omit this optional field."));
+        }
+    }
+    if let Some(config) = config {
+        for field in ["prompt", "outputArtifactKind"] {
+            if config.get(field).is_some_and(|value| !value.is_string()) {
+                return Err(TeamRuntimeDecodeError::field(format!("config.{field}"), "Provide a string."));
+            }
+        }
+    }
+    if matches!(kind, NodeKind::Work | NodeKind::Review) {
+        let role_id = graph_string_field(node, "roleId").ok_or_else(|| {
+            TeamRuntimeDecodeError::GraphDefinition(
+                organization::run::graph::DefinitionError::MissingAssignmentRole(id.clone()))
+        })?.to_owned();
+        let session = decode_team_graph_session_ref(config)?;
+        let prompt = config.and_then(|config| graph_text_field(config, "prompt"));
+        if kind == NodeKind::Review && prompt.is_none() {
+            return Err(TeamRuntimeDecodeError::GraphDefinition(
+                organization::run::graph::DefinitionError::InvalidReviewAssignment(id)));
+        }
+        let draft = NodeDraft {
+            id, title, max_attempts, role_id,
+            prompt: prompt.unwrap_or("").to_owned(),
+            assignment: if kind == NodeKind::Work {
+                NodeAssignmentDraft::Work {
+                    task_id: graph_string_field(node, "taskId").unwrap_or(node_id.as_str()).to_owned(),
+                    output_artifact_kind: config
+                        .and_then(|config| graph_text_field(config, "outputArtifactKind"))
+                        .map(str::to_owned),
+                }
+            } else {
+                NodeAssignmentDraft::Review
+            },
+        };
+        return Ok(match session {
+            Some(session) => DecodedNode::Defined(draft.bind(session)),
+            None => DecodedNode::Unbound(draft),
+        });
+    }
+    let definition = match kind {
+        organization::NodeKind::Start => organization::NodeDefinition::start(
             id,
             title,
             max_attempts,
             decode_team_graph_start_trigger(config)?,
-        )),
-        organization::NodeKind::Work => {
-            let task_id = graph_string_field(node, "taskId").unwrap_or(node_id.as_str());
-            let role_id = decode_team_graph_role_id(node).unwrap_or("team");
-            let prompt = config
-                .and_then(|config| graph_text_field(config, "prompt"))
-                .unwrap_or("");
-            let output_artifact_kind = config
-                .and_then(|config| graph_text_field(config, "outputArtifactKind"))
-                .map(str::to_owned);
-            let group_id = graph_string_field(node, "groupId")
-                .map(|group_id| organization::GroupId::new(group_id.to_owned()));
-            Ok(organization::NodeDefinition::work(
-                id,
-                title,
-                max_attempts,
-                organization::WorkAssignment::typed(
-                    task_id,
-                    prompt,
-                    organization::ExecutorPolicy::team_role_session(
-                        role_id,
-                        decode_team_graph_session_ref(config)?,
-                    ),
-                    output_artifact_kind,
-                    group_id,
-                ),
-            ))
+        ),
+        organization::NodeKind::ScriptReview => {
+            let rule = match config.and_then(|config| config.get("rule")).and_then(Value::as_str) {
+                Some("pass_through") => organization::ScriptReviewRule::PassThrough,
+                Some("assert_all_upstream_completed") => organization::ScriptReviewRule::AssertAllUpstreamCompleted,
+                Some("assert_no_blocking_gate") => organization::ScriptReviewRule::AssertNoBlockingGate,
+                Some("assert_artifact_exists") => organization::ScriptReviewRule::AssertArtifactExists,
+                _ => return Err(TeamRuntimeDecodeError::field("config.rule", "Select an explicit ScriptReview rule listed in the graph tool schema.")),
+            };
+            organization::NodeDefinition::script_review(id, title, max_attempts, rule)
         }
-        organization::NodeKind::Review => {
-            let role_id = decode_team_graph_role_id(node);
-            let prompt = config.and_then(|config| graph_text_field(config, "prompt"));
-            if let (Some(role_id), Some(prompt)) = (role_id, prompt) {
-                Ok(organization::NodeDefinition::review(
-                    id,
-                    title,
-                    max_attempts,
-                    organization::ReviewAssignment::with_executor(
-                        organization::ExecutorPolicy::team_role_session(
-                            role_id,
-                            decode_team_graph_session_ref(config)?,
-                        ),
-                        prompt,
-                    ),
-                ))
-            } else {
-                Ok(organization::NodeDefinition::control(
-                    id,
-                    kind,
-                    title,
-                    max_attempts,
-                ))
-            }
-        }
-        organization::NodeKind::Join => Ok(organization::NodeDefinition::join(
-            id,
-            title,
-            max_attempts,
-            organization::WorkGroup::new(
-                organization::GroupId::new(graph_string_field(node, "groupId").unwrap_or("group")),
-                decode_team_graph_join_policy(config)?,
-            ),
-        )),
-        _ => Ok(organization::NodeDefinition::control(
-            id,
-            kind,
-            title,
-            max_attempts,
-        )),
-    }
+        organization::NodeKind::Join => organization::NodeDefinition::join(id, title, max_attempts),
+        _ => organization::NodeDefinition::control(id, kind, title, max_attempts),
+    };
+    Ok(DecodedNode::Defined(definition))
 }
 
 fn decode_team_graph_session_ref(
     config: Option<&serde_json::Map<String, Value>>,
-) -> Result<organization::RoleSessionRef, TeamRuntimeDecodeError> {
+) -> Result<Option<organization::RoleSessionRef>, TeamRuntimeDecodeError> {
     match config.and_then(|config| config.get("sessionRef")) {
-        None => Ok(organization::RoleSessionRef::initial()),
+        None => Ok(None),
         Some(value) => organization::RoleSessionRef::try_new(
-            value.as_str().ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+            value.as_str().ok_or_else(|| TeamRuntimeDecodeError::field("config.sessionRef", "Use the exact rs-prefixed numeric sessionRef from current run bindings."))?,
         )
-        .map_err(|_| TeamRuntimeDecodeError::InvalidInput),
+        .map(Some)
+        .map_err(|_| TeamRuntimeDecodeError::field("config.sessionRef", "Use the exact rs-prefixed numeric sessionRef from current run bindings.")),
     }
-}
-
-fn decode_team_graph_join_policy(
-    config: Option<&serde_json::Map<String, Value>>,
-) -> Result<organization::JoinPolicy, TeamRuntimeDecodeError> {
-    let Some(value) = config.and_then(|config| config.get("join")) else {
-        return Ok(organization::JoinPolicy::new(true, false, 0));
-    };
-    let join = value
-        .as_object()
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    Ok(organization::JoinPolicy::new(
-        join.get("requireCompleted")
-            .and_then(Value::as_bool)
-            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-        join.get("allowFailed")
-            .and_then(Value::as_bool)
-            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-        join.get("retryLimit")
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-    ))
 }
 
 fn decode_team_graph_node_kind(
@@ -1770,44 +2022,30 @@ fn decode_team_graph_node_kind(
         "script_review" | "scriptReview" => Ok(organization::NodeKind::ScriptReview),
         "join" => Ok(organization::NodeKind::Join),
         "end" => Ok(organization::NodeKind::End),
-        _ => Err(TeamRuntimeDecodeError::InvalidInput),
+        _ => Err(TeamRuntimeDecodeError::field("kind", "Use a node kind listed in the graph tool schema.")),
     }
 }
 
 fn decode_team_graph_node_max_attempts(
     node: &serde_json::Map<String, Value>,
-    config: Option<&serde_json::Map<String, Value>>,
 ) -> Result<std::num::NonZeroU32, TeamRuntimeDecodeError> {
-    let Some(value) = node
-        .get("maxAttempts")
-        .or_else(|| config.and_then(|config| config.get("maxAttempts")))
-    else {
+    let Some(value) = node.get("maxAttempts") else {
         return Ok(std::num::NonZeroU32::MIN);
     };
     value
         .as_u64()
         .and_then(|value| u32::try_from(value).ok())
         .and_then(std::num::NonZeroU32::new)
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)
-}
-
-fn decode_team_graph_role_id(node: &serde_json::Map<String, Value>) -> Option<&str> {
-    graph_string_field(node, "roleId").or_else(|| {
-        node.get("executor")
-            .and_then(Value::as_object)
-            .and_then(|executor| graph_string_field(executor, "roleId"))
-    })
+        .ok_or_else(|| TeamRuntimeDecodeError::field("maxAttempts", "Provide an integer from 1 through 4294967295, or omit it."))
 }
 
 fn decode_team_graph_start_trigger(
     config: Option<&serde_json::Map<String, Value>>,
 ) -> Result<Option<organization::StartTrigger>, TeamRuntimeDecodeError> {
-    let Some(trigger) = config
-        .and_then(|config| config.get("trigger"))
-        .and_then(Value::as_object)
-    else {
+    let Some(trigger) = config.and_then(|config| config.get("trigger")) else {
         return Ok(None);
     };
+    let trigger = trigger.as_object().ok_or_else(|| TeamRuntimeDecodeError::field("config.trigger", "Provide a trigger object."))?;
     match trigger
         .get("mode")
         .and_then(Value::as_str)
@@ -1815,46 +2053,54 @@ fn decode_team_graph_start_trigger(
     {
         "cron" => Ok(Some(organization::StartTrigger::Cron {
             expression: graph_text_field(trigger, "cron")
-                .ok_or(TeamRuntimeDecodeError::InvalidInput)?
+                .ok_or_else(|| TeamRuntimeDecodeError::field("config.trigger.cron", "Provide a nonblank cron expression."))?
                 .to_owned(),
         })),
-        "webhook" => {
-            Ok(
-                graph_text_field(trigger, "path").map(|path| organization::StartTrigger::Webhook {
-                    path: path.to_owned(),
-                }),
-            )
-        }
-        _ => Err(TeamRuntimeDecodeError::InvalidInput),
+        "webhook" => Ok(Some(organization::StartTrigger::Webhook {
+            path: graph_text_field(trigger, "path")
+                .ok_or_else(|| TeamRuntimeDecodeError::field("config.trigger.path", "Provide a nonblank webhook path."))?
+                .to_owned(),
+        })),
+        _ => Err(TeamRuntimeDecodeError::field("config.trigger.mode", "Use cron or webhook.")),
     }
 }
 
 fn decode_team_graph_edges(
     value: &Value,
+    nodes: &[organization::NodeDefinition],
 ) -> Result<Vec<organization::EdgeDefinition>, TeamRuntimeDecodeError> {
     let edges = value
         .as_array()
         .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    edges.iter().map(decode_team_graph_edge).collect()
+    let nodes = nodes
+        .iter()
+        .map(|node| (node.id().clone(), node.clone()))
+        .collect();
+    edges
+        .iter()
+        .map(|edge| {
+            decode_team_graph_edge(edge)?
+                .resolve(&nodes)
+                .map_err(TeamRuntimeDecodeError::GraphDefinition)
+        })
+        .collect()
 }
 
-fn decode_team_graph_edge(
-    value: &Value,
-) -> Result<organization::EdgeDefinition, TeamRuntimeDecodeError> {
+fn decode_team_graph_edge(value: &Value) -> Result<EdgeDraft, TeamRuntimeDecodeError> {
     let edge = value
         .as_object()
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-    let action = decode_team_graph_edge_action(
-        edge.get("action")
-            .and_then(Value::as_str)
-            .unwrap_or("activate"),
-    )?;
+        .ok_or_else(|| TeamRuntimeDecodeError::field("", "Provide an edge object."))?;
+    let action = edge.get("action").map(|value| {
+        decode_team_graph_edge_action(value.as_str().ok_or_else(|| {
+            TeamRuntimeDecodeError::field("action", "Provide an edge action, or omit it only when the source port and target allow exactly one action.")
+        })?)
+    }).transpose()?;
     let source_node_id = graph_string_field(edge, "sourceNodeId")
         .or_else(|| graph_string_field(edge, "fromNodeId"))
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+        .ok_or_else(|| TeamRuntimeDecodeError::field("sourceNodeId", "Provide the source node identifier."))?;
     let target_node_id = graph_string_field(edge, "targetNodeId")
         .or_else(|| graph_string_field(edge, "toNodeId"))
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+        .ok_or_else(|| TeamRuntimeDecodeError::field("targetNodeId", "Provide the target node identifier."))?;
     let include_upstream_result = match edge
         .get("payload")
         .and_then(Value::as_object)
@@ -1862,7 +2108,7 @@ fn decode_team_graph_edge(
     {
         Some(value) => value
             .as_bool()
-            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+            .ok_or_else(|| TeamRuntimeDecodeError::field("payload.includeUpstreamResult", "Provide a boolean."))?,
         None => true,
     };
     let dependency = match edge.get("dependency") {
@@ -1870,29 +2116,43 @@ fn decode_team_graph_edge(
         Some(value) => {
             let dependency = value
                 .as_object()
-                .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-            Some(organization::DependencyMetadata::new(
-                graph_string_field(dependency, "dependencyTaskId")
-                    .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                graph_string_field(dependency, "taskId")
-                    .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-            ))
+                .ok_or_else(|| TeamRuntimeDecodeError::field("dependency", "Provide a dependency object or null."))?;
+            let task = |field| {
+                dependency.get(field).map(|_| {
+                    graph_string_field(dependency, field)
+                        .map(str::to_owned)
+                        .ok_or_else(|| TeamRuntimeDecodeError::field(format!("dependency.{field}"), "Provide a nonempty task identifier or omit it for work-to-work derivation."))
+                }).transpose()
+            };
+            Some(DependencyDraft {
+                dependency_task_id: task("dependencyTaskId")?,
+                task_id: task("taskId")?,
+            })
         }
     };
-    Ok(organization::EdgeDefinition::new(
-        organization::EdgeId::new(
-            graph_string_field(edge, "edgeId").ok_or(TeamRuntimeDecodeError::InvalidInput)?,
+    let port = |field| {
+        edge.get(field)
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| valid_identifier(value) && !value.trim().is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| TeamRuntimeDecodeError::field(field, "Provide a nonempty port identifier, or omit it for a unique port."))
+            })
+            .transpose()
+    };
+    Ok(EdgeDraft {
+        id: organization::EdgeId::new(
+            graph_string_field(edge, "edgeId").ok_or_else(|| TeamRuntimeDecodeError::field("edgeId", "Provide a nonempty edge identifier."))?,
         ),
-        organization::NodeId::new(source_node_id),
-        graph_string_field(edge, "sourcePort").unwrap_or("default"),
-        organization::NodeId::new(target_node_id),
-        graph_string_field(edge, "targetPort").unwrap_or("default"),
+        source_node_id: organization::NodeId::new(source_node_id),
+        source_port: port("sourcePort")?,
+        target_node_id: organization::NodeId::new(target_node_id),
+        target_port: port("targetPort")?,
         action,
-    )
-    .with_payload(organization::EdgePayloadPolicy::new(
-        include_upstream_result,
-    ))
-    .with_dependency_opt(dependency))
+        payload: organization::EdgePayloadPolicy::new(include_upstream_result),
+        dependency,
+    })
 }
 
 fn decode_team_graph_edge_action(
@@ -1903,7 +2163,7 @@ fn decode_team_graph_edge_action(
         "rework" => Ok(organization::EdgeAction::Rework),
         "gate" => Ok(organization::EdgeAction::Gate),
         "finish" => Ok(organization::EdgeAction::Finish),
-        _ => Err(TeamRuntimeDecodeError::InvalidInput),
+        _ => Err(TeamRuntimeDecodeError::field("action", "Use activate, rework, gate, or finish.")),
     }
 }
 
@@ -1916,84 +2176,88 @@ pub(crate) fn decode_team_graph_patch_value(
 ) -> Result<TeamGraphPatchDraft, TeamRuntimeDecodeError> {
     let patch = value
         .as_object()
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+        .ok_or_else(|| TeamRuntimeDecodeError::field("arguments", "Provide a graph patch object."))?;
     let base_graph_id = graph_string_field(patch, "baseGraphId").map(str::to_owned);
     let base_workflow_plan_id = graph_string_field(patch, "baseWorkflowPlanId").map(str::to_owned);
     let operation_values = patch
         .get("operations")
         .and_then(Value::as_array)
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+        .ok_or_else(|| TeamRuntimeDecodeError::field("operations", "Provide a nonempty operations array."))?;
     let mut operations = Vec::with_capacity(operation_values.len());
-    for value in operation_values {
-        let operation = value
-            .as_object()
-            .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-        let op = operation
-            .get("op")
-            .and_then(Value::as_str)
-            .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
-        match op {
-            "add_node" => operations.push(organization::GraphPatchOperation::AddNode(
-                decode_team_graph_node(
-                    operation
-                        .get("node")
-                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                )?,
-            )),
-            "replace_node" => operations.push(organization::GraphPatchOperation::ReplaceNode(
-                decode_team_graph_node(
-                    operation
-                        .get("node")
-                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                )?,
-            )),
-            "remove_node" => operations.push(organization::GraphPatchOperation::RemoveNode(
-                organization::NodeId::new(
-                    graph_string_field(operation, "nodeId")
-                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                ),
-            )),
-            "add_edge" => operations.push(organization::GraphPatchOperation::AddEdge(
-                decode_team_graph_edge(
-                    operation
-                        .get("edge")
-                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                )?,
-            )),
-            "replace_edge" => operations.push(organization::GraphPatchOperation::ReplaceEdge(
-                decode_team_graph_edge(
-                    operation
-                        .get("edge")
-                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                )?,
-            )),
-            "remove_edge" => operations.push(organization::GraphPatchOperation::RemoveEdge(
-                organization::EdgeId::new(
-                    graph_string_field(operation, "edgeId")
-                        .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                ),
-            )),
-            "set_node_position" => {
-                operations.push(organization::GraphPatchOperation::SetNodePosition {
-                    node_id: organization::NodeId::new(
+    for (index, value) in operation_values.iter().enumerate() {
+        let decoded = (|| {
+            let operation = value
+                .as_object()
+                .ok_or_else(|| TeamRuntimeDecodeError::field("", "Provide a graph operation object."))?;
+            let op = operation
+                .get("op")
+                .and_then(Value::as_str)
+                .ok_or_else(|| TeamRuntimeDecodeError::field("op", "Provide an operation name from the tool schema."))?;
+            match op {
+                "add_node" | "replace_node" => {
+                    let node = decode_team_graph_node_draft(operation.get("node")
+                        .ok_or_else(|| TeamRuntimeDecodeError::field("node", "Provide a node object."))?)
+                        .map_err(|error| error.at("node"))?;
+                    operations.push(match (op, node) {
+                        ("add_node", DecodedNode::Defined(node)) => GraphPatchOperation::AddNode(node).into(),
+                        (_, DecodedNode::Defined(node)) => GraphPatchOperation::ReplaceNode(node).into(),
+                        ("add_node", DecodedNode::Unbound(node)) => GraphPatchDraftOperation::AddNode(node),
+                        (_, DecodedNode::Unbound(node)) => GraphPatchDraftOperation::ReplaceNode(node),
+                    });
+                }
+                "remove_node" => operations.push(
+                    organization::GraphPatchOperation::RemoveNode(organization::NodeId::new(
                         graph_string_field(operation, "nodeId")
-                            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                    ),
-                    position: decode_team_graph_node_position(
+                            .ok_or_else(|| TeamRuntimeDecodeError::field("nodeId", "Provide a nonempty node identifier."))?,
+                    ))
+                    .into(),
+                ),
+                "add_edge" => {
+                    operations.push(GraphPatchDraftOperation::AddEdge(decode_team_graph_edge(
                         operation
-                            .get("position")
-                            .ok_or(TeamRuntimeDecodeError::InvalidInput)?,
-                    )?,
-                })
+                            .get("edge")
+                            .ok_or_else(|| TeamRuntimeDecodeError::field("edge", "Provide an edge object."))?,
+                    ).map_err(|error| error.at("edge"))?))
+                }
+                "replace_edge" => operations.push(GraphPatchDraftOperation::ReplaceEdge(
+                    decode_team_graph_edge(
+                        operation
+                            .get("edge")
+                            .ok_or_else(|| TeamRuntimeDecodeError::field("edge", "Provide an edge object."))?,
+                    ).map_err(|error| error.at("edge"))?,
+                )),
+                "remove_edge" => operations.push(
+                    organization::GraphPatchOperation::RemoveEdge(organization::EdgeId::new(
+                        graph_string_field(operation, "edgeId")
+                            .ok_or_else(|| TeamRuntimeDecodeError::field("edgeId", "Provide a nonempty edge identifier."))?,
+                    ))
+                    .into(),
+                ),
+                "set_node_position" => operations.push(
+                    organization::GraphPatchOperation::SetNodePosition {
+                        node_id: organization::NodeId::new(
+                            graph_string_field(operation, "nodeId")
+                                .ok_or_else(|| TeamRuntimeDecodeError::field("nodeId", "Provide a nonempty node identifier."))?,
+                        ),
+                        position: decode_team_graph_node_position(
+                            operation
+                                .get("position")
+                                .ok_or_else(|| TeamRuntimeDecodeError::field("position", "Provide a position object."))?,
+                        ).map_err(|error| error.at("position"))?,
+                    }
+                    .into(),
+                ),
+                "set_metadata" => decode_team_graph_metadata_patch(operation, &mut operations)?,
+                _ => return Err(TeamRuntimeDecodeError::Unavailable),
             }
-            "set_metadata" => decode_team_graph_metadata_patch(operation, &mut operations)?,
-            _ => return Err(TeamRuntimeDecodeError::Unavailable),
-        }
+            Ok(())
+        })();
+        decoded.map_err(|error: TeamRuntimeDecodeError| error.at(&format!("operations[{index}]")))?;
     }
     if operations.is_empty() {
-        return Err(TeamRuntimeDecodeError::InvalidInput);
+        return Err(TeamRuntimeDecodeError::field("operations", "Provide at least one graph operation."));
     }
-    Ok(TeamGraphPatchDraft::new(
+    Ok(TeamGraphPatchDraft {
         run_id,
         audit_run_id,
         command_id,
@@ -2001,41 +2265,44 @@ pub(crate) fn decode_team_graph_patch_value(
         base_graph_id,
         base_workflow_plan_id,
         operations,
-        now_millis(),
-    ))
+        created_at: now_millis(),
+    })
 }
 
 fn decode_team_graph_node_position(value: &Value) -> Result<NodePosition, TeamRuntimeDecodeError> {
     let position = value
         .as_object()
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+        .ok_or_else(|| TeamRuntimeDecodeError::field("", "Provide a position object."))?;
     let x = position
         .get("x")
         .and_then(Value::as_i64)
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+        .ok_or_else(|| TeamRuntimeDecodeError::field("x", "Provide an integer coordinate."))?;
     let y = position
         .get("y")
         .and_then(Value::as_i64)
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+        .ok_or_else(|| TeamRuntimeDecodeError::field("y", "Provide an integer coordinate."))?;
     Ok(NodePosition::new(x, y))
 }
 
 fn decode_team_graph_metadata_patch(
     operation: &serde_json::Map<String, Value>,
-    operations: &mut Vec<organization::GraphPatchOperation>,
+    operations: &mut Vec<GraphPatchDraftOperation>,
 ) -> Result<(), TeamRuntimeDecodeError> {
     let metadata = operation
         .get("metadata")
         .and_then(Value::as_object)
-        .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
+        .ok_or_else(|| TeamRuntimeDecodeError::field("metadata", "Provide a nonempty metadata object."))?;
     if metadata.is_empty() {
-        return Err(TeamRuntimeDecodeError::InvalidInput);
+        return Err(TeamRuntimeDecodeError::field("metadata", "Provide a nonempty metadata object."));
     }
     for (key, value) in metadata {
-        operations.push(organization::GraphPatchOperation::SetMetadata {
-            key: decode_opaque_value(key)?,
-            value: decode_team_graph_metadata_value(value)?,
-        });
+        operations.push(
+            organization::GraphPatchOperation::SetMetadata {
+                key: decode_opaque_value(key).map_err(|_| TeamRuntimeDecodeError::field("metadata", "Use bounded opaque metadata keys."))?,
+                value: decode_team_graph_metadata_value(value).map_err(|_| TeamRuntimeDecodeError::field("metadata", "Use boolean, unsigned integer, or bounded opaque identifier metadata values."))?,
+            }
+            .into(),
+        );
     }
     Ok(())
 }
@@ -2207,6 +2474,7 @@ mod tests {
         for budget in [json!(1), json!(3), json!(u32::MAX)] {
             let node = decode_team_graph_node(&json!({
                 "nodeId": "work", "kind": "work", "maxAttempts": budget,
+                "roleId": "builder", "config": { "prompt": "Build result", "sessionRef": "rs2" },
             }))
             .unwrap();
             assert_eq!(
@@ -2225,12 +2493,16 @@ mod tests {
             assert!(
                 decode_team_graph_node(&json!({
                     "nodeId": "work", "kind": "work", "maxAttempts": budget,
+                    "roleId": "builder", "config": { "prompt": "Build result", "sessionRef": "rs2" },
                 }))
                 .is_err()
             );
         }
         assert_eq!(
-            decode_team_graph_node(&json!({ "nodeId": "work" }))
+            decode_team_graph_node(&json!({
+                "nodeId": "work", "roleId": "builder",
+                "config": { "prompt": "Build result", "sessionRef": "rs2" },
+            }))
                 .unwrap()
                 .max_attempts(),
             std::num::NonZeroU32::MIN,

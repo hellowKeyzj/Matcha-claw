@@ -41,50 +41,50 @@ export function handleNetworkEvent(method, tabId, params, _ctx) {
     // ── Request lifecycle ──
 
     case 'Network.requestWillBeSent':
-      log.debug(
+      log.debug(() => [
         'request →', tabId,
         params?.request?.method, truncate(params?.request?.url || '', 100),
         'type:', params?.type,
         'requestId:', params?.requestId,
-      )
+      ])
       break
 
     case 'Network.responseReceived':
-      log.debug(
+      log.debug(() => [
         'response ←', tabId,
         params?.response?.status, truncate(params?.response?.url || '', 100),
         'type:', params?.type,
         'requestId:', params?.requestId,
-      )
+      ])
       break
 
     case 'Network.loadingFinished':
-      log.debug(
+      log.debug(() => [
         'loading finished:', tabId,
         'requestId:', params?.requestId,
         'bytes:', params?.encodedDataLength,
-      )
+      ])
       break
 
     case 'Network.loadingFailed':
-      log.info(
+      log.info(() => [
         'loading failed:', tabId,
         'requestId:', params?.requestId,
         'error:', params?.errorText,
         'type:', params?.type,
         'canceled:', params?.canceled,
         'blocked:', params?.blockedReason,
-      )
+      ])
       break
 
     // ── WebSocket events ──
 
     case 'Network.webSocketCreated':
-      log.debug('WebSocket created:', tabId, 'url:', truncate(params?.url || '', 100))
+      log.debug(() => ['WebSocket created:', tabId, 'url:', truncate(params?.url || '', 100)])
       break
 
     case 'Network.webSocketClosed':
-      log.debug('WebSocket closed:', tabId, 'requestId:', params?.requestId)
+      log.debug(() => ['WebSocket closed:', tabId, 'requestId:', params?.requestId])
       break
 
     case 'Network.webSocketFrameError':

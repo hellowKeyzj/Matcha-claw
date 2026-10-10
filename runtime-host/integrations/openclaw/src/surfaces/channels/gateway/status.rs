@@ -81,18 +81,20 @@ impl ChannelStatusOperation {
         let configured = match self.configured_accounts().await {
             Ok(configured) => configured,
             Err(ChannelStatusReadError::Rejected) => {
-                status_trace("status.configured", "outcome=rejected");
+                status_trace("status.configured", || "outcome=rejected");
                 return ChannelSnapshotEffect::RuntimeRejected;
             }
             Err(ChannelStatusReadError::Unknown) => {
-                status_trace("status.configured", "outcome=unknown");
+                status_trace("status.configured", || "outcome=unknown");
                 return ChannelSnapshotEffect::OutcomeUnknown;
             }
         };
-        let (channel_count, account_count) = configured_counts(&configured);
         status_trace(
             "status.configured",
-            &format!("outcome=ok channels={channel_count} accounts={account_count}"),
+            || {
+                let (channel_count, account_count) = configured_counts(&configured);
+                format!("outcome=ok channels={channel_count} accounts={account_count}")
+            },
         );
         if configured.channels.is_empty() {
             return ChannelSnapshotEffect::Observed(empty_channel_snapshot());
@@ -104,20 +106,20 @@ impl ChannelStatusOperation {
             match channel_status_request(next_request_id("channel-status-snapshot"), None, probe) {
                 Ok(request) => request,
                 Err(_) => {
-                    status_trace("status.gateway.channels_status", "outcome=encode_invalid");
+                    status_trace("status.gateway.channels_status", || "outcome=encode_invalid");
                     return ChannelSnapshotEffect::OutcomeUnknown;
                 }
             };
         let response = match read_gateway(&self.gateway, request).await {
             Ok(response) => response,
             Err(OperationsReadError::Rejected) => {
-                status_trace("status.gateway.channels_status", "outcome=read_rejected");
+                status_trace("status.gateway.channels_status", || "outcome=read_rejected");
                 return ChannelSnapshotEffect::RuntimeRejected;
             }
             Err(error) => {
                 status_trace(
                     "status.gateway.channels_status",
-                    &format!(
+                    || format!(
                         "outcome=read_error kind={}",
                         operations_read_error_label(error)
                     ),
@@ -127,7 +129,7 @@ impl ChannelStatusOperation {
         };
         status_trace(
             "status.gateway.channels_status",
-            &format!("outcome={}", gateway_response_label(&response)),
+            || format!("outcome={}", gateway_response_label(&response)),
         );
         if matches!(response, GatewayResponse::Failure { .. }) {
             return ChannelSnapshotEffect::RuntimeRejected;
@@ -144,21 +146,21 @@ impl ChannelStatusOperation {
         if !self.runtime_running {
             status_trace(
                 "status.config_source",
-                "source=store reason=runtime_stopped",
+                || "source=store reason=runtime_stopped",
             );
             return self.configured_accounts_from_store();
         }
         match self.configured_accounts_from_gateway().await {
             Ok(configured) => {
-                status_trace("status.config_source", "source=gateway outcome=ok");
+                status_trace("status.config_source", || "source=gateway outcome=ok");
                 Ok(configured)
             }
             Err(ChannelStatusReadError::Rejected) => {
-                status_trace("status.config_source", "source=gateway outcome=rejected");
+                status_trace("status.config_source", || "source=gateway outcome=rejected");
                 Err(ChannelStatusReadError::Rejected)
             }
             Err(ChannelStatusReadError::Unknown) => {
-                status_trace("status.config_source", "source=gateway outcome=unknown");
+                status_trace("status.config_source", || "source=gateway outcome=unknown");
                 Err(ChannelStatusReadError::Unknown)
             }
         }
@@ -171,7 +173,7 @@ impl ChannelStatusOperation {
             match wire::channel::config_get_request(next_request_id("channel-status-config")) {
                 Ok(request) => request,
                 Err(_) => {
-                    status_trace("status.gateway.config_get", "outcome=encode_invalid");
+                    status_trace("status.gateway.config_get", || "outcome=encode_invalid");
                     return Err(ChannelStatusReadError::Unknown);
                 }
             };
@@ -180,7 +182,7 @@ impl ChannelStatusOperation {
             Err(error) => {
                 status_trace(
                     "status.gateway.config_get",
-                    &format!(
+                    || format!(
                         "outcome=read_error kind={}",
                         operations_read_error_label(error)
                     ),
@@ -190,14 +192,14 @@ impl ChannelStatusOperation {
         };
         status_trace(
             "status.gateway.config_get",
-            &format!("outcome={}", gateway_response_label(&response)),
+            || format!("outcome={}", gateway_response_label(&response)),
         );
         let document = match response {
             GatewayResponse::Failure { .. } => return Err(ChannelStatusReadError::Rejected),
             response => match wire::channel::decode_config_document(response) {
                 Ok(document) => document,
                 Err(_) => {
-                    status_trace("status.config_document", "outcome=decode_invalid");
+                    status_trace("status.config_document", || "outcome=decode_invalid");
                     return Err(ChannelStatusReadError::Unknown);
                 }
             },
@@ -205,7 +207,7 @@ impl ChannelStatusOperation {
         let mut document: Value = match serde_json::from_slice(&document) {
             Ok(document) => document,
             Err(_) => {
-                status_trace("status.config_document", "outcome=json_invalid");
+                status_trace("status.config_document", || "outcome=json_invalid");
                 return Err(ChannelStatusReadError::Unknown);
             }
         };
@@ -214,7 +216,7 @@ impl ChannelStatusOperation {
         let configured = match configured {
             Ok(configured) => configured,
             Err(_) => {
-                status_trace("status.config_document", "outcome=config_invalid");
+                status_trace("status.config_document", || "outcome=config_invalid");
                 return Err(ChannelStatusReadError::Unknown);
             }
         };
@@ -462,7 +464,7 @@ impl From<OperationsReadError> for ChannelStatusReadError {
     }
 }
 
-fn status_trace(phase: &str, detail: &str) {
+fn status_trace<D: fmt::Display>(phase: &str, detail: impl FnOnce() -> D) {
     super::config::channel_trace(phase, detail);
 }
 
@@ -565,7 +567,7 @@ fn decode_channel_snapshot(
     let payload = match success_payload_object(response) {
         Ok(payload) => payload,
         Err(()) => {
-            status_trace("status.decode", "field=payload outcome=invalid");
+            status_trace("status.decode", || "field=payload outcome=invalid");
             return Err(());
         }
     };
@@ -580,7 +582,7 @@ fn decode_channel_snapshot(
     {
         Some(ts) => ts,
         None => {
-            status_trace("status.decode", "field=ts outcome=invalid");
+            status_trace("status.decode", || "field=ts outcome=invalid");
             return Err(());
         }
     };
@@ -646,7 +648,7 @@ fn optional_partial(payload: &Map<String, Value>) -> Result<bool, ()> {
         Some(value) => match value.as_bool() {
             Some(value) => Ok(value),
             None => {
-                status_trace("status.decode", "field=partial outcome=invalid");
+                status_trace("status.decode", || "field=partial outcome=invalid");
                 Err(())
             }
         },
@@ -661,13 +663,13 @@ fn public_status_warnings(payload: &Map<String, Value>, partial: bool) -> Result
                 .iter()
                 .any(|value| !matches!(value, Value::String(_)))
             {
-                status_trace("status.decode", "field=warnings outcome=invalid_entry");
+                status_trace("status.decode", || "field=warnings outcome=invalid_entry");
                 return Err(());
             }
             Ok(public_status_warning(partial || !values.is_empty()))
         }
         Some(_) => {
-            status_trace("status.decode", "field=warnings outcome=invalid_type");
+            status_trace("status.decode", || "field=warnings outcome=invalid_type");
             Err(())
         }
     }
@@ -686,7 +688,7 @@ fn validate_event_loop(payload: &Map<String, Value>) -> Result<(), ()> {
         None | Some(Value::Null) => Ok(()),
         Some(Value::Object(_)) => Ok(()),
         Some(_) => {
-            status_trace("status.decode", "field=eventLoop outcome=invalid");
+            status_trace("status.decode", || "field=eventLoop outcome=invalid");
             Err(())
         }
     }
@@ -849,7 +851,7 @@ fn optional_object<'a>(
         Some(_) => {
             status_trace(
                 "status.decode",
-                &format!("field={field} outcome=invalid_type"),
+                || format!("field={field} outcome=invalid_type"),
             );
             Err(())
         }
@@ -894,7 +896,7 @@ fn decode_live_account_map(
         None => {
             status_trace(
                 "status.decode",
-                "field=channelAccounts outcome=invalid_channel_value",
+                || "field=channelAccounts outcome=invalid_channel_value",
             );
             return Err(());
         }
@@ -910,7 +912,7 @@ fn decode_live_account_map(
             None => {
                 status_trace(
                     "status.decode",
-                    "field=channelAccounts.account outcome=invalid_type",
+                    || "field=channelAccounts.account outcome=invalid_type",
                 );
                 return Err(());
             }
@@ -928,7 +930,7 @@ fn decode_live_account_map(
             Err(_) => {
                 status_trace(
                     "status.decode",
-                    "field=channelAccounts.accountId outcome=invalid",
+                    || "field=channelAccounts.accountId outcome=invalid",
                 );
                 return Err(());
             }
@@ -943,7 +945,7 @@ fn decode_live_account_map(
         {
             status_trace(
                 "status.decode",
-                "field=channelAccounts.accountId outcome=duplicate",
+                || "field=channelAccounts.accountId outcome=duplicate",
             );
             return Err(());
         }
@@ -957,7 +959,7 @@ fn decode_channel_summary(value: &Value) -> Result<ChannelSummarySnapshot, ()> {
         None => {
             status_trace(
                 "status.decode",
-                "field=channels.summary outcome=invalid_type",
+                || "field=channels.summary outcome=invalid_type",
             );
             return Err(());
         }
@@ -1011,7 +1013,7 @@ fn optional_bool(payload: &Map<String, Value>, field: &str) -> Result<Option<boo
             None => {
                 status_trace(
                     "status.decode",
-                    &format!("field={field} outcome=invalid_bool"),
+                    || format!("field={field} outcome=invalid_bool"),
                 );
                 Err(())
             }
@@ -1031,7 +1033,7 @@ fn optional_text(
             None => {
                 status_trace(
                     "status.decode",
-                    &format!("field={trace_field} outcome=invalid_text"),
+                    || format!("field={trace_field} outcome=invalid_text"),
                 );
                 Err(())
             }
@@ -1039,7 +1041,7 @@ fn optional_text(
         Some(_) => {
             status_trace(
                 "status.decode",
-                &format!("field={trace_field} outcome=invalid_text_type"),
+                || format!("field={trace_field} outcome=invalid_text_type"),
             );
             Err(())
         }
@@ -1072,7 +1074,7 @@ fn optional_timestamp(
             None => {
                 status_trace(
                     "status.decode",
-                    &format!("field={trace_field} outcome=invalid_timestamp"),
+                    || format!("field={trace_field} outcome=invalid_timestamp"),
                 );
                 Err(())
             }
@@ -1088,7 +1090,7 @@ fn optional_probe(payload: &Map<String, Value>) -> Result<Option<ChannelProbeSna
             None => {
                 status_trace(
                     "status.decode",
-                    "field=channelAccounts.probe.ok outcome=invalid_bool",
+                    || "field=channelAccounts.probe.ok outcome=invalid_bool",
                 );
                 Err(())
             }
@@ -1096,7 +1098,7 @@ fn optional_probe(payload: &Map<String, Value>) -> Result<Option<ChannelProbeSna
         Some(_) => {
             status_trace(
                 "status.decode",
-                "field=channelAccounts.probe outcome=invalid_type",
+                || "field=channelAccounts.probe outcome=invalid_type",
             );
             Err(())
         }

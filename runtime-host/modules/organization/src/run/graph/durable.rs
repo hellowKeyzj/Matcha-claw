@@ -8,9 +8,9 @@ use crate::run::event::{MetadataValue, OpaqueId};
 use super::{
     AttemptReason, AttemptStatus, DefinitionError, DependencyMetadata, EdgeAction, EdgeDefinition,
     EdgeId, EdgePayloadPolicy, ExecutionFence, ExecutorPolicy, GraphDefinition, GraphLayout,
-    GraphRunId, GraphState, GroupId, InputReceipt, JoinPolicy, NodeAttempt,
+    GraphRunId, GraphState, InputReceipt, NodeAttempt,
     NodeAttemptDurableInput, NodeDefinition, NodeExecutionHistory, NodeId, NodeKind, NodePosition,
-    ReadyQueueItem, RestoreError, ReviewAssignment, StartTrigger, WorkAssignment, WorkGroup,
+    ReadyQueueItem, RestoreError, ReviewAssignment, StartTrigger, WorkAssignment,
     restore_oracle,
 };
 
@@ -51,7 +51,7 @@ pub struct DurableNodeDefinition {
     pub trigger: Option<DurableStartTrigger>,
     pub work: Option<DurableWorkAssignment>,
     pub review: Option<DurableReviewAssignment>,
-    pub group: Option<DurableWorkGroup>,
+    pub script_review_rule: Option<crate::ScriptReviewRule>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,7 +67,6 @@ pub struct DurableWorkAssignment {
     pub role_id: String,
     pub session_ref: String,
     pub output_artifact_kind: Option<String>,
-    pub group_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,14 +74,6 @@ pub struct DurableReviewAssignment {
     pub role_id: String,
     pub session_ref: String,
     pub prompt: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DurableWorkGroup {
-    pub group_id: String,
-    pub require_completed: bool,
-    pub allow_failed: bool,
-    pub retry_limit: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -240,13 +231,13 @@ impl GraphState {
                     max_attempts: node.max_attempts().get(),
                     is_control: node.is_control(),
                     trigger: node.trigger().map(durable_trigger),
+                    script_review_rule: node.script_review_rule(),
                     work: node.work_assignment().map(|work| DurableWorkAssignment {
                         task_id: work.task_id().to_owned(),
                         prompt: work.prompt().to_owned(),
                         role_id: work.role_id().to_owned(),
                         session_ref: work.session_ref().as_str().to_owned(),
                         output_artifact_kind: work.output_artifact_kind().map(ToOwned::to_owned),
-                        group_id: work.group_id().map(|id| id.as_str().to_owned()),
                     }),
                     review: node
                         .review_assignment()
@@ -255,12 +246,6 @@ impl GraphState {
                             session_ref: review.session_ref().as_str().to_owned(),
                             prompt: review.prompt().to_owned(),
                         }),
-                    group: node.work_group().map(|group| DurableWorkGroup {
-                        group_id: group.id().as_str().to_owned(),
-                        require_completed: group.join_policy().require_completed(),
-                        allow_failed: group.join_policy().allow_failed(),
-                        retry_limit: group.join_policy().retry_limit(),
-                    }),
                 })
                 .collect(),
             edges: self
@@ -433,21 +418,28 @@ fn restore_definition(
                     node_id: node.id.clone(),
                 });
             };
+            if let Some(rule) = node.script_review_rule {
+                if node.kind != NodeKind::ScriptReview || !node.is_control
+                    || node.trigger.is_some() || node.work.is_some() || node.review.is_some()
+                {
+                    return Err(DurableRestoreError::InvalidNodeSnapshot { node_id: node.id.clone() });
+                }
+                return Ok(NodeDefinition::script_review(id, node.title.clone(), max_attempts, rule));
+            }
             match (
                 node.kind,
                 node.is_control,
                 &node.trigger,
                 &node.work,
                 &node.review,
-                &node.group,
             ) {
-                (NodeKind::Start, false, trigger, None, None, None) => Ok(NodeDefinition::start(
+                (NodeKind::Start, false, trigger, None, None) => Ok(NodeDefinition::start(
                     id,
                     node.title.clone(),
                     max_attempts,
                     trigger.as_ref().map(restore_trigger),
                 )),
-                (NodeKind::Work, false, None, Some(work), None, None) => Ok(NodeDefinition::work(
+                (NodeKind::Work, false, None, Some(work), None) => Ok(NodeDefinition::work(
                     id,
                     node.title.clone(),
                     max_attempts,
@@ -463,10 +455,9 @@ fn restore_definition(
                             )?,
                         ),
                         work.output_artifact_kind.clone(),
-                        work.group_id.clone().map(GroupId::new),
                     ),
                 )),
-                (NodeKind::Review, false, None, None, Some(review), None) => {
+                (NodeKind::Review, false, None, None, Some(review)) => {
                     Ok(NodeDefinition::review(
                         id,
                         node.title.clone(),
@@ -483,25 +474,17 @@ fn restore_definition(
                         ),
                     ))
                 }
-                (NodeKind::Join, false, None, None, None, Some(group)) => Ok(NodeDefinition::join(
+                (NodeKind::Join, false, None, None, None) => Ok(NodeDefinition::join(
                     id,
                     node.title.clone(),
                     max_attempts,
-                    WorkGroup::new(
-                        GroupId::new(group.group_id.clone()),
-                        JoinPolicy::new(
-                            group.require_completed,
-                            group.allow_failed,
-                            group.retry_limit,
-                        ),
-                    ),
                 )),
-                (NodeKind::Start, true, None, None, None, None)
-                | (NodeKind::Review, true, None, None, None, None)
-                | (NodeKind::Join, true, None, None, None, None)
-                | (NodeKind::HumanDecision, true, None, None, None, None)
-                | (NodeKind::ScriptReview, true, None, None, None, None)
-                | (NodeKind::End, true, None, None, None, None) => Ok(NodeDefinition::control(
+                (NodeKind::Start, true, None, None, None)
+                | (NodeKind::Review, true, None, None, None)
+                | (NodeKind::Join, true, None, None, None)
+                | (NodeKind::HumanDecision, true, None, None, None)
+                | (NodeKind::ScriptReview, true, None, None, None)
+                | (NodeKind::End, true, None, None, None) => Ok(NodeDefinition::control(
                     id,
                     node.kind,
                     node.title.clone(),
@@ -537,7 +520,7 @@ fn restore_definition(
             })))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    GraphDefinition::new(
+    GraphDefinition::from_durable(
         snapshot.graph_id.clone(),
         snapshot.workflow_plan_id.clone(),
         GraphRunId::new(snapshot.run_id.clone()),
@@ -641,6 +624,12 @@ fn validate_cross_references(state: &GraphState) -> Result<(), DurableRestoreErr
             }
         }
     }
+    Ok(())
+}
+
+pub(super) fn validate_attempt(state: &GraphState, node_id: &NodeId, attempt: &NodeAttempt) -> Result<(), DurableRestoreError> {
+    validate_reason(state, node_id, attempt)?;
+    for receipt in attempt.inputs() { validate_input(state, node_id, attempt, receipt)?; }
     Ok(())
 }
 

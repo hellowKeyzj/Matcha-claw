@@ -265,7 +265,7 @@ fn decode_definition(value: &Value) -> Result<organization::GraphDefinition, Dec
     let run_id = organization::GraphRunId::new(text(graph, "runId")?);
     let title = text(graph, "title")?;
     let nodes = decode_nodes(graph.get("nodes").ok_or(DecodeError::Invalid)?)?;
-    let edges = decode_edges(graph.get("edges").ok_or(DecodeError::Invalid)?)?;
+    let edges = decode_edges(graph.get("edges").ok_or(DecodeError::Invalid)?, &nodes)?;
     organization::GraphDefinition::new(graph_id, workflow_plan_id, run_id, title, nodes, edges)
         .map_err(|_| DecodeError::Invalid)
 }
@@ -346,6 +346,8 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
             reject_keys(node, &["id", "kind", "title", "maxAttempts", "work"])?;
             let task_id = text(work, "taskId")?;
             let role_id = text(work, "roleId")?;
+            let session_ref = organization::RoleSessionRef::try_new(text(work, "sessionRef")?)
+                .map_err(|_| DecodeError::Invalid)?;
             let prompt = match work.get("prompt") {
                 Some(Value::String(value)) => value.clone(),
                 None => String::new(),
@@ -353,11 +355,6 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
             };
             let output_artifact_kind = match work.get("outputArtifactKind") {
                 Some(Value::String(value)) => Some(value.clone()),
-                None => None,
-                _ => return Err(DecodeError::Invalid),
-            };
-            let group_id = match work.get("groupId") {
-                Some(Value::String(value)) => Some(organization::GroupId::new(value)),
                 None => None,
                 _ => return Err(DecodeError::Invalid),
             };
@@ -375,10 +372,10 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
                 &[
                     "taskId",
                     "roleId",
+                    "sessionRef",
                     "prompt",
                     "executor",
                     "outputArtifactKind",
-                    "groupId",
                 ],
             )?;
             Ok(organization::NodeDefinition::work(
@@ -388,46 +385,50 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
                 organization::WorkAssignment::typed(
                     task_id,
                     prompt,
-                    organization::ExecutorPolicy::team_role(role_id),
+                    organization::ExecutorPolicy::team_role_session(role_id, session_ref),
                     output_artifact_kind,
-                    group_id,
                 ),
             ))
         }
-        organization::NodeKind::Join => {
-            reject_keys(node, &["id", "kind", "title", "maxAttempts", "group"])?;
-            let Some(Value::Object(group)) = node.get("group") else {
+        organization::NodeKind::Review => {
+            reject_keys(node, &["id", "kind", "title", "maxAttempts", "review"])?;
+            let Some(Value::Object(review)) = node.get("review") else {
                 return Err(DecodeError::Invalid);
             };
-            reject_keys(group, &["groupId", "join"])?;
-            let group_id = organization::GroupId::new(text(group, "groupId")?);
-            let Some(Value::Object(join)) = group.get("join") else {
-                return Err(DecodeError::Invalid);
-            };
-            reject_keys(join, &["requireCompleted", "allowFailed", "retryLimit"])?;
-            let Some(require_completed) = join.get("requireCompleted").and_then(Value::as_bool)
-            else {
-                return Err(DecodeError::Invalid);
-            };
-            let Some(allow_failed) = join.get("allowFailed").and_then(Value::as_bool) else {
-                return Err(DecodeError::Invalid);
-            };
-            let Some(retry_limit) = join
-                .get("retryLimit")
-                .and_then(Value::as_u64)
-                .and_then(|v| v.try_into().ok())
-            else {
-                return Err(DecodeError::Invalid);
-            };
-            Ok(organization::NodeDefinition::join(
+            reject_keys(review, &["roleId", "sessionRef", "prompt"])?;
+            let role_id = text(review, "roleId")?;
+            let session_ref = organization::RoleSessionRef::try_new(text(review, "sessionRef")?)
+                .map_err(|_| DecodeError::Invalid)?;
+            let prompt = review.get("prompt").and_then(Value::as_str)
+                .ok_or(DecodeError::Invalid)?;
+            Ok(organization::NodeDefinition::review(
                 id,
                 title,
                 max_attempts,
-                organization::WorkGroup::new(
-                    group_id,
-                    organization::JoinPolicy::new(require_completed, allow_failed, retry_limit),
+                organization::ReviewAssignment::with_executor(
+                    organization::ExecutorPolicy::team_role_session(role_id, session_ref),
+                    prompt,
                 ),
             ))
+        }
+        organization::NodeKind::ScriptReview => {
+            reject_keys(node, &["id", "kind", "title", "maxAttempts", "scriptReview"])?;
+            let Some(Value::Object(review)) = node.get("scriptReview") else {
+                return Err(DecodeError::Invalid);
+            };
+            reject_keys(review, &["rule"])?;
+            let rule = match text(review, "rule")?.as_str() {
+                "pass_through" => organization::ScriptReviewRule::PassThrough,
+                "assert_all_upstream_completed" => organization::ScriptReviewRule::AssertAllUpstreamCompleted,
+                "assert_no_blocking_gate" => organization::ScriptReviewRule::AssertNoBlockingGate,
+                "assert_artifact_exists" => organization::ScriptReviewRule::AssertArtifactExists,
+                _ => return Err(DecodeError::Invalid),
+            };
+            Ok(organization::NodeDefinition::script_review(id, title, max_attempts, rule))
+        }
+        organization::NodeKind::Join => {
+            reject_keys(node, &["id", "kind", "title", "maxAttempts"])?;
+            Ok(organization::NodeDefinition::join(id, title, max_attempts))
         }
         _ => {
             reject_keys(node, &["id", "kind", "title", "maxAttempts"])?;
@@ -441,14 +442,22 @@ fn decode_node(value: &Value) -> Result<organization::NodeDefinition, DecodeErro
     }
 }
 
-fn decode_edges(value: &Value) -> Result<Vec<organization::EdgeDefinition>, DecodeError> {
+fn decode_edges(
+    value: &Value,
+    nodes: &[organization::NodeDefinition],
+) -> Result<Vec<organization::EdgeDefinition>, DecodeError> {
     let Value::Array(edges) = value else {
         return Err(DecodeError::Invalid);
     };
-    edges.iter().map(decode_edge).collect()
+    let join_nodes = nodes.iter().filter(|node| node.kind() == organization::NodeKind::Join)
+        .map(|node| node.id().as_str()).collect::<std::collections::BTreeSet<_>>();
+    edges.iter().map(|edge| decode_edge(edge, &join_nodes)).collect()
 }
 
-fn decode_edge(value: &Value) -> Result<organization::EdgeDefinition, DecodeError> {
+fn decode_edge(
+    value: &Value,
+    join_nodes: &std::collections::BTreeSet<&str>,
+) -> Result<organization::EdgeDefinition, DecodeError> {
     let Value::Object(edge) = value else {
         return Err(DecodeError::Invalid);
     };
@@ -465,18 +474,23 @@ fn decode_edge(value: &Value) -> Result<organization::EdgeDefinition, DecodeErro
             "dependency",
         ],
     )?;
-    let action = match text(edge, "action")?.as_str() {
-        "activate" => organization::EdgeAction::Activate,
-        "rework" => organization::EdgeAction::Rework,
-        "gate" => organization::EdgeAction::Gate,
-        "finish" => organization::EdgeAction::Finish,
+    let target = text(edge, "to")?;
+    let action = match edge.get("action") {
+        None if join_nodes.contains(target.as_str()) => organization::EdgeAction::Gate,
+        Some(Value::String(action)) => match action.as_str() {
+            "activate" => organization::EdgeAction::Activate,
+            "rework" => organization::EdgeAction::Rework,
+            "gate" => organization::EdgeAction::Gate,
+            "finish" => organization::EdgeAction::Finish,
+            _ => return Err(DecodeError::Invalid),
+        },
         _ => return Err(DecodeError::Invalid),
     };
     let mut definition = organization::EdgeDefinition::new(
         organization::EdgeId::new(text(edge, "id")?),
         organization::NodeId::new(text(edge, "from")?),
         text(edge, "sourcePort")?,
-        organization::NodeId::new(text(edge, "to")?),
+        organization::NodeId::new(target),
         text(edge, "targetPort")?,
         action,
     );

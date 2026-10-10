@@ -4204,7 +4204,8 @@ export async function loadSameRepoMessageLogsProgressive(
   initialEnrichCount: number = INITIAL_ENRICH_COUNT,
 ): Promise<SessionLogResult> {
   logForDebugging(
-    `/resume: loading sessions for cwd=${getOriginalCwd()}, worktrees=[${worktreePaths.join(', ')}]`,
+    () =>
+      `/resume: loading sessions for cwd=${getOriginalCwd()}, worktrees=[${worktreePaths.join(', ')}]`,
   )
   const allStatLogs = await getStatOnlyLogsForWorktrees(worktreePaths, limit)
   logForDebugging(`/resume: found ${allStatLogs.length} session files on disk`)

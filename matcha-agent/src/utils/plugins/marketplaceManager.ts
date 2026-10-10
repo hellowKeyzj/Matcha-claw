@@ -1266,7 +1266,8 @@ async function cacheMarketplaceFromUrl(
   logForDebugging(`Downloading marketplace from URL: ${redactedUrl}`)
   if (customHeaders && Object.keys(customHeaders).length > 0) {
     logForDebugging(
-      `Using custom headers: ${jsonStringify(redactHeaders(customHeaders))}`,
+      () =>
+        `Using custom headers: ${jsonStringify(redactHeaders(customHeaders))}`,
     )
   }
 

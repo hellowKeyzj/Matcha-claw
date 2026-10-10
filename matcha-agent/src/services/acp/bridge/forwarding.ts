@@ -20,9 +20,7 @@ import {
 } from './notifications.js'
 import { getMatchingModelUsage } from './modelUsage.js'
 
-// Top-level const alias retained from the original module. Only the
-// forwardSessionUpdates default branch and replayHistoryMessages reference it.
-const logger: { debug: (...args: unknown[]) => void } = console
+import { isTraceEnabled } from '../../../utils/trace.js'
 
 export function nextSdkMessageOrAbort(
   sdkMessages: AsyncGenerator<SDKMessage, void, unknown>,
@@ -376,7 +374,8 @@ export async function forwardSessionUpdates(
         }
 
         default:
-          logger.debug('Ignoring unknown SDK message type')
+          if (isTraceEnabled())
+            console.debug('Ignoring unknown SDK message type')
           break
       }
     }
@@ -413,7 +412,7 @@ export async function replayHistoryMessages(
     const msg = rawMsg as BridgeSDKMessage
     // Skip non-conversation messages
     if (msg.type !== 'user' && msg.type !== 'assistant') {
-      logger.debug('Ignoring unknown SDK message type')
+      if (isTraceEnabled()) console.debug('Ignoring unknown SDK message type')
       continue
     }
     // Skip meta messages (synthetic continuation prompts)

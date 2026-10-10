@@ -20,16 +20,16 @@ import { homedir, platform } from 'os'
 import { join } from 'path'
 import { z } from 'zod'
 import { lazySchema } from '../lazySchema.js'
+import { isTraceEnabled } from '../trace.js'
 import { jsonParse, jsonStringify } from '../slowOperations.js'
 import { getSecureSocketPath, getSocketDir } from './common.js'
 
 const VERSION = '1.0.0'
 const MAX_MESSAGE_SIZE = 1024 * 1024 // 1MB - Max message size that can be sent to Chrome
 
-const LOG_FILE =
-  process.env.USER_TYPE === 'ant'
-    ? join(homedir(), '.claude', 'debug', 'chrome-native-host.txt')
-    : undefined
+const LOG_FILE = isTraceEnabled()
+  ? join(homedir(), '.claude', 'debug', 'chrome-native-host.txt')
+  : undefined
 
 function log(message: string, ...args: unknown[]): void {
   if (LOG_FILE) {
@@ -269,11 +269,11 @@ class ChromeNativeHost {
     }
     const message = parsed.data
 
-    log(`Handling Chrome message type: ${message.type}`)
+    if (isTraceEnabled()) log(`Handling Chrome message type: ${message.type}`)
 
     switch (message.type) {
       case 'ping':
-        log('Responding to ping')
+        if (isTraceEnabled()) log('Responding to ping')
 
         sendChromeMessage(
           jsonStringify({
@@ -294,7 +294,10 @@ class ChromeNativeHost {
 
       case 'tool_response': {
         if (this.mcpClients.size > 0) {
-          log(`Forwarding tool response to ${this.mcpClients.size} MCP clients`)
+          if (isTraceEnabled())
+            log(
+              `Forwarding tool response to ${this.mcpClients.size} MCP clients`,
+            )
 
           // Extract the data portion (everything except 'type')
           const { type: _, ...data } = message
@@ -316,7 +319,10 @@ class ChromeNativeHost {
 
       case 'notification': {
         if (this.mcpClients.size > 0) {
-          log(`Forwarding notification to ${this.mcpClients.size} MCP clients`)
+          if (isTraceEnabled())
+            log(
+              `Forwarding notification to ${this.mcpClients.size} MCP clients`,
+            )
 
           // Extract the data portion (everything except 'type')
           const { type: _, ...data } = message
@@ -395,9 +401,10 @@ class ChromeNativeHost {
           const request = jsonParse(
             messageBytes.toString('utf-8'),
           ) as ToolRequest
-          log(
-            `Forwarding tool request from MCP client ${clientId}: ${request.method}`,
-          )
+          if (isTraceEnabled())
+            log(
+              `Forwarding tool request from MCP client ${clientId}: ${request.method}`,
+            )
 
           // Forward to Chrome
           sendChromeMessage(

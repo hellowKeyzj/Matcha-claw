@@ -173,5 +173,5 @@ export function registerFeishuOAuthBatchAuthTool(api: OpenClawPluginApi): void {
     { name: 'feishu_oauth_batch_auth' },
   );
 
-  api.logger.debug?.('feishu_oauth_batch_auth: Registered feishu_oauth_batch_auth tool');
+  log.debug('feishu_oauth_batch_auth: Registered feishu_oauth_batch_auth tool');
 }

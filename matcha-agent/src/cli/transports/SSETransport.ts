@@ -615,7 +615,8 @@ export class SSETransport implements Transport {
     }
 
     logForDebugging(
-      `SSETransport: POST body keys=${Object.keys(message as Record<string, unknown>).join(',')}`,
+      () =>
+        `SSETransport: POST body keys=${Object.keys(message as Record<string, unknown>).join(',')}`,
     )
 
     for (let attempt = 1; attempt <= POST_MAX_RETRIES; attempt++) {
@@ -631,7 +632,8 @@ export class SSETransport implements Transport {
         }
 
         logForDebugging(
-          `SSETransport: POST ${response.status} body=${jsonStringify(response.data).slice(0, 200)}`,
+          () =>
+            `SSETransport: POST ${response.status} body=${jsonStringify(response.data).slice(0, 200)}`,
         )
         // 4xx errors (except 429) are permanent - don't retry
         if (

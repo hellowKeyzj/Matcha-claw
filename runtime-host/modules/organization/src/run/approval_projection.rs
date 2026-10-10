@@ -31,6 +31,8 @@ impl TeamPendingApprovals {
 pub struct TeamPendingApproval {
     approval_id: String,
     stage_id: String,
+    subject: &'static str,
+    node_id: Option<String>,
     role_id: String,
     reason: String,
     requested_action: String,
@@ -44,6 +46,14 @@ impl TeamPendingApproval {
 
     pub fn stage_id(&self) -> &str {
         &self.stage_id
+    }
+
+    pub fn subject(&self) -> &'static str {
+        self.subject
+    }
+
+    pub fn node_id(&self) -> Option<&str> {
+        self.node_id.as_deref()
     }
 
     pub fn role_id(&self) -> &str {
@@ -92,9 +102,16 @@ pub fn query_team_pending_approvals(
         })
         .map(|approval| {
             let facts = approval.facts();
+            let (subject, node_id) = match &facts.subject {
+                crate::ApprovalSubject::Stage { .. } => ("stage", None),
+                crate::ApprovalSubject::WorkNode { node_id } => ("work_node", Some(node_id.clone())),
+                crate::ApprovalSubject::HumanDecision { node_id } => ("human_decision", Some(node_id.clone())),
+            };
             TeamPendingApproval {
                 approval_id: facts.approval_id.clone(),
                 stage_id: facts.stage_id.clone(),
+                subject,
+                node_id,
                 role_id: facts.role_id.clone(),
                 reason: facts.reason.clone(),
                 requested_action: facts.requested_action.clone(),
@@ -148,11 +165,12 @@ mod tests {
         let serialized = serde_json::to_string(&projection).unwrap();
         let document: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(document.as_object().unwrap().len(), 3);
-        assert_eq!(document["approvals"][0].as_object().unwrap().len(), 6);
+        assert_eq!(document["approvals"][0].as_object().unwrap().len(), 8);
+        assert_eq!(document["approvals"][0]["subject"], "stage");
+        assert_eq!(document["approvals"][0]["nodeId"], serde_json::Value::Null);
         for omitted in [
             "riskSummary",
             "idempotencyKey",
-            "subject",
             "origin",
             "effect",
             "executionFence",

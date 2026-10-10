@@ -1,3 +1,4 @@
+import { traceDebug } from '../../utils/trace-logger';
 import { ipcMain } from 'electron';
 import { isHostApiRequestAllowed } from '../../api/route-boundary';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
@@ -144,7 +145,7 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
 
   ipcMain.handle('hostapi:fetch', async (event, request: HostApiFetchRequest) => {
     const traceStartedAt = isSessionTraceEnabled() ? Date.now() : 0;
-    const sessionTraceId = readTraceHeader(request?.headers ?? {});
+    const sessionTraceId = traceStartedAt ? readTraceHeader(request?.headers ?? {}) : null;
     const sessionPage = event.senderFrame === event.sender.mainFrame
       ? sessionObservers?.capture(event.sender) : undefined;
     const requestId = typeof request?.requestId === 'string' ? request.requestId : '';
@@ -153,10 +154,10 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
     const traceActive = traceStartedAt !== 0 && sessionTraceId !== null
       && normalizedPath.split(/[?#]/, 1)[0] === '/api/capabilities/execute';
     const requestIdHash = traceActive ? summarizeIdentifier(requestId).hash : null;
-    const trace = (stage: string, payload: Record<string, unknown> = {}): void => {
+    const trace = (stage: string, payload: () => Record<string, unknown> = () => ({})): void => {
       if (!traceActive) return;
       logSessionTrace(`electron.hostapi.proxy.${stage}`, sessionTraceId, {
-        path: '/api/capabilities/execute', requestIdHash, elapsedMs: Date.now() - traceStartedAt, ...payload,
+        path: '/api/capabilities/execute', requestIdHash, elapsedMs: Date.now() - traceStartedAt, ...payload(),
       });
     };
     trace('received');
@@ -168,7 +169,7 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
       }
       trace('e2e.start');
       const e2eMock = await handleE2EHostApiFetch(request);
-      trace('e2e.end', { outcome: e2eMock ? 'mocked' : 'passthrough' });
+      trace('e2e.end', () => ({ outcome: e2eMock ? 'mocked' : 'passthrough' }));
       if (e2eMock) {
         return e2eMock;
       }
@@ -190,16 +191,16 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
       try {
         trace('ready.start');
         await waitForHostApiReadyOrAbort(controller.signal);
-        trace('ready.end', { outcome: 'ready' });
+        trace('ready.end', () => ({ outcome: 'ready' }));
 
         if (normalizedPath === '/api/sealed-skills/export') {
-          console.info('[startup-trace]', {
+          traceDebug(() => ['[startup-trace]', {
             source: 'sealed-skills-export',
             phase: 'hostapi-proxy',
             detail: 'request',
             method,
             skillKey: skillKeyFromHostApiBody(request?.body),
-          });
+          }]);
         }
 
         const headers = withoutRendererAuthenticationHeaders(request?.headers);
@@ -229,20 +230,20 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
           signal: controller.signal,
         });
 
-        trace('fetch.headers', { status: response.status });
+        trace('fetch.headers', () => ({ status: response.status }));
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
         if (contentType.includes('application/json')) {
-          trace('body.start', { outcome: 'json', status: response.status });
+          trace('body.start', () => ({ outcome: 'json', status: response.status }));
           const json = await response.json();
-          trace('body.end', { outcome: 'json', status: response.status });
+          trace('body.end', () => ({ outcome: 'json', status: response.status }));
           if (normalizedPath === '/api/sealed-skills/export') {
-            console.info('[startup-trace]', {
+            traceDebug(() => ['[startup-trace]', {
               source: 'sealed-skills-export',
               phase: 'hostapi-proxy',
               detail: 'response',
               status: response.status,
               outcome: outcomeFromHostApiBody(json),
-            });
+            }]);
           }
           return {
             ok: true,
@@ -254,16 +255,16 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
           };
         }
 
-        trace('body.start', { outcome: 'text', status: response.status });
+        trace('body.start', () => ({ outcome: 'text', status: response.status }));
         const text = await response.text();
-        trace('body.end', { outcome: 'text', status: response.status });
+        trace('body.end', () => ({ outcome: 'text', status: response.status }));
         if (normalizedPath === '/api/sealed-skills/export') {
-          console.info('[startup-trace]', {
+          traceDebug(() => ['[startup-trace]', {
             source: 'sealed-skills-export',
             phase: 'hostapi-proxy',
             detail: 'text-response',
             status: response.status,
-          });
+          }]);
         }
         return {
           ok: true,
@@ -280,14 +281,14 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
         }
       }
     } catch {
-      trace('failure', { outcome: inflightRequest?.failureCode ?? 'UNAVAILABLE' });
+      trace('failure', () => ({ outcome: inflightRequest?.failureCode ?? 'UNAVAILABLE' }));
       if (normalizedPath === '/api/sealed-skills/export') {
-        console.info('[startup-trace]', {
+        traceDebug(() => ['[startup-trace]', {
           source: 'sealed-skills-export',
           phase: 'hostapi-proxy',
           detail: 'failure',
           code: inflightRequest?.failureCode ?? 'UNAVAILABLE',
-        });
+        }]);
       }
       publishE2EHostApiBoundary({ stage: 'proxy-failure', method, path: normalizedPath });
       return {

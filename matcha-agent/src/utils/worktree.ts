@@ -496,7 +496,8 @@ export async function copyWorktreeIncludeFiles(
 
   if (copied.length > 0) {
     logForDebugging(
-      `Copied ${copied.length} files from .worktreeinclude: ${copied.join(', ')}`,
+      () =>
+        `Copied ${copied.length} files from .worktreeinclude: ${copied.join(', ')}`,
     )
   }
 

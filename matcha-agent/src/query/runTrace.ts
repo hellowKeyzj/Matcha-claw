@@ -1,3 +1,5 @@
+import { isTraceEnabled } from '../utils/trace.js'
+
 export type RunTraceValue = string | number | boolean | null | undefined
 
 export type RunTraceDetails = Record<string, RunTraceValue>
@@ -63,10 +65,7 @@ export function sanitizeRunTraceDetails(
 export function isRunTraceEnabled(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
-  return (
-    isTruthyEnvValue(env.MATCHA_AGENT_RUN_TRACE) ||
-    isTruthyEnvValue(env.MATCHACLAW_SESSION_TRACE)
-  )
+  return isTraceEnabled(env)
 }
 
 export function logProcessSessionTrace(
@@ -86,17 +85,4 @@ export function logProcessSessionTrace(
       ...(sanitizedDetails ?? {}),
     })}\n`,
   )
-}
-
-function isTruthyEnvValue(value: string | undefined): boolean {
-  if (!value) return false
-  switch (value.toLowerCase()) {
-    case '1':
-    case 'true':
-    case 'yes':
-    case 'on':
-      return true
-    default:
-      return false
-  }
 }

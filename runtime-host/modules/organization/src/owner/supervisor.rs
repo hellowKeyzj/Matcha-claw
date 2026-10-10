@@ -1,5 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use platform::trace::{identifier_hash, runtime_trace};
+use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -38,10 +40,24 @@ impl TeamRunSupervisor {
         now: u64,
         retry_deferred: bool,
     ) {
-        if let Ok(run_ids) = input.organization.active_run_ids().await {
-            self.run_actors
-                .wake_active_runs(input, run_ids, now, retry_deferred)
-                .await;
+        runtime_trace("runtime.team_run.active_runs.begin", || json!({
+            "schedulerNow": now,
+            "clockUnit": "milliseconds",
+            "retryDeferred": retry_deferred,
+        }));
+        match input.organization.active_run_ids().await {
+            Ok(run_ids) => {
+                runtime_trace("runtime.team_run.active_runs.result", || json!({
+                    "outcome": "returned",
+                    "runCount": run_ids.len(),
+                }));
+                self.run_actors
+                    .wake_active_runs(input, run_ids, now, retry_deferred)
+                    .await;
+            }
+            Err(_) => runtime_trace("runtime.team_run.active_runs.result", || json!({
+                "outcome": "owner_unavailable",
+            })),
         }
     }
 
@@ -52,8 +68,9 @@ impl TeamRunSupervisor {
     }
 }
 
-pub(super) async fn run(
-    mut input: TeamRunCoordinatorInput,
+pub(super) async fn run<T: Send + Sync + 'static>(
+    input: TeamRunCoordinatorInput,
+    mut admission_changes: tokio::sync::watch::Receiver<T>,
     mut requests: mpsc::Receiver<TeamRunCoordinatorRequest>,
     cancellation: CancellationToken,
 ) {
@@ -61,6 +78,9 @@ pub(super) async fn run(
     let mut schedule_changes = input.organization.subscribe_schedule_changes();
     let mut team_trigger_cron = TeamTriggerCron::default();
     let mut supervisor = TeamRunSupervisor::new(&input);
+    runtime_trace("runtime.team_run.coordinator.started", || json!({
+        "admitted": input.admission.is_admitted(),
+    }));
     reconcile(&input, &mut team_trigger_cron, &mut supervisor).await;
     let mut maintenance = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(30),
@@ -71,7 +91,7 @@ pub(super) async fn run(
         match next(
             &mut requests,
             &mut requests_open,
-            &mut input.admission_changes,
+            &mut admission_changes,
             &mut schedule_changes,
             &mut supervisor.run_actors,
             &mut maintenance,
@@ -81,16 +101,32 @@ pub(super) async fn run(
         {
             Next::Shutdown => {
                 supervisor.cancel_and_join(&input).await;
+                runtime_trace("runtime.team_run.coordinator.stopped", || json!({}));
                 return;
             }
-            Next::Tick | Next::AdmissionChanged => {
+            Next::Tick => {
+                runtime_trace("runtime.team_run.coordinator.wake", || json!({
+                    "reason": "maintenance",
+                    "admitted": input.admission.is_admitted(),
+                }));
+                reconcile(&input, &mut team_trigger_cron, &mut supervisor).await;
+            }
+            Next::AdmissionChanged => {
+                runtime_trace("runtime.team_run.coordinator.wake", || json!({
+                    "reason": "admission_changed",
+                    "admitted": input.admission.is_admitted(),
+                }));
                 reconcile(&input, &mut team_trigger_cron, &mut supervisor).await;
             }
             Next::ScheduleChanged(wake) => {
-                let _wake = wake;
+                runtime_trace("runtime.team_run.coordinator.wake", || json!({
+                    "reason": format!("{:?}", wake.reason()),
+                    "runHash": wake.run_id().map(|id| identifier_hash(id.as_str())),
+                    "admitted": input.admission.is_admitted(),
+                }));
                 if input.admission.is_admitted() {
                     supervisor
-                        .wake_active_runs(&input, now_seconds(), false)
+                        .wake_active_runs(&input, now_millis(), false)
                         .await;
                 }
             }
@@ -101,7 +137,7 @@ pub(super) async fn run(
                     .await;
                 if input.admission.is_admitted() {
                     supervisor
-                        .wake_active_runs(&input, now_seconds(), false)
+                        .wake_active_runs(&input, now_millis(), false)
                         .await;
                 }
             }
@@ -115,10 +151,10 @@ pub(super) async fn run(
     }
 }
 
-async fn next(
+async fn next<T>(
     requests: &mut mpsc::Receiver<TeamRunCoordinatorRequest>,
     requests_open: &mut bool,
-    admission_changes: &mut tokio::sync::watch::Receiver<super::coordinator::AdmissionState>,
+    admission_changes: &mut tokio::sync::watch::Receiver<T>,
     schedule_changes: &mut tokio::sync::watch::Receiver<TeamRunWake>,
     run_actors: &mut TeamRunActors,
     maintenance: &mut tokio::time::Interval,
@@ -126,17 +162,26 @@ async fn next(
 ) -> Next {
     tokio::select! {
         biased;
-        _ = cancellation.cancelled() => Next::Shutdown,
+        _ = cancellation.cancelled() => {
+            runtime_trace("runtime.team_run.coordinator.stopping", || json!({ "reason": "cancelled" }));
+            Next::Shutdown
+        },
         request = requests.recv(), if *requests_open => Next::Request(request),
         changed = admission_changes.changed() => match changed {
             Ok(()) => Next::AdmissionChanged,
-            Err(_) => Next::Shutdown,
+            Err(_) => {
+                runtime_trace("runtime.team_run.coordinator.stopping", || json!({ "reason": "admission_closed" }));
+                Next::Shutdown
+            },
         },
         _ = maintenance.tick() => Next::Tick,
         completion = run_actors.next_completion() => Next::ActivityCompleted(completion),
         changed = schedule_changes.changed() => match changed {
             Ok(()) => Next::ScheduleChanged(schedule_changes.borrow().clone()),
-            Err(_) => Next::Shutdown,
+            Err(_) => {
+                runtime_trace("runtime.team_run.coordinator.stopping", || json!({ "reason": "schedule_closed" }));
+                Next::Shutdown
+            },
         },
     }
 }
@@ -149,7 +194,7 @@ async fn reconcile(
     if !input.admission.is_admitted() {
         return;
     }
-    let now = now_seconds();
+    let now = now_millis();
     reconcile_team_trigger_cron(input, team_trigger_cron, now).await;
     supervisor.wake_active_runs(input, now, true).await;
 }
@@ -162,9 +207,21 @@ async fn reconcile_team_trigger_cron(
     let Ok(triggers) = input.organization.trigger_list(None).await else {
         return;
     };
-    for reconciliation in cron.reconcile(triggers, now) {
-        let CronReconciliation::Due(plan) = reconciliation else {
-            continue;
+    // Cron slots and their idempotency keys use seconds; persisted run facts use milliseconds.
+    for reconciliation in cron.reconcile(triggers, now / 1_000) {
+        let plan = match reconciliation {
+            CronReconciliation::Due(plan) => plan,
+            CronReconciliation::InvalidSchedule {
+                run_id,
+                start_node_id,
+            } => {
+                runtime_trace("runtime.team_run.cron.invalid_schedule", || json!({
+                    "runHash": identifier_hash(run_id.as_str()),
+                    "nodeHash": identifier_hash(&start_node_id),
+                }));
+                continue;
+            }
+            CronReconciliation::AwaitingSlot | CronReconciliation::OutcomeUnknown => continue,
         };
         let request = plan.fire;
         if !matches!(
@@ -176,11 +233,13 @@ async fn reconcile_team_trigger_cron(
     }
 }
 
-fn now_seconds() -> u64 {
+fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -191,8 +250,7 @@ mod tests {
     #[tokio::test]
     async fn fact_change_wakes_without_waiting_for_maintenance() {
         let (_requests, mut requests) = mpsc::channel(1);
-        let (_admission, mut admission) =
-            watch::channel(super::super::coordinator::AdmissionState::Changed);
+        let (_admission, mut admission) = watch::channel(());
         let (changes, mut changes_rx) = watch::channel(TeamRunWake::new(
             super::super::coordinator::TeamRunWakeReason::GraphChanged,
             None,
@@ -234,8 +292,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_precedes_a_pending_fact_change() {
         let (_requests, mut requests) = mpsc::channel(1);
-        let (_admission, mut admission) =
-            watch::channel(super::super::coordinator::AdmissionState::Changed);
+        let (_admission, mut admission) = watch::channel(());
         let (changes, mut changes_rx) = watch::channel(TeamRunWake::new(
             super::super::coordinator::TeamRunWakeReason::GraphChanged,
             None,

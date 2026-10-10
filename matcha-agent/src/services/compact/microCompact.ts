@@ -343,7 +343,8 @@ async function cachedMicrocompactPath(
     }
 
     logForDebugging(
-      `Cached MC deleting ${toolsToDelete.length} tool(s): ${toolsToDelete.join(', ')}`,
+      () =>
+        `Cached MC deleting ${toolsToDelete.length} tool(s): ${toolsToDelete.join(', ')}`,
     )
 
     // Log the event

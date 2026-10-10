@@ -30,9 +30,9 @@ export function handleLogEvent(method, tabId, params, _ctx) {
     if (level === 'error') {
       log.warn('browser log [error]:', tabId, truncate(text, 150), url ? `(${truncate(url, 80)})` : '')
     } else if (level === 'warning') {
-      log.info('browser log [warn]:', tabId, truncate(text, 150))
+      log.warn('browser log [warn]:', tabId, truncate(text, 150))
     } else {
-      log.debug('browser log:', tabId, `[${level}]`, truncate(text, 100))
+      log.debug(() => ['browser log:', tabId, `[${level}]`, truncate(text, 100)])
     }
   }
 }

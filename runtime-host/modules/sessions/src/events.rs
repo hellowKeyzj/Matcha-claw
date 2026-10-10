@@ -29,7 +29,7 @@ impl SessionDeltaSource {
 
     pub fn publish(&self, delta: SessionDelta) -> bool {
         if crate::trace::enabled() {
-            crate::trace::log_unscoped("sessions.delta.publish", serde_json::json!({
+            crate::trace::log_unscoped("sessions.delta.publish", || serde_json::json!({
                 "identity": crate::trace::identity_shape(&delta.identity), "epoch": delta.epoch,
                 "seq": delta.seq, "cursor": delta.cursor, "runHash": delta.run_id.as_deref().map(crate::trace::fingerprint),
                 "changes": crate::trace::changes_shape(&delta.changes), "receivers": self.sender.receiver_count(),
@@ -37,21 +37,21 @@ impl SessionDeltaSource {
         }
         let sent = self.sender.send(SessionEvent::Delta(delta));
         if crate::trace::enabled() {
-            crate::trace::log_unscoped("sessions.delta.publish_outcome", serde_json::json!({ "hasReceiver": sent.is_ok() }));
+            crate::trace::log_unscoped("sessions.delta.publish_outcome", || serde_json::json!({ "hasReceiver": sent.is_ok() }));
         }
         true
     }
 
     pub fn resync(&self, identity: SessionIdentity, epoch: u64, seq: u64) {
         if crate::trace::enabled() {
-            crate::trace::log_unscoped("sessions.resync.publish", serde_json::json!({
+            crate::trace::log_unscoped("sessions.resync.publish", || serde_json::json!({
                 "identity": crate::trace::identity_shape(&identity), "epoch": epoch, "seq": seq,
                 "receivers": self.sender.receiver_count(),
             }));
         }
         let sent = self.sender.send(SessionEvent::Resync { identity, epoch, seq });
         if crate::trace::enabled() {
-            crate::trace::log_unscoped("sessions.resync.publish_outcome", serde_json::json!({ "hasReceiver": sent.is_ok() }));
+            crate::trace::log_unscoped("sessions.resync.publish_outcome", || serde_json::json!({ "hasReceiver": sent.is_ok() }));
         }
     }
 
@@ -105,7 +105,7 @@ impl StreamHandler for SessionDeltaStream {
                                     "kind": "delta", "identity": crate::trace::identity_shape(&delta.identity),
                                     "epoch": delta.epoch, "seq": delta.seq, "cursor": delta.cursor,
                                 }));
-                                crate::trace::log_unscoped("sessions.sse.write", serde_json::json!({
+                                crate::trace::log_unscoped("sessions.sse.write", || serde_json::json!({
                                     "frame": frame_context, "outcome": if written.is_ok() { "succeeded" } else { "failed" },
                                 }));
                             }
@@ -113,7 +113,7 @@ impl StreamHandler for SessionDeltaStream {
                         },
                         Ok(SessionEvent::Resync { identity, epoch, seq }) => {
                             if crate::trace::enabled() {
-                                crate::trace::log_unscoped("sessions.sse.resync_frame", serde_json::json!({
+                                crate::trace::log_unscoped("sessions.sse.resync_frame", || serde_json::json!({
                                     "identity": crate::trace::identity_shape(&identity), "epoch": epoch, "seq": seq,
                                 }));
                             }
@@ -123,7 +123,7 @@ impl StreamHandler for SessionDeltaStream {
                                 frame_context = Some(serde_json::json!({
                                     "kind": "resync", "identity": crate::trace::identity_shape(&identity), "epoch": epoch, "seq": seq,
                                 }));
-                                crate::trace::log_unscoped("sessions.sse.write", serde_json::json!({
+                                crate::trace::log_unscoped("sessions.sse.write", || serde_json::json!({
                                     "frame": frame_context, "outcome": if written.is_ok() { "succeeded" } else { "failed" },
                                 }));
                             }
@@ -131,13 +131,13 @@ impl StreamHandler for SessionDeltaStream {
                         }
                         Err(broadcast::error::RecvError::Lagged(missed)) => {
                             if crate::trace::enabled() {
-                                crate::trace::log_unscoped("sessions.sse.closed", serde_json::json!({ "reason": "lagged", "missedCount": missed }));
+                                crate::trace::log_unscoped("sessions.sse.closed", || serde_json::json!({ "reason": "lagged", "missedCount": missed }));
                             }
                             return Ok(());
                         },
                         Err(broadcast::error::RecvError::Closed) => {
                             if crate::trace::enabled() {
-                                crate::trace::log_unscoped("sessions.sse.closed", serde_json::json!({ "reason": "source_closed" }));
+                                crate::trace::log_unscoped("sessions.sse.closed", || serde_json::json!({ "reason": "source_closed" }));
                             }
                             return Ok(());
                         },
@@ -145,14 +145,14 @@ impl StreamHandler for SessionDeltaStream {
                     _ = keepalive.tick() => {
                         let written = stream.write_all(b":keepalive\n\n").await;
                         if crate::trace::enabled() && written.is_err() {
-                            crate::trace::log_unscoped("sessions.sse.write", serde_json::json!({ "kind": "keepalive", "outcome": "failed" }));
+                            crate::trace::log_unscoped("sessions.sse.write", || serde_json::json!({ "kind": "keepalive", "outcome": "failed" }));
                         }
                         written?;
                     },
                 }
                 let flushed = stream.flush().await;
                 if crate::trace::enabled() && (frame_context.is_some() || flushed.is_err()) {
-                    crate::trace::log_unscoped("sessions.sse.flush", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.sse.flush", || serde_json::json!({
                         "frame": frame_context, "outcome": if flushed.is_ok() { "succeeded" } else { "failed" },
                     }));
                 }
@@ -164,7 +164,7 @@ impl StreamHandler for SessionDeltaStream {
 
 fn session_delta_frame(delta: &SessionDelta) -> Vec<u8> {
     if crate::trace::enabled() {
-        crate::trace::log_unscoped("sessions.sse.delta_frame", serde_json::json!({
+        crate::trace::log_unscoped("sessions.sse.delta_frame", || serde_json::json!({
             "identity": crate::trace::identity_shape(&delta.identity), "epoch": delta.epoch,
             "seq": delta.seq, "cursor": delta.cursor, "sseId": delta.seq(),
             "runHash": delta.run_id.as_deref().map(crate::trace::fingerprint),

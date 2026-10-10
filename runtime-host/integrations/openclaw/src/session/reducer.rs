@@ -25,7 +25,7 @@ fn trace_reducer_event(
     if !super::trace::enabled() {
         return;
     }
-    super::trace::log_unscoped("runtime.openclaw.reducer.input", serde_json::json!({
+    super::trace::log_unscoped("runtime.openclaw.reducer.input", || serde_json::json!({
         "sessionHash": sessions_module::trace::fingerprint(event.session_key.as_str()),
         "runHash": event.run_id.as_ref().map(|id| sessions_module::trace::fingerprint(id.as_str())),
         "messageHash": event.message_id.as_ref().map(|id| sessions_module::trace::fingerprint(id.as_str())),
@@ -48,7 +48,7 @@ fn trace_reducer_event(
             };
             super::trace::log_unscoped(
                 "runtime.openclaw.reducer.event",
-                serde_json::json!({
+                || serde_json::json!({
                     "kind": "chat",
                     "state": format!("{:?}", chat.state),
                     "sourceEpoch": source_epoch.map(GatewayEpoch::as_u64),
@@ -74,7 +74,7 @@ fn trace_reducer_event(
             let Some(activity) = event.activity.as_ref() else {
                 super::trace::log_unscoped(
                     "runtime.openclaw.reducer.event",
-                    serde_json::json!({
+                    || serde_json::json!({
                         "kind": format!("{:?}", event.kind),
                         "sourceEpoch": source_epoch.map(GatewayEpoch::as_u64),
                         "gatewaySequence": event.gateway_sequence,
@@ -120,7 +120,7 @@ fn trace_reducer_event(
             };
             super::trace::log_unscoped(
                 "runtime.openclaw.reducer.event",
-                serde_json::json!({
+                || serde_json::json!({
                     "kind": format!("{:?}", event.kind),
                     "sourceEpoch": source_epoch.map(GatewayEpoch::as_u64),
                     "gatewaySequence": event.gateway_sequence,
@@ -145,7 +145,7 @@ fn trace_reducer_event(
             };
             super::trace::log_unscoped(
                 "runtime.openclaw.reducer.event",
-                serde_json::json!({
+                || serde_json::json!({
                     "kind": format!("{:?}", event.kind),
                     "sourceEpoch": source_epoch.map(GatewayEpoch::as_u64),
                     "gatewaySequence": event.gateway_sequence,
@@ -163,7 +163,7 @@ fn trace_reducer_event(
         SessionEventKind::Changed => {
             super::trace::log_unscoped(
                 "runtime.openclaw.reducer.event",
-                serde_json::json!({
+                || serde_json::json!({
                     "kind": "changed",
                     "sourceEpoch": source_epoch.map(GatewayEpoch::as_u64),
                     "gatewaySequence": event.gateway_sequence,
@@ -325,7 +325,7 @@ fn trace_canonical_changes(stage: &'static str, changes: &[CanonicalSessionChang
     let projected = crate::driver::projection::openclaw_canonical_changes(changes);
     super::trace::log_unscoped(
         "runtime.openclaw.reducer.projected",
-        serde_json::json!({
+        || serde_json::json!({
             "reducerStage": stage,
             "commitState": "candidate_only",
             "projectedChanges": sessions_module::trace::changes_shape(&projected),
@@ -403,7 +403,7 @@ impl SessionReducerActor {
 
     ) -> Option<CanonicalIngressResult> {
         if event.session_key != self.session_key {
-            if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", serde_json::json!({
+            if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                 "reason": "session_key_mismatch", "sessionHash": sessions_module::trace::fingerprint(event.session_key.as_str()),
                 "targetSessionHash": sessions_module::trace::fingerprint(self.session_key.as_str()) })); }
             return None;
@@ -416,7 +416,7 @@ impl SessionReducerActor {
             let mut body = self.body.clone();
             body.begin_update();
             let (replacement, admitted) = body.live_message(message, &cache).or_else(|| {
-                if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", serde_json::json!({
+                if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                     "reason": "body_message_candidate", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
                 None
             })?;
@@ -439,7 +439,7 @@ impl SessionReducerActor {
         if event.run_id.as_ref().is_some_and(|run| self.body.terminal.iter().any(|(id, _)| id == run.as_str()))
             && !event.chat.as_ref().is_some_and(|chat| chat.state == ChatState::Final && chat.final_message.is_some())
         {
-            if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", serde_json::json!({
+            if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                 "reason": "terminal_fence", "runHash": event.run_id.as_ref().map(|run| sessions_module::trace::fingerprint(run.as_str())),
                 "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
             return None;
@@ -476,7 +476,7 @@ impl SessionReducerActor {
                 }
                 SessionEventKind::Changed => self.reduce_changed(event, source_epoch),
             }.or_else(|| {
-                if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", serde_json::json!({
+                if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                     "reason": "no_native_change", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
                 None
             })?;
@@ -494,7 +494,7 @@ impl SessionReducerActor {
                 let mut body = self.body.clone();
                 body.begin_update();
                 let replacement = body.observe(&canonical, chat.as_ref(), &cache).or_else(|| {
-                    if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", serde_json::json!({
+                    if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.dropped", || serde_json::json!({
                         "reason": "body_observe_candidate", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
                     None
                 })?;
@@ -511,7 +511,7 @@ impl SessionReducerActor {
                     CanonicalSessionChange::AssistantTurnChunk { .. }
                     | CanonicalSessionChange::AssistantTurnSnapshot { .. })));
                 if changes.is_empty() {
-                    if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.no_display_changes", serde_json::json!({
+                    if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.no_display_changes", || serde_json::json!({
                         "reason": "committed_without_display_change", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
                     return None;
                 }
@@ -557,7 +557,7 @@ impl SessionReducerActor {
             } else if !matches!(change, CanonicalSessionChange::ToolActivity { .. }) {
                 if cache.apply_change(change).is_none() {
                     if super::trace::enabled() {
-                        super::trace::log_unscoped("runtime.openclaw.reducer.commit_rejected", serde_json::json!({
+                        super::trace::log_unscoped("runtime.openclaw.reducer.commit_rejected", || serde_json::json!({
                             "reason": "cache_apply_change", "candidateItems": sessions_module::trace::items_shape(&body.items),
                             "actualFinalItems": sessions_module::trace::items_shape(&self.body.items),
                             "change": sessions_module::trace::changes_shape(&crate::driver::projection::openclaw_canonical_changes(std::slice::from_ref(change))) }));
@@ -582,7 +582,7 @@ impl SessionReducerActor {
             Ok(view) => view,
             Err(_) => {
                 if super::trace::enabled() {
-                    super::trace::log_unscoped("runtime.openclaw.reducer.commit_rejected", serde_json::json!({
+                    super::trace::log_unscoped("runtime.openclaw.reducer.commit_rejected", || serde_json::json!({
                         "reason": "candidate_view", "candidateItems": sessions_module::trace::items_shape(&body.items),
                         "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) }));
                 }
@@ -591,7 +591,7 @@ impl SessionReducerActor {
         };
         if view.validate().is_err() {
             if super::trace::enabled() {
-                super::trace::log_unscoped("runtime.openclaw.reducer.commit_rejected", serde_json::json!({
+                super::trace::log_unscoped("runtime.openclaw.reducer.commit_rejected", || serde_json::json!({
                     "reason": "candidate_validation", "candidateItems": sessions_module::trace::items_shape(&body.items),
                     "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) }));
             }
@@ -610,7 +610,7 @@ impl SessionReducerActor {
             let commit_elapsed_ms = commit_started.elapsed().as_secs_f64() * 1000.0;
             let trace_started = std::time::Instant::now();
             self.body.trace_committed("runtime.openclaw.reducer.body_committed");
-            super::trace::log_unscoped("runtime.openclaw.reducer.commit_accepted", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.reducer.commit_accepted", || serde_json::json!({
                 "displayChanged": display_changed, "terminalHistoryPending": self.body.needs_terminal_history(),
                 "projectionState": "committed", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items),
                 "retiredItemCount": self.body.retired.len(), "retiredItemsTruncated": self.body.retired.len() > 200,
@@ -619,7 +619,7 @@ impl SessionReducerActor {
                 "activeRunHash": self.cache.runtime.active_run_id.as_deref().map(sessions_module::trace::fingerprint),
                 "commitElapsedMs": commit_elapsed_ms, "timingScope": "cache_merge_validate_and_assign_excluding_commit_success_trace" }));
             let trace_elapsed_ms = trace_started.elapsed().as_secs_f64() * 1000.0;
-            super::trace::log_unscoped("runtime.openclaw.reducer.commit_trace_timing", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.reducer.commit_trace_timing", || serde_json::json!({
                 "commitTraceElapsedMs": trace_elapsed_ms, "itemCount": self.body.items.len(),
                 "timingScope": "body_committed_and_commit_accepted_shape_hash_emit_excluding_this_log" }));
         }
@@ -631,7 +631,7 @@ impl SessionReducerActor {
         use sessions_module::ports::RuntimeOperationFailure as Failure;
         let history_started = super::trace::enabled().then(std::time::Instant::now);
         if super::trace::enabled() {
-            super::trace::log_unscoped("runtime.openclaw.reducer.history_input", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.reducer.history_input", || serde_json::json!({
                 "sessionHash": sessions_module::trace::fingerprint(self.session_key.as_str()), "sourceEpoch": epoch.as_u64(),
                 "historyKind": format!("{:?}", window.state().kind()), "direction": format!("{:?}", page.direction()),
                 "limit": page.limit(), "offset": page.offset(), "rangeStart": window.range().start(), "rangeEnd": window.range().end(),
@@ -651,11 +651,11 @@ impl SessionReducerActor {
         }
         let input_trace_elapsed_ms = history_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
         if window.state().kind() == super::window::HistoryKind::Reset {
-            if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.history_reset", serde_json::json!({ "decision": "request_full_history", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
+            if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.history_reset", || serde_json::json!({ "decision": "request_full_history", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
             return Ok(None);
         }
         if window.session_key().is_some_and(|key| key != self.session_key.as_str()) {
-            if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.history_rejected", serde_json::json!({ "reason": "session_key_mismatch" })); }
+            if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.history_rejected", || serde_json::json!({ "reason": "session_key_mismatch" })); }
             return Err(Failure::TargetRejected);
         }
         let full = window.state().kind() == super::window::HistoryKind::Full;
@@ -699,7 +699,7 @@ impl SessionReducerActor {
         let mut projected_messages = Vec::new();
         for message in window.messages() {
             let projected = body.apply_message(message, window.state().kind() == super::window::HistoryKind::Delta, &cache).ok_or_else(|| {
-                if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.history_rejected", serde_json::json!({
+                if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.history_rejected", || serde_json::json!({
                     "reason": "body_message_candidate", "messageHash": message.message_id().map(sessions_module::trace::fingerprint),
                     "sequence": message.sequence(), "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
                 Failure::Unknown
@@ -711,20 +711,20 @@ impl SessionReducerActor {
             body.promote_history(&projected_messages).ok_or(Failure::Unknown)?;
         }
         body.apply_history(&self.body.items).ok_or_else(|| {
-            if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.history_rejected", serde_json::json!({
+            if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.history_rejected", || serde_json::json!({
                 "reason": "body_history_candidate", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
             Failure::Unknown
         })?;
         if let Some(run) = in_flight_run {
             if !body.terminal.iter().any(|(id, _)| id == run.run_id()) {
                 body.apply_cumulative(run.run_id(), run.text()).ok_or_else(|| {
-                    if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.history_rejected", serde_json::json!({
+                    if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.reducer.history_rejected", || serde_json::json!({
                         "reason": "body_cumulative_candidate", "runHash": sessions_module::trace::fingerprint(run.run_id()),
                         "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) })); }
                     Failure::Unknown
                 })?;
             } else if super::trace::enabled() {
-                super::trace::log_unscoped("runtime.openclaw.reducer.history_cumulative_ignored", serde_json::json!({
+                super::trace::log_unscoped("runtime.openclaw.reducer.history_cumulative_ignored", || serde_json::json!({
                     "reason": "terminal_fence", "runHash": sessions_module::trace::fingerprint(run.run_id()),
                     "text": sessions_module::trace::text_shape(run.text()) }));
             }
@@ -782,7 +782,7 @@ impl SessionReducerActor {
         if let Some(history_started) = history_started {
             let history_elapsed_ms = history_started.elapsed().as_secs_f64() * 1000.0;
             let accepted_trace_started = std::time::Instant::now();
-            super::trace::log_unscoped("runtime.openclaw.reducer.history_accepted", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.reducer.history_accepted", || serde_json::json!({
                 "sourceEpoch": epoch.as_u64(), "historyKind": format!("{:?}", window.state().kind()),
                 "fullLatest": full_latest, "terminalHistoryPending": self.body.needs_terminal_history(), "projectionState": "committed",
                 "actualFinalItems": sessions_module::trace::items_shape(&self.body.items),
@@ -791,7 +791,7 @@ impl SessionReducerActor {
                 "commitWithTraceElapsedMs": commit_with_trace_elapsed_ms, "historyWithTraceElapsedMs": history_elapsed_ms,
                 "timingScope": "sync_history_before_history_accepted_including_body_internal_trace" }));
             let accepted_trace_elapsed_ms = accepted_trace_started.elapsed().as_secs_f64() * 1000.0;
-            super::trace::log_unscoped("runtime.openclaw.reducer.history_trace_timing", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.reducer.history_trace_timing", || serde_json::json!({
                 "historyAcceptedTraceElapsedMs": accepted_trace_elapsed_ms, "messageCount": window.messages().len(),
                 "itemCount": self.body.items.len(), "timingScope": "history_accepted_shape_hash_emit_excluding_this_log" }));
         }
@@ -833,7 +833,7 @@ impl SessionReducerActor {
         };
         view.validate().map_err(|_| {
             if super::trace::enabled() {
-                super::trace::log_unscoped("runtime.openclaw.reducer.view_rejected", serde_json::json!({
+                super::trace::log_unscoped("runtime.openclaw.reducer.view_rejected", || serde_json::json!({
                     "reason": "view_validation", "candidateItems": sessions_module::trace::items_shape(&body.items),
                     "actualFinalItems": sessions_module::trace::items_shape(&self.body.items) }));
             }
@@ -900,7 +900,7 @@ impl SessionReducerActor {
     ) -> CanonicalIngressResult {
         if super::trace::enabled() {
             self.body.trace_committed("runtime.openclaw.reducer.recover_body_retained");
-            super::trace::log_unscoped("runtime.openclaw.reducer.recover", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.reducer.recover", || serde_json::json!({
                 "sessionHash": sessions_module::trace::fingerprint(self.session_key.as_str()),
                 "sourceEpoch": source_epoch.map(GatewayEpoch::as_u64), "reason": format!("{:?}", reason),
                 "activeRunHash": self.active_run.as_ref().map(|run| sessions_module::trace::fingerprint(run.run_id.as_str())),
@@ -1029,7 +1029,7 @@ impl SessionReducerActor {
             None => (snapshot, true),
         };
         if super::trace::enabled() {
-            super::trace::log_unscoped("runtime.openclaw.reducer.chat_text_selection", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.reducer.chat_text_selection", || serde_json::json!({
                 "sourceEpoch": source_epoch.map(GatewayEpoch::as_u64), "nativeCursor": event.gateway_sequence, "chatSequence": chat.sequence,
                 "runHash": sessions_module::trace::fingerprint(run_id.as_str()), "replace": replace,
                 "selectedText": text.map(sessions_module::trace::text_shape),

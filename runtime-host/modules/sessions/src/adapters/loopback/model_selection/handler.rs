@@ -56,7 +56,7 @@ async fn handle_request(
     session_trace::log(
         "runtime.model-selection.request",
         trace_id,
-        serde_json::json!({ "method": &request.method, "path": &request.path }),
+        || serde_json::json!({ "method": &request.method, "path": &request.path }),
     );
     let Some(authorization) = request
         .headers
@@ -67,7 +67,7 @@ async fn handle_request(
         session_trace::log(
             "runtime.model-selection.unauthorized",
             trace_id,
-            serde_json::json!({}),
+            || serde_json::json!({}),
         );
         return Response::unauthorized();
     };
@@ -77,7 +77,7 @@ async fn handle_request(
             session_trace::log(
                 "runtime.model-selection.bad-json",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::bad_request();
         }
@@ -94,7 +94,7 @@ async fn handle_request(
             session_trace::log(
                 "runtime.model-selection.decode-unauthorized",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::unauthorized();
         }
@@ -102,7 +102,7 @@ async fn handle_request(
             session_trace::log(
                 "runtime.model-selection.decode-invalid",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::bad_request();
         }
@@ -113,7 +113,7 @@ async fn handle_request(
             session_trace::log(
                 "runtime.model-selection.command-invalid",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::bad_request();
         }
@@ -121,7 +121,7 @@ async fn handle_request(
     session_trace::log(
         "runtime.model-selection.command",
         trace_id,
-        serde_json::json!({
+        || serde_json::json!({
             "endpoint": format!("{:?}", command.endpoint),
             "sessionKey": session_trace::id_shape(Some(&command.session_key)),
             "endpointSessionId": session_trace::id_shape(command.endpoint_session_id.as_deref()),
@@ -135,7 +135,7 @@ async fn handle_request(
         session_trace::log(
             "runtime.model-selection.unsupported",
             trace_id,
-            serde_json::json!({}),
+            || serde_json::json!({}),
         );
         session.record_boundary_outcome("sessions.model", crate::call::SessionsCallOutcome::Unsupported).await;
         return Response::from_delivery(SessionModelSelectionDelivery::Unsupported);
@@ -147,7 +147,7 @@ async fn handle_request(
             session_trace::log(
                 "runtime.model-selection.owner-unavailable",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::unavailable();
         }
@@ -156,7 +156,7 @@ async fn handle_request(
     session_trace::log(
         "runtime.model-selection.outcome",
         trace_id,
-        serde_json::json!({
+        || serde_json::json!({
             "status": delivery.status_code(),
             "rejectionReason": delivery.rejection_reason(),
         }),

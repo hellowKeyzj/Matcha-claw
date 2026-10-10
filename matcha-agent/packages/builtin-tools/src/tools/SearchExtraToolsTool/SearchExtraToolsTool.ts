@@ -409,7 +409,8 @@ export const SearchExtraToolsTool = buildTool({
 
       if (found.length === 0) {
         logForDebugging(
-          `SearchExtraToolsTool: select failed — none found: ${missing.join(', ')}`,
+          () =>
+            `SearchExtraToolsTool: select failed — none found: ${missing.join(', ')}`,
         )
         logSearchOutcome([], 'select')
         const pendingServers = getPendingServerNames()
@@ -423,10 +424,13 @@ export const SearchExtraToolsTool = buildTool({
 
       if (missing.length > 0) {
         logForDebugging(
-          `SearchExtraToolsTool: partial select — found: ${found.join(', ')}, missing: ${missing.join(', ')}`,
+          () =>
+            `SearchExtraToolsTool: partial select — found: ${found.join(', ')}, missing: ${missing.join(', ')}`,
         )
       } else {
-        logForDebugging(`SearchExtraToolsTool: selected ${found.join(', ')}`)
+        logForDebugging(
+          () => `SearchExtraToolsTool: selected ${found.join(', ')}`,
+        )
       }
       logSearchOutcome(found, 'select')
       return buildSearchResult(

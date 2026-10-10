@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, num::NonZeroU32};
+use std::{collections::{BTreeMap, BTreeSet}, num::NonZeroU32};
 
 use crate::run::event::{MetadataValue, OpaqueId};
 
@@ -433,14 +433,48 @@ impl GraphLayout {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GraphChanges {
+    pub(crate) definition: bool,
+    pub(crate) metadata: BTreeSet<OpaqueId>,
+    pub(crate) layout: BTreeSet<NodeId>,
+    pub(crate) attempts: BTreeSet<(NodeId, u32)>,
+    pub(crate) ready: BTreeSet<NodeId>,
+    pub(crate) removed_nodes: BTreeSet<NodeId>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct GraphMutation {
+    changes: GraphChanges,
+    definition: Option<GraphDefinition>,
+    metadata: BTreeMap<OpaqueId, Option<MetadataValue>>,
+    layout: BTreeMap<NodeId, Option<NodePosition>>,
+    attempts: BTreeMap<(NodeId, u32), Option<NodeAttempt>>,
+    histories: BTreeMap<NodeId, Option<NodeExecutionHistory>>,
+    ready: BTreeMap<NodeId, Option<ReadyQueueItem>>,
+}
+
+#[derive(Clone, Debug)]
 pub struct GraphState {
     definition: GraphDefinition,
     metadata: BTreeMap<OpaqueId, MetadataValue>,
     layout: GraphLayout,
     executions: BTreeMap<NodeId, NodeExecutionHistory>,
     ready_queue: Vec<ReadyQueueItem>,
+    mutation: Option<GraphMutation>,
 }
+
+impl PartialEq for GraphState {
+    fn eq(&self, other: &Self) -> bool {
+        self.definition == other.definition
+            && self.metadata == other.metadata
+            && self.layout == other.layout
+            && self.executions == other.executions
+            && self.ready_queue == other.ready_queue
+    }
+}
+
+impl Eq for GraphState {}
 
 impl GraphState {
     pub fn initialize(definition: GraphDefinition, now: u64) -> Self {
@@ -486,6 +520,7 @@ impl GraphState {
             layout,
             executions,
             ready_queue,
+            mutation: None,
         }
     }
 
@@ -502,7 +537,297 @@ impl GraphState {
             layout,
             executions,
             ready_queue,
+            mutation: None,
         }
+    }
+
+    pub(crate) fn begin_mutation(&mut self) {
+        if self.mutation.is_none() {
+            self.mutation = Some(GraphMutation::default());
+        }
+    }
+
+    pub(crate) fn changes(&self) -> Option<&GraphChanges> {
+        self.mutation.as_ref().map(|mutation| &mutation.changes)
+    }
+
+    pub(crate) fn commit_mutation(&mut self) {
+        self.mutation = None;
+    }
+
+    pub(crate) fn rollback_mutation(&mut self) {
+        let Some(mutation) = self.mutation.take() else { return };
+        if let Some(definition) = mutation.definition {
+            self.definition = definition;
+        }
+        for (key, value) in mutation.metadata {
+            match value {
+                Some(value) => { self.metadata.insert(key, value); }
+                None => { self.metadata.remove(&key); }
+            }
+        }
+        for (node, position) in mutation.layout {
+            match position {
+                Some(position) => { self.layout.node_positions.insert(node, position); }
+                None => { self.layout.node_positions.remove(&node); }
+            }
+        }
+        for (node, history) in mutation.histories {
+            match history {
+                Some(history) => { self.executions.insert(node, history); }
+                None => { self.executions.remove(&node); }
+            }
+        }
+        for ((node, number), attempt) in mutation.attempts.into_iter().rev() {
+            let Some(history) = self.executions.get_mut(&node) else { continue };
+            let index = number as usize - 1;
+            match attempt {
+                Some(attempt) => history.attempts[index] = attempt,
+                None => history.attempts.truncate(index),
+            }
+        }
+        self.ready_queue.retain(|item| !mutation.ready.contains_key(item.node_id()));
+        self.ready_queue.extend(mutation.ready.into_values().flatten());
+        self.ready_queue.sort_by(|left, right| {
+            left.enqueued_at.cmp(&right.enqueued_at).then_with(|| left.node_id.cmp(&right.node_id))
+        });
+    }
+
+    pub(crate) fn apply_event(&mut self, event: super::GraphEvent) -> Result<(), super::ReduceError> {
+        let standalone = self.mutation.is_none();
+        self.begin_mutation();
+        let result = super::reducer::reduce_in_place(self, event);
+        if standalone {
+            if result.is_ok() { self.commit_mutation(); } else { self.rollback_mutation(); }
+        }
+        result
+    }
+
+    pub(crate) fn settle_superseded(&mut self, event: super::GraphEvent) -> Result<(), super::ReduceError> {
+        let standalone = self.mutation.is_none();
+        self.begin_mutation();
+        let result = super::reducer::settle_superseded_in_place(self, event);
+        if standalone {
+            if result.is_ok() { self.commit_mutation(); } else { self.rollback_mutation(); }
+        }
+        result
+    }
+
+    fn remember_attempt(&mut self, node: &NodeId, number: u32) {
+        if let Some(mutation) = &mut self.mutation {
+            let key = (node.clone(), number);
+            mutation.changes.attempts.insert(key.clone());
+            if !mutation.histories.contains_key(node) {
+                mutation.attempts.entry(key).or_insert_with(|| {
+                    self.executions.get(node).and_then(|history| history.attempts.get(number as usize - 1)).cloned()
+                });
+            }
+        }
+    }
+
+    fn remember_ready(&mut self, node: &NodeId) {
+        if let Some(mutation) = &mut self.mutation {
+            mutation.changes.ready.insert(node.clone());
+            mutation.ready.entry(node.clone()).or_insert_with(|| {
+                self.ready_queue.iter().find(|item| item.node_id() == node).cloned()
+            });
+        }
+    }
+
+    pub(super) fn remember_metadata(&mut self, key: &OpaqueId) {
+        if let Some(mutation) = &mut self.mutation {
+            mutation.changes.metadata.insert(key.clone());
+            mutation.metadata.entry(key.clone()).or_insert_with(|| self.metadata.get(key).cloned());
+        }
+    }
+
+    pub(super) fn remember_position(&mut self, node: &NodeId) {
+        if let Some(mutation) = &mut self.mutation {
+            mutation.changes.layout.insert(node.clone());
+            mutation.layout.entry(node.clone()).or_insert_with(|| self.layout.node_positions.get(node).copied());
+        }
+    }
+
+    pub(super) fn take_history(&mut self, node: &NodeId) -> Option<NodeExecutionHistory> {
+        self.executions.remove(node)
+    }
+
+    pub(super) fn remember_new_history(&mut self, node: &NodeId) {
+        if let Some(mutation) = &mut self.mutation {
+            mutation.histories.entry(node.clone()).or_insert(None);
+            mutation.changes.attempts.insert((node.clone(), 1));
+        }
+    }
+
+    pub(super) fn finish_patch(
+        &mut self,
+        definition: GraphDefinition,
+        metadata: BTreeMap<OpaqueId, MetadataValue>,
+        layout: GraphLayout,
+        executions: BTreeMap<NodeId, NodeExecutionHistory>,
+        ready_queue: Vec<ReadyQueueItem>,
+    ) {
+        if let Some(mutation) = &mut self.mutation {
+            if definition != self.definition {
+                mutation.changes.definition = true;
+                mutation.definition.get_or_insert_with(|| self.definition.clone());
+            }
+            for (node, history) in std::mem::take(&mut self.executions) {
+                mutation.changes.removed_nodes.insert(node.clone());
+                mutation.histories.entry(node).or_insert(Some(history));
+            }
+            for node in self.ready_queue.iter().chain(ready_queue.iter()).map(ReadyQueueItem::node_id) {
+                let old = self.ready_queue.iter().find(|item| item.node_id() == node);
+                let new = ready_queue.iter().find(|item| item.node_id() == node);
+                if old != new {
+                    mutation.changes.ready.insert(node.clone());
+                    mutation.ready.entry(node.clone()).or_insert_with(|| old.cloned());
+                }
+            }
+        }
+        self.definition = definition;
+        self.metadata = metadata;
+        self.layout = layout;
+        self.executions = executions;
+        self.ready_queue = ready_queue;
+    }
+
+    pub(crate) fn replace_with(&mut self, replacement: GraphState) {
+        if let Some(mutation) = &mut self.mutation {
+            mutation.changes.definition = true;
+            mutation.definition.get_or_insert_with(|| self.definition.clone());
+            for key in self.metadata.keys().chain(replacement.metadata.keys()) {
+                mutation.changes.metadata.insert(key.clone());
+                mutation.metadata.entry(key.clone()).or_insert_with(|| self.metadata.get(key).cloned());
+            }
+            for node in self.layout.node_positions.keys().chain(replacement.layout.node_positions.keys()) {
+                mutation.changes.layout.insert(node.clone());
+                mutation.layout.entry(node.clone()).or_insert_with(|| self.layout.node_positions.get(node).copied());
+            }
+            for (node, history) in std::mem::take(&mut self.executions) {
+                mutation.changes.removed_nodes.insert(node.clone());
+                mutation.histories.entry(node).or_insert(Some(history));
+            }
+            for (node, history) in &replacement.executions {
+                mutation.histories.entry(node.clone()).or_insert(None);
+                mutation.changes.attempts.extend(history.attempts().iter().map(|attempt| (node.clone(), attempt.number().get())));
+            }
+            for node in self.ready_queue.iter().chain(replacement.ready_queue.iter()).map(ReadyQueueItem::node_id) {
+                mutation.changes.ready.insert(node.clone());
+                mutation.ready.entry(node.clone()).or_insert_with(|| self.ready_queue.iter().find(|item| item.node_id() == node).cloned());
+            }
+        }
+        self.definition = replacement.definition;
+        self.metadata = replacement.metadata;
+        self.layout = replacement.layout;
+        self.executions = replacement.executions;
+        self.ready_queue = replacement.ready_queue;
+    }
+
+    pub(crate) fn validate_changes(&self) -> Result<(), ()> {
+        let Some(mutation) = &self.mutation else { return Ok(()) };
+        let changes = &mutation.changes;
+        if changes.definition {
+            self.definition.validate_structure().map_err(|_| ())?;
+            if self.definition.nodes().len() != self.executions.len()
+                || self.definition.nodes().iter().any(|node| !self.executions.contains_key(node.id()))
+            { return Err(()); }
+        }
+        for (node, number) in &changes.attempts {
+            let Some(history) = self.executions.get(node) else { continue };
+            let attempt = history.attempts.get(*number as usize - 1).ok_or(())?;
+            let definition = self.definition.node(node).ok_or(())?;
+            let fence = AttemptId::for_node(node, attempt.number());
+            if attempt.number().get() != *number || attempt.node_id() != node
+                || attempt.node_kind() != definition.kind() || attempt.number() > definition.max_attempts()
+                || attempt.fence().attempt_id() != &fence
+                || attempt.fence().node_execution_id() != &NodeExecutionId::for_attempt(&fence)
+                || attempt.updated_at() < attempt.created_at()
+                || (matches!(attempt.status(), AttemptStatus::Completed | AttemptStatus::Failed) != attempt.output_port().is_some())
+            { return Err(()); }
+            super::durable::validate_attempt(self, node, attempt).map_err(|_| ())?;
+        }
+        if changes.definition {
+            for (node, history) in &self.executions {
+                for attempt in history.attempts() {
+                    super::durable::validate_attempt(self, node, attempt).map_err(|_| ())?;
+                }
+            }
+        }
+        for node in &changes.layout {
+            if self.layout.node_positions.contains_key(node) && self.definition.node(node).is_none() { return Err(()); }
+        }
+        for node in changes.ready.iter().chain(changes.attempts.iter().map(|(node, _)| node)) {
+            let current = self.current_attempt(node);
+            let mut ready = self.ready_queue.iter().filter(|item| item.node_id() == node);
+            match (current, ready.next()) {
+                (Some(attempt), Some(item)) if attempt.status() == AttemptStatus::Ready && attempt.fence() == item.fence() => {}
+                (Some(attempt), None) if attempt.status() != AttemptStatus::Ready => {}
+                (None, None) => {}
+                _ => return Err(()),
+            }
+            if ready.next().is_some() { return Err(()); }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn import_definition(&mut self, definition: GraphDefinition) {
+        self.definition = definition;
+    }
+
+    pub(crate) fn import_metadata(&mut self, key: OpaqueId, value: Option<MetadataValue>) {
+        match value {
+            Some(value) => { self.metadata.insert(key, value); }
+            None => { self.metadata.remove(&key); }
+        }
+    }
+
+    pub(crate) fn import_position(&mut self, node: NodeId, value: Option<NodePosition>) {
+        match value {
+            Some(value) => { self.layout.node_positions.insert(node, value); }
+            None => { self.layout.node_positions.remove(&node); }
+        }
+    }
+
+    pub(crate) fn import_attempt(&mut self, attempt: NodeAttempt) -> Result<(), ()> {
+        let history = self.executions.entry(attempt.node_id().clone()).or_insert_with(|| NodeExecutionHistory::from_durable(Vec::new()));
+        let index = attempt.number().get() as usize - 1;
+        if index == history.attempts.len() { history.attempts.push(attempt); }
+        else if index < history.attempts.len() { history.attempts[index] = attempt; }
+        else { return Err(()); }
+        Ok(())
+    }
+
+    pub(crate) fn remove_attempt_record(&mut self, execution_id: &str) {
+        let Some((node, number)) = execution_id.rsplit_once(":attempt:") else { return };
+        let Ok(number) = number.parse::<u32>() else { return };
+        let node = NodeId::new(node);
+        if let Some(history) = self.executions.get_mut(&node) {
+            history.attempts.retain(|attempt| attempt.number().get() != number);
+            if history.attempts.is_empty() { self.executions.remove(&node); }
+        }
+    }
+
+    pub(crate) fn import_ready(&mut self, node: &NodeId, value: Option<ReadyQueueItem>) {
+        self.ready_queue.retain(|item| item.node_id() != node);
+        if let Some(value) = value { self.ready_queue.push(value); }
+        self.ready_queue.sort_by(|left, right| left.enqueued_at.cmp(&right.enqueued_at).then_with(|| left.node_id.cmp(&right.node_id)));
+    }
+
+    pub(crate) fn previous_attempt(&self, node: &NodeId, number: u32) -> Option<&NodeAttempt> {
+        let mutation = self.mutation.as_ref()?;
+        if let Some(previous) = mutation.attempts.get(&(node.clone(), number)) { return previous.as_ref(); }
+        if let Some(previous) = mutation.histories.get(node) {
+            return previous.as_ref().and_then(|history| history.attempts.get(number as usize - 1));
+        }
+        self.executions.get(node).and_then(|history| history.attempts.get(number as usize - 1))
+    }
+
+    pub(crate) fn removed_attempts(&self) -> impl Iterator<Item = &NodeAttempt> {
+        self.mutation.iter().flat_map(|mutation| {
+            mutation.changes.removed_nodes.iter().filter_map(|node| mutation.histories.get(node).and_then(Option::as_ref))
+                .flat_map(|history| history.attempts())
+        })
     }
 
     pub fn definition(&self) -> &GraphDefinition {
@@ -532,6 +857,8 @@ impl GraphState {
     }
 
     pub(crate) fn current_attempt_mut(&mut self, node_id: &NodeId) -> Option<&mut NodeAttempt> {
+        let number = self.current_attempt(node_id)?.number().get();
+        self.remember_attempt(node_id, number);
         self.executions
             .get_mut(node_id)
             .map(NodeExecutionHistory::current_mut)
@@ -542,6 +869,10 @@ impl GraphState {
         node_id: &NodeId,
         fence: &ExecutionFence,
     ) -> Option<&mut NodeAttempt> {
+        let history = self.executions.get(node_id)?;
+        let (_, superseded) = history.attempts.split_last()?;
+        let number = superseded.iter().find(|attempt| attempt.fence() == fence)?.number().get();
+        self.remember_attempt(node_id, number);
         let history = self.executions.get_mut(node_id)?;
         let (_, superseded) = history.attempts.split_last_mut()?;
         superseded
@@ -550,6 +881,7 @@ impl GraphState {
     }
 
     pub(crate) fn append_attempt(&mut self, node_id: &NodeId, attempt: NodeAttempt) {
+        self.remember_attempt(node_id, attempt.number().get());
         self.executions
             .get_mut(node_id)
             .expect("definition nodes always have an execution history")
@@ -562,6 +894,7 @@ impl GraphState {
             .iter()
             .all(|item| item.node_id != attempt.node_id)
         {
+            self.remember_ready(attempt.node_id());
             self.ready_queue
                 .push(ReadyQueueItem::for_attempt(attempt, now));
             self.ready_queue.sort_by(|left, right| {
@@ -573,12 +906,14 @@ impl GraphState {
     }
 
     pub(crate) fn remove_ready_item(&mut self, node_id: &NodeId) {
-        self.ready_queue.retain(|item| item.node_id != *node_id);
+        if self.ready_queue.iter().any(|item| item.node_id() == node_id) {
+            self.remember_ready(node_id);
+            self.ready_queue.retain(|item| item.node_id != *node_id);
+        }
     }
 
     pub(crate) fn remove_ready_items(&mut self, node_ids: &[NodeId]) {
-        self.ready_queue
-            .retain(|item| !node_ids.contains(&item.node_id));
+        for node in node_ids { self.remove_ready_item(node); }
     }
 
     #[cfg(test)]

@@ -92,7 +92,8 @@ export const loadPluginOutputStyles = memoize(
 
     if (errors.length > 0) {
       logForDebugging(
-        `Plugin loading errors: ${errors.map(e => getPluginErrorMessage(e)).join(', ')}`,
+        () =>
+          `Plugin loading errors: ${errors.map(e => getPluginErrorMessage(e)).join(', ')}`,
       )
     }
 

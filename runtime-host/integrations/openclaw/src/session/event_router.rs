@@ -81,7 +81,7 @@ impl EventRouter {
                 "generation": generation, "sourceEpoch": epoch.as_u64(), "nativeCursor": cursor,
                 "inputKind": "live", "eventKind": format!("{:?}", event.kind),
                 "runHash": run_id.as_deref().map(sessions_module::trace::fingerprint) });
-            sessions_module::trace::with_context(context, || self.actor(&identity, generation).reduce(event, Some(epoch)))
+            sessions_module::trace::with_context(|| context, || self.actor(&identity, generation).reduce(event, Some(epoch)))
         } else { self.actor(&identity, generation).reduce(event, Some(epoch)) };
         let committed_terminal = result.as_ref().is_some_and(|result| matches!(result,
             CanonicalIngressResult::Produced(delta) if delta.changes().iter().any(|change| matches!(change, super::projection::CanonicalSessionChange::Terminal { .. }))));
@@ -98,7 +98,7 @@ impl EventRouter {
         if (message_refresh && !has_live_run) || recovery_refresh { self.pending_messages.remove(&key); }
         self.prune_recoveries();
         if super::trace::enabled() && (persisted || terminal || truncated) {
-            super::trace::log_unscoped("runtime.openclaw.router.history_refresh", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.router.history_refresh", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
                 "sourceEpoch": epoch.as_u64(), "nativeCursor": cursor,
                 "accepted": accepted, "resultKind": match &result { None => "none", Some(CanonicalIngressResult::Produced(_)) => "produced", Some(CanonicalIngressResult::Unknown { .. }) => "unknown" },
@@ -112,7 +112,7 @@ impl EventRouter {
             change.history_refresh = history_refresh;
             let event = SessionIngressEvent::new(event_identity, change);
             if super::trace::enabled() {
-                super::trace::log_unscoped("runtime.openclaw.router.forward", serde_json::json!({
+                super::trace::log_unscoped("runtime.openclaw.router.forward", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
                     "sourceEpoch": epoch.as_u64(), "nativeCursor": cursor,
                     "changes": result.as_ref().and_then(|result| match result {
@@ -120,23 +120,23 @@ impl EventRouter {
                         CanonicalIngressResult::Unknown { .. } => None,
                     }) }));
             }
-            let sent = self.session_events.send(event).await;
+            let sent = observations.enqueue_ingress(&self.session_events, event).await;
             if super::trace::enabled() {
-                super::trace::log_unscoped("runtime.openclaw.router.delivery", serde_json::json!({
+                super::trace::log_unscoped("runtime.openclaw.router.delivery", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
                     "sourceEpoch": epoch.as_u64(), "nativeCursor": cursor, "queueAccepted": sent.is_ok(), "hostApplied": "not_observed" }));
             }
         } else {
             if super::trace::enabled() {
-                super::trace::log_unscoped("runtime.openclaw.router.no_display_changes", serde_json::json!({
+                super::trace::log_unscoped("runtime.openclaw.router.no_display_changes", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
                     "sourceEpoch": epoch.as_u64(), "nativeCursor": cursor, "hasReducerResult": result.is_some(),
                     "cursorOnly": cursor.is_some() }));
             }
             if cursor.is_some() || history_refresh {
-                let sent = self.session_events.send(SessionIngressEvent::new(identity.clone(), sessions_module::command::SessionEvent { binding, run_id, cursor, history_refresh, changes: Vec::new() })).await;
+                let sent = observations.enqueue_ingress(&self.session_events, SessionIngressEvent::new(identity.clone(), sessions_module::command::SessionEvent { binding, run_id, cursor, history_refresh, changes: Vec::new() })).await;
                 if super::trace::enabled() {
-                    super::trace::log_unscoped("runtime.openclaw.router.delivery", serde_json::json!({
+                    super::trace::log_unscoped("runtime.openclaw.router.delivery", || serde_json::json!({
                         "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
                         "sourceEpoch": epoch.as_u64(), "nativeCursor": cursor, "cursorOnly": true,
                         "queueAccepted": sent.is_ok(), "hostApplied": "not_observed" }));
@@ -215,30 +215,30 @@ impl EventRouter {
         for recovery in self.recoveries.values_mut().filter(|recovery| recovery.deadline.is_some_and(|deadline| deadline <= now)) {
             recovery.deadline = None;
             let binding = SessionEventBinding::observed(recovery.identity.clone(), recovery.generation, Some(recovery.epoch.as_u64()), false).expect("validated observation binding");
-            let _ = self.session_events.send(SessionIngressEvent::new(recovery.identity.clone(), sessions_module::command::SessionEvent {
+            let _ = recovery.observations.enqueue_ingress(&self.session_events, SessionIngressEvent::new(recovery.identity.clone(), sessions_module::command::SessionEvent {
                 binding, run_id: Some(recovery.run_id.clone()), cursor: None, history_refresh: true, changes: Vec::new(),
             })).await;
         }
     }
 
-    pub(crate) async fn recover(&mut self, identity: SessionIdentity, generation: u64, epoch: GatewayEpoch, reason: CanonicalRecoveryReason) {
+    pub(crate) async fn recover(&mut self, identity: SessionIdentity, generation: u64, epoch: GatewayEpoch, reason: CanonicalRecoveryReason, observations: &crate::gateway::observation::Observations) {
         if super::trace::enabled() {
-            super::trace::log_unscoped("runtime.openclaw.router.recover", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.router.recover", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
                 "sourceEpoch": epoch.as_u64(), "nativeCursor": null, "inputKind": "recovery" }));
         }
         self.recoveries.remove(&(identity_key(&identity), generation));
         let result = self.actor(&identity, generation).recover(Some(epoch), reason);
         let binding = SessionEventBinding::observed(identity, generation, Some(epoch.as_u64()), false).expect("validated observation binding");
-        self.send(Some(result), binding).await;
+        self.send(Some(result), binding, observations).await;
     }
 
-    pub(crate) async fn goal(&mut self, identity: &SessionIdentity, generation: u64, session_id: &str, goal: sessions_module::goal::SessionGoalView, epoch: GatewayEpoch, cursor: Option<u64>) -> Result<(), RuntimeOperationFailure> {
+    pub(crate) async fn goal(&mut self, identity: &SessionIdentity, generation: u64, session_id: &str, goal: sessions_module::goal::SessionGoalView, epoch: GatewayEpoch, cursor: Option<u64>, observations: &crate::gateway::observation::Observations) -> Result<(), RuntimeOperationFailure> {
         if self.actor(identity, generation).sync_goal(session_id, goal.clone())? {
             let binding = SessionEventBinding::observed(identity.clone(), generation, Some(epoch.as_u64()), false).ok_or(RuntimeOperationFailure::Unknown)?;
-            self.session_events.send(SessionIngressEvent::new(identity.clone(), sessions_module::command::SessionEvent {
+            observations.enqueue_ingress(&self.session_events, SessionIngressEvent::new(identity.clone(), sessions_module::command::SessionEvent {
                 binding, run_id: None, cursor, history_refresh: false, changes: vec![sessions_module::state::SessionChange::GoalChanged { goal }],
-            })).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+            })).await?;
         }
         Ok(())
     }
@@ -262,14 +262,14 @@ impl EventRouter {
                 "cursorPresent": window.state().delta_cursor().is_some(),
                 "cursorHash": window.state().delta_cursor().map(sessions_module::trace::fingerprint),
                 "direction": format!("{:?}", page.direction()) });
-            sessions_module::trace::with_context(context, || actor.sync_history(&window, page, epoch))
+            sessions_module::trace::with_context(|| context, || actor.sync_history(&window, page, epoch))
         } else { actor.sync_history(&window, page, epoch) };
         if result?.is_none() { return Ok(None); }
         let mut view = actor.snapshot(host_epoch)?;
         view.identity = identity.clone();
         if super::trace::enabled() {
             let retired = actor.retired_item_ids();
-            super::trace::log_unscoped("runtime.openclaw.router.history_snapshot", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.router.history_snapshot", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
                 "sourceEpoch": epoch.as_u64(), "hostEpoch": host_epoch, "items": sessions_module::trace::view_shape(&view),
                 "retiredItemCount": retired.len(), "retiredItemsTruncated": retired.len() > 200,
@@ -283,14 +283,14 @@ impl EventRouter {
         let key = identity_key(identity);
         if self.actors.contains_key(&(key.clone(), next_generation)) {
             if super::trace::enabled() {
-                super::trace::log_unscoped("runtime.openclaw.router.restart_rejected", serde_json::json!({
+                super::trace::log_unscoped("runtime.openclaw.router.restart_rejected", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
                     "nextGeneration": next_generation, "reason": "target_actor_exists" }));
             }
             return Err(RuntimeOperationFailure::Unknown);
         }
         if super::trace::enabled() {
-            super::trace::log_unscoped("runtime.openclaw.router.restart_move", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.router.restart_move", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
                 "nextGeneration": next_generation, "sourceEpoch": null,
                 "originalActorPresent": self.actors.contains_key(&(key.clone(), generation)),
@@ -305,7 +305,7 @@ impl EventRouter {
         let _ = actor.recover(None, CanonicalRecoveryReason::NativeUnknown);
         self.actors.insert((key, next_generation), actor);
         if super::trace::enabled() {
-            super::trace::log_unscoped("runtime.openclaw.router.restart_moved", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.router.restart_moved", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
                 "nextGeneration": next_generation, "sourceEpoch": null }));
         }
@@ -319,15 +319,15 @@ impl EventRouter {
         self.recovery_claims.retain(|claim| claim.0 != key.0 || claim.1 != generation);
         let removed = self.actors.remove(&key);
         if super::trace::enabled() {
-            super::trace::log_unscoped("runtime.openclaw.router.close", serde_json::json!({
+            super::trace::log_unscoped("runtime.openclaw.router.close", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
                 "actorRemoved": removed.is_some(), "bodyDestroyed": removed.is_some() }));
         }
     }
 
-    async fn send(&self, result: Option<CanonicalIngressResult>, binding: SessionEventBinding) {
+    async fn send(&self, result: Option<CanonicalIngressResult>, binding: SessionEventBinding, observations: &crate::gateway::observation::Observations) {
         if let Some(result) = result && let Some(event) = openclaw_session_event(&result, binding) {
-            let _ = self.session_events.send(event).await;
+            let _ = observations.enqueue_ingress(&self.session_events, event).await;
         }
     }
 }

@@ -293,19 +293,19 @@ impl sessions_module::ports::SessionObservation for OpenClawObservation {
         Box::pin(async move {
             let previous_generation = current.load(Ordering::Acquire);
             if crate::session::trace::enabled() {
-                crate::session::trace::log_unscoped("runtime.openclaw.observation.restart.handle_request", serde_json::json!({
+                crate::session::trace::log_unscoped("runtime.openclaw.observation.restart.handle_request", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&identity), "generation": previous_generation, "nextGeneration": generation }));
             }
             let result = client.restart_observation(&identity, previous_generation, generation).await;
             if crate::session::trace::enabled() {
-                crate::session::trace::log_unscoped("runtime.openclaw.observation.restart.handle_result", serde_json::json!({
+                crate::session::trace::log_unscoped("runtime.openclaw.observation.restart.handle_result", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&identity), "generation": previous_generation, "nextGeneration": generation,
                     "completed": result.is_ok() }));
             }
             result?;
             current.store(generation, Ordering::Release);
             if crate::session::trace::enabled() {
-                crate::session::trace::log_unscoped("runtime.openclaw.observation.restart.generation_stored", serde_json::json!({
+                crate::session::trace::log_unscoped("runtime.openclaw.observation.restart.generation_stored", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&identity), "generation": generation, "previousGeneration": previous_generation }));
             }
             Ok(())

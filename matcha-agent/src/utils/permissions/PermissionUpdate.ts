@@ -71,7 +71,8 @@ export function applyPermissionUpdate(
         permissionRuleValueToString(rule),
       )
       logForDebugging(
-        `Applying permission update: Adding ${update.rules.length} ${update.behavior} rule(s) to destination '${update.destination}': ${jsonStringify(ruleStrings)}`,
+        () =>
+          `Applying permission update: Adding ${update.rules.length} ${update.behavior} rule(s) to destination '${update.destination}': ${jsonStringify(ruleStrings)}`,
       )
 
       // Determine which collection to update based on behavior
@@ -99,7 +100,8 @@ export function applyPermissionUpdate(
         permissionRuleValueToString(rule),
       )
       logForDebugging(
-        `Replacing all ${update.behavior} rules for destination '${update.destination}' with ${update.rules.length} rule(s): ${jsonStringify(ruleStrings)}`,
+        () =>
+          `Replacing all ${update.behavior} rules for destination '${update.destination}' with ${update.rules.length} rule(s): ${jsonStringify(ruleStrings)}`,
       )
 
       // Determine which collection to update based on behavior
@@ -121,7 +123,8 @@ export function applyPermissionUpdate(
 
     case 'addDirectories': {
       logForDebugging(
-        `Applying permission update: Adding ${update.directories.length} director${update.directories.length === 1 ? 'y' : 'ies'} with destination '${update.destination}': ${jsonStringify(update.directories)}`,
+        () =>
+          `Applying permission update: Adding ${update.directories.length} director${update.directories.length === 1 ? 'y' : 'ies'} with destination '${update.destination}': ${jsonStringify(update.directories)}`,
       )
       const newAdditionalDirs = new Map(context.additionalWorkingDirectories)
       for (const directory of update.directories) {
@@ -141,7 +144,8 @@ export function applyPermissionUpdate(
         permissionRuleValueToString(rule),
       )
       logForDebugging(
-        `Applying permission update: Removing ${update.rules.length} ${update.behavior} rule(s) from source '${update.destination}': ${jsonStringify(ruleStrings)}`,
+        () =>
+          `Applying permission update: Removing ${update.rules.length} ${update.behavior} rule(s) from source '${update.destination}': ${jsonStringify(ruleStrings)}`,
       )
 
       // Determine which collection to update based on behavior
@@ -170,7 +174,8 @@ export function applyPermissionUpdate(
 
     case 'removeDirectories': {
       logForDebugging(
-        `Applying permission update: Removing ${update.directories.length} director${update.directories.length === 1 ? 'y' : 'ies'}: ${jsonStringify(update.directories)}`,
+        () =>
+          `Applying permission update: Removing ${update.directories.length} director${update.directories.length === 1 ? 'y' : 'ies'}: ${jsonStringify(update.directories)}`,
       )
       const newAdditionalDirs = new Map(context.additionalWorkingDirectories)
       for (const directory of update.directories) {

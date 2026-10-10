@@ -1,9 +1,9 @@
+import type { TFunction } from 'i18next';
 import type { SessionRenderToolCard, SessionRenderToolStatusKind } from '../../../types/session/tool-card';
 import type {
   ToolActivityTextBlock,
-  ToolActivityTone,
   ToolActivityTrailingLabel,
-  ToolActivityViewModel,
+  ToolActivityContent,
 } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
 
@@ -184,48 +184,27 @@ function formatCommandForTitle(command: string | null): string {
   return firstToken.startsWith('/') ? firstToken : `/${firstToken}`;
 }
 
-function formatSkillName(skillName: string | null): string {
-  return skillName?.trim() || '未知';
+function formatSkillName(skillName: string | null, t: TFunction<'chat'>): string {
+  return skillName?.trim() || t('toolActivity.unknown');
 }
 
-function buildTitle(request: SkillToolRequest): string {
+function buildTitle(request: SkillToolRequest, t: TFunction<'chat'>): string {
   if (request.mode === 'command') {
-    return `运行 ${formatCommandForTitle(request.command)}`;
+    return t('toolActivity.run', { name: formatCommandForTitle(request.command) });
   }
-  return `加载 skill ${formatSkillName(request.skillName)}`;
-}
-
-function resolveTone(status: SessionRenderToolStatusKind): ToolActivityTone {
-  if (status === 'running') return 'running';
-  if (status === 'error') return 'danger';
-  if (status === 'missing_result') return 'muted';
-  return 'neutral';
-}
-
-function formatStatusLabel(
-  request: SkillToolRequest,
-  output: SkillToolOutputSummary,
-  toolStatus: SessionRenderToolStatusKind,
-): string {
-  if (toolStatus === 'running') return '运行中';
-  if (toolStatus === 'error') return '失败';
-  if (toolStatus === 'missing_result') return '无结果';
-
-  const normalizedStatus = output.status?.toLowerCase() ?? '';
-  if (normalizedStatus === 'error' || normalizedStatus === 'failed' || normalizedStatus === 'failure') return '失败';
-  if (normalizedStatus === 'running' || normalizedStatus === 'loading') return '运行中';
-
-  return request.mode === 'command' ? '已运行' : '已加载';
+  return t('toolActivity.skill.load', { name: formatSkillName(request.skillName, t) });
 }
 
 function buildByline(
   request: SkillToolRequest,
   output: SkillToolOutputSummary,
   toolStatus: SessionRenderToolStatusKind,
+  hasOutputError: boolean,
+  t: TFunction<'chat'>,
 ): string {
-  const parts = [formatStatusLabel(request, output, toolStatus)];
+  const parts = toolStatus === 'completed' && !hasOutputError ? [request.mode === 'command' ? t('toolActivity.skill.ran') : t('toolActivity.skill.loaded')] : [];
   if (output.allowedTools) {
-    parts.push(`${output.allowedTools.length} tools`);
+    parts.push(t('toolActivity.tools', { count: output.allowedTools.length }));
   }
   if (output.model) {
     parts.push(output.model);
@@ -245,7 +224,7 @@ function formatPrimitive(value: string | number | boolean): string {
   return typeof value === 'string' ? truncateText(value, 240) : String(value);
 }
 
-function formatValueSummary(value: unknown): string | null {
+function formatValueSummary(value: unknown, t: TFunction<'chat'>): string | null {
   if (value == null) {
     return null;
   }
@@ -255,12 +234,12 @@ function formatValueSummary(value: unknown): string | null {
   }
   if (Array.isArray(value)) {
     if (value.length === 0) {
-      return '空';
+      return t('toolActivity.empty');
     }
     if (value.every(isPrimitive)) {
       return truncateText(value.map(formatPrimitive).join(' '), 240);
     }
-    return `${value.length} 项`;
+    return t('toolActivity.items', { count: value.length });
   }
   if (isRecord(value)) {
     const entries = Object.entries(value).slice(0, 8).map(([key, entryValue]) => {
@@ -268,27 +247,27 @@ function formatValueSummary(value: unknown): string | null {
         return `${key}=${formatPrimitive(entryValue)}`;
       }
       if (Array.isArray(entryValue)) {
-        return `${key}=${entryValue.length} 项`;
+        return `${key}=${t('toolActivity.items', { count: entryValue.length })}`;
       }
       if (isRecord(entryValue)) {
-        return `${key}=对象`;
+        return `${key}=${t('toolActivity.object')}`;
       }
-      return `${key}=空`;
+      return `${key}=${t('toolActivity.empty')}`;
     });
-    return entries.length > 0 ? truncateText(entries.join(', '), 240) : '空';
+    return entries.length > 0 ? truncateText(entries.join(', '), 240) : t('toolActivity.empty');
   }
   return null;
 }
 
-function buildParameterText(request: SkillToolRequest): string {
+function buildParameterText(request: SkillToolRequest, t: TFunction<'chat'>): string {
   const lines: string[] = [];
   if (request.mode === 'command') {
     lines.push(`command: ${formatCommandForTitle(request.command)}`);
   } else {
-    lines.push(`skill: ${formatSkillName(request.skillName)}`);
+    lines.push(`skill: ${formatSkillName(request.skillName, t)}`);
   }
 
-  const argsSummary = formatValueSummary(request.args);
+  const argsSummary = formatValueSummary(request.args, t);
   if (argsSummary) {
     lines.push(`args: ${argsSummary}`);
   }
@@ -296,22 +275,18 @@ function buildParameterText(request: SkillToolRequest): string {
   return lines.join('\n');
 }
 
-function formatAllowedToolsList(tools: ReadonlyArray<string>): string {
+function formatAllowedToolsList(tools: ReadonlyArray<string>, t: TFunction<'chat'>): string {
   if (tools.length === 0) {
-    return '0 tools';
+    return t('toolActivity.tools', { count: 0 });
   }
   const visibleTools = tools.slice(0, 8).join(', ');
   return tools.length > 8 ? `${visibleTools} +${tools.length - 8}` : visibleTools;
 }
 
-function buildResultText(
-  request: SkillToolRequest,
-  output: SkillToolOutputSummary,
-  toolStatus: SessionRenderToolStatusKind,
-): string {
-  const lines = [`status: ${formatStatusLabel(request, output, toolStatus)}`];
+function buildResultText(output: SkillToolOutputSummary, t: TFunction<'chat'>): string {
+  const lines = output.status ? [`status: ${output.status}`] : [];
   if (output.allowedTools) {
-    lines.push(`allowedTools: ${formatAllowedToolsList(output.allowedTools)}`);
+    lines.push(`allowedTools: ${formatAllowedToolsList(output.allowedTools, t)}`);
   }
   if (output.model) {
     lines.push(`model: ${output.model}`);
@@ -325,22 +300,24 @@ function buildResultText(
 function buildTextBlocks(
   request: SkillToolRequest,
   output: SkillToolOutputSummary,
-  toolStatus: SessionRenderToolStatusKind,
+  t: TFunction<'chat'>,
 ): ToolActivityTextBlock[] {
-  return [
-    {
-      kind: 'input',
-      title: '参数',
-      text: buildParameterText(request),
-      copyable: true,
-    },
-    {
+  const blocks: ToolActivityTextBlock[] = [{
+    kind: 'input',
+    title: t('toolActivity.skill.parameters'),
+    text: buildParameterText(request, t),
+    copyable: true,
+  }];
+  const resultText = buildResultText(output, t);
+  if (resultText) {
+    blocks.push({
       kind: 'output',
-      title: request.mode === 'command' ? '运行结果' : '加载结果',
-      text: buildResultText(request, output, toolStatus),
+      title: request.mode === 'command' ? t('toolActivity.skill.runResult') : t('toolActivity.skill.loadResult'),
+      text: resultText,
       copyable: false,
-    },
-  ];
+    });
+  }
+  return blocks;
 }
 
 export function isSkillToolActivity(tool: SessionRenderToolCard): boolean {
@@ -350,21 +327,19 @@ export function isSkillToolActivity(tool: SessionRenderToolCard): boolean {
     || SKILL_TOOL_NAMES.has(normalizedName);
 }
 
-export function skillToolActivityRenderer(tool: SessionRenderToolCard): ToolActivityViewModel {
+export function skillToolActivityRenderer(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {
   const request = resolveRequest(tool);
   const output = resolveOutputSummary(tool);
-  const title = buildTitle(request);
-  const trailingLabels: ToolActivityTrailingLabel[] = [
-    { text: buildByline(request, output, tool.status), tone: 'muted' },
-  ];
+  const title = buildTitle(request, t);
+  const hasOutputError = ['error', 'failed', 'failure'].includes(output.status?.toLowerCase() ?? '');
+  const byline = buildByline(request, output, tool.status, hasOutputError, t);
+  const trailingLabels: ToolActivityTrailingLabel[] = byline ? [{ text: byline, tone: 'muted' }] : [];
 
   return {
     title,
-    tone: resolveTone(tool.status),
-    isRunning: tool.status === 'running',
-    isError: tool.status === 'error',
+    hasOutputError,
     canExpand: true,
     trailingLabels,
-    textBlocks: buildTextBlocks(request, output, tool.status),
+    textBlocks: buildTextBlocks(request, output, t),
   };
 }

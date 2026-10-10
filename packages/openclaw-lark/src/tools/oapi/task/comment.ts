@@ -113,7 +113,7 @@ export function registerFeishuTaskCommentTool(api: OpenClawPluginApi): void {
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.info(`create: task_guid=${p.task_guid}, reply_to=${p.reply_to_comment_id ?? 'none'}`);
+              log.trace(() => `create: task_guid=${p.task_guid}, reply_to=${p.reply_to_comment_id ?? 'none'}`);
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const data: any = {
@@ -154,7 +154,7 @@ export function registerFeishuTaskCommentTool(api: OpenClawPluginApi): void {
             // LIST
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(
+              log.trace(() =>
                 `list: resource_id=${p.resource_id}, direction=${p.direction ?? 'asc'}, page_size=${p.page_size ?? 50}`,
               );
 
@@ -193,7 +193,7 @@ export function registerFeishuTaskCommentTool(api: OpenClawPluginApi): void {
             // GET
             // -----------------------------------------------------------------
             case 'get': {
-              log.info(`get: comment_id=${p.comment_id}`);
+              log.trace(() => `get: comment_id=${p.comment_id}`);
 
               const res = await client.invoke(
                 'feishu_task_comment.get',

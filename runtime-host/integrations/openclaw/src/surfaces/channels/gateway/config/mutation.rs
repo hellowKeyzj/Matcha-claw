@@ -18,10 +18,10 @@ impl ChannelConfigOperation {
             ChannelConfigMutationOutcome,
         >,
     ) -> ChannelConfigMutationOutcome {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         channel_trace(
             "mutation.begin",
-            &format!(
+            || format!(
                 "path={}",
                 if self.runtime_running {
                     "gateway"
@@ -36,15 +36,15 @@ impl ChannelConfigOperation {
                     return ChannelConfigMutationOutcome::Unknown;
                 };
                 let mut preflight_outcome = None;
-                let native_started = Instant::now();
-                channel_trace("native.update.begin", "path=local");
+                let native_started = platform::trace::enabled().then(Instant::now);
+                channel_trace("native.update.begin", || "path=local");
                 let result =
                     OpenClawConfigStore::new(state_dir.clone()).update_private_document(|stored| {
                         channel_trace(
                             "native.read.end",
-                            &format!(
+                            || format!(
                                 "outcome=success elapsedMs={}",
-                                native_started.elapsed().as_millis()
+                                native_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                             ),
                         );
                         let mut document = stored.as_value();
@@ -57,30 +57,30 @@ impl ChannelConfigOperation {
                         let unchanged = document == previous;
                         zeroize_value(&mut previous);
                         if unchanged {
-                            channel_trace("mutation.noop", "path=local reason=unchanged");
+                            channel_trace("mutation.noop", || "path=local reason=unchanged");
                             zeroize_value(&mut document);
                             return OpenClawConfigMutation::unchanged();
                         }
                         *stored = OpenClawConfigDocument::from_value(document)
                             .expect("channel mutation preserves document object");
-                        channel_trace("native.write.begin", "path=local");
+                        channel_trace("native.write.begin", || "path=local");
                         OpenClawConfigMutation::changed()
                     });
                 match &result {
                     Ok(update) => channel_trace(
                         "native.update.end",
-                        &format!(
+                        || format!(
                             "changed={} elapsedMs={}",
                             update.changed,
-                            native_started.elapsed().as_millis()
+                            native_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                         ),
                     ),
                     // This closed enum contains no native paths, payloads or raw errors.
                     Err(error) => channel_trace(
                         "native.update.end",
-                        &format!(
+                        || format!(
                             "code={error:?} elapsedMs={}",
-                            native_started.elapsed().as_millis()
+                            native_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                         ),
                     ),
                 }
@@ -96,9 +96,9 @@ impl ChannelConfigOperation {
             for attempt in 0..3 {
                 channel_trace(
                     "config.get.begin",
-                    &format!("path=gateway attempt={}", attempt + 1),
+                    || format!("path=gateway attempt={}", attempt + 1),
                 );
-                let get_started = Instant::now();
+                let get_started = platform::trace::enabled().then(Instant::now);
                 let request = match wire::channel::config_get_request(next_request_id(
                     "channel-config-get",
                 )) {
@@ -116,9 +116,9 @@ impl ChannelConfigOperation {
                 };
                 channel_trace(
                     "config.get.end",
-                    &format!(
+                    || format!(
                         "outcome={result_code} elapsedMs={}",
-                        get_started.elapsed().as_millis()
+                        get_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                     ),
                 );
                 let snapshot = match response {
@@ -147,7 +147,7 @@ impl ChannelConfigOperation {
                     }
                 };
                 if unchanged {
-                    channel_trace("mutation.noop", "path=gateway reason=unchanged");
+                    channel_trace("mutation.noop", || "path=gateway reason=unchanged");
                     zeroize_value(&mut previous);
                     zeroize_value(&mut document);
                     return ChannelConfigMutationOutcome::Noop;
@@ -167,13 +167,13 @@ impl ChannelConfigOperation {
                     Err(ConfigConflict) => {
                         channel_trace(
                             "config.cas.conflict",
-                            &format!("attempt={} retry={}", attempt + 1, attempt < 2),
+                            || format!("attempt={} retry={}", attempt + 1, attempt < 2),
                         );
                         continue;
                     }
                 }
             }
-            channel_trace("config.cas.exhausted", "attempts=3 outcome=Rejected");
+            channel_trace("config.cas.exhausted", || "attempts=3 outcome=Rejected");
             ChannelConfigMutationOutcome::Rejected
         }
         .await;
@@ -237,8 +237,8 @@ impl ChannelConfigOperation {
             }
         };
         let (request_id, encoded, method) = encoded;
-        let started = Instant::now();
-        channel_trace(&format!("{method}.begin"), "path=gateway");
+        let started = platform::trace::enabled().then(Instant::now);
+        channel_trace(if method == "config.patch" { "config.patch.begin" } else { "config.set.begin" }, || "path=gateway");
         let delivery = self.gateway.rpc_encoded_mutation(request_id, encoded).await;
         let delivery_code = match &delivery {
             MutationDelivery::Response(GatewayResponse::Failure { .. }) => "Rejected",
@@ -247,10 +247,10 @@ impl ChannelConfigOperation {
             MutationDelivery::MayHaveReached(_) => "MayHaveReached",
         };
         channel_trace(
-            &format!("{method}.end"),
-            &format!(
+            if method == "config.patch" { "config.patch.end" } else { "config.set.end" },
+            || format!(
                 "delivery={delivery_code} elapsedMs={}",
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         Ok(match delivery {
@@ -285,13 +285,13 @@ impl ChannelConfigOperation {
                 }
             }
             MutationDelivery::NotWritten(error) => {
-                channel_trace(&format!("{method}.not_written"), &format!("code={error:?}"));
+                channel_trace(if method == "config.patch" { "config.patch.not_written" } else { "config.set.not_written" }, || format!("code={error:?}"));
                 ChannelConfigMutationOutcome::Unknown
             }
             MutationDelivery::MayHaveReached(error) => {
                 channel_trace(
-                    &format!("{method}.may_have_reached"),
-                    &format!("code={error:?}"),
+                    if method == "config.patch" { "config.patch.may_have_reached" } else { "config.set.may_have_reached" },
+                    || format!("code={error:?}"),
                 );
                 let Some(readback) = readback else {
                     return Ok(ChannelConfigMutationOutcome::Unknown);
@@ -301,29 +301,29 @@ impl ChannelConfigOperation {
                 else {
                     return Ok(ChannelConfigMutationOutcome::Unknown);
                 };
-                let read_started = Instant::now();
-                channel_trace("config.readback.begin", "path=gateway");
+                let read_started = platform::trace::enabled().then(Instant::now);
+                channel_trace("config.readback.begin", || "path=gateway");
                 let response = read_gateway(&self.gateway, request).await;
                 channel_trace(
                     "config.readback.end",
-                    &format!(
+                    || format!(
                         "path=gateway responseReceived={} elapsedMs={}",
                         response.is_ok(),
-                        read_started.elapsed().as_millis()
+                        read_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                     ),
                 );
                 let Ok(response) = response else {
                     return Ok(ChannelConfigMutationOutcome::Unknown);
                 };
                 let Ok(mut persisted) = decode_read_snapshot(response) else {
-                    channel_trace("config.readback.decode", "outcome=failed");
+                    channel_trace("config.readback.decode", || "outcome=failed");
                     return Ok(ChannelConfigMutationOutcome::Unknown);
                 };
                 let matches = readback.matches(&persisted);
                 zeroize_value(&mut persisted);
                 channel_trace(
                     "config.readback.compare",
-                    &format!("path=gateway matches={matches}"),
+                    || format!("path=gateway matches={matches}"),
                 );
                 if matches {
                     ChannelConfigMutationOutcome::Confirmed
@@ -512,7 +512,7 @@ fn channel_binding_agent(bindings: &[Value], channel: &str) -> Option<String> {
 }
 
 fn ensure_binding(document: &mut Value, channel: &str, account: &str, agent: Option<&str>) {
-    channel_trace("binding.prepare", "outcome=begin persisted=false");
+    channel_trace("binding.prepare", || "outcome=begin persisted=false");
     let mut bindings = document
         .get("bindings")
         .and_then(Value::as_array)
@@ -532,7 +532,7 @@ fn ensure_binding(document: &mut Value, channel: &str, account: &str, agent: Opt
     }
     channel_trace(
         "binding.prepare",
-        &format!(
+        || format!(
             "outcome=prepared bindingCount={} persisted=false",
             bindings.len()
         ),

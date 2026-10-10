@@ -43,19 +43,19 @@ export function createSessionTimelineTransport(
 ): SessionTimelineTransport {
   const execute = async (request: unknown, operation: TimelineRequest['operationId'], traceId?: string | null): Promise<SessionTimelineTransportResponse> => {
     if (!isRequest(request, operation)) {
-      logSessionTrace('electron.timeline.rejected', traceId, { operation });
+      logSessionTrace('electron.timeline.rejected', traceId, () => ({ operation }));
       return { status: 503, body: UNAVAILABLE };
     }
     const endpoint = operation === 'sessions.load' ? '/api/sessions/load' : '/api/sessions/window';
-    const startedAt = Date.now();
-    logSessionTrace('electron.timeline.request', traceId, {
+    const startedAt = traceId && isSessionTraceEnabled() ? Date.now() : 0;
+    logSessionTrace('electron.timeline.request', traceId, () => ({
       operation,
       adapter: request.input.sessionIdentity.endpoint.runtimeAdapterId,
       sessionKey: summarizeIdentifier(request.input.sessionKey),
       endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
       limit: request.input.limit ?? null,
       mode: request.input.mode ?? null,
-    });
+    }));
     const response = await sendLoopbackJson({
       port: runtimeHostTransportPort,
       path: endpoint,
@@ -72,23 +72,23 @@ export function createSessionTimelineTransport(
       headers: traceHeader(traceId),
     });
     if (response === null) {
-      logSessionTrace('electron.timeline.failure', traceId, {
+      logSessionTrace('electron.timeline.failure', traceId, () => ({
         operation,
         elapsedMs: Date.now() - startedAt,
-      });
+      }));
       return { status: 503, body: UNAVAILABLE };
     }
     const body = response.body;
     const decodeStartedAt = traceId && isSessionTraceEnabled() ? performance.now() : null;
     const view = response.status === 200 ? decodeSessionView(body) : null;
     const decodeElapsedMs = decodeStartedAt === null ? null : performance.now() - decodeStartedAt;
-    logSessionTrace('electron.timeline.response', traceId, {
+    logSessionTrace('electron.timeline.response', traceId, () => ({
       operation,
       status: response.status,
       contract: view ? 'valid' : isUnavailable(body) ? 'unavailable' : 'invalid',
       elapsedMs: Date.now() - startedAt,
       decodeElapsedMs,
-    });
+    }));
     if (response.status === 200 && view && view.sessionKey === request.input.sessionKey) {
       return { status: 200, body: view };
     }

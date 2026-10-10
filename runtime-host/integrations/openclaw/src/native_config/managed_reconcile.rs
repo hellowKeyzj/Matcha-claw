@@ -52,7 +52,6 @@ const MANAGED_SOURCES: &[(&str, &[&str])] = &[
     ("task-manager", &["task-manager"]),
     ("security-core", &["security-core"]),
     ("browser-relay", &["browser-relay"]),
-    ("memory-lancedb-pro", &["memory-lancedb-pro"]),
     ("matchaclaw-media", &["matchaclaw-media"]),
 ];
 

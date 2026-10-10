@@ -690,21 +690,18 @@ async function performMCPXaaAuth(
   const clientConfig = getMcpClientConfig(serverName, serverConfig)
   const clientSecret = clientConfig?.clientSecret
   if (!clientSecret) {
-    // Diagnostic context for serverKey mismatch debugging. Only computed
-    // on the error path so there's no perf cost on success.
-    const wantedKey = getServerKey(serverName, serverConfig)
-    const haveKeys = Object.keys(
-      getSecureStorage().read()?.mcpOAuthClientConfig ?? {},
-    )
-    const headersForLogging = Object.fromEntries(
-      Object.entries(serverConfig.headers ?? {}).map(([k, v]) =>
-        k.toLowerCase() === 'authorization' ? [k, '[REDACTED]'] : [k, v],
-      ),
-    )
-    logMCPDebug(
-      serverName,
-      `XAA: secret lookup miss. wanted=${wantedKey} have=[${haveKeys.join(', ')}] configHeaders=${jsonStringify(headersForLogging)}`,
-    )
+    logMCPDebug(serverName, () => {
+      const wantedKey = getServerKey(serverName, serverConfig)
+      const haveKeys = Object.keys(
+        getSecureStorage().read()?.mcpOAuthClientConfig ?? {},
+      )
+      const headersForLogging = Object.fromEntries(
+        Object.entries(serverConfig.headers ?? {}).map(([k, v]) =>
+          k.toLowerCase() === 'authorization' ? [k, '[REDACTED]'] : [k, v],
+        ),
+      )
+      return `XAA: secret lookup miss. wanted=${wantedKey} have=[${haveKeys.join(', ')}] configHeaders=${jsonStringify(headersForLogging)}`
+    })
     throw new Error(
       `XAA: AS client secret not found for '${serverName}'. Re-add with --client-secret.`,
     )

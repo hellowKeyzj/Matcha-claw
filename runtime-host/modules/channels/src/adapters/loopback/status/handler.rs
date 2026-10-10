@@ -68,7 +68,7 @@ async fn handle_request(
                 Err(error) => {
                     platform::trace::channel_trace(
                         "channel.loopback.json_decode",
-                        match error.classify() {
+                        || match error.classify() {
                             serde_json::error::Category::Io => "outcome=io",
                             serde_json::error::Category::Syntax => "outcome=syntax",
                             serde_json::error::Category::Data => "outcome=data",

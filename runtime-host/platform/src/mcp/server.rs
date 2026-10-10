@@ -21,10 +21,11 @@ pub trait ToolProvider {
 
 pub type ToolCallOutcome = Result<Value, ToolCallError>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolCallError {
     InvalidParams,
     Internal,
+    Execution(Value),
 }
 
 pub struct ToolCatalog {
@@ -133,13 +134,19 @@ impl Server {
         require_exact_keys(params, &["name", "arguments"]).map_err(|_| invalid_params())?;
         let name = required_string(params, "name").map_err(|_| invalid_params())?;
         let arguments = strict_object(params.get("arguments")).map_err(|_| invalid_params())?;
-        let result = self
-            .catalog
-            .call(name, arguments)
-            .map_err(map_tool_call_error)?;
-        Ok(json!({
+        let (result, is_error) = match self.catalog.call(name, arguments) {
+            Ok(result) => (result, false),
+            Err(ToolCallError::Execution(result)) => (result, true),
+            Err(ToolCallError::InvalidParams) => return Err(invalid_params()),
+            Err(ToolCallError::Internal) => return Err(internal_error()),
+        };
+        let mut response = json!({
             "content": [{ "type": "text", "text": serde_json::to_string(&result).expect("closed MCP result is serializable") }]
-        }))
+        });
+        if is_error {
+            response["isError"] = Value::Bool(true);
+        }
+        Ok(response)
     }
 }
 
@@ -224,13 +231,6 @@ const fn decode_message(error: DecodeError) -> &'static str {
         | DecodeError::BodyTooLarge
         | DecodeError::MalformedHeader
         | DecodeError::InvalidRequest => INVALID_REQUEST,
-    }
-}
-
-const fn map_tool_call_error(error: ToolCallError) -> (i32, &'static str) {
-    match error {
-        ToolCallError::InvalidParams => invalid_params(),
-        ToolCallError::Internal => internal_error(),
     }
 }
 

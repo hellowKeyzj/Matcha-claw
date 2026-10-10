@@ -141,13 +141,13 @@ function logPatchSessionSnapshotTodoToolDebug(input: {
   ) {
     return;
   }
-  logRendererTodoToolDebug('renderer.patchSessionSnapshot.global', {
+  logRendererTodoToolDebug('renderer.patchSessionSnapshot.global', () => ({
     sessionKey: input.sessionKey,
     caller: resolveTodoToolDebugCaller(),
     beforeItems: summarizeItemsForTodoToolDebug(input.currentItems),
     incomingSnapshot: summarizeSnapshotForTodoToolDebug(input.snapshot),
     afterItems: summarizeItemsForTodoToolDebug(input.nextItems),
-  });
+  }));
 }
 
 function buildAttachedFilesSignature(
@@ -1403,10 +1403,8 @@ function projectionItemStatus(status: SessionWireItem['status']): SessionAssista
 function projectionToolCard(
   tool: SessionWireTool,
   runtimeAdapterId: SessionRenderToolCard['runtimeAdapterId'],
+  status: SessionRenderToolCard['status'],
 ): SessionRenderToolCard {
-  const status = tool.phase === 'failed'
-    ? 'error'
-    : tool.phase === 'completed' ? 'completed' : 'running';
   const summary = tool.summary ?? undefined;
   const input = tool.input ?? {};
   const inputText = tool.inputText ?? stringifyToolPayload(tool.input);
@@ -1459,7 +1457,37 @@ export function projectSessionViewItems(view: SessionProjectionState): SessionRe
   }
   const tools = factValue(view.tools) ?? [];
   const runtimeAdapterId = view.identity.endpoint.runtimeAdapterId;
-  const toolsById = new Map(tools.map((tool) => [tool.toolCallId, projectionToolCard(tool, runtimeAdapterId)] as const));
+  const abortedRunIds = new Set<string>();
+  const abortedToolIds = new Set<string>();
+  const toolRunIds = new Map<string, string | null>();
+  for (const item of items) {
+    if (item.kind !== 'assistantTurn') continue;
+    if (item.status === 'aborted' && item.runId) abortedRunIds.add(item.runId);
+    for (const segment of item.segments) {
+      if (segment.kind !== 'toolUse' && segment.kind !== 'toolResult') continue;
+      if (item.status === 'aborted') abortedToolIds.add(segment.toolCallId);
+      if (!item.runId) continue;
+      const previous = toolRunIds.get(segment.toolCallId);
+      toolRunIds.set(segment.toolCallId, previous === undefined || previous === item.runId ? item.runId : null);
+    }
+  }
+  const runtime = factValue(view.runtime);
+  const runtimeConfirmed = runtime !== null && runtime.issue === null
+    && view.completeness !== 'unknown' && view.completeness !== 'unavailable'
+    && !(typeof view.completeness === 'object' && view.completeness.incomplete.missing.includes('replay_cursor'));
+  const statusForTool = (tool: SessionWireTool): SessionRenderToolCard['status'] => {
+    if (tool.phase === 'completed') return 'completed';
+    if (tool.phase === 'failed') return 'error';
+    const runId = tool.runId ?? toolRunIds.get(tool.toolCallId);
+    if (abortedToolIds.has(tool.toolCallId) || (runId && abortedRunIds.has(runId))) return 'cancelled';
+    if (!runtimeConfirmed) return 'unknown';
+    if (isTerminalRunPhase(runtime.phase) || runtime.activeRunId === null) return 'missing_result';
+    if (!runId) return 'unknown';
+    return runtime.activeRunId === runId ? 'running' : 'missing_result';
+  };
+  const toolsById = new Map(tools.map((tool) => [tool.toolCallId,
+    projectionToolCard(tool, runtimeAdapterId, statusForTool(tool)),
+  ] as const));
   return items.map((item) => {
     if (item.kind === 'userMessage') {
       const media = item.content.flatMap((content) => projectionMedia(content));
@@ -1707,13 +1735,13 @@ function applyDecodedSessionView(
     const nextItems = reconcileSessionItems(current.items, projectedItems);
     const traceStartedAt = timing ? performance.now() : 0;
     if (timing) timing.reconcileElapsedMs += traceStartedAt - reconcileStartedAt;
-    if (traceId) logSessionTrace('session.assembly.reconcile', traceId, {
+    if (traceId) logSessionTrace('session.assembly.reconcile', traceId, () => ({
       identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
       recordKey: summarizeIdentifier(recordKey), displayEpoch: display.epoch, displaySeq: display.seq, displayCursor: display.cursor,
       display: summarizeWireAssistantTurns(factValue(display.items)),
       before: summarizeRenderAssistantTurns(current.items), projected: summarizeRenderAssistantTurns(projectedItems),
       reconciled: summarizeRenderAssistantTurns(nextItems),
-    });
+    }));
     if (timing) timing.traceEmitElapsedMs += performance.now() - traceStartedAt;
     const nextRuntime = projectionRuntime(current.runtime, view.runtime, nextItems, view.runtimeNotice ?? null, pendingTurnTerminated);
     const pendingAssistant = current.items.find((item) => item.kind === 'assistant-turn' && item.key === current.runtime.pendingTurnKey);
@@ -1725,11 +1753,11 @@ function applyDecodedSessionView(
       && !nextItems.some((item) => item.key === pendingAssistant.key
         || item.kind === 'assistant-turn' && item.runId && item.runId === nextRuntime.activeRunId)) nextItems.push(pendingAssistant);
     const placeholderTraceStartedAt = timing ? performance.now() : 0;
-    if (traceId) logSessionTrace('session.assembly.placeholder.after', traceId, {
+    if (traceId) logSessionTrace('session.assembly.placeholder.after', traceId, () => ({
       identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
       pendingItemHash: summarizeIdentifier(pendingAssistant?.key).hash, pendingTurnHash: summarizeIdentifier(current.runtime.pendingTurnKey).hash,
       items: summarizeRenderAssistantTurns(nextItems),
-    });
+    }));
     if (timing) timing.traceEmitElapsedMs += performance.now() - placeholderTraceStartedAt;
     const nextWindow = projectionWindow(current.window, display.window);
     windows.set(displayKey, { ...display, recordKey });
@@ -1770,20 +1798,20 @@ export function applySessionView(
         reason: 'reason' in result ? summarizeIdentifier(result.reason) : result.status === 'stale' ? 'older-watermark' : result.status === 'duplicate' ? 'same-watermark' : null,
         items: summarizeRenderAssistantTurns(getSessionRecord(input.get(), displayRecordKey(input.get(), view.identity)).items),
       };
-      logSessionTrace('session.view.apply.result', traceId, {
+      logSessionTrace('session.view.apply.result', traceId, () => ({
         ...payload, applyElapsedMs, projectionElapsedMs: timing.projectionElapsedMs, reconcileElapsedMs: timing.reconcileElapsedMs,
         traceEmitElapsedMsBeforeResult: beforeTraceEmitElapsedMs + timing.traceEmitElapsedMs,
         resultSummaryElapsedMs: performance.now() - summaryStartedAt,
-      });
+      }));
     }
     return result;
   };
-  if (traceId) logSessionTrace('session.view.apply.before', traceId, {
+  if (traceId) logSessionTrace('session.view.apply.before', traceId, () => ({
     identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
     windowOnly: !!options.windowOnly, direction: options.direction ?? null,
     incoming: summarizeWireAssistantTurns(factValue(view.items)),
     before: summarizeRenderAssistantTurns(getSessionRecord(input.get(), displayRecordKey(input.get(), view.identity)).items),
-  });
+  }));
   if (traceId) {
     applyStartedAt = performance.now();
     beforeTraceEmitElapsedMs = applyStartedAt - beforeTraceStartedAt;
@@ -1827,12 +1855,12 @@ export function applySessionView(
       const items = reconcileSessionItems(current.items, projectedItems);
       const traceStartedAt = timing ? performance.now() : 0;
       if (timing) timing.reconcileElapsedMs += traceStartedAt - reconcileStartedAt;
-      if (traceId) logSessionTrace('session.view.window.assembly', traceId, {
+      if (traceId) logSessionTrace('session.view.window.assembly', traceId, () => ({
         identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
         direction: options.direction ?? null, preserveLive: !!preserveLive,
         display: summarizeWireAssistantTurns(factValue(display.items)), before: summarizeRenderAssistantTurns(current.items),
         projected: summarizeRenderAssistantTurns(projectedItems), reconciled: summarizeRenderAssistantTurns(items),
-      });
+      }));
       if (timing) timing.traceEmitElapsedMs += performance.now() - traceStartedAt;
       return { loadedSessions: patchSessionRecord(state, recordKey, {
         items,
@@ -2126,10 +2154,10 @@ export function applySessionDelta(
 ): SessionProjectionApplyResult {
   const traceId = createSessionTraceId('session.delta.apply-boundary');
   const finish = (result: SessionProjectionApplyResult): SessionProjectionApplyResult => {
-    if (traceId) logSessionTrace('session.delta.apply.result', traceId, {
+    if (traceId) logSessionTrace('session.delta.apply.result', traceId, () => ({
       identity: summarizeSessionIdentity(delta.identity), epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor,
       status: result.status, reason: 'reason' in result ? summarizeIdentifier(result.reason) : result.status === 'stale' ? 'older-watermark' : result.status === 'duplicate' ? 'same-watermark' : null,
-    });
+    }));
     return result;
   };
   const store = projectionStore(input.get);
@@ -2146,7 +2174,7 @@ export function applySessionDelta(
     change.kind === 'runtimeChanged'
     || (change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase))
   ));
-  if (traceId) logSessionTrace('session.delta.apply.start', traceId, {
+  if (traceId) logSessionTrace('session.delta.apply.start', traceId, () => ({
     identity: summarizeSessionIdentity(delta.identity),
     recordKey: summarizeIdentifier(recordKey),
     sessionKey: summarizeIdentifier(delta.sessionKey),
@@ -2168,9 +2196,9 @@ export function applySessionDelta(
           runId: summarizeIdentifier(change.kind === 'runtimeChanged' ? change.runtime.activeRunId : change.runId),
         })),
     } : {}),
-  });
+  }));
   if (traceTurnState) {
-    logSessionTrace('session.delta.apply.turns.before', traceId, {
+    logSessionTrace('session.delta.apply.turns.before', traceId, () => ({
       sessionKey: summarizeIdentifier(delta.sessionKey),
       seq: delta.seq,
       cursor: delta.cursor,
@@ -2179,14 +2207,14 @@ export function applySessionDelta(
       identity: summarizeSessionIdentity(delta.identity), epoch: delta.epoch,
       displayTurns: summarizeWireAssistantTurns(factValue(windowStore(input.get).get(displayProjectionKey(state, delta.identity))?.items ?? 'unknown')),
       renderTurns: summarizeRenderAssistantTurns(getSessionRecord(state, recordKey).items),
-    });
+    }));
   }
   if (!previous) {
     const historyReason = 'session_delta_without_view';
-    if (traceId) logSessionTrace('session.delta.recovery-required', traceId, {
+    if (traceId) logSessionTrace('session.delta.recovery-required', traceId, () => ({
       sessionKey: summarizeIdentifier(delta.sessionKey),
       reason: historyReason,
-    });
+    }));
     return finish({ status: 'gap', sessionKey: delta.sessionKey, reason: 'missing SessionView' });
   }
   if (delta.epoch < previous.epoch) {
@@ -2195,10 +2223,10 @@ export function applySessionDelta(
   const epochChanged = delta.epoch > previous.epoch;
   if (epochChanged && (delta.cursor !== 1 || delta.seq !== 1)) {
     const historyReason = 'session_delta_epoch_gap';
-    if (traceId) logSessionTrace('session.delta.recovery-required', traceId, {
+    if (traceId) logSessionTrace('session.delta.recovery-required', traceId, () => ({
       sessionKey: summarizeIdentifier(delta.sessionKey),
       reason: historyReason,
-    });
+    }));
     return finish({ status: 'gap', sessionKey: delta.sessionKey, reason: 'new epoch delta did not start at seq 1, cursor 1' });
   }
   if (!epochChanged) {
@@ -2210,10 +2238,10 @@ export function applySessionDelta(
     }
     if (delta.cursor !== previous.cursor + 1 || delta.seq !== previous.seq + 1) {
       const historyReason = 'session_delta_gap';
-      if (traceId) logSessionTrace('session.delta.recovery-required', traceId, {
+      if (traceId) logSessionTrace('session.delta.recovery-required', traceId, () => ({
         sessionKey: summarizeIdentifier(delta.sessionKey),
         reason: historyReason,
-      });
+      }));
       return finish({ status: 'gap', sessionKey: delta.sessionKey, reason: `expected seq ${previous.seq + 1}, cursor ${previous.cursor + 1}` });
     }
   }
@@ -2275,7 +2303,7 @@ export function applySessionDelta(
     const appliedState = input.get();
     const recordKey = projectionRecordKey(appliedState, sessionIdentityForProjection(appliedState, projected));
     const appliedRuntime = recordKey ? appliedState.loadedSessions[recordKey]?.runtime : null;
-    logSessionTrace('session.delta.apply.runtime.after', traceId, {
+    logSessionTrace('session.delta.apply.runtime.after', traceId, () => ({
       sessionKey: summarizeIdentifier(delta.sessionKey),
       seq: delta.seq,
       cursor: delta.cursor,
@@ -2283,10 +2311,10 @@ export function applySessionDelta(
       projectionActiveRunId: summarizeIdentifier(factValue(projected.runtime)?.activeRunId),
       runtimePhase: appliedRuntime?.runPhase ?? null,
       activeRunId: summarizeIdentifier(appliedRuntime?.activeRunId),
-    });
+    }));
   }
   if (traceTurnState) {
-    logSessionTrace('session.delta.apply.turns.after', traceId, {
+    logSessionTrace('session.delta.apply.turns.after', traceId, () => ({
       sessionKey: summarizeIdentifier(delta.sessionKey),
       seq: delta.seq,
       cursor: delta.cursor,
@@ -2294,7 +2322,7 @@ export function applySessionDelta(
       identity: summarizeSessionIdentity(delta.identity), epoch: delta.epoch,
       displayTurns: summarizeWireAssistantTurns(factValue(display.items)),
       renderTurns: summarizeRenderAssistantTurns(getSessionRecord(input.get(), recordKey).items),
-    });
+    }));
   }
   if (tasksChanged) refreshSessionTasks(input, projected, true);
   return finish({ status: 'applied', sessionKey: recordKey, epoch: delta.epoch, seq: delta.seq, cursor: delta.cursor });

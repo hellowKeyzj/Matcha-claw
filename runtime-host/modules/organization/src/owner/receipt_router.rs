@@ -107,6 +107,12 @@ impl TeamRunReceiptRouter {
     }
 
     fn record(&mut self, observation: ActivityReceiptObservation) {
+        platform::trace::runtime_trace("runtime.team_run.activity.receipt", || serde_json::json!({
+            "runHash": platform::trace::identifier_hash(observation.run_id.as_str()),
+            "activityHash": platform::trace::identifier_hash(observation.activity_id.as_str()),
+            "status": format!("{:?}", observation.status),
+            "retryOnWake": observation.status.should_retry_on_wakeup(),
+        }));
         if !matches!(
             observation.status,
             ActivityReceiptStatus::Delivered

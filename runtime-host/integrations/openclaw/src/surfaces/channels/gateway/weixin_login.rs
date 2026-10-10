@@ -61,8 +61,8 @@ impl WeixinLogin {
     }
 
     pub async fn start(&self, input: WebLoginStart) -> WebLoginStartEffect {
-        let started = Instant::now();
-        channel_trace("weixin.start", "event=begin");
+        let started = platform::trace::enabled().then(Instant::now);
+        channel_trace("weixin.start", || "event=begin");
         let effect = self.start_login(input).await;
         let outcome = match &effect {
             WebLoginStartEffect::Progress(_) => "qr",
@@ -71,9 +71,9 @@ impl WeixinLogin {
         };
         channel_trace(
             "weixin.start",
-            &format!(
+            || format!(
                 "event=end outcome={outcome} elapsedMs={}",
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         effect
@@ -97,7 +97,7 @@ impl WeixinLogin {
         let qr_data_url = match render_qr_data_url(&qr.qrcode_img_content) {
             Ok(qr_data_url) => qr_data_url,
             Err(()) => {
-                channel_trace("weixin.qr-render", "outcome=unknown error=render-or-size");
+                channel_trace("weixin.qr-render", || "outcome=unknown error=render-or-size");
                 return WebLoginStartEffect::Unknown;
             }
         };
@@ -130,8 +130,8 @@ impl WeixinLogin {
         input: WebLoginWait,
         cancellation: CancellationToken,
     ) -> WebLoginWaitEffect {
-        let started = Instant::now();
-        channel_trace("weixin.wait", "event=begin");
+        let started = platform::trace::enabled().then(Instant::now);
+        channel_trace("weixin.wait", || "event=begin");
         let effect = self.wait_login(input, cancellation).await;
         let outcome = match &effect {
             WebLoginWaitEffect::Progress(progress) => match progress.status() {
@@ -144,9 +144,9 @@ impl WeixinLogin {
         };
         channel_trace(
             "weixin.wait",
-            &format!(
+            || format!(
                 "event=end outcome={outcome} elapsedMs={}",
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         effect
@@ -168,12 +168,12 @@ impl WeixinLogin {
         else {
             channel_trace(
                 "weixin.wait-session",
-                "outcome=unknown reason=not-found-or-ambiguous",
+                || "outcome=unknown reason=not-found-or-ambiguous",
             );
             return WebLoginWaitEffect::Unknown;
         };
         if login.started_at.elapsed() >= ACTIVE_LOGIN_TTL {
-            channel_trace("weixin.wait-session", "outcome=unknown reason=expired");
+            channel_trace("weixin.wait-session", || "outcome=unknown reason=expired");
             self.sessions.lock().await.remove(&session_key);
             return WebLoginWaitEffect::Unknown;
         }
@@ -189,7 +189,7 @@ impl WeixinLogin {
                 return WebLoginWaitEffect::Cancelled;
             }
             if Instant::now() >= deadline {
-                channel_trace("weixin.wait-session", "outcome=unknown reason=deadline");
+                channel_trace("weixin.wait-session", || "outcome=unknown reason=deadline");
                 self.sessions.lock().await.remove(&session_key);
                 return WebLoginWaitEffect::Unknown;
             }
@@ -205,10 +205,10 @@ impl WeixinLogin {
                 Err(()) => return WebLoginWaitEffect::Unknown,
             };
             match status.status.trim() {
-                "wait" => channel_trace("weixin.poll-state", "outcome=waiting"),
-                "scaned" => channel_trace("weixin.poll-state", "outcome=scanned"),
+                "wait" => channel_trace("weixin.poll-state", || "outcome=waiting"),
+                "scaned" => channel_trace("weixin.poll-state", || "outcome=scanned"),
                 "expired" => {
-                    channel_trace("weixin.poll-state", "outcome=expired action=refresh");
+                    channel_trace("weixin.poll-state", || "outcome=expired action=refresh");
                     return self
                         .refresh_session(session_key, current, cancellation.clone())
                         .await;
@@ -216,7 +216,7 @@ impl WeixinLogin {
                 "confirmed" => {
                     channel_trace(
                         "weixin.confirmed",
-                        &format!(
+                        || format!(
                             "accountPresent={} credentialPresent={}",
                             status
                                 .ilink_bot_id
@@ -261,7 +261,7 @@ impl WeixinLogin {
                         None,
                     ));
                 }
-                _ => channel_trace("weixin.poll-state", "outcome=unrecognized action=continue"),
+                _ => channel_trace("weixin.poll-state", || "outcome=unrecognized action=continue"),
             }
             tokio::select! {
                 _ = cancellation.cancelled() => return WebLoginWaitEffect::Cancelled,
@@ -282,12 +282,12 @@ impl WeixinLogin {
     ) -> WebLoginWaitEffect {
         channel_trace(
             "weixin.qr-refresh",
-            &format!("event=begin attempt={}", current.refresh_count),
+            || format!("event=begin attempt={}", current.refresh_count),
         );
         if current.refresh_count >= MAX_QR_REFRESH_COUNT {
             channel_trace(
                 "weixin.qr-refresh",
-                "event=end outcome=unknown reason=refresh-exhausted",
+                || "event=end outcome=unknown reason=refresh-exhausted",
             );
             self.sessions.lock().await.remove(&session_key);
             return WebLoginWaitEffect::Unknown;
@@ -366,7 +366,7 @@ impl WeixinLogin {
         account_id: Option<&str>,
     ) -> Result<QrCodeResponse, ()> {
         let mut url = ilink_url(api_base_url, "ilink/bot/get_bot_qrcode").map_err(|()| {
-            channel_trace("weixin.qr-start-http", "outcome=rejected error=invalid-url");
+            channel_trace("weixin.qr-start-http", || "outcome=rejected error=invalid-url");
         })?;
         url.query_pairs_mut()
             .append_pair("bot_type", DEFAULT_ILINK_BOT_TYPE);
@@ -374,49 +374,49 @@ impl WeixinLogin {
         if let Some(route_tag) = self.load_config_string(account_id, "routeTag") {
             request = request.header("SKRouteTag", route_tag);
         }
-        let started = Instant::now();
-        channel_trace("weixin.qr-start-http", "event=begin");
+        let started = platform::trace::enabled().then(Instant::now);
+        channel_trace("weixin.qr-start-http", || "event=begin");
         let response = request.send().await.map_err(|error| {
             channel_trace(
                 "weixin.qr-start-http",
-                &format!(
+                || format!(
                     "event=end error={} elapsedMs={}",
                     http_error_class(&error),
-                    started.elapsed().as_millis()
+                    started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                 ),
             );
         })?;
         channel_trace(
             "weixin.qr-start-http",
-            &format!(
+            || format!(
                 "event=headers status={} elapsedMs={}",
                 response.status().as_u16(),
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         if !response.status().is_success() {
-            channel_trace("weixin.qr-start-http", "event=end outcome=rejected");
+            channel_trace("weixin.qr-start-http", || "event=end outcome=rejected");
             return Err(());
         }
         let qr = response.json::<QrCodeResponse>().await.map_err(|error| {
             channel_trace(
                 "weixin.qr-start-http",
-                &format!(
+                || format!(
                     "event=end error={} elapsedMs={}",
                     http_error_class(&error),
-                    started.elapsed().as_millis()
+                    started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                 ),
             );
         })?;
         channel_trace(
             "weixin.qr-start-http",
-            &format!(
+            || format!(
                 "event=end outcome=decoded elapsedMs={}",
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         if qr.qrcode.trim().is_empty() || qr.qrcode_img_content.trim().is_empty() {
-            channel_trace("weixin.qr-start-decode", "outcome=unknown reason=empty-qr");
+            channel_trace("weixin.qr-start-decode", || "outcome=unknown reason=empty-qr");
             return Err(());
         }
         Ok(qr)
@@ -429,7 +429,7 @@ impl WeixinLogin {
         account_id: Option<&str>,
     ) -> Result<QrStatusResponse, ()> {
         let mut url = ilink_url(api_base_url, "ilink/bot/get_qrcode_status").map_err(|()| {
-            channel_trace("weixin.qr-poll-http", "outcome=rejected error=invalid-url");
+            channel_trace("weixin.qr-poll-http", || "outcome=rejected error=invalid-url");
         })?;
         url.query_pairs_mut().append_pair("qrcode", qrcode);
         let mut request = self
@@ -440,21 +440,21 @@ impl WeixinLogin {
         if let Some(route_tag) = self.load_config_string(account_id, "routeTag") {
             request = request.header("SKRouteTag", route_tag);
         }
-        let started = Instant::now();
-        channel_trace("weixin.qr-poll-http", "event=begin");
+        let started = platform::trace::enabled().then(Instant::now);
+        channel_trace("weixin.qr-poll-http", || "event=begin");
         let response = match request.send().await {
             Ok(response) => response,
             Err(error) => {
                 channel_trace(
                     "weixin.qr-poll-http",
-                    &format!(
+                    || format!(
                         "event=end error={} elapsedMs={}",
                         http_error_class(&error),
-                        started.elapsed().as_millis()
+                        started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                     ),
                 );
                 if error.is_timeout() {
-                    channel_trace("weixin.qr-poll-http", "outcome=waiting reason=poll-timeout");
+                    channel_trace("weixin.qr-poll-http", || "outcome=waiting reason=poll-timeout");
                     return Ok(QrStatusResponse::waiting());
                 }
                 return Err(());
@@ -462,32 +462,32 @@ impl WeixinLogin {
         };
         channel_trace(
             "weixin.qr-poll-http",
-            &format!(
+            || format!(
                 "event=headers status={} elapsedMs={}",
                 response.status().as_u16(),
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         if !response.status().is_success() {
-            channel_trace("weixin.qr-poll-http", "event=end outcome=rejected");
+            channel_trace("weixin.qr-poll-http", || "event=end outcome=rejected");
             return Err(());
         }
         let result = response.json::<QrStatusResponse>().await.map_err(|error| {
             channel_trace(
                 "weixin.qr-poll-http",
-                &format!(
+                || format!(
                     "event=end error={} elapsedMs={}",
                     http_error_class(&error),
-                    started.elapsed().as_millis()
+                    started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                 ),
             );
         });
         if result.is_ok() {
             channel_trace(
                 "weixin.qr-poll-http",
-                &format!(
+                || format!(
                     "event=end outcome=decoded elapsedMs={}",
-                    started.elapsed().as_millis()
+                    started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                 ),
             );
         }
@@ -495,16 +495,16 @@ impl WeixinLogin {
     }
 
     fn load_config_string(&self, account_id: Option<&str>, key: &str) -> Option<String> {
-        let started = Instant::now();
-        channel_trace("weixin.config-read", "event=begin");
+        let started = platform::trace::enabled().then(Instant::now);
+        channel_trace("weixin.config-read", || "event=begin");
         let document = match OpenClawConfigStore::new(self.state_dir.clone()).read_private() {
             Ok(document) => document,
             Err(_) => {
                 channel_trace(
                     "weixin.config-read",
-                    &format!(
+                    || format!(
                         "event=end outcome=unavailable action=use-existing-default elapsedMs={}",
-                        started.elapsed().as_millis()
+                        started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                     ),
                 );
                 return None;
@@ -512,9 +512,9 @@ impl WeixinLogin {
         };
         channel_trace(
             "weixin.config-read",
-            &format!(
+            || format!(
                 "event=end outcome=read elapsedMs={}",
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         let channels = document.get("channels").and_then(Value::as_object)?;
@@ -547,15 +547,15 @@ impl WeixinLogin {
             normalize_account_id(raw_account_id).unwrap_or_else(|| FALLBACK_ACCOUNT_ID.to_owned());
         let state_dir = self.state_dir.as_path().join(WEIXIN_STATE_DIR);
         let accounts_dir = state_dir.join(WEIXIN_ACCOUNTS_DIR);
-        let started = Instant::now();
-        channel_trace("weixin.account-save", "event=begin accountPresent=true");
+        let started = platform::trace::enabled().then(Instant::now);
+        channel_trace("weixin.account-save", || "event=begin accountPresent=true");
         std::fs::create_dir_all(&accounts_dir).map_err(|error| {
             channel_trace(
                 "weixin.account-save",
-                &format!(
+                || format!(
                     "event=end stage=mkdir error={:?} elapsedMs={}",
                     error.kind(),
-                    started.elapsed().as_millis()
+                    started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                 ),
             );
         })?;
@@ -573,7 +573,7 @@ impl WeixinLogin {
             data.insert("userId".into(), Value::String(user_id.to_owned()));
         }
         let mut bytes = serde_json::to_vec_pretty(&data).map_err(|_| {
-            channel_trace("weixin.account-save", "event=end error=json-encode");
+            channel_trace("weixin.account-save", || "event=end error=json-encode");
         })?;
         let path = account_file(&accounts_dir, &account_id);
         let written = std::fs::write(&path, &bytes);
@@ -582,14 +582,14 @@ impl WeixinLogin {
         written.map_err(|error| {
             channel_trace(
                 "weixin.account-save",
-                &format!(
+                || format!(
                     "event=end stage=write error={:?} elapsedMs={}",
                     error.kind(),
-                    started.elapsed().as_millis()
+                    started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                 ),
             );
         })?;
-        channel_trace("weixin.account-save", "stage=account-file outcome=written");
+        channel_trace("weixin.account-save", || "stage=account-file outcome=written");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -604,14 +604,14 @@ impl WeixinLogin {
         } else {
             channel_trace(
                 "weixin.account-index-write",
-                "outcome=noop reason=already-indexed",
+                || "outcome=noop reason=already-indexed",
             );
         }
         channel_trace(
             "weixin.account-save",
-            &format!(
+            || format!(
                 "event=end outcome=written elapsedMs={}",
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         Ok(account_id)
@@ -807,10 +807,10 @@ pub(super) fn clear_account_state(
     state_dir: &CanonicalStateDir,
     account_id: Option<&str>,
 ) -> Result<(), ()> {
-    let started = Instant::now();
+    let started = platform::trace::enabled().then(Instant::now);
     channel_trace(
         "weixin.account-clear",
-        &format!("event=begin accountPresent={}", account_id.is_some()),
+        || format!("event=begin accountPresent={}", account_id.is_some()),
     );
     let state_dir = state_dir.as_path().join(WEIXIN_STATE_DIR);
     let Some(account_id) = account_id else {
@@ -818,9 +818,9 @@ pub(super) fn clear_account_state(
             Ok(()) => {
                 channel_trace(
                     "weixin.account-clear",
-                    &format!(
+                    || format!(
                         "event=end scope=channel outcome=removed elapsedMs={}",
-                        started.elapsed().as_millis()
+                        started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                     ),
                 );
                 Ok(())
@@ -828,9 +828,9 @@ pub(super) fn clear_account_state(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 channel_trace(
                     "weixin.account-clear",
-                    &format!(
+                    || format!(
                         "event=end scope=channel outcome=noop reason=not-found elapsedMs={}",
-                        started.elapsed().as_millis()
+                        started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                     ),
                 );
                 Ok(())
@@ -838,10 +838,10 @@ pub(super) fn clear_account_state(
             Err(error) => {
                 channel_trace(
                     "weixin.account-clear",
-                    &format!(
+                    || format!(
                         "event=end scope=channel error={:?} elapsedMs={}",
                         error.kind(),
-                        started.elapsed().as_millis()
+                        started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                     ),
                 );
                 Err(())
@@ -856,30 +856,30 @@ pub(super) fn clear_account_state(
     for suffix in [".json", ".sync.json", ".context-tokens.json"] {
         channel_trace(
             "weixin.account-file-remove",
-            &format!("event=begin fileKind={suffix}"),
+            || format!("event=begin fileKind={suffix}"),
         );
         match std::fs::remove_file(accounts_dir.join(format!("{account_id}{suffix}"))) {
             Ok(()) => channel_trace(
                 "weixin.account-file-remove",
-                &format!(
+                || format!(
                     "event=end fileKind={suffix} outcome=removed elapsedMs={}",
-                    started.elapsed().as_millis()
+                    started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                 ),
             ),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => channel_trace(
                 "weixin.account-file-remove",
-                &format!(
+                || format!(
                     "event=end fileKind={suffix} outcome=noop reason=not-found elapsedMs={}",
-                    started.elapsed().as_millis()
+                    started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                 ),
             ),
             Err(error) => {
                 channel_trace(
                     "weixin.account-file-remove",
-                    &format!(
+                    || format!(
                         "event=end fileKind={suffix} error={:?} elapsedMs={}",
                         error.kind(),
-                        started.elapsed().as_millis()
+                        started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                     ),
                 );
                 return Err(());
@@ -893,14 +893,14 @@ pub(super) fn clear_account_state(
     } else {
         channel_trace(
             "weixin.account-index-write",
-            "outcome=noop reason=not-indexed",
+            || "outcome=noop reason=not-indexed",
         );
     }
     channel_trace(
         "weixin.account-clear",
-        &format!(
+        || format!(
             "event=end scope=account outcome=removed elapsedMs={}",
-            started.elapsed().as_millis()
+            started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
         ),
     );
     Ok(())
@@ -911,16 +911,16 @@ fn account_file(accounts_dir: &Path, account_id: &str) -> PathBuf {
 }
 
 fn read_account_index(path: &Path) -> Result<Vec<String>, ()> {
-    let started = Instant::now();
-    channel_trace("weixin.account-index-read", "event=begin");
+    let started = platform::trace::enabled().then(Instant::now);
+    channel_trace("weixin.account-index-read", || "event=begin");
     let mut bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             channel_trace(
                 "weixin.account-index-read",
-                &format!(
+                || format!(
                     "event=end outcome=absent elapsedMs={}",
-                    started.elapsed().as_millis()
+                    started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                 ),
             );
             return Ok(Vec::new());
@@ -928,10 +928,10 @@ fn read_account_index(path: &Path) -> Result<Vec<String>, ()> {
         Err(error) => {
             channel_trace(
                 "weixin.account-index-read",
-                &format!(
+                || format!(
                     "event=end error={:?} elapsedMs={}",
                     error.kind(),
-                    started.elapsed().as_millis()
+                    started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                 ),
             );
             return Err(());
@@ -940,17 +940,17 @@ fn read_account_index(path: &Path) -> Result<Vec<String>, ()> {
     let parsed = serde_json::from_slice::<Value>(&bytes);
     bytes.zeroize();
     let Value::Array(values) = parsed.map_err(|_| {
-        channel_trace("weixin.account-index-read", "event=end error=json-decode");
+        channel_trace("weixin.account-index-read", || "event=end error=json-decode");
     })?
     else {
-        channel_trace("weixin.account-index-read", "event=end error=invalid-shape");
+        channel_trace("weixin.account-index-read", || "event=end error=invalid-shape");
         return Err(());
     };
     channel_trace(
         "weixin.account-index-read",
-        &format!(
+        || format!(
             "event=end outcome=decoded elapsedMs={}",
-            started.elapsed().as_millis()
+            started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
         ),
     );
     Ok(values
@@ -963,36 +963,36 @@ fn read_account_index(path: &Path) -> Result<Vec<String>, ()> {
 }
 
 fn write_account_index(state_dir: &Path, path: &Path, accounts: &[String]) -> Result<(), ()> {
-    let started = Instant::now();
-    channel_trace("weixin.account-index-write", "event=begin");
+    let started = platform::trace::enabled().then(Instant::now);
+    channel_trace("weixin.account-index-write", || "event=begin");
     std::fs::create_dir_all(state_dir).map_err(|error| {
         channel_trace(
             "weixin.account-index-write",
-            &format!(
+            || format!(
                 "event=end stage=mkdir error={:?} elapsedMs={}",
                 error.kind(),
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
     })?;
     let bytes = serde_json::to_vec_pretty(accounts).map_err(|_| {
-        channel_trace("weixin.account-index-write", "event=end error=json-encode");
+        channel_trace("weixin.account-index-write", || "event=end error=json-encode");
     })?;
     std::fs::write(path, bytes).map_err(|error| {
         channel_trace(
             "weixin.account-index-write",
-            &format!(
+            || format!(
                 "event=end stage=write error={:?} elapsedMs={}",
                 error.kind(),
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
     })?;
     channel_trace(
         "weixin.account-index-write",
-        &format!(
+        || format!(
             "event=end outcome=written elapsedMs={}",
-            started.elapsed().as_millis()
+            started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
         ),
     );
     Ok(())

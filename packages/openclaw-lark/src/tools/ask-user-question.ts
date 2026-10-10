@@ -25,7 +25,7 @@ import type { OpenClawConfig, OpenClawPluginApi } from 'openclaw/plugin-sdk/core
 import { Type } from '@sinclair/typebox';
 import { getTicket, withTicket } from '../core/lark-ticket';
 import { resolveCardCallbackOperatorId } from '../core/card-action-operator';
-import { larkLogger } from '../core/lark-logger';
+import { isTraceEnabled, larkLogger } from '../core/lark-logger';
 import { createCardEntity, sendCardByCardId, updateCardKitCard } from '../card/cardkit';
 import { buildQueueKey, enqueueFeishuChatTask } from '../channel/chat-queue';
 import { handleFeishuMessage } from '../messaging/inbound/handler';
@@ -289,7 +289,7 @@ export function handleAskUserAction(data: unknown, _cfg: OpenClawConfig, account
     // Targeted fallback: exact accountId:chatId match via secondary index
     ctx = findQuestionByChat(accountId, openChatId);
     if (ctx) {
-      log.info(`resolved question via chat-scoped fallback: ${ctx.questionId}`);
+      if (isTraceEnabled()) log.trace(`resolved question via chat-scoped fallback: ${ctx.questionId}`);
     }
   }
   if (!ctx) {
@@ -311,7 +311,7 @@ export function handleAskUserAction(data: unknown, _cfg: OpenClawConfig, account
     return { toast: { type: 'error', content: '表单数据丢失，请重试' } };
   }
 
-  log.info(`form_value: ${JSON.stringify(formValue)}`);
+  log.trace(() => `form_value: ${JSON.stringify(formValue)}`);
 
   // ---- Parse form_value → answers ----
   const answers: Record<string, string> = {};
@@ -1084,5 +1084,5 @@ export function registerAskUserQuestionTool(api: OpenClawPluginApi): void {
     },
   });
 
-  api.logger.debug?.(`${toolName}: registered tool`);
+  log.debug(() => `${toolName}: registered tool`);
 }

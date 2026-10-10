@@ -91,6 +91,8 @@ fn pending_approvals_body(approvals: &organization::run::TeamPendingApprovals) -
         "approvals": approvals.approvals().iter().map(|approval| json!({
             "approvalId": approval.approval_id(),
             "stageId": approval.stage_id(),
+            "subject": approval.subject(),
+            "nodeId": approval.node_id(),
             "roleId": approval.role_id(),
             "reason": approval.reason(),
             "requestedAction": approval.requested_action(),

@@ -36,44 +36,44 @@ export function handleRuntimeEvent(method, tabId, params, _ctx) {
     }
 
     case 'Runtime.consoleAPICalled':
-      log.debug(
+      log.debug(() => [
         'console.' + (params?.type || 'log') + ':', tabId,
         'args:', params?.args?.length || 0,
         'contextId:', params?.executionContextId,
-      )
+      ])
       break
 
     case 'Runtime.executionContextCreated':
-      log.debug(
+      log.debug(() => [
         'context created:', tabId,
         'id:', params?.context?.id,
         'name:', params?.context?.name,
         'origin:', truncate(params?.context?.origin || '', 60),
-      )
+      ])
       break
 
     case 'Runtime.executionContextDestroyed':
-      log.debug(
+      log.debug(() => [
         'context destroyed:', tabId,
         'id:', params?.executionContextId || params?.executionContextUniqueId,
-      )
+      ])
       break
 
     case 'Runtime.executionContextsCleared':
-      log.debug('all contexts cleared:', tabId)
+      log.debug(() => ['all contexts cleared:', tabId])
       break
 
     case 'Runtime.bindingCalled':
-      log.debug(
+      log.debug(() => [
         'binding called:', tabId,
         'name:', params?.name,
         'payload:', truncate(params?.payload || '', 60),
         'contextId:', params?.executionContextId,
-      )
+      ])
       break
 
     case 'Runtime.inspectRequested':
-      log.debug('inspect requested:', tabId, 'hints:', JSON.stringify(params?.hints))
+      log.debug(() => ['inspect requested:', tabId, 'hints:', JSON.stringify(params?.hints)])
       break
   }
 }

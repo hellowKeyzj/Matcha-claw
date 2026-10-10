@@ -1,3 +1,5 @@
+import { normalizeAppError } from './error-model';
+
 export type HostApiProxySuccessData = {
   status: number;
   ok: boolean;
@@ -131,7 +133,7 @@ export function unwrapHostApiProxyEnvelope<T>(
   const { status, ok, json, text } = envelope.data;
   if (status >= 400 || ok === false) {
     const fallbackMessage = text || `Host API request failed: ${context.method} ${context.path} (HTTP ${status})`;
-    throw new Error(extractHostApiErrorMessage(json, fallbackMessage));
+    throw normalizeAppError(new Error(extractHostApiErrorMessage(json, fallbackMessage)), { ...context, status });
   }
 
   if (status === 204) {

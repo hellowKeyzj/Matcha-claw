@@ -88,7 +88,7 @@ export function registerFeishuCalendarCalendarTool(api: OpenClawPluginApi): void
             // LIST CALENDARS
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: page_size=${p.page_size ?? 50}, page_token=${p.page_token ?? 'none'}`);
+              log.trace(() => `list: page_size=${p.page_size ?? 50}, page_token=${p.page_token ?? 'none'}`);
 
               const res = await client.invoke(
                 'feishu_calendar_calendar.list',
@@ -127,7 +127,7 @@ export function registerFeishuCalendarCalendarTool(api: OpenClawPluginApi): void
                 });
               }
 
-              log.info(`get: calendar_id=${p.calendar_id}`);
+              log.trace(() => `get: calendar_id=${p.calendar_id}`);
 
               const res = await client.invoke(
                 'feishu_calendar_calendar.get',
@@ -154,7 +154,7 @@ export function registerFeishuCalendarCalendarTool(api: OpenClawPluginApi): void
             // PRIMARY CALENDAR
             // -----------------------------------------------------------------
             case 'primary': {
-              log.info(`primary: querying primary calendar`);
+              log.trace(() => `primary: querying primary calendar`);
 
               const res = await client.invoke(
                 'feishu_calendar_calendar.primary',

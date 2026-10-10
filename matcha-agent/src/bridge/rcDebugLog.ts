@@ -6,6 +6,7 @@
 import { appendFileSync, mkdirSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { isTraceEnabled } from '../utils/trace.js'
 
 const LOG_PATH = join(homedir(), '.claude', 'rc-debug.log')
 
@@ -16,7 +17,9 @@ function ensureLogDir() {
 
 let headerWritten = false
 
-export function rcLog(msg: string): void {
+export function rcLog(msg: string | (() => string)): void {
+  if (!isTraceEnabled()) return
+  msg = typeof msg === 'function' ? msg() : msg
   try {
     if (!headerWritten) {
       ensureLogDir()
@@ -35,6 +38,7 @@ export function rcLog(msg: string): void {
 
 /** Clear the log file at session start. */
 export function rcLogClear(): void {
+  if (!isTraceEnabled()) return
   try {
     ensureLogDir()
     appendFileSync(LOG_PATH, '')

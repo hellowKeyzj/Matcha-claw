@@ -1,8 +1,26 @@
-import { describe, expect, it, vi } from 'vitest';
+import { createRequire } from 'node:module';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { TeamRunGraphCanvas } from '@/pages/Teams/TeamRunGraphCanvas';
 import type { TeamGraphNodeRecord, TeamGraphSnapshotRecord } from '@/services/openclaw/team-runtime-client';
 import teamsEn from '@/i18n/locales/en/teams.json';
+import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
+
+const { Worker: ElkWorker } = createRequire(import.meta.url)('elkjs/lib/elk-worker.min.js');
+
+beforeEach(() => {
+  vi.stubGlobal('Worker', class extends ElkWorker {
+    addEventListener() {}
+    terminate() {}
+  });
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(960);
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(520);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 const labels = {
   ...teamsEn.run.graphCanvas,
@@ -25,19 +43,31 @@ const labels = {
   startCronCustomIntervalMinutes: 'Every minutes', startCronCustomIntervalHours: 'Every hours', startCronCustomTime: 'Time',
   startCronCustomValueRequired: 'Cron required', startTriggerHint: 'Trigger hint', defaultOutputPort: 'Output', edges: 'Edges', noEdges: 'No edges',
   nodePaletteDescriptions: { start: 'Start', work: 'Work', review: 'Review', human_decision: 'Decision', script_review: 'Script', join: 'Join', end: 'End' },
-  workPrompt: 'Work prompt', outputArtifactKind: 'Output artifact kind', groupId: 'Group ID',
-  joinRequireCompleted: 'Require completed upstream nodes', joinAllowFailed: 'Allow failed upstream nodes', joinRetryLimit: 'Join retry limit',
+  workPrompt: 'Work prompt', outputArtifactKind: 'Output artifact kind',
   includeUpstreamResult: 'Include upstream result',
 } as const;
 
+const roles = [
+  { roleId: 'builder', sessionRef: 'rs2' },
+  { roleId: 'reviewer', sessionRef: 'rs4' },
+].map((binding) => ({
+  ...binding,
+  runId: 'run-1',
+  agentId: `${binding.roleId}-agent`,
+  endpointRef: openClawTestRuntimeEndpoint,
+  localSessionId: `${binding.roleId}-session`,
+  endpointSessionId: `${binding.roleId}-session`,
+  sessionIdentity: createOpenClawTestSessionIdentity(`${binding.roleId}-session`, `${binding.roleId}-agent`),
+}));
+
 function renderCanvas(graph: TeamGraphSnapshotRecord, onPatchGraph = vi.fn().mockResolvedValue(undefined)) {
-  render(<TeamRunGraphCanvas graph={graph} emptyLabel="Empty" titleLabel="Run graph" executorLabel="Executor" labels={labels} onPatchGraph={onPatchGraph} />);
+  render(<TeamRunGraphCanvas graph={graph} roles={roles} emptyLabel="Empty" titleLabel="Run graph" executorLabel="Executor" labels={labels} onPatchGraph={onPatchGraph} />);
   return onPatchGraph;
 }
 
 const workGraph: TeamGraphSnapshotRecord = {
   graphId: 'graph-1', workflowPlanId: 'plan-1', runId: 'run-1', status: 'draft',
-  nodes: [{ nodeId: 'work-1', kind: 'work', title: 'Work', roleId: 'builder', taskId: 'task-1', maxAttempts: 1 }],
+  nodes: [{ nodeId: 'work-1', kind: 'work', sourcePorts: ['completed'], sourcePortActions: { completed: ['activate', 'gate', 'finish'] }, targetPorts: ['input'], title: 'Work', roleId: 'builder', taskId: 'task-1', maxAttempts: 1, config: { prompt: 'Build the result.', sessionRef: roles[0].sessionRef } }],
   edges: [],
 };
 
@@ -46,8 +76,9 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
     const patchGraph = renderCanvas(workGraph);
     fireEvent.click(screen.getAllByText('Work')[0]!.closest('[role="button"]')!);
     const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByLabelText('Role ID'), { target: { value: 'reviewer' } });
-    fireEvent.change(within(dialog).getByLabelText('Work prompt'), { target: { value: 'Review the upstream result.' } });
+    fireEvent.change(within(dialog).getByRole('combobox', { name: labels.workMember }), { target: { value: 'reviewer' } });
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Work prompt' }), { target: { value: 'Review the upstream result.' } });
+    fireEvent.click(within(dialog).getByText(labels.optionalOutput));
     fireEvent.change(within(dialog).getByLabelText('Output artifact kind'), { target: { value: 'review-report' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
 
@@ -56,8 +87,7 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
         op: 'replace_node',
         node: expect.objectContaining({
           nodeId: 'work-1', kind: 'work', roleId: 'reviewer', taskId: 'task-1',
-          executor: { kind: 'team-role', roleId: 'reviewer' },
-          config: expect.objectContaining({ prompt: 'Review the upstream result.', outputArtifactKind: 'review-report' }),
+          config: expect.objectContaining({ prompt: 'Review the upstream result.', outputArtifactKind: 'review-report', sessionRef: roles[1].sessionRef }),
         }),
       },
     ]));
@@ -67,7 +97,13 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
   it('adds nodes with bounded draft identifiers', async () => {
     const patchGraph = renderCanvas(workGraph);
 
+    fireEvent.click(screen.getByRole('button', { name: labels.nodePalette }));
     fireEvent.click(screen.getByRole('button', { name: /Role step/ }));
+    const dialog = await screen.findByRole('dialog');
+    expect(patchGraph).not.toHaveBeenCalled();
+    fireEvent.change(within(dialog).getByRole('combobox', { name: labels.workMember }), { target: { value: roles[0].roleId } });
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Work prompt' }), { target: { value: 'Build the result.' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
 
     await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
       {
@@ -75,7 +111,8 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
         node: expect.objectContaining({
           nodeId: expect.stringMatching(/^draft-node:work:/),
           kind: 'work',
-          roleId: 'leader',
+          roleId: roles[0].roleId,
+          config: expect.objectContaining({ prompt: 'Build the result.', sessionRef: roles[0].sessionRef }),
           maxAttempts: 3,
         }),
       },
@@ -93,15 +130,18 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
     const graph: TeamGraphSnapshotRecord = {
       ...workGraph,
       nodes: [
-        { nodeId: 'source-node-with-a-very-long-public-projection-id', kind: 'work', title: 'Source', roleId: 'builder', taskId: 'task-1', maxAttempts: 1 },
-        { nodeId: 'target-node-with-a-very-long-public-projection-id', kind: 'review', title: 'Target', roleId: 'reviewer', maxAttempts: 1 },
+        { nodeId: 'source-node-with-a-very-long-public-projection-id', kind: 'work', sourcePorts: ['completed'], sourcePortActions: { completed: ['activate', 'gate', 'finish'] }, targetPorts: ['input'], title: 'Source', roleId: 'builder', taskId: 'task-1', maxAttempts: 1, config: { prompt: 'Build the result.', sessionRef: roles[0].sessionRef } },
+        { nodeId: 'target-node-with-a-very-long-public-projection-id', kind: 'review', sourcePorts: ['completed', 'rework'], sourcePortActions: { completed: ['activate', 'gate', 'finish'], rework: ['rework'] }, targetPorts: ['input'], title: 'Target', roleId: 'reviewer', maxAttempts: 1, config: { prompt: 'Review the result.', sessionRef: roles[1].sessionRef } },
       ],
       edges: [],
     };
     const patchGraph = renderCanvas(graph);
 
-    fireEvent.click(screen.getByLabelText('Connect from Source: completed'));
+    fireEvent.click(await screen.findByLabelText(`Connect from Source: ${labels.portLabels.completed}`));
     fireEvent.click(screen.getByLabelText('Connect to Target'));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'Action' }), { target: { value: 'activate' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save edge' }));
 
     await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
       {
@@ -124,14 +164,14 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
     const graph: TeamGraphSnapshotRecord = {
       ...workGraph,
       nodes: [
-        { nodeId: 'work-1', kind: 'work', title: 'Work', roleId: 'builder', taskId: 'task-1', maxAttempts: 1 },
-        { nodeId: 'review-1', kind: 'review', title: 'Review', roleId: 'reviewer', maxAttempts: 1 },
+        { nodeId: 'work-1', kind: 'work', sourcePorts: ['completed'], sourcePortActions: { completed: ['activate', 'gate', 'finish'] }, targetPorts: ['input'], title: 'Work', roleId: 'builder', taskId: 'task-1', maxAttempts: 1, config: { prompt: 'Build the result.', sessionRef: roles[0].sessionRef } },
+        { nodeId: 'review-1', kind: 'review', sourcePorts: ['completed', 'rework'], sourcePortActions: { completed: ['activate', 'gate', 'finish'], rework: ['rework'] }, targetPorts: ['input'], title: 'Review', roleId: 'reviewer', maxAttempts: 1, config: { prompt: 'Review the result.', sessionRef: roles[1].sessionRef } },
       ],
       edges: [],
     };
     const patchGraph = renderCanvas(graph);
 
-    fireEvent.click(screen.getByLabelText('Connect from Review: rework'));
+    fireEvent.click(await screen.findByLabelText(`Connect from Review: ${labels.portLabels.rework}`));
     fireEvent.click(screen.getByLabelText('Connect to Work'));
 
     await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
@@ -154,14 +194,17 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
       ...workGraph,
       nodes: [
         { ...workGraph.nodes[0]!, status: 'completed' },
-        { nodeId: 'review-1', kind: 'review', title: 'Review', roleId: 'reviewer', maxAttempts: 1 },
+        { nodeId: 'review-1', kind: 'review', sourcePorts: ['completed', 'rework'], sourcePortActions: { completed: ['activate', 'gate', 'finish'], rework: ['rework'] }, targetPorts: ['input'], title: 'Review', roleId: 'reviewer', maxAttempts: 1, config: { prompt: 'Review the result.', sessionRef: roles[1].sessionRef } },
       ],
       edges: [{ edgeId: 'forward', sourceNodeId: 'work-1', targetNodeId: 'review-1', sourcePort: 'completed', targetPort: 'input', action: 'activate' }],
     };
     const patchGraph = renderCanvas(graph);
 
-    fireEvent.click(screen.getByLabelText('Connect from Review: completed'));
+    fireEvent.click(await screen.findByLabelText(`Connect from Review: ${labels.portLabels.completed}`));
     fireEvent.click(screen.getByLabelText('Connect to Work'));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'Action' }), { target: { value: 'activate' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save edge' }));
 
     await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
       {
@@ -177,14 +220,16 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
       ...workGraph,
       nodes: [
         ...workGraph.nodes,
-        { nodeId: 'review-1', kind: 'review', title: 'Review', roleId: 'reviewer', maxAttempts: 1 },
+        { nodeId: 'review-1', kind: 'review', sourcePorts: ['completed', 'rework'], sourcePortActions: { completed: ['activate', 'gate', 'finish'], rework: ['rework'] }, targetPorts: ['input'], title: 'Review', roleId: 'reviewer', maxAttempts: 1, config: { prompt: 'Review the result.', sessionRef: roles[1].sessionRef } },
       ],
       edges: [{ edgeId: 'edge-1', sourceNodeId: 'review-1', targetNodeId: 'work-1', sourcePort, targetPort: 'input', action: sourcePort === 'rework' ? 'rework' : 'activate' }],
     };
     const patchGraph = renderCanvas(graph);
+    await waitFor(() => expect(screen.getByLabelText('Workflow edges').querySelector('g path')).not.toBeNull());
     fireEvent.click(screen.getByLabelText('Workflow edges').querySelector('g path')!);
     const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByLabelText('When upstream result is'), { target: { value: 'rework' } });
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'When upstream result is' }), { target: { value: 'rework' } });
+    expect(within(within(dialog).getByRole('region', { name: 'Action' })).getByText(labels.edgeActionOptions.rework, { exact: true })).toBeVisible();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save edge' }));
 
     await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
@@ -194,14 +239,24 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
   });
 
   it.each(['start', 'work', 'review', 'human_decision', 'script_review', 'join', 'end'])('preserves and explicitly edits the %s node execution budget', async (kind) => {
+    const sourcePortActions: TeamGraphNodeRecord['sourcePortActions'] = {
+      start: { completed: ['activate', 'gate', 'finish'] },
+      work: { completed: ['activate', 'gate', 'finish'] },
+      review: { completed: ['activate', 'gate', 'finish'], rework: ['rework'] },
+      human_decision: { approved: ['activate', 'gate', 'finish'], rejected: ['activate', 'rework', 'gate', 'finish'], aborted: ['activate', 'rework', 'gate', 'finish'] },
+      script_review: { passed: ['activate', 'gate', 'finish'], failed: ['activate', 'rework', 'gate', 'finish'] },
+      join: { joined: ['activate', 'gate', 'finish'] },
+      end: {},
+    }[kind] as TeamGraphNodeRecord['sourcePortActions'];
     const node: TeamGraphNodeRecord = {
       nodeId: 'node-1', kind, title: 'Configured node', roleId: 'builder', taskId: 'task-1', maxAttempts: 7,
-      executor: { kind: 'team-role', roleId: 'builder' },
-      config: kind === 'start' ? { trigger: { mode: 'cron', cron: '*/10 * * * *' } } : {},
+      sourcePorts: Object.keys(sourcePortActions), sourcePortActions,
+      config: kind === 'start' ? { trigger: { mode: 'cron', cron: '*/10 * * * *' } } : kind === 'work' || kind === 'review' ? { prompt: 'Complete the configured task.', sessionRef: roles[0].sessionRef } : kind === 'script_review' ? { rule: 'pass_through' } : {},
     };
     const patchGraph = renderCanvas({ ...workGraph, nodes: [node] });
     fireEvent.click(screen.getByText('Configured node').closest('[role="button"]')!);
     let dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByText(labels.executionSettings));
     const budgetInput = within(dialog).getByRole('spinbutton', { name: labels.nodeMaxAttempts });
     expect(budgetInput).toHaveValue(7);
     expect(budgetInput).toHaveAttribute('min', '1');
@@ -217,6 +272,7 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
 
     fireEvent.click(screen.getByText('Configured node').closest('[role="button"]')!);
     dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByText(labels.executionSettings));
     fireEvent.change(within(dialog).getByRole('spinbutton', { name: labels.nodeMaxAttempts }), { target: { value: '1' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
     await waitFor(() => expect(patchGraph).toHaveBeenLastCalledWith([
@@ -228,11 +284,12 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
   it.each(['work', 'start'])('rejects invalid %s budgets and accepts the u32 maximum', async (kind) => {
     const graph: TeamGraphSnapshotRecord = {
       ...workGraph,
-      nodes: [{ ...workGraph.nodes[0]!, kind, config: kind === 'start' ? { trigger: { mode: 'cron', cron: '*/10 * * * *' } } : {} }],
+      nodes: [{ ...workGraph.nodes[0]!, kind, config: kind === 'start' ? { trigger: { mode: 'cron', cron: '*/10 * * * *' } } : workGraph.nodes[0]!.config }],
     };
     const patchGraph = renderCanvas(graph);
     fireEvent.click(screen.getAllByText('Work')[0]!.closest('[role="button"]')!);
     const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByText(labels.executionSettings));
     const budgetInput = within(dialog).getByRole('spinbutton', { name: labels.nodeMaxAttempts });
     const save = within(dialog).getByRole('button', { name: 'Save node' });
     for (const value of ['', '0', '-1', '1.5', '1e2', '4294967296']) {
@@ -254,6 +311,7 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByRole('status')).toHaveTextContent(labels.reworkLimitExceeded);
     expect(within(dialog).queryByText('rework_limit_exceeded')).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByText(labels.executionSettings));
     expect(within(dialog).getByRole('spinbutton', { name: labels.nodeMaxAttempts })).toHaveValue(1);
   });
 
@@ -270,9 +328,9 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
       ...workGraph,
       nodes: [
         ...workGraph.nodes,
-        { nodeId: 'join-1', kind: 'join', title: 'Join', groupId: 'group-1', join: { requireCompleted: true, allowFailed: false, retryLimit: 1 }, maxAttempts: 1 },
+        { nodeId: 'join-1', kind: 'join', title: 'Join', sourcePorts: ['joined'], sourcePortActions: { joined: ['activate', 'gate', 'finish'] }, targetPorts: ['input'], config: {}, maxAttempts: 1 },
       ],
-      edges: [{ edgeId: 'edge-1', sourceNodeId: 'work-1', targetNodeId: 'join-1', sourcePort: 'completed', targetPort: 'input', action: 'activate', payload: { includeUpstreamResult: true } }],
+      edges: [{ edgeId: 'edge-1', sourceNodeId: 'work-1', targetNodeId: 'join-1', sourcePort: 'completed', targetPort: 'input', action: 'gate', payload: { includeUpstreamResult: true } }],
     };
     const patchGraph = renderCanvas(graph);
     fireEvent.click(screen.getAllByText('Join')[0]!.closest('[role="button"]')!);
@@ -282,10 +340,11 @@ describe('TeamRunGraphCanvas typed graph fact editors', () => {
     await waitFor(() => expect(patchGraph).toHaveBeenCalledWith([
       {
         op: 'replace_node',
-        node: expect.objectContaining({ nodeId: 'join-1', kind: 'join', title: 'Merge', groupId: 'group-1' }),
+        node: { nodeId: 'join-1', kind: 'join', title: 'Merge', maxAttempts: 1 },
       },
     ]));
 
+    await waitFor(() => expect(screen.getByLabelText('Workflow edges').querySelector('g path')).not.toBeNull());
     fireEvent.click(screen.getByLabelText('Workflow edges').querySelector('g path')!);
     const edgeDialog = await screen.findByRole('dialog');
     fireEvent.click(within(edgeDialog).getByLabelText('Include upstream result'));

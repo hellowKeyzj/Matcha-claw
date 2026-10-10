@@ -1,5 +1,6 @@
+import type { TFunction } from 'i18next';
 import type { SessionRenderToolCard } from '../../../types/session/tool-card';
-import type { ToolActivityTextBlock, ToolActivityTone, ToolActivityTrailingLabel, ToolActivityViewModel } from '../tool-activity-view-model';
+import type { ToolActivityTextBlock, ToolActivityTrailingLabel, ToolActivityContent } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText } from './result-content';
 
 const SHELL_TOOL_NAME_PATTERN = /^(bash|shell|powershell|pwsh|terminal|command|exec|runcommand|run_command|run-command|run command|cmd|sh)$/i;
@@ -141,12 +142,12 @@ function shellLabel(toolName: string, command: string): string {
   return 'Shell';
 }
 
-function titleFromCommand(command: string, label: string): string {
+function titleFromCommand(command: string, label: string, t: TFunction<'chat'>): string {
   const summary = truncateText(compactWhitespace(command), TITLE_COMMAND_LIMIT);
   if (summary) {
     return summary;
   }
-  return `运行 ${label}`;
+  return t('toolActivity.run', { name: label });
 }
 
 function resultBodyText(tool: SessionRenderToolCard): string {
@@ -219,31 +220,13 @@ function isNonZeroExitCode(exitCode: number | string | undefined): boolean {
   return false;
 }
 
-function resolveTone(tool: SessionRenderToolCard, output: ParsedShellOutput): ToolActivityTone {
-  if (tool.status === 'running') return 'running';
-  if (tool.status === 'error') return 'danger';
-  if (tool.status === 'missing_result') return 'muted';
-  if (isNonZeroExitCode(output.exitCode)) return 'danger';
-  return 'neutral';
-}
-
-function resolveError(tool: SessionRenderToolCard, output: ParsedShellOutput): boolean {
-  return tool.status === 'error' || isNonZeroExitCode(output.exitCode);
-}
-
-function buildTrailingLabels(tool: SessionRenderToolCard, output: ParsedShellOutput): ToolActivityTrailingLabel[] {
+function buildTrailingLabels(tool: SessionRenderToolCard, output: ParsedShellOutput, t: TFunction<'chat'>): ToolActivityTrailingLabel[] {
   const labels: ToolActivityTrailingLabel[] = [];
-  if (tool.status === 'running') {
-    labels.push({ text: '运行中', tone: 'muted' });
-  }
   if (output.exitCode !== undefined) {
-    labels.push({ text: `exit ${output.exitCode}`, tone: 'muted' });
-  }
-  if (output.status) {
-    labels.push({ text: output.status, tone: 'muted' });
+    labels.push({ text: t('toolActivity.shell.exit', { code: output.exitCode }), tone: 'muted' });
   }
   if (output.signal) {
-    labels.push({ text: `signal ${output.signal}`, tone: 'muted' });
+    labels.push({ text: t('toolActivity.shell.signal', { signal: output.signal }), tone: 'muted' });
   }
   const duration = formatDuration(output.durationMs ?? tool.durationMs);
   if (duration) {
@@ -252,31 +235,31 @@ function buildTrailingLabels(tool: SessionRenderToolCard, output: ParsedShellOut
   return labels;
 }
 
-function buildDetailsBlock(output: ParsedShellOutput): ToolActivityTextBlock | null {
+function buildDetailsBlock(output: ParsedShellOutput, t: TFunction<'chat'>): ToolActivityTextBlock | null {
   const lines: string[] = [];
   if (output.isTruncated) {
-    lines.push('输出已截断。');
+    lines.push(t('toolActivity.shell.truncated'));
   }
   if (output.fullOutputPath) {
-    lines.push(`完整输出：${output.fullOutputPath}`);
+    lines.push(t('toolActivity.shell.fullOutputPath', { path: output.fullOutputPath }));
   }
   if (!lines.length) {
     return null;
   }
   return {
     kind: 'notice',
-    title: output.isTruncated ? '输出详情' : '完整输出',
+    title: output.isTruncated ? t('toolActivity.shell.outputDetails') : t('toolActivity.shell.fullOutput'),
     text: lines.join('\n'),
     copyable: false,
   };
 }
 
-function buildTextBlocks(command: string, label: string, output: ParsedShellOutput): ToolActivityTextBlock[] {
+function buildTextBlocks(command: string, label: string, output: ParsedShellOutput, t: TFunction<'chat'>): ToolActivityTextBlock[] {
   const blocks: ToolActivityTextBlock[] = [];
   if (command.trim()) {
     blocks.push({
       kind: 'input',
-      title: `${label} 命令`,
+      title: t('toolActivity.shell.command', { name: label }),
       text: command.trim(),
       copyable: true,
     });
@@ -300,20 +283,23 @@ function buildTextBlocks(command: string, label: string, output: ParsedShellOutp
   if (!output.stdout && !output.stderr && output.fallbackText) {
     blocks.push({
       kind: 'output',
-      title: '输出',
+      title: t('toolActivity.output'),
       text: output.fallbackText,
       copyable: false,
     });
   }
+  if (output.status) {
+    blocks.push({ kind: 'notice', title: t('toolActivity.shell.outputStatus'), text: output.status, copyable: false });
+  }
   if (isNonZeroExitCode(output.exitCode)) {
     blocks.push({
       kind: 'notice',
-      title: '退出码',
-      text: `exit ${output.exitCode}`,
+      title: t('toolActivity.shell.exitCode'),
+      text: t('toolActivity.shell.exit', { code: output.exitCode }),
       copyable: false,
     });
   }
-  const detailsBlock = buildDetailsBlock(output);
+  const detailsBlock = buildDetailsBlock(output, t);
   if (detailsBlock) {
     blocks.push(detailsBlock);
   }
@@ -324,19 +310,17 @@ export function isShellToolCard(tool: SessionRenderToolCard): boolean {
   return SHELL_TOOL_NAME_PATTERN.test(tool.name.trim()) || SHELL_TOOL_NAME_PATTERN.test(tool.displayTitle.trim());
 }
 
-export function shellToolActivityRenderer(tool: SessionRenderToolCard): ToolActivityViewModel {
+export function shellToolActivityRenderer(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {
   const command = readCommand(tool).trim();
   const label = shellLabel(`${tool.name} ${tool.displayTitle}`, command);
   const output = parseShellOutput(tool);
-  const textBlocks = buildTextBlocks(command, label, output);
+  const textBlocks = buildTextBlocks(command, label, output, t);
 
   return {
-    title: titleFromCommand(command, label),
-    tone: resolveTone(tool, output),
-    isRunning: tool.status === 'running',
-    isError: resolveError(tool, output),
+    title: titleFromCommand(command, label, t),
+    hasOutputError: isNonZeroExitCode(output.exitCode),
     canExpand: textBlocks.length > 0,
-    trailingLabels: buildTrailingLabels(tool, output),
+    trailingLabels: buildTrailingLabels(tool, output, t),
     textBlocks,
   };
 }

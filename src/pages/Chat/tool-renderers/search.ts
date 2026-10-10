@@ -1,8 +1,8 @@
-import type { SessionRenderToolCard, SessionRenderToolStatusKind } from '../../../types/session/tool-card';
+import type { TFunction } from 'i18next';
+import type { SessionRenderToolCard } from '../../../types/session/tool-card';
 import type {
-  ToolActivityTone,
   ToolActivityTrailingLabel,
-  ToolActivityViewModel,
+  ToolActivityContent,
 } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
 
@@ -184,46 +184,39 @@ function formatDuration(durationMs?: number): string | null {
   return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
-function resolveTone(status: SessionRenderToolStatusKind): ToolActivityTone {
-  if (status === 'running') return 'running';
-  if (status === 'error') return 'danger';
-  if (status === 'missing_result') return 'muted';
-  return 'neutral';
-}
-
-function buildTitle(kind: SearchToolKind, query: SearchToolQuery): string {
+function buildTitle(kind: SearchToolKind, query: SearchToolQuery, t: TFunction<'chat'>): string {
   const file = query.file ?? query.path;
   const needle = query.pattern ?? query.query ?? query.glob;
 
   if (kind === 'read') {
-    return `读取 ${shortText(file ?? '文件', MAX_TITLE_VALUE_LENGTH)}`;
+    return t('toolActivity.search.read', { name: shortText(file ?? t('toolActivity.fileLabel'), MAX_TITLE_VALUE_LENGTH) });
   }
   if (kind === 'glob') {
-    return '列出匹配文件';
+    return t('toolActivity.search.listMatches');
   }
   if (kind === 'list') {
-    return file ? `列出 ${shortText(file, MAX_TITLE_VALUE_LENGTH)}` : '列出文件';
+    return file ? t('toolActivity.search.list', { name: shortText(file, MAX_TITLE_VALUE_LENGTH) }) : t('toolActivity.search.listFiles');
   }
-  return `搜索 ${shortText(needle ?? '内容', MAX_TITLE_VALUE_LENGTH)}`;
+  return t('toolActivity.search.search', { query: shortText(needle ?? t('toolActivity.content'), MAX_TITLE_VALUE_LENGTH) });
 }
 
-function appendCondition(lines: string[], label: string, value?: string): void {
+function appendCondition(lines: string[], label: string, value: string | undefined, t: TFunction<'chat'>): void {
   if (value) {
-    lines.push(`${label}：${value}`);
+    lines.push(t('toolActivity.field', { label, value }));
   }
 }
 
-function formatQueryConditions(query: SearchToolQuery): string {
+function formatQueryConditions(query: SearchToolQuery, t: TFunction<'chat'>): string {
   const lines: string[] = [];
-  appendCondition(lines, '文件', query.file);
-  if (query.path !== query.file) appendCondition(lines, '路径', query.path);
-  appendCondition(lines, '模式', query.pattern);
-  appendCondition(lines, '查询', query.query);
-  appendCondition(lines, 'Glob', query.glob);
-  appendCondition(lines, '类型', query.type);
-  appendCondition(lines, '输出模式', query.outputMode);
-  appendCondition(lines, '数量上限', query.headLimit);
-  appendCondition(lines, '偏移', query.offset);
+  appendCondition(lines, t('toolActivity.fileLabel'), query.file, t);
+  if (query.path !== query.file) appendCondition(lines, t('toolActivity.path'), query.path, t);
+  appendCondition(lines, t('toolActivity.search.pattern'), query.pattern, t);
+  appendCondition(lines, t('toolActivity.search.query'), query.query, t);
+  appendCondition(lines, 'Glob', query.glob, t);
+  appendCondition(lines, t('toolActivity.type'), query.type, t);
+  appendCondition(lines, t('toolActivity.search.outputMode'), query.outputMode, t);
+  appendCondition(lines, t('toolActivity.search.limit'), query.headLimit, t);
+  appendCondition(lines, t('toolActivity.search.offset'), query.offset, t);
   return lines.join('\n');
 }
 
@@ -524,31 +517,25 @@ function buildOutputSummary(tool: SessionRenderToolCard, kind: SearchToolKind, q
   return summary;
 }
 
-function formatTruncated(items: string[], itemName: string, limit: number): string {
+function formatTruncated(items: string[], unit: 'items' | 'lines', limit: number, t: TFunction<'chat'>): string {
   const visible = items.slice(0, limit);
   const remaining = items.length - visible.length;
   if (remaining <= 0) {
     return visible.join('\n');
   }
-  return `${visible.join('\n')}\n… 余下 ${remaining} ${itemName}`;
+  return `${visible.join('\n')}\n${unit === 'items' ? t('toolActivity.remainingItems', { count: remaining }) : t('toolActivity.remainingLines', { count: remaining })}`;
 }
 
-function buildTrailingLabels(tool: SessionRenderToolCard, summary: SearchOutputSummary, title: string): ToolActivityTrailingLabel[] {
+function buildTrailingLabels(tool: SessionRenderToolCard, summary: SearchOutputSummary, t: TFunction<'chat'>): ToolActivityTrailingLabel[] {
   const labels: ToolActivityTrailingLabel[] = [];
-  if (tool.status === 'running' && title !== '运行中') {
-    labels.push({ text: '运行中', tone: 'muted' });
-  }
-  if (tool.status === 'missing_result' && title !== '无结果') {
-    labels.push({ text: '无结果', tone: 'muted' });
-  }
   if (summary.count != null) {
-    labels.push({ text: `${summary.count} 处命中`, tone: 'muted' });
+    labels.push({ text: t('toolActivity.search.hits', { count: summary.count }), tone: 'muted' });
   } else if (summary.paths.length > 0) {
-    labels.push({ text: `${summary.paths.length} 个路径`, tone: 'muted' });
+    labels.push({ text: t('toolActivity.search.paths', { count: summary.paths.length }), tone: 'muted' });
   } else if (summary.hitLines.length > 0) {
-    labels.push({ text: `${summary.hitLines.length} 行命中`, tone: 'muted' });
+    labels.push({ text: t('toolActivity.search.hitLines', { count: summary.hitLines.length }), tone: 'muted' });
   } else if (summary.contentLines.length > 0) {
-    labels.push({ text: `${summary.contentLines.length} 行`, tone: 'muted' });
+    labels.push({ text: t('toolActivity.lines', { count: summary.contentLines.length }), tone: 'muted' });
   }
 
   const durationLabel = formatDuration(tool.durationMs);
@@ -558,26 +545,26 @@ function buildTrailingLabels(tool: SessionRenderToolCard, summary: SearchOutputS
   return labels;
 }
 
-function appendOutputBlocks(blocks: ToolActivityViewModel['textBlocks'], kind: SearchToolKind, summary: SearchOutputSummary): void {
+function appendOutputBlocks(blocks: ToolActivityContent['textBlocks'], kind: SearchToolKind, summary: SearchOutputSummary, t: TFunction<'chat'>): void {
   if (summary.paths.length > 0) {
     blocks.push({
       kind: 'output',
-      title: '路径列表',
-      text: formatTruncated(summary.paths, '项', MAX_LIST_ITEMS),
+      title: t('toolActivity.search.pathList'),
+      text: formatTruncated(summary.paths, 'items', MAX_LIST_ITEMS, t),
       copyable: false,
     });
   }
 
   const hitSummary = [
-    summary.count != null ? `命中数：${summary.count}` : null,
-    summary.hitLines.length > 0 ? formatTruncated(summary.hitLines, '行', MAX_TEXT_LINES) : null,
-    summary.resultItems.length > 0 ? formatTruncated(summary.resultItems, '项', MAX_LIST_ITEMS) : null,
+    summary.count != null ? t('toolActivity.search.hitCount', { count: summary.count }) : null,
+    summary.hitLines.length > 0 ? formatTruncated(summary.hitLines, 'lines', MAX_TEXT_LINES, t) : null,
+    summary.resultItems.length > 0 ? formatTruncated(summary.resultItems, 'items', MAX_LIST_ITEMS, t) : null,
   ].filter((item): item is string => item != null && item.trim().length > 0).join('\n');
 
   if (hitSummary) {
     blocks.push({
       kind: 'output',
-      title: '命中摘要',
+      title: t('toolActivity.search.hitSummary'),
       text: hitSummary,
       copyable: false,
     });
@@ -586,8 +573,8 @@ function appendOutputBlocks(blocks: ToolActivityViewModel['textBlocks'], kind: S
   if (summary.contentLines.length > 0) {
     blocks.push({
       kind: 'output',
-      title: kind === 'read' ? '读取内容' : '输出',
-      text: formatTruncated(summary.contentLines, '行', MAX_TEXT_LINES),
+      title: kind === 'read' ? t('toolActivity.search.readContent') : t('toolActivity.output'),
+      text: formatTruncated(summary.contentLines, 'lines', MAX_TEXT_LINES, t),
       copyable: false,
     });
   }
@@ -595,45 +582,42 @@ function appendOutputBlocks(blocks: ToolActivityViewModel['textBlocks'], kind: S
   if (summary.hasOutput && summary.paths.length === 0 && !hitSummary && summary.contentLines.length === 0) {
     blocks.push({
       kind: 'notice',
-      text: '工具已返回输出，未识别为路径或命中列表。',
+      text: t('toolActivity.search.unrecognizedOutput'),
       copyable: false,
     });
   }
 }
 
-export function renderSearchToolActivity(tool: SessionRenderToolCard): ToolActivityViewModel {
+export function renderSearchToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {
   const kind = resolveToolKind(tool);
   const query = readSearchToolQuery(tool);
-  const title = buildTitle(kind, query);
+  const title = buildTitle(kind, query, t);
   const summary = buildOutputSummary(tool, kind, query);
-  const textBlocks: ToolActivityViewModel['textBlocks'] = [];
-  const queryConditions = formatQueryConditions(query);
+  const textBlocks: ToolActivityContent['textBlocks'] = [];
+  const queryConditions = formatQueryConditions(query, t);
 
   if (queryConditions) {
     textBlocks.push({
       kind: 'input',
-      title: '查询条件',
+      title: t('toolActivity.search.conditions'),
       text: queryConditions,
       copyable: false,
     });
   }
 
-  appendOutputBlocks(textBlocks, kind, summary);
+  appendOutputBlocks(textBlocks, kind, summary, t);
 
   return {
     title,
-    tone: resolveTone(tool.status),
-    isRunning: tool.status === 'running',
-    isError: tool.status === 'error',
     canExpand: textBlocks.length > 0,
-    trailingLabels: buildTrailingLabels(tool, summary, title),
+    trailingLabels: buildTrailingLabels(tool, summary, t),
     textBlocks,
   };
 }
 
-export function searchToolActivityRenderer(tool: SessionRenderToolCard): ToolActivityViewModel | null {
+export function searchToolActivityRenderer(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent | null {
   if (!canRenderSearchToolActivity(tool)) {
     return null;
   }
-  return renderSearchToolActivity(tool);
+  return renderSearchToolActivity(tool, t);
 }

@@ -261,15 +261,15 @@ pub(crate) fn observe_native_terminal(
             waiting_at: observed_at,
         },
     };
-    let reduced = if superseded {
+    if superseded {
         if native_terminal == NativeTerminalStatus::Cancelled {
-            crate::run::graph::settle_superseded_attempt(graph.clone(), event)
+            graph.settle_superseded(event)
         } else {
             // The native fact is durable, but only its authorized output can settle history.
-            Ok(graph.clone())
+            Ok(())
         }
     } else {
-        crate::reduce(graph.clone(), event)
+        graph.apply_event(event)
     }
     .map_err(|error| match error {
         crate::ReduceError::UnknownNode(_) => TerminalObservationError::NodeMismatch,
@@ -288,7 +288,6 @@ pub(crate) fn observe_native_terminal(
         }
     };
     delivery.mark_terminal_observed(observation);
-    *graph = reduced;
     Ok(outcome)
 }
 
@@ -470,40 +469,55 @@ fn resolve_authorized_graph_outcome_with_output(
             failed_at: resolution.resolved_at(),
         },
     };
-    let reduced = if superseded {
-        crate::run::graph::settle_superseded_attempt(graph.clone(), event)
-    } else {
-        crate::reduce(graph.clone(), event)
+    let local_mutation = graph.changes().is_none();
+    if local_mutation {
+        graph.begin_mutation();
     }
-    .map_err(|error| match error {
-        crate::ReduceError::StaleFence { .. } => AuthorizedGraphResolutionError::StaleFence,
-        crate::ReduceError::UnknownNode(_) => AuthorizedGraphResolutionError::NodeMismatch,
-        _ => AuthorizedGraphResolutionError::GraphStateMismatch,
-    })?;
-    let settled = reduced.executions()[&NodeId::new(observation.node_id())]
-        .attempts()
-        .iter()
-        .find(|attempt| attempt.fence() == resolution.fence())
-        .ok_or(AuthorizedGraphResolutionError::StaleFence)?;
-    let effective_outcome = match settled.status() {
-        crate::AttemptStatus::Completed => AuthorizedGraphOutcome::Completed,
-        crate::AttemptStatus::Failed => AuthorizedGraphOutcome::Failed,
-        _ => return Err(AuthorizedGraphResolutionError::GraphStateMismatch),
-    };
+    let result = (|| {
+        if superseded {
+            graph.settle_superseded(event)
+        } else {
+            graph.apply_event(event)
+        }
+        .map_err(|error| match error {
+            crate::ReduceError::StaleFence { .. } => AuthorizedGraphResolutionError::StaleFence,
+            crate::ReduceError::UnknownNode(_) => AuthorizedGraphResolutionError::NodeMismatch,
+            crate::ReduceError::InvalidOutputPort { .. } => AuthorizedGraphResolutionError::OutputPortDoesNotMatchEdge,
+            _ => AuthorizedGraphResolutionError::GraphStateMismatch,
+        })?;
+        let settled = graph.executions()[&NodeId::new(observation.node_id())]
+            .attempts()
+            .iter()
+            .find(|attempt| attempt.fence() == resolution.fence())
+            .ok_or(AuthorizedGraphResolutionError::StaleFence)?;
+        match settled.status() {
+            crate::AttemptStatus::Completed => Ok(AuthorizedGraphOutcome::Completed),
+            crate::AttemptStatus::Failed => Ok(AuthorizedGraphOutcome::Failed),
+            _ => Err(AuthorizedGraphResolutionError::GraphStateMismatch),
+        }
+    })();
+    if local_mutation {
+        if result.is_ok() { graph.commit_mutation(); } else { graph.rollback_mutation(); }
+    }
+    let effective_outcome = result?;
     let resolution = resolution.with_outcome(effective_outcome);
     let DeliveryPhase::TerminalObserved { observation } = &mut delivery.phase else {
         unreachable!("delivery phase was matched before graph reduction")
     };
     observation.resolve_graph(output, resolution);
-    *graph = reduced;
     Ok(AuthorizedGraphResolutionOutcome::Recorded)
 }
 
-fn require_source_port_routes_or_terminal(
+pub(super) fn require_source_port_routes_or_terminal(
     graph: &GraphState,
     node_id: &NodeId,
     output_port: &str,
 ) -> Result<(), AuthorizedGraphResolutionError> {
+    let node = graph.definition().node(node_id)
+        .ok_or(AuthorizedGraphResolutionError::NodeMismatch)?;
+    if !node.kind().accepts_completed_output(output_port) {
+        return Err(AuthorizedGraphResolutionError::OutputPortDoesNotMatchEdge);
+    }
     let mut outgoing = graph.definition().outgoing_edges(node_id);
     match outgoing.next() {
         None => Ok(()),

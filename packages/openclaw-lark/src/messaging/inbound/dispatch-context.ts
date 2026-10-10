@@ -187,7 +187,7 @@ export async function resolveThreadSessionKey(params: {
     accountId: account.accountId,
   });
   if (!threadCapable) {
-    log.info(`thread session skipped: group ${chatId} is not topic/thread mode`);
+    log.trace(() => `thread session skipped: group ${chatId} is not topic/thread mode`);
     return undefined;
   }
 

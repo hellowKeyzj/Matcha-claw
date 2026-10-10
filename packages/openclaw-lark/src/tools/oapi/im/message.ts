@@ -145,7 +145,7 @@ export function registerFeishuImUserMessageTool(api: OpenClawPluginApi): boolean
             // SEND MESSAGE
             // -----------------------------------------------------------------
             case 'send': {
-              log.info(
+              log.trace(() =>
                 `send: receive_id_type=${p.receive_id_type}, receive_id=${p.receive_id}, msg_type=${p.msg_type}`,
               );
               const res = await client.invoke(
@@ -184,7 +184,7 @@ export function registerFeishuImUserMessageTool(api: OpenClawPluginApi): boolean
             // REPLY MESSAGE
             // -----------------------------------------------------------------
             case 'reply': {
-              log.info(
+              log.trace(() =>
                 `reply: message_id=${p.message_id}, msg_type=${p.msg_type}, reply_in_thread=${p.reply_in_thread ?? false}`,
               );
               const res = await client.invoke(

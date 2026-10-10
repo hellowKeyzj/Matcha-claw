@@ -525,7 +525,8 @@ export function useInboxPoller({
           `[InboxPoller] Applying team permission update: ${parsed.toolName} allowed in ${parsed.directoryPath}`,
         )
         logForDebugging(
-          `[InboxPoller] Permission update rules: ${jsonStringify(parsed.permissionUpdate.rules)}`,
+          () =>
+            `[InboxPoller] Permission update rules: ${jsonStringify(parsed.permissionUpdate.rules)}`,
         )
 
         setAppState(prev => {
@@ -536,7 +537,8 @@ export function useInboxPoller({
             destination: 'session',
           })
           logForDebugging(
-            `[InboxPoller] Updated session allow rules: ${jsonStringify(updated.alwaysAllowRules.session)}`,
+            () =>
+              `[InboxPoller] Updated session allow rules: ${jsonStringify(updated.alwaysAllowRules.session)}`,
           )
           return {
             ...prev,

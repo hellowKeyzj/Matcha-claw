@@ -120,7 +120,7 @@ impl ArtifactRecord {
         let content_ref = bounded(content_ref.into(), MAX_OPAQUE_BYTES)
             .ok_or(ArtifactRecordError::InvalidContentReference)?;
         let summary = summary
-            .map(|v| bounded(v, MAX_TEXT_BYTES).ok_or(ArtifactRecordError::InvalidSummary))
+            .map(|v| bounded(v, crate::run::MAX_SUMMARY_BYTES).ok_or(ArtifactRecordError::InvalidSummary))
             .transpose()?;
         let source_envelope_id = identity(source_envelope_id.into())?;
         let idempotency_key = identity(idempotency_key.into())?;

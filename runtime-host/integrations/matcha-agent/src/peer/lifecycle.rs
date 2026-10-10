@@ -45,9 +45,6 @@ use crate::{
     },
 };
 
-const MATCHACLAW_SESSION_TRACE: &str = "MATCHACLAW_SESSION_TRACE";
-const MATCHA_AGENT_RUN_TRACE: &str = "MATCHA_AGENT_RUN_TRACE";
-
 pub struct MatchaPeer {
     pub(super) handle: SupervisorHandle,
     pub(super) supervisor: Supervisor,
@@ -469,7 +466,7 @@ pub(crate) fn renderer_projection_step(
 }
 
 fn log_model_run_trace(envelope: &crate::session::protocol_event::EventEnvelope) {
-    if !matcha_trace_enabled() || envelope.event.event_type() != "run.trace" {
+    if !platform::trace::enabled() || envelope.event.event_type() != "run.trace" {
         return;
     }
 
@@ -558,11 +555,6 @@ fn log_model_run_trace(envelope: &crate::session::protocol_event::EventEnvelope)
             }
         })
     );
-}
-
-fn matcha_trace_enabled() -> bool {
-    std::env::var(MATCHACLAW_SESSION_TRACE).as_deref() == Ok("1")
-        || std::env::var(MATCHA_AGENT_RUN_TRACE).as_deref() == Ok("1")
 }
 
 fn safe_trace_detail(event: &Value, key: &str) -> Option<Value> {

@@ -17,6 +17,7 @@ import { createBufferedWriter } from './bufferedWriter.js'
 import { CACHE_PATHS } from './cachePaths.js'
 import { registerCleanup } from './cleanupRegistry.js'
 import { logForDebugging } from './debug.js'
+import { isTraceEnabled } from './trace.js'
 import { getFsImplementation } from './fsOperations.js'
 import { attachErrorLogSink, dateToFilename } from './log.js'
 import { jsonStringify } from './slowOperations.js'
@@ -202,6 +203,7 @@ function logMCPErrorImpl(serverName: string, error: unknown): void {
  * Implementation for logMCPDebug - writes MCP debug message to log file.
  */
 function logMCPDebugImpl(serverName: string, message: string): void {
+  if (!isTraceEnabled()) return
   logForDebugging(`MCP server "${serverName}": ${message}`)
 
   const logFile = getMCPLogsPath(serverName)

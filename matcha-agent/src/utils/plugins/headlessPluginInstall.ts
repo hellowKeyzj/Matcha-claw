@@ -121,7 +121,8 @@ export async function installPluginsForHeadless(): Promise<boolean> {
 
       if (reconcileResult.skipped.length > 0) {
         logForDebugging(
-          `installPluginsForHeadless: skipped ${reconcileResult.skipped.length} marketplace(s) unsupported by zip cache: ${reconcileResult.skipped.join(', ')}`,
+          () =>
+            `installPluginsForHeadless: skipped ${reconcileResult.skipped.length} marketplace(s) unsupported by zip cache: ${reconcileResult.skipped.join(', ')}`,
         )
       }
 

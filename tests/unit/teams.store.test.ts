@@ -10,6 +10,7 @@ vi.mock('@/services/openclaw/team-runtime-client', () => ({
   listTeamRuns: vi.fn(),
   provisionTeamAgents: vi.fn(),
   readTeamRunSnapshot: vi.fn(),
+  readTeamDesignSnapshot: vi.fn(),
   resolveTeamApproval: vi.fn(),
   resumeTeam: vi.fn(),
   submitTeamRunDecision: vi.fn(),
@@ -43,6 +44,7 @@ import {
   importTeamRunGraphYaml as importTeamGraphYaml,
   listTeamRuns as listTeamRunLifecycle,
   readTeamRunSnapshot,
+  readTeamDesignSnapshot,
   resolveTeamApproval as resolveTeamHumanDecision,
   resumeTeam as resumeTeamRunLifecycle,
   submitTeamRunGraphPatch as submitTeamGraphPatch,
@@ -629,7 +631,7 @@ describe('teams store', () => {
         'team-1': {
           runId: 'teamrun-source',
           status: 'running',
-          nodes: [{ nodeId: 'node-1', kind: 'work', title: 'Task 1' }],
+          nodes: [{ nodeId: 'node-1', kind: 'work', title: 'Task 1', sourcePorts: ['completed'], sourcePortActions: { completed: ['activate', 'gate', 'finish'] } }],
           edges: [],
           updatedAt: 222,
         },
@@ -849,8 +851,8 @@ describe('teams store', () => {
       graphId: 'graph:team-1-run-1.0.0-1000',
       workflowPlanId: 'workflow:team-1-run-1.0.0-1000',
       nodes: [
-        { nodeId: 'start', kind: 'start', title: 'Start', status: 'pending', maxAttempts: 1 },
-        { nodeId: 'old', kind: 'work', title: 'Old', status: 'pending', maxAttempts: 1 },
+        { nodeId: 'start', kind: 'start', title: 'Start', status: 'pending', maxAttempts: 1, sourcePorts: ['completed'], sourcePortActions: { completed: ['activate', 'gate', 'finish'] } },
+        { nodeId: 'old', kind: 'work', title: 'Old', status: 'pending', maxAttempts: 1, sourcePorts: ['completed'], sourcePortActions: { completed: ['activate', 'gate', 'finish'] } },
       ],
       edges: [
         { edgeId: 'edge:start:old', sourceNodeId: 'start', targetNodeId: 'old', status: 'waiting' },
@@ -874,6 +876,18 @@ describe('teams store', () => {
       graphByTeamId: { 'team-1': currentGraph },
     } as never);
 
+    const savedNodes = [
+      { nodeId: 'start', kind: 'start', title: 'Start updated', status: 'ready', maxAttempts: 1, sourcePorts: ['completed'], sourcePortActions: { completed: ['activate', 'gate', 'finish'] } },
+      { nodeId: 'work', kind: 'work', title: 'Work', roleId: 'leader', taskId: 'work', status: 'pending', maxAttempts: 1, executor: { kind: 'team-role', roleId: 'leader' }, config: { prompt: 'Work' }, sourcePorts: ['completed'], sourcePortActions: { completed: ['activate', 'gate', 'finish'] } },
+    ];
+    const savedEdges = [
+      { edgeId: 'edge:start:work', sourceNodeId: 'start', targetNodeId: 'work', sourcePort: 'out', targetPort: 'in', action: 'activate', payload: { includeUpstreamResult: true }, status: 'waiting' },
+    ];
+    vi.mocked(readTeamRunSnapshot).mockResolvedValueOnce({
+      ...buildSnapshot(),
+      graph: { ...currentGraph, nodes: savedNodes, edges: savedEdges },
+    } as never);
+
     await useTeamsStore.getState().submitGraphPatch('team-1', operations);
 
     expect(submitTeamGraphPatch).toHaveBeenCalledWith({
@@ -886,19 +900,14 @@ describe('teams store', () => {
       },
       idempotencyKey: expect.stringMatching(/^graph-patch:/),
     });
-    expect(useTeamsStore.getState().graphByTeamId['team-1']?.nodes).toEqual([
-      { nodeId: 'start', kind: 'start', title: 'Start updated', status: 'ready', maxAttempts: 1 },
-      { nodeId: 'work', kind: 'work', title: 'Work', roleId: 'leader', taskId: 'work', status: 'pending', maxAttempts: 1, executor: { kind: 'team-role', roleId: 'leader' }, config: { prompt: 'Work' } },
-    ]);
-    expect(useTeamsStore.getState().graphByTeamId['team-1']?.edges).toEqual([
-      { edgeId: 'edge:start:work', sourceNodeId: 'start', targetNodeId: 'work', sourcePort: 'out', targetPort: 'in', action: 'activate', payload: { includeUpstreamResult: true }, status: 'waiting' },
-    ]);
+    expect(useTeamsStore.getState().graphByTeamId['team-1']?.nodes).toEqual(savedNodes);
+    expect(useTeamsStore.getState().graphByTeamId['team-1']?.edges).toEqual(savedEdges);
   });
 
   it('exports graph YAML through the active TeamRun without mutating graph state', async () => {
     const graph = {
       runId: 'team-1-run-1.0.0-1000',
-      nodes: [{ nodeId: 'node-1', kind: 'work', title: 'Task 1' }],
+      nodes: [{ nodeId: 'node-1', kind: 'work', title: 'Task 1', sourcePorts: ['completed'], sourcePortActions: { completed: ['activate', 'gate', 'finish'] } }],
       edges: [],
       status: 'running',
       updatedAt: 222,
@@ -1099,7 +1108,38 @@ describe('teams store', () => {
   });
 
   it('resolves human decisions through the sealed approval transport', async () => {
-    useTeamsStore.setState({ teams: [teamMeta()], runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] }, runsById: { 'team-1-run-1.0.0-1000': buildSnapshot('waiting_for_user').run ?? undefined }, runByTeamId: { 'team-1': buildSnapshot('waiting_for_user').run ?? undefined } });
+    useTeamsStore.setState({
+      teams: [teamMeta()],
+      runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
+      runsById: { 'team-1-run-1.0.0-1000': buildSnapshot('waiting_for_user').run ?? undefined },
+      runByTeamId: { 'team-1': buildSnapshot('waiting_for_user').run ?? undefined },
+      approvalsByTeamId: { 'team-1': [{
+        approvalId: 'approval-1',
+        runId: 'team-1-run-1.0.0-1000',
+        subject: 'human_decision',
+        nodeId: 'human-1',
+        stageId: 'human-1',
+        roleId: 'leader',
+        reason: 'Review required',
+        requestedAction: 'Approve publication',
+        risk: 'normal',
+        status: 'pending',
+        idempotencyKey: 'approval-1',
+        createdAt: 1,
+      }] },
+    });
+
+    vi.mocked(readTeamDesignSnapshot).mockResolvedValueOnce({
+      success: true,
+      teamId: 'team-1',
+      runId: 'team-1-run-1.0.0-1000',
+      startGate: { status: 'started' },
+      graphVersion: 'a'.repeat(64),
+      designEpoch: null,
+      graph: { nodes: [], edges: [], status: 'waiting' },
+      roles: [],
+      runtimeError: null,
+    });
 
     await useTeamsStore.getState().resolveApproval('team-1', 'approval-1', 'approve', 'Approved');
 

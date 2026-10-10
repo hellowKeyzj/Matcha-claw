@@ -97,12 +97,12 @@ export const convertPost: ContentConverterFn = (raw, ctx) => {
   const v2 = parsed.content_v2;
   const usedV2 = Array.isArray(v2) && v2.length > 0;
   const contentBlocks = usedV2 ? v2 : (parsed.content ?? []);
-  log.info('post content source selected', {
+  log.trace('post content source selected', () => ({
     messageId: ctx.messageId,
     source: usedV2 ? 'content_v2' : 'content',
     hasV2: Array.isArray(v2),
     v2Len: Array.isArray(v2) ? v2.length : 0,
-  });
+  }));
 
   for (const paragraph of contentBlocks) {
     if (!Array.isArray(paragraph)) continue;

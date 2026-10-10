@@ -1,4 +1,5 @@
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry'
+import { logTaskPipeline } from '../shared/debug-logging.js'
 import { TaskStoreError, mapTaskStoreError } from '../shared/errors.js'
 import { toNonEmptyString } from '../shared/params.js'
 import { readTaskOutputGatewayPayload, readTaskStopGatewayPayload } from './background-task-tools.js'
@@ -11,10 +12,6 @@ type GatewayParams = Record<string, unknown>
 type GatewayOptions = {
   params: GatewayParams
   respond: (success: boolean, data?: unknown, error?: { code: string; message: string }) => void
-}
-
-function logTaskPipeline(api: OpenClawPluginApi, event: string, count: number): void {
-  api.logger?.debug?.(`[task-pipeline] plugin.${event} count=${count}`)
 }
 
 async function withGatewayGuard(options: GatewayOptions, task: () => Promise<unknown>): Promise<void> {

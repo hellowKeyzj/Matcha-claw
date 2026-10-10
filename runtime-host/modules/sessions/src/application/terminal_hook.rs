@@ -6,7 +6,7 @@ pub struct SessionRunTerminalSnapshot {
     pub native_run_id: String,
     pub delivery_context: Option<super::state::SessionDeliveryContext>,
     pub phase: RunPhase,
-    pub final_assistant_text: Option<String>,
+    pub assistant_texts: Vec<String>,
 }
 
 pub trait SessionTerminalHook: Send + Sync {

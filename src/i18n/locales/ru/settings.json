@@ -1,9 +1,7 @@
 {
   "title": "Настройки",
-  "subtitle": "Настройте ваш опыт работы с MatchaClaw",
   "appearance": {
     "title": "Общие",
-    "description": "Настройте внешний вид",
     "theme": "Тема",
     "light": "Светлая",
     "dark": "Тёмная",
@@ -11,7 +9,6 @@
     "language": "Язык",
     "launchAtStartup": "Запуск при старте системы",
     "userAvatar": "User Avatar",
-    "userAvatarDesc": "Upload your photo to use as the chat user avatar",
     "userAvatarPreviewAlt": "User avatar preview",
     "uploadAvatarInputLabel": "Upload User Avatar",
     "uploadAvatar": "Upload Avatar",
@@ -167,6 +164,53 @@
       }
     }
   },
+  "license": {
+    "title": "Lisence",
+    "description": "При входе в облачный аккаунт активация не требуется",
+    "gateState": {
+      "checking": "Проверка",
+      "granted": "Активирована",
+      "blocked": "Не активирована",
+      "unavailable": "Недоступно"
+    },
+    "renewAlert": {
+      "near_expiry_renew_failed": "Срок истекает, продление не удалось, повторите проверку"
+    },
+    "inputLabel": "Ключ лицензии",
+    "placeholder": "Введите ключ лицензии",
+    "showKey": "Показать ключ лицензии",
+    "hideKey": "Скрыть ключ лицензии",
+    "validate": "Активировать",
+    "revalidate": "Проверить повторно",
+    "clear": "Удалить лицензию",
+    "replaceKey": "Заменить ключ лицензии",
+    "saveAndValidate": "Сохранить и проверить",
+    "clearTitle": "Удалить лицензию?",
+    "clearDescription": "После удаления для локального использования потребуется повторная активация",
+    "messages": {
+      "valid": "Проверка пройдена",
+      "cache_grace_valid": "Офлайн-лицензия действительна",
+      "empty": "Введите ключ лицензии",
+      "format_invalid": "Неверный формат ключа",
+      "service_unconfigured": "Сервис лицензирования не настроен",
+      "network_error": "Сервис лицензирования недоступен, проверьте сеть",
+      "server_rejected": "Ключ лицензии отклонён",
+      "expired": "Лицензия истекла",
+      "device_mismatch": "Лицензия для другого устройства",
+      "not_allowed": "Ключ лицензии не разрешён",
+      "checksum_invalid": "Неверная контрольная сумма ключа лицензии",
+      "unknown": "Проверка не удалась"
+    },
+    "toast": {
+      "cleared": "Лицензия очищена"
+    },
+    "expiresAt": "Действует до: {{time}}",
+    "offlineGraceUntil": "Доступно офлайн до: {{time}}",
+    "loadFailed": "Статус недоступен, обновите страницу",
+    "storedKeyFailed": "Ключ недоступен, обновите страницу",
+    "operationFailed": "Проверка не завершена, повторите попытку",
+    "clearFailed": "Не удалось очистить лицензию, повторите попытку"
+  },
   "diagnostics": {
     "title": "Diagnostics",
     "description": "Collect a local diagnostics bundle for troubleshooting",
@@ -200,6 +244,36 @@
     "matchaAgentAppServerStatus": "Статус matcha-agent app-server",
     "matchaAgentAppServerDescription": "Проверка состояния процесса и порта matcha-agent app-server.",
     "matchaAgentAppServerRestartFailed": "Не удалось перезапустить matcha-agent app-server: {{error}}",
+    "repair": {
+      "action": "Восстановить",
+      "confirmTitle": "Восстановить OpenClaw?",
+      "confirmDescription": "OpenClaw будет остановлен, после чего запустится его штатное средство восстановления. Оно может изменить конфигурацию и перенести данные из старого формата. Затем OpenClaw будет заново подготовлен и запущен. Выполняющиеся задачи будут прерваны. Продолжить?",
+      "confirmAction": "Остановить и восстановить",
+      "automatic": "Автоматическое восстановление",
+      "manual": "Ручное восстановление",
+      "pending": "Обработка запроса на восстановление",
+      "statusUnavailable": "Сведения о ходе восстановления временно недоступны. Проверьте журналы.",
+      "unknown": "Результат этого восстановления ещё не подтверждён. Прежде чем продолжить, проверьте состояние среды выполнения и журналы. Автоматической повторной попытки не будет.",
+      "rejected": "Среда выполнения отклонила этот запрос на восстановление. Дождитесь завершения текущей операции и проверьте снова.",
+      "phases": {
+        "idle": "Бездействие",
+        "stopping": "Остановка",
+        "repairing": "Восстановление",
+        "preparing": "Подготовка",
+        "starting": "Запуск",
+        "succeeded": "Восстановление завершено",
+        "failed": "Ошибка восстановления"
+      },
+      "failures": {
+        "stopFailed": "Не удалось остановить OpenClaw. Проверьте журналы.",
+        "doctorFailed": "Штатное средство восстановления OpenClaw завершилось с ошибкой. Проверьте журналы.",
+        "doctorTimedOut": "Превышено время ожидания штатного средства восстановления OpenClaw. Проверьте журналы.",
+        "doctorCancelled": "Выполнение штатного средства восстановления OpenClaw отменено. Проверьте журналы.",
+        "doctorSpawnFailed": "Не удалось запустить процесс штатного средства восстановления OpenClaw. Проверьте журналы.",
+        "preparationFailed": "Не удалось подготовить OpenClaw к запуску после восстановления. Проверьте журналы.",
+        "startFailed": "Не удалось запустить OpenClaw после восстановления. Проверьте журналы."
+      }
+    },
     "tabs": {
       "general": "General",
       "browser": "Browser"
@@ -225,9 +299,7 @@
     "proxySaveFailed": "Не удалось сохранить настройки прокси",
     "browser": {
       "title": "Browser",
-      "description": "Choose which browser runtime path MatchaClaw should use",
       "modeLabel": "Browser Mode",
-      "modeDescription": "Choose the active browser runtime path.",
       "currentMode": "Current",
       "modeSaving": "Applying browser mode and restarting Gateway...",
       "modeSaved": "Browser mode saved",
@@ -235,15 +307,15 @@
       "modes": {
         "relay": {
           "title": "Browser Relay",
-          "description": "Use the MatchaClaw Browser Relay plugin and browser extension."
+          "description": "Подключение через расширение браузера"
         },
         "native": {
           "title": "Native Browser",
-          "description": "Use OpenClaw's built-in browser plugin without the extension."
+          "description": "Расширение браузера не требуется"
         },
         "off": {
           "title": "Off",
-          "description": "Disable all browser capability."
+          "description": "Отключить функции браузера"
         }
       },
       "nativeModeTitle": "Native Browser is active",

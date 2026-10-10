@@ -284,7 +284,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     }
     logRendererTodoToolDebug(
       'renderer.ChatAssistantTurn.render-item',
-      summarizeAssistantTurnForTodoToolDebug(item),
+      () => (summarizeAssistantTurnForTodoToolDebug(item)),
     );
   }, [item]);
 
@@ -478,7 +478,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   }, [collapseVersion, sessionIdentity]);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
-    logSessionTrace('session.assistant-turn.committed', 'session-assistant-turn-boundary', {
+    logSessionTrace('session.assistant-turn.committed', 'session-assistant-turn-boundary', () => ({
       identity: summarizeSessionIdentity(sessionIdentity), item: summarizeRenderItem(item),
       hasContentSegments, pendingMode, rendered: hasContentSegments || visibleDerivedAttachedFiles.length > 0 || !!pendingMode,
       rawPlainText: summarizeText(rawPlainText), cleanedPlainText: summarizeText(plainText),
@@ -491,7 +491,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
           input: summarizeText(segment.text), assembled: summarizeText(renderText), hasLargeText: !!segment.largeText,
           rendered: !!segment.largeText || !!renderText.trim() }];
       }),
-    });
+    }));
   }, [hasContentSegments, item, messageRenderTextByKey, pendingMode, plainText, rawPlainText, sessionIdentity, visibleDerivedAttachedFiles.length]);
   if (!hasContentSegments && visibleDerivedAttachedFiles.length === 0 && !pendingMode) {
     return null;

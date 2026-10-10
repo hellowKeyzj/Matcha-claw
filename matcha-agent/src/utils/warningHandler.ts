@@ -4,7 +4,7 @@ import {
   logEvent,
 } from 'src/services/analytics/index.js'
 import { logForDebugging } from './debug.js'
-import { isEnvTruthy } from './envUtils.js'
+import { isTraceEnabled } from './trace.js'
 import { getPlatform } from './platform.js'
 
 // Track warnings to avoid spam — bounded to prevent unbounded memory growth
@@ -97,7 +97,7 @@ export function initializeWarningHandler(): void {
       })
 
       // In debug mode, show all warnings with context
-      if (isEnvTruthy(process.env.CLAUDE_DEBUG)) {
+      if (isTraceEnabled()) {
         const prefix = isInternal ? '[Internal Warning]' : '[Warning]'
         logForDebugging(`${prefix} ${warning.toString()}`, { level: 'warn' })
       }

@@ -247,7 +247,7 @@ export function handleStoreSessionUpdateEvent(
   );
   const eventRunId = normalizeIdentifier(sessionUpdate.runId);
 
-  logRendererTodoToolDebug('renderer.session-update.received', {
+  logRendererTodoToolDebug('renderer.session-update.received', () => ({
     sessionUpdate: sessionUpdate.sessionUpdate,
     sessionKey: sessionUpdate.sessionKey,
     runId: sessionUpdate.runId,
@@ -256,7 +256,7 @@ export function handleStoreSessionUpdateEvent(
       : ('item' in sessionUpdate ? sessionUpdate.item : undefined),
     taskSnapshot: 'taskSnapshot' in sessionUpdate ? sessionUpdate.taskSnapshot : undefined,
     snapshot: summarizeSnapshotForTodoToolDebug(sessionUpdate.snapshot),
-  });
+  }));
 
   if (sessionUpdate.sessionUpdate === 'session_info_update') {
     applySessionLifecycleEvent({

@@ -29,6 +29,7 @@ type HostEventName =
   | 'runtime-host:restart'
   | 'runtime-host:disconnected'
   | 'package:changed'
+  | 'license:gate-changed'
   | 'team:event'
   | 'team:changed'
   | 'matcha-agent:status'
@@ -114,6 +115,7 @@ export function registerHostEventBridge(deps: {
     'gateway:exit',
     'team:event',
     'package:changed',
+    'license:gate-changed',
   ] as const) {
     deps.hostEventBus.on(eventName, (payload) => {
       sendRendererHostEvent(deps.getMainWindow(), eventName, payload);

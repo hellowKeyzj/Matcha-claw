@@ -112,7 +112,6 @@
         "packageActions": "スキルパッケージの操作",
         "viewCloudPackages": "クラウドパッケージを表示",
         "installedDescription": "ローカルにインストールしたスキルパッケージを管理します。",
-        "marketDescription": "クラウドからスキルパッケージを探してインストールします。",
         "search": "スキルパッケージを検索",
         "packageInstalled": "インストール済み",
         "packageAvailable": "未インストール",
@@ -130,7 +129,7 @@
             "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "このバージョンは公開できません。一覧を更新してください。"
         },
         "cloudTitle": "クラウドスキルパッケージマーケット",
-        "cloudEmpty": "クラウドスキルパッケージはまだありません。",
+        "cloudEmpty": "クラウドスキルパッケージはまだありません",
         "cloudAvailable": "クラウドで利用可能",
         "cloudInstalled": "インストール済み",
         "packageSize": "{{size}} バイト",

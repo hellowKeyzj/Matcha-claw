@@ -24,14 +24,12 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
     log(
         "runtime.agents.request",
         trace_id.as_deref(),
-        serde_json::json!({ "method": request.method(), "path": request.path() }),
+        || serde_json::json!({ "method": request.method(), "path": request.path() }),
     );
     if request.method() != "POST" || path != super::AUTHORIZATION_ENDPOINT {
-        log(
-            "runtime.agents.not-found",
-            trace_id.as_deref(),
-            serde_json::json!({}),
-        );
+        log("runtime.agents.not-found", trace_id.as_deref(), || {
+            serde_json::json!({})
+        });
         return ResponseBody::not_found();
     }
     let Some(authorization) = request
@@ -40,21 +38,17 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
         .find(|(name, _)| name == AUTHORIZATION_HEADER)
         .and_then(|(_, value)| value.strip_prefix(BEARER_PREFIX))
     else {
-        log(
-            "runtime.agents.unauthorized",
-            trace_id.as_deref(),
-            serde_json::json!({}),
-        );
+        log("runtime.agents.unauthorized", trace_id.as_deref(), || {
+            serde_json::json!({})
+        });
         return ResponseBody::unauthorized();
     };
     let value = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
         Err(_) => {
-            log(
-                "runtime.agents.bad-json",
-                trace_id.as_deref(),
-                serde_json::json!({}),
-            );
+            log("runtime.agents.bad-json", trace_id.as_deref(), || {
+                serde_json::json!({})
+            });
             return ResponseBody::bad_request();
         }
     };
@@ -62,27 +56,28 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
     let request = match AgentsRequest::decode(value, authorization, &mut verifier, now_millis()) {
         Ok(request) => request,
         Err(_) => {
-            log(
-                "runtime.agents.decode-invalid",
-                trace_id.as_deref(),
-                serde_json::json!({}),
-            );
+            log("runtime.agents.decode-invalid", trace_id.as_deref(), || {
+                serde_json::json!({})
+            });
             return ResponseBody::unauthorized();
         }
     };
     log(
         "runtime.agents.decode-accepted",
         trace_id.as_deref(),
-        serde_json::json!({
-            "capability": &request.id,
-            "operation": &request.operation_id,
-            "adapter": &request.scope.endpoint.runtime_adapter_id,
-            "instance": &request.scope.endpoint.runtime_instance_id,
-            "scopeAgentId": id_shape(Some(&request.scope.agent_id)),
-            "targetSubagentId": id_shape(request.target.subagent_id.as_deref()),
-        }),
+        || {
+            serde_json::json!({
+                "capability": &request.id,
+                "operation": &request.operation_id,
+                "adapter": &request.scope.endpoint.runtime_adapter_id,
+                "instance": &request.scope.endpoint.runtime_instance_id,
+                "scopeAgentId": id_shape(Some(&request.scope.agent_id)),
+                "targetSubagentId": id_shape(request.target.subagent_id.as_deref()),
+            })
+        },
     );
-    let operation_id = request.operation_id.clone();
+    let operation_id =
+        (trace_id.is_some() && platform::trace::enabled()).then(|| request.operation_id.clone());
     let principal = request.principal.clone();
     let command = match request.command(trace_id.as_deref()) {
         Ok(command) => command,
@@ -90,7 +85,7 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
             log(
                 "runtime.agents.command-invalid",
                 trace_id.as_deref(),
-                serde_json::json!({ "operation": operation_id }),
+                || serde_json::json!({ "operation": operation_id }),
             );
             return ResponseBody::bad_request();
         }
@@ -99,7 +94,7 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
     log(
         "runtime.agents.command",
         trace_id.as_deref(),
-        serde_json::json!({ "operation": operation_id }),
+        || serde_json::json!({ "operation": operation_id }),
     );
     if crate::application::results::is_background_mutation(&command) {
         return match dependencies.subagents.admit(command, principal).await {
@@ -119,7 +114,7 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
                 log(
                     "runtime.agents.timeout",
                     trace_id.as_deref(),
-                    serde_json::json!({ "operation": operation_id }),
+                    || serde_json::json!({ "operation": operation_id }),
                 );
                 return ResponseBody::fixed(503, super::TIMEOUT_ERROR);
             }
@@ -133,20 +128,18 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
             log(
                 "runtime.agents.owner-unavailable",
                 trace_id.as_deref(),
-                serde_json::json!({ "operation": operation_id }),
+                || serde_json::json!({ "operation": operation_id }),
             );
             Delivery::Unavailable
         }
     };
-    log(
-        "runtime.agents.outcome",
-        trace_id.as_deref(),
+    log("runtime.agents.outcome", trace_id.as_deref(), || {
         serde_json::json!({
             "operation": operation_id,
             "status": delivery.status_code(),
             "delivery": delivery_trace_kind(&delivery),
-        }),
-    );
+        })
+    });
     ResponseBody::from_delivery(delivery)
 }
 
@@ -232,15 +225,11 @@ fn trace_id(headers: &[(String, String)]) -> Option<&str> {
         })
 }
 
-fn log(stage: &str, trace_id: Option<&str>, payload: Value) {
-    if trace_id.is_none() || !enabled() {
+fn log(stage: &str, trace_id: Option<&str>, payload: impl FnOnce() -> Value) {
+    if trace_id.is_none() || !platform::trace::enabled() {
         return;
     }
-    emit(stage, trace_id, payload);
-}
-
-fn enabled() -> bool {
-    std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() == Ok("1")
+    emit(stage, trace_id, payload());
 }
 
 fn emit(stage: &str, trace_id: Option<&str>, payload: Value) {

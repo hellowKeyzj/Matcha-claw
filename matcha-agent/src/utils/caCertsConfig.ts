@@ -67,7 +67,8 @@ function getExtraCertsPathFromConfig(): string | undefined {
     const settingsEnv = settings?.env
 
     logForDebugging(
-      `CA certs: Config fallback - globalEnv keys: ${globalEnv ? Object.keys(globalEnv).join(',') : 'none'}, settingsEnv keys: ${settingsEnv ? Object.keys(settingsEnv).join(',') : 'none'}`,
+      () =>
+        `CA certs: Config fallback - globalEnv keys: ${globalEnv ? Object.keys(globalEnv).join(',') : 'none'}, settingsEnv keys: ${settingsEnv ? Object.keys(settingsEnv).join(',') : 'none'}`,
     )
 
     // Settings override global config (same precedence as applyConfigEnvironmentVariables)

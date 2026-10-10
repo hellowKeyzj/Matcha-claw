@@ -115,9 +115,6 @@ dmg:
 
 # Windows Configuration
 win:
-  # Skip executable signing and resource editing: local and release Windows
-  # packages are unsigned because no code-signing certificate is provisioned.
-  signAndEditExecutable: false
   # Skip update signature verification: we ship via OSS + GitHub without a
   # code-signing certificate, so verifying would always fail on the updater.
   verifyUpdateCodeSignature: false

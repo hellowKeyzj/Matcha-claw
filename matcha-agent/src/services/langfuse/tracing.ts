@@ -289,7 +289,8 @@ export function createToolBatchSpan(
     }
 
     logForDebugging(
-      `[langfuse] Tool batch span created: ${batchSpan.id} (tools=${params.toolNames.join(',')})`,
+      () =>
+        `[langfuse] Tool batch span created: ${batchSpan.id} (tools=${params.toolNames.join(',')})`,
     )
     return batchSpan
   } catch (e) {

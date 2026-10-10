@@ -22,7 +22,7 @@ import {
 import { createSignalQuitHandler } from './signal-quit';
 import { acquireProcessInstanceFileLock } from './process-instance-lock';
 
-const WINDOWS_APP_USER_MODEL_ID = 'app.matchaclaw.desktop';
+const WINDOWS_APP_USER_MODEL_ID = 'app.MatchaClaw.desktop';
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 const requestedUserDataDir = process.env.MATCHACLAW_E2E_USER_DATA_DIR?.trim();
 

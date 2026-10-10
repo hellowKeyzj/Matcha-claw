@@ -1,3 +1,4 @@
+import { isTraceEnabled, traceLog } from '@/lib/trace-logger';
 /**
  * Settings Page
  * Application configuration
@@ -21,9 +22,13 @@ import {
   Trash2,
   User,
   FolderOpen,
+  Wrench,
 } from 'lucide-react';
 import { StableScrollArea } from '@/components/scroll';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { fetchGatewayRepair, isGatewayRepairActive } from '@/lib/gateway-repair';
+import type { RuntimeRepairSnapshot } from '@/types/runtime-repair';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -34,6 +39,8 @@ import { cn } from '@/lib/utils';
 import { CallsRoute } from '@/lib/route-preload';
 import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
+import { useLocalLicenseLocked } from '@/stores/license';
+import { LicenseSection } from './LicenseSection';
 import { useGatewayStore } from '@/stores/gateway';
 import {
   findRuntimeEndpointByAdapter,
@@ -115,14 +122,14 @@ function summarizeSettingsTraceError(error: unknown): { errorName: string; messa
   };
 }
 
-function traceSettingsStartup(phase: string, payload: Record<string, unknown>): void {
-  console.info(JSON.stringify({
+function traceSettingsStartup(phase: string, payload: () => Record<string, unknown>): void {
+  traceLog(() => [JSON.stringify({
     prefix: STARTUP_TRACE_PREFIX,
     source: 'settings-page',
     phase,
     atMs: Date.now(),
-    ...payload,
-  }));
+    ...payload(),
+  })]);
 }
 
 function formatMatchaAgentAppServerStatusLabel(
@@ -175,7 +182,7 @@ type RuntimeStatusVariant = 'success' | 'outline' | 'destructive' | 'secondary';
 type RuntimeStatusAction = {
   id: string;
   label: string;
-  icon: 'refresh' | 'logs';
+  icon: 'refresh' | 'repair' | 'logs';
   onClick: () => void;
   disabled?: boolean;
   loading?: boolean;
@@ -232,6 +239,9 @@ function RuntimeStatusActionIcon({ action }: { action: RuntimeStatusAction }) {
   if (action.loading) {
     return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
   }
+  if (action.icon === 'repair') {
+    return <Wrench className="h-3.5 w-3.5" />;
+  }
   if (action.icon === 'logs') {
     return <FileText className="h-3.5 w-3.5" />;
   }
@@ -262,7 +272,7 @@ function RuntimeStatusList({ items }: { items: RuntimeStatusItem[] }) {
           key={item.id}
           role="listitem"
           className={cn(
-            'grid gap-3 px-4 py-3.5 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center',
+            'grid gap-3 px-4 py-3.5 sm:grid-cols-[8rem_auto_minmax(0,1fr)] sm:items-center',
             index > 0 && 'border-t border-border/70',
           )}
         >
@@ -270,7 +280,7 @@ function RuntimeStatusList({ items }: { items: RuntimeStatusItem[] }) {
             <RuntimeStatusDot tone={item.tone} />
             <span className="truncate text-sm font-medium tracking-[-0.01em] text-foreground">{item.title}</span>
           </div>
-          <div className="sm:justify-self-end">
+          <div className="sm:justify-self-start">
             <RuntimeStatusPill tone={item.tone}>{item.status}</RuntimeStatusPill>
           </div>
           <div className="flex flex-wrap items-center gap-2 sm:justify-self-end">
@@ -433,6 +443,13 @@ export function Settings() {
   const initGatewayEvents = useGatewayStore((state) => state.init);
   const refreshRuntimeHostStatusSnapshot = useGatewayStore((state) => state.refreshRuntimeHostStatus);
   const restartGateway = useGatewayStore((state) => state.restart);
+  const repairGateway = useGatewayStore((state) => state.repair);
+  const gatewayLifecycleOperation = useGatewayStore((state) => state.lifecycleOperation);
+  const gatewayProcessState = useGatewayStore((state) => state.status.processState);
+  const gatewayRepairOutcome = useGatewayStore((state) => state.repairOutcome);
+  const [gatewayRepair, setGatewayRepair] = useState<RuntimeRepairSnapshot | null>(null);
+  const [gatewayRepairUnavailable, setGatewayRepairUnavailable] = useState(false);
+  const [showRepairConfirmation, setShowRepairConfirmation] = useState(false);
   const refreshing = usePluginsStore((state) => state.refreshing);
   const refreshReason = usePluginsStore((state) => state.refreshReason);
   const mutating = usePluginsStore((state) => state.mutating);
@@ -466,9 +483,10 @@ export function Settings() {
   const [lastDiagnosticsArchiveId, setLastDiagnosticsArchiveId] = useState('');
   const [lastDiagnosticsEntries, setLastDiagnosticsEntries] = useState(0);
   const [lastDiagnosticsBytes, setLastDiagnosticsBytes] = useState(0);
-  const [activeSection, setActiveSection] = useState<SettingsSectionKey>(
-    () => parseSettingsSectionFromSearch(location.search) ?? DEFAULT_SETTINGS_SECTION
-  );
+  const licenseLocked = useLocalLicenseLocked();
+  const activeSection: SettingsSectionKey = licenseLocked
+    ? 'license'
+    : parseSettingsSectionFromSearch(location.search) ?? DEFAULT_SETTINGS_SECTION;
   const [browserRelayInfo, setBrowserRelayInfo] = useState<BrowserRelayInfo | null>(null);
   const userAvatarInputRef = useRef<HTMLInputElement | null>(null);
   const [matchaAgentAppServerStatus, setMatchaAgentAppServerStatus] = useState<MatchaAgentAppServerStatus | null>(null);
@@ -478,6 +496,7 @@ export function Settings() {
   const matchaAgentAppServerStatusRequestSequenceRef = useRef(0);
 
   useEffect(() => {
+    if (licenseLocked) return;
     void initGatewayEvents();
     const hadRuntime = usePluginsStore.getState().runtimeReady;
     void refreshRuntime({ reason: 'initial' }).catch(() => {
@@ -485,7 +504,50 @@ export function Settings() {
         toast.error(t('plugins:errors.loadFailed'));
       }
     });
-  }, [initGatewayEvents, refreshRuntime, t]);
+  }, [initGatewayEvents, licenseLocked, refreshRuntime, t]);
+
+  useEffect(() => {
+    if (licenseLocked) return;
+    let stopped = false;
+    let request: AbortController | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const isVisible = () => document.visibilityState !== 'hidden';
+    const refresh = async () => {
+      if (stopped || !isVisible() || request) return;
+      clearTimeout(timer);
+      request = new AbortController();
+      try {
+        const snapshot = await fetchGatewayRepair(request.signal);
+        if (stopped) return;
+        setGatewayRepair(snapshot);
+        setGatewayRepairUnavailable(false);
+      } catch {
+        if (!stopped) setGatewayRepairUnavailable(true);
+      } finally {
+        request = null;
+        // Gateway events do not expose every doctor phase; keep one visible-page read in flight.
+        if (!stopped && isVisible()) timer = setTimeout(() => void refresh(), 5_000);
+      }
+    };
+    const onVisibilityChange = () => {
+      clearTimeout(timer);
+      if (isVisible()) void refresh();
+    };
+    const unsubscribe = useGatewayStore.subscribe((state, previous) => {
+      if (state.status !== previous.status || state.lifecycleOperation !== previous.lifecycleOperation) {
+        void refresh();
+      }
+    });
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    void refresh();
+    return () => {
+      stopped = true;
+      request?.abort();
+      clearTimeout(timer);
+      unsubscribe();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [licenseLocked]);
 
   const handleShowOpenClawLogs = async () => {
     try {
@@ -652,7 +714,7 @@ export function Settings() {
   };
 
   useEffect(() => {
-    if (!showCliTools) return;
+    if (licenseLocked || !showCliTools) return;
     let cancelled = false;
 
     (async () => {
@@ -674,7 +736,7 @@ export function Settings() {
     })();
 
     return () => { cancelled = true; };
-  }, [devModeUnlocked, showCliTools]);
+  }, [devModeUnlocked, licenseLocked, showCliTools]);
 
   const handleCopyCliCommand = async () => {
     if (!openclawCliCommand) return;
@@ -745,14 +807,7 @@ export function Settings() {
   }, [historyStrategySampleMinDraft]);
 
   useEffect(() => {
-    const sectionFromQuery = parseSettingsSectionFromSearch(location.search);
-    if (!sectionFromQuery) {
-      return;
-    }
-    setActiveSection((prev) => (prev === sectionFromQuery ? prev : sectionFromQuery));
-  }, [location.search]);
-
-  useEffect(() => {
+    if (licenseLocked) return;
     let cancelled = false;
 
     (async () => {
@@ -771,7 +826,7 @@ export function Settings() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [licenseLocked]);
 
   const handleSaveProxySettings = async () => {
     setSavingProxy(true);
@@ -1038,38 +1093,38 @@ export function Settings() {
   }, [refreshRuntimeHostStatusSnapshot, t]);
 
   const applyMatchaAgentAppServerStatus = useCallback((status: MatchaAgentAppServerStatus) => {
-    traceSettingsStartup('matcha-agent-status-apply', summarizeMatchaAgentAppServerTrace(status) ?? {});
+    traceSettingsStartup('matcha-agent-status-apply', () => (summarizeMatchaAgentAppServerTrace(status) ?? {}));
     setMatchaAgentAppServerStatus(status);
     setMatchaAgentAppServerError('');
   }, []);
 
   const loadMatchaAgentAppServerStatus = useCallback(async () => {
     const ownedRequestSequence = matchaAgentAppServerStatusRequestSequenceRef.current + 1;
-    const startedAtMs = Date.now();
+    const startedAtMs = isTraceEnabled() ? Date.now() : 0;
     matchaAgentAppServerStatusRequestSequenceRef.current = ownedRequestSequence;
     const isOwnedStatusRequest = () => matchaAgentAppServerStatusRequestSequenceRef.current === ownedRequestSequence;
 
-    traceSettingsStartup('matcha-agent-status-request-start', { sequence: ownedRequestSequence });
+    traceSettingsStartup('matcha-agent-status-request-start', () => ({ sequence: ownedRequestSequence }));
     setMatchaAgentAppServerLoading(true);
     setMatchaAgentAppServerError('');
     try {
       const status = await hostApiFetch<MatchaAgentAppServerStatus>('/api/matcha-agent/app-server/status');
-      traceSettingsStartup('matcha-agent-status-request-success', {
+      traceSettingsStartup('matcha-agent-status-request-success', () => ({
         sequence: ownedRequestSequence,
         durationMs: Date.now() - startedAtMs,
         owned: isOwnedStatusRequest(),
         ...(summarizeMatchaAgentAppServerTrace(status) ?? {}),
-      });
+      }));
       if (isOwnedStatusRequest()) {
         applyMatchaAgentAppServerStatus(status);
       }
     } catch (error) {
-      traceSettingsStartup('matcha-agent-status-request-error', {
+      traceSettingsStartup('matcha-agent-status-request-error', () => ({
         sequence: ownedRequestSequence,
         durationMs: Date.now() - startedAtMs,
         owned: isOwnedStatusRequest(),
         ...summarizeSettingsTraceError(error),
-      });
+      }));
       if (isOwnedStatusRequest()) {
         setMatchaAgentAppServerError(toUserMessage(error));
       }
@@ -1118,7 +1173,7 @@ export function Settings() {
     void loadMatchaAgentAppServerStatus();
     const unsubscribe = subscribeHostEvent<MatchaAgentAppServerStatus>('matcha-agent:status', (payload) => {
       if (payload && typeof payload === 'object' && typeof payload.processState === 'string') {
-        traceSettingsStartup('matcha-agent-status-event', summarizeMatchaAgentAppServerTrace(payload) ?? {});
+        traceSettingsStartup('matcha-agent-status-event', () => (summarizeMatchaAgentAppServerTrace(payload) ?? {}));
         applyMatchaAgentAppServerStatus(payload);
       }
     });
@@ -1135,7 +1190,19 @@ export function Settings() {
     }
   }, [restartHostAction, t]);
 
-  const openClawEndpointTone = runtimeStatusToneForVariant(openClawEndpointBadgeVariant);
+  const gatewayRepairActive = isGatewayRepairActive(gatewayRepair);
+  const gatewayActionsBusy = gatewayLifecycleOperation !== null || gatewayRepairActive
+    || gatewayProcessState === 'starting' || gatewayProcessState === 'control_connecting';
+  const repairOutcomeMessage = gatewayRepairOutcome
+    ? gatewayRepairOutcome === 'succeeded'
+      ? t('gateway.repair.phases.succeeded')
+      : gatewayRepairOutcome === 'unknown' || gatewayRepairOutcome === 'rejected'
+        ? t(`gateway.repair.${gatewayRepairOutcome}`)
+        : t(`gateway.repair.failures.${gatewayRepairOutcome}`)
+    : null;
+  const openClawEndpointTone = gatewayRepairActive
+    ? 'pending'
+    : runtimeStatusToneForVariant(openClawEndpointBadgeVariant);
   const runtimeHostTone = runtimeHostStatusTone(effectiveRuntimeHostStatus);
   const matchaAgentAppServerTone = runtimeStatusToneForVariant(matchaAgentAppServerBadgeVariant);
   const shouldShowRuntimeHostDetails = Boolean(
@@ -1198,7 +1265,9 @@ export function Settings() {
     {
       id: 'openclaw',
       title: t('gateway.openclawRuntimeLabel'),
-      status: openClawEndpointStatus,
+      status: gatewayRepairActive && gatewayRepair
+        ? t(`gateway.repair.phases.${gatewayRepair.phase}`)
+        : openClawEndpointStatus,
       tone: openClawEndpointTone,
       actions: [
         {
@@ -1206,6 +1275,16 @@ export function Settings() {
           label: t('common:actions.restart'),
           icon: 'refresh',
           onClick: restartGateway,
+          disabled: gatewayActionsBusy,
+          loading: gatewayLifecycleOperation === 'restart',
+        },
+        {
+          id: 'repair',
+          label: t('gateway.repair.action'),
+          icon: 'repair',
+          onClick: () => setShowRepairConfirmation(true),
+          disabled: gatewayActionsBusy,
+          loading: gatewayLifecycleOperation === 'repair' || gatewayRepairActive,
         },
         {
           id: 'logs',
@@ -1214,7 +1293,28 @@ export function Settings() {
           onClick: handleShowOpenClawLogs,
         },
       ],
-      details: showOpenClawLogs ? (
+      details: gatewayRepairActive || gatewayRepair?.trigger === 'automatic'
+        || gatewayLifecycleOperation === 'repair' || repairOutcomeMessage || gatewayRepairUnavailable || showOpenClawLogs ? (
+        <>
+        <div role="status" aria-live="polite" className="space-y-2 text-xs text-muted-foreground">
+          {gatewayRepair && (gatewayRepairActive || gatewayRepair.trigger === 'automatic') && (
+            <p>
+              {gatewayRepair.trigger && `${t(`gateway.repair.${gatewayRepair.trigger}`)} · `}
+              {t(`gateway.repair.phases.${gatewayRepair.phase}`)}
+              {gatewayRepair.failure && ` · ${t(`gateway.repair.failures.${gatewayRepair.failure}`)}`}
+            </p>
+          )}
+          {gatewayLifecycleOperation === 'repair' && !gatewayRepairActive && (
+            <p>{t('gateway.repair.pending')}</p>
+          )}
+          {repairOutcomeMessage && (
+            <p className={gatewayRepairOutcome === 'succeeded' ? 'text-emerald-700 dark:text-emerald-200' : 'text-muted-foreground'}>
+              {t('gateway.repair.manual')}{' · '}{repairOutcomeMessage}
+            </p>
+          )}
+          {gatewayRepairUnavailable && <p>{t('gateway.repair.statusUnavailable')}</p>}
+        </div>
+        {showOpenClawLogs && (
         <div className="rounded-lg border border-border bg-card p-4">
           <div className="mb-2 flex items-center justify-between gap-2">
             <p className="text-sm font-medium">{t('gateway.openclawLogs')}</p>
@@ -1234,6 +1334,8 @@ export function Settings() {
             </pre>
           </StableScrollArea>
         </div>
+        )}
+        </>
       ) : undefined,
     },
     {
@@ -1275,12 +1377,13 @@ export function Settings() {
     { key: 'browser', label: t('gateway.browser.title') },
     { key: 'updates', label: t('updates.title') },
     { key: 'advanced', label: t('advanced.title') },
+    { key: 'license', label: t('license.title') },
     { key: 'diagnostics', label: t('diagnostics.title') },
     { key: 'calls', label: commonT('calls.title') },
   ];
 
   const switchSection = useCallback((section: SettingsSectionKey) => {
-    setActiveSection(section);
+    if (licenseLocked && section !== 'license') return;
     const params = new URLSearchParams(location.search);
     params.set('section', section);
     const nextSearch = params.toString();
@@ -1291,15 +1394,25 @@ export function Settings() {
       },
       { replace: true },
     );
-  }, [location.pathname, location.search, navigate]);
+  }, [licenseLocked, location.pathname, location.search, navigate]);
 
   return (
     <div className="flex flex-col gap-6 text-foreground" data-testid="settings-page">
+      <ConfirmDialog
+        open={!licenseLocked && showRepairConfirmation}
+        title={t('gateway.repair.confirmTitle')}
+        message={t('gateway.repair.confirmDescription')}
+        confirmLabel={t('gateway.repair.confirmAction')}
+        cancelLabel={t('common:actions.cancel')}
+        variant="destructive"
+        onCancel={() => setShowRepairConfirmation(false)}
+        onConfirm={async () => {
+          setShowRepairConfirmation(false);
+          if (!gatewayActionsBusy) await repairGateway();
+        }}
+      />
       <div>
         <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t('title')}</h1>
-        <p className="text-[hsl(var(--shell-text-muted))]">
-          {t('subtitle')}
-        </p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
@@ -1316,6 +1429,7 @@ export function Settings() {
                       ? 'bg-[hsl(var(--shell-surface))] text-foreground [border-color:hsl(var(--shell-border))]'
                       : 'text-[hsl(var(--shell-text-muted))] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-foreground'
                   }`}
+                  disabled={licenseLocked && section.key !== 'license'}
                   onClick={() => switchSection(section.key)}
                 >
                   <span
@@ -1332,6 +1446,7 @@ export function Settings() {
         </Card>
 
         <div className="min-w-0 space-y-6">
+          {activeSection === 'license' && <LicenseSection />}
           {activeSection === 'calls' && (
             <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">{commonT('calls.loading')}</p>}>
               <CallsRoute />
@@ -1342,7 +1457,6 @@ export function Settings() {
       <Card className="order-2">
         <CardHeader>
           <CardTitle>{t('appearance.title')}</CardTitle>
-          <CardDescription>{t('appearance.description')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -1405,9 +1519,6 @@ export function Settings() {
           <div className="space-y-3">
             <div>
               <Label>{t('appearance.userAvatar')}</Label>
-              <p className="text-sm text-muted-foreground">
-                {t('appearance.userAvatarDesc')}
-              </p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-muted">
@@ -1471,13 +1582,11 @@ export function Settings() {
             <Card className="order-1">
               <CardHeader>
                 <CardTitle>{t('gateway.browser.title')}</CardTitle>
-                <CardDescription>{t('gateway.browser.description')}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-3 rounded-xl border border-border/60 p-5">
                   <div className="space-y-1">
                     <Label>{t('gateway.browser.modeLabel')}</Label>
-                    <p className="text-sm text-muted-foreground">{t('gateway.browser.modeDescription')}</p>
                   </div>
                   <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
                     {([

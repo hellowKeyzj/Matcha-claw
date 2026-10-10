@@ -18,6 +18,7 @@ use crate::{
         RuntimeOperationFailure, SessionObservation, SessionObservationRequest,
         SessionObserveCommand, SessionObserveOutcome, SessionReleaseOutcome, SessionSync,
     },
+    send::{SessionSendCommand, SessionSendOutcome},
     state::{SessionChange, SessionCompleteness, SessionIdentity, SessionState, SessionView},
     timeline,
 };
@@ -66,6 +67,10 @@ enum WaiterReply {
         reply: oneshot::Sender<SessionObserveOutcome>,
     },
     Timeline(oneshot::Sender<timeline::Outcome>),
+    Send {
+        command: SessionSendCommand,
+        reply: oneshot::Sender<SessionSendOutcome>,
+    },
 }
 
 impl Observation {
@@ -285,7 +290,7 @@ impl SessionLane {
         };
         if entry.closing || entry.baseline.is_some() {
             if crate::trace::enabled() {
-                crate::trace::log_unscoped("sessions.sync.skip", serde_json::json!({
+                crate::trace::log_unscoped("sessions.sync.skip", || serde_json::json!({
                     "identity": crate::trace::identity_shape(identity), "generation": entry.generation,
                     "reason": if entry.closing { "closing" } else { "sync_inflight" }, "closing": entry.closing,
                     "needsSync": entry.needs_sync, "hasBaseline": entry.baseline.is_some(),
@@ -305,7 +310,7 @@ impl SessionLane {
             return;
         };
         if crate::trace::enabled() {
-            crate::trace::log_unscoped("sessions.sync.start", serde_json::json!({
+            crate::trace::log_unscoped("sessions.sync.start", || serde_json::json!({
                 "identity": crate::trace::identity_shape(identity), "generation": entry.generation,
                 "closing": entry.closing, "needsSyncBefore": entry.needs_sync, "needsSyncAfter": false,
                 "baseline": crate::trace::view_shape(&baseline.view()), "waiters": entry.waiters.len(),
@@ -329,7 +334,7 @@ impl SessionLane {
             let result = tokio::select! { _ = cancel.cancelled() => return, result = handle.sync(command, epoch) => result };
             if let Some(started) = started {
                 let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-                crate::trace::log_unscoped("sessions.sync.runtime_returned", serde_json::json!({
+                crate::trace::log_unscoped("sessions.sync.runtime_returned", || serde_json::json!({
                     "identity": crate::trace::identity_shape(&identity), "generation": generation,
                     "runtimeSyncElapsedMs": elapsed, "timingScope": "handle_sync_including_runtime_trace_excluding_completion_lane",
                     "succeeded": result.is_ok(),
@@ -418,7 +423,7 @@ impl SessionLane {
                 && entry.baseline.is_none()
                 && entry.committed_command.as_ref() == Some(&timeline);
             if crate::trace::enabled() {
-                crate::trace::log_unscoped("sessions.observation.ready", serde_json::json!({
+                crate::trace::log_unscoped("sessions.observation.ready", || serde_json::json!({
                     "identity": crate::trace::identity_shape(&identity), "generation": entry.generation,
                     "request": command_shape(&timeline), "activeRequest": entry.active_command.as_ref().map(command_shape),
                     "committedRequest": entry.committed_command.as_ref().map(command_shape),
@@ -534,6 +539,63 @@ impl SessionLane {
             return;
         }
         self.start_sync(shared, &identity, command);
+    }
+
+    pub(super) async fn start_send(
+        &mut self,
+        shared: &SessionShared,
+        command: SessionSendCommand,
+        reply: oneshot::Sender<SessionSendOutcome>,
+        call: Option<SessionCall>,
+    ) {
+        if reply.is_closed() {
+            crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
+            return;
+        }
+        let identity = command.identity.clone();
+        let waiting = shared
+            .observations
+            .lock()
+            .expect("session observation lock")
+            .get(&session_identity_lane_key(&identity))
+            .is_some_and(|entry| {
+                entry.closing
+                    || entry.waiters.iter().any(|waiter| matches!(&waiter.reply, WaiterReply::Send { .. }))
+            });
+        if !waiting {
+            self.resume_send(shared, command, reply, call).await;
+            return;
+        }
+        if self.state.is_none() {
+            self.state = SessionState::new(identity.clone(), shared.epoch).ok();
+        }
+        let waiter = Waiter {
+            command: self.latest_command(&identity, timeline::WindowRequest::latest()),
+            reply: WaiterReply::Send { command, reply },
+            call,
+        };
+        let rejected = {
+            let mut entries = shared
+                .observations
+                .lock()
+                .expect("session observation lock");
+            let entry = entries
+                .get_mut(&session_identity_lane_key(&identity))
+                .expect("waiting observation");
+            if entry.waiters.len() >= MAX_WAITERS {
+                Some(waiter)
+            } else {
+                entry.recovery_available = true;
+                if entry.closing {
+                    entry.restart_after_close = true;
+                }
+                entry.waiters.push(waiter);
+                None
+            }
+        };
+        if let Some(waiter) = rejected {
+            finish_failed_waiter(waiter, RuntimeOperationFailure::Unavailable).await;
+        }
     }
 
     pub(super) fn prepare_send_receive(
@@ -747,7 +809,7 @@ impl SessionLane {
         };
         if entry.closing {
             if crate::trace::enabled() {
-                crate::trace::log_unscoped("sessions.observation.close_skip", serde_json::json!({
+                crate::trace::log_unscoped("sessions.observation.close_skip", || serde_json::json!({
                     "identity": crate::trace::identity_shape(identity), "generation": entry.generation,
                     "reason": "already_closing", "closing": entry.closing, "needsSync": entry.needs_sync,
                     "restartRequested": restart, "restartAfterClose": entry.restart_after_close || restart,
@@ -761,7 +823,7 @@ impl SessionLane {
             return;
         };
         if crate::trace::enabled() {
-            crate::trace::log_unscoped("sessions.observation.close", serde_json::json!({
+            crate::trace::log_unscoped("sessions.observation.close", || serde_json::json!({
                 "identity": crate::trace::identity_shape(identity), "generation": entry.generation,
                 "restart": restart, "closingBefore": entry.closing, "closingAfter": true,
                 "needsSync": entry.needs_sync, "hasBaseline": entry.baseline.is_some(),
@@ -784,14 +846,14 @@ impl SessionLane {
             let restarted = if restart {
                 let next_generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.observation.restart", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.observation.restart", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "oldGeneration": generation,
                         "newGeneration": next_generation, "closing": true,
                     }));
                 }
                 let result = handle.restart(next_generation).await.map(|()| next_generation);
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.observation.restart_outcome", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.observation.restart_outcome", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "oldGeneration": generation,
                         "newGeneration": next_generation, "outcome": if result.is_ok() { "succeeded" } else { "failed" },
                     }));
@@ -825,7 +887,7 @@ impl SessionLane {
             };
             if entry.generation != generation || !entry.closing {
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.observation.closed_reject", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.observation.closed_reject", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "reason": "generation_or_closing_mismatch",
                         "generation": generation, "currentGeneration": entry.generation,
                         "closing": entry.closing, "needsSync": entry.needs_sync,
@@ -844,7 +906,7 @@ impl SessionLane {
                 None => {}
             }
             if crate::trace::enabled() {
-                crate::trace::log_unscoped("sessions.observation.closed", serde_json::json!({
+                crate::trace::log_unscoped("sessions.observation.closed", || serde_json::json!({
                     "identity": crate::trace::identity_shape(&identity), "oldGeneration": generation,
                     "newGeneration": entry.generation, "closing": entry.closing, "needsSync": entry.needs_sync,
                     "outcome": match restarted { Some(Ok(_)) => "restarted", Some(Err(_)) => "restart_failed", None => "closed" },
@@ -890,7 +952,7 @@ impl SessionLane {
             };
             if entry.closing || entry.baseline.is_some() || entry.handle.is_none() {
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.observation.continue_skip", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.observation.continue_skip", || serde_json::json!({
                         "identity": crate::trace::identity_shape(identity), "generation": entry.generation,
                         "reason": if entry.closing { "closing" } else if entry.baseline.is_some() { "sync_inflight" } else { "no_handle" },
                         "activeRequest": entry.active_command.as_ref().map(command_shape),
@@ -918,7 +980,7 @@ impl SessionLane {
                     }
                 });
             if crate::trace::enabled() {
-                crate::trace::log_unscoped("sessions.observation.continue", serde_json::json!({
+                crate::trace::log_unscoped("sessions.observation.continue", || serde_json::json!({
                     "identity": crate::trace::identity_shape(identity), "generation": entry.generation,
                     "request": command.as_ref().map(command_shape), "activeRequest": entry.active_command.as_ref().map(command_shape),
                     "committedRequest": entry.committed_command.as_ref().map(command_shape),
@@ -957,7 +1019,7 @@ impl SessionLane {
             };
             if entry.generation != generation || entry.closing {
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.sync.reject", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.sync.reject", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "reason": "generation_or_closing_mismatch",
                         "generation": generation, "currentGeneration": entry.generation,
                         "closing": entry.closing, "needsSync": entry.needs_sync,
@@ -966,7 +1028,7 @@ impl SessionLane {
                 return;
             }
             if crate::trace::enabled() {
-                crate::trace::log_unscoped("sessions.sync.completed", serde_json::json!({
+                crate::trace::log_unscoped("sessions.sync.completed", || serde_json::json!({
                     "identity": crate::trace::identity_shape(&identity), "generation": generation,
                     "closing": entry.closing, "needsSync": entry.needs_sync,
                     "hasBaseline": entry.baseline.is_some(), "hasCommand": entry.active_command.is_some(),
@@ -989,7 +1051,7 @@ impl SessionLane {
         let input_trace_started = crate::trace::enabled().then(Instant::now);
         if crate::trace::enabled() {
             if let Ok(sync) = &result {
-                crate::trace::log_unscoped("sessions.sync.input", serde_json::json!({
+                crate::trace::log_unscoped("sessions.sync.input", || serde_json::json!({
                     "identity": crate::trace::identity_shape(&identity), "generation": generation,
                     "incoming": crate::trace::view_shape(&sync.view), "baseline": crate::trace::view_shape(&baseline.view()),
                     "current": self.state.as_ref().map(|state| crate::trace::view_shape(&state.view())),
@@ -1057,7 +1119,7 @@ impl SessionLane {
                     Err(crate::state::SessionStateError::InvalidFacts)
                 } else if crate::trace::enabled() {
                     let current = next.view();
-                    crate::trace::with_context(serde_json::json!({
+                    crate::trace::with_context(|| serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "generation": generation,
                         "sourceEpoch": sync.source_epoch, "syncEpoch": sync.view.epoch, "syncSeq": sync.view.seq,
                         "epoch": current.epoch, "seq": current.seq, "cursor": current.cursor,
@@ -1069,7 +1131,7 @@ impl SessionLane {
                             crate::state::SessionFact::Complete(items) | crate::state::SessionFact::Incomplete { facts: items, .. } => Some(items.len()),
                             _ => None,
                         };
-                        crate::trace::log_unscoped("sessions.sync.reconcile_timing", serde_json::json!({
+                        crate::trace::log_unscoped("sessions.sync.reconcile_timing", || serde_json::json!({
                             "reconcileElapsedMs": elapsed, "inputTraceElapsedMs": input_trace_elapsed_ms,
                             "timingScope": "reconcile_sync_including_internal_trace_excluding_view_clone_and_outer_trace",
                             "request": command_shape(&command), "succeeded": reconciled.is_ok(),
@@ -1107,12 +1169,12 @@ impl SessionLane {
                         shared.store_snapshot_state(next).await;
                         if crate::trace::enabled() {
                             let trace_started = Instant::now();
-                            crate::trace::log_unscoped("sessions.sync.reconciled", serde_json::json!({
+                            crate::trace::log_unscoped("sessions.sync.reconciled", || serde_json::json!({
                                 "identity": crate::trace::identity_shape(&identity), "generation": generation,
                                 "outcome": "committed", "view": crate::trace::view_shape(&view),
                             }));
                             let trace_elapsed_ms = trace_started.elapsed().as_secs_f64() * 1000.0;
-                            crate::trace::log_unscoped("sessions.sync.reconciled_trace_timing", serde_json::json!({
+                            crate::trace::log_unscoped("sessions.sync.reconciled_trace_timing", || serde_json::json!({
                                 "identity": crate::trace::identity_shape(&identity), "generation": generation,
                                 "reconciledTraceElapsedMs": trace_elapsed_ms, "timingScope": "reconciled_view_shape_hash_emit_excluding_this_log",
                             }));
@@ -1124,7 +1186,7 @@ impl SessionLane {
                     }
                     Err(_) => {
                         if crate::trace::enabled() {
-                            crate::trace::log_unscoped("sessions.sync.reconciled", serde_json::json!({
+                            crate::trace::log_unscoped("sessions.sync.reconciled", || serde_json::json!({
                                 "identity": crate::trace::identity_shape(&identity), "generation": generation,
                                 "outcome": "rejected", "reason": if terminal_commit_failed { "terminal_commit_failed" } else { "reconcile_rejected" },
                                 "current": crate::trace::view_shape(&next.view()),
@@ -1136,7 +1198,7 @@ impl SessionLane {
             }
             _ => {
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.sync.reject", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.sync.reject", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "generation": generation,
                         "reason": "sync_failed_or_identity_mismatch",
                     }));
@@ -1180,7 +1242,7 @@ impl SessionLane {
                     && entry.recovery_available
                     && entry.demanded();
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.sync.failure_close", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.sync.failure_close", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "generation": entry.generation,
                         "restart": restart, "recoveryAvailable": entry.recovery_available,
                         "needsSync": entry.needs_sync, "closing": entry.closing, "demanded": entry.demanded(),
@@ -1200,22 +1262,30 @@ impl SessionLane {
             self.close_observation(shared, &identity, restart);
             return;
         }
-        let waiters = {
-            let mut entries = shared
-                .observations
-                .lock()
-                .expect("session observation lock");
-            let entry = entries
-                .get_mut(&session_identity_lane_key(&identity))
-                .expect("sync observation");
-            let (ready, pending): (Vec<_>, Vec<_>) = std::mem::take(&mut entry.waiters)
-                .into_iter()
-                .partition(|waiter| waiter.command == command);
-            entry.waiters = pending;
-            ready
-        };
-        for waiter in waiters {
-            finish_waiter(waiter, view.clone()).await;
+        // Retain the remaining waiters as demand while each send resumes.
+        loop {
+            let waiter = {
+                let mut entries = shared
+                    .observations
+                    .lock()
+                    .expect("session observation lock");
+                let entry = entries
+                    .get_mut(&session_identity_lane_key(&identity))
+                    .expect("sync observation");
+                entry.waiters.iter().position(|waiter| waiter.command == command)
+                    .map(|index| entry.waiters.remove(index))
+            };
+            let Some(waiter) = waiter else { break; };
+            match waiter {
+                Waiter { reply: WaiterReply::Send { command, reply }, call, .. } => {
+                    if reply.is_closed() {
+                        crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
+                    } else {
+                        self.resume_send(shared, command, reply, call).await;
+                    }
+                }
+                waiter => finish_waiter(waiter, view.clone()).await,
+            }
         }
         self.continue_observation(shared, &identity);
     }
@@ -1234,7 +1304,7 @@ impl SessionLane {
                 return;
             };
             if crate::trace::enabled() {
-                crate::trace::log_unscoped("sessions.observation.recover", serde_json::json!({
+                crate::trace::log_unscoped("sessions.observation.recover", || serde_json::json!({
                     "identity": crate::trace::identity_shape(identity), "generation": entry.generation,
                     "needsSyncBefore": entry.needs_sync, "needsSyncAfter": true, "closing": entry.closing,
                     "restart": entry.recovery_available, "hasBaseline": entry.baseline.is_some(),
@@ -1266,14 +1336,14 @@ impl SessionLane {
                 let needs_sync_before = entry.needs_sync;
                 entry.needs_sync = true;
                 if crate::trace::enabled() {
-                    crate::trace::log_unscoped("sessions.observation.history_refresh", serde_json::json!({
+                    crate::trace::log_unscoped("sessions.observation.history_refresh", || serde_json::json!({
                         "identity": crate::trace::identity_shape(identity), "generation": entry.generation,
                         "needsSyncBefore": needs_sync_before, "needsSyncAfter": entry.needs_sync,
                         "syncInflight": entry.baseline.is_some(), "closing": entry.closing, "hasHandle": entry.handle.is_some(),
                     }));
                 }
             } else if crate::trace::enabled() {
-                crate::trace::log_unscoped("sessions.observation.history_refresh", serde_json::json!({
+                crate::trace::log_unscoped("sessions.observation.history_refresh", || serde_json::json!({
                     "identity": crate::trace::identity_shape(identity), "reason": "no_observation",
                 }));
             }
@@ -1294,6 +1364,15 @@ fn observe_failure(failure: RuntimeOperationFailure) -> SessionObserveOutcome {
 
 async fn finish_failed_waiter(waiter: Waiter, failure: RuntimeOperationFailure) {
     match waiter.reply {
+        WaiterReply::Send { reply, .. } => {
+            let outcome = match failure {
+                RuntimeOperationFailure::TargetRejected => SessionSendOutcome::Rejected,
+                RuntimeOperationFailure::Unsupported => SessionSendOutcome::Unsupported,
+                RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending
+                    | RuntimeOperationFailure::Unknown => SessionSendOutcome::Unavailable,
+            };
+            crate::call::reply(waiter.call.as_ref(), reply, outcome).await;
+        }
         WaiterReply::Observe { reply, .. } => {
             crate::call::reply(waiter.call.as_ref(), reply, observe_failure(failure)).await
         }
@@ -1322,6 +1401,9 @@ async fn finish_failed_waiter(waiter: Waiter, failure: RuntimeOperationFailure) 
 
 async fn finish_waiter(waiter: Waiter, view: Option<SessionView>) {
     match waiter.reply {
+        WaiterReply::Send { reply, .. } => {
+            crate::call::reply(waiter.call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
+        }
         WaiterReply::Observe {
             lease_id, reply, ..
         } => {

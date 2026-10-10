@@ -45,7 +45,7 @@ impl<T> CallReply<T> {
 
 impl<T> CallReply<T> {
     pub(crate) fn trace_id(&self) -> Option<String> {
-        self.call.as_ref().map(CallScope::trace_id)
+        self.call.as_ref().filter(|_| platform::trace::enabled()).map(CallScope::trace_id)
     }
 
     pub(crate) fn provision_observer(&self) -> Option<crate::TeamProvisionObserver> {
@@ -150,7 +150,7 @@ impl<T> CallReply<T> {
                         call.finished.store(true, Ordering::Release);
                         session_trace(
                             "runtime.team.call.terminal",
-                            json!({"status": detail.status()}),
+                            || json!({"status": detail.status()}),
                         );
                     } else {
                         audit_failure();
@@ -162,7 +162,7 @@ impl<T> CallReply<T> {
             let sent = self.sender.send(value);
             session_trace(
                 "runtime.team.owner.reply",
-                json!({"reason": if sent.is_ok() { "sent" } else { "receiver_closed" }}),
+                || json!({"reason": if sent.is_ok() { "sent" } else { "receiver_closed" }}),
             );
             sent
         })
@@ -233,7 +233,6 @@ enum OrganizationCallOutcome {
     Materialized,
     Created,
     Started,
-    Intake,
     WaitingForInput,
     ApprovalRequested,
     TerminalRecorded,
@@ -318,7 +317,7 @@ impl CallWorkflows {
                 match workflow {
                     Some(CallWorkflow::Team { owner, request }) => {
                         with_session_trace(owner.call_trace_id(), async {
-                            session_trace("runtime.team.workflow.start", json!({}));
+                            session_trace("runtime.team.workflow.start", || json!({}));
                             let failed = if owner.call_running().await {
                                 match request {
                                     TeamWorkflow::Skill(request) => {
@@ -350,7 +349,7 @@ impl CallWorkflows {
                                 true
                             };
                             owner.finish_workflow(failed).await;
-                            session_trace("runtime.team.workflow.end", json!({}));
+                            session_trace("runtime.team.workflow.end", || json!({}));
                         })
                         .await;
                     }
@@ -360,18 +359,19 @@ impl CallWorkflows {
                         reply,
                     }) => {
                         with_session_trace(owner.call_trace_id(), async {
-                            session_trace("runtime.team.workflow.start", json!({}));
+                            session_trace("runtime.team.workflow.start", || json!({}));
                             let outcome = if owner.call_running().await {
                                 owner.execute_team_runtime_inline(command).await
                             } else {
                                 Err(crate::owner::handle::closed_error())
                             };
                             owner.finish_workflow(outcome.is_err()).await;
+                            let sent = reply.send(outcome).is_ok();
                             session_trace(
                                 "runtime.team.workflow.reply",
-                                json!({"sent": reply.send(outcome).is_ok()}),
+                                || json!({"sent": sent}),
                             );
-                            session_trace("runtime.team.workflow.end", json!({}));
+                            session_trace("runtime.team.workflow.end", || json!({}));
                         })
                         .await;
                     }
@@ -396,7 +396,7 @@ impl CallWorkflows {
                         reply,
                     }) => {
                         with_session_trace(owner.call_trace_id(), async {
-                            session_trace("runtime.team.workflow.start", json!({}));
+                            session_trace("runtime.team.workflow.start", || json!({}));
                             let outcome = if owner.call_running().await {
                                 owner
                                     .execute_runtime_capability_inline(resolver, request)
@@ -406,12 +406,13 @@ impl CallWorkflows {
                             };
                             owner.finish_workflow(outcome.is_err()).await;
                             if let Some(reply) = reply {
+                                let sent = reply.send(outcome).is_ok();
                                 session_trace(
                                     "runtime.team.workflow.reply",
-                                    json!({"sent": reply.send(outcome).is_ok()}),
+                                    || json!({"sent": sent}),
                                 );
                             }
-                            session_trace("runtime.team.workflow.end", json!({}));
+                            session_trace("runtime.team.workflow.end", || json!({}));
                         })
                         .await;
                     }
@@ -442,11 +443,11 @@ impl CallWorkflows {
             .map_err(|_| {
                 session_trace(
                     "runtime.team.workflow.enqueue",
-                    json!({"reason": "admission_closed"}),
+                    || json!({"reason": "admission_closed"}),
                 );
                 crate::owner::handle::closed_error()
             })?;
-        session_trace("runtime.team.workflow.enqueue", json!({"reason": "queued"}));
+        session_trace("runtime.team.workflow.enqueue", || json!({"reason": "queued"}));
         owner.call_admitted().await;
         outcome
             .await
@@ -498,11 +499,11 @@ impl CallWorkflows {
             .map_err(|_| {
                 session_trace(
                     "runtime.team.workflow.enqueue",
-                    json!({"reason": "admission_closed"}),
+                    || json!({"reason": "admission_closed"}),
                 );
                 crate::TeamRuntimeDecodeError::Unavailable
             })?;
-        session_trace("runtime.team.workflow.enqueue", json!({"reason": "queued"}));
+        session_trace("runtime.team.workflow.enqueue", || json!({"reason": "queued"}));
         owner.call_admitted().await;
         outcome
             .await
@@ -540,16 +541,16 @@ impl CallWorkflows {
         self.sender.try_send(workflow).map_err(|_| {
             session_trace(
                 "runtime.team.workflow.enqueue",
-                json!({"reason": "admission_closed"}),
+                || json!({"reason": "admission_closed"}),
             );
             crate::TeamRuntimeDecodeError::Unavailable
         })?;
-        session_trace("runtime.team.workflow.enqueue", json!({"reason": "queued"}));
+        session_trace("runtime.team.workflow.enqueue", || json!({"reason": "queued"}));
         call.workflow_owned.store(true, Ordering::Release);
         match call.context.accepted().await {
             Ok(receipt) => {
                 *state = CallStatus::Accepted;
-                session_trace("runtime.team.call.admission", json!({"reason": "accepted"}));
+                session_trace("runtime.team.call.admission", || json!({"reason": "accepted"}));
                 Ok(receipt)
             }
             Err(_) => {
@@ -557,7 +558,7 @@ impl CallWorkflows {
                 *state = CallStatus::Failed;
                 session_trace(
                     "runtime.team.call.admission",
-                    json!({"reason": "audit_failed"}),
+                    || json!({"reason": "audit_failed"}),
                 );
                 Err(crate::TeamRuntimeDecodeError::Unavailable)
             }
@@ -596,19 +597,14 @@ impl CallWorkflows {
         if let Some(scope) = &scope {
             dependencies = dependencies.with_call(scope.clone());
         }
-        let trace_id = scope.as_ref().map(CallScope::trace_id);
+        let trace_id = scope.as_ref().filter(|_| platform::trace::enabled()).map(CallScope::trace_id);
         with_session_trace(trace_id, async {
-            let started = Instant::now();
-            let request_trace_hash = serde_json::from_slice::<Value>(&request.body)
-                .ok()
-                .and_then(|body| {
-                    body.get("traceId")
-                        .and_then(Value::as_str)
-                        .map(identifier_hash)
-                });
+            let started = platform::trace::enabled().then(Instant::now);
             session_trace(
                 "runtime.team.call.received",
-                json!({"requestTraceIdHash": request_trace_hash}),
+                || json!({"requestTraceIdHash": serde_json::from_slice::<Value>(&request.body)
+                    .ok()
+                    .and_then(|body| body.get("traceId").and_then(Value::as_str).map(identifier_hash))}),
             );
             let response = if runtime_route {
                 loopback::dispatch_team_runtime(dependencies, request).await
@@ -625,7 +621,7 @@ impl CallWorkflows {
             }
             session_trace(
                 "runtime.team.call.response",
-                json!({"status": response.status(), "elapsedMs": started.elapsed().as_millis()}),
+                || json!({"status": response.status(), "elapsedMs": started.map(|started| started.elapsed().as_millis())}),
             );
             response
         })
@@ -690,7 +686,7 @@ impl CallScope {
         if *state == CallStatus::Received {
             if self.context.accepted().await.is_ok() {
                 *state = CallStatus::Accepted;
-                session_trace("runtime.team.call.admission", json!({"reason": "accepted"}));
+                session_trace("runtime.team.call.admission", || json!({"reason": "accepted"}));
             } else {
                 audit_failure();
                 *state = CallStatus::Failed;
@@ -704,7 +700,7 @@ impl CallScope {
         if *state == CallStatus::Accepted {
             if self.context.running().await.is_ok() {
                 *state = CallStatus::Running;
-                session_trace("runtime.team.call.running", json!({"reason": "running"}));
+                session_trace("runtime.team.call.running", || json!({"reason": "running"}));
             } else {
                 audit_failure();
                 *state = CallStatus::Failed;
@@ -734,7 +730,7 @@ impl CallScope {
             self.finished.store(true, Ordering::Release);
             session_trace(
                 "runtime.team.call.terminal",
-                json!({"status": detail.status()}),
+                || json!({"status": detail.status()}),
             );
         } else {
             audit_failure();
@@ -818,14 +814,14 @@ async fn finish(
     if context.finish(status, detail).await.is_err() {
         audit_failure();
     } else {
-        session_trace("runtime.team.call.terminal", json!({"status": status}));
+        session_trace("runtime.team.call.terminal", || json!({"status": status}));
     }
 }
 
 fn audit_failure() {
     session_trace(
         "runtime.team.call.audit",
-        json!({"reason": "persistence_failed"}),
+        || json!({"reason": "persistence_failed"}),
     );
     eprintln!("Organization call audit persistence failed");
 }
@@ -890,6 +886,7 @@ fn command_name(request: &Request, runtime_route: bool) -> Option<&'static str> 
                 Some("team.dependencyPlan") => "team.dependencyPlan",
                 Some("team.provisionAgents") => "team.provisionAgents",
                 Some("team.delete") => "team.delete",
+                Some("team.runStart") => "team.runStart",
                 Some("team.runCreate") => "team.runCreate",
                 Some("team.runList") => "team.runList",
                 Some("team.triggerList") => "team.triggerList",
@@ -901,13 +898,6 @@ fn command_name(request: &Request, runtime_route: bool) -> Option<&'static str> 
                 Some("team.graphExportYaml") => "team.graphExportYaml",
                 Some("team.graphImportYaml") => "team.graphImportYaml",
                 Some("team.triggerFire") => "team.triggerFire",
-                Some("team.runStartConfirm" | "team.proposalConfirm") => "team.runStartConfirm",
-                Some(
-                    "team.runStartContinue"
-                    | "team.proposalContinue"
-                    | "team.proposalCancel"
-                    | "team.runStartReject",
-                ) => "team.runStartContinue",
                 Some("team.nodePromptRetryDue") => "team.nodePromptRetryDue",
                 Some("team.nodeEvent") => "team.nodeEvent",
                 Some("team.runDiagnostics") => "team.runDiagnostics",
@@ -1040,12 +1030,7 @@ fn single_stage(request: &Request, runtime_route: bool) -> bool {
                 | "team.triggerFire"
                 | "team.nodeEvent"
                 | "team.runDecisionSubmit"
-                | "team.runStartConfirm"
-                | "team.proposalConfirm"
-                | "team.runStartContinue"
-                | "team.proposalContinue"
-                | "team.proposalCancel"
-                | "team.runStartReject"
+                | "team.runStart"
                 | "team.nodePromptRetryDue"
                 | "team.runDiagnostics"
                 | "team.approvalResolve"

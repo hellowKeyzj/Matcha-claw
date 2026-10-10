@@ -193,8 +193,6 @@ pub(in crate::composition::host) struct RuntimeOwners {
     pub(in crate::composition::host) fleet_module: FleetModule,
     pub(in crate::composition::host) organization_module: OrganizationModule,
     pub(in crate::composition::host) organization_handle: organization::OrganizationHandle,
-    pub(in crate::composition::host) start_gate_registry:
-        std::sync::Arc<organization::StartGateRegistry>,
 }
 
 pub(in crate::composition::host) struct RuntimeOwnerInput {
@@ -376,7 +374,6 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     organization_scope.register_event_subscription("sessions.run-terminal", move || async move {
         let _ = session_terminal_scope.close_and_join().await;
     });
-    let start_gate_registry = session_terminal.start_gate_registry();
 
     let (session_module, session_task) = sessions_module::spawn_owner(
         &owner_runtime_system,
@@ -484,17 +481,16 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         session_handle.clone(),
         Arc::clone(&runtime_directory),
     ));
-    let (admission_changes_tx, admission_changes) =
-        tokio::sync::watch::channel(organization::AdmissionState::Changed);
-    drop(admission_changes_tx);
     let (team_run_coordinator, team_run_coordinator_handle) =
-        organization::TeamRunCoordinator::spawn(organization::TeamRunCoordinatorInput {
-            admission: admission.clone() as Arc<dyn organization::TeamRunAdmission>,
-            organization: organization_handle.clone(),
-            activity_executor,
-            admission_changes,
-            observation: runtime_observation.sink(),
-        });
+        organization::TeamRunCoordinator::spawn(
+            organization::TeamRunCoordinatorInput {
+                admission: admission.clone() as Arc<dyn organization::TeamRunAdmission>,
+                organization: organization_handle.clone(),
+                activity_executor,
+                observation: runtime_observation.sink(),
+            },
+            admission.subscribe(),
+        );
 
     let peer_startup = crate::composition::peer::PeerStartupState::new();
     let peer_owner = crate::composition::peer::PeerOwner::new(
@@ -519,7 +515,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         ),
     );
     let peer_handle =
-        crate::composition::peer::PeerHandle::new(peer_owner_handle, Arc::clone(&admission), Arc::clone(&runtime_directory));
+        crate::composition::peer::PeerHandle::new(peer_owner_handle, Arc::clone(&admission), Arc::clone(&runtime_directory), Arc::clone(&open_claw));
     let (diagnostics, diagnostics_task) = ::diagnostics::spawn_owner(
         &owner_runtime_system,
         ::diagnostics::DiagnosticsOwnerInput {
@@ -597,6 +593,5 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         fleet_module,
         organization_module,
         organization_handle,
-        start_gate_registry,
     })
 }

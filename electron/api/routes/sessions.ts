@@ -23,6 +23,7 @@ import { decodeSessionGoalOutcome, decodeSessionGoalRequest, isGoalIdentifier, i
 import { isSessionSendGoalResponse, type SessionSendRequest } from '../../main/runtime-host-delivery/transport/sessions/send';
 import type { WorkspaceMediaTransport } from '../../main/runtime-host-delivery/transport/workspace/media';
 import {
+  isSessionTraceEnabled,
   logSessionTrace,
   summarizeIdentifier,
 } from '../../main/runtime-host-delivery/transport/sessions/trace';
@@ -81,10 +82,10 @@ export async function dispatchSessionCapability(
   signal?: AbortSignal,
 ): Promise<PublicTransportResponse | null> {
   if (!isRecord(body)) return null;
-  logSessionTrace('capability.dispatch', traceId, {
+  logSessionTrace('capability.dispatch', traceId, () => ({
     id: typeof body.id === 'string' ? body.id : null,
     operationId: typeof body.operationId === 'string' ? body.operationId : null,
-  });
+  }));
 
   if (body.id === 'session.management' && (body.operationId === 'sessions.observe' || body.operationId === 'sessions.release')) {
     return await dispatchSessionObservation(body, deps, sessionPage, traceId, signal);
@@ -122,7 +123,7 @@ export async function dispatchSessionCapability(
   }
   if ((body.id === 'session.prompt' || body.id === 'session.abort')
     && body.operationId === 'sessions.abort') {
-    logSessionTrace('capability.abort.dispatch', traceId, {});
+    logSessionTrace('capability.abort.dispatch', traceId);
     const request = adaptSessionAbortRequest(body, traceId);
     return traceId
       ? await deps.runtimeHostTransports.sessionAbortTransport.abort(request, traceId)
@@ -310,14 +311,14 @@ async function dispatchSessionSend(
     ? request.input.runId ?? request.input.idempotencyKey : undefined;
   const demand = deps.sessionObservers.beginSend(sessionPage, request.scope.identity, requestedRunId);
   try {
-    logSessionTrace('capability.send.request', traceId, {
+    logSessionTrace('capability.send.request', traceId, () => ({
       adapter: request.scope.identity.endpoint.runtimeAdapterId,
       sessionKey: summarizeIdentifier(request.input.identity.sessionKey),
       endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
       runId: summarizeIdentifier(request.input.runId),
       idempotencyKey: summarizeIdentifier(request.input.idempotencyKey),
       attachmentCount: request.input.attachments.length,
-    });
+    }));
     const response = traceId === undefined
       ? await deps.runtimeHostTransports.sessionSendTransport.send(request)
       : await deps.runtimeHostTransports.sessionSendTransport.send(request, traceId);
@@ -331,10 +332,10 @@ async function dispatchSessionSend(
         || projected.body.outcome === 'unsupported')))) {
       deps.sessionObservers.releaseSend(demand);
     } else if (request.input.intent !== undefined) deps.sessionObservers.retainUnknownGoalSend(demand);
-    logSessionTrace('capability.send.response', traceId, {
+    logSessionTrace('capability.send.response', traceId, () => ({
       status: response.status,
       projected: Boolean(projected),
-    });
+    }));
     return projected ?? (request.input.intent === undefined
       ? { status: 503, body: SESSION_SEND_UNAVAILABLE }
       : { status: 200, body: { outcome: 'unknown' } });
@@ -959,11 +960,11 @@ function adaptSessionTimelineRequest(
     || !isSessionIdentity(body.target.identity)
     || !sameIdentity(body.scope.identity, body.target.identity)
     || !isRecord(body.input)) {
-    logSessionTrace('electron.timeline.route.invalid', traceId, {
+    logSessionTrace('electron.timeline.route.invalid', traceId, () => ({
       operationId,
       reason: 'envelope',
       envelope: summarizeTimelineBody(body),
-    });
+    }));
     throw new Error('Session timeline request is invalid');
   }
 
@@ -976,20 +977,20 @@ function adaptSessionTimelineRequest(
     || body.input.sessionKey !== body.scope.identity.sessionKey
     || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))
     || (body.input.limit !== undefined && !isTimelineLimit(body.input.limit))) {
-    logSessionTrace('electron.timeline.route.invalid', traceId, {
+    logSessionTrace('electron.timeline.route.invalid', traceId, () => ({
       operationId,
       reason: 'input',
       envelope: summarizeTimelineBody(body),
-    });
+    }));
     throw new Error('Session timeline request is invalid');
   }
   if (operationId === 'sessions.load') {
     if (body.input.mode !== undefined || body.input.offset !== undefined || body.input.includeCanonical !== undefined) {
-      logSessionTrace('electron.timeline.route.invalid', traceId, {
+      logSessionTrace('electron.timeline.route.invalid', traceId, () => ({
         operationId,
         reason: 'load-window-fields',
         envelope: summarizeTimelineBody(body),
-      });
+      }));
       throw new Error('Session timeline request is invalid');
     }
     const request = {
@@ -1004,7 +1005,7 @@ function adaptSessionTimelineRequest(
         ...(body.input.limit === undefined ? {} : { limit: body.input.limit }),
       },
     };
-    logSessionTrace('electron.timeline.route.adapted', traceId, {
+    if (isSessionTraceEnabled()) logSessionTrace('electron.timeline.route.adapted', traceId, {
       operationId,
       adapter: body.scope.identity.endpoint.runtimeAdapterId,
       instance: body.scope.identity.endpoint.runtimeInstanceId,
@@ -1016,35 +1017,35 @@ function adaptSessionTimelineRequest(
   }
 
   if (body.input.includeCanonical !== undefined && typeof body.input.includeCanonical !== 'boolean') {
-    logSessionTrace('electron.timeline.route.invalid', traceId, {
+    logSessionTrace('electron.timeline.route.invalid', traceId, () => ({
       operationId,
       reason: 'include-canonical',
       envelope: summarizeTimelineBody(body),
-    });
+    }));
     throw new Error('Session timeline request is invalid');
   }
   if (body.input.mode !== 'latest' && body.input.mode !== 'older' && body.input.mode !== 'newer') {
-    logSessionTrace('electron.timeline.route.invalid', traceId, {
+    logSessionTrace('electron.timeline.route.invalid', traceId, () => ({
       operationId,
       reason: 'mode',
       envelope: summarizeTimelineBody(body),
-    });
+    }));
     throw new Error('Session timeline request is invalid');
   }
   if (body.input.mode === 'latest' && body.input.offset !== undefined) {
-    logSessionTrace('electron.timeline.route.invalid', traceId, {
+    logSessionTrace('electron.timeline.route.invalid', traceId, () => ({
       operationId,
       reason: 'latest-offset',
       envelope: summarizeTimelineBody(body),
-    });
+    }));
     throw new Error('Session timeline request is invalid');
   }
   if (body.input.offset !== undefined && !isSafeNonNegativeInteger(body.input.offset)) {
-    logSessionTrace('electron.timeline.route.invalid', traceId, {
+    logSessionTrace('electron.timeline.route.invalid', traceId, () => ({
       operationId,
       reason: 'offset',
       envelope: summarizeTimelineBody(body),
-    });
+    }));
     throw new Error('Session timeline request is invalid');
   }
   const request = {
@@ -1062,7 +1063,7 @@ function adaptSessionTimelineRequest(
       ...(body.input.includeCanonical === undefined ? {} : { includeCanonical: body.input.includeCanonical }),
     },
   };
-  logSessionTrace('electron.timeline.route.adapted', traceId, {
+  if (isSessionTraceEnabled()) logSessionTrace('electron.timeline.route.adapted', traceId, {
     operationId,
     adapter: body.scope.identity.endpoint.runtimeAdapterId,
     instance: body.scope.identity.endpoint.runtimeInstanceId,
@@ -1101,7 +1102,7 @@ function adaptSessionContentLoadRequest(
     || !isSafeNonNegativeInteger(body.input.offset)
     || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))
     || (body.input.limit !== undefined && !isContentLimit(body.input.limit))) {
-    logSessionTrace('electron.content.route.invalid', traceId, { envelope: summarizeTimelineBody(body) });
+    logSessionTrace('electron.content.route.invalid', traceId, () => ({ envelope: summarizeTimelineBody(body) }));
     throw new Error('Session content request is invalid');
   }
   const request = {
@@ -1118,7 +1119,7 @@ function adaptSessionContentLoadRequest(
       ...(body.input.limit === undefined ? {} : { limit: body.input.limit }),
     },
   } satisfies SessionContentLoadRequest;
-  logSessionTrace('electron.content.route.adapted', traceId, {
+  if (isSessionTraceEnabled()) logSessionTrace('electron.content.route.adapted', traceId, {
     adapter: body.scope.identity.endpoint.runtimeAdapterId,
     instance: body.scope.identity.endpoint.runtimeInstanceId,
     sessionKey: summarizeIdentifier(body.input.sessionKey as string),
@@ -1240,10 +1241,10 @@ function adaptSessionPermissionRequest(
     || !sameIdentity(body.scope.identity, body.input.sessionIdentity)
     || body.input.sessionKey !== body.scope.identity.sessionKey
     || (operationId === 'sessions.permission.set' && !isSessionPermissionMode(body.input.permissionMode))) {
-    logSessionTrace('electron.permission.route.invalid', traceId, {
+    logSessionTrace('electron.permission.route.invalid', traceId, () => ({
       operationId,
       envelope: summarizePermissionBody(body),
-    });
+    }));
     throw new Error('Session permission request is invalid');
   }
   const request = {
@@ -1262,7 +1263,7 @@ function adaptSessionPermissionRequest(
           permissionMode: body.input.permissionMode,
         },
   } satisfies SessionPermissionRequest;
-  logSessionTrace('electron.permission.route.adapted', traceId, {
+  if (isSessionTraceEnabled()) logSessionTrace('electron.permission.route.adapted', traceId, {
     operationId,
     adapter: body.scope.identity.endpoint.runtimeAdapterId,
     instance: body.scope.identity.endpoint.runtimeInstanceId,
@@ -1336,20 +1337,21 @@ function adaptSessionAbortRequest(body: Record<string, unknown>, traceId?: strin
       && (!Array.isArray(body.input.approvalIds)
         || body.input.approvalIds.some((approvalId) => !isIdentifier(approvalId))))
 ) {
-    const input = isRecord(body.input) ? body.input : null;
-    logSessionTrace('electron.abort.route.invalid', traceId, {
-      reason: 'request-validation',
-      sessionKey: summarizeString(input?.sessionKey),
-      endpointSessionId: summarizeString(input?.endpointSessionId),
-      runId: summarizeString(input?.runId),
-      approvalIdsCount: Array.isArray(input?.approvalIds) ? input.approvalIds.length : null,
-      emptyApprovalIds: Array.isArray(input?.approvalIds) && input.approvalIds.length === 0,
+    logSessionTrace('electron.abort.route.invalid', traceId, () => {
+      const input = isRecord(body.input) ? body.input : null;
+      return {
+        reason: 'request-validation',
+        sessionKey: summarizeString(input?.sessionKey),
+        endpointSessionId: summarizeString(input?.endpointSessionId),
+        runId: summarizeString(input?.runId),
+        approvalIdsCount: Array.isArray(input?.approvalIds) ? input.approvalIds.length : null,
+        emptyApprovalIds: Array.isArray(input?.approvalIds) && input.approvalIds.length === 0,
+      };
     });
     throw new Error('Session abort request is invalid');
   }
-  const endpoint = body.scope.identity.endpoint;
-  logSessionTrace('electron.abort.route.adapted', traceId, {
-    adapter: endpoint.runtimeAdapterId,
+  if (isSessionTraceEnabled()) logSessionTrace('electron.abort.route.adapted', traceId, {
+    adapter: body.scope.identity.endpoint.runtimeAdapterId,
     sessionKey: summarizeString(body.input.sessionKey),
     endpointSessionId: summarizeString(body.input.endpointSessionId),
     runId: summarizeString(body.input.runId),
@@ -1593,15 +1595,15 @@ function adaptSessionModelSelectionRequest(body: Record<string, unknown>, traceI
     || !isIdentifier(body.input.modelSelectionId)
     || body.input.modelSelectionId !== body.target.modelSelectionId
     || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))) {
-    logSessionTrace('electron.model-selection.route.invalid', traceId, {
+    logSessionTrace('electron.model-selection.route.invalid', traceId, () => ({
       reason: explainSessionModelSelectionInvalid(body),
       envelope: summarizeSessionModelSelectionBody(body),
-    });
+    }));
     throw new Error('Session model selection request is invalid');
   }
   const endpoint = body.scope.identity.endpoint;
   const sessionKey = body.scope.identity.sessionKey;
-  logSessionTrace('electron.model-selection.route.adapted', traceId, {
+  if (isSessionTraceEnabled()) logSessionTrace('electron.model-selection.route.adapted', traceId, {
     adapter: endpoint.runtimeAdapterId,
     instance: endpoint.runtimeInstanceId,
     sessionKey: summarizeIdentifier(sessionKey),

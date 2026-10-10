@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { logger } from '../../../../utils/logger';
+import { isTraceEnabled } from '../../../../utils/trace-logger';
 import type { SessionChange, SessionIdentity, SessionItem, SessionView } from './session-contract';
 
 const SESSION_TRACE_PREFIX = 'session-trace';
@@ -8,10 +9,10 @@ export const SESSION_TRACE_HEADER = 'X-MatchaClaw-Session-Trace';
 type TracePayload = Record<string, unknown>;
 
 export function isSessionTraceEnabled(): boolean {
-  return process.env.MATCHACLAW_SESSION_TRACE === '1';
+  return isTraceEnabled();
 }
 
-export function logSessionTrace(stage: string, traceId: string | null | undefined, payload: TracePayload = {}): void {
+export function logSessionTrace(stage: string, traceId: string | null | undefined, payload?: TracePayload | (() => TracePayload)): void {
   if (!traceId || !isSessionTraceEnabled()) {
     return;
   }
@@ -21,7 +22,7 @@ export function logSessionTrace(stage: string, traceId: string | null | undefine
     traceIdHash: createHash('sha256').update(traceId).digest('hex').slice(0, 16),
     stage,
     at: Date.now(),
-    ...payload,
+    ...(typeof payload === 'function' ? payload() : payload),
   }));
 }
 

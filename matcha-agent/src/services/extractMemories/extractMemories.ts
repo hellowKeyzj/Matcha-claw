@@ -451,7 +451,7 @@ export function initExtractMemories(): void {
 
       if (writtenPaths.length > 0) {
         logForDebugging(
-          `[extractMemories] memories saved: ${writtenPaths.join(', ')}`,
+          () => `[extractMemories] memories saved: ${writtenPaths.join(', ')}`,
         )
       } else {
         logForDebugging('[extractMemories] no memories saved this run')

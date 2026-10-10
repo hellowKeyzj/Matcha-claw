@@ -374,12 +374,12 @@ export const useSecurityPolicyStore = create<SecurityPolicyState>((set, get) => 
     const silent = options?.silent === true;
     const traceId = createSessionTraceId('security-policy:security.read');
     const hasCachedPolicy = securityPolicyCache !== null;
-    logSessionTrace('renderer.security.policy.request', traceId, {
+    logSessionTrace('renderer.security.policy.request', traceId, () => ({
       operationId: 'security.read',
       silent,
       hadCachedPolicy: hasCachedPolicy,
       policyReady: get().policyReady,
-    });
+    }));
     if (hasCachedPolicy) {
       set({ refreshing: !silent, initialLoading: false, policyReady: false });
     } else {
@@ -398,21 +398,21 @@ export const useSecurityPolicyStore = create<SecurityPolicyState>((set, get) => 
         policyReady: true,
         error: null,
       });
-      logSessionTrace('renderer.security.policy.response', traceId, {
+      logSessionTrace('renderer.security.policy.response', traceId, () => ({
         operationId: 'security.read',
         preset: normalized.preset,
         securityPolicyVersion: normalized.securityPolicyVersion,
         runtimeFieldCount: Object.keys(normalized.runtime).length,
-      });
+      }));
     } catch (error) {
       set({
         policyReady: false,
         error: error instanceof Error ? error.message : 'errors.loadFailed',
       });
-      logSessionTrace('renderer.security.policy.error', traceId, {
+      logSessionTrace('renderer.security.policy.error', traceId, () => ({
         operationId: 'security.read',
         error: summarizeError(error),
-      });
+      }));
     } finally {
       set({ initialLoading: false, refreshing: false });
     }

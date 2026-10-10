@@ -28,6 +28,7 @@ pub enum TeamRunWakeReason {
     NodeEventRecorded,
     ApprovalResolved,
     DecisionSubmitted,
+    SchedulerObservationChanged,
 }
 
 impl TeamRunWake {
@@ -48,17 +49,11 @@ pub trait TeamRunAdmission: Send + Sync {
     fn is_admitted(&self) -> bool;
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AdmissionState {
-    Changed,
-}
-
 #[derive(Clone)]
 pub struct TeamRunCoordinatorInput {
     pub admission: Arc<dyn TeamRunAdmission>,
     pub organization: OrganizationHandle,
     pub activity_executor: Arc<dyn TeamActivityExecutor>,
-    pub admission_changes: watch::Receiver<AdmissionState>,
     pub observation: ObservationSink,
 }
 
@@ -85,11 +80,14 @@ impl TeamRunCoordinatorHandle {
 }
 
 impl TeamRunCoordinator {
-    pub fn spawn(input: TeamRunCoordinatorInput) -> (Self, TeamRunCoordinatorHandle) {
+    pub fn spawn<T: Send + Sync + 'static>(
+        input: TeamRunCoordinatorInput,
+        admission_changes: watch::Receiver<T>,
+    ) -> (Self, TeamRunCoordinatorHandle) {
         let (requests, receiver) = mpsc::channel(TEAM_RUN_MAINTENANCE_CAPACITY);
         let handle = TeamRunCoordinatorHandle { requests };
         let (service, _) = ServiceHandle::spawn(move |cancellation| async move {
-            super::supervisor::run(input, receiver, cancellation).await;
+            super::supervisor::run(input, admission_changes, receiver, cancellation).await;
         });
         (Self { service }, handle)
     }

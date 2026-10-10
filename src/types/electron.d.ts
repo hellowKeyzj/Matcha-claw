@@ -21,6 +21,7 @@ export interface ElectronAPI {
   getPathForFile: (file: File) => string;
   platform: NodeJS.Platform;
   isDev: boolean;
+  traceEnabled: boolean;
 }
 
 export interface MatchaClawDebugAPI {

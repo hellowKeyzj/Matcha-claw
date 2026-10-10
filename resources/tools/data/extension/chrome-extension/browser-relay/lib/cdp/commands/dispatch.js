@@ -93,7 +93,7 @@ export function createDispatcher(mgr) {
       await chrome.debugger.sendCommand(debuggerSession, 'Runtime.disable')
       await new Promise((r) => setTimeout(r, RUNTIME_ENABLE_DELAY))
     } catch (err) {
-      console.debug('[matchaclaw-relay] Runtime.disable pre-step failed:', err)
+      log.debug(() => ['Runtime.disable pre-step failed:', err])
     }
     return withTimeout(
       chrome.debugger.sendCommand(debuggerSession, 'Runtime.enable', params),
@@ -110,20 +110,20 @@ export function createDispatcher(mgr) {
     const tabId = mgr.resolveTabId(sessionId, targetId)
 
     if (shouldTraceMethod(method)) {
-      log.info('forwardCDPCommand received', {
+      log.info(() => ['forwardCDPCommand received', {
         method,
         sessionId: sessionId || null,
         targetId: targetId || null,
         tabId,
         url: typeof params?.url === 'string' ? params.url : null,
-      })
+      }])
     }
 
     return enqueueForTab(tabId, async () => {
       // ── Target.* commands (no tabId required for createTarget) ──
       if (method === 'Target.createTarget') {
         const result = await cdpCreateTarget(params)
-        log.info('forwardCDPCommand Target.createTarget result', result)
+        log.info(() => ['forwardCDPCommand Target.createTarget result', result])
         return result
       }
       if (method === 'Target.closeAllAgentTabs') return cdpCloseAllAgentTabs()
@@ -173,13 +173,13 @@ export function createDispatcher(mgr) {
         method,
       )
       if (shouldTraceMethod(method)) {
-        log.info('forwardCDPCommand forwarded result', {
+        log.info(() => ['forwardCDPCommand forwarded result', {
           method,
           sessionId: sessionId || null,
           tabId,
           resultTargetId: typeof result?.targetId === 'string' ? result.targetId : null,
           infoTargetId: typeof result?.targetInfo?.targetId === 'string' ? result.targetInfo.targetId : null,
-        })
+        }])
       }
       return result
     })

@@ -433,10 +433,10 @@ impl ProviderHandle {
             "providerGeneration.generateText",
         )
         .await.map_err(|_| {
-            session_trace("provider-generation.call-begin-failed", json!({ "streaming": false }));
+            session_trace("provider-generation.call-begin-failed", || json!({ "streaming": false }));
         })?;
-        let provider_call_hash = call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str()));
-        session_trace("provider-generation.call-begun", json!({
+        let provider_call_hash = platform::trace::enabled().then(|| call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str()))).flatten();
+        session_trace("provider-generation.call-begun", || json!({
             "providerCallHash": provider_call_hash, "streaming": false,
         }));
         let (reply, rx) = oneshot::channel();
@@ -444,20 +444,16 @@ impl ProviderHandle {
             call,
             request,
             cancellation,
-            diagnostic_trace: current_session_trace(),
+            diagnostic_trace: platform::trace::enabled().then(current_session_trace).flatten(),
             stream: None,
             reply,
         })
         .await
         .map_err(|_| {
-            session_trace("provider-generation.send-query-failed", json!({
-                "providerCallHash": provider_call_hash, "streaming": false,
-            }));
+            eprintln!("[provider] phase=provider-generation.send-query-failed streaming=false");
         })?;
         rx.await.map_err(|_| {
-            session_trace("provider-generation.reply-channel-failed", json!({
-                "providerCallHash": provider_call_hash, "streaming": false,
-            }));
+            eprintln!("[provider] phase=provider-generation.reply-channel-failed streaming=false");
         })
     }
 
@@ -480,11 +476,11 @@ impl ProviderHandle {
                 )
                 .await
                 .map_err(|_| {
-                    session_trace("provider-generation.call-begin-failed", json!({ "streaming": true }));
+                    session_trace("provider-generation.call-begin-failed", || json!({ "streaming": true }));
                     LlmClientError::StreamSink("provider owner unavailable".into())
                 })?;
-                let provider_call_hash = call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str()));
-                session_trace("provider-generation.call-begun", json!({
+                let provider_call_hash = platform::trace::enabled().then(|| call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str()))).flatten();
+                session_trace("provider-generation.call-begun", || json!({
                     "providerCallHash": provider_call_hash, "streaming": true,
                 }));
                 let (stream, mut events) = mpsc::channel::<ProviderStreamMessage>(1);
@@ -493,15 +489,13 @@ impl ProviderHandle {
                     call,
                     request,
                     cancellation: cancellation.clone(),
-                    diagnostic_trace: current_session_trace(),
+                    diagnostic_trace: platform::trace::enabled().then(current_session_trace).flatten(),
                     stream: Some(stream),
                     reply,
                 })
                 .await
                 .map_err(|_| {
-                    session_trace("provider-generation.send-query-failed", json!({
-                        "providerCallHash": provider_call_hash, "streaming": true,
-                    }));
+                    eprintln!("[provider] phase=provider-generation.send-query-failed streaming=true");
                     LlmClientError::StreamSink("provider owner unavailable".into())
                 })?;
                 while let Some(message) = events.recv().await {
@@ -518,9 +512,7 @@ impl ProviderHandle {
                     }
                 }
                 rx.await.map_err(|_| {
-                    session_trace("provider-generation.reply-channel-failed", json!({
-                        "providerCallHash": provider_call_hash, "streaming": true,
-                    }));
+                    eprintln!("[provider] phase=provider-generation.reply-channel-failed streaming=true");
                     LlmClientError::StreamSink("provider owner unavailable".into())
                 })
             } => outcome,

@@ -29,12 +29,12 @@ export async function handleChannelCredentialsRoutes(
   try {
     body = await parseJsonBody(req);
   } catch {
-    beginChannelTrace('route.credentials.invalid', traceId)(400, INVALID);
+    beginChannelTrace('route.credentials.invalid', traceId)?.(400, INVALID);
     sendJson(res, 400, INVALID);
     return true;
   }
   if (!isChannelCredentialsRequest(body)) {
-    beginChannelTrace('route.credentials.invalid', traceId)(400, INVALID);
+    beginChannelTrace('route.credentials.invalid', traceId)?.(400, INVALID);
     sendJson(res, 400, INVALID);
     return true;
   }
@@ -42,10 +42,10 @@ export async function handleChannelCredentialsRoutes(
   const finish = beginChannelTrace('route.credentials.validate', traceId);
   try {
     const response = await transport.validate(body, traceId);
-    finish(response.status, response.body);
+    finish?.(response.status, response.body);
     sendJson(res, response.status, response.body);
   } catch (error) {
-    finish(503, UNAVAILABLE, channelTraceError(error));
+    finish?.(503, UNAVAILABLE, channelTraceError(error));
     sendJson(res, 503, UNAVAILABLE);
   }
   return true;

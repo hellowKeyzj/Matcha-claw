@@ -1,4 +1,5 @@
 import { invokeIpc } from '@/lib/api-client';
+import { isTraceEnabled } from '@/lib/trace-logger';
 import { isProviderMutationCommitted, waitForProviderMutation } from '@/lib/provider-call';
 import type { ProviderCallDetail } from '@/types/call-log/provider';
 import { nativeProjectionError } from '@/lib/provider-projection-errors';
@@ -197,18 +198,17 @@ async function mutate(
   input: { account: AccountIntent; apiKey?: string; token?: string } | { accountId: string; revision: number },
   success: 'stored' | 'deleted',
 ): Promise<ProjectionResult> {
-  const trace = providerMutationInputTrace(input);
   const target = 'account' in input
     ? { accountId: input.account.id, accountRevision: input.account.revision }
     : { accountId: input.accountId, accountRevision: input.revision };
   try {
-    logProviderConfigTrace('request-start', { channel, ...trace });
+    if (isTraceEnabled()) logProviderConfigTrace('request-start', { channel, ...providerMutationInputTrace(input) });
     const receipt = await waitForProviderMutation(
       await invokePrivate<unknown>(channel, input),
       success === 'stored' ? 'providerAccounts.replace' : 'providerAccounts.delete',
       target,
     );
-    logProviderConfigTrace('request-finished', {
+    if (isTraceEnabled()) logProviderConfigTrace('request-finished', {
       channel,
       outcome: receipt.outcome,
       ...providerProjectionTrace(receipt),
@@ -219,7 +219,7 @@ async function mutate(
     }
     return { success: false, error: outcomeError(receipt), receipt };
   } catch (error) {
-    logProviderConfigTrace('request-failed', {
+    if (isTraceEnabled()) logProviderConfigTrace('request-failed', {
       channel,
       errorName: error instanceof Error ? error.name : typeof error,
     });

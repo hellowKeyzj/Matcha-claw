@@ -79,7 +79,7 @@ export async function sendChatTransport(
   const payloadInput = resolveChatSendTransportPayload(params.message, attachments);
   const message = payloadInput.message;
   const attachmentsToInline = payloadInput.attachments;
-  logSessionTrace('send.transport.request', params.traceId, {
+  logSessionTrace('send.transport.request', params.traceId, () => ({
     sessionKey: summarizeIdentifier(params.sessionIdentity.sessionKey),
     endpointSessionId: summarizeIdentifier(params.endpointSessionId),
     sessionIdentity: summarizeSessionIdentity(params.sessionIdentity),
@@ -88,7 +88,7 @@ export async function sendChatTransport(
     attachmentCount: attachmentsToInline.length,
     attachmentBytes: attachmentsToInline.reduce((sum, attachment) => sum + attachment.fileSize, 0),
     timeoutMs: params.timeoutMs ?? null,
-  });
+  }));
   const payload = {
     ...(params.endpointSessionId ? { endpointSessionId: params.endpointSessionId } : {}),
     sessionIdentity: params.sessionIdentity,
@@ -110,13 +110,13 @@ export async function sendChatTransport(
   const response = params.traceId === undefined
     ? await hostSessionPrompt(payload)
     : await hostSessionPrompt(payload, { traceId: params.traceId });
-  logSessionTrace('send.transport.response', params.traceId, {
+  logSessionTrace('send.transport.response', params.traceId, () => ({
     success: response.success ?? null,
     outcome: response.outcome ?? null,
     status: response.status ?? null,
     runId: summarizeIdentifier(response.runId),
     errorPresent: typeof response.error === 'string' && response.error.trim().length > 0,
-  });
+  }));
   const normalizedRunId = typeof response.runId === 'string'
     ? response.runId.trim()
     : '';

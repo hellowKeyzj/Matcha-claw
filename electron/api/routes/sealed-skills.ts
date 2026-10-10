@@ -1,3 +1,4 @@
+import { traceDebug, isTraceEnabled } from '../../utils/trace-logger';
 import type { IncomingMessage, ServerResponse } from 'http';
 import { dialog } from 'electron';
 import type { SealedSkillsTransport } from '../../main/runtime-host-delivery/transport/skills/sealed';
@@ -53,46 +54,46 @@ export async function handleSealedSkillsRoutes(
     body = await parseJsonBody(req);
   } catch {
     if (operation === 'export') {
-      console.info('[startup-trace]', {
+      traceDebug(() => ['[startup-trace]', {
         source: 'sealed-skills-export',
         phase: 'route',
         detail: 'invalid-json',
-      });
+      }]);
     }
     sendJson(res, 400, INVALID);
     return true;
   }
-  const exportSkillKey = operation === 'export' ? skillKeyFromBody(body) : null;
+  const exportSkillKey = operation === 'export' && isTraceEnabled() ? skillKeyFromBody(body) : null;
   if (operation === 'export') {
-    console.info('[startup-trace]', {
+    traceDebug(() => ['[startup-trace]', {
       source: 'sealed-skills-export',
       phase: 'route',
       detail: exportSkillKey ? 'request' : 'invalid-request',
       ...(exportSkillKey ? { skillKey: exportSkillKey } : {}),
-    });
+    }]);
   }
 
   try {
     const response = await transport[operation](body);
     if (operation === 'export') {
-      console.info('[startup-trace]', {
+      traceDebug(() => ['[startup-trace]', {
         source: 'sealed-skills-export',
         phase: 'route',
         detail: 'response',
         status: response.status,
         outcome: outcomeFromBody(response.body),
         ...(exportSkillKey ? { skillKey: exportSkillKey } : {}),
-      });
+      }]);
     }
     sendJson(res, response.status, response.body);
   } catch {
     if (operation === 'export') {
-      console.info('[startup-trace]', {
+      traceDebug(() => ['[startup-trace]', {
         source: 'sealed-skills-export',
         phase: 'route',
         detail: 'exception',
         ...(exportSkillKey ? { skillKey: exportSkillKey } : {}),
-      });
+      }]);
     }
     sendJson(res, 503, UNKNOWN);
   }

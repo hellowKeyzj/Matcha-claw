@@ -1,5 +1,8 @@
 import { Buffer } from 'node:buffer'
-import { logProcessSessionTrace } from '../../query/runTrace.js'
+import {
+  isRunTraceEnabled,
+  logProcessSessionTrace,
+} from '../../query/runTrace.js'
 import {
   APP_SERVER_PROTOCOL_VERSION,
   type AppServerConfig,
@@ -79,14 +82,15 @@ export class WsServer {
             message,
           )
           if (response) {
-            logProcessSessionTrace(
-              'matcha-agent-app-server',
-              'app-server.ws.response',
-              {
-                clientIdLength: ws.data.clientId.length,
-                responseBytes: Buffer.byteLength(response, 'utf8'),
-              },
-            )
+            if (isRunTraceEnabled())
+              logProcessSessionTrace(
+                'matcha-agent-app-server',
+                'app-server.ws.response',
+                {
+                  clientIdLength: ws.data.clientId.length,
+                  responseBytes: Buffer.byteLength(response, 'utf8'),
+                },
+              )
             ws.send(response)
           }
         },

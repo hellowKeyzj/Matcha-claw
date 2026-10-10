@@ -81,14 +81,14 @@ impl OpenClawDriver {
         use crate::session::{protocol, trace};
         use sessions_module::trace as session_trace;
 
-        let started = std::time::Instant::now();
-        let trace_id = command.trace_id().map(str::to_owned);
+        let started = platform::trace::enabled().then(std::time::Instant::now);
+        let trace_id = platform::trace::enabled().then(|| command.trace_id().map(str::to_owned)).flatten();
         let method = if command.run_id.is_some() {
             protocol::CHAT_ABORT_METHOD
         } else {
             protocol::SESSIONS_ABORT_METHOD
         };
-        trace::log_unscoped("openclaw.sessions.abort.request", serde_json::json!({
+        trace::log_unscoped("openclaw.sessions.abort.request", || serde_json::json!({
             "traceId": trace_id,
             "method": method,
             "sessionKey": session_trace::id_shape(Some(&command.identity.session_key)),
@@ -98,7 +98,7 @@ impl OpenClawDriver {
         let session_key = match protocol::SessionKey::try_new(command.identity.session_key) {
             Ok(session_key) => session_key,
             Err(_) => {
-                trace::log_unscoped("openclaw.sessions.abort.invalid", serde_json::json!({ "traceId": trace_id, "method": method, "reason": "session-key", "elapsedMs": started.elapsed().as_millis() }));
+                trace::log_unscoped("openclaw.sessions.abort.invalid", || serde_json::json!({ "traceId": trace_id, "method": method, "reason": "session-key", "elapsedMs": started.map(|started| started.elapsed().as_millis()).unwrap_or_default() }));
                 return SessionAbortOutcome::Rejected;
             }
         };
@@ -107,7 +107,7 @@ impl OpenClawDriver {
                 let run_id = match protocol::RunId::try_new(run_id) {
                     Ok(run_id) => run_id,
                     Err(_) => {
-                        trace::log_unscoped("openclaw.sessions.abort.invalid", serde_json::json!({ "traceId": trace_id, "method": method, "reason": "run-id", "elapsedMs": started.elapsed().as_millis() }));
+                        trace::log_unscoped("openclaw.sessions.abort.invalid", || serde_json::json!({ "traceId": trace_id, "method": method, "reason": "run-id", "elapsedMs": started.map(|started| started.elapsed().as_millis()).unwrap_or_default() }));
                         return SessionAbortOutcome::Rejected;
                     }
                 };
@@ -120,11 +120,11 @@ impl OpenClawDriver {
                             SessionAbortOutcome::Unknown
                         },
                         "succeeded",
-                        serde_json::json!({
+                        if platform::trace::enabled() { serde_json::json!({
                             "ok": result.ok,
                             "aborted": result.aborted,
                             "runCount": result.run_ids.len(),
-                        }),
+                        }) } else { Value::Null },
                     ),
                     Ok(InvocationOutcome::TargetRejected(_)) => (SessionAbortOutcome::Rejected, "target-rejected", Value::Null),
                     Ok(InvocationOutcome::Cancelled) => (SessionAbortOutcome::Unknown, "cancelled", Value::Null),
@@ -142,14 +142,14 @@ impl OpenClawDriver {
                             SessionAbortOutcome::Unknown
                         },
                         "succeeded",
-                        serde_json::json!({
+                        if platform::trace::enabled() { serde_json::json!({
                             "ok": result.ok,
                             "status": match result.status {
                                 protocol::SessionAbortStatus::Aborted => "aborted",
                                 protocol::SessionAbortStatus::NoActiveRun => "no-active-run",
                             },
                             "hasAbortedRunId": result.aborted_run_id.is_some(),
-                        }),
+                        }) } else { Value::Null },
                     ),
                     Ok(InvocationOutcome::TargetRejected(_)) => (SessionAbortOutcome::Rejected, "target-rejected", Value::Null),
                     Ok(InvocationOutcome::Cancelled) => (SessionAbortOutcome::Unknown, "cancelled", Value::Null),
@@ -158,13 +158,13 @@ impl OpenClawDriver {
                 }
             }
         };
-        trace::log_unscoped("openclaw.sessions.abort.receipt", serde_json::json!({
+        trace::log_unscoped("openclaw.sessions.abort.receipt", || serde_json::json!({
             "traceId": trace_id,
             "method": method,
             "invocationOutcome": invocation_outcome,
             "nativeReceipt": native_receipt,
             "outcome": outcome,
-            "elapsedMs": started.elapsed().as_millis(),
+            "elapsedMs": started.map(|started| started.elapsed().as_millis()).unwrap_or_default(),
         }));
         outcome
     }
@@ -367,6 +367,7 @@ impl OpenClawDriver {
             Ok(params) => params,
             Err(_) => return SessionSendOutcome::Rejected,
         };
+        let system_provenance_receipt_bytes = command.system_provenance_receipt.as_ref().map(String::len);
         if let Some(receipt) = command.system_provenance_receipt {
             params = params.with_system_provenance_receipt(receipt);
         }
@@ -396,6 +397,13 @@ impl OpenClawDriver {
                 Err(sessions_module::ports::RuntimeOperationFailure::Unsupported) => SessionSendOutcome::Unsupported,
                 Err(_) => SessionSendOutcome::Unavailable,
             };
+        }
+        if crate::session::trace::enabled() {
+            crate::session::trace::log_unscoped("openclaw.chat.send.request", || serde_json::json!({
+                "traceId": command.trace_id,
+                "systemProvenanceReceiptPresent": system_provenance_receipt_bytes.is_some(),
+                "systemProvenanceReceiptBytes": system_provenance_receipt_bytes.unwrap_or(0),
+            }));
         }
         match self.session_gateway.send_chat(params).await {
             Ok(InvocationOutcome::Succeeded(result)) => SessionSendOutcome::Succeeded {
@@ -809,7 +817,7 @@ impl SessionOpenOps for OpenClawDriver {
                 );
                 return view;
             };
-            let resolved_model = Some(selection.runtime_model_ref.clone());
+            let resolved_model = platform::trace::enabled().then(|| selection.runtime_model_ref.clone());
             let resolved_model_state =
                 sessions_module::state::SessionModelState::selected_from_ref(
                     selection.runtime_model_ref,
@@ -850,7 +858,7 @@ fn log_session_model_reconciled(
 ) {
     use sessions_module::trace as session_trace;
 
-    if std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+    if !platform::trace::enabled() {
         return;
     }
     eprintln!(
@@ -871,7 +879,7 @@ fn log_session_model_reconciled(
 fn log_session_model_reconcile_entered(session_key: &str) {
     use sessions_module::trace as session_trace;
 
-    if std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+    if !platform::trace::enabled() {
         return;
     }
     eprintln!(
@@ -888,7 +896,7 @@ fn log_session_model_reconcile_entered(session_key: &str) {
 fn log_session_model_reconcile_kept(session_key: &str, model: &str) {
     use sessions_module::trace as session_trace;
 
-    if std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+    if !platform::trace::enabled() {
         return;
     }
     eprintln!(
@@ -911,7 +919,7 @@ fn log_session_model_reconcile_skipped(
 ) {
     use sessions_module::trace as session_trace;
 
-    if std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+    if !platform::trace::enabled() {
         return;
     }
     eprintln!(

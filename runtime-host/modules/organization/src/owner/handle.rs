@@ -175,7 +175,7 @@ impl OrganizationHandle {
     }
 
     pub(crate) fn call_trace_id(&self) -> Option<String> {
-        self.call.as_ref().map(crate::call::CallScope::trace_id)
+        self.call.as_ref().filter(|_| platform::trace::enabled()).map(crate::call::CallScope::trace_id)
     }
 
     pub(crate) async fn call_admitted(&self) {
@@ -319,7 +319,7 @@ impl OrganizationHandle {
         idempotency_key: IdempotencyKey,
     ) -> Result<TeamMaterializationCommandOutcome, RequestAdmissionClosed> {
         let (reply, reply_rx) = self.reply_channel();
-        platform::trace::session_trace("runtime.team.owner.enqueue.start", serde_json::json!({}));
+        platform::trace::session_trace("runtime.team.owner.enqueue.start", || serde_json::json!({}));
         self.inner
             .send_command(OrganizationCommand::ManualTeamMaterialize {
                 team_id,
@@ -333,19 +333,19 @@ impl OrganizationHandle {
             .map_err(|error| {
                 platform::trace::session_trace(
                     "runtime.team.owner.enqueue.end",
-                    serde_json::json!({"reason": "admission_closed"}),
+                    || serde_json::json!({"reason": "admission_closed"}),
                 );
                 closed(error)
             })?;
         platform::trace::session_trace(
             "runtime.team.owner.enqueue.end",
-            serde_json::json!({"reason": "queued"}),
+            || serde_json::json!({"reason": "queued"}),
         );
         self.call_admitted().await;
         reply_rx.await.map_err(|_| {
             platform::trace::session_trace(
                 "runtime.team.owner.reply",
-                serde_json::json!({"reason": "sender_closed"}),
+                || serde_json::json!({"reason": "sender_closed"}),
             );
             closed_error()
         })
@@ -363,7 +363,7 @@ impl OrganizationHandle {
     ) -> Result<ManualTeamCreateOutcome, RequestAdmissionClosed> {
         if let Some(call) = &self.call { call.references(Some(team_id.as_str()), Some(run.run_id().as_str()), None).await; }
         let (reply, reply_rx) = self.reply_channel();
-        platform::trace::session_trace("runtime.team.owner.enqueue.start", serde_json::json!({}));
+        platform::trace::session_trace("runtime.team.owner.enqueue.start", || serde_json::json!({}));
         self.inner
             .send_command(OrganizationCommand::ManualTeamCreate {
                 team_id,
@@ -379,19 +379,19 @@ impl OrganizationHandle {
             .map_err(|error| {
                 platform::trace::session_trace(
                     "runtime.team.owner.enqueue.end",
-                    serde_json::json!({"reason": "admission_closed"}),
+                    || serde_json::json!({"reason": "admission_closed"}),
                 );
                 closed(error)
             })?;
         platform::trace::session_trace(
             "runtime.team.owner.enqueue.end",
-            serde_json::json!({"reason": "queued"}),
+            || serde_json::json!({"reason": "queued"}),
         );
         self.call_admitted().await;
         reply_rx.await.map_err(|_| {
             platform::trace::session_trace(
                 "runtime.team.owner.reply",
-                serde_json::json!({"reason": "sender_closed"}),
+                || serde_json::json!({"reason": "sender_closed"}),
             );
             closed_error()
         })
@@ -483,7 +483,7 @@ impl OrganizationHandle {
     pub async fn run_list(
         &self,
         team_id: TeamId,
-    ) -> Result<Vec<TeamRunQueryOutcome>, RequestAdmissionClosed> {
+    ) -> Result<Result<Vec<crate::TeamRunListEntry>, StoreFault>, RequestAdmissionClosed> {
         let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::RunList { team_id, reply })
@@ -585,16 +585,30 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
+    async fn run_start(
+        &self,
+        team_id: TeamId,
+        run_id: GraphRunId,
+        epoch: Option<String>,
+        version: String,
+    ) -> Result<Result<(), StoreFault>, RequestAdmissionClosed> {
+        let wake_run_id = run_id.clone();
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.inner.send_command(OrganizationCommand::RunStart {
+            team_id, run_id, epoch, version, reply,
+        }).await.map_err(closed)?;
+        let outcome = rx.await.map_err(|_| closed_error())?;
+        if matches!(outcome, Ok(true)) {
+            self.publish_team_run_wake(TeamRunWakeReason::RunStarted, Some(wake_run_id));
+        }
+        Ok(outcome.map(|_| ()))
+    }
+
     pub(crate) async fn design_operation(
         &self,
         operation: crate::application::design::DesignOperation,
         resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
     ) -> Result<Result<serde_json::Value, StoreFault>, RequestAdmissionClosed> {
-        let changed = !matches!(
-            operation,
-            crate::application::design::DesignOperation::Snapshot { .. }
-                | crate::application::design::DesignOperation::Context { .. }
-        );
         let run_id = operation.run_id().clone();
         let (reply, rx) = tokio::sync::oneshot::channel();
         self.inner
@@ -606,10 +620,10 @@ impl OrganizationHandle {
             .await
             .map_err(closed)?;
         let outcome = rx.await.map_err(|_| closed_error())?;
-        if changed && outcome.is_ok() {
+        if matches!(&outcome, Ok((_, true))) {
             self.publish_team_run_wake(TeamRunWakeReason::StartGateChanged, Some(run_id));
         }
-        Ok(outcome)
+        Ok(outcome.map(|(result, _)| result))
     }
 
     pub async fn record_evidence(
@@ -625,6 +639,27 @@ impl OrganizationHandle {
         rx.await.map_err(|_| closed_error())
     }
 
+    pub(crate) async fn runtime_graph_context(
+        &self,
+        scope: crate::TeamRunExecutionScope,
+    ) -> Result<Result<serde_json::Value, StoreFault>, RequestAdmissionClosed> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.inner.send_query(OrganizationQuery::RuntimeGraphContext { scope, reply })
+            .await.map_err(closed)?;
+        rx.await.map_err(|_| closed_error())
+    }
+
+    pub(crate) async fn runtime_graph_patch(
+        &self,
+        scope: crate::TeamRunExecutionScope,
+        patch: crate::store::RuntimePromptPatch,
+    ) -> Result<Result<serde_json::Value, StoreFault>, RequestAdmissionClosed> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.inner.send_command(OrganizationCommand::RuntimeGraphPatch { scope, patch, reply })
+            .await.map_err(closed)?;
+        rx.await.map_err(|_| closed_error())
+    }
+
     pub async fn execute_team_mcp(
         &self,
         name: String,
@@ -637,15 +672,14 @@ impl OrganizationHandle {
     pub async fn start_gate_prompt_plan(
         &self,
         lookup: StartGateRuntimeBindingLookup,
-        proposal_id_seed: Option<String>,
-        requested_at: u64,
+        resolver: std::sync::Arc<dyn crate::RoleSessionIdentityResolver>,
     ) -> Result<Option<StartGatePromptPlan>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_query(OrganizationQuery::StartGatePromptPlan {
                 lookup,
-                proposal_id_seed,
-                requested_at,
+                resolver,
+                trace_id: platform::trace::enabled().then(platform::trace::current_session_trace).flatten(),
                 reply,
             })
             .await
@@ -661,90 +695,6 @@ impl OrganizationHandle {
                     Some(plan.run_id().clone()),
                 );
             }
-        }
-        Ok(outcome)
-    }
-
-    pub async fn start_gate_terminal_proposal_set(
-        &self,
-        run_id: GraphRunId,
-        proposal_id: String,
-        source_delivery_id: String,
-        final_assistant_text: String,
-        generation: String,
-        design: bool,
-    ) -> Result<
-        Result<Option<organization::SetRunStartProposalOutcome>, StoreFault>,
-        RequestAdmissionClosed,
-    > {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
-        self.inner
-            .send_command(OrganizationCommand::StartGateTerminalProposalSet {
-                run_id,
-                proposal_id,
-                source_delivery_id,
-                final_assistant_text,
-                generation,
-                design,
-                reply,
-            })
-            .await
-            .map_err(closed)?;
-        let outcome = reply_rx.await.map_err(|_| closed_error())?;
-        if matches!(
-            outcome,
-            Ok(Some(crate::SetRunStartProposalOutcome::Recorded))
-        ) {
-            self.publish_team_run_wake(TeamRunWakeReason::StartGateChanged, None);
-        }
-        Ok(outcome)
-    }
-
-    pub async fn run_start_confirm(
-        &self,
-        run_id: GraphRunId,
-        proposal_id: String,
-    ) -> Result<Result<organization::ConfirmRunStartOutcome, StoreFault>, RequestAdmissionClosed>
-    {
-        let wake_run_id = run_id.clone();
-        let (reply, reply_rx) = self.reply_channel();
-        self.inner
-            .send_command(OrganizationCommand::RunStartConfirm {
-                run_id,
-                proposal_id,
-                reply,
-            })
-            .await
-            .map_err(closed)?;
-        self.call_admitted().await;
-        let outcome = reply_rx.await.map_err(|_| closed_error())?;
-        if outcome.is_ok() {
-            self.publish_team_run_wake(TeamRunWakeReason::RunStarted, Some(wake_run_id));
-        }
-        Ok(outcome)
-    }
-
-    pub async fn run_start_continue(
-        &self,
-        run_id: GraphRunId,
-        proposal_id: String,
-    ) -> Result<
-        Result<organization::ContinueRunDiscussionOutcome, StoreFault>,
-        RequestAdmissionClosed,
-    > {
-        let (reply, reply_rx) = self.reply_channel();
-        self.inner
-            .send_command(OrganizationCommand::RunStartContinue {
-                run_id,
-                proposal_id,
-                reply,
-            })
-            .await
-            .map_err(closed)?;
-        self.call_admitted().await;
-        let outcome = reply_rx.await.map_err(|_| closed_error())?;
-        if matches!(outcome, Ok(crate::ContinueRunDiscussionOutcome::Intake)) {
-            self.publish_team_run_wake(TeamRunWakeReason::StartGateChanged, None);
         }
         Ok(outcome)
     }
@@ -1181,12 +1131,20 @@ impl OrganizationHandle {
         run_id: GraphRunId,
         now: u64,
     ) -> Result<Result<Vec<ActivityId>, StoreFault>, RequestAdmissionClosed> {
+        let wake_run_id = run_id.clone();
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::ScheduleReadyNodes { run_id, now, reply })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let (outcome, changed) = reply_rx.await.map_err(|_| closed_error())?;
+        if changed {
+            self.publish_team_run_wake(
+                TeamRunWakeReason::SchedulerObservationChanged,
+                Some(wake_run_id),
+            );
+        }
+        Ok(outcome)
     }
 
     pub async fn pending_run_activity_ids(
@@ -1257,28 +1215,43 @@ impl OrganizationHandle {
         native_run_id: String,
         delivery_context: Option<(DeliveryId, crate::EndpointSessionId)>,
         status: organization::NativeTerminalStatus,
-        final_assistant_text: Option<String>,
+        assistant_texts: Vec<String>,
         settled_at: u64,
     ) -> Result<
         Result<organization::TeamMessageTerminalObservation, StoreFault>,
         RequestAdmissionClosed,
     > {
+        let native_run_hash = platform::trace::enabled().then(|| platform::trace::identifier_hash(&native_run_id));
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::TeamMessageTerminalObserved {
                 native_run_id,
                 delivery_context,
                 status,
-                final_assistant_text,
+                assistant_texts,
                 settled_at,
                 reply,
             })
             .await
-            .map_err(closed)?;
-        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+            .map_err(|error| {
+                platform::trace::runtime_trace("runtime.team_run.terminal.wake", || serde_json::json!({
+                    "nativeRunHash": native_run_hash, "published": false, "error": "admission_closed",
+                }));
+                closed(error)
+            })?;
+        let outcome = reply_rx.await.map_err(|_| {
+            platform::trace::runtime_trace("runtime.team_run.terminal.wake", || serde_json::json!({
+                "nativeRunHash": native_run_hash, "published": false, "error": "reply_closed",
+            }));
+            closed_error()
+        })?;
         if outcome.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::TerminalSettled, None);
         }
+        platform::trace::runtime_trace("runtime.team_run.terminal.wake", || serde_json::json!({
+            "nativeRunHash": native_run_hash, "published": outcome.is_ok(), "reason": "terminal_settled",
+            "error": outcome.as_ref().err().map(crate::trace::terminal_error),
+        }));
         Ok(outcome)
     }
 
@@ -1705,18 +1678,8 @@ async fn execute_team_runtime(
                 owner.trigger_fire(request, fired_at).await.ok()?,
             )
         }
-        TeamRuntimeCommand::RunStartConfirm {
-            run_id,
-            proposal_id,
-        } => TeamRuntimeCommandOutcome::RunStartConfirm(
-            owner.run_start_confirm(run_id, proposal_id).await.ok()?,
-        ),
-        TeamRuntimeCommand::RunStartContinue {
-            run_id,
-            proposal_id,
-        } => TeamRuntimeCommandOutcome::RunStartContinue(
-            owner.run_start_continue(run_id, proposal_id).await.ok()?,
-        ),
+        TeamRuntimeCommand::RunStart { team_id, run_id, epoch, version } =>
+            TeamRuntimeCommandOutcome::RunStart(owner.run_start(team_id, run_id, epoch, version).await.ok()?),
         TeamRuntimeCommand::NodePromptRetryDue { run_id } => {
             TeamRuntimeCommandOutcome::NodePromptRetryDue(
                 owner.node_prompt_retry_due(run_id).await.ok()?,

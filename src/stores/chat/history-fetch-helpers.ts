@@ -278,14 +278,14 @@ export async function fetchHistoryWindow(
     traceId,
   } = input;
 
-  logSessionTrace('history.transport.request', traceId, {
+  logSessionTrace('history.transport.request', traceId, () => ({
     recordKey: summarizeIdentifier(recordKey),
     sessionKey: summarizeIdentifier(sessionIdentity.sessionKey),
     endpointSessionId: summarizeIdentifier(endpointSessionId),
     sessionIdentity: summarizeSessionIdentity(sessionIdentity),
     limit,
     timeoutMs: timeoutMs ?? null,
-  });
+  }));
   let rawView: unknown;
   try {
     rawView = await hostSessionLoad({
@@ -293,13 +293,13 @@ export async function fetchHistoryWindow(
       sessionIdentity,
       limit,
     }, { timeoutMs, traceId });
-    logSessionTrace('history.transport.response', traceId, {
+    logSessionTrace('history.transport.response', traceId, () => ({
       rawType: rawView && typeof rawView === 'object' ? 'object' : typeof rawView,
-    });
+    }));
   } catch (error) {
-    logSessionTrace('history.transport.error', traceId, {
+    logSessionTrace('history.transport.error', traceId, () => ({
       ...summarizeError(error),
-    });
+    }));
     throw resolveSessionViewError(error);
   }
 

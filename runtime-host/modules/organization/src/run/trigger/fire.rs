@@ -79,6 +79,7 @@ pub(super) fn is_opaque_identifier(value: &str) -> bool {
 pub enum TriggerFireError {
     InvalidRequest(TriggerFireRequestError),
     RunMismatch,
+    RunNotStarted,
     SourceMismatch,
     Reduce(ReduceError),
 }
@@ -88,6 +89,7 @@ impl fmt::Debug for TriggerFireError {
         let message = match self {
             Self::InvalidRequest(_) => "TriggerFireError::InvalidRequest",
             Self::RunMismatch => "TriggerFireError::RunMismatch",
+            Self::RunNotStarted => "TriggerFireError::RunNotStarted",
             Self::SourceMismatch => "TriggerFireError::SourceMismatch",
             Self::Reduce(_) => "TriggerFireError::GraphStateViolation",
         };
@@ -100,6 +102,7 @@ impl fmt::Display for TriggerFireError {
         let message = match self {
             Self::InvalidRequest(_) => "trigger fire request is invalid",
             Self::RunMismatch => "trigger fire request does not match an existing TeamRun",
+            Self::RunNotStarted => "start the TeamRun before firing a trigger",
             Self::SourceMismatch => {
                 "trigger fire request source does not match the armed TeamRun trigger"
             }

@@ -1,6 +1,6 @@
 /**
  * Query profiling utility for measuring and reporting time spent in the query
- * pipeline from user input to first token arrival. Enable by setting CLAUDE_CODE_PROFILE_QUERY=1
+ * pipeline from user input to first token arrival. Enable by setting MATCHACLAW_TRACE=1
  *
  * Uses Node.js built-in performance hooks API for standard timing measurement.
  * Tracks each query session with detailed checkpoints for identifying bottlenecks.
@@ -28,12 +28,12 @@
  */
 
 import { logForDebugging } from './debug.js'
-import { isEnvTruthy } from './envUtils.js'
+import { isTraceEnabled } from './trace.js'
 import { formatMs, formatTimelineLine, getPerformance } from './profilerBase.js'
 
 // Module-level state - initialized once when the module loads
 // eslint-disable-next-line custom-rules/no-process-env-top-level
-const ENABLED = isEnvTruthy(process.env.CLAUDE_CODE_PROFILE_QUERY)
+const ENABLED = isTraceEnabled()
 
 // Track memory snapshots separately (perf_hooks doesn't track memory)
 const memorySnapshots = new Map<string, NodeJS.MemoryUsage>()
@@ -53,7 +53,7 @@ export function startQueryProfile(): void {
   const perf = getPerformance()
 
   // Clear previous marks and memory snapshots
-  perf.clearMarks()
+  for (const name of memorySnapshots.keys()) perf.clearMarks(name)
   memorySnapshots.clear()
   firstTokenTime = null
 
@@ -128,11 +128,13 @@ function getSlowWarning(deltaMs: number, name: string): string {
  */
 function getQueryProfileReport(): string {
   if (!ENABLED) {
-    return 'Query profiling not enabled (set CLAUDE_CODE_PROFILE_QUERY=1)'
+    return 'Query profiling not enabled (set MATCHACLAW_TRACE=1)'
   }
 
   const perf = getPerformance()
-  const marks = perf.getEntriesByType('mark')
+  const marks = perf
+    .getEntriesByType('mark')
+    .filter(mark => memorySnapshots.has(mark.name))
   if (marks.length === 0) {
     return 'No query profiling checkpoints recorded'
   }

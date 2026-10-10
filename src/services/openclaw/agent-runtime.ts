@@ -1,4 +1,5 @@
 import type { GatewayRpcInvoker } from '@/services/openclaw/types';
+import { isTraceEnabled } from '@/lib/trace-logger';
 
 interface AgentRunResult {
   runId?: unknown;
@@ -69,7 +70,7 @@ export async function waitAgentRun(
     const currentSliceMs = Math.max(1000, Math.min(waitSliceMs, remainingMs));
     const rpcTimeoutMs = currentSliceMs + rpcTimeoutBufferMs;
 
-    console.info(
+    if (isTraceEnabled()) console.info(
       `[${logPrefix}] agent.wait start runId=${runId} round=${round} waitTimeoutMs=${currentSliceMs} rpcTimeoutMs=${rpcTimeoutMs} elapsedMs=${elapsedMs}`,
     );
 
@@ -92,13 +93,13 @@ export async function waitAgentRun(
 
     const status = typeof result.status === 'string' ? result.status.toLowerCase() : '';
     if (AGENT_WAIT_SUCCESS_STATUSES.has(status)) {
-      console.info(
+      if (isTraceEnabled()) console.info(
         `[${logPrefix}] agent.wait ok runId=${runId} round=${round} elapsedMs=${Date.now() - startedAt} status=${status || 'ok'}`,
       );
       return result;
     }
     if (status === 'timeout') {
-      console.info(
+      if (isTraceEnabled()) console.info(
         `[${logPrefix}] agent.wait timeout-slice runId=${runId} round=${round} elapsedMs=${Date.now() - startedAt}, continue waiting`,
       );
       continue;

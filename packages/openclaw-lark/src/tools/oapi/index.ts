@@ -9,6 +9,7 @@
  */
 
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/core';
+import { isTraceEnabled } from '../../core/lark-logger';
 import { registerFeishuImTools as registerFeishuImBotTools } from '../tat/im/index';
 import {
   registerFeishuCalendarCalendarTool,
@@ -91,5 +92,5 @@ export function registerOapiTools(api: OpenClawPluginApi): void {
   // IM tools (bot identity)
   registerFeishuImBotTools(api);
 
-  api.logger.debug?.('Registered all OAPI tools (calendar, task, bitable, search, drive, wiki, sheets, im)');
+  if (isTraceEnabled()) api.logger.debug?.('Registered all OAPI tools (calendar, task, bitable, search, drive, wiki, sheets, im)');
 }

@@ -105,7 +105,7 @@ pub(crate) fn credential_is_available(
                 reference,
                 "read-failed",
                 0,
-                String::new(),
+                String::new,
                 false,
             );
             return Err(error);
@@ -118,7 +118,7 @@ pub(crate) fn credential_is_available(
         reference,
         "read-success",
         profiles.len(),
-        auth_profile_provider_summary(&profiles),
+        || auth_profile_provider_summary(&profiles),
         available,
     );
     Ok(available)
@@ -385,9 +385,12 @@ fn trace_auth_profile_check(
     reference: &CredentialReference,
     phase: &'static str,
     profile_count: usize,
-    profile_providers: String,
+    profile_providers: impl FnOnce() -> String,
     available: bool,
 ) {
+    if !platform::trace::enabled() {
+        return;
+    }
     eprintln!(
         "[startup-trace] source=openclaw-auth-state-db phase={} state_dir={} required_provider={} credential_ref={} profile_count={} profile_providers={} available={}",
         phase,
@@ -395,7 +398,7 @@ fn trace_auth_profile_check(
         provider_key,
         summarize_reference(reference.as_str()),
         profile_count,
-        profile_providers,
+        profile_providers(),
         available,
     );
 }

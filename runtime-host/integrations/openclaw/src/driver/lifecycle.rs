@@ -29,18 +29,24 @@ impl LifecycleOps for OpenClawDriver {
         let plugins = self.plugins();
         let diagnostic_reporter = Arc::clone(&self.diagnostic_reporter);
         Box::pin(async move {
-            let started = std::time::Instant::now();
-            eprintln!("[startup-trace] source=openclaw-launch phase=plugin-prepare stage=start");
+            let started = platform::trace::enabled().then(std::time::Instant::now);
+            if platform::trace::enabled() {
+                eprintln!("[startup-trace] source=openclaw-launch phase=plugin-prepare stage=start");
+            }
             let prepared =
                 prepare_openclaw_lifecycle(&supervisor, gateway_port, plugins, diagnostic_reporter)
                     .await;
-            eprintln!(
-                "[startup-trace] source=openclaw-launch phase=plugin-prepare stage=end duration_ms={} success={}",
-                started.elapsed().as_millis(),
-                prepared.is_ok()
-            );
+            if platform::trace::enabled() {
+                eprintln!(
+                    "[startup-trace] source=openclaw-launch phase=plugin-prepare stage=end duration_ms={} success={}",
+                    started.map(|started| started.elapsed().as_millis()).unwrap_or_default(),
+                    prepared.is_ok()
+                );
+            }
             prepared.map_err(|_| RuntimeStartFailure::CompletionFailed)?;
-            eprintln!("[startup-trace] source=openclaw-launch phase=process-start stage=start");
+            if platform::trace::enabled() {
+                eprintln!("[startup-trace] source=openclaw-launch phase=process-start stage=start");
+            }
             start_supervisor(supervisor).await
         })
     }

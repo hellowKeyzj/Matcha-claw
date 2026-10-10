@@ -63,12 +63,12 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
 
   const resolvedFooter = resolveFooterConfig(feishuCfg?.footer);
 
-  log.info('reply mode resolved', {
+  log.trace('reply mode resolved', {
     effectiveReplyMode,
     replyMode,
     chatType,
   });
-  log.info('footer config resolved', {
+  log.trace('footer config resolved', {
     accountId: account.accountId,
     sessionKey,
     chatType,
@@ -141,17 +141,17 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       if (typingStopped && typingState) {
         await removeTypingIndicator({ cfg, state: typingState, accountId });
         typingState = null;
-        log.info('removed typing indicator (raced with stop)');
+        log.trace('removed typing indicator (raced with stop)');
         return;
       }
-      log.info('added typing indicator reaction');
+      log.trace('added typing indicator reaction');
     },
     stop: async () => {
       typingStopped = true;
       if (!typingState) return;
       await removeTypingIndicator({ cfg, state: typingState, accountId });
       typingState = null;
-      log.info('removed typing indicator reaction');
+      log.trace('removed typing indicator reaction');
     },
     onStartError: (err) => {
       logTypingFailure({
@@ -186,10 +186,10 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     },
 
     deliver: async (payload: ReplyPayload, meta?: { kind?: string }) => {
-      log.debug('deliver called', {
+      log.debug('deliver called', () => ({
         textPreview: payload.text?.slice(0, 100),
         kind: meta?.kind,
-      });
+      }));
 
       if (shouldSkip('deliver.entry')) return;
 
@@ -249,7 +249,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       if (text.trim()) {
         if (shouldUseCard(text)) {
           const chunks = core.channel.text.chunkTextWithMode(text, textChunkLimit, chunkMode);
-          log.info('deliver: sending card chunks', {
+          log.trace('deliver: sending card chunks', {
             count: chunks.length,
             chatId,
           });
@@ -310,7 +310,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           }
         } else {
           const chunks = core.channel.text.chunkTextWithMode(text, textChunkLimit, chunkMode);
-          log.info('deliver: sending text chunks', {
+          log.trace('deliver: sending text chunks', {
             count: chunks.length,
             chatId,
           });
@@ -337,9 +337,9 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       for (const mediaUrl of payloadMediaUrls) {
         if (!mediaUrl?.trim()) continue;
         try {
-          log.info('deliver: sending media via static path', {
+          log.trace('deliver: sending media via static path', () => ({
             mediaUrl: mediaUrl.slice(0, 80),
-          });
+          }));
           await sendMediaLark({
             cfg,
             to: chatId,

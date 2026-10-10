@@ -4,6 +4,7 @@ import type { RuntimeHostTransports } from '../main/runtime-host-delivery/transp
 import type { ProviderCredentialStatusTransport } from '../main/ipc/provider-private-auth';
 import type { RemoteFleetCredentialWriteAdapter } from '../main/ipc/fleet-private';
 import type { CloudAccountService } from '../main/cloud-account/service';
+import type { LicenseService } from '../main/license/service';
 
 export type { RuntimeHostLifecycle } from '../main/runtime-host-delivery/lifecycle-owner';
 import type { RuntimeHostLifecycle } from '../main/runtime-host-delivery/lifecycle-owner';
@@ -13,6 +14,7 @@ export type RuntimeHostTransportContext<K extends keyof RuntimeHostTransports> =
 }>;
 
 export interface HostApiContext {
+  licenseService: LicenseService;
   cloudAccountService?: CloudAccountService;
   eventBus: HostEventBus;
   runtimeHost: RuntimeHostLifecycle;

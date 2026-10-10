@@ -722,22 +722,26 @@ describe('team chat', () => {
       runListByTeamId: {
         'team-1': [
           {
-            state: 'available',
-            teamId: 'team-1',
             runId: 'teamrun-old',
             status: 'completed',
             revision: 1,
-            teamRevision: 1,
-            graphStatus: 'completed',
+            packageName: 'ascendc-team',
+            packageVersion: '1.0.0',
+            sourcePath: '.tmp/team-skill/SKILL.md',
+            createdAt: 1,
+            updatedAt: 1,
+            sessions: [],
           },
           {
-            state: 'available',
-            teamId: 'team-1',
             runId: 'teamrun-new',
             status: 'running',
             revision: 2,
-            teamRevision: 2,
-            graphStatus: 'running',
+            packageName: 'ascendc-team',
+            packageVersion: '1.0.0',
+            sourcePath: '.tmp/team-skill/SKILL.md',
+            createdAt: 2,
+            updatedAt: 2,
+            sessions: [],
           },
         ],
       },
@@ -780,13 +784,23 @@ describe('team chat', () => {
       </MemoryRouter>,
     );
 
-    fireEvent.change(await screen.findByLabelText('Run List'), { target: { value: 'teamrun-old' } });
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = vi.fn();
+    try {
+      const runSelect = await screen.findByRole('combobox', { name: 'Run history' });
+      await waitFor(() => expect(useTeamsStore.getState().refreshSnapshot).toHaveBeenCalledWith('team-1'));
+      vi.mocked(useTeamsStore.getState().refreshSnapshot).mockClear();
+      fireEvent.keyDown(runSelect, { key: 'ArrowDown' });
+      fireEvent.click(await screen.findByRole('option', { name: 'Unnamed run · old' }));
 
-    await waitFor(() => {
-      expect(useTeamsStore.getState().setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-old');
-      expect(useTeamsStore.getState().refreshSnapshot).toHaveBeenCalledWith('team-1');
-    });
-    expect(useTeamsStore.getState().refreshActiveRunViews).not.toHaveBeenCalled();
+      await waitFor(() => {
+        expect(useTeamsStore.getState().setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-old');
+        expect(useTeamsStore.getState().refreshSnapshot).toHaveBeenCalledWith('team-1');
+      });
+      expect(useTeamsStore.getState().refreshActiveRunViews).not.toHaveBeenCalled();
+    } finally {
+      Element.prototype.scrollIntoView = originalScrollIntoView;
+    }
   });
 
   it('shows an empty run hint when no run exists while still rendering the canvas shell', async () => {

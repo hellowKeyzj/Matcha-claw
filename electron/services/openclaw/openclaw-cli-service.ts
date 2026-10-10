@@ -225,7 +225,7 @@ export async function autoInstallCliIfNeeded(
       try {
         unlinkSync(target);
         symlinkSync(wrapperSrc, target);
-        logger.debug(`Refreshed CLI symlink: ${target} -> ${wrapperSrc}`);
+        logger.debug(() => `Refreshed CLI symlink: ${target} -> ${wrapperSrc}`);
       } catch {
         // non-critical
       }

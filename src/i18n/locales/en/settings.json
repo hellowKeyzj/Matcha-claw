@@ -1,9 +1,7 @@
 {
   "title": "Settings",
-  "subtitle": "Configure your MatchaClaw experience",
   "appearance": {
     "title": "General",
-    "description": "Customize the look and feel",
     "theme": "Theme",
     "light": "Light",
     "dark": "Dark",
@@ -11,7 +9,6 @@
     "language": "Language",
     "launchAtStartup": "Launch at system startup",
     "userAvatar": "User Avatar",
-    "userAvatarDesc": "Upload your photo to use as the chat user avatar",
     "userAvatarPreviewAlt": "User avatar preview",
     "uploadAvatarInputLabel": "Upload User Avatar",
     "uploadAvatar": "Upload Avatar",
@@ -167,6 +164,53 @@
       }
     }
   },
+  "license": {
+    "title": "Lisence",
+    "description": "No activation required when signed in with a cloud account",
+    "gateState": {
+      "checking": "Checking",
+      "granted": "Granted",
+      "blocked": "Blocked",
+      "unavailable": "Unavailable"
+    },
+    "renewAlert": {
+      "near_expiry_renew_failed": "Expiring soon, renewal failed, please revalidate"
+    },
+    "inputLabel": "License Key",
+    "placeholder": "Enter license key",
+    "showKey": "Show license key",
+    "hideKey": "Hide license key",
+    "validate": "Activate",
+    "revalidate": "Revalidate",
+    "clear": "Clear license",
+    "replaceKey": "Change license key",
+    "saveAndValidate": "Save and validate",
+    "clearTitle": "Clear license?",
+    "clearDescription": "After clearing, you will need to activate again for local use",
+    "messages": {
+      "valid": "Validated",
+      "cache_grace_valid": "Offline license valid",
+      "empty": "Enter a license key",
+      "format_invalid": "Invalid license key format",
+      "service_unconfigured": "License service not configured",
+      "network_error": "Cannot reach license service, check your network",
+      "server_rejected": "License key rejected",
+      "expired": "License expired",
+      "device_mismatch": "License device mismatch",
+      "not_allowed": "License is not allowed",
+      "checksum_invalid": "License checksum is invalid",
+      "unknown": "Validation failed"
+    },
+    "toast": {
+      "cleared": "License cleared"
+    },
+    "expiresAt": "Expires: {{time}}",
+    "offlineGraceUntil": "Available offline until: {{time}}",
+    "loadFailed": "Cannot load status, please refresh",
+    "storedKeyFailed": "Cannot load license key, please refresh",
+    "operationFailed": "Validation incomplete, please retry",
+    "clearFailed": "Failed to clear license, please retry"
+  },
   "diagnostics": {
     "title": "Diagnostics",
     "description": "Collect a local diagnostics bundle for troubleshooting",
@@ -200,6 +244,36 @@
     "matchaAgentAppServerStatus": "matcha-agent app-server Status",
     "matchaAgentAppServerDescription": "Inspect the matcha-agent endpoint readiness, app-server process state, and port.",
     "matchaAgentAppServerRestartFailed": "Failed to restart matcha-agent app-server: {{error}}",
+    "repair": {
+      "action": "Repair",
+      "confirmTitle": "Repair OpenClaw?",
+      "confirmDescription": "This will stop OpenClaw and run its native repair tool, which may change configuration and migrate legacy data. OpenClaw will then be prepared and started again. Running tasks will be interrupted. Continue?",
+      "confirmAction": "Stop and repair",
+      "automatic": "Automatic repair",
+      "manual": "Manual repair",
+      "pending": "Processing repair request",
+      "statusUnavailable": "Repair progress is temporarily unavailable. Check the logs.",
+      "unknown": "The outcome of this repair is not yet confirmed. Check the runtime status and logs before taking further action. It will not be retried automatically.",
+      "rejected": "The runtime rejected this repair request. Wait for the current operation to finish, then check again.",
+      "phases": {
+        "idle": "Idle",
+        "stopping": "Stopping",
+        "repairing": "Repairing",
+        "preparing": "Preparing",
+        "starting": "Starting",
+        "succeeded": "Repair complete",
+        "failed": "Repair failed"
+      },
+      "failures": {
+        "stopFailed": "Could not stop OpenClaw. Check the logs.",
+        "doctorFailed": "OpenClaw's native repair failed. Check the logs.",
+        "doctorTimedOut": "OpenClaw's native repair timed out. Check the logs.",
+        "doctorCancelled": "OpenClaw's native repair was cancelled. Check the logs.",
+        "doctorSpawnFailed": "Could not start OpenClaw's native repair process. Check the logs.",
+        "preparationFailed": "Could not prepare OpenClaw for startup after repair. Check the logs.",
+        "startFailed": "Could not start OpenClaw after repair. Check the logs."
+      }
+    },
     "tabs": {
       "general": "General",
       "browser": "Browser"
@@ -225,9 +299,7 @@
     "proxySaveFailed": "Failed to save proxy settings",
     "browser": {
       "title": "Browser",
-      "description": "Choose which browser runtime path MatchaClaw should use",
       "modeLabel": "Browser Mode",
-      "modeDescription": "Choose the active browser runtime path.",
       "currentMode": "Current",
       "modeSaving": "Applying browser mode and restarting Gateway...",
       "modeSaved": "Browser mode saved",
@@ -235,15 +307,15 @@
       "modes": {
         "relay": {
           "title": "Browser Relay",
-          "description": "Use the MatchaClaw Browser Relay plugin and browser extension."
+          "description": "Connect through a browser extension"
         },
         "native": {
           "title": "Native Browser",
-          "description": "Use OpenClaw's built-in browser plugin without the extension."
+          "description": "No browser extension needed"
         },
         "off": {
           "title": "Off",
-          "description": "Disable all browser capability."
+          "description": "Disable browser features"
         }
       },
       "nativeModeTitle": "Native Browser is active",

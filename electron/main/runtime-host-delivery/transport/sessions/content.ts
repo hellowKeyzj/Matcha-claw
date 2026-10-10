@@ -1,7 +1,7 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 import { decodeSessionContentLoadResponse } from './session-contract';
-import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 const UNAVAILABLE = { success: false, error: 'Session content is unavailable' } as const;
 const ENDPOINT = '/api/sessions/content';
 const MAX_CONTENT_REF_BYTES = 512;
@@ -46,15 +46,15 @@ export function createSessionContentTransport(
         logSessionTrace('electron.content.rejected', traceId);
         return { status: 503, body: UNAVAILABLE };
       }
-      const startedAt = Date.now();
-      logSessionTrace('electron.content.request', traceId, {
+      const startedAt = traceId && isSessionTraceEnabled() ? Date.now() : 0;
+      logSessionTrace('electron.content.request', traceId, () => ({
         adapter: request.input.sessionIdentity.endpoint.runtimeAdapterId,
         sessionKey: summarizeIdentifier(request.input.sessionKey),
         endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
         contentRef: summarizeIdentifier(request.input.contentRef),
         offset: request.input.offset,
         limit: request.input.limit ?? null,
-      });
+      }));
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: ENDPOINT,
@@ -71,16 +71,16 @@ export function createSessionContentTransport(
         headers: traceHeader(traceId),
       });
       if (response === null) {
-        logSessionTrace('electron.content.failure', traceId, { elapsedMs: Date.now() - startedAt });
+        logSessionTrace('electron.content.failure', traceId, () => ({ elapsedMs: Date.now() - startedAt }));
         return { status: 503, body: UNAVAILABLE };
       }
       const body = response.body;
       const loaded = response.status === 200 ? decodeSessionContentLoadResponse(body) : null;
-      logSessionTrace('electron.content.response', traceId, {
+      logSessionTrace('electron.content.response', traceId, () => ({
         status: response.status,
         contract: loaded ? 'valid' : isUnavailable(body) ? 'unavailable' : 'invalid',
         elapsedMs: Date.now() - startedAt,
-      });
+      }));
       if (response.status === 200
         && loaded
         && loaded.contentRef === request.input.contentRef

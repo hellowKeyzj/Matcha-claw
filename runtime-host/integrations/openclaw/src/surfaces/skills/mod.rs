@@ -96,11 +96,12 @@ impl skills_module::ports::SkillsPort for OpenClawSkillsPort {
     ) -> skills_module::ports::SkillsFuture<'a, Result<skills_module::management::Outcome, ()>>
     {
         Box::pin(async move {
-            let importing = matches!(
-                &command,
-                skills_module::management::Command::ImportMarkdown { .. }
-                    | skills_module::management::Command::ImportBundle { .. }
-            );
+            let importing = platform::trace::enabled()
+                && matches!(
+                    &command,
+                    skills_module::management::Command::ImportMarkdown { .. }
+                        | skills_module::management::Command::ImportBundle { .. }
+                );
             if !self.admission.admit_openclaw_skills_request() {
                 if importing {
                     eprintln!(
@@ -470,20 +471,28 @@ impl OpenClawSkillStatusCatalog {
         )
         .map_err(|_| SkillStatusCatalogError::Protocol)?;
         let _ = SKILL_STATUS_METHODS;
-        eprintln!("[startup-trace] source=skills-status phase=rpc detail=request");
+        if platform::trace::enabled() {
+            eprintln!("[startup-trace] source=skills-status phase=rpc detail=request");
+        }
         match self.gateway.rpc_query(request).await {
             Ok(GatewayResponse::Failure { .. }) => {
-                eprintln!("[startup-trace] source=skills-status phase=rpc detail=gateway-rejected");
+                if platform::trace::enabled() {
+                    eprintln!("[startup-trace] source=skills-status phase=rpc detail=gateway-rejected");
+                }
                 Err(SkillStatusCatalogError::Rejected)
             }
             Ok(response) => decode_skill_status_catalog(response).map_err(|_| {
-                eprintln!("[startup-trace] source=skills-status phase=decode detail=wire-rejected");
+                if platform::trace::enabled() {
+                    eprintln!("[startup-trace] source=skills-status phase=decode detail=wire-rejected");
+                }
                 SkillStatusCatalogError::Protocol
             }),
             Err(_) => {
-                eprintln!(
-                    "[startup-trace] source=skills-status phase=rpc detail=gateway-unavailable"
-                );
+                if platform::trace::enabled() {
+                    eprintln!(
+                        "[startup-trace] source=skills-status phase=rpc detail=gateway-unavailable"
+                    );
+                }
                 Err(SkillStatusCatalogError::Unavailable)
             }
         }
@@ -521,17 +530,21 @@ fn decode_skill_status_catalog(response: GatewayResponse) -> Result<SkillStatusC
         match decode_skill_status_item(skill) {
             Ok(item) => items.push(item),
             Err(reason) => {
-                rejected += 1;
-                last_reject_reason = Some(reason);
+                if platform::trace::enabled() {
+                    rejected += 1;
+                    last_reject_reason = Some(reason);
+                }
             }
         }
     }
     items.sort_by(|left, right| left.entry.key.cmp(&right.entry.key));
     let before_dedup = items.len();
     items.dedup_by(|left, right| left.entry.key == right.entry.key);
-    rejected += before_dedup - items.len();
-    if before_dedup != items.len() {
-        last_reject_reason = Some(StatusEntryRejectReason::DuplicateKey);
+    if platform::trace::enabled() {
+        rejected += before_dedup - items.len();
+        if before_dedup != items.len() {
+            last_reject_reason = Some(StatusEntryRejectReason::DuplicateKey);
+        }
     }
     let mut entries = Vec::with_capacity(items.len());
     let mut locators = BTreeMap::new();
@@ -662,10 +675,12 @@ impl StatusEntryRejectReason {
 }
 
 fn trace_status_decode(reason: &str, total: usize, accepted: usize, rejected: usize) {
-    eprintln!(
-        "[startup-trace] source=skills-status phase=decode detail={} total={} accepted={} rejected={}",
-        reason, total, accepted, rejected
-    );
+    if platform::trace::enabled() {
+        eprintln!(
+            "[startup-trace] source=skills-status phase=decode detail={} total={} accepted={} rejected={}",
+            reason, total, accepted, rejected
+        );
+    }
 }
 
 fn canonical_status_slug(value: &str) -> Option<String> {

@@ -29,6 +29,7 @@ import { handleExternalConnectorsRoutes } from './routes/external-connectors';
 import { handleFileRoutes } from './routes/files';
 import { handleFleetRoutes } from './routes/fleet';
 import { handleGatewayRoutes } from './routes/gateway';
+import { handleLicenseRoutes } from './routes/license';
 import { handleLogRoutes } from './routes/logs';
 import { handleManualTeamRoutes } from './routes/manual-team';
 import { handleMatchaAgentAppServerRoutes } from './routes/matcha-agent-app-server';
@@ -118,6 +119,7 @@ const routeHandlers: readonly RouteHandler[] = [
     deps.credentialWriteAdapter,
   ),
   (req, res, url, deps) => handleGatewayRoutes(req, res, url, deps),
+  (req, res, url, deps) => handleLicenseRoutes(req, res, url, deps),
   (req, res, url, deps) => handleLogRoutes(req, res, url, deps),
   (req, res, url, deps) => handleManualTeamRoutes(req, res, url, deps.runtimeHostTransports.manualTeamTransport),
   (req, res, url, deps) => handleMatchaAgentAppServerRoutes(req, res, url, deps),
@@ -232,10 +234,10 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
     const traceId = isSessionTraceEnabled() ? readTraceHeader(req.headers) : null;
     const traceActive = traceId !== null && req.url?.split(/[?#]/, 1)[0] === '/api/capabilities/execute';
     const traceStartedAt = traceActive ? Date.now() : 0;
-    const trace = (stage: string, payload: Record<string, unknown> = {}): void => {
+    const trace = (stage: string, payload?: () => Record<string, unknown>): void => {
       if (!traceActive) return;
       logSessionTrace(`electron.hostapi.server.${stage}`, traceId, {
-        path: '/api/capabilities/execute', elapsedMs: Date.now() - traceStartedAt, ...payload,
+        path: '/api/capabilities/execute', elapsedMs: Date.now() - traceStartedAt, ...payload?.(),
       });
     };
     trace('received');
@@ -272,13 +274,13 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
           : '';
         const presentedToken = bearerToken || queryToken;
         if (!presentedToken || presentedToken !== hostApiToken) {
-          trace('auth.end', { outcome: 'rejected', status: 401 });
+          trace('auth.end', () => ({ outcome: 'rejected', status: 401 }));
           sendJson(res, 401, { success: false, error: 'Unauthorized' });
           return;
         }
       }
 
-      trace('auth.end', { outcome: hostApiToken ? 'accepted' : 'not-required' });
+      trace('auth.end', () => ({ outcome: hostApiToken ? 'accepted' : 'not-required' }));
 
       if (!requireJsonContentType(req)) {
         sendJson(res, 415, { success: false, error: 'Content-Type must be application/json' });
@@ -300,11 +302,11 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
       trace('dispatch.start');
       for (const handler of routeHandlers) {
         if (await handler(req, res, requestUrl, deps)) {
-          trace('dispatch.end', { outcome: 'handled', status: res.statusCode });
+          trace('dispatch.end', () => ({ outcome: 'handled', status: res.statusCode }));
           return;
         }
       }
-      trace('dispatch.end', { outcome: 'unhandled' });
+      trace('dispatch.end', () => ({ outcome: 'unhandled' }));
       if (isMainOwnedRoute(requestUrl.pathname)) {
         sendJson(res, 500, {
           success: false,
@@ -314,7 +316,7 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
       }
       sendJson(res, 404, { success: false, error: `No route for ${req.method} ${requestUrl.pathname}` });
     } catch {
-      trace('failure', { outcome: 'failed', status: 500 });
+      trace('failure', () => ({ outcome: 'failed', status: 500 }));
       logger.error('Host API request failed.');
       sendJson(res, 500, { success: false, error: 'Host API request failed.' });
     }

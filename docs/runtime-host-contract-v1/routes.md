@@ -189,20 +189,18 @@ Current route/transport evidence: [fleet.ts](../../electron/api/routes/fleet.ts)
 
 FleetOwner 当前仍保留单 Fleet durable authority；owner-local keyed lanes 已通过 Rust 侧证据，覆盖 terminal provider open、dispatch、connection/environment/resource lifecycle；Remote Fleet mutation payload projection、live recovery、startup Pending replay scanner、query refresh、terminal provider failure owner-local settlement 与 focused tests 已通过；不拆 per-target/per-resource owner。focused fault/backpressure、process restart/terminal replay、package/Windows、SSH bootstrap gates 未全闭合。
 
-## G. gateway routes: distinguish same-name main ownership
+## G. Gateway lifecycle / repair
 
-child registers:
+Electron 的 `/api/gateway/status` 读取安全状态投影；start/stop/restart/repair 经签名 runtime-control transport 进入 Rust，不由 Electron 持有第二套 peer lifecycle workflow。[VERIFY: electron/api/routes/gateway.ts:17-81] [VERIFY: electron/main/runtime-host-delivery/transport/runtime-control.ts:205-223]
 
-```text
-GET  /api/gateway/status
-POST /api/gateway/recover
-POST /api/gateway/ready                     LEGACY-REJECTED
-POST /api/gateway/control-ui/auto-approve   LEGACY-REJECTED
-```
+| Renderer Host API | Signed child route（均为 POST） | 返回 |
+|---|---|---|
+| `POST /api/gateway/repair` | `/api/runtime-control/lifecycle/repair` | `202 CallReceipt {callId,accepted:true}`；module 为 `runtime-control`，command 为 `lifecycle.repair`；Busy 返回 409，不当成接单或成功。 |
+| `GET /api/gateway/repair` | `/api/runtime-control/repair/status` | 200 安全快照 `{phase,trigger,failure}`；读取失败返回 503，不伪造 idle。 |
 
-But Electron marks `/api/gateway/status` and several gateway lifecycle routes as main-owned. Renderer Host API reaches Electron’s gateway manager for those main-owned paths, not necessarily the child registration. Do not use child route existence alone to infer public client behavior.
+`phase = idle | stopping | repairing | preparing | starting | succeeded | failed`；`trigger = null | automatic | manual`；`failure = null | stopFailed | doctorFailed | doctorTimedOut | doctorCancelled | doctorSpawnFailed | preparationFailed | startFailed`。child read 使用 `runtime-control:read / runtime.repair.status / runtime-repair-status`，repair 使用 `runtime-control:write / runtime.lifecycle.repair / runtime-lifecycle-repair`，绑定原 endpoint 与严格签名 body。repair 只在 OpenClaw route fragment 实现，不扩 Matcha 能力。[VERIFY: runtime-host/modules/runtime-directory/src/domain/control.rs:128-174] [VERIFY: runtime-host/modules/runtime-directory/src/control_loopback.rs:344-354] [VERIFY: runtime-host/integrations/openclaw/src/driver/runtime_control_route.rs:148-194] [VERIFY: electron/main/runtime-host-delivery/transport/runtime-control.ts:130-141] [VERIFY: electron/api/routes/gateway.ts:121-137]
 
-Evidence: [gateway-routes.ts](../../runtime-host/api/routes/gateway-routes.ts#L14-L21)、[route-boundary.ts](../../electron/api/route-boundary.ts#L13-L38)。
+快照不包含 stdout/stderr、配置、token、私有路径或版本升级 marker；它是当前修复进度，不替代某次 CallReceipt 的终态。CallLog detail 的 `repair` 为可选安全快照，无值时省略，原 start/stop/restart detail 不新增 `repair:null`。[VERIFY: src/types/runtime-repair.ts:1-24] [VERIFY: runtime-host/modules/runtime-directory/src/call.rs:23-40]
 
 ## Route response rule
 

@@ -174,7 +174,8 @@ function createSpanAttributes(
  * Sets the interaction context for all subsequent operations.
  */
 export function startInteractionSpan(userPrompt: string): Span {
-  ensureCleanupInterval()
+  if (isAnyTracingEnabled() || isPerfettoTracingEnabled())
+    ensureCleanupInterval()
 
   // Start Perfetto span regardless of OTel tracing state
   const perfettoSpanId = isPerfettoTracingEnabled()

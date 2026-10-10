@@ -148,7 +148,7 @@ async function getOtlpReaders() {
           // The console exporter is for debugging, so console output is intentional here
 
           logForDebugging('\n=== Resource Attributes ===')
-          logForDebugging(jsonStringify(metrics.resource.attributes))
+          logForDebugging(() => jsonStringify(metrics.resource.attributes))
           logForDebugging('===========================\n')
         }
 
@@ -224,7 +224,8 @@ async function getOtlpLogExporters() {
   const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT
 
   logForDebugging(
-    `[3P telemetry] getOtlpLogExporters: types=${jsonStringify(exporterTypes)}, protocol=${protocol}, endpoint=${endpoint}`,
+    () =>
+      `[3P telemetry] getOtlpLogExporters: types=${jsonStringify(exporterTypes)}, protocol=${protocol}, endpoint=${endpoint}`,
   )
 
   const exporters = []

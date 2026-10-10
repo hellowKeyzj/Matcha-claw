@@ -241,35 +241,35 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     const requestSequence = ++observation.requestSequence;
     const startedAt = isSessionTraceEnabled() ? performance.now() : null;
     const task = (async () => {
-      if (isSessionTraceEnabled()) logSessionTrace('session.observe.request', options.traceId, {
+      if (isSessionTraceEnabled()) logSessionTrace('session.observe.request', options.traceId, () => ({
         identity: summarizeSessionIdentity(identity), leaseHash: summarizeIdentifier(observation.leaseId).hash,
         requestSequence, generation, limit: CHAT_HISTORY_FULL_LIMIT,
-      });
+      }));
       let result: Awaited<ReturnType<typeof observeChatSession>>;
       try {
         result = await observeChatSession({ sessionIdentity: identity, leaseId: observation.leaseId, limit: CHAT_HISTORY_FULL_LIMIT }, options);
       } catch (error) {
-        if (isSessionTraceEnabled()) logSessionTrace('session.observe.error', options.traceId, {
+        if (isSessionTraceEnabled()) logSessionTrace('session.observe.error', options.traceId, () => ({
           identity: summarizeSessionIdentity(identity), leaseHash: summarizeIdentifier(observation.leaseId).hash,
           requestSequence, requestElapsedMs: startedAt === null ? null : performance.now() - startedAt,
           current: observations.get(key) === observation, ...summarizeError(error),
-        });
+        }));
         throw error;
       }
       if ('outcome' in result || observations.get(key) !== observation) {
-        if (isSessionTraceEnabled()) logSessionTrace('session.observe.drop', options.traceId, {
+        if (isSessionTraceEnabled()) logSessionTrace('session.observe.drop', options.traceId, () => ({
           identity: summarizeSessionIdentity(identity), leaseHash: summarizeIdentifier(observation.leaseId).hash,
           requestSequence, requestElapsedMs: startedAt === null ? null : performance.now() - startedAt,
           reason: 'outcome' in result ? 'observation-released' : 'observation-replaced',
-        });
+        }));
         if ('view' in result) await releaseChatSession({ sessionIdentity: identity, leaseId: observation.leaseId });
         return null;
       }
-      if (isSessionTraceEnabled()) logSessionTrace('session.observe.response', options.traceId, {
+      if (isSessionTraceEnabled()) logSessionTrace('session.observe.response', options.traceId, () => ({
         identity: summarizeSessionIdentity(identity), leaseHash: summarizeIdentifier(observation.leaseId).hash,
         requestSequence, requestElapsedMs: startedAt === null ? null : performance.now() - startedAt,
         epoch: result.view.epoch, seq: result.view.seq, cursor: result.view.cursor,
-      });
+      }));
       return result.view;
     })();
     observation.request = task;
@@ -280,9 +280,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     const tracing = isSessionTraceEnabled();
     let requestElapsedMs: number | null = null;
     const trace = (stage: string, extra: Record<string, unknown> = {}) => {
-      if (isSessionTraceEnabled()) logSessionTrace(stage, 'session-observation-boundary', {
+      if (isSessionTraceEnabled()) logSessionTrace(stage, 'session-observation-boundary', () => ({
         identity: summarizeSessionIdentity(identity), leaseHash: summarizeIdentifier(leaseId).hash, cause, requestedWatermark: watermark ?? null, requestElapsedMs, ...extra,
-      });
+      }));
     };
     const identityKey = buildSessionIdentityKey(identity);
     const observation = observations.get(identityKey);
@@ -377,7 +377,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     },
     releaseSession: releaseObservation,
     resyncSession: async (event) => {
-      const drop = (reason: string) => { if (isSessionTraceEnabled()) logSessionTrace('session.resync.drop', 'session-resync-boundary', { reason }); };
+      const drop = (reason: string) => { if (isSessionTraceEnabled()) logSessionTrace('session.resync.drop', 'session-resync-boundary', () => ({ reason })); };
       if (!event || typeof event !== 'object' || Array.isArray(event)) { drop('invalid-event-shape'); return; }
       const value = event as Record<string, unknown>;
       if (Object.keys(value).length !== 3
@@ -389,11 +389,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         drop('invalid-identity');
         return;
       }
-      const observation = observations.get(buildSessionIdentityKey(value.identity));
-      if (isSessionTraceEnabled()) logSessionTrace('session.resync.request', 'session-resync-boundary', {
-        identity: summarizeSessionIdentity(value.identity), epoch: value.epoch, seq: value.seq,
+      const identity = value.identity;
+      const observation = observations.get(buildSessionIdentityKey(identity));
+      if (isSessionTraceEnabled()) logSessionTrace('session.resync.request', 'session-resync-boundary', () => ({
+        identity: summarizeSessionIdentity(identity), epoch: value.epoch, seq: value.seq,
         accepted: !!observation, reason: observation ? null : 'no-active-observation',
-      });
+      }));
       if (observation?.identity.endpoint.kind === 'native-runtime' && observation.identity.endpoint.runtimeAdapterId === 'openclaw') {
         const key = buildSessionIdentityKey(observation.identity);
         const covered = () => observation.watermark && (observation.watermark.epoch > (value.epoch as number)

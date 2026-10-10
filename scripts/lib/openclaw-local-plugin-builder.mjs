@@ -31,14 +31,6 @@ const BUILD_TARGETS = [
     runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist'],
   },
   {
-    pluginId: 'memory-lancedb-pro',
-    packageDir: 'packages/memory-lancedb-pro',
-    compileDirs: ['src'],
-    compileFiles: ['index.ts', 'cli.ts'],
-    preserveDirStructure: true,
-    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist', 'models', 'skills'],
-  },
-  {
     pluginId: 'matchaclaw-media',
     packageDir: 'packages/openclaw-matchaclaw-media-plugin',
     compileDirs: ['src'],

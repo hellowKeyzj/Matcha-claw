@@ -84,13 +84,13 @@ export function createChannelCredentialsTransport(
         body = response.body;
         if ((response.status === 200 || response.status === 400)
           && isChannelCredentialsValidation(body, input.config)) {
-          finish(status, body);
+          finish?.(status, body);
           return { status: response.status, body };
         }
         body = UNAVAILABLE;
         errorCode = 'INVALID_RESPONSE';
       }
-      finish(status, body, errorCode);
+      finish?.(status, body, errorCode);
       return { status: 503, body: UNAVAILABLE };
     },
   };

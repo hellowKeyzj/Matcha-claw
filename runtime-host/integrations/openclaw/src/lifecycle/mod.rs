@@ -1,4 +1,5 @@
 mod channel_bootstrap;
+pub mod doctor;
 pub mod launch;
 pub mod logs;
 pub mod port_guard;

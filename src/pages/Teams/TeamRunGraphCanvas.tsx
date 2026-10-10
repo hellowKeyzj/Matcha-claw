@@ -1,7 +1,13 @@
-import { useEffect, useId, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import { Bot, CheckCircle2, FileCode2, Flag, GitMerge, Maximize2, Minus, Plus, UserCheck, Zap, type LucideIcon } from 'lucide-react';
 import { StableScrollArea } from '@/components/scroll';
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { createSessionTraceId, logSessionTrace, summarizeIdentifier, summarizeTeamGraphPort } from '@/lib/session-trace';
+import { Sheet } from '@/components/ui/sheet';
+import { createGraphLayoutEngine, routeGraphEdges } from './team-graph-layout';
+import { edgeActionCandidates, TeamGraphPortRepair } from './TeamGraphPortRepair';
+import { TeamEdgeInspector } from './TeamEdgeInspector';
+import type { GraphLayoutInput, GraphLayoutResult, GraphPoint } from './team-graph-layout-types';
+import type { TeamDesignFailure, TeamGraphNodeConfigRecord, TeamScriptReviewRule } from '@/types/team-design';
 import type {
   TeamGraphEdgeAction,
   TeamGraphEdgeRecord,
@@ -12,23 +18,44 @@ import type {
   TeamWebhookAuthProjection,
 } from '@/services/openclaw/team-runtime-client';
 
-type TeamGraphCanvasNodeKind = 'start' | 'work' | 'review' | 'human_decision' | 'script_review' | 'join' | 'end';
-
-type TeamGraphStartTriggerMode = 'webhook' | 'cron';
-type TeamGraphCronPresetId = 'every10Minutes' | 'every30Minutes' | 'hourly' | 'dailyAt9' | 'custom';
-type TeamGraphCronCustomKind = 'intervalMinutes' | 'intervalHours' | 'dailyAt';
-type TeamGraphReviewExecutorKind = 'team-role' | 'human';
-type TeamGraphScriptReviewRuleId = 'passThrough' | 'assertAllUpstreamCompleted' | 'assertNoBlockingGate' | 'assertArtifactExists';
-
+import { TeamNodeInspector } from './TeamNodeInspector';
+import { TeamAssignmentEditor } from './TeamAssignmentEditor';
+import { TeamStartEditor, DEFAULT_CRON_SCHEDULE, readStartTrigger, buildCronExpression, normalizeWebhookPathInput, buildWebhookPublicUrl, readPositiveIntegerInRange } from './TeamStartEditor';
+import { TeamScriptReviewEditor } from './TeamScriptReviewEditor';
+import { TeamControlNodeDetails } from './TeamControlNodeDetails';
+import type { TeamGraphCanvasNodeKind, TeamGraphStartTriggerMode, TeamGraphCronPresetId, TeamGraphCronCustomKind, CronScheduleDraft } from './team-node-editor-types';
 const TEAM_GRAPH_EDGE_ACTIONS: TeamGraphEdgeAction[] = ['activate', 'rework', 'gate', 'finish'];
+const EMPTY_PORTS: readonly string[] = [];
 
 export type TeamRunGraphCanvasLabels = {
+  cancelEdge: string;
+  closeEdge: string;
+  edgeActionDescriptions: Record<TeamGraphEdgeAction, string>;
+  cancelNode: string;
+  closeNode: string;
+  nodeTechnicalDetails: string;
+  executionSettings: string;
+  executionLimitSummary: string;
+  workMember: string;
+  reviewMember: string;
+  nodeKindLabels: Record<TeamGraphCanvasNodeKind, string>;
+  expandPrompt: string;
+  collapsePrompt: string;
+  optionalOutput: string;
+  scriptReviewRuleDescriptions: Record<TeamScriptReviewRule, string>;
+  humanDecisionHint: string;
+  nodeIncomingConnections: string;
+  nodeOutgoingConnections: string;
+  nodeNoConnections: string;
   nodeDetails?: string;
   nodeDetailsDescription?: string;
   task?: string;
   zoomIn?: string;
   zoomOut?: string;
   fitToView?: string;
+  autoLayout?: string;
+  layoutPending?: string;
+  layoutFailed?: string;
   workflowCanvas: string;
   workflowEdges: string;
   nodePalette: string;
@@ -48,11 +75,21 @@ export type TeamRunGraphCanvasLabels = {
   targetNode: string;
   sourcePort: string;
   targetPort: string;
-  edgeType: string;
+  portLabels: Record<string, string>;
+  invalidPort: string;
+  automaticPortRepair: string;
+  noPort: string;
+  portRepairTitle: string;
+  portRepairHint: string;
+  portRepairReconnect: string;
+  portRepairDelete: string;
+  savePortRepair: string;
   edgeAction: string;
+  selectEdgeAction: string;
+  invalidEdgeAction: string;
+  noEdgeAction: string;
   edgeActionOptions: Record<TeamGraphEdgeAction, string>;
   includeUpstreamResult: string;
-  edgeLabel: string;
   edgeConnection: string;
   edgeTriggerCondition: string;
   edgeDataTransfer: string;
@@ -66,26 +103,21 @@ export type TeamRunGraphCanvasLabels = {
   nodeMaxAttemptsInvalid: string;
   reworkLimitExceeded: string;
   roleId: string;
-  executorJson: string;
+  sessionRef: string;
+  selectRole: string;
+  selectSession: string;
+  noRoleBindings: string;
+  invalidBinding: string;
+  roleBindingRequired: string;
   prompt: string;
   workPrompt: string;
   reviewPrompt: string;
   outputArtifactKind: string;
-  reviewExecutorKind: string;
-  reviewExecutorTeamRole: string;
-  reviewExecutorHuman: string;
-  humanDecisionReason: string;
-  humanDecisionRequestedAction: string;
-  humanDecisionRisk: string;
   scriptReviewRule: string;
-  scriptReviewRules: Record<TeamGraphScriptReviewRuleId, string>;
-  scriptReviewArtifactKind: string;
+  scriptReviewRuleRequired: string;
+  scriptReviewRules: Record<TeamScriptReviewRule, string>;
   joinConfigurationHint: string;
   endConfigurationHint: string;
-  advancedJson: string;
-  roleIdRequired: string;
-  configJson: string;
-  invalidJson: string;
   saveGraphUnavailable: string;
   connectionDraft: string;
   runStatusLabel: string;
@@ -97,6 +129,7 @@ export type TeamRunGraphCanvasLabels = {
   nodeCount: string;
   edgeCount: string;
   startTriggerMode: string;
+  startTriggerManual: string;
   startTriggerWebhook: string;
   startTriggerCron: string;
   startWebhookPath: string;
@@ -117,6 +150,8 @@ export type TeamRunGraphCanvasLabels = {
   startWebhookPathInvalid: string;
   startCronSchedule: string;
   startCronSchedules: Record<TeamGraphCronPresetId, string>;
+  startCronKeepExpression: string;
+  startCronExpressionHint: string;
   startCronCustomKind: string;
   startCronCustomKinds: Record<TeamGraphCronCustomKind, string>;
   startCronCustomIntervalMinutes: string;
@@ -144,6 +179,9 @@ export type TeamRunGraphCanvasProps = {
   webhookAuth?: TeamWebhookAuthProjection | null;
   labels: TeamRunGraphCanvasLabels;
   onPatchGraph?: (operations: TeamGraphPatchOperation[]) => Promise<void> | void;
+  graphVersion?: string;
+  runtimeError?: TeamDesignFailure | null;
+  onRepairGraph?: (operations: TeamGraphPatchOperation[]) => Promise<void> | void;
 };
 
 type PositionedNode = TeamGraphNodeRecord & {
@@ -163,15 +201,9 @@ type DragState = {
   moved: boolean;
 };
 
-type ConnectionSource = {
-  sourcePort: string;
-  action: TeamGraphEdgeAction;
-};
-
 type ConnectionDraft = {
   sourceNodeId: string;
   sourcePort: string;
-  action: TeamGraphEdgeAction;
 };
 
 type ConfigurationSheet =
@@ -198,40 +230,18 @@ type TeamGraphEdgeVisual = {
 
 const NODE_WIDTH = 220;
 const NODE_HEIGHT = 118;
-const COLUMN_GAP = 280;
-const ROW_GAP = 190;
 const CANVAS_PADDING = 72;
 const DRAG_THRESHOLD = 3;
-const START_CRON_PRESETS: Array<{ presetId: Exclude<TeamGraphCronPresetId, 'custom'>; cron: string }> = [
-  { presetId: 'every10Minutes', cron: '*/10 * * * *' },
-  { presetId: 'every30Minutes', cron: '*/30 * * * *' },
-  { presetId: 'hourly', cron: '0 * * * *' },
-  { presetId: 'dailyAt9', cron: '0 9 * * *' },
-];
-const START_CRON_CUSTOM_KIND_IDS: TeamGraphCronCustomKind[] = ['intervalMinutes', 'intervalHours', 'dailyAt'];
-const DEFAULT_START_CRON_PRESET_ID: TeamGraphCronPresetId = 'every10Minutes';
-const DEFAULT_START_CRON_EXPRESSION = START_CRON_PRESETS.find((preset) => preset.presetId === DEFAULT_START_CRON_PRESET_ID)!.cron;
-const DEFAULT_START_CRON_CUSTOM_KIND: TeamGraphCronCustomKind = 'intervalMinutes';
-const DEFAULT_START_CRON_CUSTOM_INTERVAL_MINUTES = '10';
-const DEFAULT_START_CRON_CUSTOM_INTERVAL_HOURS = '1';
-const DEFAULT_START_CRON_CUSTOM_TIME = '09:00';
 const DEFAULT_NODE_MAX_ATTEMPTS = 3;
 const NODE_MAX_ATTEMPTS_LIMIT = 0xffff_ffff;
-const NODE_PALETTE: Array<{ kind: TeamGraphCanvasNodeKind; title: string; sourcePort: string }> = [
-  { kind: 'start', title: 'Trigger', sourcePort: 'completed' },
-  { kind: 'work', title: 'Role step', sourcePort: 'completed' },
-  { kind: 'review', title: 'Review', sourcePort: 'completed' },
-  { kind: 'human_decision', title: 'Decision', sourcePort: 'approved' },
-  { kind: 'script_review', title: 'Script check', sourcePort: 'passed' },
-  { kind: 'join', title: 'Join', sourcePort: 'joined' },
-  { kind: 'end', title: 'Finish', sourcePort: 'completed' },
-];
-
-const SCRIPT_REVIEW_RULE_IDS: TeamGraphScriptReviewRuleId[] = [
-  'passThrough',
-  'assertAllUpstreamCompleted',
-  'assertNoBlockingGate',
-  'assertArtifactExists',
+const NODE_PALETTE: Array<{ kind: TeamGraphCanvasNodeKind; title: string }> = [
+  { kind: 'start', title: 'Trigger' },
+  { kind: 'work', title: 'Role step' },
+  { kind: 'review', title: 'Review' },
+  { kind: 'human_decision', title: 'Decision' },
+  { kind: 'script_review', title: 'Script check' },
+  { kind: 'join', title: 'Join' },
+  { kind: 'end', title: 'Finish' },
 ];
 
 const EDGE_VISUALS: Record<string, TeamGraphEdgeVisual> = {
@@ -383,22 +393,97 @@ function edgeVisualForEdge(edge: TeamGraphEdgeRecord): TeamGraphEdgeVisual {
 }
 
 function edgeDisplayLabel(edge: TeamGraphEdgeRecord): string {
-  return edge.sourcePort || edge.kind || edge.label || '';
+  return edge.sourcePort || '';
 }
 
-function positionNodes(
-  nodes: TeamGraphNodeRecord[],
-  draftPositions: Record<string, { x: number; y: number }>,
-  layoutPositions: Record<string, { x: number; y: number }>,
-  columns: number,
-): PositionedNode[] {
-  return nodes.map((node, index) => {
-    const position = draftPositions[node.nodeId] ?? layoutPositions[node.nodeId] ?? {
-      x: CANVAS_PADDING + (index % columns) * COLUMN_GAP,
-      y: CANVAS_PADDING + Math.floor(index / columns) * ROW_GAP,
+function useGraphLayout(scope: string, input: GraphLayoutInput, measured: boolean, dragging: boolean) {
+  const [layout, setLayout] = useState<{ scope: string; shapeKey: string; result: GraphLayoutResult } | null>(null);
+  const [status, setStatus] = useState<'idle' | 'pending' | 'failed'>('idle');
+  const shapeKey = useMemo(() => JSON.stringify([input.nodes, input.edges]), [input]);
+  const contextRef = useRef({ scope, input, dragging, shapeKey });
+  const requestRef = useRef<((arrange: boolean) => Promise<GraphLayoutResult | null>) | null>(null);
+  const acceptRef = useRef<((result: GraphLayoutResult) => void) | null>(null);
+
+  useLayoutEffect(() => {
+    contextRef.current = { scope, input, dragging, shapeKey };
+  }, [scope, input, dragging, shapeKey]);
+
+  useEffect(() => {
+    const engine = createGraphLayoutEngine();
+    let disposed = false;
+    let running = false;
+    let previous: { scope: string; shapeKey: string; result: GraphLayoutResult } | null = null;
+    type Request = { arrange: boolean; context: typeof contextRef.current; resolve: (result: GraphLayoutResult | null) => void };
+    let pending: Request | null = null;
+    const drain = async () => {
+      if (running) return;
+      running = true;
+      while (pending && !disposed) {
+        const request = pending;
+        pending = null;
+        const { context } = request;
+        try {
+          const result = await engine.layout(request.arrange
+            ? { ...context.input, fixedPositions: {}, previousPositions: undefined }
+            : { ...context.input, previousPositions: previous?.scope === context.scope
+              ? { ...previous.result.positions, ...context.input.fixedPositions }
+              : undefined });
+          if (disposed || context !== contextRef.current || context.dragging) {
+            request.resolve(null);
+            continue;
+          }
+          if (!request.arrange) {
+            previous = { scope: context.scope, shapeKey: context.shapeKey, result };
+            setLayout({ scope: context.scope, shapeKey: context.shapeKey, result });
+          }
+          setStatus('idle');
+          request.resolve(result);
+        } catch (error) {
+          if (!disposed && context === contextRef.current) {
+            console.error('[team-graph:layout]', error);
+            setStatus('failed');
+          }
+          request.resolve(null);
+        }
+      }
+      running = false;
     };
-    return { ...node, x: position.x, y: position.y };
-  });
+    acceptRef.current = (result) => {
+      const context = contextRef.current;
+      previous = { scope: context.scope, shapeKey: context.shapeKey, result };
+      setLayout({ scope: context.scope, shapeKey: context.shapeKey, result });
+    };
+    requestRef.current = (arrange) => new Promise((resolve) => {
+      pending?.resolve(null);
+      pending = null;
+      const context = { ...contextRef.current };
+      contextRef.current = context;
+      if (!arrange && previous?.scope === context.scope && previous.shapeKey === context.shapeKey) {
+        setStatus('idle');
+        resolve(null);
+        return;
+      }
+      pending = { arrange, context, resolve };
+      setStatus('pending');
+      void drain();
+    });
+    return () => {
+      disposed = true;
+      pending?.resolve(null);
+      pending = null;
+      requestRef.current = null;
+      acceptRef.current = null;
+      engine.dispose();
+    };
+  }, []);
+
+  const requestLayout = useCallback((arrange = false) => requestRef.current?.(arrange) ?? Promise.resolve(null), []);
+  useEffect(() => {
+    if (measured && !dragging) void requestLayout();
+  }, [scope, input, measured, dragging, requestLayout]);
+
+  const acceptLayout = useCallback((result: GraphLayoutResult) => acceptRef.current?.(result), []);
+  return { layout: layout?.scope === scope ? layout : null, shapeKey, status, requestLayout, acceptLayout };
 }
 
 type NodePaletteControlProps = {
@@ -466,66 +551,9 @@ function NodePaletteControl({ labels, isOpen, isSaving, onToggle, onClose, onAdd
   );
 }
 
-function createEdgePath(source: PositionedNode, target: PositionedNode, sourceWidth: number, sourceHeight: number, targetHeight: number): string {
-  const startX = source.x + sourceWidth;
-  const startY = source.y + sourceHeight / 2;
-  const endX = target.x;
-  const endY = target.y + targetHeight / 2;
-  const controlOffset = Math.max(80, Math.abs(endX - startX) / 2);
-  return `M ${startX} ${startY} C ${startX + controlOffset} ${startY}, ${endX - controlOffset} ${endY}, ${endX} ${endY}`;
-}
-
-function parseJsonObject(value: string, fieldLabel: string, invalidJsonLabel: string): Record<string, unknown> {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return {};
-  }
-  const parsed = JSON.parse(trimmed) as unknown;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`${fieldLabel}: ${invalidJsonLabel}`);
-  }
-  return parsed as Record<string, unknown>;
-}
-
-function stringifyJsonObject(value: Record<string, unknown> | undefined): string {
-  return JSON.stringify(value ?? {}, null, 2);
-}
-
 function readNodePrompt(node: TeamGraphNodeRecord | null): string {
   const prompt = node?.config?.prompt;
   return typeof prompt === 'string' ? prompt : '';
-}
-
-function readString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
-}
-
-function readNodeConfigString(node: TeamGraphNodeRecord | null, field: string): string {
-  const value = node?.config?.[field];
-  return typeof value === 'string' ? value : '';
-}
-
-function readNodeRoleId(node: TeamGraphNodeRecord | null): string {
-  return readString(node?.executor?.roleId) ?? readString(node?.roleId) ?? '';
-}
-
-function readReviewExecutorKind(node: TeamGraphNodeRecord | null): TeamGraphReviewExecutorKind {
-  return node?.executor?.kind === 'team-role' ? 'team-role' : 'human';
-}
-
-function readScriptReviewRuleId(node: TeamGraphNodeRecord | null): TeamGraphScriptReviewRuleId {
-  const ruleId = readNodeConfigString(node, 'ruleId');
-  if (ruleId === 'assertAllUpstreamCompleted' || ruleId === 'assertNoBlockingGate' || ruleId === 'assertArtifactExists') return ruleId;
-  return 'passThrough';
-}
-
-function writeOptionalString(record: Record<string, unknown>, field: string, value: string): void {
-  const trimmed = value.trim();
-  if (trimmed) {
-    record[field] = trimmed;
-  } else {
-    delete record[field];
-  }
 }
 
 function graphPatchRecord(value: Record<string, unknown>): Record<string, unknown> {
@@ -539,11 +567,9 @@ function graphPatchNode(node: TeamGraphNodeRecord): Record<string, unknown> {
     kind,
     title: node.title?.trim() || node.nodeId,
     roleId: kind === 'work' || kind === 'review' ? node.roleId : undefined,
-    groupId: kind === 'work' || kind === 'join' ? node.groupId : undefined,
     taskId: kind === 'work' ? node.taskId : undefined,
     maxAttempts: node.maxAttempts,
-    executor: kind === 'work' || kind === 'review' ? node.executor : undefined,
-    config: kind === 'start' || kind === 'work' || kind === 'review' || kind === 'join' ? node.config : undefined,
+    config: kind === 'start' || kind === 'work' || kind === 'review' || kind === 'script_review' ? node.config : undefined,
   });
 }
 
@@ -668,173 +694,16 @@ function nextNodePosition(
   return { x: start.x, y: Math.max(minY, bottom + CANVAS_PADDING / 2) };
 }
 
-function defaultConfigForNode(kind: TeamGraphCanvasNodeKind, title: string): Record<string, unknown> | undefined {
-  if (kind === 'work') return { prompt: title };
-  if (kind === 'script_review') return { runtime: 'python', timeoutMs: 60_000, outputLimitBytes: 32_768 };
-  if (kind === 'start') return { trigger: defaultStartTrigger('webhook') };
-  return undefined;
-}
-
-function defaultStartTrigger(mode: TeamGraphStartTriggerMode): Record<string, unknown> {
-  if (mode === 'cron') return { mode: 'cron', cron: DEFAULT_START_CRON_EXPRESSION };
-  return { mode: 'webhook', path: '' };
-}
-
-function normalizeWebhookPathInput(value: string): string {
-  return value.trim().replace(/^\/+/, '').replace(/\/+$/, '');
-}
-
-function normalizeWebhookPublicBaseUrlInput(value: string): string {
-  return value.trim().replace(/\/+$/, '');
-}
-
-function buildWebhookRoutePreview(path: string): string {
-  const normalizedPath = normalizeWebhookPathInput(path);
-  return normalizedPath ? `/api/team-runtime/webhooks/${normalizedPath}` : '/api/team-runtime/webhooks/{path}';
-}
-
-function buildWebhookPublicUrl(publicBaseUrl: string, path: string): string {
-  const normalizedBaseUrl = normalizeWebhookPublicBaseUrlInput(publicBaseUrl);
-  if (!normalizedBaseUrl) return '';
-  return `${normalizedBaseUrl}${buildWebhookRoutePreview(path)}`;
-}
-
-function isValidWebhookPublicBaseUrl(value: string): boolean {
-  if (!value.trim()) return true;
-  try {
-    const url = new URL(value.trim());
-    return url.protocol === 'https:' || url.protocol === 'http:';
-  } catch {
-    return false;
-  }
-}
-
-function cronPresetIdForExpression(cronExpression: string): TeamGraphCronPresetId {
-  return START_CRON_PRESETS.find((preset) => preset.cron === cronExpression)?.presetId ?? 'custom';
-}
-
-function readCustomCronSchedule(cronExpression: string): { kind: TeamGraphCronCustomKind; intervalMinutes: string; intervalHours: string; time: string } {
-  const everyMinutesMatch = /^\*\/(\d+) \* \* \* \*$/.exec(cronExpression);
-  if (everyMinutesMatch?.[1]) {
-    return { kind: 'intervalMinutes', intervalMinutes: everyMinutesMatch[1], intervalHours: DEFAULT_START_CRON_CUSTOM_INTERVAL_HOURS, time: DEFAULT_START_CRON_CUSTOM_TIME };
-  }
-  const everyHoursMatch = /^0 \*\/(\d+) \* \* \*$/.exec(cronExpression);
-  if (everyHoursMatch?.[1]) {
-    return { kind: 'intervalHours', intervalMinutes: DEFAULT_START_CRON_CUSTOM_INTERVAL_MINUTES, intervalHours: everyHoursMatch[1], time: DEFAULT_START_CRON_CUSTOM_TIME };
-  }
-  const dailyAtMatch = /^(\d{1,2}) (\d{1,2}) \* \* \*$/.exec(cronExpression);
-  if (dailyAtMatch?.[1] && dailyAtMatch[2]) {
-    return { kind: 'dailyAt', intervalMinutes: DEFAULT_START_CRON_CUSTOM_INTERVAL_MINUTES, intervalHours: DEFAULT_START_CRON_CUSTOM_INTERVAL_HOURS, time: `${dailyAtMatch[2].padStart(2, '0')}:${dailyAtMatch[1].padStart(2, '0')}` };
-  }
-  return { kind: DEFAULT_START_CRON_CUSTOM_KIND, intervalMinutes: DEFAULT_START_CRON_CUSTOM_INTERVAL_MINUTES, intervalHours: DEFAULT_START_CRON_CUSTOM_INTERVAL_HOURS, time: DEFAULT_START_CRON_CUSTOM_TIME };
-}
-
-function readPositiveIntegerInRange(value: string, min: number, max: number): number | null {
-  const trimmedValue = value.trim();
-  if (!/^\d+$/.test(trimmedValue)) return null;
-  const parsed = Number.parseInt(trimmedValue, 10);
-  if (!Number.isInteger(parsed) || parsed < min || parsed > max) return null;
-  return parsed;
-}
-
-function buildCustomCronExpression(input: { kind: TeamGraphCronCustomKind; intervalMinutes: string; intervalHours: string; time: string }): string | null {
-  if (input.kind === 'intervalMinutes') {
-    const minutes = readPositiveIntegerInRange(input.intervalMinutes, 1, 59);
-    return minutes === null ? null : `*/${minutes} * * * *`;
-  }
-  if (input.kind === 'intervalHours') {
-    const hours = readPositiveIntegerInRange(input.intervalHours, 1, 23);
-    return hours === null ? null : `0 */${hours} * * *`;
-  }
-  const timeMatch = /^(\d{2}):(\d{2})$/.exec(input.time.trim());
-  if (!timeMatch?.[1] || !timeMatch[2]) return null;
-  const hours = readPositiveIntegerInRange(timeMatch[1], 0, 23);
-  const minutes = readPositiveIntegerInRange(timeMatch[2], 0, 59);
-  return hours === null || minutes === null ? null : `${minutes} ${hours} * * *`;
-}
-
-function readStartTrigger(node: TeamGraphNodeRecord | null): { mode: TeamGraphStartTriggerMode; cronPresetId: TeamGraphCronPresetId; customKind: TeamGraphCronCustomKind; customIntervalMinutes: string; customIntervalHours: string; customTime: string; path: string; publicBaseUrl: string } {
-  const trigger = node?.config?.trigger;
-  const record = trigger && typeof trigger === 'object' && !Array.isArray(trigger) ? (trigger as Record<string, unknown>) : {};
-  const mode: TeamGraphStartTriggerMode = record.mode === 'cron' ? 'cron' : 'webhook';
-  const cron = typeof record.cron === 'string' ? record.cron : '';
-  const customSchedule = readCustomCronSchedule(cron);
+function summarizeGraphEdge(edge: TeamGraphEdgeRecord, sourceNode: TeamGraphNodeRecord | null, runId: string) {
   return {
-    mode,
-    cronPresetId: cronPresetIdForExpression(cron),
-    customKind: customSchedule.kind,
-    customIntervalMinutes: customSchedule.intervalMinutes,
-    customIntervalHours: customSchedule.intervalHours,
-    customTime: customSchedule.time,
-    path: typeof record.path === 'string' ? record.path : '',
-    publicBaseUrl: typeof record.publicBaseUrl === 'string' ? record.publicBaseUrl : '',
+    runHash: summarizeIdentifier(runId).hash,
+    edgeHash: summarizeIdentifier(edge.edgeId).hash,
+    sourceNodeHash: summarizeIdentifier(edge.sourceNodeId).hash,
+    targetNodeHash: summarizeIdentifier(edge.targetNodeId).hash,
+    nodeKind: NODE_PALETTE.find((item) => item.kind === sourceNode?.kind)?.kind ?? 'unknown',
+    canonicalSourcePort: summarizeTeamGraphPort(edge.sourcePort),
+    action: TEAM_GRAPH_EDGE_ACTIONS.find((action) => action === edge.action) ?? null,
   };
-}
-
-function defaultExecutorForNode(kind: TeamGraphCanvasNodeKind): Record<string, unknown> | undefined {
-  if (kind === 'work') return { kind: 'team-role', roleId: 'leader' };
-  if (kind === 'review') return { kind: 'team-role', roleId: 'leader' };
-  if (kind === 'human_decision') return { kind: 'human' };
-  if (kind === 'script_review') return { kind: 'script', runtime: 'python' };
-  return undefined;
-}
-
-function defaultSourcePortForNode(node: TeamGraphNodeRecord): string {
-  switch (node.kind) {
-    case 'review':
-      return 'completed';
-    case 'script_review':
-      return 'passed';
-    case 'human_decision':
-      return 'approved';
-    case 'join':
-      return 'joined';
-    default:
-      return 'completed';
-  }
-}
-
-function defaultTargetPortForNode(): string {
-  return 'input';
-}
-
-function defaultEdgeActionForSourcePort(sourcePort: string): TeamGraphEdgeAction {
-  return sourcePort === 'rework' ? 'rework' : 'activate';
-}
-
-function defaultEdgeTypeForSourcePort(sourcePort: string): string {
-  if (sourcePort === 'completed') return 'completed_success';
-  if (sourcePort === 'rework' || sourcePort === 'failed' || sourcePort === 'rejected') return 'rework';
-  if (sourcePort === 'approved') return 'approval';
-  return sourcePort || 'control';
-}
-
-function sourcePortOptionsForNode(node: TeamGraphNodeRecord | null): string[] {
-  switch (node?.kind) {
-    case 'start':
-      return ['completed'];
-    case 'review':
-      return ['completed', 'rework'];
-    case 'script_review':
-      return ['passed', 'failed'];
-    case 'human_decision':
-      return ['approved', 'rejected', 'aborted'];
-    case 'join':
-      return ['joined'];
-    default:
-      return ['completed', 'failed'];
-  }
-}
-
-function connectionSourcesForNode(node: TeamGraphNodeRecord): ConnectionSource[] {
-  if (node.kind === 'review') {
-    return [
-      { sourcePort: 'completed', action: 'activate' },
-      { sourcePort: 'rework', action: 'rework' },
-    ];
-  }
-  const sourcePort = defaultSourcePortForNode(node);
-  return [{ sourcePort, action: defaultEdgeActionForSourcePort(sourcePort) }];
 }
 
 function formatTemplate(template: string, values: Record<string, string | number>): string {
@@ -864,44 +733,6 @@ function visualForNodeKind(kind: string | undefined): TeamGraphNodeVisual {
   return NODE_VISUALS[visualKindForNodeKind(kind)];
 }
 
-type NodeBasicsEditorProps = {
-  readonly label: string;
-  readonly value: string;
-  readonly onChange: (value: string) => void;
-};
-
-function NodeBasicsEditor({ label, value, onChange }: NodeBasicsEditorProps) {
-  return (
-    <label className="grid gap-1 text-xs text-muted-foreground">
-      {label}
-      <input className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={value} onChange={(event) => onChange(event.target.value)} />
-    </label>
-  );
-}
-
-type RoleIdEditorProps = {
-  readonly label: string;
-  readonly value: string;
-  readonly roles: readonly TeamRoleBindingRecord[];
-  readonly onChange: (value: string) => void;
-};
-
-function RoleIdEditor({ label, value, roles, onChange }: RoleIdEditorProps) {
-  return (
-    <label className="grid gap-1 text-xs text-muted-foreground">
-      {label}
-      {roles.length > 0 ? (
-        <select className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={value} onChange={(event) => onChange(event.target.value)}>
-          <option value="">-</option>
-          {roles.map((role) => <option key={role.roleId} value={role.roleId}>{role.roleId}</option>)}
-        </select>
-      ) : (
-        <input className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={value} onChange={(event) => onChange(event.target.value)} />
-      )}
-    </label>
-  );
-}
-
 export function TeamRunGraphCanvas({
   graph,
   runStatus,
@@ -913,44 +744,39 @@ export function TeamRunGraphCanvas({
   webhookAuth,
   labels,
   onPatchGraph,
+  graphVersion,
+  runtimeError,
+  onRepairGraph,
   mode = onPatchGraph ? 'editable' : 'readonly',
   compact = false,
   mutationPending = false,
 }: TeamRunGraphCanvasProps) {
   const canEdit = mode === 'editable' && Boolean(onPatchGraph);
+  const repairGraph = onRepairGraph ?? (canEdit ? onPatchGraph : undefined);
   const canvasId = useId();
   const [zoom, setZoom] = useState<number | null>(null);
+  const [readyScope, setReadyScope] = useState<string | null>(null);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [configurationSheet, setConfigurationSheet] = useState<ConfigurationSheet>(null);
   const [nodeTitle, setNodeTitle] = useState('');
   const [nodeMaxAttempts, setNodeMaxAttempts] = useState('');
   const [roleId, setRoleId] = useState('');
-  const [executorJson, setExecutorJson] = useState('{}');
+  const [sessionRef, setSessionRef] = useState('');
+  const [newNode, setNewNode] = useState<{ node: TeamGraphNodeRecord; position: GraphPoint } | null>(null);
   const [prompt, setPrompt] = useState('');
   const [outputArtifactKind, setOutputArtifactKind] = useState('');
-  const [reviewExecutorKind, setReviewExecutorKind] = useState<TeamGraphReviewExecutorKind>('team-role');
-  const [humanDecisionReason, setHumanDecisionReason] = useState('');
-  const [humanDecisionRequestedAction, setHumanDecisionRequestedAction] = useState('');
-  const [humanDecisionRisk, setHumanDecisionRisk] = useState('');
-  const [scriptReviewRule, setScriptReviewRule] = useState<TeamGraphScriptReviewRuleId>('passThrough');
-  const [scriptReviewArtifactKind, setScriptReviewArtifactKind] = useState('');
-  const [configJson, setConfigJson] = useState('{}');
-  const [startTriggerMode, setStartTriggerMode] = useState<TeamGraphStartTriggerMode>('webhook');
+  const [scriptReviewRule, setScriptReviewRule] = useState<TeamScriptReviewRule | ''>('');
+  const [startTriggerMode, setStartTriggerMode] = useState<TeamGraphStartTriggerMode>('manual');
   const [startWebhookPath, setStartWebhookPath] = useState('');
   const [startWebhookPublicBaseUrl, setStartWebhookPublicBaseUrl] = useState('');
-  const [startCronPresetId, setStartCronPresetId] = useState<TeamGraphCronPresetId>(DEFAULT_START_CRON_PRESET_ID);
-  const [startCronCustomKind, setStartCronCustomKind] = useState<TeamGraphCronCustomKind>(DEFAULT_START_CRON_CUSTOM_KIND);
-  const [startCronCustomIntervalMinutes, setStartCronCustomIntervalMinutes] = useState(DEFAULT_START_CRON_CUSTOM_INTERVAL_MINUTES);
-  const [startCronCustomIntervalHours, setStartCronCustomIntervalHours] = useState(DEFAULT_START_CRON_CUSTOM_INTERVAL_HOURS);
-  const [startCronCustomTime, setStartCronCustomTime] = useState(DEFAULT_START_CRON_CUSTOM_TIME);
+  const [startCronSchedule, setStartCronSchedule] = useState<CronScheduleDraft>(DEFAULT_CRON_SCHEDULE);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
-  const [edgeSourcePort, setEdgeSourcePort] = useState('completed');
-  const [edgeTargetPort, setEdgeTargetPort] = useState('input');
-  const [edgeType, setEdgeType] = useState('completed_success');
-  const [edgeLabel, setEdgeLabel] = useState('');
-  const [edgeAction, setEdgeAction] = useState<'activate' | 'rework' | 'gate' | 'finish'>('activate');
+  const [edgeSourcePort, setEdgeSourcePort] = useState('');
+  const [edgeTargetPort, setEdgeTargetPort] = useState('');
+  const [newEdge, setNewEdge] = useState<TeamGraphEdgeRecord | null>(null);
+  const [edgeAction, setEdgeAction] = useState<TeamGraphEdgeAction | ''>('');
   const [edgeIncludeUpstreamResult, setEdgeIncludeUpstreamResult] = useState(true);
   const [formError, setFormError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -958,7 +784,9 @@ export function TeamRunGraphCanvas({
   const [connectionDraft, setConnectionDraft] = useState<ConnectionDraft | null>(null);
   const [isNodePaletteOpen, setNodePaletteOpen] = useState(false);
   const [draftPositions, setDraftPositions] = useState<Record<string, { x: number; y: number }>>({});
-  const [dragState, setDragState] = useState<DragState | null>(null);
+  const [dragNodeId, setDragNodeId] = useState<string | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const dragFrameRef = useRef<number | null>(null);
   const [nodeSizes, setNodeSizes] = useState<Record<string, NodeSize>>({});
   const canvasScrollerRef = useRef<HTMLDivElement | null>(null);
   const nodeElementsRef = useRef<Record<string, HTMLDivElement | null>>({});
@@ -966,66 +794,160 @@ export function TeamRunGraphCanvas({
 
   const effectiveGraph = useMemo<TeamGraphSnapshotRecord>(() => graph ?? EMPTY_TEAM_GRAPH, [graph]);
   const graphRunId = effectiveGraph.runId ?? '';
-  const layoutRunIdRef = useRef(graphRunId);
-  const draftRunId = layoutRunIdRef.current;
-  const positionedNodes = useMemo(() => positionNodes(
-    effectiveGraph.nodes,
-    canEdit && draftRunId === graphRunId ? draftPositions : {},
-    effectiveGraph.layout?.nodePositions ?? {},
-    compact ? 1 : 4,
-  ), [effectiveGraph.nodes, effectiveGraph.layout?.nodePositions, canEdit, draftRunId, graphRunId, draftPositions, compact]);
+  const layoutScope = JSON.stringify([graphRunId, effectiveGraph.graphId]);
+  const layoutScopeRef = useRef(layoutScope);
+  const [arrangedView, setArrangedView] = useState<{ scope: string; positions: Record<string, GraphPoint> } | null>(null);
+  const draftScope = layoutScopeRef.current;
+  const activeDrafts = useMemo(() => draftScope === layoutScope ? draftPositions : {}, [draftScope, layoutScope, draftPositions]);
+  const viewPositions = !canEdit && arrangedView?.scope === layoutScope ? arrangedView.positions : undefined;
+  const geometryKey = useMemo(() => {
+    const sourcePortsByNode = new Map(effectiveGraph.nodes.map((node) => [node.nodeId, new Set(node.sourcePorts)]));
+    for (const edge of effectiveGraph.edges) sourcePortsByNode.get(edge.sourceNodeId)?.add(edge.sourcePort ?? '');
+    return JSON.stringify({
+      nodes: effectiveGraph.nodes.map((node) => ({
+        id: node.nodeId,
+        width: nodeSizes[node.nodeId]?.width ?? NODE_WIDTH,
+        height: nodeSizes[node.nodeId]?.height ?? NODE_HEIGHT,
+        sourcePorts: [...sourcePortsByNode.get(node.nodeId)!],
+      })).sort((a, b) => a.id.localeCompare(b.id)),
+      edges: effectiveGraph.edges.map((edge) => ({
+        id: edge.edgeId, source: edge.sourceNodeId, target: edge.targetNodeId,
+        sourcePort: edge.sourcePort ?? '',
+        rework: edge.action === 'rework' || edge.sourcePort === 'rework',
+      })).sort((a, b) => a.id.localeCompare(b.id)),
+      fixedPositions: Object.fromEntries(effectiveGraph.nodes.flatMap((node) => {
+        const position = viewPositions?.[node.nodeId] ?? effectiveGraph.layout?.nodePositions?.[node.nodeId];
+        return position ? [[node.nodeId, position]] : [];
+      }).sort(([a], [b]) => String(a).localeCompare(String(b)))),
+    });
+  }, [effectiveGraph.nodes, effectiveGraph.edges, effectiveGraph.layout?.nodePositions, nodeSizes, viewPositions]);
+  const layoutInput = useMemo(() => JSON.parse(geometryKey) as GraphLayoutInput, [geometryKey]);
+  const nodesMeasured = effectiveGraph.nodes.every((node) => Boolean(nodeSizes[node.nodeId]));
+  const currentGraphRef = useRef({ scope: layoutScope, input: layoutInput });
+  useLayoutEffect(() => { currentGraphRef.current = { scope: layoutScope, input: layoutInput }; }, [layoutScope, layoutInput]);
+  const { layout, shapeKey, status: layoutStatus, requestLayout, acceptLayout } = useGraphLayout(layoutScope, layoutInput, nodesMeasured, Boolean(dragNodeId) || isSaving);
+  const positions = useMemo(() => {
+    const next = { ...layout?.result.positions, ...layoutInput.fixedPositions, ...activeDrafts };
+    return layout && Object.entries(next).every(([id, point]) => point.x === layout.result.positions[id]?.x && point.y === layout.result.positions[id]?.y)
+      ? layout.result.positions : next;
+  }, [layout, layoutInput, activeDrafts]);
+  const positionedNodes = useMemo(() => effectiveGraph.nodes.map((node) => ({
+    ...node, ...(positions[node.nodeId] ?? { x: 0, y: 0 }),
+  })), [effectiveGraph.nodes, positions]);
+  const visibleGeometry = useMemo(() => {
+    if (layout?.shapeKey === shapeKey && positions === layout.result.positions) return layout.result;
+    return routeGraphEdges({
+      ...layoutInput,
+      nodes: layoutInput.nodes.filter((node) => positions[node.id]),
+      edges: layoutInput.edges.filter((edge) => positions[edge.source] && positions[edge.target]),
+    }, positions);
+  }, [layout, layoutInput, positions, shapeKey]);
   const nodeById = useMemo(
     () => new Map(positionedNodes.map((node) => [node.nodeId, node])),
     [positionedNodes],
   );
   const selectedNode = useMemo(() => (
-    effectiveGraph.nodes.find((node) => node.nodeId === selectedNodeId) ?? null
-  ), [effectiveGraph.nodes, selectedNodeId]);
+    newNode?.node ?? effectiveGraph.nodes.find((node) => node.nodeId === selectedNodeId) ?? null
+  ), [newNode, effectiveGraph.nodes, selectedNodeId]);
   const selectedNodeKind = selectedNode ? visualKindForNodeKind(selectedNode.kind) : null;
   const selectedEdge = useMemo(() => (
-    effectiveGraph.edges.find((edge) => edge.edgeId === selectedEdgeId) ?? null
-  ), [effectiveGraph.edges, selectedEdgeId]);
+    newEdge ?? effectiveGraph.edges.find((edge) => edge.edgeId === selectedEdgeId) ?? null
+  ), [newEdge, effectiveGraph.edges, selectedEdgeId]);
   const selectedEdgeSourceNode = useMemo(() => (
     selectedEdge ? effectiveGraph.nodes.find((node) => node.nodeId === selectedEdge.sourceNodeId) ?? null : null
   ), [effectiveGraph.nodes, selectedEdge]);
   const selectedEdgeTargetNode = useMemo(() => (
     selectedEdge ? effectiveGraph.nodes.find((node) => node.nodeId === selectedEdge.targetNodeId) ?? null : null
   ), [effectiveGraph.nodes, selectedEdge]);
-  const selectedEdgeTargetHasMultipleInboundEdges = useMemo(() => (
-    selectedEdge ? effectiveGraph.edges.filter((edge) => edge.targetNodeId === selectedEdge.targetNodeId).length > 1 : false
-  ), [effectiveGraph.edges, selectedEdge]);
-  const selectedRole = roles.find((role) => role.roleId === readNodeRoleId(selectedNode) && (!graphRunId || role.runId === graphRunId));
-  const canvasWidth = Math.max(compact ? NODE_WIDTH + CANVAS_PADDING * 2 : 820, ...positionedNodes.map((node) => node.x + (nodeSizes[node.nodeId]?.width ?? NODE_WIDTH) + CANVAS_PADDING));
-  const canvasHeight = Math.max(compact ? NODE_HEIGHT + CANVAS_PADDING * 2 : 440, ...positionedNodes.map((node) => node.y + (nodeSizes[node.nodeId]?.height ?? NODE_HEIGHT) + CANVAS_PADDING));
-  const widthScale = viewportSize.width > 0 ? Math.min(1, viewportSize.width / canvasWidth) : 1;
-  const canvasScale = compact ? zoom ?? widthScale : 1;
-  const fitScale = Math.min(widthScale, viewportSize.height > 0 ? viewportSize.height / canvasHeight : 1);
+  const sourcePorts = selectedEdgeSourceNode?.sourcePorts ?? EMPTY_PORTS;
+  const targetPorts = selectedEdgeTargetNode?.targetPorts ?? EMPTY_PORTS;
+  const patchSourcePort = sourcePorts.length === 1 ? sourcePorts[0] : edgeSourcePort;
+  const patchTargetPort = targetPorts.length === 1 ? targetPorts[0] : edgeTargetPort;
+  const edgePortsValid = sourcePorts.includes(patchSourcePort) && targetPorts.includes(patchTargetPort);
+  const edgeActions = edgeActionCandidates(selectedEdgeSourceNode, patchSourcePort, selectedEdgeTargetNode);
+  const edgeActionValid = edgeAction !== '' && edgeActions.includes(edgeAction);
+  const roleBindings = useMemo(() => roles.filter((role) => role.runId === graphRunId && Boolean(role.sessionRef)), [roles, graphRunId]);
+  const roleBindingValid = roleBindings.some((role) => role.roleId === roleId && role.sessionRef === sessionRef);
+  const changeRoleBinding = (role: string, session: string) => { setRoleId(role); setSessionRef(session); };
+  const [origin, setOrigin] = useState({ scope: layoutScope, x: 0, y: 0 });
+  const canvasOrigin = {
+    x: Math.min(origin.scope === layoutScope ? origin.x : 0, visibleGeometry.bounds.x - CANVAS_PADDING),
+    y: Math.min(origin.scope === layoutScope ? origin.y : 0, visibleGeometry.bounds.y - CANVAS_PADDING),
+  };
+  const canvasWidth = Math.max(NODE_WIDTH + CANVAS_PADDING * 2, visibleGeometry.bounds.x + visibleGeometry.bounds.width + CANVAS_PADDING - canvasOrigin.x);
+  const canvasHeight = Math.max(NODE_HEIGHT + CANVAS_PADDING * 2, visibleGeometry.bounds.y + visibleGeometry.bounds.height + CANVAS_PADDING - canvasOrigin.y);
+  const fitScale = Math.min(1, viewportSize.width > 0 ? viewportSize.width / canvasWidth : 1, viewportSize.height > 0 ? viewportSize.height / canvasHeight : 1);
+  const canvasScale = zoom ?? fitScale;
+  const canvasReady = readyScope === layoutScope || effectiveGraph.nodes.length === 0;
   const webhookPublicUrl = buildWebhookPublicUrl(startWebhookPublicBaseUrl, startWebhookPath);
 
+  useLayoutEffect(() => {
+    const sameScope = origin.scope === layoutScope;
+    if (sameScope && origin.x === canvasOrigin.x && origin.y === canvasOrigin.y) return;
+    const scroller = canvasScrollerRef.current;
+    if (sameScope && scroller && zoom !== null) {
+      scroller.scrollLeft += (origin.x - canvasOrigin.x) * canvasScale;
+      scroller.scrollTop += (origin.y - canvasOrigin.y) * canvasScale;
+    }
+    setOrigin({ scope: layoutScope, x: canvasOrigin.x, y: canvasOrigin.y });
+  }, [origin, layoutScope, canvasOrigin.x, canvasOrigin.y, canvasScale, zoom]);
+
   useEffect(() => {
-    if (!compact || !canvasScrollerRef.current || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(([entry]) => {
-      if (entry) setViewportSize({ width: entry.contentRect.width, height: entry.contentRect.height });
-    });
-    observer.observe(canvasScrollerRef.current);
+    const element = canvasScrollerRef.current;
+    if (!element) return;
+    const measure = () => {
+      const style = getComputedStyle(element);
+      setViewportSize({
+        width: element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+        height: element.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+      });
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
     return () => observer.disconnect();
-  }, [compact]);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (layout?.shapeKey !== shapeKey || layoutStatus !== 'idle' || !nodesMeasured || layoutInput.nodes.length === 0 || viewportSize.width <= 0 || viewportSize.height <= 0) return;
+    if (zoom === null || readyScope !== layoutScope) setZoom(fitScale);
+    if (readyScope !== layoutScope) setReadyScope(layoutScope);
+  }, [zoom, layout, shapeKey, layoutStatus, nodesMeasured, layoutInput.nodes.length, viewportSize, fitScale, readyScope, layoutScope]);
+
+  const cancelDragFrame = useCallback(() => {
+    if (dragFrameRef.current !== null) cancelAnimationFrame(dragFrameRef.current);
+    dragFrameRef.current = null;
+  }, []);
+
+  useLayoutEffect(() => {
+    setDragNodeId(null);
+    setDraftPositions((current) => hasRecordEntries(current) ? {} : current);
+    return () => {
+      cancelDragFrame();
+      dragRef.current = null;
+    };
+  }, [layoutScope, canEdit, cancelDragFrame]);
 
   useEffect(() => {
     setZoom(null);
+    setReadyScope(null);
+    setIsSaving(false);
     setSelectedNodeId(null);
+    setNewNode(null);
     setSelectedEdgeId(null);
+    setNewEdge(null);
     setConfigurationSheet(null);
     setConnectionDraft(null);
-    setDragState(null);
     setNodePaletteOpen(false);
     setFormError(null);
-  }, [graphRunId, compact, canEdit]);
+  }, [layoutScope, canEdit]);
 
   useEffect(() => {
-    if (layoutRunIdRef.current !== graphRunId) {
-      layoutRunIdRef.current = graphRunId;
-      setDraftPositions((current) => (hasRecordEntries(current) ? {} : current));
+    if (layoutScopeRef.current !== layoutScope) {
+      layoutScopeRef.current = layoutScope;
+      setArrangedView(null);
+      setNodeSizes({});
       return;
     }
     setDraftPositions((current) => {
@@ -1033,7 +955,8 @@ export function TeamRunGraphCanvas({
       let changed = false;
       const next: Record<string, { x: number; y: number }> = {};
       for (const [nodeId, position] of Object.entries(current)) {
-        if (activeNodeIds.has(nodeId)) {
+        const saved = effectiveGraph.layout?.nodePositions?.[nodeId];
+        if (activeNodeIds.has(nodeId) && (dragNodeId === nodeId || saved?.x !== position.x || saved?.y !== position.y)) {
           next[nodeId] = position;
         } else {
           changed = true;
@@ -1041,14 +964,15 @@ export function TeamRunGraphCanvas({
       }
       return changed ? next : current;
     });
-  }, [effectiveGraph.nodes, graphRunId]);
+  }, [effectiveGraph.nodes, effectiveGraph.layout?.nodePositions, layoutScope, dragNodeId]);
 
+  const nodeIdsKey = useMemo(() => JSON.stringify(effectiveGraph.nodes.map((node) => node.nodeId).sort()), [effectiveGraph.nodes]);
   useEffect(() => {
-    const activeNodeIds = new Set(positionedNodes.map((node) => node.nodeId));
+    const activeNodeIds = new Set<string>(JSON.parse(nodeIdsKey));
     for (const nodeId of Object.keys(nodeElementsRef.current)) {
       if (!activeNodeIds.has(nodeId)) delete nodeElementsRef.current[nodeId];
     }
-  }, [positionedNodes]);
+  }, [nodeIdsKey]);
 
   useEffect(() => {
     if (typeof ResizeObserver === 'undefined') {
@@ -1074,7 +998,9 @@ export function TeamRunGraphCanvas({
         for (const entry of entries) {
           const nodeId = entry.target.getAttribute('data-node-id');
           if (!nodeId) continue;
-          const size = { width: Math.ceil(entry.contentRect.width || NODE_WIDTH), height: Math.ceil(entry.contentRect.height || NODE_HEIGHT) };
+          const element = entry.target as HTMLDivElement;
+          const box = entry.borderBoxSize?.[0];
+          const size = { width: Math.ceil(box?.inlineSize || element.offsetWidth), height: Math.ceil(box?.blockSize || element.offsetHeight) };
           if (next[nodeId]?.width !== size.width || next[nodeId]?.height !== size.height) {
             next[nodeId] = size;
             changed = true;
@@ -1084,95 +1010,143 @@ export function TeamRunGraphCanvas({
       });
     });
     for (const element of Object.values(nodeElementsRef.current)) {
-      if (element) observer.observe(element);
+      if (element) observer.observe(element, { box: 'border-box' });
     }
     return () => observer.disconnect();
-  }, [positionedNodes]);
+  }, [nodeIdsKey, layoutScope]);
 
   useEffect(() => {
     setCopiedWebhookPublicUrl(false);
   }, [startWebhookPath, startWebhookPublicBaseUrl]);
 
-  useEffect(() => {
+  const resetNodeDraft = useCallback(() => {
     if (!selectedNode) {
       setNodeTitle('');
       setNodeMaxAttempts('');
       setRoleId('');
-      setExecutorJson('{}');
+      setSessionRef('');
       setPrompt('');
       setOutputArtifactKind('');
-      setReviewExecutorKind('team-role');
-      setHumanDecisionReason('');
-      setHumanDecisionRequestedAction('');
-      setHumanDecisionRisk('');
-      setScriptReviewRule('passThrough');
-      setScriptReviewArtifactKind('');
-      setConfigJson('{}');
+      setScriptReviewRule('');
       return;
     }
     setNodeTitle(selectedNode.title ?? '');
     setNodeMaxAttempts(selectedNode.maxAttempts === undefined ? '' : String(selectedNode.maxAttempts));
-    setRoleId(readNodeRoleId(selectedNode));
-    setExecutorJson(stringifyJsonObject(selectedNode.executor));
+    setRoleId((selectedNode?.roleId ?? ''));
+    setSessionRef(selectedNode.config?.sessionRef ?? '');
     setPrompt(readNodePrompt(selectedNode));
-    setOutputArtifactKind(readNodeConfigString(selectedNode, 'outputArtifactKind'));
-    setReviewExecutorKind(readReviewExecutorKind(selectedNode));
-    setHumanDecisionReason(readNodeConfigString(selectedNode, 'reason'));
-    setHumanDecisionRequestedAction(readNodeConfigString(selectedNode, 'requestedAction'));
-    setHumanDecisionRisk(readNodeConfigString(selectedNode, 'risk'));
-    setScriptReviewRule(readScriptReviewRuleId(selectedNode));
-    setScriptReviewArtifactKind(readNodeConfigString(selectedNode, 'artifactKind'));
-    setConfigJson(stringifyJsonObject(selectedNode.config));
+    setOutputArtifactKind(selectedNode.config?.outputArtifactKind ?? '');
+    setScriptReviewRule(selectedNode.config?.rule ?? '');
     const trigger = readStartTrigger(selectedNode);
     setStartTriggerMode(trigger.mode);
     setStartWebhookPath(trigger.path);
-    setStartWebhookPublicBaseUrl(trigger.publicBaseUrl);
-    setStartCronPresetId(trigger.cronPresetId);
-    setStartCronCustomKind(trigger.customKind);
-    setStartCronCustomIntervalMinutes(trigger.customIntervalMinutes);
-    setStartCronCustomIntervalHours(trigger.customIntervalHours);
-    setStartCronCustomTime(trigger.customTime);
+    setStartWebhookPublicBaseUrl('');
+    setStartCronSchedule(trigger.cron);
     setFormError(null);
   }, [selectedNode]);
 
-  useEffect(() => {
+  useEffect(resetNodeDraft, [resetNodeDraft]);
+
+  const closeNodeEditor = () => {
+    resetNodeDraft();
+    setConfigurationSheet(null);
+    setNewNode(null);
+  };
+
+  const resetEdgeDraft = useCallback(() => {
     if (!selectedEdge) {
-      setEdgeSourcePort('completed');
-      setEdgeTargetPort('input');
-      setEdgeType('completed_success');
-      setEdgeLabel('');
-      setEdgeAction('activate');
+      setEdgeSourcePort('');
+      setEdgeTargetPort('');
+      setEdgeAction('');
       setEdgeIncludeUpstreamResult(true);
       return;
     }
-    const nextSourcePort = selectedEdge.sourcePort ?? defaultSourcePortForNode(selectedEdgeSourceNode ?? { nodeId: selectedEdge.sourceNodeId, kind: 'work' });
+    const nextSourcePort = selectedEdge.sourcePort ?? '';
     setEdgeSourcePort(nextSourcePort);
-    setEdgeTargetPort(selectedEdge.targetPort ?? defaultTargetPortForNode());
-    setEdgeType(selectedEdge.edgeType ?? selectedEdge.kind ?? defaultEdgeTypeForSourcePort(nextSourcePort));
-    setEdgeLabel(selectedEdge.label ?? '');
-    setEdgeAction(selectedEdge.action ?? defaultEdgeActionForSourcePort(nextSourcePort));
+    setEdgeTargetPort(selectedEdge.targetPort ?? '');
+    setEdgeAction(selectedEdge.action ?? '');
     setEdgeIncludeUpstreamResult(selectedEdge.payload?.includeUpstreamResult !== false);
     setFormError(null);
-  }, [selectedEdge, selectedEdgeSourceNode]);
+  }, [selectedEdge]);
+
+  useEffect(resetEdgeDraft, [resetEdgeDraft, selectedEdgeSourceNode]);
+
+  const closeEdgeEditor = () => {
+    resetEdgeDraft();
+    setConfigurationSheet(null);
+    setNewEdge(null);
+  };
+
+  useEffect(() => {
+    if (configurationSheet?.kind !== 'edge' || !selectedEdge) return;
+    logSessionTrace('renderer.team_run.edge.configuration.observed', createSessionTraceId('team-edge-config'), () => ({
+      ...summarizeGraphEdge(selectedEdge, selectedEdgeSourceNode, graphRunId),
+      editable: canEdit,
+      canonicalSourcePortMissing: selectedEdge.sourcePort == null,
+      uiSourcePort: summarizeTeamGraphPort(edgeSourcePort),
+      uiSourcePortInOptions: sourcePorts.includes(edgeSourcePort),
+      uiTargetPort: summarizeTeamGraphPort(edgeTargetPort),
+      uiTargetPortInOptions: targetPorts.includes(edgeTargetPort),
+      patchSourcePort: summarizeTeamGraphPort(patchSourcePort),
+      patchTargetPort: summarizeTeamGraphPort(patchTargetPort),
+      uiAction: TEAM_GRAPH_EDGE_ACTIONS.find((action) => action === edgeAction) ?? null,
+    }));
+  }, [configurationSheet, selectedEdge, selectedEdgeSourceNode, graphRunId, canEdit, edgeSourcePort, edgeTargetPort, edgeAction, sourcePorts, targetPorts, patchSourcePort, patchTargetPort]);
 
   const submitGraphPatch = async (operations: TeamGraphPatchOperation[]): Promise<boolean> => {
     if (!canEdit || !onPatchGraph || isSaving || mutationPending) return false;
+    const scope = currentGraphRef.current.scope;
     setIsSaving(true);
     setFormError(null);
     try {
       await onPatchGraph(operations);
-      return true;
+      return currentGraphRef.current.scope === scope;
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : String(error));
+      if (currentGraphRef.current.scope === scope) setFormError(error instanceof Error ? error.message : String(error));
       return false;
     } finally {
-      setIsSaving(false);
+      if (currentGraphRef.current.scope === scope) setIsSaving(false);
     }
   };
 
-  const appendEdge = async (input: { sourceNodeId: string; targetNodeId: string; sourcePort: string; action: TeamGraphEdgeAction; label?: string }): Promise<void> => {
+  const handleAutoLayout = async (): Promise<void> => {
+    const context = currentGraphRef.current;
+    const result = await requestLayout(true);
+    if (!result || currentGraphRef.current !== context) return;
+    if (!canEdit) {
+      acceptLayout(result);
+      setArrangedView({ scope: layoutScope, positions: result.positions });
+      setOrigin({ scope: layoutScope, x: Math.min(0, result.bounds.x - CANVAS_PADDING), y: Math.min(0, result.bounds.y - CANVAS_PADDING) });
+      setZoom(null);
+      return;
+    }
+    setDraftPositions(result.positions);
+    const saved = await submitGraphPatch(Object.entries(result.positions).map(([nodeId, position]) => ({
+      op: 'set_node_position', nodeId, position,
+    })));
+    if (currentGraphRef.current.scope !== context.scope) return;
+    setDraftPositions({});
+    if (saved && JSON.stringify([context.input.nodes, context.input.edges]) === JSON.stringify([currentGraphRef.current.input.nodes, currentGraphRef.current.input.edges])) {
+      acceptLayout(result);
+      setOrigin({ scope: layoutScope, x: Math.min(0, result.bounds.x - CANVAS_PADDING), y: Math.min(0, result.bounds.y - CANVAS_PADDING) });
+      setZoom(null);
+    }
+  };
+
+  const appendEdge = async (input: { sourceNodeId: string; targetNodeId: string; sourcePort: string }): Promise<void> => {
     if (!input.sourceNodeId || !input.targetNodeId || input.sourceNodeId === input.targetNodeId) {
       setFormError(`${labels.sourceNode} / ${labels.targetNode}`);
+      return;
+    }
+    const source = nodeById.get(input.sourceNodeId);
+    const target = nodeById.get(input.targetNodeId);
+    if (!source?.sourcePorts?.includes(input.sourcePort) || target?.targetPorts?.length !== 1) {
+      setFormError(labels.noPort);
+      return;
+    }
+    const actions = edgeActionCandidates(source, input.sourcePort, target);
+    if (actions.length === 0) {
+      setFormError(labels.noEdgeAction);
       return;
     }
     const nextEdge: TeamGraphEdgeRecord = {
@@ -1180,13 +1154,15 @@ export function TeamRunGraphCanvas({
       sourceNodeId: input.sourceNodeId,
       targetNodeId: input.targetNodeId,
       sourcePort: input.sourcePort,
-      targetPort: defaultTargetPortForNode(),
-      edgeType: defaultEdgeTypeForSourcePort(input.sourcePort),
-      ...(input.label ? { label: input.label } : {}),
-      action: input.action,
+      targetPort: target.targetPorts[0],
+      ...(actions.length === 1 ? { action: actions[0] } : {}),
       payload: { includeUpstreamResult: true },
-      kind: 'projection',
     };
+    if (actions.length > 1) {
+      setNewEdge(nextEdge);
+      setConfigurationSheet({ kind: 'edge', edgeId: nextEdge.edgeId });
+      return;
+    }
     if (await submitGraphPatch([{ op: 'add_edge', edge: graphPatchEdge(nextEdge) }])) {
       setSelectedEdgeId(nextEdge.edgeId);
       setConfigurationSheet({ kind: 'edge', edgeId: nextEdge.edgeId });
@@ -1205,50 +1181,25 @@ export function TeamRunGraphCanvas({
     }
   };
 
-  const handleSaveStartNode = async (maxAttempts: number): Promise<void> => {
-    if (!selectedNode) return;
+  const buildStartConfig = (): TeamGraphNodeConfigRecord | null => {
+    if (startTriggerMode === 'manual') return {};
     const normalizedWebhookPath = normalizeWebhookPathInput(startWebhookPath);
     if (startTriggerMode === 'webhook' && !normalizedWebhookPath) {
       setFormError(labels.startWebhookPathRequired);
-      return;
+      return null;
     }
     if (startTriggerMode === 'webhook' && normalizedWebhookPath.includes('..')) {
       setFormError(labels.startWebhookPathInvalid);
-      return;
+      return null;
     }
-    const normalizedPublicBaseUrl = normalizeWebhookPublicBaseUrlInput(startWebhookPublicBaseUrl);
-    if (startTriggerMode === 'webhook' && !isValidWebhookPublicBaseUrl(normalizedPublicBaseUrl)) {
-      setFormError(labels.startWebhookPublicBaseUrlInvalid);
-      return;
-    }
-    const presetCronExpression = START_CRON_PRESETS.find((preset) => preset.presetId === startCronPresetId)?.cron ?? null;
-    const customCronExpression = buildCustomCronExpression({
-      kind: startCronCustomKind,
-      intervalMinutes: startCronCustomIntervalMinutes,
-      intervalHours: startCronCustomIntervalHours,
-      time: startCronCustomTime,
-    });
-    const cronExpression = startCronPresetId === 'custom' ? customCronExpression : presetCronExpression;
+    const cronExpression = buildCronExpression(startCronSchedule);
     if (startTriggerMode === 'cron' && !cronExpression) {
       setFormError(labels.startCronCustomValueRequired);
-      return;
+      return null;
     }
-    const trigger: Record<string, unknown> = startTriggerMode === 'cron'
-      ? { mode: 'cron', cron: cronExpression }
-      : {
-        mode: 'webhook',
-        path: normalizedWebhookPath,
-        ...(normalizedPublicBaseUrl ? { publicBaseUrl: normalizedPublicBaseUrl } : {}),
-      };
-    const nextNode = graphPatchNode({
-      ...selectedNode,
-      title: nodeTitle.trim() || undefined,
-      maxAttempts,
-      config: { ...(selectedNode.config ?? {}), trigger },
-    });
-    if (await submitGraphPatch([{ op: 'replace_node', node: nextNode }])) {
-      setConfigurationSheet(null);
-    }
+    return { trigger: startTriggerMode === 'cron'
+      ? { mode: 'cron', cron: cronExpression! }
+      : { mode: 'webhook', path: normalizedWebhookPath } };
   };
 
   const handleSaveNode = async (): Promise<void> => {
@@ -1258,108 +1209,82 @@ export function TeamRunGraphCanvas({
       setFormError(labels.nodeMaxAttemptsInvalid);
       return;
     }
+    let config: TeamGraphNodeConfigRecord | undefined;
     if (selectedNode.kind === 'start') {
-      await handleSaveStartNode(maxAttempts);
-      return;
+      const startConfig = buildStartConfig();
+      if (!startConfig) return;
+      config = startConfig;
     }
-
-    let nextExecutor: Record<string, unknown>;
-    let nextConfig: Record<string, unknown>;
-    try {
-      nextExecutor = parseJsonObject(executorJson, labels.executorJson, labels.invalidJson);
-      nextConfig = parseJsonObject(configJson, labels.configJson, labels.invalidJson);
-    } catch (error) {
-      setFormError(error instanceof Error ? error.message : String(error));
-      return;
-    }
-
-    let nextRoleId: string | undefined;
-    switch (selectedNode.kind) {
-      case 'review': {
-        if (reviewExecutorKind === 'team-role') {
-          const role = roleId.trim();
-          if (!role) {
-            setFormError(labels.roleIdRequired);
-            return;
-          }
-          nextRoleId = role;
-          nextExecutor = { ...nextExecutor, kind: 'team-role', roleId: role };
-          writeOptionalString(nextConfig, 'prompt', prompt);
-        } else {
-          nextExecutor = { ...nextExecutor, kind: 'human' };
-          delete nextExecutor.roleId;
-          delete nextConfig.prompt;
-        }
-        break;
+    if (selectedNode.kind === 'script_review') {
+      if (!scriptReviewRule) {
+        setFormError(labels.scriptReviewRuleRequired);
+        return;
       }
-      case 'human_decision':
-        nextExecutor = { ...nextExecutor, kind: 'human' };
-        delete nextExecutor.roleId;
-        delete nextConfig.prompt;
-        writeOptionalString(nextConfig, 'reason', humanDecisionReason);
-        writeOptionalString(nextConfig, 'requestedAction', humanDecisionRequestedAction);
-        writeOptionalString(nextConfig, 'risk', humanDecisionRisk);
-        break;
-      case 'script_review':
-        nextExecutor = { ...nextExecutor, kind: 'script', runtime: readString(nextExecutor.runtime) ?? 'python' };
-        delete nextExecutor.roleId;
-        delete nextConfig.prompt;
-        nextConfig.ruleId = scriptReviewRule;
-        writeOptionalString(nextConfig, 'artifactKind', scriptReviewArtifactKind);
-        break;
-      case 'join':
-      case 'end':
-        nextExecutor = {};
-        delete nextConfig.prompt;
-        break;
-      case 'work':
-      default: {
-        const role = roleId.trim();
-        if (!role) {
-          setFormError(labels.roleIdRequired);
-          return;
-        }
-        nextRoleId = role;
-        nextExecutor = { ...nextExecutor, kind: 'team-role', roleId: role };
-        writeOptionalString(nextConfig, 'prompt', prompt);
-        writeOptionalString(nextConfig, 'outputArtifactKind', outputArtifactKind);
-        break;
-      }
+      config = { rule: scriptReviewRule };
     }
-
+    if (selectedNode.kind === 'work' || selectedNode.kind === 'review') {
+      if (!roleBindingValid) {
+        setFormError(labels.roleBindingRequired);
+        return;
+      }
+      config = { prompt, sessionRef, ...(selectedNode.kind === 'work' && outputArtifactKind.trim() ? { outputArtifactKind: outputArtifactKind.trim() } : {}) };
+    }
     const nextNode = graphPatchNode({
       ...selectedNode,
       title: nodeTitle.trim() || undefined,
       maxAttempts,
-      roleId: nextRoleId,
-      executor: hasRecordEntries(nextExecutor) ? nextExecutor : undefined,
-      config: hasRecordEntries(nextConfig) ? nextConfig : undefined,
+      roleId,
+      config,
     });
-    if (await submitGraphPatch([{ op: 'replace_node', node: nextNode }])) {
+    const operations: TeamGraphPatchOperation[] = newNode
+      ? [{ op: 'add_node', node: nextNode }, { op: 'set_node_position', nodeId: selectedNode.nodeId, position: newNode.position }]
+      : [{ op: 'replace_node', node: nextNode }];
+    if (await submitGraphPatch(operations)) {
+      setNewNode(null);
+      setSelectedNodeId(selectedNode.nodeId);
       setConfigurationSheet(null);
     }
   };
 
   const handleSaveEdge = async (): Promise<void> => {
     if (!selectedEdge) return;
-    const nextSourcePort = edgeSourcePort.trim() || defaultSourcePortForNode(selectedEdgeSourceNode ?? { nodeId: selectedEdge.sourceNodeId, kind: 'work' });
+    if (!edgePortsValid) {
+      setFormError(labels.noPort);
+      return;
+    }
+    if (!edgeActionValid || !edgeAction) {
+      setFormError(edgeActions.length === 0 ? labels.noEdgeAction : labels.selectEdgeAction);
+      return;
+    }
     const nextEdge = graphPatchEdge({
       ...selectedEdge,
-      sourcePort: nextSourcePort,
-      targetPort: edgeTargetPort.trim() || defaultTargetPortForNode(),
-      edgeType: edgeType.trim() || defaultEdgeTypeForSourcePort(nextSourcePort),
-      kind: selectedEdge.kind ?? 'projection',
-      label: edgeLabel.trim() || undefined,
+      sourcePort: patchSourcePort,
+      targetPort: patchTargetPort,
       action: edgeAction,
       payload: { includeUpstreamResult: edgeIncludeUpstreamResult },
     });
-    if (await submitGraphPatch([{ op: 'replace_edge', edge: nextEdge }])) {
+    logSessionTrace('renderer.team_run.edge.patch.requested', createSessionTraceId('team-edge-patch'), () => ({
+      ...summarizeGraphEdge(selectedEdge, selectedEdgeSourceNode, graphRunId),
+      operation: newEdge ? 'add_edge' : 'replace_edge',
+      canonicalSourcePortMissing: selectedEdge.sourcePort == null,
+      uiSourcePort: summarizeTeamGraphPort(edgeSourcePort),
+      uiTargetPort: summarizeTeamGraphPort(edgeTargetPort),
+      patchSourcePort: summarizeTeamGraphPort(patchSourcePort),
+      patchTargetPort: summarizeTeamGraphPort(patchTargetPort),
+      patchAction: TEAM_GRAPH_EDGE_ACTIONS.find((action) => action === nextEdge.action) ?? null,
+      sourcePortAutomaticallyCorrected: patchSourcePort !== edgeSourcePort,
+      targetPortAutomaticallyCorrected: patchTargetPort !== edgeTargetPort,
+      canEdit, isSaving, mutationPending,
+    }));
+    if (await submitGraphPatch([{ op: newEdge ? 'add_edge' : 'replace_edge', edge: nextEdge }])) {
+      setNewEdge(null);
       setConfigurationSheet(null);
     }
   };
 
   const handleDeleteNode = async (): Promise<void> => {
     if (!selectedNode) return;
+    if (newNode) { setNewNode(null); setConfigurationSheet(null); return; }
     if (await submitGraphPatch([{ op: 'remove_node', nodeId: selectedNode.nodeId }])) {
       setSelectedNodeId(null);
       setConfigurationSheet(null);
@@ -1368,6 +1293,7 @@ export function TeamRunGraphCanvas({
 
   const handleDeleteEdge = async (): Promise<void> => {
     if (!selectedEdge) return;
+    if (newEdge) { setNewEdge(null); setConfigurationSheet(null); return; }
     if (await submitGraphPatch([{ op: 'remove_edge', edgeId: selectedEdge.edgeId }])) {
       setSelectedEdgeId(null);
       setConfigurationSheet(null);
@@ -1379,28 +1305,34 @@ export function TeamRunGraphCanvas({
     const nodeId = createProjectionNodeId(kind);
     const viewport = readCanvasViewport(canvasScrollerRef.current);
     const rawPosition = nextNodePosition(positionedNodes, nodeSizes, viewport ? {
-      scrollLeft: viewport.scrollLeft / canvasScale,
-      scrollTop: viewport.scrollTop / canvasScale,
+      scrollLeft: viewport.scrollLeft / canvasScale + canvasOrigin.x,
+      scrollTop: viewport.scrollTop / canvasScale + canvasOrigin.y,
       clientWidth: viewport.clientWidth / canvasScale,
       clientHeight: viewport.clientHeight / canvasScale,
     } : null);
     const position = { x: Math.round(rawPosition.x), y: Math.round(rawPosition.y) };
+    const binding = roleBindings.length === 1 ? roleBindings[0] : undefined;
     const node: TeamGraphNodeRecord = {
       nodeId,
       kind,
       title: paletteItem.title,
       maxAttempts: DEFAULT_NODE_MAX_ATTEMPTS,
+      sourcePortActions: {},
       status: 'pending',
-      ...(kind === 'work' || kind === 'review' ? { roleId: 'leader' } : {}),
+      ...(kind === 'work' || kind === 'review' ? { roleId: binding?.roleId } : {}),
       ...(kind === 'work' ? { taskId: nodeId } : {}),
-      executor: defaultExecutorForNode(kind),
-      config: defaultConfigForNode(kind, paletteItem.title),
+      config: kind === 'work' || kind === 'review' ? { prompt: paletteItem.title, sessionRef: binding?.sessionRef } : undefined,
     };
+    if (kind === 'start' || kind === 'work' || kind === 'review' || kind === 'script_review' || kind === 'join') {
+      setNewNode({ node, position });
+      setConfigurationSheet({ kind: 'node', nodeId });
+      setNodePaletteOpen(false);
+      return;
+    }
     if (await submitGraphPatch([
       { op: 'add_node', node: graphPatchNode(node) },
       { op: 'set_node_position', nodeId, position },
     ])) {
-      setDraftPositions((current) => ({ ...current, [nodeId]: position }));
       setSelectedNodeId(nodeId);
       setNodePaletteOpen(false);
     }
@@ -1408,9 +1340,9 @@ export function TeamRunGraphCanvas({
 
 
   const handleNodePointerDown = (event: PointerEvent<HTMLDivElement>, node: PositionedNode): void => {
-    if (!canEdit || isSaving || event.button !== 0) return;
+    if (!canEdit || isSaving || mutationPending || dragRef.current || event.button !== 0) return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    setDragState({
+    dragRef.current = {
       nodeId: node.nodeId,
       pointerId: event.pointerId,
       pointerStartX: event.clientX,
@@ -1420,37 +1352,64 @@ export function TeamRunGraphCanvas({
       currentX: node.x,
       currentY: node.y,
       moved: false,
-    });
+    };
+    setDragNodeId(node.nodeId);
+  };
+
+  const updateDragPosition = (event: PointerEvent<HTMLDivElement>): DragState | null => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return null;
+    const dx = event.clientX - drag.pointerStartX;
+    const dy = event.clientY - drag.pointerStartY;
+    drag.currentX = Math.max(Math.min(CANVAS_PADDING / 2, drag.nodeStartX), drag.nodeStartX + dx / canvasScale);
+    drag.currentY = Math.max(Math.min(CANVAS_PADDING / 2, drag.nodeStartY), drag.nodeStartY + dy / canvasScale);
+    drag.moved ||= Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD;
+    return drag;
   };
 
   const handleNodePointerMove = (event: PointerEvent<HTMLDivElement>): void => {
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
-    const dx = event.clientX - dragState.pointerStartX;
-    const dy = event.clientY - dragState.pointerStartY;
-    const nextX = Math.max(CANVAS_PADDING / 2, dragState.nodeStartX + dx / canvasScale);
-    const nextY = Math.max(CANVAS_PADDING / 2, dragState.nodeStartY + dy / canvasScale);
-    const moved = dragState.moved || Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD;
-    setDraftPositions((current) => ({ ...current, [dragState.nodeId]: { x: nextX, y: nextY } }));
-    setDragState({ ...dragState, currentX: nextX, currentY: nextY, moved });
+    const drag = updateDragPosition(event);
+    if (!drag?.moved || dragFrameRef.current !== null) return;
+    dragFrameRef.current = requestAnimationFrame(() => {
+      dragFrameRef.current = null;
+      const latest = dragRef.current!;
+      const position = { x: latest.currentX, y: latest.currentY };
+      setDraftPositions((current) => ({ ...current, [latest.nodeId]: position }));
+    });
   };
 
   const handleNodePointerUp = async (event: PointerEvent<HTMLDivElement>): Promise<void> => {
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    const finishedDrag = updateDragPosition(event);
+    if (!finishedDrag) return;
+    cancelDragFrame();
+    dragRef.current = null;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
-    const finishedDrag = dragState;
-    setDragState(null);
+    const scope = currentGraphRef.current.scope;
+    setDragNodeId(null);
     if (finishedDrag.moved) {
       const position = { x: Math.round(finishedDrag.currentX), y: Math.round(finishedDrag.currentY) };
       setDraftPositions((current) => ({ ...current, [finishedDrag.nodeId]: position }));
       suppressClickNodeIdRef.current = finishedDrag.nodeId;
       window.setTimeout(() => { suppressClickNodeIdRef.current = null; }, 0);
       await submitGraphPatch([{ op: 'set_node_position', nodeId: finishedDrag.nodeId, position }]);
+      if (currentGraphRef.current.scope === scope) {
+        setDraftPositions((current) => Object.fromEntries(Object.entries(current).filter(([nodeId]) => nodeId !== finishedDrag.nodeId)));
+      }
     }
   };
 
-  const handleStartConnection = (event: MouseEvent<HTMLButtonElement>, node: TeamGraphNodeRecord, source: ConnectionSource): void => {
+  const handleNodePointerCancel = (event: PointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    cancelDragFrame();
+    dragRef.current = null;
+    setDraftPositions((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== drag.nodeId)));
+    setDragNodeId(null);
+  };
+
+  const handleStartConnection = (event: MouseEvent<HTMLButtonElement>, node: TeamGraphNodeRecord, sourcePort: string): void => {
     event.stopPropagation();
-    setConnectionDraft({ sourceNodeId: node.nodeId, sourcePort: source.sourcePort, action: source.action });
+    setConnectionDraft({ sourceNodeId: node.nodeId, sourcePort });
   };
 
   const handleFinishConnection = (event: MouseEvent<HTMLButtonElement>, target: TeamGraphNodeRecord): void => {
@@ -1460,8 +1419,6 @@ export function TeamRunGraphCanvas({
       sourceNodeId: connectionDraft.sourceNodeId,
       targetNodeId: target.nodeId,
       sourcePort: connectionDraft.sourcePort,
-      action: connectionDraft.action,
-      label: connectionDraft.sourcePort,
     });
     setConnectionDraft(null);
   };
@@ -1479,7 +1436,7 @@ export function TeamRunGraphCanvas({
           {roles.length > 0 ? (
             <div className="flex -space-x-2" aria-label={labels.teamRoles}>
               {roles.slice(0, 4).map((role) => (
-                <div key={role.roleId} title={`${role.roleId} · ${role.agentId}`} className="grid h-8 w-8 place-items-center rounded-full border-2 border-background bg-primary/15 text-[10px] font-semibold text-primary">
+                <div key={`${role.roleId}:${role.sessionRef}`} title={`${role.roleId} · ${role.agentId}`} className="grid h-8 w-8 place-items-center rounded-full border-2 border-background bg-primary/15 text-[10px] font-semibold text-primary">
                   {role.roleId.slice(0, 2).toUpperCase()}
                 </div>
               ))}
@@ -1487,7 +1444,7 @@ export function TeamRunGraphCanvas({
             </div>
           ) : null}
           {headerActions}
-          {connectionDraft ? <div className="rounded-full border border-primary/20 bg-primary/10 px-2 py-1 text-xs text-primary">{labels.connectionDraft}: {connectionDraft.sourcePort}</div> : null}
+          {connectionDraft ? <div className="rounded-full border border-primary/20 bg-primary/10 px-2 py-1 text-xs text-primary">{labels.connectionDraft}: {labels.portLabels[connectionDraft.sourcePort] ?? connectionDraft.sourcePort}</div> : null}
           <div className="flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/35 px-2.5 py-1 text-xs text-muted-foreground shadow-sm">
             {runStatus ? (
               <span className={`flex items-center gap-1.5 ${statusTextTone(runStatus)}`} title={`${labels.runStatusLabel}: ${statusLabel(runStatus, labels)}`}>
@@ -1504,11 +1461,35 @@ export function TeamRunGraphCanvas({
         </div>
       </div>
 
+      {repairGraph ? <TeamGraphPortRepair
+        key={`${layoutScope}:${graphVersion ?? ''}`}
+        graph={effectiveGraph}
+        runtimeError={runtimeError}
+        edgePatch={graphPatchEdge}
+        labels={labels}
+        pending={isSaving || mutationPending}
+        onSave={async (operations) => {
+          if (isSaving || mutationPending) return;
+          const scope = currentGraphRef.current.scope;
+          setIsSaving(true);
+          try {
+            await repairGraph(operations);
+          } finally {
+            if (currentGraphRef.current.scope === scope) setIsSaving(false);
+          }
+        }}
+      /> : null}
       {formError ? <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{formError}</div> : null}
 
-      <div className={compact ? 'relative flex min-h-0 flex-1 flex-col gap-2' : 'relative'}>
-        {compact ? (
-          <div className="flex items-center justify-end gap-1 text-xs">
+      <div className={compact ? 'relative flex min-h-0 flex-1 flex-col gap-2' : 'relative'} aria-busy={!canvasReady && layoutStatus !== 'failed'}>
+          {!canvasReady && layoutStatus !== 'failed' ? <span role="status" className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">{labels.layoutPending ?? 'Arranging…'}</span> : null}
+          <div className="flex items-center justify-end gap-1 pb-2 text-xs" style={{ visibility: canvasReady || layoutStatus === 'failed' ? 'visible' : 'hidden' }}>
+            {layoutStatus === 'pending' ? <span role="status" className="mr-2 text-muted-foreground">{labels.layoutPending ?? 'Arranging…'}</span> : null}
+            {layoutStatus === 'failed' ? <span role="alert" className="mr-2 text-destructive">{labels.layoutFailed ?? 'Layout failed. Try arranging again.'}</span> : null}
+            <button type="button" className="rounded border px-2 py-1.5 hover:bg-muted disabled:opacity-50" onClick={() => { void handleAutoLayout(); }} disabled={isSaving || mutationPending || Boolean(dragNodeId) || !nodesMeasured || effectiveGraph.nodes.length === 0}>
+              {labels.autoLayout ?? 'Auto layout'}
+            </button>
+            <div className="flex items-center gap-1" style={{ visibility: canvasReady ? 'visible' : 'hidden' }}>
             <button type="button" className="rounded border p-1.5 hover:bg-muted" aria-label={labels.zoomOut ?? '−'} title={labels.zoomOut} onClick={() => setZoom(canvasScale / 1.2)}>
               <Minus className="h-3.5 w-3.5" />
             </button>
@@ -1517,14 +1498,18 @@ export function TeamRunGraphCanvas({
               <Plus className="h-3.5 w-3.5" />
             </button>
             <button type="button" className="rounded border p-1.5 hover:bg-muted" aria-label={labels.fitToView ?? labels.workflowCanvas} title={labels.fitToView} onClick={() => {
-              setZoom(fitScale);
+              const x = Math.min(0, visibleGeometry.bounds.x - CANVAS_PADDING);
+              const y = Math.min(0, visibleGeometry.bounds.y - CANVAS_PADDING);
+              setOrigin({ scope: layoutScope, x, y });
+              setZoom(Math.min(1, viewportSize.width / (visibleGeometry.bounds.x + visibleGeometry.bounds.width + CANVAS_PADDING - x), viewportSize.height / (visibleGeometry.bounds.y + visibleGeometry.bounds.height + CANVAS_PADDING - y)));
               canvasScrollerRef.current?.scrollTo({ left: 0, top: 0 });
             }}>
               <Maximize2 className="h-3.5 w-3.5" />
             </button>
+            </div>
           </div>
-        ) : null}
-        <StableScrollArea ref={canvasScrollerRef} data-team-graph-canvas="true" className={`relative overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner ${compact ? 'min-h-[240px] max-h-[60vh] flex-1' : 'min-h-[520px]'}`}>
+        <div className={compact ? 'relative flex min-h-0 flex-1 flex-col' : 'relative'}>
+        <StableScrollArea ref={canvasScrollerRef} data-team-graph-canvas="true" inert={!canvasReady} style={{ opacity: canvasReady ? 1 : 0 }} className={`relative overflow-auto rounded-2xl border border-border bg-muted/25 p-4 text-foreground shadow-inner ${compact ? 'min-h-[240px] max-h-[60vh] flex-1' : 'h-[520px]'}`}>
           <div className="overflow-hidden" style={{ width: canvasWidth * canvasScale, height: canvasHeight * canvasScale }}>
           <div
             aria-label={labels.workflowCanvas}
@@ -1544,7 +1529,7 @@ export function TeamRunGraphCanvas({
               backgroundSize: '22px 22px',
             }}
           >
-            <svg className="absolute inset-0" width={canvasWidth} height={canvasHeight} role="img" aria-label={labels.workflowEdges}>
+            <svg className="absolute inset-0" width={canvasWidth} height={canvasHeight} viewBox={`${canvasOrigin.x} ${canvasOrigin.y} ${canvasWidth} ${canvasHeight}`} role="img" aria-label={labels.workflowEdges}>
               <defs>
                 {[...Object.values(EDGE_VISUALS), FALLBACK_EDGE_VISUAL].map((visual) => (
                   <marker key={visual.markerId} id={`${canvasId}-${visual.markerId}`} markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
@@ -1558,14 +1543,11 @@ export function TeamRunGraphCanvas({
                 if (!source || !target) {
                   return null;
                 }
-                const sourceSize = nodeSizes[source.nodeId] ?? { width: NODE_WIDTH, height: NODE_HEIGHT };
-                const targetSize = nodeSizes[target.nodeId] ?? { width: NODE_WIDTH, height: NODE_HEIGHT };
-                const startX = source.x + sourceSize.width;
-                const startY = source.y + sourceSize.height / 2;
-                const endX = target.x;
-                const endY = target.y + targetSize.height / 2;
-                const labelX = (startX + endX) / 2;
-                const labelY = (startY + endY) / 2 - 12;
+                const route = visibleGeometry.routes[edge.edgeId];
+                if (!route || !nodesMeasured) return null;
+                const path = route.points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
+                const labelX = route.label.x;
+                const labelY = route.label.y;
                 const edgeVisual = edgeVisualForEdge(edge);
                 const edgeLabel = edgeDisplayLabel(edge);
                 const isSelectedEdge = selectedEdgeId === edge.edgeId;
@@ -1574,7 +1556,7 @@ export function TeamRunGraphCanvas({
                 return (
                   <g key={edge.edgeId} onMouseEnter={() => setHoveredEdgeId(edge.edgeId)} onMouseLeave={() => setHoveredEdgeId((current) => current === edge.edgeId ? null : current)}>
                     <path
-                      d={createEdgePath(source, target, sourceSize.width, sourceSize.height, targetSize.height)}
+                      d={path}
                       fill="none"
                       stroke="transparent"
                       strokeWidth="14"
@@ -1599,7 +1581,7 @@ export function TeamRunGraphCanvas({
                       }}
                     />
                     <path
-                      d={createEdgePath(source, target, sourceSize.width, sourceSize.height, targetSize.height)}
+                      d={path}
                       fill="none"
                       stroke={edgeVisual.stroke}
                       strokeWidth={isSelectedEdge ? '3.5' : '2.5'}
@@ -1640,7 +1622,7 @@ export function TeamRunGraphCanvas({
               const isSelected = selectedNode?.nodeId === node.nodeId;
               const visual = visualForNodeKind(node.kind);
               const NodeIcon = visual.Icon;
-              const connectionSources = connectionSourcesForNode(node);
+              const connectionSources = node.sourcePorts ?? EMPTY_PORTS;
               return (
                 <div
                   key={node.nodeId}
@@ -1665,12 +1647,13 @@ export function TeamRunGraphCanvas({
                   onPointerDown={(event) => handleNodePointerDown(event, node)}
                   onPointerMove={handleNodePointerMove}
                   onPointerUp={(event) => { void handleNodePointerUp(event); }}
-                  className={`absolute ${canEdit ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} overflow-hidden rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
-                  style={{ left: node.x, top: node.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT }}
+                  onPointerCancel={handleNodePointerCancel}
+                  className={`absolute ${canEdit ? 'cursor-grab active:cursor-grabbing touch-none' : 'cursor-pointer'} rounded-[18px] border p-0 text-left shadow-md shadow-slate-900/10 transition hover:border-primary/40 hover:shadow-lg hover:shadow-slate-900/15 ${visual.canvasClassName} ${isSelected ? 'ring-2 ring-primary/35 ring-offset-2 ring-offset-background' : ''}`}
+                  style={{ left: node.x - canvasOrigin.x, top: node.y - canvasOrigin.y, width: NODE_WIDTH, minHeight: NODE_HEIGHT, visibility: positions[node.nodeId] && nodeSizes[node.nodeId] ? 'visible' : 'hidden' }}
                 >
-                  <div className={`h-1 w-full ${visual.accentClassName}`} />
+                  <div className={`h-1 w-full rounded-t-[17px] ${visual.accentClassName}`} />
                   {canEdit ? <>
-                  <button
+                  {node.targetPorts?.length === 1 && (!connectionDraft || edgeActionCandidates(nodeById.get(connectionDraft.sourceNodeId), connectionDraft.sourcePort, node).length > 0) ? <button
                     type="button"
                     aria-label={formatTemplate(labels.connectToNode, { title: node.title ?? node.nodeId })}
                     className="group absolute -left-5 top-1/2 z-20 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full"
@@ -1678,19 +1661,19 @@ export function TeamRunGraphCanvas({
                     onClick={(event) => handleFinishConnection(event, node)}
                   >
                     <span className={`h-4 w-4 rounded-full border shadow-sm transition group-hover:ring-4 group-hover:ring-primary/10 group-focus-visible:ring-4 group-focus-visible:ring-primary/10 ${connectionDraft ? visual.handleClassName : 'border-border bg-background'}`} />
-                  </button>
+                  </button> : null}
                   <div className="absolute -right-5 top-1/2 z-20 flex -translate-y-1/2 flex-col gap-1">
                     {connectionSources.map((source) => (
                       <button
-                        key={source.sourcePort}
+                        key={source}
                         type="button"
-                        aria-label={`${formatTemplate(labels.connectFromNode, { title: node.title ?? node.nodeId })}: ${source.sourcePort}`}
-                        title={source.sourcePort}
+                        aria-label={`${formatTemplate(labels.connectFromNode, { title: node.title ?? node.nodeId })}: ${labels.portLabels[source] ?? source}`}
+                        title={labels.portLabels[source] ?? source}
                         className="group grid h-8 w-10 place-items-center rounded-full"
                         onPointerDown={(event) => event.stopPropagation()}
                         onClick={(event) => handleStartConnection(event, node, source)}
                       >
-                        <span className={`h-4 w-4 rounded-full border shadow-sm transition group-hover:ring-4 group-hover:ring-primary/10 group-focus-visible:ring-4 group-focus-visible:ring-primary/10 ${connectionDraft?.sourceNodeId === node.nodeId && connectionDraft.sourcePort === source.sourcePort ? visual.handleClassName : 'border-border bg-background'}`} />
+                        <span className={`h-4 w-4 rounded-full border shadow-sm transition group-hover:ring-4 group-hover:ring-primary/10 group-focus-visible:ring-4 group-focus-visible:ring-primary/10 ${connectionDraft?.sourceNodeId === node.nodeId && connectionDraft.sourcePort === source ? visual.handleClassName : 'border-border bg-background'}`} />
                       </button>
                     ))}
                   </div>
@@ -1708,10 +1691,10 @@ export function TeamRunGraphCanvas({
                         </div>
                       </div>
                     </div>
-                    {readNodeRoleId(node) ? (
+                    {(node.roleId ?? '') ? (
                       <div className="flex items-center justify-between rounded-xl border border-border/80 bg-muted/50 px-2 py-1.5 text-[11px]">
                         <span className="truncate text-muted-foreground">{executorLabel}</span>
-                        <span className="ml-2 truncate font-medium text-foreground">{readNodeRoleId(node)}</span>
+                        <span className="ml-2 truncate font-medium text-foreground">{(node.roleId ?? '')}</span>
                       </div>
                     ) : null}
                   </div>
@@ -1730,383 +1713,113 @@ export function TeamRunGraphCanvas({
           onClose={() => setNodePaletteOpen(false)}
           onAddNode={(kind) => { void handleAddNode(kind); }}
         /> : null}
+        </div>
       </div>
 
-      <Sheet open={configurationSheet !== null} onOpenChange={(open) => { if (!open) setConfigurationSheet(null); }}>
-        <SheetContent side="right" className="w-[28rem] max-w-full overflow-y-auto sm:max-w-xl">
-          <SheetHeader>
-            <SheetTitle>{!canEdit && configurationSheet?.kind === 'node' ? labels.nodeDetails ?? labels.nodeTitle : configurationSheet?.kind === 'edge' ? labels.edgeConfiguration : labels.nodeConfiguration}</SheetTitle>
-            <SheetDescription>{!canEdit && configurationSheet?.kind === 'node' ? labels.nodeDetailsDescription ?? labels.workflowCanvas : configurationSheet?.kind === 'edge' ? labels.edgeConfigurationDescription : labels.nodeConfigurationDescription}</SheetDescription>
-          </SheetHeader>
-
-          {configurationSheet?.kind === 'node' && selectedNode ? (
-            <dl className="mt-4 grid gap-3 text-sm">
-              <div><dt className="text-xs text-muted-foreground">{labels.nodeTitle}</dt><dd className="mt-1 break-words">{selectedNode.title ?? selectedNode.nodeId}</dd></div>
-              <div><dt className="text-xs text-muted-foreground">{labels.graphStatusLabel}</dt><dd className={`mt-1 ${statusTextTone(selectedNode.status)}`}>{statusLabel(selectedNode.status, labels)}{selectedNode.statusReason === 'rework_limit_exceeded' ? <span className="ml-2 text-muted-foreground">{labels.reworkLimitExceeded}</span> : null}</dd></div>
-              {readNodeRoleId(selectedNode) ? <div><dt className="text-xs text-muted-foreground">{executorLabel}</dt><dd className="mt-1 break-all">{readNodeRoleId(selectedNode)}{selectedRole ? ` · ${selectedRole.agentId}` : ''}</dd></div> : null}
-              {selectedNode.taskId ? <div><dt className="text-xs text-muted-foreground">{labels.task ?? 'taskId'}</dt><dd className="mt-1 break-all font-mono text-xs">{selectedNode.taskId}</dd></div> : null}
-              {readNodePrompt(selectedNode) ? <div><dt className="text-xs text-muted-foreground">{selectedNode.kind === 'review' ? labels.reviewPrompt : labels.workPrompt}</dt><dd className="mt-1 whitespace-pre-wrap break-words">{readNodePrompt(selectedNode)}</dd></div> : null}
-              {!canEdit && selectedNode.maxAttempts !== undefined ? <div><dt className="text-xs text-muted-foreground">{labels.nodeMaxAttempts}</dt><dd className="mt-1">{selectedNode.maxAttempts}</dd></div> : null}
-            </dl>
-          ) : null}
-
-          {canEdit && configurationSheet?.kind === 'node' && selectedNode ? (
-            <div className="mt-4 space-y-1">
-              {selectedNode.statusReason === 'rework_limit_exceeded' ? (
-                <div role="status" className="mb-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{labels.reworkLimitExceeded}</div>
-              ) : null}
-              <label className="grid gap-1 text-xs text-muted-foreground">
-                {labels.nodeMaxAttempts}
-                <input
-                  className="rounded border bg-background px-2 py-1 text-sm text-foreground"
-                  type="number"
-                  min={1}
-                  max={NODE_MAX_ATTEMPTS_LIMIT}
-                  step={1}
-                  aria-describedby={`${canvasId}-max-attempts-hint`}
-                  value={nodeMaxAttempts}
-                  onChange={(event) => setNodeMaxAttempts(event.target.value)}
-                />
-              </label>
-              <div id={`${canvasId}-max-attempts-hint`} className="text-xs text-muted-foreground">{labels.nodeMaxAttemptsHint}</div>
-            </div>
-          ) : null}
-
-          {canEdit && configurationSheet?.kind === 'node' && selectedNode && selectedNodeKind === 'start' ? (
-            <div className="mt-4 space-y-3 text-sm">
-              <label className="grid gap-1 text-xs text-muted-foreground">
-                {labels.nodeTitle}
-                <input className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={nodeTitle} onChange={(event) => setNodeTitle(event.target.value)} />
-              </label>
-              <label className="grid gap-1 text-xs text-muted-foreground">
-                {labels.startTriggerMode}
-                <select
-                  className="rounded border bg-background px-2 py-1 text-sm text-foreground"
-                  value={startTriggerMode}
-                  onChange={(event) => {
-                    const nextMode = event.target.value === 'cron' ? 'cron' : 'webhook';
-                    if (nextMode === 'cron' && startTriggerMode !== 'cron') {
-                      setStartCronPresetId(DEFAULT_START_CRON_PRESET_ID);
-                    }
-                    setStartTriggerMode(nextMode);
-                  }}
-                >
-                  <option value="webhook">{labels.startTriggerWebhook}</option>
-                  <option value="cron">{labels.startTriggerCron}</option>
-                </select>
-              </label>
-              {startTriggerMode === 'webhook' ? (
-                <div className="space-y-3">
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.startWebhookPath}
-                    <input className="rounded border bg-background px-2 py-1 font-mono text-xs text-foreground" value={startWebhookPath} onChange={(event) => setStartWebhookPath(event.target.value)} />
-                  </label>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.startWebhookPublicBaseUrl}
-                    <input className="rounded border bg-background px-2 py-1 font-mono text-xs text-foreground" value={startWebhookPublicBaseUrl} onChange={(event) => setStartWebhookPublicBaseUrl(event.target.value)} placeholder="https://example.ngrok.app" />
-                  </label>
-                  <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-300">{labels.startWebhookPublicBaseUrlHint}</div>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.startCronSchedule}
-                    <select
-                      className="rounded border bg-background px-2 py-1 text-sm text-foreground"
-                      value={startCronPresetId}
-                      onChange={(event) => setStartCronPresetId(event.target.value as TeamGraphCronPresetId)}
-                    >
-                      {START_CRON_PRESETS.map((preset) => (
-                        <option key={preset.presetId} value={preset.presetId}>{labels.startCronSchedules[preset.presetId]}</option>
-                      ))}
-                      <option value="custom">{labels.startCronSchedules.custom}</option>
-                    </select>
-                  </label>
-                  {startCronPresetId === 'custom' ? (
-                    <div className="space-y-2">
-                      <label className="grid gap-1 text-xs text-muted-foreground">
-                        {labels.startCronCustomKind}
-                        <select
-                          className="rounded border bg-background px-2 py-1 text-sm text-foreground"
-                          value={startCronCustomKind}
-                          onChange={(event) => setStartCronCustomKind(event.target.value as TeamGraphCronCustomKind)}
-                        >
-                          {START_CRON_CUSTOM_KIND_IDS.map((kind) => (
-                            <option key={kind} value={kind}>{labels.startCronCustomKinds[kind]}</option>
-                          ))}
-                        </select>
-                      </label>
-                      {startCronCustomKind === 'intervalMinutes' ? (
-                        <label className="grid gap-1 text-xs text-muted-foreground">
-                          {labels.startCronCustomIntervalMinutes}
-                          <input
-                            className="rounded border bg-background px-2 py-1 text-sm text-foreground"
-                            type="number"
-                            min={1}
-                            max={59}
-                            value={startCronCustomIntervalMinutes}
-                            onChange={(event) => setStartCronCustomIntervalMinutes(event.target.value)}
-                          />
-                        </label>
-                      ) : null}
-                      {startCronCustomKind === 'intervalHours' ? (
-                        <label className="grid gap-1 text-xs text-muted-foreground">
-                          {labels.startCronCustomIntervalHours}
-                          <input
-                            className="rounded border bg-background px-2 py-1 text-sm text-foreground"
-                            type="number"
-                            min={1}
-                            max={23}
-                            value={startCronCustomIntervalHours}
-                            onChange={(event) => setStartCronCustomIntervalHours(event.target.value)}
-                          />
-                        </label>
-                      ) : null}
-                      {startCronCustomKind === 'dailyAt' ? (
-                        <label className="grid gap-1 text-xs text-muted-foreground">
-                          {labels.startCronCustomTime}
-                          <input
-                            className="rounded border bg-background px-2 py-1 text-sm text-foreground"
-                            type="time"
-                            value={startCronCustomTime}
-                            onChange={(event) => setStartCronCustomTime(event.target.value)}
-                          />
-                        </label>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-              )}
-              {startTriggerMode === 'webhook' ? (
-                <div className="rounded border border-border/60 bg-muted/30 p-2 text-[11px] text-muted-foreground">
-                  <div>{labels.startWebhookPathPreview}: <span className="break-all font-mono text-foreground">{buildWebhookRoutePreview(startWebhookPath)}</span></div>
-                  <div className="flex items-start gap-2">
-                    <span className="shrink-0">{labels.startWebhookToken}:</span>
-                    <span className="min-w-0 flex-1 break-all font-mono text-foreground">{webhookAuth?.maskedToken || labels.startWebhookTokenUnavailable}</span>
-                    <button
-                      type="button"
-                      className="shrink-0 rounded border border-border bg-background px-2 py-0.5 text-[10px] font-medium text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled
-                    >
-                      {labels.copyWebhookToken}
-                    </button>
-                  </div>
-                  <div className="mt-2 flex items-start gap-2">
-                    <span className="shrink-0">{labels.startWebhookPublicUrl}:</span>
-                    <span className="min-w-0 flex-1 break-all font-mono text-foreground">{webhookPublicUrl || labels.startWebhookPublicUrlUnavailable}</span>
-                    <button
-                      type="button"
-                      className="shrink-0 rounded border border-border bg-background px-2 py-0.5 text-[10px] font-medium text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                      onClick={() => void copyTextToClipboard(webhookPublicUrl, setCopiedWebhookPublicUrl)}
-                      disabled={!webhookPublicUrl}
-                    >
-                      {copiedWebhookPublicUrl ? labels.copiedWebhookPublicUrl : labels.copyWebhookPublicUrl}
-                    </button>
-                  </div>
-                  <div>{labels.startWebhookPathPreviewHint}</div>
-                </div>
-              ) : null}
-              <div className="rounded border border-border/60 bg-muted/30 p-2 text-[11px] text-muted-foreground">{labels.startTriggerHint}</div>
-              <div className="flex gap-2">
-                <button type="button" className="rounded border px-3 py-1.5 text-xs font-medium" onClick={() => void handleSaveNode()} disabled={isSaving || mutationPending}>
-                  {labels.saveNode}
-                </button>
-                <button type="button" className="rounded border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive" onClick={() => void handleDeleteNode()} disabled={isSaving || mutationPending}>
-                  {labels.deleteNode}
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          {canEdit && configurationSheet?.kind === 'node' && selectedNode && selectedNodeKind && selectedNodeKind !== 'start' ? (
-            <div className="mt-4 space-y-3 text-sm">
-              <NodeBasicsEditor label={labels.nodeTitle} value={nodeTitle} onChange={setNodeTitle} />
-
-              {selectedNodeKind === 'work' ? (
-                <>
-                  <RoleIdEditor label={labels.roleId} value={roleId} roles={roles} onChange={setRoleId} />
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.workPrompt}
-                    <textarea className="min-h-24 rounded border bg-background px-2 py-1 text-sm text-foreground" value={prompt} onChange={(event) => setPrompt(event.target.value)} />
-                  </label>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.outputArtifactKind}
-                    <input className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={outputArtifactKind} onChange={(event) => setOutputArtifactKind(event.target.value)} />
-                  </label>
-                </>
-              ) : null}
-
-              {selectedNodeKind === 'review' ? (
-                <>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.reviewExecutorKind}
-                    <select className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={reviewExecutorKind} onChange={(event) => setReviewExecutorKind(event.target.value === 'team-role' ? 'team-role' : 'human')}>
-                      <option value="team-role">{labels.reviewExecutorTeamRole}</option>
-                      <option value="human">{labels.reviewExecutorHuman}</option>
-                    </select>
-                  </label>
-                  {reviewExecutorKind === 'team-role' ? (
-                    <>
-                      <RoleIdEditor label={labels.roleId} value={roleId} roles={roles} onChange={setRoleId} />
-                      <label className="grid gap-1 text-xs text-muted-foreground">
-                        {labels.reviewPrompt}
-                        <textarea className="min-h-24 rounded border bg-background px-2 py-1 text-sm text-foreground" value={prompt} onChange={(event) => setPrompt(event.target.value)} />
-                      </label>
-                    </>
-                  ) : null}
-                </>
-              ) : null}
-
-              {selectedNodeKind === 'human_decision' ? (
-                <>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.humanDecisionReason}
-                    <input className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={humanDecisionReason} onChange={(event) => setHumanDecisionReason(event.target.value)} />
-                  </label>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.humanDecisionRequestedAction}
-                    <input className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={humanDecisionRequestedAction} onChange={(event) => setHumanDecisionRequestedAction(event.target.value)} />
-                  </label>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.humanDecisionRisk}
-                    <textarea className="min-h-20 rounded border bg-background px-2 py-1 text-sm text-foreground" value={humanDecisionRisk} onChange={(event) => setHumanDecisionRisk(event.target.value)} />
-                  </label>
-                </>
-              ) : null}
-
-              {selectedNodeKind === 'script_review' ? (
-                <>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.scriptReviewRule}
-                    <select className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={scriptReviewRule} onChange={(event) => setScriptReviewRule(event.target.value as TeamGraphScriptReviewRuleId)}>
-                      {SCRIPT_REVIEW_RULE_IDS.map((ruleId) => <option key={ruleId} value={ruleId}>{labels.scriptReviewRules[ruleId]}</option>)}
-                    </select>
-                  </label>
-                  {scriptReviewRule === 'assertArtifactExists' ? (
-                    <label className="grid gap-1 text-xs text-muted-foreground">
-                      {labels.scriptReviewArtifactKind}
-                      <input className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={scriptReviewArtifactKind} onChange={(event) => setScriptReviewArtifactKind(event.target.value)} />
-                    </label>
-                  ) : null}
-                </>
-              ) : null}
-
-              {selectedNodeKind === 'join' ? <div className="rounded border border-border/60 bg-muted/30 p-2 text-[11px] text-muted-foreground">{labels.joinConfigurationHint}</div> : null}
-              {selectedNodeKind === 'end' ? <div className="rounded border border-border/60 bg-muted/30 p-2 text-[11px] text-muted-foreground">{labels.endConfigurationHint}</div> : null}
-
-              <details className="rounded border border-border/60 bg-muted/20 p-2 text-xs text-muted-foreground">
-                <summary className="cursor-pointer font-medium text-foreground">{labels.advancedJson}</summary>
-                <div className="mt-3 space-y-3">
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.executorJson}
-                    <textarea className="min-h-24 rounded border bg-background px-2 py-1 font-mono text-xs text-foreground" value={executorJson} onChange={(event) => setExecutorJson(event.target.value)} />
-                  </label>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.configJson}
-                    <textarea className="min-h-28 rounded border bg-background px-2 py-1 font-mono text-xs text-foreground" value={configJson} onChange={(event) => setConfigJson(event.target.value)} />
-                  </label>
-                </div>
-              </details>
-
-              <div className="flex gap-2">
-                <button type="button" className="rounded border px-3 py-1.5 text-xs font-medium" onClick={() => void handleSaveNode()} disabled={isSaving || mutationPending}>
-                  {labels.saveNode}
-                </button>
-                <button type="button" className="rounded border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive" onClick={() => void handleDeleteNode()} disabled={isSaving || mutationPending}>
-                  {labels.deleteNode}
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          {!canEdit && configurationSheet?.kind === 'edge' && selectedEdge ? (
-            <dl className="mt-4 grid gap-3 text-sm">
-              <div><dt className="text-xs text-muted-foreground">{labels.edgeConnection}</dt><dd className="mt-1 break-words">{selectedEdgeSourceNode?.title ?? selectedEdge.sourceNodeId} → {selectedEdgeTargetNode?.title ?? selectedEdge.targetNodeId}</dd></div>
-              {selectedEdge.sourcePort ? <div><dt className="text-xs text-muted-foreground">{labels.sourcePort}</dt><dd className="mt-1">{selectedEdge.sourcePort}</dd></div> : null}
-              {selectedEdge.targetPort ? <div><dt className="text-xs text-muted-foreground">{labels.targetPort}</dt><dd className="mt-1">{selectedEdge.targetPort}</dd></div> : null}
-              {selectedEdge.action ? <div><dt className="text-xs text-muted-foreground">{labels.edgeAction}</dt><dd className="mt-1">{labels.edgeActionOptions[selectedEdge.action]}</dd></div> : null}
-              {selectedEdge.status ? <div><dt className="text-xs text-muted-foreground">{labels.graphStatusLabel}</dt><dd className="mt-1">{statusLabel(selectedEdge.status, labels)}</dd></div> : null}
-              {selectedEdge.label ? <div><dt className="text-xs text-muted-foreground">{labels.edgeLabel}</dt><dd className="mt-1 break-words">{selectedEdge.label}</dd></div> : null}
-            </dl>
-          ) : null}
-
-          {canEdit && configurationSheet?.kind === 'edge' && selectedEdge ? (
-            <div className="mt-4 space-y-3 text-sm">
-              <div className="rounded border bg-muted/30 p-2 text-xs text-muted-foreground">
-                <div className="mb-1 font-medium text-foreground">{labels.edgeConnection}</div>
-                <div className="break-all">
-                  {selectedEdgeSourceNode?.title ?? selectedEdge.sourceNodeId} → {selectedEdgeTargetNode?.title ?? selectedEdge.targetNodeId}
-                </div>
-              </div>
-              <label className="grid gap-1 text-xs text-muted-foreground">
-                {labels.edgeTriggerCondition}
-                <select className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={edgeSourcePort} onChange={(event) => {
-                  const nextPort = event.target.value;
-                  setEdgeSourcePort(nextPort);
-                  setEdgeType(defaultEdgeTypeForSourcePort(nextPort));
-                  setEdgeAction(defaultEdgeActionForSourcePort(nextPort));
-                }}>
-                  {sourcePortOptionsForNode(selectedEdgeSourceNode).map((port) => <option key={port} value={port}>{port}</option>)}
-                </select>
-              </label>
-              <label className="grid gap-1 text-xs text-muted-foreground">
-                {labels.edgeAction}
-                <select className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={edgeAction} onChange={(event) => setEdgeAction(event.target.value as TeamGraphEdgeAction)}>
-                  {TEAM_GRAPH_EDGE_ACTIONS.map((action) => <option key={action} value={action}>{labels.edgeActionOptions[action]}</option>)}
-                </select>
-              </label>
-              {selectedEdgeTargetNode?.kind === 'join' && selectedEdgeTargetHasMultipleInboundEdges && edgeAction !== 'gate' ? (
-                <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-300">{labels.edgeJoinGateHint}</div>
-              ) : null}
-              <div className="grid gap-1 text-xs text-muted-foreground">
-                <div>{labels.edgeDataTransfer}</div>
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={edgeIncludeUpstreamResult} onChange={(event) => setEdgeIncludeUpstreamResult(event.target.checked)} />
-                  {labels.includeUpstreamResult}
-                </label>
-              </div>
-              <details className="rounded border border-border/60 bg-muted/20 p-2 text-xs text-muted-foreground">
-                <summary className="cursor-pointer font-medium text-foreground">{labels.edgeAdvancedFields}</summary>
-                <div className="mt-3 space-y-3">
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.sourcePort}
-                    <input className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={edgeSourcePort} onChange={(event) => {
-                      const nextPort = event.target.value;
-                      setEdgeSourcePort(nextPort);
-                      setEdgeType(defaultEdgeTypeForSourcePort(nextPort));
-                      setEdgeAction(defaultEdgeActionForSourcePort(nextPort));
-                    }} />
-                  </label>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.targetPort}
-                    <input className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={edgeTargetPort} onChange={(event) => setEdgeTargetPort(event.target.value)} />
-                  </label>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.edgeType}
-                    <input className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={edgeType} onChange={(event) => setEdgeType(event.target.value)} />
-                  </label>
-                  <label className="grid gap-1 text-xs text-muted-foreground">
-                    {labels.edgeLabel}
-                    <input className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={edgeLabel} onChange={(event) => setEdgeLabel(event.target.value)} />
-                  </label>
-                  <div className="grid gap-1 text-xs text-muted-foreground">
-                    ID
-                    <div className="rounded border bg-background px-2 py-1 font-mono text-[11px] text-foreground break-all">{selectedEdge.edgeId}</div>
-                  </div>
-                </div>
-              </details>
-              <div className="flex gap-2">
-                <button type="button" className="rounded border px-3 py-1.5 text-xs font-medium" onClick={() => void handleSaveEdge()} disabled={isSaving || mutationPending}>
-                  {labels.saveEdge}
-                </button>
-                <button type="button" className="rounded border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive" onClick={() => void handleDeleteEdge()} disabled={isSaving || mutationPending}>
-                  {labels.deleteEdge}
-                </button>
-              </div>
-            </div>
-          ) : null}
-          {formError ? <div role="alert" className="mt-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{formError}</div> : null}
-        </SheetContent>
+      <Sheet open={configurationSheet !== null} onOpenChange={(open) => {
+        if (!open && !isSaving && !mutationPending) {
+          if (configurationSheet?.kind === 'node') closeNodeEditor();
+          else closeEdgeEditor();
+        }
+      }}>
+        {configurationSheet?.kind === 'node' && selectedNode && selectedNodeKind ? (
+          <TeamNodeInspector
+            key={selectedNode.nodeId}
+            node={selectedNode}
+            kind={selectedNodeKind}
+            editable={canEdit}
+            pending={isSaving || mutationPending}
+            isNew={Boolean(newNode)}
+            title={nodeTitle}
+            maxAttempts={nodeMaxAttempts}
+            maxAttemptsLimit={NODE_MAX_ATTEMPTS_LIMIT}
+            status={newNode ? '' : statusLabel(selectedNode.status, labels)}
+            statusClassName={statusTextTone(selectedNode.status)}
+            labels={labels}
+            error={formError}
+            onTitleChange={setNodeTitle}
+            onMaxAttemptsChange={setNodeMaxAttempts}
+            onSave={() => { void handleSaveNode(); }}
+            onDelete={() => { void handleDeleteNode(); }}
+            onClose={closeNodeEditor}
+          >
+            {selectedNodeKind === 'work' || selectedNodeKind === 'review' ? <TeamAssignmentEditor
+              kind={selectedNodeKind}
+              editable={canEdit}
+              disabled={isSaving || mutationPending}
+              labels={labels}
+              roleId={canEdit ? roleId : selectedNode.roleId ?? ''}
+              sessionRef={canEdit ? sessionRef : selectedNode.config?.sessionRef ?? ''}
+              roles={roleBindings}
+              prompt={canEdit ? prompt : readNodePrompt(selectedNode)}
+              outputArtifactKind={canEdit ? outputArtifactKind : selectedNode.config?.outputArtifactKind ?? ''}
+              onBindingChange={changeRoleBinding}
+              onPromptChange={setPrompt}
+              onOutputArtifactKindChange={setOutputArtifactKind}
+            /> : null}
+            {selectedNodeKind === 'start' ? <TeamStartEditor
+              editable={canEdit}
+              disabled={isSaving || mutationPending}
+              labels={labels}
+              triggerMode={canEdit ? startTriggerMode : readStartTrigger(selectedNode).mode}
+              webhookPath={canEdit ? startWebhookPath : readStartTrigger(selectedNode).path}
+              webhookPublicBaseUrl={startWebhookPublicBaseUrl}
+              cronSchedule={canEdit ? startCronSchedule : readStartTrigger(selectedNode).cron}
+              webhookAuth={webhookAuth}
+              copiedWebhookPublicUrl={copiedWebhookPublicUrl}
+              onTriggerModeChange={setStartTriggerMode}
+              onWebhookPathChange={setStartWebhookPath}
+              onWebhookPublicBaseUrlChange={setStartWebhookPublicBaseUrl}
+              onCronScheduleChange={setStartCronSchedule}
+              onCopyWebhookPublicUrl={() => { void copyTextToClipboard(webhookPublicUrl, setCopiedWebhookPublicUrl); }}
+            /> : null}
+            {selectedNodeKind === 'script_review' ? <TeamScriptReviewEditor
+              editable={canEdit}
+              disabled={isSaving || mutationPending}
+              labels={labels}
+              rule={canEdit ? scriptReviewRule : selectedNode.config?.rule ?? ''}
+              onRuleChange={setScriptReviewRule}
+            /> : null}
+            {selectedNodeKind === 'human_decision' || selectedNodeKind === 'join' || selectedNodeKind === 'end' || selectedNodeKind === 'review' || selectedNodeKind === 'script_review' ? <TeamControlNodeDetails
+              kind={selectedNodeKind}
+              node={selectedNode}
+              nodes={effectiveGraph.nodes}
+              edges={effectiveGraph.edges}
+              labels={labels}
+            /> : null}
+          </TeamNodeInspector>
+        ) : configurationSheet?.kind === 'edge' && selectedEdge ? (
+          <TeamEdgeInspector
+            key={selectedEdge.edgeId}
+            edge={selectedEdge}
+            sourceNode={selectedEdgeSourceNode}
+            targetNode={selectedEdgeTargetNode}
+            editable={canEdit}
+            pending={isSaving || mutationPending}
+            isNew={Boolean(newEdge)}
+            sourcePort={canEdit ? edgeSourcePort : selectedEdge.sourcePort ?? ''}
+            targetPort={canEdit ? edgeTargetPort : selectedEdge.targetPort ?? ''}
+            action={canEdit ? edgeAction : selectedEdge.action ?? ''}
+            actions={canEdit ? edgeActions : edgeActionCandidates(selectedEdgeSourceNode, selectedEdge.sourcePort ?? '', selectedEdgeTargetNode)}
+            includeUpstreamResult={canEdit ? edgeIncludeUpstreamResult : selectedEdge.payload?.includeUpstreamResult !== false}
+            canSave={edgePortsValid && edgeActionValid}
+            status={newEdge ? '' : statusLabel(selectedEdge.status, labels)}
+            statusClassName={statusTextTone(selectedEdge.status)}
+            labels={labels}
+            error={formError}
+            onSourcePortChange={(sourcePort) => {
+              setEdgeSourcePort(sourcePort);
+              const actions = edgeActionCandidates(selectedEdgeSourceNode, sourcePort, selectedEdgeTargetNode);
+              if (actions.length === 1) setEdgeAction(actions[0]);
+            }}
+            onTargetPortChange={setEdgeTargetPort}
+            onActionChange={setEdgeAction}
+            onIncludeUpstreamResultChange={setEdgeIncludeUpstreamResult}
+            onSave={() => { void handleSaveEdge(); }}
+            onDelete={() => { void handleDeleteEdge(); }}
+            onClose={closeEdgeEditor}
+          />
+        ) : null}
       </Sheet>
     </div>
   );

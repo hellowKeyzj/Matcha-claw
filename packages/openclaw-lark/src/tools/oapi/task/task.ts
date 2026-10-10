@@ -450,7 +450,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
             // CREATE TASK
             // -----------------------------------------------------------------
             case 'create': {
-              log.info(`create: summary=${p.summary}`);
+              log.trace(() => `create: summary=${p.summary}`);
 
               const taskData: any = {
                 summary: p.summary,
@@ -472,7 +472,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
                   timestamp: dueTs,
                   is_all_day: p.due.is_all_day ?? false,
                 };
-                log.info(`create: due time converted: ${p.due.timestamp} -> ${dueTs}ms`);
+                log.trace(() => `create: due time converted: ${p.due?.timestamp} -> ${dueTs}ms`);
               }
 
               // Handle start time conversion
@@ -524,7 +524,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
             // GET TASK
             // -----------------------------------------------------------------
             case 'get': {
-              log.info(`get: task_guid=${p.task_guid}`);
+              log.trace(() => `get: task_guid=${p.task_guid}`);
 
               const authType = p.auth_type || 'user';
               const res = await client.invoke(
@@ -554,7 +554,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
             // LIST TASKS
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: page_size=${p.page_size ?? 50}, completed=${p.completed ?? false}`);
+              log.trace(() => `list: page_size=${p.page_size ?? 50}, completed=${p.completed ?? false}`);
 
               const authType = p.auth_type || 'user';
               const res = await client.invoke(
@@ -590,7 +590,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
             // PATCH TASK
             // -----------------------------------------------------------------
             case 'patch': {
-              log.info(`patch: task_guid=${p.task_guid}`);
+              log.trace(() => `patch: task_guid=${p.task_guid}`);
 
               const updateData: any = {};
 
@@ -713,7 +713,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
                 });
               }
 
-              log.info(`add_members: task_guid=${p.task_guid}, members_count=${p.members.length}`);
+              log.trace(() => `add_members: task_guid=${p.task_guid}, members_count=${p.members.length}`);
 
               const memberData = p.members.map((m) => ({
                 id: m.id,

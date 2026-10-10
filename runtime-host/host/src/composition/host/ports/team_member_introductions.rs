@@ -46,18 +46,20 @@ impl TeamMemberIntroductions for ProviderTeamMemberIntroductions {
                     prompt.push_str(&format!("\n\n【{section}】\n{content}"));
                 }
             }
-            let started = Instant::now();
-            let role_hash = identifier_hash(request.role_id.as_str());
-            let member_trace = current_session_trace().map(|id| {
-                id.replacen(
-                    "session-trace:team-call:",
-                    &format!("session-trace:team-call.member-{role_hash}:"),
-                    1,
-                )
+            let started = platform::trace::enabled().then(Instant::now);
+            let role_hash = platform::trace::enabled().then(|| identifier_hash(request.role_id.as_str()));
+            let member_trace = role_hash.as_ref().and_then(|role_hash| {
+                current_session_trace().map(|id| {
+                    id.replacen(
+                        "session-trace:team-call:",
+                        &format!("session-trace:team-call.member-{role_hash}:"),
+                        1,
+                    )
+                })
             });
             session_trace(
                 "runtime.team.introduction.provider.requested",
-                json!({
+                || json!({
                     "roleHash": role_hash,
                     "memberTraceId": member_trace,
                     "inputBytes": SYSTEM_PROMPT.len() + prompt.len(),
@@ -84,44 +86,43 @@ impl TeamMemberIntroductions for ProviderTeamMemberIntroductions {
             let outcome = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
-                    session_trace("runtime.team.introduction.provider.cancelled", json!({
-                        "roleHash": role_hash, "elapsedMs": started.elapsed().as_millis() as u64,
+                    session_trace("runtime.team.introduction.provider.cancelled", || json!({
+                        "roleHash": role_hash, "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
                     }));
                     return Err(MemberIntroductionError::Cancelled);
                 }
                 outcome = generation => outcome.map_err(|_| {
-                    session_trace("runtime.team.introduction.provider.transport-failed", json!({
-                        "roleHash": role_hash, "elapsedMs": started.elapsed().as_millis() as u64,
+                    session_trace("runtime.team.introduction.provider.transport-failed", || json!({
+                        "roleHash": role_hash, "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
                     }));
                     MemberIntroductionError::Unavailable
                 })?,
             };
-            let (category, finish_reason, text_bytes, nonempty) = match &outcome {
-                ProviderTextGenerationOutcome::Generated { response, .. } => (
-                    "Generated",
-                    match response.finish_reason.as_ref() {
-                        Some(LlmFinishReason::Stop) => "Stop",
-                        Some(LlmFinishReason::Length) => "Length",
-                        Some(LlmFinishReason::ToolUse) => "ToolUse",
-                        Some(LlmFinishReason::ContentFilter) => "ContentFilter",
-                        Some(LlmFinishReason::Other(_)) => "Other",
-                        None => "None",
-                    },
-                    response.text.len(),
-                    !response.text.trim().is_empty(),
-                ),
-                ProviderTextGenerationOutcome::Rejected => ("Rejected", "None", 0, false),
-                ProviderTextGenerationOutcome::Unavailable => ("Unavailable", "None", 0, false),
-                ProviderTextGenerationOutcome::Cancelled => ("Cancelled", "None", 0, false),
-            };
-            session_trace(
-                "runtime.team.introduction.provider.completed",
+            session_trace("runtime.team.introduction.provider.completed", || {
+                let (category, finish_reason, text_bytes, nonempty) = match &outcome {
+                    ProviderTextGenerationOutcome::Generated { response, .. } => (
+                        "Generated",
+                        match response.finish_reason.as_ref() {
+                            Some(LlmFinishReason::Stop) => "Stop",
+                            Some(LlmFinishReason::Length) => "Length",
+                            Some(LlmFinishReason::ToolUse) => "ToolUse",
+                            Some(LlmFinishReason::ContentFilter) => "ContentFilter",
+                            Some(LlmFinishReason::Other(_)) => "Other",
+                            None => "None",
+                        },
+                        response.text.len(),
+                        !response.text.trim().is_empty(),
+                    ),
+                    ProviderTextGenerationOutcome::Rejected => ("Rejected", "None", 0, false),
+                    ProviderTextGenerationOutcome::Unavailable => ("Unavailable", "None", 0, false),
+                    ProviderTextGenerationOutcome::Cancelled => ("Cancelled", "None", 0, false),
+                };
                 json!({
                     "roleHash": role_hash, "category": category, "finishReason": finish_reason,
                     "textBytes": text_bytes, "nonempty": nonempty,
-                    "elapsedMs": started.elapsed().as_millis() as u64,
-                }),
-            );
+                    "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
+                })
+            });
             match outcome {
                 ProviderTextGenerationOutcome::Generated { response, .. } => {
                     if !matches!(response.finish_reason, Some(LlmFinishReason::Stop)) {

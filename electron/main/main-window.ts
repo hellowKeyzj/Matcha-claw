@@ -1,6 +1,7 @@
 import { app, BrowserWindow, nativeImage, nativeTheme, shell } from 'electron';
 import { join } from 'path';
 import { logger } from '../utils/logger';
+import { isTraceEnabled, traceDebug } from '../utils/trace-logger';
 import { getMacTrafficLightPosition } from './traffic-light-layout';
 import { getWindowThemeBackgroundColor } from './window';
 import { registerZoomShortcuts } from './zoom-shortcuts';
@@ -24,15 +25,10 @@ function getAppIcon(): Electron.NativeImage | undefined {
   return icon.isEmpty() ? undefined : icon;
 }
 
-const RENDERER_STARTUP_TRACE_FORWARDING_ENV = 'MATCHACLAW_FORWARD_RENDERER_STARTUP_TRACE';
 const RENDERER_STARTUP_TRACE_PREFIX = '[startup-trace]';
 const RENDERER_SESSION_TRACE_PREFIX = 'session-trace';
 const RENDERER_STARTUP_TRACE_LIMIT = 500;
 const RENDERER_SESSION_TRACE_LIMIT = 4 * 1024 * 1024;
-
-function shouldForwardRendererStartupTrace(): boolean {
-  return !app.isPackaged && process.env[RENDERER_STARTUP_TRACE_FORWARDING_ENV] === '1';
-}
 
 function sanitizeRendererStartupTrace(message: string): string {
   return message
@@ -42,12 +38,11 @@ function sanitizeRendererStartupTrace(message: string): string {
 }
 
 function forwardRendererStartupTrace(win: BrowserWindow): void {
-  const forwardStartup = shouldForwardRendererStartupTrace();
-  const forwardSession = process.env.MATCHACLAW_SESSION_TRACE === '1';
-  if (!forwardStartup && !forwardSession) return;
+  if (!isTraceEnabled()) return;
   win.webContents.on('console-message', (_event, _level, message) => {
-    const isStartupTrace = forwardStartup && message.includes(RENDERER_STARTUP_TRACE_PREFIX);
-    const isSessionTrace = forwardSession && message.includes(`"prefix":"${RENDERER_SESSION_TRACE_PREFIX}"`);
+    if (!isTraceEnabled()) return;
+    const isSessionTrace = message.includes(`"prefix":"${RENDERER_SESSION_TRACE_PREFIX}"`);
+    const isStartupTrace = !isSessionTrace && message.includes(RENDERER_STARTUP_TRACE_PREFIX);
     if (!isStartupTrace && !isSessionTrace) return;
     if (isSessionTrace) {
       if (message.length > RENDERER_SESSION_TRACE_LIMIT) {
@@ -55,11 +50,11 @@ function forwardRendererStartupTrace(win: BrowserWindow): void {
         return;
       }
       // Session traces contain only diagnostic summaries; preserve the complete assembly record.
-      logger.info(`[${RENDERER_SESSION_TRACE_PREFIX}] source=renderer-console message=${message
+      traceDebug(() => `[${RENDERER_SESSION_TRACE_PREFIX}] source=renderer-console message=${message
         .replace(/(?:[A-Za-z]:[\\/]|\/(?:Users|home|var|tmp|private)\/)[^\s"'<>)]*/g, '[path]')
         .replace(/(token|authorization|password|secret|api[-_ ]?key)(["'\s:=]+)[^\s"',}]+/gi, '$1$2[redacted]')}`);
     } else {
-      logger.info(`${RENDERER_STARTUP_TRACE_PREFIX} source=renderer-console message=${sanitizeRendererStartupTrace(message)}`);
+      traceDebug(() => `${RENDERER_STARTUP_TRACE_PREFIX} source=renderer-console message=${sanitizeRendererStartupTrace(message)}`);
     }
   });
 }

@@ -18,8 +18,8 @@
 
 import { RelayState, STATE_UI, DEFAULT_CONTROL_PORT, RELAY_PORT_OFFSET, clampPort, computeRelayPort } from '../../constants.js'
 import { setIconWithDot } from '../../icon-badge.js'
-import { createLogger } from '../../logger.js'
-import { prepareSessionKey, activateEncryption, resetEncryption, encryptMessage, decryptMessage, isEncryptionActive } from '../../crypto.js'
+import { createLogger, setTraceEnabled, isTraceEnabled } from '../../logger.js'
+import { prepareSessionKey, activateEncryption, resetEncryption, encryptMessage, decryptMessage, isEncryptionActive, isEncryptedWireMessage } from '../../crypto.js'
 import { getBrowserInstanceId } from '../../browser-instance.js'
 
 const log = createLogger('relay')
@@ -108,7 +108,7 @@ const RELOAD_DEBOUNCE_MS = 500             // 给日志/storage 写入 flush 的
 let _reloadScheduled = false
 
 async function maybeSelfReload(targetKey) {
-  log.info('maybeSelfReload: in')
+  log.info(() => ['maybeSelfReload: in'])
   if (_reloadScheduled) return
 
   // 防御：ext:<version> 类型用启动时缓存的版本号自验证，
@@ -116,7 +116,7 @@ async function maybeSelfReload(targetKey) {
   if (targetKey.startsWith('ext:')) {
     const wanted = targetKey.slice(4)
     if (LOADED_VERSION === wanted) {
-      log.info(`maybeSelfReload: loaded version ${LOADED_VERSION} already matches target, skip`)
+      log.info(() => [`maybeSelfReload: loaded version ${LOADED_VERSION} already matches target, skip`])
       return
     }
   }
@@ -146,7 +146,7 @@ async function maybeSelfReload(targetKey) {
   }
 
   _reloadScheduled = true
-  log.info(`maybeSelfReload: scheduling chrome.runtime.reload() for targetKey=${targetKey}`)
+  log.info(() => [`maybeSelfReload: scheduling chrome.runtime.reload() for targetKey=${targetKey}`])
   setTimeout(() => {
     try {
       chrome.runtime.reload()
@@ -309,7 +309,7 @@ export function trySendToRelay(payload) {
   try {
     sendToRelay(payload)
   } catch (err) {
-    console.debug('[matchaclaw-relay] trySendToRelay failed:', err)
+    log.debug(() => ['trySendToRelay failed:', err])
   }
 }
 
@@ -473,7 +473,7 @@ async function raceConnectPorts(ports, signal) {
     }
   }
 
-  log.info('connected to relay port', winner.port)
+  log.info(() => ['connected to relay port', winner.port])
   return winner.ws
 }
 
@@ -525,7 +525,7 @@ async function ensureConnection() {
     try {
       const { encryptedSessionKey } = await prepareSessionKey()
       helloParams.encryptedSessionKey = encryptedSessionKey
-      log.info('Prepared encrypted session key for handshake')
+      log.info(() => ['Prepared encrypted session key for handshake'])
     } catch (err) {
       log.warn('Failed to prepare session key — handshake will proceed without encryption:', err)
     }
@@ -549,9 +549,10 @@ async function ensureConnection() {
 }
 
 function onRelayClosed(reason) {
-  log.info('onRelayClosed:', reason)
+  log.info(() => ['onRelayClosed:', reason])
   relayWs = null
   resetEncryption()
+  setTraceEnabled(false)
   _sendChain = Promise.resolve()
 
   void Promise.resolve(callbacks.onTransportClosed('connectionLost')).catch((err) => {
@@ -601,18 +602,19 @@ async function onRelayMessage(rawText) {
   //   - extensionVersion 不一致但协议兼容 → reloadTargetKey = 'ext:<version>'（连接保持可用）
   // 桌面端主动要求扩展 reload（独立于 helloAck 的显式指令）
   if (msg?.method === 'Extension.reload') {
-    log.info('Extension.reload: received reload command from desktop')
+    log.info(() => ['Extension.reload: received reload command from desktop'])
     void maybeSelfReload(msg.params?.reloadTargetKey || 'ext:forced')
     return
   }
 
   if (msg?.method === 'Extension.helloAck') {
     const p = msg.params || {}
+    setTraceEnabled(isEncryptedWireMessage(rawText) && p.status === 'ok' && p.encrypted === true && p.traceEnabled === true)
     if (p.status === 'ok') {
       if (p.encrypted === true) {
         activateEncryption()
         void chrome.storage.local.remove('_relayError')
-        log.info('Extension.helloAck: handshake OK — transport encryption activated (AES-256-GCM)')
+        log.info(() => ['Extension.helloAck: handshake OK — transport encryption activated (AES-256-GCM)'])
       } else {
         log.warn('Extension.helloAck: server does not support encryption — disconnecting')
         void chrome.storage.local.set({
@@ -660,23 +662,23 @@ async function onRelayMessage(rawText) {
     const cdpMethod = msg.params?.method || ''
     pushLog('↓', msg.method, cdpMethod)
     if (shouldTraceCdpMethod(cdpMethod)) {
-      log.info('forwardCDPCommand received from desktop', {
+      log.info(() => ['forwardCDPCommand received from desktop', {
         id: msg.id,
         method: cdpMethod,
         sessionId: typeof msg.params?.sessionId === 'string' ? msg.params.sessionId : null,
         targetId: typeof msg.params?.params?.targetId === 'string' ? msg.params.params.targetId : null,
         url: typeof msg.params?.params?.url === 'string' ? msg.params.params.url : null,
-      })
+      }])
     }
     try {
       const result = await callbacks.onMessage(msg)
       if (shouldTraceCdpMethod(cdpMethod)) {
-        log.info('forwardCDPCommand result to desktop', {
+        log.info(() => ['forwardCDPCommand result to desktop', {
           id: msg.id,
           method: cdpMethod,
           resultTargetId: typeof result?.targetId === 'string' ? result.targetId : null,
           infoTargetId: typeof result?.targetInfo?.targetId === 'string' ? result.targetInfo.targetId : null,
-        })
+        }])
       }
       trySendToRelay({ id: msg.id, result })
     } catch (err) {
@@ -700,13 +702,13 @@ async function onRelayMessage(rawText) {
  */
 export async function connectAndAttach() {
   const t0 = performance.now()
-  log.debug('connectAndAttach: begin, connected:', isRelayConnected(), 'reconnecting:', _reconnectPending)
+  log.debug(() => ['connectAndAttach: begin, connected:', isRelayConnected(), 'reconnecting:', _reconnectPending])
   if (isRelayConnected()) return true
-  if (_reconnectPending) { log.debug('connectAndAttach: reconnect already scheduled, skip'); return false }
-  if (!(await isRelayEnabled())) { log.debug('connectAndAttach: relay not enabled'); return false }
+  if (_reconnectPending) { log.debug(() => ['connectAndAttach: reconnect already scheduled, skip']); return false }
+  if (!(await isRelayEnabled())) { log.debug(() => ['connectAndAttach: relay not enabled']); return false }
   try {
     await ensureConnection()
-    log.info('connectAndAttach: connected in', (performance.now() - t0).toFixed(1), 'ms')
+    log.info(() => ['connectAndAttach: connected in', (performance.now() - t0).toFixed(1), 'ms'])
     cancelDisconnectNotify()
     setState(RelayState.CONNECTED)
     reconnectAttempt = 0
@@ -732,13 +734,14 @@ export async function connectAndAttach() {
  * onShutdown() handles the explicit user-disabled path only.
  */
 export async function disconnect() {
-  const t0 = performance.now()
-  log.info('disconnect: begin, current state:', _state, 'ws:', relayWs ? 'open' : 'null')
+  const t0 = isTraceEnabled() ? performance.now() : 0
+  log.info(() => ['disconnect: begin, current state:', _state, 'ws:', relayWs ? 'open' : 'null'])
   void chrome.storage.local.remove('_relayError')
 
   const wsToClose = relayWs
   relayWs = null
   resetEncryption()
+  setTraceEnabled(false)
   _sendChain = Promise.resolve()
 
   cancelReconnect()
@@ -753,11 +756,11 @@ export async function disconnect() {
   relayConnectPromise = null
 
   if (wsToClose) {
-    log.debug('disconnect: closing WebSocket')
+    log.debug(() => ['disconnect: closing WebSocket'])
     try { wsToClose.close() } catch { /* ignore */ }
   }
 
-  log.debug('disconnect: awaiting storage write + shutdown...')
+  log.debug(() => ['disconnect: awaiting storage write + shutdown...'])
   await Promise.all([
     setRelayEnabled(false),
     Promise.resolve(callbacks.onShutdown('disabled')).catch((err) => {
@@ -765,16 +768,16 @@ export async function disconnect() {
     }),
   ])
 
-  log.info('disconnect: done in', (performance.now() - t0).toFixed(1), 'ms')
+  log.info(() => ['disconnect: done in', (performance.now() - t0).toFixed(1), 'ms'])
 
   setState(RelayState.DISABLED)
 }
 
 export async function toggle() {
-  const t0 = performance.now()
+  const t0 = isTraceEnabled() ? performance.now() : 0
   if (_state !== RelayState.DISABLED) {
     await disconnect()
-    log.info('toggle: disconnect done in', (performance.now() - t0).toFixed(1), 'ms')
+    log.info(() => ['toggle: disconnect done in', (performance.now() - t0).toFixed(1), 'ms'])
     return
   }
 

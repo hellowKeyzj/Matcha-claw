@@ -38,6 +38,7 @@ import {
   type ProviderCredentialStatusTransport,
 } from './ipc/provider-private-auth';
 import { createFleetCredentialWriteAdapter } from './ipc/fleet-private';
+import { composeLicenseService } from './license/composition';
 
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 const e2eStartupOutcomeKey = '__matchaclawE2EStartupOutcome';
@@ -155,7 +156,7 @@ export async function bootstrapMainApplication(deps: {
 }> {
   logger.init();
   logger.info('=== MatchaClaw Application Starting ===');
-  logger.debug(
+  logger.debug(() =>
     `Runtime: platform=${process.platform}/${process.arch}, electron=${process.versions.electron}, node=${process.versions.node}, packaged=${app.isPackaged}`
   );
 
@@ -198,6 +199,7 @@ export async function bootstrapMainApplication(deps: {
   let providerCredentialStatusTransport: ProviderCredentialStatusTransport;
   let awaitProviderCall: ReturnType<typeof createProviderCallObserver>;
   let cloudAccountService: ReturnType<typeof createCloudAccountService>;
+  let licenseService: ReturnType<typeof composeLicenseService>;
   let delivery: RuntimeHostDelivery;
   try {
     delivery = await createRuntimeHostDelivery(deps.hostEventBus);
@@ -249,14 +251,21 @@ export async function bootstrapMainApplication(deps: {
       void cloudAccountService.runtimeRestarted().catch(() => logger.warn('Cloud package authorization restore failed'));
     });
     closeRuntimeHostDelivery = async () => {
-      await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during delivery close'));
-      stopPackageExit();
-      stopPackageRestart();
-      try { await cloudAccountService.close(); } finally {
-        transportBundle.close();
-        await delivery.close();
+      try {
+        await licenseService?.dispose();
+      } finally {
+        await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during delivery close'));
+        stopPackageExit();
+        stopPackageRestart();
+        try { await cloudAccountService.close(); } finally {
+          transportBundle.close();
+          await delivery.close();
+        }
       }
     };
+    licenseService = composeLicenseService({
+      onGateChanged: (snapshot) => deps.hostEventBus.emit('license:gate-changed', snapshot),
+    });
   } catch (error) {
     await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during bootstrap cleanup'));
     if (startedRuntimeHost) {
@@ -274,6 +283,7 @@ export async function bootstrapMainApplication(deps: {
   try {
     await waitForHostApiServerListening(
       startHostApiServer({
+        licenseService,
         cloudAccountService,
         eventBus: deps.hostEventBus,
         runtimeHost: directRuntimeHost,

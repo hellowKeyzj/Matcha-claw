@@ -226,7 +226,7 @@ export function registerFeishuTaskSectionTool(api: OpenClawPluginApi): void {
             // CREATE SECTION
             // -----------------------------------------------------------------
             case 'create': {
-              log.info(`create: name=${p.name}, resource_type=${p.resource_type}`);
+              log.trace(() => `create: name=${p.name}, resource_type=${p.resource_type}`);
 
               const data: any = {
                 name: p.name,
@@ -264,7 +264,7 @@ export function registerFeishuTaskSectionTool(api: OpenClawPluginApi): void {
             // GET SECTION
             // -----------------------------------------------------------------
             case 'get': {
-              log.info(`get: section_guid=${p.section_guid}`);
+              log.trace(() => `get: section_guid=${p.section_guid}`);
 
               const res = await client.invoke(
                 'feishu_task_section.get',
@@ -293,7 +293,7 @@ export function registerFeishuTaskSectionTool(api: OpenClawPluginApi): void {
             // PATCH SECTION
             // -----------------------------------------------------------------
             case 'patch': {
-              log.info(`patch: section_guid=${p.section_guid}`);
+              log.trace(() => `patch: section_guid=${p.section_guid}`);
 
               const sectionData: any = {};
               const updateFields: string[] = [];
@@ -348,7 +348,7 @@ export function registerFeishuTaskSectionTool(api: OpenClawPluginApi): void {
             // LIST SECTIONS
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: resource_type=${p.resource_type}, page_size=${p.page_size ?? 50}`);
+              log.trace(() => `list: resource_type=${p.resource_type}, page_size=${p.page_size ?? 50}`);
 
               const paramsData: any = {
                 resource_type: p.resource_type,
@@ -386,7 +386,7 @@ export function registerFeishuTaskSectionTool(api: OpenClawPluginApi): void {
             // TASKS IN SECTION
             // -----------------------------------------------------------------
             case 'tasks': {
-              log.info(`tasks: section_guid=${p.section_guid}`);
+              log.trace(() => `tasks: section_guid=${p.section_guid}`);
 
               const paramsData: any = {
                 user_id_type: (p.user_id_type || 'open_id') as any,

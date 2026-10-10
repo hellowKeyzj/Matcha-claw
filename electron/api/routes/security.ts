@@ -96,19 +96,19 @@ export async function handleSecurityRoutes(
 
   if (url.pathname === '/api/security') {
     const traceId = readTraceHeader(req.headers);
-    logSessionTrace('electron.security.policy.request', traceId, {
+    logSessionTrace('electron.security.policy.request', traceId, () => ({
       method: req.method,
       path: url.pathname,
-    });
+    }));
     try {
       const policy = await transport.read(traceId);
-      logSessionTrace('electron.security.policy.response', traceId, {
+      logSessionTrace('electron.security.policy.response', traceId, () => ({
         status: policy ? 200 : 503,
         contract: policy ? 'policy' : 'unavailable',
-      });
+      }));
       sendJson(res, policy ? 200 : 503, policy ?? POLICY_UNAVAILABLE);
     } catch {
-      logSessionTrace('electron.security.policy.failure', traceId, {});
+      logSessionTrace('electron.security.policy.failure', traceId);
       sendJson(res, 503, POLICY_UNAVAILABLE);
     }
     return true;

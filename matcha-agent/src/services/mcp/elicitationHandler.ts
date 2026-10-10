@@ -77,7 +77,7 @@ export function registerElicitationHandler(
     client.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
       logMCPDebug(
         serverName,
-        `Received elicitation request: ${jsonStringify(request)}`,
+        () => `Received elicitation request: ${jsonStringify(request)}`,
       )
 
       const mode = getElicitationMode(request.params)
@@ -96,7 +96,8 @@ export function registerElicitationHandler(
         if (hookResponse) {
           logMCPDebug(
             serverName,
-            `Elicitation resolved by hook: ${jsonStringify(hookResponse)}`,
+            () =>
+              `Elicitation resolved by hook: ${jsonStringify(hookResponse)}`,
           )
           logEvent('tengu_mcp_elicitation_response', {
             mode: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -154,7 +155,7 @@ export function registerElicitationHandler(
         const rawResult = await response
         logMCPDebug(
           serverName,
-          `Elicitation response: ${jsonStringify(rawResult)}`,
+          () => `Elicitation response: ${jsonStringify(rawResult)}`,
         )
         const result = await runElicitationResultHooks(
           serverName,

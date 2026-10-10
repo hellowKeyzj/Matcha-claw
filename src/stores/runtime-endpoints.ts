@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { hostRuntimeEndpointsList } from '@/lib/host-api';
+import { isTraceEnabled } from '@/lib/trace-logger';
 import { subscribeHostEvent } from '@/lib/host-events';
 import { buildRuntimeEndpointKey, runtimeEndpointsEqual, type RuntimeEndpointRef } from '../types/desktop/runtime-address';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
@@ -252,9 +253,9 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
 
   refresh: async () => {
     const requestSequence = runtimeEndpointLoadSequence + 1;
-    const startedAtMs = Date.now();
+    const startedAtMs = isTraceEnabled() ? Date.now() : 0;
     runtimeEndpointLoadSequence = requestSequence;
-    traceRuntimeEndpointStore('runtime-endpoints-list-start', {
+    if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-start', {
       sequence: requestSequence,
       hasLoadedOnce: get().hasLoadedOnce,
     });
@@ -265,8 +266,8 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
     }));
     try {
       const { endpoints } = await hostRuntimeEndpointsList();
-      const durationMs = Date.now() - startedAtMs;
-      traceRuntimeEndpointStore('runtime-endpoints-list-success', {
+      const durationMs = isTraceEnabled() ? Date.now() - startedAtMs : 0;
+      if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-success', {
         sequence: requestSequence,
         durationMs,
         endpointCount: endpoints.length,
@@ -274,7 +275,7 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
         matchaAgent: summarizeRuntimeEndpointTrace(findRuntimeEndpointByAdapter(endpoints, 'matcha-agent')),
       });
       if (runtimeEndpointLoadSequence !== requestSequence) {
-        traceRuntimeEndpointStore('runtime-endpoints-list-stale', {
+        if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-stale', {
           sequence: requestSequence,
           currentSequence: runtimeEndpointLoadSequence,
           durationMs,
@@ -295,7 +296,7 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
       });
     } catch (error) {
       if (runtimeEndpointLoadSequence !== requestSequence) {
-        traceRuntimeEndpointStore('runtime-endpoints-list-stale-error', {
+        if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-stale-error', {
           sequence: requestSequence,
           currentSequence: runtimeEndpointLoadSequence,
           durationMs: Date.now() - startedAtMs,
@@ -305,7 +306,7 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
       }
       const message = error instanceof Error ? error.message : String(error);
       const pending = isRuntimeEndpointDirectoryPending(error);
-      traceRuntimeEndpointStore('runtime-endpoints-list-error', {
+      if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-list-error', {
         sequence: requestSequence,
         durationMs: Date.now() - startedAtMs,
         pending,
@@ -334,7 +335,7 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
     const refresh = get().refresh;
     const handleRuntimeEvent = (payload: unknown) => {
       const refreshable = isRuntimeEndpointRefreshEvent(payload);
-      traceRuntimeEndpointStore('runtime-endpoints-refresh-event', {
+      if (isTraceEnabled()) traceRuntimeEndpointStore('runtime-endpoints-refresh-event', {
         refreshable,
         event: summarizeRuntimeReadinessTraceEvent(payload),
       });

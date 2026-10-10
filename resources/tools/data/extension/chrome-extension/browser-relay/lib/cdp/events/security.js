@@ -43,27 +43,27 @@ export function handleSecurityEvent(method, tabId, params, _ctx) {
             eventId: params.eventId,
             action: 'continue',
           })
-          .then(() => log.debug('cert error auto-continued:', tabId))
+          .then(() => log.debug(() => ['cert error auto-continued:', tabId]))
           .catch((err) => log.warn('cert error handle failed:', tabId, err?.message || err))
       }
       break
 
     case 'Security.visibleSecurityStateChanged': {
       const state = params?.visibleSecurityState
-      log.debug(
+      log.debug(() => [
         'visible security state:', tabId,
         'securityState:', state?.securityState,
         'hasCertError:', !!state?.certificateSecurityState?.certificateHasWeakSignature,
-      )
+      ])
       break
     }
 
     case 'Security.securityStateChanged':
-      log.debug(
+      log.debug(() => [
         'security state changed:', tabId,
         'state:', params?.securityState,
         'schemeIsCrypto:', params?.schemeIsCryptographic,
-      )
+      ])
       break
   }
 }

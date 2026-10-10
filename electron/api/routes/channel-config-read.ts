@@ -25,12 +25,12 @@ export async function handleChannelConfigReadRoutes(
   try {
     body = await parseJsonBody(req);
   } catch {
-    beginChannelTrace('route.config_read.invalid', traceId)(400, INVALID);
+    beginChannelTrace('route.config_read.invalid', traceId)?.(400, INVALID);
     sendJson(res, 400, INVALID);
     return true;
   }
   if (!isRequest(body)) {
-    beginChannelTrace('route.config_read.invalid', traceId)(400, INVALID);
+    beginChannelTrace('route.config_read.invalid', traceId)?.(400, INVALID);
     sendJson(res, 400, INVALID);
     return true;
   }
@@ -40,14 +40,14 @@ export async function handleChannelConfigReadRoutes(
     const projection = await transport.read(body, traceId);
     if (projection) {
       const response = { success: true, values: projection.values, agentId: projection.agentId };
-      finish(200, response);
+      finish?.(200, response);
       sendJson(res, 200, response);
     } else {
-      finish(503, UNAVAILABLE);
+      finish?.(503, UNAVAILABLE);
       sendJson(res, 503, UNAVAILABLE);
     }
   } catch (error) {
-    finish(503, UNAVAILABLE, channelTraceError(error));
+    finish?.(503, UNAVAILABLE, channelTraceError(error));
     sendJson(res, 503, UNAVAILABLE);
   }
   return true;

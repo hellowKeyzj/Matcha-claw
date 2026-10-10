@@ -8,12 +8,12 @@ tokio::task_local! {
     static CONTEXT: Value;
 }
 
-pub fn with_context<T>(context: Value, action: impl FnOnce() -> T) -> T {
-    CONTEXT.sync_scope(context, action)
+pub fn with_context<T>(context: impl FnOnce() -> Value, action: impl FnOnce() -> T) -> T {
+    if enabled() { CONTEXT.sync_scope(context(), action) } else { action() }
 }
 
-pub fn log_unscoped(stage: &str, payload: Value) {
-    if enabled() { emit(stage, None, payload); }
+pub fn log_unscoped(stage: &str, payload: impl FnOnce() -> Value) {
+    if enabled() { emit(stage, None, payload()); }
 }
 
 /// Same FNV-1a over UTF-16 code units as Renderer summarizeIdentifier; diagnostic only.
@@ -103,15 +103,15 @@ pub fn trace_id<'a>(headers: &'a [(String, String)]) -> Option<&'a str> {
         })
 }
 
-pub fn log(stage: &str, trace_id: Option<&str>, payload: Value) {
+pub fn log(stage: &str, trace_id: Option<&str>, payload: impl FnOnce() -> Value) {
     if trace_id.is_none() || !enabled() {
         return;
     }
-    emit(stage, trace_id, payload);
+    emit(stage, trace_id, payload());
 }
 
 pub fn enabled() -> bool {
-    std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() == Ok("1")
+    platform::trace::enabled()
 }
 
 fn emit(stage: &str, trace_id: Option<&str>, payload: Value) {

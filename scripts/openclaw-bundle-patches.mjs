@@ -1537,14 +1537,38 @@ function patchProviderConfigDebugTrace(openclawDir) {
     : { status: 'clean', detail: 'already patched' };
 }
 
+function buildProviderTraceHelper(name, sourceName) {
+  return [
+    `function ${name}(${sourceName ? '' : 'source, '}phase, details = () => ({})) {`,
+    '\tif (process.env.MATCHACLAW_TRACE !== "1") return;',
+    '\tconst suffix = Object.entries(details()).filter(([, value]) => value !== void 0).map(([key, value]) => `${key}=${String(value)}`).join(" ");',
+    `\tconsole.warn(\`[startup-trace] source=${sourceName || '${source}'} phase=\${phase}\${suffix ? " detail=" + suffix : ""}\`);`,
+    '}',
+  ].join('\n');
+}
+
+function replaceProviderTraceHelper(source, needle, helper, patchId, after = true) {
+  const name = helper.match(/^function (\w+)\(/)[1];
+  const existing = source.match(new RegExp(`function ${name}\\([^\\n]*\\) \\{[\\s\\S]*?\\n\\}`));
+  if (existing) {
+    const traceHelper = helper.slice(0, helper.indexOf('\n}') + 2);
+    return replaceOptionalOnce(source, existing[0], traceHelper, patchId);
+  }
+  return replaceOptionalOnce(source, needle, after ? `${needle}\n${helper}` : `${helper}\n${needle}`, patchId);
+}
+
+function replaceProviderTraceOnce(source, needle, replacement, patchId) {
+  if (source.includes(replacement)) return { source, changed: false };
+  // Upgrade the previously injected eager call in place, without retaining a second runtime path.
+  const previous = replacement.replace(/\(\) => \(([\s\S]*?)\)\);/g, '$1);');
+  return replaceOptionalOnce(source, source.includes(previous) ? previous : needle, replacement, patchId);
+}
+
 function patchProviderConfigReloadTrace(filePath, patchId) {
   let source = readText(filePath);
   let changed = false;
   const helper = [
-    'function matchaProviderDebugTrace(source, phase, details = {}) {',
-    '\tconst suffix = Object.entries(details).filter(([, value]) => value !== void 0).map(([key, value]) => `${key}=${String(value)}`).join(" ");',
-    '\tconsole.warn(`[startup-trace] source=${source} phase=${phase}${suffix ? " detail=" + suffix : ""}`);',
-    '}',
+    buildProviderTraceHelper('matchaProviderDebugTrace'),
     'function matchaProviderDebugError(error) {',
     '\treturn {',
     '\t\terror_name: error instanceof Error ? error.name : typeof error,',
@@ -1557,9 +1581,9 @@ function patchProviderConfigReloadTrace(filePath, patchId) {
 \t2e3,
 \t5e3
 ];`;
-  let helperPatch = replaceOptionalOnce(source, helperNeedle, `${helperNeedle}\n${helper}`, patchId);
+  let helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId);
   if (!helperPatch.changed && !source.includes('function matchaProviderDebugTrace(')) {
-    helperPatch = replaceOptionalOnce(source, 'const WATCHER_RECREATE_MAX_RETRIES = 3;', `const WATCHER_RECREATE_MAX_RETRIES = 3;\n${helper}`, patchId);
+    helperPatch = replaceProviderTraceHelper(source, 'const WATCHER_RECREATE_MAX_RETRIES = 3;', helper, patchId);
   }
   source = helperPatch.source;
   changed ||= helperPatch.changed;
@@ -1573,7 +1597,7 @@ function patchProviderConfigReloadTrace(filePath, patchId) {
 \t\t\t\tpreviousConfig: currentConfig
 \t\t\t});`;
   const planReplacement = `${planNeedle}
-\t\t\tmatchaProviderDebugTrace("openclaw-config-reload", "plan", {
+\t\t\tmatchaProviderDebugTrace("openclaw-config-reload", "plan", () => ({
 \t\t\t\tchanged_paths: changedPaths.length,
 \t\t\t\tnoop_paths: pluginInstallTimestampNoopPaths.length,
 \t\t\t\tplugin_whole_record_paths: pluginInstallWholeRecordPaths.length,
@@ -1584,22 +1608,22 @@ function patchProviderConfigReloadTrace(filePath, patchId) {
 \t\t\t\tdispose_mcp_runtimes: Boolean(plan.disposeMcpRuntimes),
 \t\t\t\thot_reasons: plan.hotReasons?.length ?? 0,
 \t\t\t\trestart_reasons: plan.restartReasons?.length ?? 0
-\t\t\t});`;
-  const planPatch = replaceOptionalOnce(source, planNeedle, planReplacement, patchId);
+\t\t\t}));`;
+  const planPatch = replaceProviderTraceOnce(source, planNeedle, planReplacement, patchId);
   source = planPatch.source;
   changed ||= planPatch.changed;
 
   const writeNeedle = `\t\t\tlastAppliedWriteHash = event.persistedHash;
 \t\t\tscheduleAfter(0);`;
   const writeReplacement = `\t\t\tlastAppliedWriteHash = event.persistedHash;
-\t\t\tmatchaProviderDebugTrace("openclaw-config-reload", "write-observed", {
+\t\t\tmatchaProviderDebugTrace("openclaw-config-reload", "write-observed", () => ({
 \t\t\t\tafter_write: event.afterWrite?.mode ?? "none",
 \t\t\t\tpersisted_hash_present: typeof event.persistedHash === "string",
 \t\t\t\tapplication: Boolean(application),
 \t\t\t\tpending_in_process: Boolean(pendingInProcessConfig)
-\t\t\t});
+\t\t\t}));
 \t\t\tscheduleAfter(0);`;
-  const writePatch = replaceOptionalOnce(source, writeNeedle, writeReplacement, patchId);
+  const writePatch = replaceProviderTraceOnce(source, writeNeedle, writeReplacement, patchId);
   source = writePatch.source;
   changed ||= writePatch.changed;
 
@@ -1612,16 +1636,16 @@ function patchProviderConfigReloadTrace(filePath, patchId) {
   const failureReplacement = `\t\t\t} catch (err) {
 \t\t\t\tconst superseded = err instanceof GatewayConfigReloadSupersededError;
 \t\t\t\tif (!(superseded && attemptedCandidate !== null && watcherIntentCandidate === attemptedCandidate)) settleApplication(attemptedCandidate, superseded ? "superseded" : "failed");
-\t\t\t\tmatchaProviderDebugTrace("openclaw-config-reload", superseded ? "superseded" : "failed", {
+\t\t\t\tmatchaProviderDebugTrace("openclaw-config-reload", superseded ? "superseded" : "failed", () => ({
 \t\t\t\t\tcandidate: attemptedCandidate !== null,
 \t\t\t\t\tpending_in_process: Boolean(pendingInProcessConfig),
 \t\t\t\t\twatcher_intent: Boolean(watcherIntentCandidate),
 \t\t\t\t\t...matchaProviderDebugError(err)
-\t\t\t\t});
+\t\t\t\t}));
 \t\t\t\tif (superseded) opts.log.info(\`config reload superseded: \${String(err)}\`);
 \t\t\t\telse opts.log.error(\`config reload failed: \${String(err)}\`);
 \t\t\t} finally {`;
-  const failurePatch = replaceOptionalOnce(source, failureNeedle, failureReplacement, patchId);
+  const failurePatch = replaceProviderTraceOnce(source, failureNeedle, failureReplacement, patchId);
   source = failurePatch.source;
   changed ||= failurePatch.changed;
 
@@ -1652,11 +1676,11 @@ function patchProviderConfigReloadTrace(filePath, patchId) {
 \t\t\ttry {
 \t\t\t\tactiveTasks = getInspectableActiveTaskRestartBlockers().length;
 \t\t\t} catch (err) {
-\t\t\t\tmatchaProviderDebugTrace("openclaw-active-work", "task-blockers-failed", matchaProviderDebugError(err));
+\t\t\t\tmatchaProviderDebugTrace("openclaw-active-work", "task-blockers-failed", () => (matchaProviderDebugError(err)));
 \t\t\t\tthrow err;
 \t\t\t}
 \t\t\tconst totalActive = queueSize + pendingReplies + embeddedRuns + backgroundExecSessions + rootRequests + activeTasks;
-\t\t\tif (totalActive > 0) matchaProviderDebugTrace("openclaw-active-work", "counts", {
+\t\t\tif (totalActive > 0) matchaProviderDebugTrace("openclaw-active-work", "counts", () => ({
 \t\t\t\tqueue_size: queueSize,
 \t\t\t\tpending_replies: pendingReplies,
 \t\t\t\tembedded_runs: embeddedRuns,
@@ -1664,7 +1688,7 @@ function patchProviderConfigReloadTrace(filePath, patchId) {
 \t\t\t\troot_requests: rootRequests,
 \t\t\t\tactive_tasks: activeTasks,
 \t\t\t\ttotal_active: totalActive
-\t\t\t});
+\t\t\t}));
 \t\t\treturn {
 \t\t\t\tqueueSize,
 \t\t\t\tpendingReplies,
@@ -1675,7 +1699,7 @@ function patchProviderConfigReloadTrace(filePath, patchId) {
 \t\t\t\ttotalActive
 \t\t\t};
 \t\t};`;
-  const activeCountsPatch = replaceOptionalOnce(source, activeCountsNeedle, activeCountsReplacement, patchId);
+  const activeCountsPatch = replaceProviderTraceOnce(source, activeCountsNeedle, activeCountsReplacement, patchId);
   source = activeCountsPatch.source;
   changed ||= activeCountsPatch.changed;
 
@@ -1687,11 +1711,11 @@ function patchProviderConfigReloadTrace(filePath, patchId) {
 \t\t\ttry {
 \t\t\t\tblockers = getInspectableActiveTaskRestartBlockers();
 \t\t\t} catch (err) {
-\t\t\t\tmatchaProviderDebugTrace("openclaw-active-work", "task-blockers-format-failed", matchaProviderDebugError(err));
+\t\t\t\tmatchaProviderDebugTrace("openclaw-active-work", "task-blockers-format-failed", () => (matchaProviderDebugError(err)));
 \t\t\t\tthrow err;
 \t\t\t}
 \t\t\tif (blockers.length === 0) return null;`;
-  const taskBlockersPatch = replaceOptionalOnce(source, taskBlockersNeedle, taskBlockersReplacement, patchId);
+  const taskBlockersPatch = replaceProviderTraceOnce(source, taskBlockersNeedle, taskBlockersReplacement, patchId);
   source = taskBlockersPatch.source;
   changed ||= taskBlockersPatch.changed;
 
@@ -1700,44 +1724,44 @@ function patchProviderConfigReloadTrace(filePath, patchId) {
 \t\t\tconst channelIds = [...new Set(channels)];`;
   const channelCheckReplacement = `\t\t\tconst initial = getActiveCounts();
 \t\t\tconst channelIds = [...new Set(channels)];
-\t\t\tmatchaProviderDebugTrace("openclaw-active-work", "channel-reload-check", {
+\t\t\tmatchaProviderDebugTrace("openclaw-active-work", "channel-reload-check", () => ({
 \t\t\t\tchannels: channelIds.length,
 \t\t\t\tpublication_pending: Boolean(publicationPending),
 \t\t\t\ttotal_active: initial.totalActive,
 \t\t\t\tactive_tasks: initial.activeTasks
-\t\t\t});
+\t\t\t}));
 \t\t\tif (initial.totalActive <= 0) return false;`;
-  const channelCheckPatch = replaceOptionalOnce(source, channelCheckNeedle, channelCheckReplacement, patchId);
+  const channelCheckPatch = replaceProviderTraceOnce(source, channelCheckNeedle, channelCheckReplacement, patchId);
   source = channelCheckPatch.source;
   changed ||= channelCheckPatch.changed;
 
   const hotStartNeedle = `\t\tconst applyHotReload = async (plan, nextConfig, publication) => {
 \t\t\tassertIrreversibleReloadPlanHasRecoveryOwner(plan, restartRecoveryAvailable);`;
   const hotStartReplacement = `\t\tconst applyHotReload = async (plan, nextConfig, publication) => {
-\t\t\tmatchaProviderDebugTrace("openclaw-hot-reload", "start", {
+\t\t\tmatchaProviderDebugTrace("openclaw-hot-reload", "start", () => ({
 \t\t\t\tchanged_paths: plan.changedPaths?.length ?? 0,
 \t\t\t\treload_plugins: Boolean(plan.reloadPlugins),
 \t\t\t\trestart_gateway: Boolean(plan.restartGateway),
 \t\t\t\trestart_channels: plan.restartChannels?.size ?? 0,
 \t\t\t\trestart_channel_accounts: plan.restartChannelAccounts?.size ?? 0,
 \t\t\t\tdispose_mcp_runtimes: Boolean(plan.disposeMcpRuntimes)
-\t\t\t});
+\t\t\t}));
 \t\t\tassertIrreversibleReloadPlanHasRecoveryOwner(plan, restartRecoveryAvailable);`;
-  const hotStartPatch = replaceOptionalOnce(source, hotStartNeedle, hotStartReplacement, patchId);
+  const hotStartPatch = replaceProviderTraceOnce(source, hotStartNeedle, hotStartReplacement, patchId);
   source = hotStartPatch.source;
   changed ||= hotStartPatch.changed;
 
   const recoveryNeedle = `\t\t\tconst scheduleRecoveryRestart = (surface, err) => {
 \t\t\t\tconst detail = err === void 0 ? "" : \`: \${formatErrorMessage(err)}\`;`;
   const recoveryReplacement = `\t\t\tconst scheduleRecoveryRestart = (surface, err) => {
-\t\t\t\tmatchaProviderDebugTrace("openclaw-hot-reload", "recovery-restart", {
+\t\t\t\tmatchaProviderDebugTrace("openclaw-hot-reload", "recovery-restart", () => ({
 \t\t\t\t\tsurface_len: String(surface).length,
 \t\t\t\t\truntime_committed: runtimeCommitted,
 \t\t\t\t\trecovery_available: restartRecoveryAvailable,
 \t\t\t\t\t...matchaProviderDebugError(err)
-\t\t\t\t});
+\t\t\t\t}));
 \t\t\t\tconst detail = err === void 0 ? "" : \`: \${formatErrorMessage(err)}\`;`;
-  const recoveryPatch = replaceOptionalOnce(source, recoveryNeedle, recoveryReplacement, patchId);
+  const recoveryPatch = replaceProviderTraceOnce(source, recoveryNeedle, recoveryReplacement, patchId);
   source = recoveryPatch.source;
   changed ||= recoveryPatch.changed;
 
@@ -1749,16 +1773,13 @@ function patchProviderConfigMethodsTrace(filePath, patchId) {
   let source = readText(filePath);
   let changed = false;
   const helper = [
-    'function matchaConfigMethodTrace(phase, details = {}) {',
-    '\tconst suffix = Object.entries(details).filter(([, value]) => value !== void 0).map(([key, value]) => `${key}=${String(value)}`).join(" ");',
-    '\tconsole.warn(`[startup-trace] source=openclaw-config-method phase=${phase}${suffix ? " detail=" + suffix : ""}`);',
-    '}',
+    buildProviderTraceHelper('matchaConfigMethodTrace', 'openclaw-config-method'),
     'function matchaConfigPatchTopKeys(value) {',
     '\treturn value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).join(",") : "";',
     '}',
   ].join('\n');
   const helperNeedle = 'function clearConfigSchemaResponseCache() {';
-  const helperPatch = replaceOptionalOnce(source, helperNeedle, `${helper}\n${helperNeedle}`, patchId);
+  const helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId, false);
   source = helperPatch.source;
   changed ||= helperPatch.changed;
 
@@ -1766,25 +1787,25 @@ function patchProviderConfigMethodsTrace(filePath, patchId) {
 \t\tconst outcome = await params.writeResult.application;
 \t\tif (outcome !== "applied") {`;
   const applicationReplacement = `\tif (params.writeResult.application) {
-\t\tmatchaConfigMethodTrace("application-wait", {
+\t\tmatchaConfigMethodTrace("application-wait", () => ({
 \t\t\tmode: params.mode,
 \t\t\tchanged_paths: params.changedPaths?.length ?? 0
-\t\t});
+\t\t}));
 \t\tconst outcome = await params.writeResult.application;
-\t\tmatchaConfigMethodTrace("application-outcome", {
+\t\tmatchaConfigMethodTrace("application-outcome", () => ({
 \t\t\tmode: params.mode,
 \t\t\toutcome,
 \t\t\tchanged_paths: params.changedPaths?.length ?? 0
-\t\t});
+\t\t}));
 \t\tif (outcome !== "applied") {`;
-  const applicationPatch = replaceOptionalOnce(source, applicationNeedle, applicationReplacement, patchId);
+  const applicationPatch = replaceProviderTraceOnce(source, applicationNeedle, applicationReplacement, patchId);
   source = applicationPatch.source;
   changed ||= applicationPatch.changed;
 
   const patchNeedle = `\t\tconst changedPaths = diffGatewayReloadPaths(snapshot.config, validatedConfig, listConfigReloadRefinementPrefixes());
 \t\tcontext?.logGateway?.info(\`config.patch write \${formatControlPlaneActor(actor)} changedPaths=\${summarizeChangedPaths(changedPaths)} restartReason=config.patch\`);`;
   const patchReplacement = `\t\tconst changedPaths = diffGatewayReloadPaths(snapshot.config, validatedConfig, listConfigReloadRefinementPrefixes());
-\t\tmatchaConfigMethodTrace("patch-ready", {
+\t\tmatchaConfigMethodTrace("patch-ready", () => ({
 \t\t\ttop_keys: matchaConfigPatchTopKeys(normalizedPatch),
 \t\t\treplace_paths: replacePaths.length,
 \t\t\tchanged_paths: changedPaths.length,
@@ -1793,9 +1814,9 @@ function patchProviderConfigMethodsTrace(filePath, patchId) {
 \t\t\t\tpreviousConfig: snapshot.config,
 \t\t\t\tnextConfig: validatedConfig
 \t\t\t})
-\t\t});
+\t\t}));
 \t\tcontext?.logGateway?.info(\`config.patch write \${formatControlPlaneActor(actor)} changedPaths=\${summarizeChangedPaths(changedPaths)} restartReason=config.patch\`);`;
-  const patchPatch = replaceOptionalOnce(source, patchNeedle, patchReplacement, patchId);
+  const patchPatch = replaceProviderTraceOnce(source, patchNeedle, patchReplacement, patchId);
   source = patchPatch.source;
   changed ||= patchPatch.changed;
 
@@ -1807,10 +1828,7 @@ function patchProviderConfigRuntimeReloadTrace(filePath, patchId) {
   let source = readText(filePath);
   let changed = false;
   const helper = [
-    'function matchaProviderRuntimeReloadTrace(phase, details = {}) {',
-    '\tconst suffix = Object.entries(details).filter(([, value]) => value !== void 0).map(([key, value]) => `${key}=${String(value)}`).join(" ");',
-    '\tconsole.warn(`[startup-trace] source=openclaw-plugin-runtime-reload phase=${phase}${suffix ? " detail=" + suffix : ""}`);',
-    '}',
+    buildProviderTraceHelper('matchaProviderRuntimeReloadTrace', 'openclaw-plugin-runtime-reload'),
     'function matchaProviderRuntimeReloadError(error) {',
     '\treturn {',
     '\t\terror_name: error instanceof Error ? error.name : typeof error,',
@@ -1819,38 +1837,38 @@ function patchProviderConfigRuntimeReloadTrace(filePath, patchId) {
     '}',
   ].join('\n');
   const helperNeedle = 'import "./sessions-dovo0Bf5.mjs";';
-  const helperPatch = replaceOptionalOnce(source, helperNeedle, `${helperNeedle}\n${helper}`, patchId);
+  const helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId);
   source = helperPatch.source;
   changed ||= helperPatch.changed;
 
   const startNeedle = `\tconst reloadAttachedGatewayPlugins = async (params) => {
 \t\tconst [{ loadPluginLookUpTable }, { listAmbientOnlyConfiguredChannelIds }, { prepareGatewayPluginLoad }, { startPluginServices, PLUGIN_SERVICE_REPLACEMENT_STOP_TIMEOUT_MS }] = await Promise.all([`;
   const startReplacement = `\tconst reloadAttachedGatewayPlugins = async (params) => {
-\t\tmatchaProviderRuntimeReloadTrace("start", {
+\t\tmatchaProviderRuntimeReloadTrace("start", () => ({
 \t\t\tnext_has_plugins: Boolean(params.nextConfig?.plugins),
 \t\t\tsource_has_plugins: Boolean(params.sourceConfig?.plugins)
-\t\t});
+\t\t}));
 \t\tconst [{ loadPluginLookUpTable }, { listAmbientOnlyConfiguredChannelIds }, { prepareGatewayPluginLoad }, { startPluginServices, PLUGIN_SERVICE_REPLACEMENT_STOP_TIMEOUT_MS }] = await Promise.all([`;
-  const startPatch = replaceOptionalOnce(source, startNeedle, startReplacement, patchId);
+  const startPatch = replaceProviderTraceOnce(source, startNeedle, startReplacement, patchId);
   source = startPatch.source;
   changed ||= startPatch.changed;
 
   const lookupNeedle = `\t\tconst nextAmbientAutostartSuppressedChannelIds = ambientEnvTriggers === "suppress" ? new Set(listAmbientOnlyConfiguredChannelIds({`;
-  const lookupReplacement = `\t\tmatchaProviderRuntimeReloadTrace("lookup-loaded", {
+  const lookupReplacement = `\t\tmatchaProviderRuntimeReloadTrace("lookup-loaded", () => ({
 \t\t\tplugins: nextPluginLookUpTable?.pluginIds?.size ?? nextPluginLookUpTable?.pluginIds?.length ?? 0,
 \t\t\tmanifests: nextPluginLookUpTable?.manifestRegistry?.plugins?.size ?? nextPluginLookUpTable?.manifestRegistry?.plugins?.length ?? 0
-\t\t});
+\t\t}));
 \t\tconst nextAmbientAutostartSuppressedChannelIds = ambientEnvTriggers === "suppress" ? new Set(listAmbientOnlyConfiguredChannelIds({`;
-  const lookupPatch = replaceOptionalOnce(source, lookupNeedle, lookupReplacement, patchId);
+  const lookupPatch = replaceProviderTraceOnce(source, lookupNeedle, lookupReplacement, patchId);
   source = lookupPatch.source;
   changed ||= lookupPatch.changed;
 
   const beforeNeedle = `\t\ttry {
 \t\t\tawait params.beforeReplace(beforeChannelIds);`;
   const beforeReplacement = `\t\ttry {
-\t\t\tmatchaProviderRuntimeReloadTrace("before-replace", { channels: beforeChannelIds.size });
+\t\t\tmatchaProviderRuntimeReloadTrace("before-replace", () => ({ channels: beforeChannelIds.size }));
 \t\t\tawait params.beforeReplace(beforeChannelIds);`;
-  const beforePatch = replaceOptionalOnce(source, beforeNeedle, beforeReplacement, patchId);
+  const beforePatch = replaceProviderTraceOnce(source, beforeNeedle, beforeReplacement, patchId);
   source = beforePatch.source;
   changed ||= beforePatch.changed;
 
@@ -1858,66 +1876,66 @@ function patchProviderConfigRuntimeReloadTrace(filePath, patchId) {
 \t\t\t\t\tstrict: true,
 \t\t\t\t\tdeadlineAtMs: Date.now() + PLUGIN_SERVICE_REPLACEMENT_STOP_TIMEOUT_MS
 \t\t\t\t});`;
-  const stopReplacement = `\t\t\t\tmatchaProviderRuntimeReloadTrace("previous-services-stop", {});
+  const stopReplacement = `\t\t\t\tmatchaProviderRuntimeReloadTrace("previous-services-stop", () => ({}));
 \t\t\t\tawait previousServices.stop({
 \t\t\t\t\tstrict: true,
 \t\t\t\t\tdeadlineAtMs: Date.now() + PLUGIN_SERVICE_REPLACEMENT_STOP_TIMEOUT_MS
 \t\t\t\t});
-\t\t\t\tmatchaProviderRuntimeReloadTrace("previous-services-stopped", {});`;
-  const stopPatch = replaceOptionalOnce(source, stopNeedle, stopReplacement, patchId);
+\t\t\t\tmatchaProviderRuntimeReloadTrace("previous-services-stopped", () => ({}));`;
+  const stopPatch = replaceProviderTraceOnce(source, stopNeedle, stopReplacement, patchId);
   source = stopPatch.source;
   changed ||= stopPatch.changed;
 
   const commitNeedle = `\t\t\tawait params.commitRuntime(() => {`;
-  const commitReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("commit-runtime-start", {});
+  const commitReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("commit-runtime-start", () => ({}));
 \t\t\tawait params.commitRuntime(() => {`;
-  const commitPatch = replaceOptionalOnce(source, commitNeedle, commitReplacement, patchId);
+  const commitPatch = replaceProviderTraceOnce(source, commitNeedle, commitReplacement, patchId);
   source = commitPatch.source;
   changed ||= commitPatch.changed;
 
   const publishNeedle = `\t\t\tif (!replacement.claim.publish(() => {`;
-  const publishReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("publish-start", {});
+  const publishReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("publish-start", () => ({}));
 \t\t\tif (!replacement.claim.publish(() => {`;
-  const publishPatch = replaceOptionalOnce(source, publishNeedle, publishReplacement, patchId);
+  const publishPatch = replaceProviderTraceOnce(source, publishNeedle, publishReplacement, patchId);
   source = publishPatch.source;
   changed ||= publishPatch.changed;
 
   const loadNeedle = `\t\t\t\tloaded = prepareGatewayPluginLoad({`;
-  const loadReplacement = `\t\t\t\tmatchaProviderRuntimeReloadTrace("prepare-load-start", {});
+  const loadReplacement = `\t\t\t\tmatchaProviderRuntimeReloadTrace("prepare-load-start", () => ({}));
 \t\t\t\tloaded = prepareGatewayPluginLoad({`;
-  const loadPatch = replaceOptionalOnce(source, loadNeedle, loadReplacement, patchId);
+  const loadPatch = replaceProviderTraceOnce(source, loadNeedle, loadReplacement, patchId);
   source = loadPatch.source;
   changed ||= loadPatch.changed;
 
   const replaceNeedle = `\t\t\t\treplaceAttachedPluginRuntime(loaded);
 \t\t\t\treleaseChannelStarts("published");`;
-  const replaceReplacement = `\t\t\t\tmatchaProviderRuntimeReloadTrace("prepare-load-finished", {});
+  const replaceReplacement = `\t\t\t\tmatchaProviderRuntimeReloadTrace("prepare-load-finished", () => ({}));
 \t\t\t\treplaceAttachedPluginRuntime(loaded);
-\t\t\t\tmatchaProviderRuntimeReloadTrace("runtime-replaced", {});
+\t\t\t\tmatchaProviderRuntimeReloadTrace("runtime-replaced", () => ({}));
 \t\t\t\treleaseChannelStarts("published");`;
-  const replacePatch = replaceOptionalOnce(source, replaceNeedle, replaceReplacement, patchId);
+  const replacePatch = replaceProviderTraceOnce(source, replaceNeedle, replaceReplacement, patchId);
   source = replacePatch.source;
   changed ||= replacePatch.changed;
 
   const discoveryNeedle = `\t\t\tawait refreshAttachedGatewayDiscovery(loaded.pluginRegistry, replacement.claim);`;
-  const discoveryReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("discovery-refresh-start", {});
+  const discoveryReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("discovery-refresh-start", () => ({}));
 \t\t\tawait refreshAttachedGatewayDiscovery(loaded.pluginRegistry, replacement.claim);
-\t\t\tmatchaProviderRuntimeReloadTrace("discovery-refresh-finished", {});`;
-  const discoveryPatch = replaceOptionalOnce(source, discoveryNeedle, discoveryReplacement, patchId);
+\t\t\tmatchaProviderRuntimeReloadTrace("discovery-refresh-finished", () => ({}));`;
+  const discoveryPatch = replaceProviderTraceOnce(source, discoveryNeedle, discoveryReplacement, patchId);
   source = discoveryPatch.source;
   changed ||= discoveryPatch.changed;
 
   const servicesNeedle = `\t\t\tconst nextServices = await startPluginServices({`;
-  const servicesReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("services-start", {});
+  const servicesReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("services-start", () => ({}));
 \t\t\tconst nextServices = await startPluginServices({`;
-  const servicesPatch = replaceOptionalOnce(source, servicesNeedle, servicesReplacement, patchId);
+  const servicesPatch = replaceProviderTraceOnce(source, servicesNeedle, servicesReplacement, patchId);
   source = servicesPatch.source;
   changed ||= servicesPatch.changed;
 
   const servicesDoneNeedle = `\t\t\tif (!await replacement.claim.waitForUnblocked() || !pluginRuntimeGeneration.publishServices(replacement.claim, nextServices)) await nextServices.stop({`;
-  const servicesDoneReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("services-started", {});
+  const servicesDoneReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("services-started", () => ({}));
 \t\t\tif (!await replacement.claim.waitForUnblocked() || !pluginRuntimeGeneration.publishServices(replacement.claim, nextServices)) await nextServices.stop({`;
-  const servicesDonePatch = replaceOptionalOnce(source, servicesDoneNeedle, servicesDoneReplacement, patchId);
+  const servicesDonePatch = replaceProviderTraceOnce(source, servicesDoneNeedle, servicesDoneReplacement, patchId);
   source = servicesDonePatch.source;
   changed ||= servicesDonePatch.changed;
 
@@ -1927,20 +1945,20 @@ function patchProviderConfigRuntimeReloadTrace(filePath, patchId) {
 \t\t\tthrow error;
 \t\t} finally {`;
   const catchReplacement = `\t\t} catch (error) {
-\t\t\tmatchaProviderRuntimeReloadTrace("failed", matchaProviderRuntimeReloadError(error));
+\t\t\tmatchaProviderRuntimeReloadTrace("failed", () => (matchaProviderRuntimeReloadError(error)));
 \t\t\treplacement.reject();
 \t\t\trecoverFromReplacementTeardown?.(error);
 \t\t\tthrow error;
 \t\t} finally {`;
-  const catchPatch = replaceOptionalOnce(source, catchNeedle, catchReplacement, patchId);
+  const catchPatch = replaceProviderTraceOnce(source, catchNeedle, catchReplacement, patchId);
   source = catchPatch.source;
   changed ||= catchPatch.changed;
 
   const doneNeedle = `\t\treturn { activeChannels: listAttachedChannelIds() };`;
   const doneReplacement = `\t\tconst activeChannels = listAttachedChannelIds();
-\t\tmatchaProviderRuntimeReloadTrace("finished", { channels: activeChannels.size });
+\t\tmatchaProviderRuntimeReloadTrace("finished", () => ({ channels: activeChannels.size }));
 \t\treturn { activeChannels };`;
-  const donePatch = replaceOptionalOnce(source, doneNeedle, doneReplacement, patchId);
+  const donePatch = replaceProviderTraceOnce(source, doneNeedle, doneReplacement, patchId);
   source = donePatch.source;
   changed ||= donePatch.changed;
 
@@ -1952,10 +1970,7 @@ function patchProviderConfigServicesTrace(filePath, patchId) {
   let source = readText(filePath);
   let changed = false;
   const helper = [
-    'function matchaPluginServiceTrace(phase, details = {}) {',
-    '\tconst suffix = Object.entries(details).filter(([, value]) => value !== void 0).map(([key, value]) => `${key}=${String(value)}`).join(" ");',
-    '\tconsole.warn(`[startup-trace] source=openclaw-plugin-services phase=${phase}${suffix ? " detail=" + suffix : ""}`);',
-    '}',
+    buildProviderTraceHelper('matchaPluginServiceTrace', 'openclaw-plugin-services'),
     'function matchaPluginServiceError(error) {',
     '\treturn {',
     '\t\terror_name: error instanceof Error ? error.name : typeof error,',
@@ -1964,7 +1979,7 @@ function patchProviderConfigServicesTrace(filePath, patchId) {
     '}',
   ].join('\n');
   const helperNeedle = 'async function startPluginServices(params) {';
-  const helperPatch = replaceOptionalOnce(source, helperNeedle, `${helper}\n${helperNeedle}`, patchId);
+  const helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId, false);
   source = helperPatch.source;
   changed ||= helperPatch.changed;
 
@@ -1973,37 +1988,37 @@ function patchProviderConfigServicesTrace(filePath, patchId) {
 \t\ttry {`;
   const stopReplacement = `\tconst stopService = async (entry, failures, deadline, beforeStop) => {
 \t\tentry.stopping = true;
-\t\tmatchaPluginServiceTrace("stop-start", {
+\t\tmatchaPluginServiceTrace("stop-start", () => ({
 \t\t\tplugin_id: entry.pluginId,
 \t\t\tservice_id: entry.id,
 \t\t\thas_deadline: deadline !== void 0,
 \t\t\tstartup_pending: Boolean(entry.startup)
-\t\t});
+\t\t}));
 \t\ttry {`;
-  const stopPatch = replaceOptionalOnce(source, stopNeedle, stopReplacement, patchId);
+  const stopPatch = replaceProviderTraceOnce(source, stopNeedle, stopReplacement, patchId);
   source = stopPatch.source;
   changed ||= stopPatch.changed;
 
   const stopDoneNeedle = `\t\tawait runBeforeDeadline(cleanup, deadline, entry.startup ? "plugin service startup settlement" : "plugin service stop");`;
   const stopDoneReplacement = `${stopDoneNeedle}
-\t\tmatchaPluginServiceTrace("stop-done", {
+\t\tmatchaPluginServiceTrace("stop-done", () => ({
 \t\t\tplugin_id: entry.pluginId,
 \t\t\tservice_id: entry.id
-\t\t});`;
-  const stopDonePatch = replaceOptionalOnce(source, stopDoneNeedle, stopDoneReplacement, patchId);
+\t\t}));`;
+  const stopDonePatch = replaceProviderTraceOnce(source, stopDoneNeedle, stopDoneReplacement, patchId);
   source = stopDonePatch.source;
   changed ||= stopDonePatch.changed;
 
   const stopFailedNeedle = `\t} catch (err) {
 \t\tlog.warn(\`plugin service stop failed (\${entry.id}): \${String(err)}\`);`;
   const stopFailedReplacement = `\t} catch (err) {
-\t\tmatchaPluginServiceTrace("stop-failed", {
+\t\tmatchaPluginServiceTrace("stop-failed", () => ({
 \t\t\tplugin_id: entry.pluginId,
 \t\t\tservice_id: entry.id,
 \t\t\t...matchaPluginServiceError(err)
-\t\t});
+\t\t}));
 \t\tlog.warn(\`plugin service stop failed (\${entry.id}): \${String(err)}\`);`;
-  const stopFailedPatch = replaceOptionalOnce(source, stopFailedNeedle, stopFailedReplacement, patchId);
+  const stopFailedPatch = replaceProviderTraceOnce(source, stopFailedNeedle, stopFailedReplacement, patchId);
   source = stopFailedPatch.source;
   changed ||= stopFailedPatch.changed;
 
@@ -2015,24 +2030,24 @@ function patchProviderConfigServicesTrace(filePath, patchId) {
 \t\tstopRequested = true;
 \t\tconst strict = options?.strict === true;
 \t\tconst deadline = strict ? options.deadlineAtMs : void 0;
-\t\tmatchaPluginServiceTrace("handle-stop", {
+\t\tmatchaPluginServiceTrace("handle-stop", () => ({
 \t\t\tstrict,
 \t\t\tservice_count: ownedServices.length,
 \t\t\thas_deadline: deadline !== void 0
-\t\t});`;
-  const handleStopPatch = replaceOptionalOnce(source, handleStopNeedle, handleStopReplacement, patchId);
+\t\t}));`;
+  const handleStopPatch = replaceProviderTraceOnce(source, handleStopNeedle, handleStopReplacement, patchId);
   source = handleStopPatch.source;
   changed ||= handleStopPatch.changed;
 
   const aggregateNeedle = `\t\tif (failures.length > 0) throw new AggregateError(failures, strict ? "plugin service replacement cleanup failed" : "multiple diagnostics exporters failed to stop");`;
   const aggregateReplacement = `\t\tif (failures.length > 0) {
-\t\t\tmatchaPluginServiceTrace("handle-stop-failed", {
+\t\t\tmatchaPluginServiceTrace("handle-stop-failed", () => ({
 \t\t\t\tstrict,
 \t\t\t\tfailures: failures.length
-\t\t\t});
+\t\t\t}));
 \t\t\tthrow new AggregateError(failures, strict ? "plugin service replacement cleanup failed" : "multiple diagnostics exporters failed to stop");
 \t\t}`;
-  const aggregatePatch = replaceOptionalOnce(source, aggregateNeedle, aggregateReplacement, patchId);
+  const aggregatePatch = replaceProviderTraceOnce(source, aggregateNeedle, aggregateReplacement, patchId);
   source = aggregatePatch.source;
   changed ||= aggregatePatch.changed;
 
@@ -2040,38 +2055,38 @@ function patchProviderConfigServicesTrace(filePath, patchId) {
 \t\tconst service = entry.service;`;
   const startReplacement = `\tconst startService = async (entry, config, strict = false, index = ownedServices.length) => {
 \t\tconst service = entry.service;
-\t\tmatchaPluginServiceTrace("start-service", {
+\t\tmatchaPluginServiceTrace("start-service", () => ({
 \t\t\tplugin_id: entry.pluginId,
 \t\t\tservice_id: service.id,
 \t\t\tstrict
-\t\t});`;
-  const startPatch = replaceOptionalOnce(source, startNeedle, startReplacement, patchId);
+\t\t}));`;
+  const startPatch = replaceProviderTraceOnce(source, startNeedle, startReplacement, patchId);
   source = startPatch.source;
   changed ||= startPatch.changed;
 
   const startDoneNeedle = `\t\tawait (params.startupTrace ? params.startupTrace.measure(traceName, invokeStart) : invokeStart());
 \t\treturn true;`;
   const startDoneReplacement = `\t\tawait (params.startupTrace ? params.startupTrace.measure(traceName, invokeStart) : invokeStart());
-\t\tmatchaPluginServiceTrace("start-service-done", {
+\t\tmatchaPluginServiceTrace("start-service-done", () => ({
 \t\t\tplugin_id: entry.pluginId,
 \t\t\tservice_id: service.id
-\t\t});
+\t\t}));
 \t\treturn true;`;
-  const startDonePatch = replaceOptionalOnce(source, startDoneNeedle, startDoneReplacement, patchId);
+  const startDonePatch = replaceProviderTraceOnce(source, startDoneNeedle, startDoneReplacement, patchId);
   source = startDonePatch.source;
   changed ||= startDonePatch.changed;
 
   const startFailedNeedle = `\t} catch (err) {
 \t\tserviceContext.serviceHealth?.reportFailure(err);`;
   const startFailedReplacement = `\t} catch (err) {
-\t\tmatchaPluginServiceTrace("start-service-failed", {
+\t\tmatchaPluginServiceTrace("start-service-failed", () => ({
 \t\t\tplugin_id: entry.pluginId,
 \t\t\tservice_id: service.id,
 \t\t\tstrict,
 \t\t\t...matchaPluginServiceError(err)
-\t\t});
+\t\t}));
 \t\tserviceContext.serviceHealth?.reportFailure(err);`;
-  const startFailedPatch = replaceOptionalOnce(source, startFailedNeedle, startFailedReplacement, patchId);
+  const startFailedPatch = replaceProviderTraceOnce(source, startFailedNeedle, startFailedReplacement, patchId);
   source = startFailedPatch.source;
   changed ||= startFailedPatch.changed;
 
@@ -2083,10 +2098,7 @@ function patchProviderConfigTaskTrace(filePath, patchId) {
   let source = readText(filePath);
   let changed = false;
   const helper = [
-    'function matchaTaskDebugTrace(phase, details = {}) {',
-    '\tconst suffix = Object.entries(details).filter(([, value]) => value !== void 0).map(([key, value]) => `${key}=${String(value)}`).join(" ");',
-    '\tconsole.warn(`[startup-trace] source=task-registry-maintenance phase=${phase}${suffix ? " detail=" + suffix : ""}`);',
-    '}',
+    buildProviderTraceHelper('matchaTaskDebugTrace', 'task-registry-maintenance'),
     'function matchaTaskDebugError(error) {',
     '\treturn {',
     '\t\terror_name: error instanceof Error ? error.name : typeof error,',
@@ -2098,7 +2110,7 @@ function patchProviderConfigTaskTrace(filePath, patchId) {
     '}',
   ].join('\n');
   const helperNeedle = 'const SWEEP_YIELD_BATCH_SIZE = 25;';
-  const helperPatch = replaceOptionalOnce(source, helperNeedle, `${helperNeedle}\n${helper}`, patchId);
+  const helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId);
   source = helperPatch.source;
   changed ||= helperPatch.changed;
 
@@ -2112,40 +2124,40 @@ function patchProviderConfigTaskTrace(filePath, patchId) {
 \tconst childSessionKey = task.childSessionKey?.trim();
 \tif (!childSessionKey) return;
 \tconst agentId = taskRegistryMaintenanceRuntime.parseAgentSessionKey(childSessionKey)?.agentId;
-\tmatchaTaskDebugTrace("session-entry.lookup", {
+\tmatchaTaskDebugTrace("session-entry.lookup", () => ({
 \t\ttask_id_len: matchaTaskDebugLen(task.taskId),
 \t\truntime: task.runtime ?? "none",
 \t\tchild_session_key_len: childSessionKey.length,
 \t\tagent_id_present: Boolean(agentId?.trim()),
 \t\tagent_id_len: matchaTaskDebugLen(agentId)
-\t});
+\t}));
 \tlet storePath;
 \ttry {
 \t\tstorePath = taskRegistryMaintenanceRuntime.resolveStorePath(void 0, { agentId });
 \t} catch (error) {
-\t\tmatchaTaskDebugTrace("session-entry.store-path-failed", {
+\t\tmatchaTaskDebugTrace("session-entry.store-path-failed", () => ({
 \t\t\ttask_id_len: matchaTaskDebugLen(task.taskId),
 \t\t\truntime: task.runtime ?? "none",
 \t\t\tchild_session_key_len: childSessionKey.length,
 \t\t\tagent_id_present: Boolean(agentId?.trim()),
 \t\t\t...matchaTaskDebugError(error)
-\t\t});
+\t\t}));
 \t\tthrow error;
 \t}
 \ttry {
 \t\treturn findSessionEntryByKey(getSessionEntryLookup(storePath, context), childSessionKey);
 \t} catch (error) {
-\t\tmatchaTaskDebugTrace("session-entry.lookup-failed", {
+\t\tmatchaTaskDebugTrace("session-entry.lookup-failed", () => ({
 \t\t\ttask_id_len: matchaTaskDebugLen(task.taskId),
 \t\t\truntime: task.runtime ?? "none",
 \t\t\tchild_session_key_len: childSessionKey.length,
 \t\t\tagent_id_present: Boolean(agentId?.trim()),
 \t\t\t...matchaTaskDebugError(error)
-\t\t});
+\t\t}));
 \t\tthrow error;
 \t}
 }`;
-  const sessionPatch = replaceOptionalOnce(source, sessionNeedle, sessionReplacement, patchId);
+  const sessionPatch = replaceProviderTraceOnce(source, sessionNeedle, sessionReplacement, patchId);
   source = sessionPatch.source;
   changed ||= sessionPatch.changed;
 
@@ -2171,15 +2183,15 @@ function patchProviderConfigTaskTrace(filePath, patchId) {
   const blockersReplacement = `function getInspectableActiveTaskRestartBlockers() {
 \ttaskRegistryMaintenanceRuntime.ensureTaskRegistryReady();
 \tconst candidates = taskRegistryMaintenanceRuntime.listTaskRecords(isTaskRestartBlocker);
-\tmatchaTaskDebugTrace("restart-blockers.candidates", { count: candidates.length });
+\tmatchaTaskDebugTrace("restart-blockers.candidates", () => ({ count: candidates.length }));
 \tlet reconciled;
 \ttry {
 \t\treconciled = reconcileTaskRecordsForOperatorInspection(candidates);
 \t} catch (error) {
-\t\tmatchaTaskDebugTrace("restart-blockers.reconcile-failed", {
+\t\tmatchaTaskDebugTrace("restart-blockers.reconcile-failed", () => ({
 \t\t\tcandidate_count: candidates.length,
 \t\t\t...matchaTaskDebugError(error)
-\t\t});
+\t\t}));
 \t\tthrow error;
 \t}
 \tconst blockers = [];
@@ -2196,10 +2208,10 @@ function patchProviderConfigTaskTrace(filePath, patchId) {
 \t\tif (task.task) blocker.title = task.task;
 \t\tblockers.push(blocker);
 \t}
-\tmatchaTaskDebugTrace("restart-blockers.result", { count: blockers.length });
+\tmatchaTaskDebugTrace("restart-blockers.result", () => ({ count: blockers.length }));
 \treturn blockers;
 }`;
-  const blockersPatch = replaceOptionalOnce(source, blockersNeedle, blockersReplacement, patchId);
+  const blockersPatch = replaceProviderTraceOnce(source, blockersNeedle, blockersReplacement, patchId);
   source = blockersPatch.source;
   changed ||= blockersPatch.changed;
 
@@ -2211,10 +2223,7 @@ function patchProviderConfigSessionPathTrace(filePath, patchId) {
   let source = readText(filePath);
   let changed = false;
   const helper = [
-    'function matchaSessionPathTrace(phase, details = {}) {',
-    '\tconst suffix = Object.entries(details).filter(([, value]) => value !== void 0).map(([key, value]) => `${key}=${String(value)}`).join(" ");',
-    '\tconsole.warn(`[startup-trace] source=session-paths phase=${phase}${suffix ? " detail=" + suffix : ""}`);',
-    '}',
+    buildProviderTraceHelper('matchaSessionPathTrace', 'session-paths'),
   ].join('\n');
   const helperNeedle = `var SessionStoreAgentIdRequiredError = class extends Error {
 \tconstructor() {
@@ -2222,7 +2231,7 @@ function patchProviderConfigSessionPathTrace(filePath, patchId) {
 \t\tthis.name = "SessionStoreAgentIdRequiredError";
 \t}
 };`;
-  const helperPatch = replaceOptionalOnce(source, helperNeedle, `${helperNeedle}\n${helper}`, patchId);
+  const helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId);
   source = helperPatch.source;
   changed ||= helperPatch.changed;
 
@@ -2230,14 +2239,14 @@ function patchProviderConfigSessionPathTrace(filePath, patchId) {
 \t\tif (!opts?.agentId?.trim()) throw new SessionStoreAgentIdRequiredError();`;
   const defaultReplacement = `\tif (!store) {
 \t\tif (!opts?.agentId?.trim()) {
-\t\t\tmatchaSessionPathTrace("store-path.failed", {
+\t\t\tmatchaSessionPathTrace("store-path.failed", () => ({
 \t\t\t\tstore_present: false,
 \t\t\t\ttemplate: false,
 \t\t\t\tagent_id_present: false
-\t\t\t});
+\t\t\t}));
 \t\t\tthrow new SessionStoreAgentIdRequiredError();
 \t\t}`;
-  const defaultPatch = replaceOptionalOnce(source, defaultNeedle, defaultReplacement, patchId);
+  const defaultPatch = replaceProviderTraceOnce(source, defaultNeedle, defaultReplacement, patchId);
   source = defaultPatch.source;
   changed ||= defaultPatch.changed;
 
@@ -2245,14 +2254,14 @@ function patchProviderConfigSessionPathTrace(filePath, patchId) {
 \t\tif (!opts?.agentId?.trim()) throw new SessionStoreAgentIdRequiredError();`;
   const templateReplacement = `\tif (store.includes("{agentId}")) {
 \t\tif (!opts?.agentId?.trim()) {
-\t\t\tmatchaSessionPathTrace("store-path.failed", {
+\t\t\tmatchaSessionPathTrace("store-path.failed", () => ({
 \t\t\t\tstore_present: true,
 \t\t\t\ttemplate: true,
 \t\t\t\tagent_id_present: false
-\t\t\t});
+\t\t\t}));
 \t\t\tthrow new SessionStoreAgentIdRequiredError();
 \t\t}`;
-  const templatePatch = replaceOptionalOnce(source, templateNeedle, templateReplacement, patchId);
+  const templatePatch = replaceProviderTraceOnce(source, templateNeedle, templateReplacement, patchId);
   source = templatePatch.source;
   changed ||= templatePatch.changed;
 

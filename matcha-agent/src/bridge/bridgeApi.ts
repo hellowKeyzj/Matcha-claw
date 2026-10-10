@@ -1,3 +1,4 @@
+import { isTraceEnabled } from '../utils/trace.js'
 import axios from 'axios'
 
 import { debugBody, extractErrorDetail } from './debugUtils.js'
@@ -67,8 +68,9 @@ export class BridgeFatalError extends Error {
 }
 
 export function createBridgeApiClient(deps: BridgeApiDeps): BridgeApiClient {
-  function debug(msg: string): void {
-    deps.onDebug?.(msg)
+  function debug(msg: string | (() => string)): void {
+    if (isTraceEnabled())
+      deps.onDebug?.(typeof msg === 'function' ? msg() : msg)
   }
 
   let consecutiveEmptyPolls = 0
@@ -191,9 +193,10 @@ export function createBridgeApiClient(deps: BridgeApiDeps): BridgeApiClient {
         `[bridge:api] POST /v1/environments/bridge -> ${response.status} environment_id=${response.data.environment_id}`,
       )
       debug(
-        `[bridge:api] >>> ${debugBody({ machine_name: config.machineName, directory: config.dir, branch: config.branch, git_repo_url: config.gitRepoUrl, max_sessions: config.maxSessions, metadata: { worker_type: config.workerType } })}`,
+        () =>
+          `[bridge:api] >>> ${debugBody({ machine_name: config.machineName, directory: config.dir, branch: config.branch, git_repo_url: config.gitRepoUrl, max_sessions: config.maxSessions, metadata: { worker_type: config.workerType } })}`,
       )
-      debug(`[bridge:api] <<< ${debugBody(response.data)}`)
+      debug(() => `[bridge:api] <<< ${debugBody(response.data)}`)
       return response.data
     },
 
@@ -246,7 +249,7 @@ export function createBridgeApiClient(deps: BridgeApiDeps): BridgeApiClient {
       debug(
         `[bridge:api] GET .../work/poll -> ${response.status} workId=${response.data.id} type=${response.data.data?.type}${response.data.data?.id ? ` sessionId=${response.data.data.id}` : ''}`,
       )
-      debug(`[bridge:api] <<< ${debugBody(response.data)}`)
+      debug(() => `[bridge:api] <<< ${debugBody(response.data)}`)
       return response.data
     },
 
@@ -449,8 +452,8 @@ export function createBridgeApiClient(deps: BridgeApiDeps): BridgeApiClient {
       debug(
         `[bridge:api] POST /v1/sessions/${sessionId}/events -> ${response.status}`,
       )
-      debug(`[bridge:api] >>> ${debugBody({ events: [event] })}`)
-      debug(`[bridge:api] <<< ${debugBody(response.data)}`)
+      debug(() => `[bridge:api] >>> ${debugBody({ events: [event] })}`)
+      debug(() => `[bridge:api] <<< ${debugBody(response.data)}`)
     },
   }
 }

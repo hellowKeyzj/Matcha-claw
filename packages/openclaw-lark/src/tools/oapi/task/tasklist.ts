@@ -182,7 +182,7 @@ export function registerFeishuTaskTasklistTool(api: OpenClawPluginApi): void {
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.info(`create: name=${p.name}, members_count=${p.members?.length ?? 0}`);
+              log.trace(() => `create: name=${p.name}, members_count=${p.members?.length ?? 0}`);
 
               const data: any = { name: p.name };
 
@@ -222,7 +222,7 @@ export function registerFeishuTaskTasklistTool(api: OpenClawPluginApi): void {
             // GET
             // -----------------------------------------------------------------
             case 'get': {
-              log.info(`get: tasklist_guid=${p.tasklist_guid}`);
+              log.trace(() => `get: tasklist_guid=${p.tasklist_guid}`);
 
               const res = await client.invoke(
                 'feishu_task_tasklist.get',
@@ -253,7 +253,7 @@ export function registerFeishuTaskTasklistTool(api: OpenClawPluginApi): void {
             // LIST
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: page_size=${p.page_size ?? 50}`);
+              log.trace(() => `list: page_size=${p.page_size ?? 50}`);
 
               const res = await client.invoke(
                 'feishu_task_tasklist.list',
@@ -286,7 +286,7 @@ export function registerFeishuTaskTasklistTool(api: OpenClawPluginApi): void {
             // TASKS - 列出清单内的任务
             // -----------------------------------------------------------------
             case 'tasks': {
-              log.info(`tasks: tasklist_guid=${p.tasklist_guid}, completed=${p.completed ?? 'all'}`);
+              log.trace(() => `tasks: tasklist_guid=${p.tasklist_guid}, completed=${p.completed ?? 'all'}`);
 
               const res = await client.invoke(
                 'feishu_task_tasklist.tasks',
@@ -323,7 +323,7 @@ export function registerFeishuTaskTasklistTool(api: OpenClawPluginApi): void {
             // PATCH
             // -----------------------------------------------------------------
             case 'patch': {
-              log.info(`patch: tasklist_guid=${p.tasklist_guid}, name=${p.name}`);
+              log.trace(() => `patch: tasklist_guid=${p.tasklist_guid}, name=${p.name}`);
 
               // 飞书 Task API 要求特殊的更新格式
               const tasklistData: any = {};
@@ -379,7 +379,7 @@ export function registerFeishuTaskTasklistTool(api: OpenClawPluginApi): void {
                 });
               }
 
-              log.info(`add_members: tasklist_guid=${p.tasklist_guid}, members_count=${p.members.length}`);
+              log.trace(() => `add_members: tasklist_guid=${p.tasklist_guid}, members_count=${p.members.length}`);
 
               const memberData = p.members.map((m) => ({
                 id: m.id,

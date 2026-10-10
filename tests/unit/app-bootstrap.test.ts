@@ -45,6 +45,7 @@ const hoisted = vi.hoisted(() => ({
   createDiagnosticsExportDependenciesMock: vi.fn(),
   createCloudAccountClientMock: vi.fn(),
   createCloudAccountServiceMock: vi.fn(),
+  composeLicenseServiceMock: vi.fn(),
   createCloudProviderSyncMock: vi.fn(),
   cloudAccountServicePrewarmMock: vi.fn(),
   startHostApiServerMock: vi.fn(),
@@ -127,6 +128,9 @@ vi.mock('../../electron/main/cloud-account/client', () => ({
 vi.mock('../../electron/main/cloud-account/service', () => ({
   createCloudAccountService: (...args: unknown[]) => hoisted.createCloudAccountServiceMock(...args),
 }));
+vi.mock('../../electron/main/license/composition', () => ({
+  composeLicenseService: (...args: unknown[]) => hoisted.composeLicenseServiceMock(...args),
+}));
 vi.mock('../../electron/main/cloud-account/provider-sync', () => ({
   createCloudProviderSync: (...args: unknown[]) => hoisted.createCloudProviderSyncMock(...args),
 }));
@@ -146,6 +150,7 @@ vi.mock('../../electron/main/gateway-control-ready-probe', () => ({
 
 function createMainWindowFixture() {
   return {
+    webContents: { id: 1, on: vi.fn(), isDestroyed: vi.fn(() => false) },
     on: vi.fn(),
     hide: vi.fn(),
     show: vi.fn(),
@@ -326,6 +331,14 @@ beforeEach(() => {
     runtimeExited: vi.fn(), runtimeRestarted: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined),
   });
   hoisted.createCloudAccountClientMock.mockReturnValue({ fetchClientBootstrap: vi.fn() });
+  hoisted.composeLicenseServiceMock.mockReturnValue({
+    gate: vi.fn(),
+    storedKey: vi.fn(),
+    validate: vi.fn(),
+    revalidate: vi.fn(),
+    clear: vi.fn(),
+    dispose: vi.fn().mockResolvedValue(undefined),
+  });
   hoisted.createDiagnosticsExportDependenciesMock.mockReturnValue({
     transport: { download: vi.fn() },
     showSaveDialog: vi.fn(),
@@ -415,7 +428,7 @@ describe('bootstrapMainApplication', () => {
         command: expect.any(Function),
         restart: expect.any(Function),
       }),
-      rendererEventRoutes: expect.anything(),
+      sessionObservers: expect.anything(),
       providerCredentialStatusTransport:
         hoisted.createProviderCredentialStatusTransportMock.mock.results[0]?.value,
       credentialWriteAdapter: expect.any(Function),
@@ -423,7 +436,17 @@ describe('bootstrapMainApplication', () => {
     expect(hostApiContext).not.toHaveProperty('hostApiTransports');
     expect(hostApiContext).not.toHaveProperty('sessionEventsTransport');
     expect(hostApiContext).not.toHaveProperty('close');
-    expect(hostApiContext).not.toHaveProperty('licenseService');
+    expect(hoisted.composeLicenseServiceMock).toHaveBeenCalledWith({ onGateChanged: expect.any(Function) });
+    expect(hostApiContext.licenseService).toBe(hoisted.composeLicenseServiceMock.mock.results[0].value);
+    expect(hoisted.composeLicenseServiceMock.mock.results[0].value.gate).not.toHaveBeenCalled();
+    expect(hoisted.composeLicenseServiceMock.mock.results[0].value.storedKey).not.toHaveBeenCalled();
+    const licenseGate = {
+      state: 'blocked', reason: 'no_stored_key', checkedAtMs: 1,
+      hasStoredKey: false, hasUsableCache: false, nextRevalidateAtMs: null,
+      lastValidation: null, renewalAlert: null,
+    };
+    hoisted.composeLicenseServiceMock.mock.calls[0][0].onGateChanged(licenseGate);
+    expect(context.deps.hostEventBus.emit).toHaveBeenCalledWith('license:gate-changed', licenseGate);
     expect(hoisted.startHostApiServerMock).toHaveBeenCalledWith(
       hostApiContext,
       undefined,
@@ -448,8 +471,9 @@ describe('bootstrapMainApplication', () => {
       }),
       hostEventBus: context.deps.hostEventBus,
       getMainWindow: context.deps.getMainWindow,
-      rendererEventRoutes: expect.anything(),
+      sessionObservers: hostApiContext.sessionObservers,
       sessionEvents: bundle.sessionEventsTransport,
+      resyncSessions: expect.any(Function),
     });
     expect(result).toEqual(expect.objectContaining({
       mainWindow: context.mainWindow,
@@ -461,7 +485,20 @@ describe('bootstrapMainApplication', () => {
     expect(hoisted.loadMainWindowContentMock).toHaveBeenCalledWith(context.mainWindow);
     expect(readE2EStartupOutcome()).toBeUndefined();
 
-    await result.closeRuntimeHostDelivery();
+    const licenseService = hoisted.composeLicenseServiceMock.mock.results[0].value;
+    let resolveLicenseDisposal!: () => void;
+    licenseService.dispose.mockReturnValue(new Promise<void>((resolve) => {
+      resolveLicenseDisposal = resolve;
+    }));
+    const closing = result.closeRuntimeHostDelivery();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(context.closeRuntimeHostDelivery).not.toHaveBeenCalled();
+    resolveLicenseDisposal();
+    await closing;
+    expect(licenseService.dispose).toHaveBeenCalledOnce();
+    expect(licenseService.dispose.mock.invocationCallOrder[0]).toBeLessThan(
+      context.closeRuntimeHostDelivery.mock.invocationCallOrder[0],
+    );
     expect(bundle.close).toHaveBeenCalledOnce();
     expect(bundle.sessionEventsTransport.close).toHaveBeenCalledOnce();
     expect(context.closeRuntimeHostDelivery).toHaveBeenCalledOnce();
@@ -483,7 +520,10 @@ describe('bootstrapMainApplication', () => {
     const bootstrapping = bootstrapMainApplication(context.deps as never);
     await Promise.resolve();
 
-    expect(hoisted.registerStaticIpcHandlersMock).toHaveBeenCalledWith(context.deps.getMainWindow);
+    expect(hoisted.registerStaticIpcHandlersMock).toHaveBeenCalledWith(
+      context.deps.getMainWindow,
+      expect.objectContaining({ attach: expect.any(Function), close: expect.any(Function) }),
+    );
     expect(hoisted.registerE2EUpdateHandlersMock).toHaveBeenCalledOnce();
     expect(hoisted.loadMainWindowContentMock).toHaveBeenCalledWith(context.mainWindow);
     expect(hoisted.createRuntimeHostTransportBundleMock).not.toHaveBeenCalled();
@@ -537,6 +577,7 @@ describe('bootstrapMainApplication', () => {
 
     expect(context.directRuntimeHost.stop).toHaveBeenCalledOnce();
     expect(context.directRuntimeHost.forceKill).not.toHaveBeenCalled();
+    expect(hoisted.composeLicenseServiceMock.mock.results[0].value.dispose).toHaveBeenCalledOnce();
     expect(bundle.close).toHaveBeenCalledOnce();
     expect(bundle.sessionEventsTransport.close).toHaveBeenCalledOnce();
     expect(context.closeRuntimeHostDelivery).toHaveBeenCalledOnce();

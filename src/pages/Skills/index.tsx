@@ -2131,7 +2131,9 @@ export function Skills() {
                 </div>
               </AgentPageToolbar>
               <TabsContent value={packageTab} className="mt-0 space-y-4">
-                <p className="text-sm text-muted-foreground">{t(packageTab === 'installed' ? 'sealed.installedDescription' : packageTab === 'mine' ? 'sealed.mineDescription' : 'sealed.marketDescription')}</p>
+                {packageTab !== 'market' && (
+                  <p className="text-sm text-muted-foreground">{t(packageTab === 'installed' ? 'sealed.installedDescription' : 'sealed.mineDescription')}</p>
+                )}
                 {packagePanelError && (
                   <div role="alert" className="flex flex-wrap items-center gap-2 text-sm">
                     <AlertCircle className="size-4 shrink-0 text-destructive" aria-hidden="true" />

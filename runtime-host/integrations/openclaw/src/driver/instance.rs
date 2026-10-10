@@ -20,9 +20,10 @@ use crate::{
         control_ui::{ControlUiUrlError, PublicControlUiUrl},
     },
     lifecycle::{
+        doctor::{DoctorRepairError, OpenClawDoctorRepair},
         launch::{LaunchError, LaunchFactory, OpenClawLaunchInput, SealedRuntimeHost},
         logs::{LifecycleDiagnostic, LifecycleDiagnosticState, LifecycleLogBuffer},
-        recovery::{DoctorRepairError, OpenClawDoctorRepair, OpenClawStartRecovery},
+        recovery::OpenClawStartRecovery,
         restart::OpenClawRestartPolicy,
         stdio::OpenClawStdioActivation,
     },
@@ -56,6 +57,12 @@ pub struct OpenClawInput {
 
 pub struct OpenClawDriver {
     pub owner: StdMutex<Option<SupervisorOwner>>,
+    pub(crate) lifecycle_gate: Arc<Mutex<()>>,
+    pub(crate) repair_state: StdMutex<runtime_directory::RuntimeRepairSnapshot>,
+    pub(crate) doctor_repair: OpenClawDoctorRepair,
+    pub(crate) diagnostic_state: LifecycleDiagnosticState,
+    pub(crate) runtime_host_mcp_executable: PathBuf,
+    pub(crate) runtime_host_mcp_state_dir: PathBuf,
     pub diagnostic_reporter: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
     pub gateway: Arc<Mutex<OpenClawGateway>>,
     pub gateway_control: OpenClawGatewayControl,
@@ -83,6 +90,8 @@ pub struct OpenClawDriver {
 pub struct PreparedOpenClaw {
     launch: LaunchFactory,
     doctor_repair: OpenClawDoctorRepair,
+    runtime_host_mcp_executable: PathBuf,
+    runtime_host_mcp_state_dir: PathBuf,
     pub working_directory: PathBuf,
     pub electron_image: PathBuf,
     entry: PathBuf,
@@ -245,22 +254,6 @@ impl OpenClawDriver {
                 &input.openclaw_dir,
             )
             .map_err(ConstructionError::WorkspaceProjection)?;
-        crate::native_config::settings::ensure_default_session_idle(state_dir.clone())
-            .map_err(ConstructionError::Projection)?;
-        crate::native_config::control_ui::ensure_matcha_operator_device_auth_policy(
-            state_dir.clone(),
-        )
-        .map_err(ConstructionError::ControlUiPolicy)?;
-        if !matches!(
-            crate::native_config::connector::preset::project_preset_mcp_server(
-                state_dir.clone(),
-                &runtime_host_mcp_executable,
-                &runtime_host_mcp_state_dir,
-            ),
-            crate::native_config::connector::external::ConnectorProjectionEffect::Written { .. }
-        ) {
-            return Err(ConstructionError::PresetMcpProjection);
-        }
         let sealed_runtime_host = match (input.sealed_endpoint, input.sealed_token) {
             (Some(endpoint), Some(token)) => Some(SealedRuntimeHost { endpoint, token }),
             (None, None) => None,
@@ -287,6 +280,8 @@ impl OpenClawDriver {
         Ok(PreparedOpenClaw {
             launch,
             doctor_repair,
+            runtime_host_mcp_executable,
+            runtime_host_mcp_state_dir,
             working_directory,
             electron_image,
             entry,
@@ -408,10 +403,7 @@ impl PreparedOpenClaw {
             stdio_activation,
             readiness,
             graceful_stop,
-            OpenClawStartRecovery::with_diagnostics_and_invalid_config_repair(
-                diagnostic_state,
-                Arc::new(self.doctor_repair),
-            ),
+            OpenClawStartRecovery::with_diagnostics(diagnostic_state.clone()),
             OpenClawRestartPolicy,
         );
 
@@ -423,6 +415,16 @@ impl PreparedOpenClaw {
         let control_ui_url = self.control_ui_url;
         Ok(OpenClawDriver {
             owner: StdMutex::new(Some(SupervisorOwner::new(supervisor))),
+            lifecycle_gate: Arc::new(Mutex::new(())),
+            repair_state: StdMutex::new(runtime_directory::RuntimeRepairSnapshot {
+                phase: runtime_directory::RuntimeRepairPhase::Idle,
+                trigger: None,
+                failure: None,
+            }),
+            doctor_repair: self.doctor_repair,
+            diagnostic_state,
+            runtime_host_mcp_executable: self.runtime_host_mcp_executable,
+            runtime_host_mcp_state_dir: self.runtime_host_mcp_state_dir,
             diagnostic_reporter,
             gateway,
             gateway_control,
@@ -453,10 +455,7 @@ pub enum ConstructionError {
     Endpoint(GatewayClientError),
     ListenerIdentity,
     ControlUiUrl(ControlUiUrlError),
-    ControlUiPolicy(crate::native_config::control_ui::Error),
     WorkspaceProjection(crate::native_config::workspace::WorkspaceProjectionError),
-    Projection(crate::native_config::settings::SettingsProjectionError),
-    PresetMcpProjection,
     Launch(LaunchError),
     DoctorRepair(DoctorRepairError),
     #[cfg(unix)]
@@ -469,10 +468,7 @@ impl fmt::Display for ConstructionError {
             Self::Endpoint(error) => error.fmt(formatter),
             Self::ListenerIdentity => formatter.write_str("listener identity generation failed"),
             Self::ControlUiUrl(error) => error.fmt(formatter),
-            Self::ControlUiPolicy(error) => error.fmt(formatter),
             Self::WorkspaceProjection(error) => error.fmt(formatter),
-            Self::Projection(error) => error.fmt(formatter),
-            Self::PresetMcpProjection => formatter.write_str("preset MCP projection failed"),
             Self::Launch(error) => error.fmt(formatter),
             Self::DoctorRepair(error) => error.fmt(formatter),
             #[cfg(unix)]
@@ -487,10 +483,7 @@ impl std::error::Error for ConstructionError {
             Self::Endpoint(error) => Some(error),
             Self::ListenerIdentity => None,
             Self::ControlUiUrl(error) => Some(error),
-            Self::ControlUiPolicy(error) => Some(error),
             Self::WorkspaceProjection(error) => Some(error),
-            Self::Projection(error) => Some(error),
-            Self::PresetMcpProjection => None,
             Self::Launch(error) => Some(error),
             Self::DoctorRepair(error) => Some(error),
             #[cfg(unix)]

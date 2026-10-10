@@ -641,12 +641,6 @@ exports.default = async function afterPack(context) {
       localSourceCandidates: [join(__dirname, '..', 'build', 'openclaw-plugins', pluginId)],
     })),
     {
-      pluginId: 'memory-lancedb-pro',
-      localSourceCandidates: [
-        join(__dirname, '..', 'build', 'openclaw-plugins', 'memory-lancedb-pro'),
-      ],
-    },
-    {
       pluginId: 'task-manager',
       localSourceCandidates: [
         join(__dirname, '..', 'build', 'openclaw-plugins', 'task-manager'),

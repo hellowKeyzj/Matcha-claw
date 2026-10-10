@@ -456,7 +456,7 @@ impl AgentNodeEventResolution {
         let summary = summary
             .map(|summary| {
                 let summary = summary.trim().to_owned();
-                (summary.len() <= 512
+                (summary.len() <= crate::run::MAX_SUMMARY_BYTES
                     && !summary.is_empty()
                     && !summary.chars().any(char::is_control))
                 .then_some(summary)
@@ -560,9 +560,12 @@ impl AgentNodeEventResolution {
         if !matches!(node_kind, NodeKind::Work | NodeKind::Review) {
             return Err(AgentNodeEventResolutionError::UnexpectedNodeKind);
         }
-        let output_port = match self.output_port() {
-            Some(output_port) => output_port,
-            None => default_output_port(self.event, node_kind)?,
+        let output_port = match self.event {
+            AgentNodeEvent::Complete => node_kind.resolve_source_port(self.output_port())
+                .ok_or(AgentNodeEventResolutionError::AuthorizedResolution(
+                    crate::AuthorizedGraphResolutionError::OutputPortDoesNotMatchEdge,
+                ))?,
+            AgentNodeEvent::Reject => self.output_port().unwrap_or(crate::NodeOutputPort::Failed.as_str()),
         };
         let outcome = match self.event {
             AgentNodeEvent::Complete => AuthorizedGraphOutcome::Completed,
@@ -588,24 +591,6 @@ impl AgentNodeEventResolution {
                 AgentNodeEventResolutionError::BlankGraphRunId
             }
         })
-    }
-}
-
-fn default_output_port(
-    event: AgentNodeEvent,
-    node_kind: NodeKind,
-) -> Result<&'static str, AgentNodeEventResolutionError> {
-    match event {
-        AgentNodeEvent::Reject => Ok("failed"),
-        AgentNodeEvent::Complete => match node_kind {
-            NodeKind::Work => Ok("completed"),
-            NodeKind::Review => Ok("passed"),
-            NodeKind::Start
-            | NodeKind::HumanDecision
-            | NodeKind::ScriptReview
-            | NodeKind::Join
-            | NodeKind::End => Err(AgentNodeEventResolutionError::UnexpectedNodeKind),
-        },
     }
 }
 

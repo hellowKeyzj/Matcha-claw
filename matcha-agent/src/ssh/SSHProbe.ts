@@ -64,7 +64,7 @@ export async function probeRemote(
     .split('\n')
     .map(l => l.trim())
     .filter(Boolean)
-  logForDebugging(`[SSHProbe] raw lines: ${JSON.stringify(lines)}`)
+  logForDebugging(() => `[SSHProbe] raw lines: ${JSON.stringify(lines)}`)
 
   const unameIdx = lines.findIndex(l => /^(Linux|Darwin)\s/.test(l))
   if (unameIdx === -1) {

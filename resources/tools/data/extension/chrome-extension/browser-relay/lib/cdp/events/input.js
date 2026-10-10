@@ -27,10 +27,10 @@ const log = createLogger('evt:input')
  */
 export function handleInputEvent(method, tabId, params, _ctx) {
   if (method === 'Input.dragIntercepted') {
-    log.info(
+    log.info(() => [
       'drag intercepted:', tabId,
       'items:', params?.data?.items?.length || 0,
       'dragOpsAllowed:', params?.data?.dragOperationsMask,
-    )
+    ])
   }
 }

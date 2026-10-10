@@ -1,4 +1,4 @@
-import { logRendererDebug } from '@/lib/debug-logging';
+import { isTraceEnabled, traceLog } from '@/lib/trace-logger';
 import type { SessionAssistantTurnItem, SessionRenderItem } from '../../types/session/render-item';
 import type { SessionStateSnapshot } from '../../types/session/snapshot';
 
@@ -13,7 +13,7 @@ function safeDebugStringify(value: unknown): string {
 }
 
 export function containsTodoToolDebugSignal(value: unknown): boolean {
-  return TODO_TOOL_DEBUG_PATTERN.test(safeDebugStringify(value));
+  return isTraceEnabled() && TODO_TOOL_DEBUG_PATTERN.test(safeDebugStringify(value));
 }
 
 export function summarizeAssistantTurnForTodoToolDebug(
@@ -92,9 +92,9 @@ export function summarizeSnapshotForTodoToolDebug(
   };
 }
 
-export function logRendererTodoToolDebug(stage: string, payload: unknown): void {
-  if (!containsTodoToolDebugSignal(payload)) {
-    return;
-  }
-  logRendererDebug(`[todo-tool-debug] ${stage}`, payload);
+export function logRendererTodoToolDebug(stage: string, payload: () => unknown): void {
+  if (!isTraceEnabled()) return;
+  const detail = payload();
+  if (!containsTodoToolDebugSignal(detail)) return;
+  traceLog(() => [`[todo-tool-debug] ${stage}`, detail]);
 }

@@ -70,12 +70,12 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
     });
   };
 
-  logSessionTrace('abort.start', traceId, {
+  logSessionTrace('abort.start', traceId, () => ({
     phase: runtimeAtClick.runPhase,
     activeRunId: summarizeIdentifier(runId),
     sessionKey: summarizeIdentifier(sessionKey),
     pendingApprovalCount: approvalIds.length,
-  });
+  }));
   clearHistoryPoll();
   clearErrorRecoveryTimer();
   set((state) => ({
@@ -87,25 +87,25 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
   onBeginMutating();
   try {
     const target = resolveSessionOperationTarget(stateAtClick, sessionKey);
-    logSessionTrace('abort.target', traceId, {
+    logSessionTrace('abort.target', traceId, () => ({
       sessionKey: summarizeIdentifier(target.sessionKey),
       endpointSessionId: summarizeIdentifier(target.endpointSessionId),
       sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
-    });
-    logSessionTrace('abort.request', traceId, {
+    }));
+    logSessionTrace('abort.request', traceId, () => ({
       runId: summarizeIdentifier(runId),
       approvalIdsCount: approvalIds.length,
-    });
+    }));
     const response = await hostSessionAbort({
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
       ...(runId ? { runId } : {}),
       ...(approvalIds.length > 0 ? { approvalIds } : {}),
     }, { traceId });
-    logSessionTrace('abort.response', traceId, {
+    logSessionTrace('abort.response', traceId, () => ({
       outcome: response.outcome,
       elapsedMs: Date.now() - startedAtMs,
-    });
+    }));
     if (response.outcome !== 'succeeded') {
       reportFailure(response.outcome === 'target_rejected' ? ABORT_REJECTED_ERROR : ABORT_UNKNOWN_ERROR);
       return;
@@ -113,18 +113,18 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
     onAbortedTelemetry(sessionKey);
     // A receipt is not a terminal event; this deadline never resends cancellation.
     setTimeout(() => {
-      logSessionTrace('abort.terminal.deadline', traceId, {
+      logSessionTrace('abort.terminal.deadline', traceId, () => ({
         phase: getSessionRuntime(get(), sessionKey).runPhase,
         activeRunId: summarizeIdentifier(getSessionRuntime(get(), sessionKey).activeRunId),
         elapsedMs: Date.now() - startedAtMs,
-      });
+      }));
       reportFailure(ABORT_STOPPING_TIMEOUT_ERROR);
     }, ABORT_TERMINAL_WAIT_MS);
   } catch (err) {
-    logSessionTrace('abort.error', traceId, {
+    logSessionTrace('abort.error', traceId, () => ({
       ...summarizeError(err),
       elapsedMs: Date.now() - startedAtMs,
-    });
+    }));
     reportFailure(ABORT_REQUEST_FAILED_ERROR);
   } finally {
     onFinishMutating();

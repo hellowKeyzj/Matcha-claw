@@ -1,5 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
-import { logSessionTrace, summarizeIdentifier, traceHeader } from '../transport/sessions/trace';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from '../transport/sessions/trace';
 import { sendLoopbackJson } from '../transport/client';
 import { decodeCallReceipt } from '../../../../src/types/call-log/receipt';
 import { isCallId } from '../../../../src/types/call-log/decode';
@@ -108,11 +108,11 @@ export function createAgentsTransport(
 
   async function execute(request: unknown, traceId?: string | null): Promise<AgentsTransportResponse> {
     if (!isAgentsRequest(request)) {
-      logSessionTrace('electron.agents.rejected', traceId, summarizeUnknownAgentsRequest(request));
+      logSessionTrace('electron.agents.rejected', traceId, () => summarizeUnknownAgentsRequest(request));
       return { status: 503, body: UNAVAILABLE };
     }
-    const startedAt = Date.now();
-    logSessionTrace('electron.agents.request', traceId, summarizeAgentsRequest(request));
+    const startedAt = traceId && isSessionTraceEnabled() ? Date.now() : 0;
+    logSessionTrace('electron.agents.request', traceId, () => summarizeAgentsRequest(request));
     try {
       const response = await fetcher(`http://127.0.0.1:${port}/api/subagents/agents`, {
         method: 'POST',
@@ -139,21 +139,21 @@ export function createAgentsTransport(
       const validSuccess = !isBackgroundOperation(request.operationId)
         && response.status === 200 && isSuccess(body, request.operationId);
       const validFailure = (response.status === 409 || response.status === 422 || response.status === 503) && isFailure(body);
-      logSessionTrace('electron.agents.response', traceId, {
+      logSessionTrace('electron.agents.response', traceId, () => ({
         operationId: request.operationId,
         status: response.status,
         contract: validSuccess ? summarizeSuccessfulAgentsBody(body, request.operationId) : validFailure ? 'failure' : 'invalid',
         elapsedMs: Date.now() - startedAt,
-      });
+      }));
       if (validSuccess) return { status: 200, body };
       if (validFailure) {
         return { status: response.status, body };
       }
     } catch {
-      logSessionTrace('electron.agents.failure', traceId, {
+      logSessionTrace('electron.agents.failure', traceId, () => ({
         operationId: request.operationId,
         elapsedMs: Date.now() - startedAt,
-      });
+      }));
       // Loopback failures intentionally remain public-unavailable.
     }
     return { status: 503, body: UNAVAILABLE };

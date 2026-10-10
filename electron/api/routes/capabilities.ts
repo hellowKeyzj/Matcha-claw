@@ -169,19 +169,19 @@ export async function handleCapabilityRoutes(
 
   const traceId = readTraceHeader(req.headers);
   const traceStartedAt = traceId && isSessionTraceEnabled() ? Date.now() : 0;
-  const trace = (stage: string, payload: Record<string, unknown> = {}): void => {
+  const trace = (stage: string, payload?: () => Record<string, unknown>): void => {
     if (!traceStartedAt) return;
     logSessionTrace(`electron.hostapi.capability.${stage}`, traceId, {
-      path: '/api/capabilities/execute', elapsedMs: Date.now() - traceStartedAt, ...payload,
+      path: '/api/capabilities/execute', elapsedMs: Date.now() - traceStartedAt, ...payload?.(),
     });
   };
   let body: unknown;
   trace('parse.start');
   try {
     body = await parseJsonBody<unknown>(req);
-    trace('parse.end', { outcome: 'parsed' });
+    trace('parse.end', () => ({ outcome: 'parsed' }));
   } catch {
-    trace('parse.end', { outcome: 'failed', status: 500 });
+    trace('parse.end', () => ({ outcome: 'failed', status: 500 }));
     sendJson(res, 500, CAPABILITY_REQUEST_FAILED);
     return true;
   }
@@ -198,16 +198,16 @@ export async function handleCapabilityRoutes(
 
   if (isRecord(body) && isSubagentConfigurationCapabilityId(body.id)) {
     const traceId = readTraceHeader(req.headers);
-    logSessionTrace('capability.subagent.configuration.dispatch', traceId, summarizeSubagentConfigurationRequest(body));
+    logSessionTrace('capability.subagent.configuration.dispatch', traceId, () => summarizeSubagentConfigurationRequest(body));
     try {
       const response = await deps.runtimeHostTransports.agentsTransport.execute(body, traceId);
-      logSessionTrace('capability.subagent.configuration.response', traceId, {
+      logSessionTrace('capability.subagent.configuration.response', traceId, () => ({
         status: response.status,
         contract: summarizeSubagentConfigurationResponse(response.body),
-      });
+      }));
       sendJson(res, response.status, response.body);
     } catch {
-      logSessionTrace('capability.subagent.configuration.failure', traceId, {});
+      logSessionTrace('capability.subagent.configuration.failure', traceId);
       sendJson(res, 503, SUBAGENT_CONFIGURATION_UNAVAILABLE);
     }
     return true;
@@ -223,19 +223,19 @@ export async function handleCapabilityRoutes(
     trace('session-dispatch.start');
     const sessionResponse = await dispatchSessionCapability(body, deps, readTraceHeader(req.headers),
       deps.sessionObservers.resolve(req.headers[SESSION_PAGE_HEADER.toLowerCase()]), sessionController.signal);
-    trace('session-dispatch.end', {
+    trace('session-dispatch.end', () => ({
       outcome: sessionController.signal.aborted ? 'aborted' : sessionResponse ? 'handled' : 'unhandled',
       status: sessionResponse?.status ?? null,
-    });
+    }));
     if (sessionResponse) {
       if (!sessionController.signal.aborted) sendJson(res, sessionResponse.status, sessionResponse.body);
       return true;
     }
   } catch {
-    trace('session-dispatch.end', {
+    trace('session-dispatch.end', () => ({
       outcome: sessionController.signal.aborted ? 'aborted' : 'failed',
       status: sessionController.signal.aborted ? null : 500,
-    });
+    }));
     if (!sessionController.signal.aborted) sendJson(res, 500, CAPABILITY_REQUEST_FAILED);
     return true;
   } finally {
@@ -291,26 +291,26 @@ export async function handleCapabilityRoutes(
 
   if (body.id === 'team.runtime') {
     const traceId = readTraceHeader(req.headers);
-    logSessionTrace('electron.team.runtime.request', traceId, summarizeTeamRuntimeRequest(body));
+    logSessionTrace('electron.team.runtime.request', traceId, () => summarizeTeamRuntimeRequest(body));
     if (!isTeamRuntimeCapabilityRequest(body)) {
-      logSessionTrace('electron.team.runtime.request-invalid', traceId, summarizeTeamRuntimeRequest(body));
+      logSessionTrace('electron.team.runtime.request-invalid', traceId, () => summarizeTeamRuntimeRequest(body));
       sendJson(res, 400, TEAM_RUNTIME_REQUEST_INVALID);
       return true;
     }
     try {
-      logSessionTrace('electron.team.runtime.transport.request', traceId, summarizeTeamRuntimeRequest(body));
+      logSessionTrace('electron.team.runtime.transport.request', traceId, () => summarizeTeamRuntimeRequest(body));
       const response = await deps.runtimeHostTransports.teamRuntimeTransport.execute(body, traceId ?? undefined);
-      logSessionTrace('electron.team.runtime.transport.response', traceId, {
+      logSessionTrace('electron.team.runtime.transport.response', traceId, () => ({
         status: response.status,
         contract: summarizeTeamRuntimeResult(response.body),
-      });
-      logSessionTrace('electron.team.runtime.response', traceId, {
+      }));
+      logSessionTrace('electron.team.runtime.response', traceId, () => ({
         status: response.status,
         contract: response.status === 202 ? 'admission' : response.status === 200 ? 'operation-result' : 'unavailable',
-      });
+      }));
       sendJson(res, response.status, response.body);
     } catch {
-      logSessionTrace('electron.team.runtime.failure', traceId, {});
+      logSessionTrace('electron.team.runtime.failure', traceId);
       sendJson(res, 503, TEAM_RUNTIME_UNAVAILABLE);
     }
     return true;

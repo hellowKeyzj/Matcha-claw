@@ -13,7 +13,7 @@
  * - User input waiting time
  *
  * Usage:
- * 1. Enable via CLAUDE_CODE_PERFETTO_TRACE=1 or CLAUDE_CODE_PERFETTO_TRACE=<path>
+ * 1. Enable via MATCHACLAW_TRACE=1; CLAUDE_CODE_PERFETTO_TRACE may select a path
  * 2. Optionally set CLAUDE_CODE_PERFETTO_WRITE_INTERVAL_S=<positive integer> to write the
  *    trace file periodically (default: write only on exit).
  * 3. Run Claude Code normally
@@ -29,6 +29,7 @@ import { dirname, join } from 'path'
 import { getSessionId } from '../../bootstrap/state.js'
 import { registerCleanup } from '../cleanupRegistry.js'
 import { logForDebugging } from '../debug.js'
+import { isTraceEnabled } from '../trace.js'
 import {
   getClaudeConfigHomeDir,
   isEnvDefinedFalsy,
@@ -251,6 +252,7 @@ function evictOldestEvents(): void {
  * Call this early in the application lifecycle
  */
 export function initializePerfettoTracing(): void {
+  if (!isTraceEnabled()) return
   const envValue = process.env.CLAUDE_CODE_PERFETTO_TRACE
   logForDebugging(
     `[Perfetto] initializePerfettoTracing called, env value: ${envValue}`,
@@ -258,18 +260,11 @@ export function initializePerfettoTracing(): void {
 
   // Wrap in feature() for dead code elimination - entire block removed from external builds
   if (feature('PERFETTO_TRACING')) {
-    if (!envValue || isEnvDefinedFalsy(envValue)) {
-      logForDebugging(
-        '[Perfetto] Tracing disabled (env var not set or disabled)',
-      )
-      return
-    }
-
     isEnabled = true
     startTimeMs = Date.now()
 
     // Determine trace file path
-    if (isEnvTruthy(envValue)) {
+    if (!envValue || isEnvTruthy(envValue) || isEnvDefinedFalsy(envValue)) {
       const tracesDir = join(getClaudeConfigHomeDir(), 'traces')
       tracePath = join(tracesDir, `trace-${getSessionId()}.json`)
     } else {

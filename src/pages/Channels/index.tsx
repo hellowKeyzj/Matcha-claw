@@ -1,3 +1,4 @@
+import { isTraceEnabled } from '@/lib/trace-logger';
 /**
  * Channels Page
  * Manage messaging channel connections with configuration UI
@@ -122,7 +123,7 @@ export function Channels() {
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
 
   const [dialogTarget, setDialogTarget] = useState<ChannelDialogTarget | null>(null);
-  const [channelToDelete, setChannelToDelete] = useState<{ id: string; type: ChannelType; traceId: string; startedAt: number } | null>(null);
+  const [channelToDelete, setChannelToDelete] = useState<{ id: string; type: ChannelType; traceId: string | undefined; startedAt: number } | null>(null);
   const [pairingChannel, setPairingChannel] = useState<Channel | null>(null);
   const statusRefreshPendingRef = useRef(false);
   const statusRefreshRafRef = useRef<number | null>(null);
@@ -311,9 +312,9 @@ export function Channels() {
                     onConfigure={() => setDialogTarget({ kind: 'configured', channel })}
                     onManagePairing={channel.type === 'feishu' ? () => setPairingChannel(channel) : undefined}
                     onDelete={() => {
-                      const traceId = crypto.randomUUID();
+                      const traceId = isTraceEnabled() ? crypto.randomUUID() : undefined;
                       logChannelTrace('delete.click', traceId);
-                      setChannelToDelete({ id: channel.id, type: channel.type, traceId, startedAt: Date.now() });
+                      setChannelToDelete({ id: channel.id, type: channel.type, traceId, startedAt: isTraceEnabled() ? Date.now() : 0 });
                     }}
                   />
                 ))}
@@ -404,12 +405,12 @@ export function Channels() {
             if (deleted) {
               await fetchChannels({ silent: true });
             }
-            logChannelTrace('delete.final', channelToDelete.traceId, { outcome: deleted ? 'confirmed' : 'unconfirmed', durationMs: Date.now() - channelToDelete.startedAt });
+            logChannelTrace('delete.final', channelToDelete.traceId, () => ({ outcome: deleted ? 'confirmed' : 'unconfirmed', durationMs: Date.now() - channelToDelete.startedAt }));
             setChannelToDelete(null);
           }
         }}
         onCancel={() => {
-          if (channelToDelete) logChannelTrace('delete.final', channelToDelete.traceId, { outcome: 'cancelled', durationMs: Date.now() - channelToDelete.startedAt });
+          if (channelToDelete) logChannelTrace('delete.final', channelToDelete.traceId, () => ({ outcome: 'cancelled', durationMs: Date.now() - channelToDelete.startedAt }));
           setChannelToDelete(null);
         }}
       />
@@ -747,15 +748,15 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
     if (!selectedType || (!activeAccountId && !activeSessionKey)) return;
 
-    const startedAt = Date.now();
+    const startedAt = isTraceEnabled() ? Date.now() : 0;
     logChannelTrace('login.cancel.start', traceId);
     if (shouldStartAuthorization && activeSessionKey) {
       try {
         const authChannelType = selectedType as Extract<ChannelType, 'qqbot' | 'dingtalk' | 'feishu'>;
         await hostChannelsCancelAuthorization(authChannelType, activeSessionKey, { traceId });
-        logChannelTrace('login.cancel.end', traceId, { outcome: 'cancelled', durationMs: Date.now() - startedAt });
+        logChannelTrace('login.cancel.end', traceId, () => ({ outcome: 'cancelled', durationMs: Date.now() - startedAt }));
       } catch (error) {
-        logChannelTrace('login.cancel.end', traceId, { outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt });
+        logChannelTrace('login.cancel.end', traceId, () => ({ outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt }));
       }
       return;
     }
@@ -764,9 +765,9 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
       try {
         const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
         await hostChannelsCancelSession(qrChannelType, activeAccountId, { traceId });
-        logChannelTrace('login.cancel.end', traceId, { outcome: 'cancelled', durationMs: Date.now() - startedAt });
+        logChannelTrace('login.cancel.end', traceId, () => ({ outcome: 'cancelled', durationMs: Date.now() - startedAt }));
       } catch (error) {
-        logChannelTrace('login.cancel.end', traceId, { outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt });
+        logChannelTrace('login.cancel.end', traceId, () => ({ outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt }));
       }
     }
   }, [clearQrGenerateTimeout, selectedType, shouldStartAuthorization, shouldStartQrLogin]);
@@ -804,8 +805,8 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
     let cancelled = false;
     const nextConfigKey = `${selectedType}:${configuredAccountId ?? ''}`;
-    const traceId = crypto.randomUUID();
-    const startedAt = Date.now();
+    const traceId = isTraceEnabled() ? crypto.randomUUID() : undefined;
+    const startedAt = isTraceEnabled() ? Date.now() : 0;
     logChannelTrace('config.read.start', traceId);
 
     (async () => {
@@ -815,14 +816,14 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
         if (cancelled) return;
 
         const hasValues = Object.keys(result.values).length > 0;
-        logChannelTrace('config.read.end', traceId, { outcome: hasValues ? 'loaded' : 'empty', durationMs: Date.now() - startedAt });
+        logChannelTrace('config.read.end', traceId, () => ({ outcome: hasValues ? 'loaded' : 'empty', durationMs: Date.now() - startedAt }));
         setConfigValues(result.values);
         setSelectedAgentId(result.agentId ?? '');
         setLoadedAgentId(result.agentId ?? '');
         if (hasValues) setIsExistingConfig(true);
       } catch (error) {
         if (!cancelled) {
-          logChannelTrace('config.read.end', traceId, { outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt });
+          logChannelTrace('config.read.end', traceId, () => ({ outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt }));
         }
       } finally {
         if (!cancelled) setLoadedConfigKey(nextConfigKey);
@@ -881,14 +882,14 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
   const handleConnect = async () => {
     if (!selectedType || !meta) return;
 
-    const traceId = crypto.randomUUID();
-    const startedAt = Date.now();
+    const traceId = isTraceEnabled() ? crypto.randomUUID() : undefined;
+    const startedAt = isTraceEnabled() ? Date.now() : 0;
     let outcome = 'unconfirmed';
     let activePhase: 'login.start' | 'validation' | 'config' | null = null;
     let phaseStartedAt = startedAt;
     logChannelTrace('create.click', traceId);
     const accountId = (configuredAccountId ?? channelName.trim()) || 'default';
-    logChannelTrace('create.submit.start', traceId, { accountPresent: Boolean(accountId), gatewayOperational: isGatewayOperational(gatewayStatus) });
+    logChannelTrace('create.submit.start', traceId, () => ({ accountPresent: Boolean(accountId), gatewayOperational: isGatewayOperational(gatewayStatus) }));
     setConnecting(true);
     setValidationResult(null);
     if (shouldStartQrLogin || shouldStartAuthorization) {
@@ -901,19 +902,19 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
       if (shouldStartQrLogin) {
         clearQrGenerateTimeout();
         qrGenerateTimeoutRef.current = setTimeout(() => {
-          logChannelTrace('login.qr.timeout', traceId, { errorCode: 'TIMEOUT', durationMs: Date.now() - startedAt });
+          logChannelTrace('login.qr.timeout', traceId, () => ({ errorCode: 'TIMEOUT', durationMs: Date.now() - startedAt }));
           setConnecting(false);
           toast.error(t('toast.qrGenerateTimeout'));
         }, QR_GENERATE_TIMEOUT_MS);
         const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
         qrAccountIdRef.current = accountId;
         qrTraceIdRef.current = traceId;
-        const loginStartedAt = Date.now();
+        const loginStartedAt = isTraceEnabled() ? Date.now() : 0;
         activePhase = 'login.start';
         phaseStartedAt = loginStartedAt;
         logChannelTrace('login.start.start', traceId);
         const startResult = await hostChannelsActivate({ channelType: qrChannelType, accountId, agentId: explicitAgentId, config: configValues }, { traceId });
-        logChannelTrace('login.start.end', traceId, { outcome: startResult.success ? 'accepted' : 'unconfirmed', durationMs: Date.now() - loginStartedAt });
+        logChannelTrace('login.start.end', traceId, () => ({ outcome: startResult.success ? 'accepted' : 'unconfirmed', durationMs: Date.now() - loginStartedAt }));
         activePhase = null;
         const progress = startResult.progress;
         if (!progress || (progress.outcome !== 'progress' && progress.outcome !== 'connected')) {
@@ -938,8 +939,8 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
         let currentQrDataUrl = progress.qrDataUrl;
         let sessionKey = progress.sessionKey;
         while (!waitController.signal.aborted) {
-          let waitResult;
-          const waitStartedAt = Date.now();
+          let waitResult: Awaited<ReturnType<typeof hostChannelsLoginWait>>;
+          const waitStartedAt = isTraceEnabled() ? Date.now() : 0;
           logChannelTrace('login.wait.start', traceId);
           try {
             waitResult = await hostChannelsLoginWait(qrChannelType, accountId, {
@@ -949,9 +950,9 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
               currentQrDataUrl,
               signal: waitController.signal,
             });
-            logChannelTrace('login.wait.end', traceId, { outcome: ['progress', 'connected', 'target_rejected'].includes(waitResult.outcome) ? waitResult.outcome : 'unknown', durationMs: Date.now() - waitStartedAt });
+            logChannelTrace('login.wait.end', traceId, () => ({ outcome: ['progress', 'connected', 'target_rejected'].includes(waitResult.outcome) ? waitResult.outcome : 'unknown', durationMs: Date.now() - waitStartedAt }));
           } catch (error) {
-            logChannelTrace('login.wait.end', traceId, { outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - waitStartedAt });
+            logChannelTrace('login.wait.end', traceId, () => ({ outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - waitStartedAt }));
             if (waitController.signal.aborted) { outcome = 'cancelled'; return; }
             throw error;
           }
@@ -991,7 +992,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
         qrWaitAbortControllerRef.current = waitController;
         qrAccountIdRef.current = accountId;
         qrTraceIdRef.current = traceId;
-        const loginStartedAt = Date.now();
+        const loginStartedAt = isTraceEnabled() ? Date.now() : 0;
         activePhase = 'login.start';
         phaseStartedAt = loginStartedAt;
         logChannelTrace('login.start.start', traceId);
@@ -1001,7 +1002,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
           ...(explicitAgentId ? { agentId: explicitAgentId } : {}),
           config: configValues,
         }, { traceId });
-        logChannelTrace('login.start.end', traceId, { outcome: startResult.outcome, durationMs: Date.now() - loginStartedAt });
+        logChannelTrace('login.start.end', traceId, () => ({ outcome: startResult.outcome, durationMs: Date.now() - loginStartedAt }));
         activePhase = null;
         if (startResult.sessionKey) authSessionKeyRef.current = startResult.sessionKey;
         if (startResult.qrDataUrl || startResult.authorizationUrl || startResult.sessionKey) {
@@ -1029,8 +1030,8 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
         }
         let sessionKey = startResult.sessionKey;
         while (!waitController.signal.aborted) {
-          let waitResult;
-          const waitStartedAt = Date.now();
+          let waitResult: Awaited<ReturnType<typeof hostChannelsWaitAuthorization>>;
+          const waitStartedAt = isTraceEnabled() ? Date.now() : 0;
           logChannelTrace('login.wait.start', traceId);
           try {
             waitResult = await hostChannelsWaitAuthorization(authorizationChannelType, sessionKey, {
@@ -1038,9 +1039,9 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
               timeoutMs: 300_000,
               signal: waitController.signal,
             });
-            logChannelTrace('login.wait.end', traceId, { outcome: ['progress', 'connected', 'target_rejected'].includes(waitResult.outcome) ? waitResult.outcome : 'unknown', durationMs: Date.now() - waitStartedAt });
+            logChannelTrace('login.wait.end', traceId, () => ({ outcome: ['progress', 'connected', 'target_rejected'].includes(waitResult.outcome) ? waitResult.outcome : 'unknown', durationMs: Date.now() - waitStartedAt }));
           } catch (error) {
-            logChannelTrace('login.wait.end', traceId, { outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - waitStartedAt });
+            logChannelTrace('login.wait.end', traceId, () => ({ outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - waitStartedAt }));
             if (waitController.signal.aborted) { outcome = 'cancelled'; return; }
             throw error;
           }
@@ -1083,12 +1084,12 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
       // Step 1: Validate credentials against the actual service API
       if (shouldValidateToken) {
-        const validationStartedAt = Date.now();
+        const validationStartedAt = isTraceEnabled() ? Date.now() : 0;
         activePhase = 'validation';
         phaseStartedAt = validationStartedAt;
         logChannelTrace('validation.start', traceId);
         const validationResponse = await hostChannelsValidateCredentials(selectedType, configValues, { traceId });
-        logChannelTrace('validation.end', traceId, { outcome: validationResponse.valid ? 'valid' : 'invalid', durationMs: Date.now() - validationStartedAt });
+        logChannelTrace('validation.end', traceId, () => ({ outcome: validationResponse.valid ? 'valid' : 'invalid', durationMs: Date.now() - validationStartedAt }));
 
         activePhase = null;
         if (!validationResponse.valid) {
@@ -1127,12 +1128,12 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
       // Step 2: Activate channel configuration
       const config: Record<string, unknown> = { ...configValues };
-      const configStartedAt = Date.now();
+      const configStartedAt = isTraceEnabled() ? Date.now() : 0;
       activePhase = 'config';
       phaseStartedAt = configStartedAt;
       logChannelTrace('config.start', traceId);
       const saveResult = await hostChannelsConfigure({ channelType: selectedType, accountId, agentId: explicitAgentId, config }, { traceId });
-      logChannelTrace('config.end', traceId, { outcome: saveResult.success ? 'confirmed' : 'unconfirmed', durationMs: Date.now() - configStartedAt });
+      logChannelTrace('config.end', traceId, () => ({ outcome: saveResult.success ? 'confirmed' : 'unconfirmed', durationMs: Date.now() - configStartedAt }));
       activePhase = null;
       if (!saveResult?.success) {
         throw new Error(saveResult?.error || 'Failed to save channel config');
@@ -1150,13 +1151,13 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
     } catch (error) {
       clearQrGenerateTimeout();
       outcome = 'error';
-      if (activePhase) logChannelTrace(`${activePhase}.end`, traceId, { outcome, errorCode: channelErrorCode(error), durationMs: Date.now() - phaseStartedAt });
-      logChannelTrace('create.error', traceId, { errorCode: channelErrorCode(error) });
+      if (activePhase) logChannelTrace(`${activePhase}.end`, traceId, () => ({ outcome, errorCode: channelErrorCode(error), durationMs: Date.now() - phaseStartedAt }));
+      logChannelTrace('create.error', traceId, () => ({ errorCode: channelErrorCode(error) }));
       toast.error(t('toast.configFailed', { error: channelErrorCode(error) }));
       setConnecting(false);
     } finally {
-      logChannelTrace('create.submit.end', traceId, { outcome, durationMs: Date.now() - startedAt });
-      logChannelTrace('create.final', traceId, { outcome, durationMs: Date.now() - startedAt });
+      logChannelTrace('create.submit.end', traceId, () => ({ outcome, durationMs: Date.now() - startedAt }));
+      logChannelTrace('create.final', traceId, () => ({ outcome, durationMs: Date.now() - startedAt }));
     }
   };
 

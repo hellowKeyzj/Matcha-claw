@@ -58,7 +58,7 @@ impl Body {
     pub(super) fn finish_message(&mut self, run: &str, message: &Message, outcome: TerminalOutcome, cache: &OpenClawReplayProjection) -> Option<()> {
         let retired_before = super::super::trace::enabled().then_some(self.retired.len());
         if super::super::trace::enabled() {
-            super::super::trace::log_unscoped("runtime.openclaw.body.final.input", serde_json::json!({ "commitState": "candidate_only",
+            super::super::trace::log_unscoped("runtime.openclaw.body.final.input", || serde_json::json!({ "commitState": "candidate_only",
                 "runHash": trace::fingerprint(run), "outcome": format!("{outcome:?}"), "hidden": message.hidden_control_reply(),
                 "historyApplied": self.history_applied_for_run(run), "sdkIdPresent": message.identity_message_id().is_some(),
                 "sdkMessageHash": message.identity_message_id().map(trace::fingerprint), "identityRunHash": message.identity_run_id().map(trace::fingerprint),
@@ -85,7 +85,7 @@ impl Body {
             self.retire_body(run)?;
             if !thinking.is_empty() { self.chunk(run, AssistantTurnChunkKind::Thinking, &thinking, true)?; }
             if super::super::trace::enabled() {
-                super::super::trace::log_unscoped("runtime.openclaw.body.final.result", serde_json::json!({ "commitState": "candidate_only",
+                super::super::trace::log_unscoped("runtime.openclaw.body.final.result", || serde_json::json!({ "commitState": "candidate_only",
                     "runHash": trace::fingerprint(run), "branch": "suppress", "retiredAdded": self.retired.len().saturating_sub(retired_before.unwrap_or(0)) }));
             }
             return Some(());
@@ -119,7 +119,7 @@ impl Body {
         }
         let Some(mut item) = transcript_session_item(message, self.items.len(), cache) else {
             if super::super::trace::enabled() {
-                super::super::trace::log_unscoped("runtime.openclaw.body.final.result", serde_json::json!({ "commitState": "candidate_only",
+                super::super::trace::log_unscoped("runtime.openclaw.body.final.result", || serde_json::json!({ "commitState": "candidate_only",
                     "runHash": trace::fingerprint(run), "branch": "no_projection", "retiredAdded": self.retired.len().saturating_sub(retired_before.unwrap_or(0)) }));
             }
             return Some(());
@@ -128,7 +128,7 @@ impl Body {
         if terminal_text.is_empty() && matches!(&item, SessionItem::AssistantTurn { segments, .. }
             if segments.iter().all(|segment| matches!(segment, SessionContent::Text { text } | SessionContent::Thinking { text } if text.trim().is_empty()))) {
             if super::super::trace::enabled() {
-                super::super::trace::log_unscoped("runtime.openclaw.body.final.result", serde_json::json!({ "commitState": "candidate_only",
+                super::super::trace::log_unscoped("runtime.openclaw.body.final.result", || serde_json::json!({ "commitState": "candidate_only",
                     "runHash": trace::fingerprint(run), "branch": "empty", "retiredAdded": self.retired.len().saturating_sub(retired_before.unwrap_or(0)) }));
             }
             return Some(());
@@ -231,7 +231,7 @@ impl Body {
             stream.provisional.push(Provisional::new(id, message));
         }
         if super::super::trace::enabled() {
-            super::super::trace::log_unscoped("runtime.openclaw.body.final.result", serde_json::json!({ "commitState": "candidate_only",
+            super::super::trace::log_unscoped("runtime.openclaw.body.final.result", || serde_json::json!({ "commitState": "candidate_only",
                 "runHash": trace::fingerprint(run), "branch": if message.identity_message_id().is_some() { "physical_apply" } else { "provisional_materialize" },
                 "retiredAdded": self.retired.len().saturating_sub(retired_before.unwrap_or(0)), "partsRemoved": removed.len(),
                 "provisionalCount": self.streams.get(run).map_or(0, |stream| stream.provisional.len()) }));
@@ -324,7 +324,7 @@ impl Body {
     pub(in crate::session) fn confirm_terminal_history(&mut self, messages: &[&Message]) -> Option<()> {
         let Some(marker) = self.terminal_marker.as_ref() else {
             if super::super::trace::enabled() {
-                super::super::trace::log_unscoped("runtime.openclaw.body.history.confirm", serde_json::json!({ "commitState": "candidate_only",
+                super::super::trace::log_unscoped("runtime.openclaw.body.history.confirm", || serde_json::json!({ "commitState": "candidate_only",
                     "result": "no_marker", "pendingBefore": false, "pendingAfter": false }));
             }
             return Some(());
@@ -335,7 +335,7 @@ impl Body {
             && self.history_ids.contains(&row.id) && self.items.iter().any(|item| item.item_id() == row.id));
         if !visible {
             if super::super::trace::enabled() {
-                super::super::trace::log_unscoped("runtime.openclaw.body.history.confirm", serde_json::json!({ "commitState": "candidate_only",
+                super::super::trace::log_unscoped("runtime.openclaw.body.history.confirm", || serde_json::json!({ "commitState": "candidate_only",
                     "result": if exact { "visible_missing" } else { "exact_missing" }, "exact": exact, "visible": exact.then_some(visible),
                     "markerRunHash": trace::fingerprint(&marker.run_id), "markerMessageHash": trace::fingerprint(&marker.message_id),
                     "historyApplied": marker.history_applied, "pendingBefore": self.needs_terminal_history(), "pendingAfter": self.needs_terminal_history() }));
@@ -349,7 +349,7 @@ impl Body {
         self.retire_terminal(&run)?;
         let checked = self.check();
         if super::super::trace::enabled() {
-            super::super::trace::log_unscoped("runtime.openclaw.body.history.confirm", serde_json::json!({ "commitState": "candidate_only",
+            super::super::trace::log_unscoped("runtime.openclaw.body.history.confirm", || serde_json::json!({ "commitState": "candidate_only",
                 "result": "confirmed", "checkPassed": checked.is_some(), "exact": exact, "visible": visible,
                 "markerRunHash": trace::fingerprint(&run), "markerMessageHash": self.terminal_marker.as_ref().map(|marker| trace::fingerprint(&marker.message_id)),
                 "historyApplied": self.terminal_marker.as_ref().map(|marker| marker.history_applied),

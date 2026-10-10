@@ -145,7 +145,7 @@ function enqueueAuthRequest(
     if (existing.phase === 'executing') {
       // flushFn 已在执行或已完成（卡片已发出），复用结果
       // 同时触发延迟刷新：用合并后的 scope 重新调用 flushFn 更新卡片
-      log.info(`auth in-flight, piggyback → key=${bufferKey}, scopes=[${[...existing.scopes].join(', ')}]`);
+      log.trace(() => `auth in-flight, piggyback → key=${bufferKey}, scopes=[${[...existing.scopes].join(', ')}]`);
 
       // 防抖 + 互斥：多个快速到达的请求只触发一次卡片更新
       if (existing.updateTimer) clearTimeout(existing.updateTimer);
@@ -155,14 +155,14 @@ function enqueueAuthRequest(
         // 互斥：如果上一轮更新还在执行，标记 pendingReupdate 等它结束后重跑
         if (existing.isUpdating) {
           existing.pendingReupdate = true;
-          log.info(`scope update deferred (previous update still running) → key=${bufferKey}`);
+          log.trace(() => `scope update deferred (previous update still running) → key=${bufferKey}`);
           return;
         }
 
         existing.isUpdating = true;
         try {
           const mergedScopes = [...existing.scopes];
-          log.info(`scope update flush → key=${bufferKey}, scopes=[${mergedScopes.join(', ')}]`);
+          log.trace(() => `scope update flush → key=${bufferKey}, scopes=[${mergedScopes.join(', ')}]`);
           // 重新调用 flushFn（executeAuthorize 会检测到 pendingFlow，
           // 原地更新旧卡片内容 + 重启 Device Flow）
           await existing.flushFn!(mergedScopes);
@@ -174,7 +174,7 @@ function enqueueAuthRequest(
           if (existing.pendingReupdate) {
             existing.pendingReupdate = false;
             const finalScopes = [...existing.scopes];
-            log.info(`scope reupdate → key=${bufferKey}, scopes=[${finalScopes.join(', ')}]`);
+            log.trace(() => `scope reupdate → key=${bufferKey}, scopes=[${finalScopes.join(', ')}]`);
             try {
               await existing.flushFn!(finalScopes);
             } catch (err) {
@@ -188,7 +188,7 @@ function enqueueAuthRequest(
     }
 
     // collecting 阶段：正常合并
-    log.info(`debounce merge → key=${bufferKey}, scopes=[${[...existing.scopes].join(', ')}]`);
+    log.trace(() => `debounce merge → key=${bufferKey}, scopes=[${[...existing.scopes].join(', ')}]`);
     return new Promise<JsonResult>((resolve, reject) => {
       existing.waiters.push({ resolve, reject });
     });
@@ -221,8 +221,8 @@ function enqueueAuthRequest(
     entry.flushFn = flushFn; // 保存引用，供 executing 阶段 scope 更新时重新调用
     const mergedScopes = [...entry.scopes];
 
-    log.info(
-      `debounce flush → key=${bufferKey}, ` + `waiters=${entry.waiters.length}, scopes=[${mergedScopes.join(', ')}]`,
+    log.trace(
+      () => `debounce flush → key=${bufferKey}, ` + `waiters=${entry.waiters.length}, scopes=[${mergedScopes.join(', ')}]`,
     );
 
     // 将 flushFn 的 Promise 存入 entry，供 executing 阶段的后来者复用
@@ -433,7 +433,7 @@ function addToDeferredUserAuth(
   const existing = deferredUserAuth.get(key);
   if (existing) {
     for (const s of scopes) existing.scopes.add(s);
-    log.info(`deferred user auth scope merge → key=${key}, scopes=[${[...existing.scopes].join(', ')}]`);
+    log.trace(() => `deferred user auth scope merge → key=${key}, scopes=[${[...existing.scopes].join(', ')}]`);
   } else {
     deferredUserAuth.set(key, { scopes: new Set(scopes), account, cfg, ticket });
     log.info(`deferred user auth created → key=${key}, scopes=[${scopes.join(', ')}]`);
@@ -601,8 +601,8 @@ async function sendAppScopeCard(params: {
   const dedup = makeDedupKey(chatId, messageId, missingScopes);
   const existingEntry = appAuthFlows.getByDedupKey(dedup);
   if (existingEntry) {
-    log.info(
-      `dedup – app-scope card already pending for chatId=${chatId}, ` +
+    log.trace(
+      () => `dedup – app-scope card already pending for chatId=${chatId}, ` +
         `scopes=[${missingScopes.join(', ')}], skipping duplicate send`,
     );
     return json({
@@ -634,7 +634,7 @@ async function sendAppScopeCard(params: {
     });
     if (!migrated) {
       // 被其他并发请求抢先迁移了，降级到新建卡片
-      log.info(`migrate raced, falling through to new card creation`);
+      log.trace(() => `migrate raced, falling through to new card creation`);
     } else {
       try {
         await updateCardKitCardForAuth({
@@ -644,8 +644,8 @@ async function sendAppScopeCard(params: {
           sequence: newSeq,
           accountId,
         });
-        log.info(
-          `app-scope card updated in-place, cardId=${activeFlow.cardId}, ` +
+        log.trace(
+          () => `app-scope card updated in-place, cardId=${activeFlow.cardId}, ` +
             `seq=${newSeq}, scopes=[${missingScopes.join(', ')}]`,
         );
 
@@ -811,7 +811,7 @@ export async function handleCardAction(data: unknown, cfg: OpenClawConfig, accou
   const consumedDeferred = deferKey ? deferredUserAuth.get(deferKey) : undefined;
   if (consumedDeferred && deferKey) {
     deferredUserAuth.delete(deferKey);
-    log.info(`consumed deferred user auth scopes: [${[...consumedDeferred.scopes].join(', ')}]`);
+    log.trace(() => `consumed deferred user auth scopes: [${[...consumedDeferred.scopes].join(', ')}]`);
   }
 
   // 校验通过才删除，防止用户在权限通过前多次点击无法重试
@@ -859,7 +859,7 @@ export async function handleCardAction(data: unknown, cfg: OpenClawConfig, accou
       const userBatch = authBatches.get(userBatchKey);
       if (userBatch) {
         for (const s of userBatch.scopes) mergedScopes.add(s);
-        log.info(`merged user batch scopes into app auth completion: [${[...mergedScopes].join(', ')}]`);
+        log.trace(() => `merged user batch scopes into app auth completion: [${[...mergedScopes].join(', ')}]`);
       }
 
       if (mergedScopes.size === 0) {

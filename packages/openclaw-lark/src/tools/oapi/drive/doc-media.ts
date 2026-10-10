@@ -203,7 +203,7 @@ async function handleInsert(
   }
 
   const fileName = path.basename(filePath);
-  log.info(`insert: doc=${documentId}, type=${mediaType}, file=${fileName}, size=${fileSize}`);
+  log.trace(() => `insert: doc=${documentId}, type=${mediaType}, file=${fileName}, size=${fileSize}`);
 
   // 2. 创建空 Block（追加到文档末尾）
   const createRes: any = await client.invoke(
@@ -287,7 +287,7 @@ async function handleInsert(
       if (dims.width && dims.height) {
         width = dims.width;
         height = dims.height;
-        log.info(`insert: detected image size ${width}x${height}`);
+        log.trace(() => `insert: detected image size ${width}x${height}`);
       }
     } catch {
       log.info('insert: could not detect image dimensions, skipping');
@@ -335,7 +335,7 @@ async function handleDownload(
   client: ReturnType<ReturnType<typeof createToolContext>['toolClient']>,
   log: ReturnType<typeof createToolContext>['log'],
 ) {
-  log.info(`download: resource_type=${p.resource_type}, token="${p.resource_token}"`);
+  log.trace(() => `download: resource_type=${p.resource_type}, token="${p.resource_token}"`);
 
   let res: any;
   if (p.resource_type === 'media') {
@@ -372,7 +372,7 @@ async function handleDownload(
     const suggestedExt = MIME_TO_EXT[mimeType] || defaultExt;
     if (suggestedExt) {
       finalPath = p.output_path + suggestedExt;
-      log.info(`download: auto-detected extension ${suggestedExt}`);
+      log.trace(() => `download: auto-detected extension ${suggestedExt}`);
     }
   }
 

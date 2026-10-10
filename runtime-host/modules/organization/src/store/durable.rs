@@ -1,28 +1,33 @@
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{self, Write},
+    fs::{self, OpenOptions},
+    io,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
+
+use platform::trace::{identifier_hash, runtime_trace};
+use serde_json::json;
 
 use super::{
     NativeTerminalReceiptTarget, OrganizationFacts, StoreFault,
-    codec::{HEADER_LEN, MAX_LOG_BYTES, RecoveredFacts, encode_frame, initialize_log, recover_log},
+    content::ContentStore,
     facts::{
         ApprovalResolutionInput, PendingWorkflowPlanAdmission, WorkflowPlanAdmissionOutcome,
         WorkflowPlanSubmitOutcome,
     },
+    records,
+    schema::RecordChange,
+    sqlite::Database,
 };
 use crate::{
     ActivityClaim, ActivityClaimOutcome, ActivityDispatchOutcome, ActivityId,
     ActivityRegistrationOutcome, ActivityRequest, ActivitySettlement, ActivitySettlementOutcome,
     AgentNodeEventResolution, AuthorizedGraphResolution, AuthorizedGraphResolutionOutcome,
-    ConfirmRunStartOutcome, ContinueRunDiscussionOutcome, ControlExecutionStep,
-    ControlNodeResolution, ControlNodeResolutionOutcome, DeliveryClaim, DeliveryId,
-    DeliveryReceipt, DeliveryResolution, DeliveryStart, EvidenceRecord, GraphDefinition,
-    GraphEvent, GraphPatch, GraphRunFacts, GraphRunId, IdempotencyKey, NativeTerminalStatus,
-    RecordOutcome, SetRunStartProposalOutcome, TeamId, TerminalObservationOutcome,
-    TriggerFireRequest, TriggerRegistration,
+    ControlExecutionStep, ControlNodeResolution, ControlNodeResolutionOutcome, DeliveryClaim,
+    DeliveryId, DeliveryReceipt, DeliveryResolution, DeliveryStart, EvidenceRecord,
+    GraphDefinition, GraphEvent, GraphPatch, GraphRunFacts, GraphRunId, IdempotencyKey,
+    NativeTerminalStatus, RecordOutcome, TeamId, TerminalObservationOutcome, TriggerFireRequest,
+    TriggerRegistration,
     run::{
         approval::{HumanDecisionCommand, HumanDecisionOutcome},
         artifact::{ArtifactRecord, ArtifactRecordOutcome},
@@ -34,12 +39,10 @@ use crate::{
 };
 use crate::{TeamDecisionCommand, TeamDecisionReceipt};
 
-const WRITER_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
-const WRITER_LOCK_POLL: Duration = Duration::from_millis(1);
-
 pub struct OrganizationStore {
     path: PathBuf,
-    lock_path: PathBuf,
+    database: Database,
+    contents: ContentStore,
     facts: OrganizationFacts,
     epoch: u64,
     requires_reopen: bool,
@@ -47,57 +50,47 @@ pub struct OrganizationStore {
 
 impl OrganizationStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreFault> {
-        let path = path.into();
-        ensure_parent_directory(&path)?;
-        let lock_path = lock_path(&path);
-        let _lock = WriterLock::acquire(&lock_path)?;
-        let mut recovered = recover_or_initialize(&path)?;
-        if recovered.truncated_tail {
-            truncate_to_recovered_prefix(&path, recovered.committed_len)?;
-        }
-        let observed_at = now_seconds()?;
-        let recovered_interrupted_materialization =
-            recovered.facts.recover_interrupted_materializations();
-        let recovered_interrupted_work = recovered.had_interrupted_delivery
-            && recovered.facts.recover_interrupted_deliveries(observed_at);
-        let recovered_interrupted_activity = recovered.had_interrupted_activity
-            && recovered.facts.recover_interrupted_activities(observed_at);
-        let recovered_interrupted_cancellation = recovered
-            .facts
-            .recover_interrupted_graph_run_cancellations(observed_at);
-        let epoch = if recovered_interrupted_materialization
-            || recovered_interrupted_work
-            || recovered_interrupted_activity
-            || recovered_interrupted_cancellation
-        {
-            commit_recovered_facts(&path, recovered.epoch, &recovered.facts)?
-        } else {
-            recovered.epoch
-        };
-
-        Ok(Self {
-            path,
-            lock_path,
-            facts: recovered.facts,
-            epoch,
-            requires_reopen: false,
-        })
+        let mut store = Self::open_live(path)?;
+        let observed_at = now_millis()?;
+        store.transact(|facts| {
+            facts.recover_interrupted_materializations();
+            facts.recover_interrupted_deliveries(observed_at);
+            facts.recover_interrupted_activities(observed_at);
+            facts.recover_interrupted_graph_run_cancellations(observed_at);
+            Ok(())
+        })?;
+        Ok(store)
     }
 
     pub fn open_live(path: impl Into<PathBuf>) -> Result<Self, StoreFault> {
         let path = path.into();
         ensure_parent_directory(&path)?;
-        let lock_path = lock_path(&path);
-        let recovered = match File::open(&path) {
-            Ok(file) => recover_log(file)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Self::open(path),
-            Err(error) => return Err(StoreFault::Read(error.kind())),
+        let fresh = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => {
+                drop(file);
+                true
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+            Err(error) => return Err(StoreFault::Commit(error.kind())),
         };
+        let mut database = Database::open(&path)?;
+        if fresh {
+            let mut transaction = database.begin()?;
+            transaction.mark_initialized()?;
+            transaction.commit()?;
+        } else if !database.initialized()? {
+            return Err(StoreFault::MigrationRequired);
+        }
+        let contents =
+            ContentStore::new(path.parent().unwrap_or_else(|| Path::new(".")).to_owned());
+        let (epoch, records) = database.read_all()?;
+        let facts = records::decode_all(&records, &contents)?;
         Ok(Self {
             path,
-            lock_path,
-            facts: recovered.facts,
-            epoch: recovered.epoch,
+            database,
+            contents,
+            facts,
+            epoch,
             requires_reopen: false,
         })
     }
@@ -117,11 +110,16 @@ impl OrganizationStore {
     }
 
     pub fn refresh(&mut self) -> Result<(), StoreFault> {
-        let recovered =
-            recover_log(File::open(&self.path).map_err(|error| StoreFault::Read(error.kind()))?)?;
-        self.facts = recovered.facts;
-        self.epoch = recovered.epoch;
-        self.requires_reopen = false;
+        if self.requires_reopen {
+            *self = Self::open_live(self.path.clone())?;
+            return Ok(());
+        }
+        let (epoch, changes) = self.database.read_since(self.epoch)?;
+        if let Err(error) = self.facts.apply_record_changes(changes, &self.contents) {
+            self.requires_reopen = true;
+            return Err(error);
+        }
+        self.epoch = epoch;
         Ok(())
     }
 
@@ -133,16 +131,11 @@ impl OrganizationStore {
         &mut self,
         mutation: impl FnOnce(&mut crate::run::TaskBoardFacts) -> Result<T, crate::run::TaskBoardError>,
     ) -> Result<T, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let result = mutation(candidate.task_board_mut()).map_err(|_| StoreFault::InvalidFacts)?;
-        candidate
-            .validate_transition_from(&self.facts)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        self.commit_locked(&lock, candidate)?;
-        Ok(result)
+        self.transact(|facts| {
+            let result = mutation(facts.task_board_mut()).map_err(|_| StoreFault::InvalidFacts)?;
+
+            Ok(result)
+        })
     }
 
     pub fn decision(&self, run_id: &str, idempotency_key: &str) -> Option<&crate::TeamDecision> {
@@ -157,30 +150,58 @@ impl OrganizationStore {
         &mut self,
         command: TeamDecisionCommand,
     ) -> Result<TeamDecisionReceipt, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let receipt = candidate
-            .record_decision(command)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if !receipt.is_replay() {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            if facts
+                .decision_ledger()
+                .event(command.decision_id())
+                .is_some_and(|event| event.run_id() != command.run_id())
+            {
+                return Err(StoreFault::InvalidFacts);
+            }
+            let receipt = facts
+                .record_decision(command)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(receipt)
+            Ok(receipt)
+        })
     }
 
+    /// Explicit whole-state replacement; normal owner mutations use record transactions.
     pub fn replace_facts(&mut self, facts: OrganizationFacts) -> Result<(), StoreFault> {
         self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
+        let mut transaction = self.database.begin()?;
+        let (epoch, changes) = transaction.read_since(self.epoch)?;
+        if let Err(error) = self.facts.apply_record_changes(changes, &self.contents) {
+            self.requires_reopen = true;
+            return Err(error);
+        }
+        self.epoch = epoch;
         facts
             .validate_transition_from(&self.facts)
             .map_err(|_| StoreFault::InvalidFacts)?;
-        self.commit_locked(&lock, facts)
+        let records = records::encode_all(&facts, &self.contents)?;
+        let keys = records
+            .iter()
+            .map(|record| &record.key)
+            .collect::<std::collections::BTreeSet<_>>();
+        for previous in transaction.read_all()? {
+            if !keys.contains(&previous.key) {
+                transaction.delete(&previous.key)?;
+            }
+        }
+        for record in &records {
+            transaction.put(record)?;
+        }
+        match transaction.commit() {
+            Ok(epoch) => {
+                self.facts = facts;
+                self.epoch = epoch;
+                Ok(())
+            }
+            Err(error) => {
+                self.requires_reopen = matches!(error, StoreFault::CommitOutcomeUnknown(_));
+                Err(error)
+            }
+        }
     }
 
     pub fn replace_workflow_template(
@@ -198,20 +219,15 @@ impl OrganizationStore {
         &mut self,
         request: crate::TeamRunPurgeRequest,
     ) -> Result<crate::GraphRunPurgeOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .purge_graph_run(
-                request,
-                now_seconds().map_err(|_| StoreFault::Read(io::ErrorKind::Other))?,
-            )
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, crate::GraphRunPurgeOutcome::Purged) {
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+        self.transact(|facts| {
+            let outcome = facts
+                .purge_graph_run(
+                    request,
+                    now_millis().map_err(|_| StoreFault::Read(io::ErrorKind::Other))?,
+                )
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            Ok(outcome)
+        })
     }
 
     pub fn replace_workflow_plan_template(
@@ -231,40 +247,24 @@ impl OrganizationStore {
         run: GraphRunFacts,
         creation_idempotency_key: &str,
     ) -> Result<CreateGraphRunOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .create_graph_run(run, creation_idempotency_key)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, CreateGraphRunOutcome::Created(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .create_graph_run(run, creation_idempotency_key)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     pub fn admit_workflow_plan_run(
         &mut self,
         admission: PendingWorkflowPlanAdmission,
     ) -> Result<WorkflowPlanAdmissionOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .admit_workflow_plan_run(admission)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, WorkflowPlanAdmissionOutcome::Recorded(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .admit_workflow_plan_run(admission)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     pub fn submit_workflow_plan(
@@ -276,27 +276,19 @@ impl OrganizationStore {
         team_revision: crate::TeamRevision,
         plan: crate::run::WorkflowPlan,
     ) -> Result<WorkflowPlanSubmitOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .submit_workflow_plan(
-                team,
-                run_id,
-                creation_idempotency_key,
-                source_identity,
-                team_revision,
-                plan,
-            )
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, WorkflowPlanSubmitOutcome::Submitted(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .submit_workflow_plan(
+                    team,
+                    run_id,
+                    creation_idempotency_key,
+                    source_identity,
+                    team_revision,
+                    plan,
+                )
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     pub fn create_workflow_plan_run(
@@ -309,72 +301,64 @@ impl OrganizationStore {
         template_revision: u64,
         created_at: u64,
     ) -> Result<CreateGraphRunOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .create_workflow_plan_run(
-                team,
-                run_id,
-                creation_idempotency_key,
-                plan,
-                source_identity,
-                template_revision,
-                created_at,
-            )
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, CreateGraphRunOutcome::Created(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .create_workflow_plan_run(
+                    team,
+                    run_id,
+                    creation_idempotency_key,
+                    plan,
+                    source_identity,
+                    template_revision,
+                    created_at,
+                )
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
-    pub fn set_run_start_proposal(
+    pub(crate) fn start_run(
         &mut self,
+        team_id: &TeamId,
         run_id: &GraphRunId,
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    ) -> Result<SetRunStartProposalOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .set_run_start_proposal(run_id, proposal_id, summary, source_delivery_id)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, SetRunStartProposalOutcome::Recorded) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
-    }
+        epoch: Option<&str>,
+        version: &str,
+    ) -> Result<bool, StoreFault> {
+        self.transact(|facts| {
+            let run = facts
+                .run(run_id)
+                .ok_or(StoreFault::Design(super::DesignError::UnknownRun))?;
+            if run.team() != team_id {
+                return Err(StoreFault::Design(super::DesignError::TeamMismatch));
+            }
+            // Started is the existing one-way, no-write replay boundary.
+            if matches!(run.start_gate(), crate::RunStartGate::Started) {
+                return Ok(false);
+            }
+            if !matches!(
+                run.lifecycle().state(),
+                crate::GraphRunLifecycleState::Active
+            ) {
+                return Err(StoreFault::Design(super::DesignError::RunInactive));
+            }
+            match run.start_gate() {
+                crate::RunStartGate::Intake if epoch.is_none() => {}
+                crate::RunStartGate::Designing { design_epoch, .. }
+                    if epoch == Some(design_epoch.as_str()) => {}
+                _ => return Err(StoreFault::Design(super::DesignError::StaleEpoch)),
+            }
+            if super::codec::graph_version(run.graph().definition())? != version {
+                return Err(StoreFault::Design(super::DesignError::StaleGraphVersion));
+            }
+            crate::application::design::validate_graph(facts, run)?;
 
-    pub fn confirm_run_start(
-        &mut self,
-        run_id: &GraphRunId,
-        proposal_id: &str,
-    ) -> Result<ConfirmRunStartOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .confirm_run_start(run_id, proposal_id)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, ConfirmRunStartOutcome::Started) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            facts
+                .design_run_mut(run_id)
+                .expect("validated run")
+                .start_gate = crate::RunStartGate::Started;
+
+            Ok(true)
+        })
     }
 
     pub(crate) fn exit_design(
@@ -383,46 +367,16 @@ impl OrganizationStore {
         run_id: &GraphRunId,
         epoch: &str,
     ) -> Result<(), StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let run = candidate
-            .design_run_mut(run_id)
-            .filter(|run| run.team() == team_id)
-            .ok_or(StoreFault::InvalidFacts)?;
-        let outcome = run
-            .start_gate
-            .exit_design(epoch)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, ContinueRunDiscussionOutcome::Intake) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let run = facts
+                .design_run_mut(run_id)
+                .filter(|run| run.team() == team_id)
+                .ok_or(StoreFault::InvalidFacts)?;
+            run.start_gate
+                .exit_design(epoch)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(())
-    }
-
-    pub fn continue_run_discussion(
-        &mut self,
-        run_id: &GraphRunId,
-        proposal_id: &str,
-    ) -> Result<ContinueRunDiscussionOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .continue_run_discussion(run_id, proposal_id)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, ContinueRunDiscussionOutcome::Intake) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(())
+        })
     }
 
     pub fn begin_graph_run_cancellation(
@@ -431,20 +385,12 @@ impl OrganizationStore {
         idempotency_key: &str,
         requested_at: u64,
     ) -> Result<BeginCancellationOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .begin_graph_run_cancellation(run_id, idempotency_key, requested_at)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, BeginCancellationOutcome::Started(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .begin_graph_run_cancellation(run_id, idempotency_key, requested_at)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     pub fn settle_graph_run_cancellation(
@@ -454,23 +400,12 @@ impl OrganizationStore {
         outcome: RoleAbortOutcome,
         observed_at: u64,
     ) -> Result<SettleCancellationOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let settled = candidate
-            .settle_graph_run_cancellation(run_id, idempotency_key, outcome, observed_at)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(
-            settled,
-            SettleCancellationOutcome::Cancelled | SettleCancellationOutcome::OutcomeUnknown
-        ) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let settled = facts
+                .settle_graph_run_cancellation(run_id, idempotency_key, outcome, observed_at)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(settled)
+            Ok(settled)
+        })
     }
 
     pub fn tombstone_graph_run(
@@ -479,20 +414,12 @@ impl OrganizationStore {
         idempotency_key: &str,
         tombstoned_at: u64,
     ) -> Result<TombstoneOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .tombstone_graph_run(run_id, idempotency_key, tombstoned_at)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, TombstoneOutcome::Tombstoned) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .tombstone_graph_run(run_id, idempotency_key, tombstoned_at)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     pub fn resume_graph_runs(&self, team_id: &crate::TeamId) -> Vec<ResumeOutcome> {
@@ -503,20 +430,12 @@ impl OrganizationStore {
         &mut self,
         request: crate::DeliveryRequest,
     ) -> Result<crate::RegisterOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .register_delivery(request)
-            .map_err(StoreFault::DeliveryRequest)?;
-        if matches!(&outcome, crate::RegisterOutcome::Recorded(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+        self.transact(|facts| {
+            let outcome = facts
+                .register_delivery(request)
+                .map_err(StoreFault::DeliveryRequest)?;
+            Ok(outcome)
+        })
     }
 
     pub fn register_activity_and_start_attempt(
@@ -532,21 +451,15 @@ impl OrganizationStore {
                 .register_activity(request)
                 .map_err(|_| StoreFault::InvalidFacts)?;
             if matches!(&outcome, ActivityRegistrationOutcome::Recorded(_)) {
-                let run = facts
-                    .run(&run_id)
-                    .cloned()
-                    .ok_or(StoreFault::InvalidFacts)?;
-                let graph = crate::reduce(
-                    run.graph().clone(),
-                    GraphEvent::AttemptStarted {
-                        node_id,
-                        fence,
-                        started_at,
-                    },
-                )
-                .map_err(|_| StoreFault::InvalidFacts)?;
                 facts
-                    .replace_run_graph(&run_id, graph)
+                    .apply_graph_event(
+                        &run_id,
+                        GraphEvent::AttemptStarted {
+                            node_id,
+                            fence,
+                            started_at,
+                        },
+                    )
                     .map_err(|_| StoreFault::InvalidFacts)?;
             }
             Ok(outcome)
@@ -557,77 +470,45 @@ impl OrganizationStore {
         &mut self,
         request: ActivityRequest,
     ) -> Result<ActivityRegistrationOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .register_activity(request)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(&outcome, ActivityRegistrationOutcome::Recorded(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .register_activity(request)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     pub fn resolve_human_decision(
         &mut self,
         command: HumanDecisionCommand,
     ) -> Result<HumanDecisionOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .resolve_human_decision(command)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if outcome == HumanDecisionOutcome::Recorded {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .resolve_human_decision(command)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     pub fn record_artifact(
         &mut self,
         record: ArtifactRecord,
     ) -> Result<ArtifactRecordOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .record_artifact(record)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, ArtifactRecordOutcome::Recorded(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .record_artifact(record)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     pub fn record_evidence(&mut self, record: EvidenceRecord) -> Result<RecordOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .record_evidence(record)
-            .map_err(StoreFault::Evidence)?;
-        if matches!(outcome, RecordOutcome::Recorded(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+        self.transact(|facts| {
+            let outcome = facts
+                .record_evidence(record)
+                .map_err(StoreFault::Evidence)?;
+            Ok(outcome)
+        })
     }
 
     /// Tombstone is the Organization lifecycle boundary: facts remain durable and
@@ -637,20 +518,12 @@ impl OrganizationStore {
         team_id: &TeamId,
         cleanup_idempotency_key: IdempotencyKey,
     ) -> Result<super::facts::TeamTombstoneOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .tombstone_team(team_id, cleanup_idempotency_key)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, super::facts::TeamTombstoneOutcome::Tombstoned) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .tombstone_team(team_id, cleanup_idempotency_key)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     /// Returns only materializations which may be settled by native readback.
@@ -697,20 +570,12 @@ impl OrganizationStore {
         team_id: &TeamId,
         outcome: crate::MaterializationOperationOutcome,
     ) -> Result<crate::MaterializationRecordOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let recorded = candidate
-            .record_team_materialization_cleanup_outcome(team_id, outcome)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if recorded == crate::MaterializationRecordOutcome::Recorded {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let recorded = facts
+                .record_team_materialization_cleanup_outcome(team_id, outcome)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(recorded)
+            Ok(recorded)
+        })
     }
 
     pub fn create_team_materialization(
@@ -818,82 +683,76 @@ impl OrganizationStore {
         receipt: DeliveryReceipt,
         activity_settlement: Option<ActivitySettlement>,
     ) -> Result<(DeliveryResolution, Option<ActivitySettlementOutcome>), StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let delivery_id = DeliveryId::new(claim.activity_id().as_str().to_owned())
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        let delivery = self
-            .facts
-            .deliveries()
-            .delivery(&delivery_id)
-            .ok_or(StoreFault::InvalidFacts)?;
-        let activity = self
-            .facts
-            .activities()
-            .activity(claim.activity_id())
-            .ok_or(StoreFault::InvalidFacts)?;
-        if let DeliveryReceipt::Accepted {
-            receipt,
-            native_correlation,
-            ..
-        } = &receipt
-        {
-            let accepted = match delivery.phase() {
-                crate::DeliveryPhase::Delivered {
-                    receipt: existing,
-                    native_correlation: existing_correlation,
-                    ..
-                } => existing == receipt && existing_correlation == native_correlation,
-                crate::DeliveryPhase::TerminalObserved { observation } => {
-                    observation.delivered_receipt() == receipt
-                        && Some(observation.correlation()) == native_correlation.as_ref()
+        self.transact(|facts| {
+            let delivery_id = DeliveryId::new(claim.activity_id().as_str().to_owned())
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            let delivery = facts
+                .deliveries()
+                .delivery(&delivery_id)
+                .ok_or(StoreFault::InvalidFacts)?;
+            let activity = facts
+                .activities()
+                .activity(claim.activity_id())
+                .ok_or(StoreFault::InvalidFacts)?;
+            if let DeliveryReceipt::Accepted {
+                receipt,
+                native_correlation,
+                ..
+            } = &receipt
+            {
+                let accepted = match delivery.phase() {
+                    crate::DeliveryPhase::Delivered {
+                        receipt: existing,
+                        native_correlation: existing_correlation,
+                        ..
+                    } => existing == receipt && existing_correlation == native_correlation,
+                    crate::DeliveryPhase::TerminalObserved { observation } => {
+                        observation.delivered_receipt() == receipt
+                            && Some(observation.correlation()) == native_correlation.as_ref()
+                    }
+                    _ => false,
+                };
+                let snapshot = activity.snapshot();
+                let matching_claim = activity.active_claim().map_or_else(
+                    || {
+                        snapshot.completed_attempts() == claim.attempt()
+                            && snapshot.next_claim_generation() == claim.generation() + 1
+                    },
+                    |active| active == claim,
+                );
+                if accepted && matching_claim && activity_settlement.is_none() {
+                    return Ok((DeliveryResolution::Delivered, None));
                 }
-                _ => false,
-            };
-            let snapshot = activity.snapshot();
-            let matching_claim = activity.active_claim().map_or_else(
-                || {
-                    snapshot.completed_attempts() == claim.attempt()
-                        && snapshot.next_claim_generation() == claim.generation() + 1
-                },
-                |active| active == claim,
-            );
-            if accepted && matching_claim && activity_settlement.is_none() {
-                return Ok((DeliveryResolution::Delivered, None));
             }
-        }
-        if activity.active_claim() != Some(claim) {
-            return Err(StoreFault::InvalidFacts);
-        }
-        let delivery_claim = delivery
-            .active_claim()
-            .cloned()
-            .ok_or(StoreFault::InvalidFacts)?;
-        let mut candidate = self.facts.clone();
-        let delivery = candidate
-            .settle_delivery(&delivery_claim, receipt, 0)
-            .map_err(|error| StoreFault::DeliveryReceipt(Box::new(error)))?;
-        let activity = activity_settlement
-            .map(|settlement| {
-                candidate
-                    .settle_activity(claim, settlement)
-                    .map_err(|_| StoreFault::InvalidFacts)
-            })
-            .transpose()?;
-        let run_id = candidate
-            .activities()
-            .activity(claim.activity_id())
-            .ok_or(StoreFault::InvalidFacts)?
-            .facts()
-            .run_id
-            .clone();
-        candidate.cancel_superseded_pending_activities(&run_id);
-        candidate
-            .validate_transition_from(&self.facts)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        self.commit_locked(&lock, candidate)?;
-        Ok((delivery, activity))
+            if activity.active_claim() != Some(claim) {
+                return Err(StoreFault::InvalidFacts);
+            }
+            let delivery_claim = delivery
+                .active_claim()
+                .cloned()
+                .ok_or(StoreFault::InvalidFacts)?;
+
+            let delivery = facts
+                .settle_delivery(&delivery_claim, receipt, 0)
+                .map_err(|error| StoreFault::DeliveryReceipt(Box::new(error)))?;
+            let activity = activity_settlement
+                .map(|settlement| {
+                    facts
+                        .settle_activity(claim, settlement)
+                        .map_err(|_| StoreFault::InvalidFacts)
+                })
+                .transpose()?;
+            let run_id = facts
+                .activities()
+                .activity(claim.activity_id())
+                .ok_or(StoreFault::InvalidFacts)?
+                .facts()
+                .run_id
+                .clone();
+            facts.cancel_superseded_pending_activities(&run_id);
+
+            Ok((delivery, activity))
+        })
     }
 
     pub fn claim_activity(
@@ -901,20 +760,12 @@ impl OrganizationStore {
         activity_id: &ActivityId,
         claimed_at: u64,
     ) -> Result<ActivityClaimOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .claim_activity(activity_id, claimed_at)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(&outcome, ActivityClaimOutcome::Claimed(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .claim_activity(activity_id, claimed_at)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     pub fn dispatch_activity(
@@ -922,20 +773,12 @@ impl OrganizationStore {
         claim: &ActivityClaim,
         dispatched_at: u64,
     ) -> Result<ActivityDispatchOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .dispatch_activity(claim, dispatched_at)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(&outcome, ActivityDispatchOutcome::Recorded) {
-            candidate
-                .validate_transition_from(&self.facts)
+        self.transact(|facts| {
+            let outcome = facts
+                .dispatch_activity(claim, dispatched_at)
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     pub fn settle_activity(
@@ -955,20 +798,12 @@ impl OrganizationStore {
         delivery_id: &DeliveryId,
         claimed_at: u64,
     ) -> Result<DeliveryStart, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let start = candidate
-            .claim_delivery(delivery_id, claimed_at)
-            .map_err(|error| StoreFault::DeliveryReceipt(Box::new(error)))?;
-        if matches!(&start, DeliveryStart::Claimed(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(start)
+        self.transact(|facts| {
+            let start = facts
+                .claim_delivery(delivery_id, claimed_at)
+                .map_err(|error| StoreFault::DeliveryReceipt(Box::new(error)))?;
+            Ok(start)
+        })
     }
 
     pub fn settle_delivery(
@@ -989,20 +824,12 @@ impl OrganizationStore {
         request: TriggerFireRequest,
         fired_at: u64,
     ) -> Result<TriggerRegistration, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let registration = candidate
-            .fire_trigger(request, fired_at)
-            .map_err(StoreFault::TriggerFire)?;
-        if matches!(&registration, TriggerRegistration::Recorded(_)) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(registration)
+        self.transact(|facts| {
+            let registration = facts
+                .fire_trigger(request, fired_at)
+                .map_err(StoreFault::TriggerFire)?;
+            Ok(registration)
+        })
     }
 
     pub(crate) fn accept_native_terminal_context(
@@ -1011,20 +838,41 @@ impl OrganizationStore {
         endpoint_session_id: crate::EndpointSessionId,
         native_run_id: String,
     ) -> Result<(), StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        if candidate
-            .accept_native_terminal_context(delivery_id, endpoint_session_id, native_run_id)
-            .map_err(|_| StoreFault::InvalidFacts)?
-        {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(())
+        runtime_trace("runtime.team_run.terminal.store.accept_context", || {
+            json!({
+                "deliveryHash": identifier_hash(delivery_id.as_str()),
+                "nativeRunHash": identifier_hash(&native_run_id), "outcome": "begin",
+            })
+        });
+        let mut phase = "ensure_writable";
+        let mut recorded = false;
+        let result = self.transact(|facts| {
+            phase = "accept_context";
+            recorded = facts
+                .accept_native_terminal_context(delivery_id, endpoint_session_id, native_run_id)
+                .map_err(|error| {
+                    runtime_trace("runtime.team_run.terminal.store.accept_context", || json!({
+                        "deliveryHash": identifier_hash(delivery_id.as_str()), "outcome": "error",
+                        "reason": crate::trace::terminal_facts_reason(&error),
+                    }));
+                    StoreFault::InvalidFacts
+                })?;
+            phase = "commit";
+            Ok(())
+        });
+        runtime_trace("runtime.team_run.terminal.store.accept_context", || {
+            json!({
+                "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": phase,
+                "outcome": match &result {
+                    Ok(()) if recorded => "recorded",
+                    Ok(()) => "replayed",
+                    Err(StoreFault::CommitOutcomeUnknown(_)) => "commit_outcome_unknown",
+                    Err(_) => "error",
+                },
+                "error": result.as_ref().err().map(crate::trace::terminal_error),
+            })
+        });
+        result
     }
 
     pub fn native_terminal_target(
@@ -1040,30 +888,73 @@ impl OrganizationStore {
         native_terminal: NativeTerminalStatus,
         observed_at: u64,
     ) -> Result<TerminalObservationOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let Some(current) = self.facts.native_terminal_target(target.delivery_id()) else {
-            return Err(StoreFault::TerminalObservation(
-                crate::TerminalObservationError::DeliveryNotAccepted,
-            ));
-        };
-        if current != target {
-            return Err(StoreFault::TerminalObservation(
-                crate::TerminalObservationError::StaleFence,
-            ));
-        }
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .observe_native_terminal(target.delivery_id(), native_terminal, observed_at)
-            .map_err(StoreFault::TerminalObservation)?;
-        if !matches!(outcome, TerminalObservationOutcome::Replayed) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+        self.transact(|facts| {
+            let Some(current) = facts.native_terminal_target(target.delivery_id()) else {
+                return Err(StoreFault::TerminalObservation(
+                    crate::TerminalObservationError::DeliveryNotAccepted,
+                ));
+            };
+            if current != target {
+                return Err(StoreFault::TerminalObservation(
+                    crate::TerminalObservationError::StaleFence,
+                ));
+            }
+
+            let outcome = facts
+                .observe_native_terminal(target.delivery_id(), native_terminal, observed_at)
+                .map_err(StoreFault::TerminalObservation)?;
+            Ok(outcome)
+        })
+    }
+
+    pub(crate) fn settle_native_terminal(
+        &mut self,
+        target: NativeTerminalReceiptTarget,
+        status: NativeTerminalStatus,
+        output: Result<
+            Option<crate::TeamNodeOutput>,
+            crate::application::team_message::TeamMessageFailure,
+        >,
+        settled_at: u64,
+    ) -> Result<AuthorizedGraphResolutionOutcome, StoreFault> {
+        runtime_trace("runtime.team_run.terminal.store.settle", || {
+            json!({
+                "deliveryHash": identifier_hash(target.delivery_id().as_str()),
+                "runHash": identifier_hash(target.graph_run_id().as_str()),
+                "nativeRunHash": identifier_hash(target.correlation().native_run_receipt().as_str()),
+                "outcome": "begin",
+            })
+        });
+        let mut phase = "ensure_writable";
+        let result = self.transact(|facts| {
+            phase = "target_fence";
+            if facts.native_terminal_target(target.delivery_id()).as_ref() != Some(&target) {
+                return Err(StoreFault::TerminalObservation(
+                    crate::TerminalObservationError::StaleFence,
+                ));
+            }
+
+            phase = "settle_facts";
+            let outcome = facts.settle_native_terminal(&target, status, output, settled_at)?;
+            phase = "commit";
+            Ok(outcome)
+        });
+        runtime_trace("runtime.team_run.terminal.store.settle", || {
+            json!({
+                "deliveryHash": identifier_hash(target.delivery_id().as_str()),
+                "runHash": identifier_hash(target.graph_run_id().as_str()),
+                "nativeRunHash": identifier_hash(target.correlation().native_run_receipt().as_str()),
+                "phase": phase,
+                "outcome": match &result {
+                    Ok(AuthorizedGraphResolutionOutcome::Recorded) => "recorded",
+                    Ok(AuthorizedGraphResolutionOutcome::Replayed) => "replayed",
+                    Err(StoreFault::CommitOutcomeUnknown(_)) => "commit_outcome_unknown",
+                    Err(_) => "error",
+                },
+                "error": result.as_ref().err().map(crate::trace::terminal_error),
+            })
+        });
+        result
     }
 
     pub fn resolve_native_run_output(
@@ -1073,39 +964,32 @@ impl OrganizationStore {
         final_assistant_text: String,
         resolved_at: u64,
     ) -> Result<AuthorizedGraphResolutionOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let Some(current) = self.facts.native_terminal_target(target.delivery_id()) else {
-            return Err(StoreFault::NativeRunOutputResolution(
+        self.transact(|facts| {
+            let Some(current) = facts.native_terminal_target(target.delivery_id()) else {
+                return Err(StoreFault::NativeRunOutputResolution(
                 crate::NativeRunOutputResolutionError::AuthorizedResolution(
                     crate::AuthorizedGraphResolutionError::DeliveryNotAwaitingAuthorizedResolution,
                 ),
             ));
-        };
-        if current != target {
-            return Err(StoreFault::NativeRunOutputResolution(
-                crate::NativeRunOutputResolutionError::AuthorizedResolution(
-                    crate::AuthorizedGraphResolutionError::StaleFence,
-                ),
-            ));
-        }
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .resolve_native_run_output(
-                target.delivery_id(),
-                receipt,
-                final_assistant_text,
-                resolved_at,
-            )
-            .map_err(StoreFault::NativeRunOutputResolution)?;
-        if matches!(outcome, AuthorizedGraphResolutionOutcome::Recorded) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            };
+            if current != target {
+                return Err(StoreFault::NativeRunOutputResolution(
+                    crate::NativeRunOutputResolutionError::AuthorizedResolution(
+                        crate::AuthorizedGraphResolutionError::StaleFence,
+                    ),
+                ));
+            }
+
+            let outcome = facts
+                .resolve_native_run_output(
+                    target.delivery_id(),
+                    receipt,
+                    final_assistant_text,
+                    resolved_at,
+                )
+                .map_err(StoreFault::NativeRunOutputResolution)?;
+            Ok(outcome)
+        })
     }
 
     pub fn apply_graph_patch(
@@ -1114,11 +998,7 @@ impl OrganizationStore {
         patch: GraphPatch,
         applied_at: u64,
     ) -> Result<(), StoreFault> {
-        self.transact(|facts| {
-            facts
-                .apply_graph_patch(run_id, &patch, applied_at)
-                .map_err(StoreFault::GraphPatch)
-        })
+        self.transact(|facts| facts.apply_graph_patch(run_id, &patch, applied_at))
     }
 
     pub fn replace_team_graph(
@@ -1126,20 +1006,59 @@ impl OrganizationStore {
         command: crate::RunCommand,
         definition: GraphDefinition,
     ) -> Result<crate::CommandReceipt, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let receipt = candidate
-            .replace_team_graph(command, definition)
-            .map_err(StoreFault::EventLedger)?;
-        if !receipt.is_replay() {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(receipt)
+        let run_id = GraphRunId::new(command.run_id().as_str());
+        runtime_trace("runtime.team_run.graph_write.request", || {
+            json!({
+                "operation": "replace", "runHash": identifier_hash(run_id.as_str()),
+                "requestVersionHash": super::codec::graph_version(&definition).ok().map(|value| identifier_hash(&value)),
+                "edgeCount": definition.edges().len(), "edgesTruncated": definition.edges().len() > 32,
+                "edges": definition.edges().iter().take(32).map(crate::trace::edge).collect::<Vec<_>>(),
+            })
+        });
+        let result: Result<crate::CommandReceipt, StoreFault> = self.transact(|facts| {
+            let receipt = facts.replace_team_graph(command, definition)?;
+            Ok(receipt)
+        });
+        crate::trace::graph_write_result(
+            self.facts(),
+            &run_id,
+            "replace",
+            result.as_ref().map(|receipt| receipt.is_replay()),
+        );
+        result
+    }
+
+    pub(crate) fn apply_graph_patch_draft(
+        &mut self,
+        draft: crate::TeamGraphPatchDraft,
+    ) -> Result<crate::CommandReceipt, StoreFault> {
+        let run_id = draft.run_id.clone();
+        let result: Result<crate::CommandReceipt, StoreFault> = self.transact(|facts| {
+            let run = facts.run(&run_id)
+                .ok_or(StoreFault::GraphPatch(crate::GraphPatchError::UnknownRun))?;
+            let command = draft.command(run.graph().definition())?;
+            if let Some(receipt) = facts.events().replay(&command).map_err(StoreFault::EventLedger)? {
+                return Ok(receipt);
+            }
+            let patch = draft.resolve(run.graph().definition(), run.runtime().map_or(&[], |runtime| runtime.bindings()))?;
+            runtime_trace("runtime.team_run.graph_write.request", || json!({
+                "operation": "patch", "runHash": identifier_hash(run_id.as_str()),
+                "expectedGraphIdHash": identifier_hash(patch.expected_graph_id()),
+                "expectedWorkflowPlanIdHash": identifier_hash(patch.expected_workflow_plan_id()),
+                "patch": crate::trace::patch_edges(patch.operations()),
+            }));
+
+            let receipt = facts.team_graph_patch(command, &patch)?;
+
+            Ok(receipt)
+        });
+        crate::trace::graph_write_result(
+            self.facts(),
+            &run_id,
+            "patch",
+            result.as_ref().map(|receipt| receipt.is_replay()),
+        );
+        result
     }
 
     pub fn team_graph_patch(
@@ -1147,20 +1066,26 @@ impl OrganizationStore {
         command: crate::RunCommand,
         patch: GraphPatch,
     ) -> Result<crate::CommandReceipt, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let receipt = candidate
-            .team_graph_patch(command, &patch)
-            .map_err(StoreFault::EventLedger)?;
-        if !receipt.is_replay() {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(receipt)
+        let run_id = GraphRunId::new(command.run_id().as_str());
+        runtime_trace("runtime.team_run.graph_write.request", || {
+            json!({
+                "operation": "patch", "runHash": identifier_hash(run_id.as_str()),
+                "expectedGraphIdHash": identifier_hash(patch.expected_graph_id()),
+                "expectedWorkflowPlanIdHash": identifier_hash(patch.expected_workflow_plan_id()),
+                "patch": crate::trace::patch_edges(patch.operations()),
+            })
+        });
+        let result: Result<crate::CommandReceipt, StoreFault> = self.transact(|facts| {
+            let receipt = facts.team_graph_patch(command, &patch)?;
+            Ok(receipt)
+        });
+        crate::trace::graph_write_result(
+            self.facts(),
+            &run_id,
+            "patch",
+            result.as_ref().map(|receipt| receipt.is_replay()),
+        );
+        result
     }
 
     pub fn team_node_event(
@@ -1168,44 +1093,32 @@ impl OrganizationStore {
         command: crate::RunCommand,
         event: crate::TeamNodeEvent,
     ) -> Result<crate::TeamNodeEventOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        if matches!(
-            event.kind(),
-            crate::TeamNodeEventKind::Complete | crate::TeamNodeEventKind::Reject
-        ) {
-            return Ok(crate::TeamNodeEventOutcome::TerminalReceiptRequired);
-        }
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .team_node_event(command, event)
-            .map_err(StoreFault::EventLedger)?;
-        candidate
-            .validate_transition_from(&self.facts)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        self.commit_locked(&lock, candidate)?;
-        Ok(outcome)
+        self.transact(|facts| {
+            if matches!(
+                event.kind(),
+                crate::TeamNodeEventKind::Complete | crate::TeamNodeEventKind::Reject
+            ) {
+                return Ok(crate::TeamNodeEventOutcome::TerminalReceiptRequired);
+            }
+
+            let outcome = facts
+                .team_node_event(command, event)
+                .map_err(StoreFault::EventLedger)?;
+
+            Ok(outcome)
+        })
     }
 
     pub fn apply_agent_node_event_resolution(
         &mut self,
         resolution: AgentNodeEventResolution,
     ) -> Result<AuthorizedGraphResolutionOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .apply_agent_node_event_resolution(resolution)
-            .map_err(StoreFault::AgentNodeEventResolution)?;
-        if matches!(outcome, AuthorizedGraphResolutionOutcome::Recorded) {
-            candidate
-                .validate_transition_from(&self.facts)
-                .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+        self.transact(|facts| {
+            let outcome = facts
+                .apply_agent_node_event_resolution(resolution)
+                .map_err(StoreFault::AgentNodeEventResolution)?;
+            Ok(outcome)
+        })
     }
 
     pub fn apply_authorized_graph_resolution(
@@ -1223,39 +1136,31 @@ impl OrganizationStore {
         &mut self,
         input: ApprovalResolutionInput,
     ) -> Result<super::facts::ApprovalResolutionOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let ApprovalResolutionInput {
-            run_id,
-            approval_id,
-            stage_id,
-            role_id,
-            decision,
-            resolved_at,
-            note,
-            idempotency_key,
-        } = input;
-        let outcome = candidate
-            .resolve_approval(ApprovalResolutionInput {
-                run_id: run_id.clone(),
-                approval_id: approval_id.to_owned(),
-                stage_id: stage_id.to_owned(),
-                role_id: role_id.to_owned(),
+        self.transact(|facts| {
+            let ApprovalResolutionInput {
+                run_id,
+                approval_id,
+                stage_id,
+                role_id,
                 decision,
                 resolved_at,
                 note,
-                idempotency_key: idempotency_key.to_owned(),
-            })
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        if matches!(outcome, super::facts::ApprovalResolutionOutcome::Recorded) {
-            candidate
-                .validate_transition_from(&self.facts)
+                idempotency_key,
+            } = input;
+            let outcome = facts
+                .resolve_approval(ApprovalResolutionInput {
+                    run_id: run_id.clone(),
+                    approval_id: approval_id.to_owned(),
+                    stage_id: stage_id.to_owned(),
+                    role_id: role_id.to_owned(),
+                    decision,
+                    resolved_at,
+                    note,
+                    idempotency_key: idempotency_key.to_owned(),
+                })
                 .map_err(|_| StoreFault::InvalidFacts)?;
-            self.commit_locked(&lock, candidate)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })
     }
 
     pub fn apply_graph_event(
@@ -1264,11 +1169,8 @@ impl OrganizationStore {
         event: GraphEvent,
     ) -> Result<(), StoreFault> {
         self.transact(|facts| {
-            let run = facts.run(run_id).cloned().ok_or(StoreFault::InvalidFacts)?;
-            let graph =
-                crate::reduce(run.graph().clone(), event).map_err(|_| StoreFault::InvalidFacts)?;
             facts
-                .replace_run_graph(run_id, graph)
+                .apply_graph_event(run_id, event)
                 .map_err(|_| StoreFault::InvalidFacts)
         })
     }
@@ -1279,10 +1181,47 @@ impl OrganizationStore {
         step: ControlExecutionStep,
     ) -> Result<(), StoreFault> {
         match step {
-            ControlExecutionStep::GraphEvent(event) => self.apply_graph_event(run_id, event),
+            ControlExecutionStep::GraphEvent(event) => self.transact(|facts| {
+                let run = facts
+                    .require_started_run(run_id)
+                    .map_err(|_| StoreFault::InvalidFacts)?;
+                let GraphEvent::NodeCompleted {
+                    node_id,
+                    fence,
+                    output_port,
+                    ..
+                } = &event
+                else {
+                    return Err(StoreFault::InvalidFacts);
+                };
+                if output_port != "completed"
+                    || run.graph().definition().node(node_id).is_none_or(|node| {
+                        !matches!(node.kind(), crate::NodeKind::Start | crate::NodeKind::End)
+                    })
+                    || run.graph().current_attempt(node_id).is_none_or(|attempt| {
+                        attempt.fence() != fence || attempt.status() != crate::AttemptStatus::Ready
+                    })
+                {
+                    return Err(StoreFault::InvalidFacts);
+                }
+                facts.apply_graph_event(run_id, event)
+            }),
             ControlExecutionStep::ControlResolution(resolution) => {
+                if resolution.graph_run_id() != run_id {
+                    return Err(StoreFault::InvalidFacts);
+                }
                 self.apply_control_node_resolution(resolution).map(|_| ())
             }
+            ControlExecutionStep::HumanDecisionApproval {
+                node_id,
+                fence,
+                requested_at,
+            } => self.transact(|facts| {
+                facts
+                    .request_human_decision(run_id, node_id, fence, requested_at)
+                    .map_err(|_| StoreFault::InvalidFacts)?;
+                Ok(())
+            }),
         }
     }
 
@@ -1290,28 +1229,37 @@ impl OrganizationStore {
         &mut self,
         resolution: ControlNodeResolution,
     ) -> Result<ControlNodeResolutionOutcome, StoreFault> {
-        self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        if self
-            .facts
-            .control_node_resolution(resolution.idempotency_key())
-            .is_some()
-        {
-            return self
-                .facts
+        self.transact(|facts| {
+            if facts
+                .control_node_resolution(resolution.idempotency_key())
+                .is_some()
+            {
+                return facts
+                    .apply_control_node_resolution(resolution)
+                    .map_err(StoreFault::ControlNodeResolution);
+            }
+
+            let outcome = facts
                 .apply_control_node_resolution(resolution)
-                .map_err(StoreFault::ControlNodeResolution);
+                .map_err(StoreFault::ControlNodeResolution)?;
+
+            Ok(outcome)
+        })
+    }
+
+    pub(super) fn read_locked<T>(
+        &mut self,
+        read: impl FnOnce(&OrganizationFacts) -> Result<T, StoreFault>,
+    ) -> Result<T, StoreFault> {
+        self.ensure_writable()?;
+        let transaction = self.database.begin()?;
+        let (epoch, changes) = transaction.read_since(self.epoch)?;
+        if let Err(error) = self.facts.apply_record_changes(changes, &self.contents) {
+            self.requires_reopen = true;
+            return Err(error);
         }
-        let mut candidate = self.facts.clone();
-        let outcome = candidate
-            .apply_control_node_resolution(resolution)
-            .map_err(StoreFault::ControlNodeResolution)?;
-        candidate
-            .validate_transition_from(&self.facts)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        self.commit_locked(&lock, candidate)?;
-        Ok(outcome)
+        self.epoch = epoch;
+        read(&self.facts)
     }
 
     pub(super) fn transact<T>(
@@ -1319,15 +1267,43 @@ impl OrganizationStore {
         mutation: impl FnOnce(&mut OrganizationFacts) -> Result<T, StoreFault>,
     ) -> Result<T, StoreFault> {
         self.ensure_writable()?;
-        let lock = WriterLock::acquire(&self.lock_path)?;
-        self.refresh_locked()?;
-        let mut candidate = self.facts.clone();
-        let result = mutation(&mut candidate)?;
-        candidate
-            .validate_transition_from(&self.facts)
-            .map_err(|_| StoreFault::InvalidFacts)?;
-        self.commit_locked(&lock, candidate)?;
-        Ok(result)
+        let mut transaction = self.database.begin()?;
+        let (epoch, changes) = transaction.read_since(self.epoch)?;
+        if let Err(error) = self.facts.apply_record_changes(changes, &self.contents) {
+            self.requires_reopen = true;
+            return Err(error);
+        }
+        self.epoch = epoch;
+        self.facts.begin_transaction();
+        let prepared: Result<T, StoreFault> = (|| {
+            let result = mutation(&mut self.facts)?;
+            for change in self.facts.changed_records(&self.contents)? {
+                match change {
+                    RecordChange::Put(record) => transaction.put(&record)?,
+                    RecordChange::Delete(key) => transaction.delete(&key)?,
+                }
+            }
+            Ok(result)
+        })();
+        let result = match prepared {
+            Ok(result) => result,
+            Err(error) => {
+                self.facts.rollback_transaction();
+                return Err(error);
+            }
+        };
+        match transaction.commit() {
+            Ok(epoch) => {
+                self.facts.commit_transaction();
+                self.epoch = epoch;
+                Ok(result)
+            }
+            Err(error) => {
+                self.facts.rollback_transaction();
+                self.requires_reopen = matches!(error, StoreFault::CommitOutcomeUnknown(_));
+                Err(error)
+            }
+        }
     }
 
     fn ensure_writable(&self) -> Result<(), StoreFault> {
@@ -1336,60 +1312,15 @@ impl OrganizationStore {
         }
         Ok(())
     }
-
-    fn refresh_locked(&mut self) -> Result<(), StoreFault> {
-        let recovered =
-            recover_log(File::open(&self.path).map_err(|error| StoreFault::Read(error.kind()))?)?;
-        if recovered.truncated_tail {
-            truncate_to_recovered_prefix(&self.path, recovered.committed_len)?;
-        }
-        if (recovered.had_interrupted_delivery || recovered.had_interrupted_activity)
-            && recovered.facts != self.facts
-        {
-            return Err(StoreFault::RecoveryRequired);
-        }
-        self.facts = recovered.facts;
-        self.epoch = recovered.epoch;
-        Ok(())
-    }
-
-    fn commit_locked(
-        &mut self,
-        lock: &WriterLock,
-        facts: OrganizationFacts,
-    ) -> Result<(), StoreFault> {
-        let next_epoch = self.epoch.checked_add(1).ok_or(StoreFault::EpochOverflow)?;
-        let frame = encode_frame(next_epoch, &facts)?;
-        let log_len = lock.log_len(&self.path)?;
-        let projected_len = log_len
-            .checked_add(u64::try_from(frame.len()).map_err(|_| StoreFault::LogFull)?)
-            .ok_or(StoreFault::LogFull)?;
-        if projected_len > MAX_LOG_BYTES {
-            return Err(StoreFault::LogFull);
-        }
-
-        let mut log = OpenOptions::new()
-            .append(true)
-            .open(&self.path)
-            .map_err(|error| StoreFault::Commit(error.kind()))?;
-        if let Err(error) = log.write_all(&frame) {
-            return Err(StoreFault::Commit(error.kind()));
-        }
-        if let Err(error) = log.sync_data() {
-            self.requires_reopen = true;
-            return Err(StoreFault::CommitOutcomeUnknown(error.kind()));
-        }
-        self.facts = facts;
-        self.epoch = next_epoch;
-        Ok(())
-    }
 }
 
-fn now_seconds() -> Result<u64, StoreFault> {
+fn now_millis() -> Result<u64, StoreFault> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
         .map_err(|_| StoreFault::InvalidFacts)
+        .and_then(|duration| {
+            u64::try_from(duration.as_millis()).map_err(|_| StoreFault::InvalidFacts)
+        })
 }
 
 fn ensure_parent_directory(path: &Path) -> Result<(), StoreFault> {
@@ -1399,119 +1330,4 @@ fn ensure_parent_directory(path: &Path) -> Result<(), StoreFault> {
         fs::create_dir_all(parent).map_err(|error| StoreFault::Commit(error.kind()))?;
     }
     Ok(())
-}
-
-fn recover_or_initialize(path: &Path) -> Result<RecoveredFacts, StoreFault> {
-    match File::open(path) {
-        Ok(file) => recover_log(file),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => initialize_log_file(path),
-        Err(error) => Err(StoreFault::Read(error.kind())),
-    }
-}
-
-fn initialize_log_file(path: &Path) -> Result<RecoveredFacts, StoreFault> {
-    match OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(mut file) => {
-            initialize_log(&mut file)?;
-            file.sync_all()
-                .map_err(|error| StoreFault::CommitOutcomeUnknown(error.kind()))?;
-            Ok(RecoveredFacts {
-                facts: OrganizationFacts::default(),
-                epoch: 0,
-                committed_len: HEADER_LEN as u64,
-                truncated_tail: false,
-                had_interrupted_delivery: false,
-                had_interrupted_activity: false,
-            })
-        }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let file = File::open(path).map_err(|error| StoreFault::Read(error.kind()))?;
-            recover_log(file)
-        }
-        Err(error) => Err(StoreFault::Commit(error.kind())),
-    }
-}
-
-fn commit_recovered_facts(
-    path: &Path,
-    epoch: u64,
-    facts: &OrganizationFacts,
-) -> Result<u64, StoreFault> {
-    let next_epoch = epoch.checked_add(1).ok_or(StoreFault::EpochOverflow)?;
-    let frame = encode_frame(next_epoch, facts)?;
-    let log_len = fs::metadata(path)
-        .map(|metadata| metadata.len())
-        .map_err(|error| StoreFault::Commit(error.kind()))?;
-    let projected_len = log_len
-        .checked_add(u64::try_from(frame.len()).map_err(|_| StoreFault::LogFull)?)
-        .ok_or(StoreFault::LogFull)?;
-    if projected_len > MAX_LOG_BYTES {
-        return Err(StoreFault::LogFull);
-    }
-    let mut log = OpenOptions::new()
-        .append(true)
-        .open(path)
-        .map_err(|error| StoreFault::Commit(error.kind()))?;
-    log.write_all(&frame)
-        .map_err(|error| StoreFault::Commit(error.kind()))?;
-    log.sync_data()
-        .map_err(|error| StoreFault::CommitOutcomeUnknown(error.kind()))?;
-    Ok(next_epoch)
-}
-
-fn truncate_to_recovered_prefix(path: &Path, committed_len: u64) -> Result<(), StoreFault> {
-    OpenOptions::new()
-        .write(true)
-        .open(path)
-        .and_then(|file| {
-            file.set_len(committed_len)?;
-            file.sync_all()
-        })
-        .map_err(|error| StoreFault::Recovery(error.kind()))
-}
-
-fn lock_path(path: &Path) -> PathBuf {
-    let mut lock = path.as_os_str().to_owned();
-    lock.push(".lock");
-    lock.into()
-}
-
-struct WriterLock {
-    path: PathBuf,
-}
-
-impl WriterLock {
-    fn acquire(path: &Path) -> Result<Self, StoreFault> {
-        let started = SystemTime::now();
-        loop {
-            match OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(file) => {
-                    drop(file);
-                    return Ok(Self {
-                        path: path.to_owned(),
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let elapsed = started.elapsed().unwrap_or_default();
-                    if elapsed >= WRITER_LOCK_TIMEOUT {
-                        return Err(StoreFault::WriterBusy);
-                    }
-                    std::thread::sleep(WRITER_LOCK_POLL.min(WRITER_LOCK_TIMEOUT - elapsed));
-                }
-                Err(error) => return Err(StoreFault::Lock(error.kind())),
-            }
-        }
-    }
-
-    fn log_len(&self, path: &Path) -> Result<u64, StoreFault> {
-        fs::metadata(path)
-            .map(|metadata| metadata.len())
-            .map_err(|error| StoreFault::Commit(error.kind()))
-    }
-}
-
-impl Drop for WriterLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
 }

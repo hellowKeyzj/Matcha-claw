@@ -5,8 +5,8 @@ mod rework;
 use super::{
     AttemptId, AttemptStatus, DefinitionError, DependencyMetadata, DurableRestoreError, EdgeAction,
     EdgeDefinition, EdgeId, EdgePayloadPolicy, ExecutionFence, ExecutorPolicy, GraphDefinition,
-    GraphEvent, GraphRunId, GraphState, GraphStatus, GroupId, JoinPolicy, NodeDefinition,
-    NodeExecutionId, NodeId, NodeKind, ReviewAssignment, StartTrigger, WorkAssignment, WorkGroup,
+    GraphEvent, GraphRunId, GraphState, GraphStatus, NodeDefinition,
+    NodeExecutionId, NodeId, NodeKind, ReviewAssignment, StartTrigger, WorkAssignment,
     project, reduce, restore_oracle,
 };
 
@@ -114,7 +114,7 @@ fn roots_in_reverse_definition_order() -> GraphDefinition {
 }
 
 fn rich_definition() -> GraphDefinition {
-    GraphDefinition::new(
+    GraphDefinition::from_durable(
         "graph-rich",
         "plan-rich",
         GraphRunId::new("run-rich"),
@@ -136,7 +136,6 @@ fn rich_definition() -> GraphDefinition {
                     "work instruction",
                     ExecutorPolicy::team_role("role-work"),
                     Some("artifact-report".to_owned()),
-                    Some(GroupId::new("group-work")),
                 ),
             ),
             NodeDefinition::review(
@@ -149,7 +148,6 @@ fn rich_definition() -> GraphDefinition {
                 node("typed-join"),
                 "Typed join",
                 attempts(),
-                WorkGroup::new(GroupId::new("group-typed"), JoinPolicy::new(true, false, 2)),
             ),
             NodeDefinition::control(
                 node("control-review"),
@@ -689,15 +687,6 @@ fn durable_snapshot_round_trips_full_node_and_edge_metadata() {
         Some("artifact-report")
     );
     assert_eq!(
-        restored.definition().nodes()[2]
-            .work_assignment()
-            .unwrap()
-            .group_id()
-            .unwrap()
-            .as_str(),
-        "group-work"
-    );
-    assert_eq!(
         restored.definition().nodes()[3]
             .review_assignment()
             .unwrap()
@@ -711,13 +700,8 @@ fn durable_snapshot_round_trips_full_node_and_edge_metadata() {
             .prompt(),
         "review instruction"
     );
-    assert_eq!(
-        restored.definition().nodes()[4]
-            .work_group()
-            .unwrap()
-            .join_policy(),
-        &JoinPolicy::new(true, false, 2)
-    );
+    assert_eq!(restored.definition().nodes()[4].kind(), NodeKind::Join);
+    assert!(!restored.definition().nodes()[4].is_control());
     assert!(
         !restored.definition().edges()[1]
             .payload()
@@ -752,18 +736,6 @@ fn durable_restore_rejects_control_marker_payload_mismatches() {
         .is_control = true;
     assert!(matches!(
         GraphState::restore_durable(typed_review),
-        Err(DurableRestoreError::InvalidNodeSnapshot { .. })
-    ));
-
-    let mut control_join = state.durable_snapshot();
-    control_join
-        .nodes
-        .iter_mut()
-        .find(|node| node.id == "control-join")
-        .unwrap()
-        .is_control = false;
-    assert!(matches!(
-        GraphState::restore_durable(control_join),
         Err(DurableRestoreError::InvalidNodeSnapshot { .. })
     ));
 }
@@ -1034,8 +1006,9 @@ fn validates_agent_node_edge_ports_and_rework_action() {
     .unwrap_err();
     assert_eq!(
         work_default,
-        DefinitionError::InvalidWorkEdgeSourcePort {
+        DefinitionError::InvalidEdgeSourcePort {
             edge_id: EdgeId::new("work-end"),
+            node_id: node("work"),
             source_port: "default".into(),
         }
     );
@@ -1070,7 +1043,7 @@ fn validates_agent_node_edge_ports_and_rework_action() {
     .unwrap_err();
     assert_eq!(
         completed_rework,
-        DefinitionError::InvalidCompletedEdgeAction(EdgeId::new("completed-rework"))
+        DefinitionError::InvalidEdgeAction(EdgeId::new("completed-rework"))
     );
 
     let rework_activate = GraphDefinition::new(
@@ -1103,7 +1076,7 @@ fn validates_agent_node_edge_ports_and_rework_action() {
     .unwrap_err();
     assert_eq!(
         rework_activate,
-        DefinitionError::InvalidReworkEdgeAction(EdgeId::new("rework-activate"))
+        DefinitionError::InvalidEdgeAction(EdgeId::new("rework-activate"))
     );
 
     let review_approved = GraphDefinition::new(
@@ -1136,8 +1109,9 @@ fn validates_agent_node_edge_ports_and_rework_action() {
     .unwrap_err();
     assert_eq!(
         review_approved,
-        DefinitionError::InvalidReviewEdgeSourcePort {
+        DefinitionError::InvalidEdgeSourcePort {
             edge_id: EdgeId::new("review-approved"),
+            node_id: node("review"),
             source_port: "approved".into(),
         }
     );
@@ -1196,11 +1170,11 @@ fn keeps_control_node_internal_ports_available() {
                 "Decision",
                 attempts(),
             ),
-            NodeDefinition::control(
+            NodeDefinition::script_review(
                 node("script-review"),
-                NodeKind::ScriptReview,
                 "Script review",
                 attempts(),
+                crate::ScriptReviewRule::PassThrough,
             ),
             NodeDefinition::control(node("join"), NodeKind::Join, "Join", attempts()),
             NodeDefinition::control(node("end"), NodeKind::End, "End", attempts()),
@@ -1235,9 +1209,9 @@ fn keeps_control_node_internal_ports_available() {
                 EdgeAction::Finish,
             ),
             edge(
-                "script-approved",
+                "script-passed",
                 "script-review",
-                "approved",
+                "passed",
                 "join",
                 EdgeAction::Gate,
             ),

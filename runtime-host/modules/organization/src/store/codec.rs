@@ -1,5 +1,10 @@
+#[cfg(test)]
+use std::io::Write;
+#[cfg(test)]
+use crate::RoleMaterializationAgent;
+
 use std::{
-    io::{Read, Write},
+    io::Read,
     num::{NonZeroU32, NonZeroU64},
 };
 
@@ -12,7 +17,7 @@ use crate::{
     EvidenceReferenceKind, ExecutionFence, GraphRunId, GraphState, IdempotencyKey,
     ManagedAgentReference, MaterializationReceipt, MaterializationRejection, MaterializationSource,
     MemberId, NativeDeliveryCorrelation, NodeDefinition, NodeId, NodeKind,
-    RoleAgentMaterialization, RoleAssignment, RoleId, RoleKind, RoleMaterializationAgent,
+    RoleAgentMaterialization, RoleAssignment, RoleId, RoleKind,
     RoleMaterializationReceipt, RoleSessionReceipt, RunRuntimeReceipt, RuntimeEndpointReference,
     StartTrigger, TeamDefinition, TeamId, TeamMaterializationCleanup, TeamMaterializationIntent,
     TeamMaterializationLifecycle, TeamMaterializationRemoval, TeamMaterializationRequest,
@@ -37,7 +42,7 @@ use crate::{
         delivery::{
             AuthorizedGraphOutcome, AuthorizedGraphResolution, AuthorizedGraphResolutionReceipt,
             NativeRunReceiptReference, NativeTerminalStatus, TeamNodeOutput,
-            TeamNodeOutputDispatch, TerminalObservationResolution, TerminalObservationSnapshot,
+            TerminalObservationResolution, TerminalObservationSnapshot,
             TerminalObservationSnapshotInput,
         },
         event::{
@@ -51,7 +56,7 @@ use crate::{
             DurableExecutionFence, DurableGraphLayout, DurableInputReceipt, DurableNodeAttempt,
             DurableNodeDefinition, DurableNodeExecution, DurableNodePosition,
             DurableReadyQueueItem, DurableReviewAssignment, DurableStartTrigger,
-            DurableWorkAssignment, DurableWorkGroup, GraphDurableSnapshot,
+            DurableWorkAssignment, GraphDurableSnapshot,
         },
         lifecycle::{GraphRunLifecycle, GraphRunLifecycleState},
     },
@@ -66,12 +71,13 @@ use super::{GraphRunFacts, OrganizationFacts, StoreFault, TeamFacts};
 pub(super) const HEADER_LEN: usize = 17;
 pub(super) const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const LOG_MAGIC: [u8; 8] = *b"MORGDU01";
-const CURRENT_SCHEMA_VERSION: u8 = 25;
-const FRAME_MARKER: u8 = 0xA1;
+const CURRENT_SCHEMA_VERSION: u8 = 27;
+const FRAME_MARKER: u8 = 0xA3;
+const SCHEMA26_FRAME_MARKER: u8 = 0xA2;
+const SCHEMA25_FRAME_MARKER: u8 = 0xA1;
 const FRAME_METADATA_LEN: usize = 16;
 const MAX_FACTS_BYTES: usize = 1024 * 1024;
 const MAX_COLLECTION_ENTRIES: usize = 16_384;
-const MAX_STRING_BYTES: usize = 16 * 1024;
 
 pub(super) struct RecoveredFacts {
     pub(super) facts: OrganizationFacts,
@@ -82,6 +88,7 @@ pub(super) struct RecoveredFacts {
     pub(super) had_interrupted_activity: bool,
 }
 
+#[cfg(test)]
 pub(super) fn initialize_log(mut output: impl Write) -> Result<(), StoreFault> {
     output
         .write_all(&LOG_MAGIC)
@@ -104,7 +111,7 @@ pub(super) fn recover_log(mut input: impl Read) -> Result<RecoveredFacts, StoreF
         return Err(StoreFault::CorruptRecord);
     }
     let schema = content[LOG_MAGIC.len()];
-    if schema != CURRENT_SCHEMA_VERSION {
+    if !matches!(schema, 25 | 26 | CURRENT_SCHEMA_VERSION) {
         return Err(StoreFault::UnsupportedSchemaVersion(schema));
     }
 
@@ -120,10 +127,19 @@ pub(super) fn recover_log(mut input: impl Read) -> Result<RecoveredFacts, StoreF
     let mut had_interrupted_delivery = false;
     let mut had_interrupted_activity = false;
 
+    // Historical prefixes remain intact; schemas may advance but never regress.
+    let mut latest_schema = schema;
     while offset < content.len() {
-        if content[offset] != FRAME_MARKER {
+        let frame_schema = match content[offset] {
+            SCHEMA25_FRAME_MARKER => 25,
+            SCHEMA26_FRAME_MARKER => 26,
+            FRAME_MARKER => CURRENT_SCHEMA_VERSION,
+            _ => return Err(StoreFault::CorruptRecord),
+        };
+        if frame_schema < latest_schema {
             return Err(StoreFault::CorruptRecord);
         }
+        latest_schema = frame_schema;
         offset += 1;
         let metadata_end = offset
             .checked_add(FRAME_METADATA_LEN)
@@ -169,7 +185,13 @@ pub(super) fn recover_log(mut input: impl Read) -> Result<RecoveredFacts, StoreF
         if frame_epoch != expected_epoch {
             return Err(StoreFault::CorruptRecord);
         }
-        let decoded = decode_facts(payload)?;
+        let decoded = decode_facts(payload, frame_schema).inspect_err(|error| {
+            platform::trace::runtime_trace("runtime.team_run.store.decode_failed", || serde_json::json!({
+                "frameEpoch": frame_epoch,
+                "frameEndOffset": payload_end,
+                "reason": if matches!(error, StoreFault::InvalidFacts) { "invalid_facts" } else { "decode_error" },
+            }));
+        })?;
         had_interrupted_delivery = decoded
             .deliveries()
             .deliveries()
@@ -195,6 +217,7 @@ pub(super) fn recover_log(mut input: impl Read) -> Result<RecoveredFacts, StoreF
     })
 }
 
+#[cfg(test)]
 pub(super) fn encode_frame(epoch: u64, facts: &OrganizationFacts) -> Result<Vec<u8>, StoreFault> {
     let payload = encode_facts(facts)?;
     if payload.len() > MAX_FACTS_BYTES {
@@ -210,6 +233,7 @@ pub(super) fn encode_frame(epoch: u64, facts: &OrganizationFacts) -> Result<Vec<
     Ok(frame)
 }
 
+#[cfg(test)]
 fn encode_facts(facts: &OrganizationFacts) -> Result<Vec<u8>, StoreFault> {
     let mut output = Vec::new();
     push_count(&mut output, facts.teams().count())?;
@@ -270,8 +294,13 @@ fn encode_facts(facts: &OrganizationFacts) -> Result<Vec<u8>, StoreFault> {
     Ok(output)
 }
 
-fn decode_facts(content: &[u8]) -> Result<OrganizationFacts, StoreFault> {
-    let mut reader = Reader::new(content);
+fn decode_facts(content: &[u8], schema: u8) -> Result<OrganizationFacts, StoreFault> {
+    let mut reader = match schema {
+        25 => Reader::schema25(content),
+        26 => Reader::with_schema(content, schema),
+        CURRENT_SCHEMA_VERSION => Reader::new(content),
+        _ => return Err(StoreFault::UnsupportedSchemaVersion(schema)),
+    };
     let teams = (0..reader.count()?)
         .map(|_| {
             Ok(TeamFacts::new(
@@ -302,8 +331,27 @@ fn decode_facts(content: &[u8]) -> Result<OrganizationFacts, StoreFault> {
             let team = TeamId::try_new(reader.string()?).map_err(|_| StoreFault::InvalidFacts)?;
             let revision =
                 TeamRevision::try_new(reader.u64()?).map_err(|_| StoreFault::InvalidFacts)?;
-            let graph = GraphState::restore_durable(reader.graph()?)
-                .map_err(|_| StoreFault::InvalidFacts)?;
+            let snapshot = reader.graph()?;
+            let run_hash = platform::trace::enabled()
+                .then(|| platform::trace::identifier_hash(&snapshot.run_id));
+            let graph = GraphState::restore_durable(snapshot).map_err(|error| {
+                platform::trace::runtime_trace("runtime.team_run.store.graph_restore_failed", || {
+                    use crate::run::graph::{DurableRestoreError, RestoreError};
+                    let (reason, node) = match &error {
+                        DurableRestoreError::InvalidInputTimestamp { node_id, .. } =>
+                            ("invalid_input_timestamp", Some(node_id)),
+                        DurableRestoreError::InvalidState(RestoreError::InvalidAttemptTimestamp { node_id, .. }) =>
+                            ("invalid_attempt_timestamp", Some(node_id)),
+                        _ => ("invalid_graph", None),
+                    };
+                    serde_json::json!({
+                        "runHash": run_hash,
+                        "reason": reason,
+                        "nodeHash": node.map(|id| platform::trace::identifier_hash(id.as_str())),
+                    })
+                });
+                StoreFault::InvalidFacts
+            })?;
             let runtime = reader.optional_runtime()?;
             let lifecycle = reader.lifecycle()?;
             let start_gate = reader.start_gate()?;
@@ -367,6 +415,7 @@ fn decode_facts(content: &[u8]) -> Result<OrganizationFacts, StoreFault> {
     .map_err(|_| StoreFault::InvalidFacts)
 }
 
+#[cfg(test)]
 fn encode_team_definition(
     output: &mut Vec<u8>,
     definition: &TeamDefinition,
@@ -395,6 +444,7 @@ fn encode_team_definition(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_materialization_lifecycle(
     output: &mut Vec<u8>,
     lifecycle: &TeamMaterializationLifecycle,
@@ -442,6 +492,7 @@ fn encode_materialization_lifecycle(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_materialization_request(
     output: &mut Vec<u8>,
     request: &TeamMaterializationRequest,
@@ -494,6 +545,7 @@ fn encode_materialization_request(
     push_string(output, request.idempotency_key().as_str())
 }
 
+#[cfg(test)]
 fn encode_materialization_cleanup(
     output: &mut Vec<u8>,
     cleanup: &TeamMaterializationCleanup,
@@ -523,6 +575,7 @@ fn encode_materialization_cleanup(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_materialization_removal(
     output: &mut Vec<u8>,
     removal: &TeamMaterializationRemoval,
@@ -531,6 +584,7 @@ fn encode_materialization_removal(
     push_string(output, removal.idempotency_key().as_str())
 }
 
+#[cfg(test)]
 fn encode_materialization(
     output: &mut Vec<u8>,
     receipt: &MaterializationReceipt,
@@ -560,6 +614,7 @@ fn encode_materialization(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_workflow_plan(
     output: &mut Vec<u8>,
     plan: &crate::run::WorkflowPlan,
@@ -568,18 +623,6 @@ fn encode_workflow_plan(
     push_string(output, plan.run_id())?;
     push_string(output, plan.title())?;
     push_string(output, plan.status())?;
-    push_count(output, plan.groups().len())?;
-    for group in plan.groups() {
-        push_string(output, group.group_id())?;
-        push_string(output, group.title())?;
-        push_count(output, group.task_ids().len())?;
-        for task_id in group.task_ids() {
-            push_string(output, task_id)?;
-        }
-        output.push(u8::from(group.join().require_completed()));
-        output.push(u8::from(group.join().allow_failed()));
-        output.extend_from_slice(&group.join().retry_limit().to_le_bytes());
-    }
     push_count(output, plan.tasks().len())?;
     for task in plan.tasks() {
         push_string(output, task.task_id())?;
@@ -597,6 +640,7 @@ fn encode_workflow_plan(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_graph(output: &mut Vec<u8>, graph: &GraphDurableSnapshot) -> Result<(), StoreFault> {
     push_string(output, &graph.graph_id)?;
     push_string(output, &graph.workflow_plan_id)?;
@@ -641,7 +685,6 @@ fn encode_graph(output: &mut Vec<u8>, graph: &GraphDurableSnapshot) -> Result<()
                 push_string(output, &work.role_id)?;
                 push_string(output, &work.session_ref)?;
                 push_optional_string(output, work.output_artifact_kind.as_deref())?;
-                push_optional_string(output, work.group_id.as_deref())?;
             }
         }
         match &node.review {
@@ -653,16 +696,7 @@ fn encode_graph(output: &mut Vec<u8>, graph: &GraphDurableSnapshot) -> Result<()
                 push_string(output, &review.prompt)?;
             }
         }
-        match &node.group {
-            None => output.push(0),
-            Some(group) => {
-                output.push(1);
-                push_string(output, &group.group_id)?;
-                output.push(u8::from(group.require_completed));
-                output.push(u8::from(group.allow_failed));
-                output.extend_from_slice(&group.retry_limit.to_le_bytes());
-            }
-        }
+        output.push(node.script_review_rule.map_or(0, script_review_rule_tag));
     }
     push_count(output, graph.edges.len())?;
     for edge in &graph.edges {
@@ -700,6 +734,7 @@ fn encode_graph(output: &mut Vec<u8>, graph: &GraphDurableSnapshot) -> Result<()
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_attempt(output: &mut Vec<u8>, attempt: &DurableNodeAttempt) -> Result<(), StoreFault> {
     encode_fence(output, &attempt.fence)?;
     output.extend_from_slice(&attempt.number.to_le_bytes());
@@ -731,11 +766,13 @@ fn encode_attempt(output: &mut Vec<u8>, attempt: &DurableNodeAttempt) -> Result<
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_fence(output: &mut Vec<u8>, fence: &DurableExecutionFence) -> Result<(), StoreFault> {
     push_string(output, &fence.attempt_id)?;
     push_string(output, &fence.node_execution_id)
 }
 
+#[cfg(test)]
 fn encode_deliveries(
     output: &mut Vec<u8>,
     ledger: &DeliveryLedgerSnapshot,
@@ -762,6 +799,7 @@ fn encode_deliveries(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_delivery_phase(
     output: &mut Vec<u8>,
     phase: &DeliveryPhaseSnapshot,
@@ -818,6 +856,7 @@ fn encode_delivery_phase(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_terminal_observation(
     output: &mut Vec<u8>,
     observation: &TerminalObservationSnapshot,
@@ -842,28 +881,24 @@ fn encode_terminal_observation(
     match observation.output() {
         None => output.push(0),
         Some(team_output) => {
-            output.push(1);
+            output.push(2);
             encode_team_node_output(output, team_output)?;
         }
     }
     encode_terminal_resolution(output, observation.resolution())
 }
 
+#[cfg(test)]
 fn encode_team_node_output(
     output: &mut Vec<u8>,
     team_output: &TeamNodeOutput,
 ) -> Result<(), StoreFault> {
     push_string(output, team_output.final_assistant_text())?;
     push_string(output, team_output.summary())?;
-    push_string(output, team_output.decision())?;
-    push_count(output, team_output.dispatch().len())?;
-    for dispatch in team_output.dispatch() {
-        push_string(output, dispatch.role_id())?;
-        push_string(output, dispatch.task())?;
-    }
-    Ok(())
+    push_string(output, team_output.decision())
 }
 
+#[cfg(test)]
 fn encode_activities(
     output: &mut Vec<u8>,
     ledger: &ActivityLedgerSnapshot,
@@ -894,6 +929,7 @@ fn encode_activities(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_activity_kind(output: &mut Vec<u8>, kind: &ActivityKind) -> Result<(), StoreFault> {
     match kind {
         ActivityKind::AgentTask {
@@ -916,6 +952,7 @@ fn encode_activity_kind(output: &mut Vec<u8>, kind: &ActivityKind) -> Result<(),
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_activity_phase(
     output: &mut Vec<u8>,
     phase: &ActivityPhaseSnapshot,
@@ -961,6 +998,7 @@ fn encode_activity_phase(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_activity_claim(
     output: &mut Vec<u8>,
     claim: &ActivityClaimSnapshot,
@@ -972,6 +1010,7 @@ fn encode_activity_claim(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_triggers(output: &mut Vec<u8>, ledger: &crate::TriggerLedger) -> Result<(), StoreFault> {
     push_count(output, ledger.requests().count())?;
     for request in ledger.requests() {
@@ -983,6 +1022,7 @@ fn encode_triggers(output: &mut Vec<u8>, ledger: &crate::TriggerLedger) -> Resul
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_control_resolutions<'a>(
     output: &mut Vec<u8>,
     resolutions: impl Iterator<Item = &'a ControlNodeResolution>,
@@ -1011,6 +1051,7 @@ fn encode_control_resolutions<'a>(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_approvals<'a>(
     output: &mut Vec<u8>,
     approvals: impl Iterator<Item = &'a crate::Approval>,
@@ -1047,6 +1088,7 @@ fn encode_approvals<'a>(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_approval_subject(
     output: &mut Vec<u8>,
     subject: &ApprovalSubject,
@@ -1067,6 +1109,7 @@ fn encode_approval_subject(
     }
 }
 
+#[cfg(test)]
 fn encode_evidence<'a>(
     output: &mut Vec<u8>,
     records: impl Iterator<Item = &'a EvidenceRecord>,
@@ -1085,6 +1128,7 @@ fn encode_evidence<'a>(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_artifacts<'a>(
     output: &mut Vec<u8>,
     records: impl Iterator<Item = &'a ArtifactRecord>,
@@ -1115,6 +1159,7 @@ fn encode_artifacts<'a>(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_decisions(
     output: &mut Vec<u8>,
     snapshot: &TeamDecisionLedgerSnapshot,
@@ -1133,6 +1178,7 @@ fn encode_decisions(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_decision_snapshot(
     output: &mut Vec<u8>,
     decision: &TeamDecisionSnapshot,
@@ -1153,6 +1199,7 @@ fn encode_decision_snapshot(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_events(output: &mut Vec<u8>, snapshot: &EventLedgerSnapshot) -> Result<(), StoreFault> {
     push_count(output, snapshot.commands().len())?;
     for record in snapshot.commands() {
@@ -1181,6 +1228,7 @@ fn encode_events(output: &mut Vec<u8>, snapshot: &EventLedgerSnapshot) -> Result
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_run_command(output: &mut Vec<u8>, command: &RunCommand) -> Result<(), StoreFault> {
     push_string(output, command.run_id().as_str())?;
     push_string(output, command.command_id().as_str())?;
@@ -1190,6 +1238,7 @@ fn encode_run_command(output: &mut Vec<u8>, command: &RunCommand) -> Result<(), 
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_command_payload(
     output: &mut Vec<u8>,
     payload: &CommandPayload,
@@ -1215,6 +1264,20 @@ fn encode_command_payload(
         CommandPayload::GraphReplace(definition) => {
             output.push(3);
             encode_graph_definition(output, definition)
+        }
+        CommandPayload::HistoricalGraphReplace(historical) => {
+            output.push(match historical.schema() {
+                25 => 5,
+                26 => 6,
+                _ => return Err(StoreFault::InvalidFacts),
+            });
+            let raw = historical.encoded_definition();
+            if raw.len() > MAX_FACTS_BYTES {
+                return Err(StoreFault::RecordTooLarge);
+            }
+            output.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+            output.extend_from_slice(raw);
+            Ok(())
         }
         CommandPayload::NodeProgress(progress) => {
             output.push(1);
@@ -1288,7 +1351,6 @@ fn encode_node_definition(
             push_string(output, work.role_id())?;
             push_string(output, work.session_ref().as_str())?;
             push_optional_string(output, work.output_artifact_kind())?;
-            push_optional_string(output, work.group_id().map(crate::GroupId::as_str))?;
         }
     }
     match node.review_assignment() {
@@ -1300,16 +1362,7 @@ fn encode_node_definition(
             push_string(output, review.prompt())?;
         }
     }
-    match node.work_group() {
-        None => output.push(0),
-        Some(group) => {
-            output.push(1);
-            push_string(output, group.id().as_str())?;
-            output.push(u8::from(group.join_policy().require_completed()));
-            output.push(u8::from(group.join_policy().allow_failed()));
-            output.extend_from_slice(&group.join_policy().retry_limit().to_le_bytes());
-        }
-    }
+    output.push(node.script_review_rule().map_or(0, script_review_rule_tag));
     Ok(())
 }
 
@@ -1335,14 +1388,87 @@ fn encode_edge_definition(
     Ok(())
 }
 
-pub(crate) fn graph_patch_fingerprint(
-    patch: &crate::GraphPatch,
+pub(crate) fn graph_patch_draft_fingerprint(
+    base_graph_id: &str,
+    base_workflow_plan_id: &str,
+    operations: &[crate::application::team_runtime::GraphPatchDraftOperation],
 ) -> Result<crate::run::event::OpaqueId, StoreFault> {
+    use crate::application::team_runtime::GraphPatchDraftOperation;
     use sha2::{Digest, Sha256};
     let mut bytes = Vec::new();
-    push_string(&mut bytes, patch.expected_graph_id())?;
-    push_string(&mut bytes, patch.expected_workflow_plan_id())?;
-    for operation in patch.operations() {
+    push_string(&mut bytes, base_graph_id)?;
+    push_string(&mut bytes, base_workflow_plan_id)?;
+    for operation in operations {
+        let operation = match operation {
+            GraphPatchDraftOperation::Graph(operation) => operation,
+            GraphPatchDraftOperation::AddNode(node) | GraphPatchDraftOperation::ReplaceNode(node) => {
+                // Only omitted bindings use these request-only tags; explicit nodes keep their bytes.
+                bytes.push(if matches!(operation, GraphPatchDraftOperation::AddNode(_)) { 12 } else { 13 });
+                push_string(&mut bytes, node.id.as_str())?;
+                push_string(&mut bytes, &node.title)?;
+                bytes.extend_from_slice(&node.max_attempts.get().to_le_bytes());
+                push_string(&mut bytes, &node.role_id)?;
+                push_string(&mut bytes, &node.prompt)?;
+                match &node.assignment {
+                    crate::application::team_runtime::NodeAssignmentDraft::Work { task_id, output_artifact_kind } => {
+                        bytes.push(0);
+                        push_string(&mut bytes, task_id)?;
+                        push_optional_string(&mut bytes, output_artifact_kind.as_deref())?;
+                    }
+                    crate::application::team_runtime::NodeAssignmentDraft::Review => bytes.push(1),
+                }
+                continue;
+            }
+            GraphPatchDraftOperation::AddEdge(edge) | GraphPatchDraftOperation::ReplaceEdge(edge) => {
+                let explicit = edge.action.is_some()
+                    && edge.source_port.is_some()
+                    && edge.target_port.is_some();
+                bytes.push(match (operation, edge.action, explicit) {
+                    (GraphPatchDraftOperation::AddEdge(_), None, _) => 10,
+                    (GraphPatchDraftOperation::ReplaceEdge(_), None, _) => 11,
+                    (GraphPatchDraftOperation::AddEdge(_), Some(_), true) => 3,
+                    (GraphPatchDraftOperation::ReplaceEdge(_), Some(_), true) => 4,
+                    (GraphPatchDraftOperation::AddEdge(_), Some(_), false) => 8,
+                    _ => 9,
+                });
+                push_string(&mut bytes, edge.id.as_str())?;
+                push_string(&mut bytes, edge.source_node_id.as_str())?;
+                if explicit {
+                    push_string(&mut bytes, edge.source_port.as_deref().expect("explicit ports"))?;
+                } else {
+                    push_optional_string(&mut bytes, edge.source_port.as_deref())?;
+                }
+                push_string(&mut bytes, edge.target_node_id.as_str())?;
+                if explicit {
+                    push_string(&mut bytes, edge.target_port.as_deref().expect("explicit ports"))?;
+                } else {
+                    push_optional_string(&mut bytes, edge.target_port.as_deref())?;
+                }
+                if let Some(action) = edge.action {
+                    bytes.push(edge_action_tag(action));
+                }
+                bytes.push(u8::from(edge.payload.include_upstream_result()));
+                match &edge.dependency {
+                    None => bytes.push(0),
+                    Some(dependency) => match (
+                        dependency.dependency_task_id.as_deref(),
+                        dependency.task_id.as_deref(),
+                    ) {
+                        (Some(source), Some(target)) => {
+                            bytes.push(1);
+                            push_string(&mut bytes, source)?;
+                            push_string(&mut bytes, target)?;
+                        }
+                        (source, target) => {
+                            bytes.push(2);
+                            push_optional_string(&mut bytes, source)?;
+                            push_optional_string(&mut bytes, target)?;
+                        }
+                    },
+                }
+                continue;
+            }
+        };
         match operation {
             crate::GraphPatchOperation::AddNode(node) => {
                 bytes.push(0);
@@ -1398,6 +1524,7 @@ pub(crate) fn graph_patch_fingerprint(
         .map_err(|_| StoreFault::InvalidFacts)
 }
 
+#[cfg(test)]
 fn encode_graph_patch_operation(
     output: &mut Vec<u8>,
     operation: &GraphPatchOperation,
@@ -1429,7 +1556,7 @@ fn encode_graph_patch_operation(
             target_node_id,
             action,
         } => {
-            output.push(3);
+            output.push(if action.is_some() { 3 } else { 8 });
             encode_graph_edge(output, edge_id, source_node_id, target_node_id, *action)
         }
         GraphPatchOperation::ReplaceEdge {
@@ -1438,7 +1565,7 @@ fn encode_graph_patch_operation(
             target_node_id,
             action,
         } => {
-            output.push(4);
+            output.push(if action.is_some() { 4 } else { 9 });
             encode_graph_edge(output, edge_id, source_node_id, target_node_id, *action)
         }
         GraphPatchOperation::RemoveEdge { edge_id } => {
@@ -1460,6 +1587,7 @@ fn encode_graph_patch_operation(
     }
 }
 
+#[cfg(test)]
 fn encode_graph_node(
     output: &mut Vec<u8>,
     node_id: &str,
@@ -1471,20 +1599,24 @@ fn encode_graph_node(
     push_optional_string(output, role_id.map(String::as_str))
 }
 
+#[cfg(test)]
 fn encode_graph_edge(
     output: &mut Vec<u8>,
     edge_id: &str,
     source_node_id: &str,
     target_node_id: &str,
-    action: GraphEdgeAction,
+    action: Option<GraphEdgeAction>,
 ) -> Result<(), StoreFault> {
     push_string(output, edge_id)?;
     push_string(output, source_node_id)?;
     push_string(output, target_node_id)?;
-    output.push(graph_edge_action_tag(action));
+    if let Some(action) = action {
+        output.push(graph_edge_action_tag(action));
+    }
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_metadata_value(output: &mut Vec<u8>, value: &MetadataValue) -> Result<(), StoreFault> {
     match value {
         MetadataValue::Enabled(value) => {
@@ -1503,6 +1635,7 @@ fn encode_metadata_value(output: &mut Vec<u8>, value: &MetadataValue) -> Result<
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_team_event_payload(
     output: &mut Vec<u8>,
     payload: &TeamEventPayload,
@@ -1556,6 +1689,7 @@ fn encode_team_event_payload(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_terminal_resolution(
     output: &mut Vec<u8>,
     resolution: &TerminalObservationResolution,
@@ -1583,6 +1717,7 @@ fn encode_terminal_resolution(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_task_board(output: &mut Vec<u8>, board: &TaskBoardFacts) -> Result<(), StoreFault> {
     let tasks = board.tasks().collect::<Vec<_>>();
     push_count(output, tasks.len())?;
@@ -1635,6 +1770,7 @@ fn encode_task_board(output: &mut Vec<u8>, board: &TaskBoardFacts) -> Result<(),
     Ok(())
 }
 
+#[cfg(test)]
 fn push_optional_u64(output: &mut Vec<u8>, value: Option<u64>) {
     match value {
         Some(value) => {
@@ -1645,19 +1781,10 @@ fn push_optional_u64(output: &mut Vec<u8>, value: Option<u64>) {
     }
 }
 
+#[cfg(test)]
 fn encode_start_gate(output: &mut Vec<u8>, start_gate: &RunStartGate) -> Result<(), StoreFault> {
     match start_gate {
         RunStartGate::Intake => output.push(0),
-        RunStartGate::ProposalPending {
-            proposal_id,
-            summary,
-            source_delivery_id,
-        } => {
-            output.push(1);
-            push_string(output, proposal_id)?;
-            push_string(output, summary)?;
-            push_string(output, source_delivery_id)?;
-        }
         RunStartGate::Started => output.push(2),
         RunStartGate::Designing {
             design_epoch,
@@ -1667,30 +1794,11 @@ fn encode_start_gate(output: &mut Vec<u8>, start_gate: &RunStartGate) -> Result<
             push_string(output, design_epoch)?;
             push_optional_string(output, prompt_generation.as_deref())?;
         }
-        RunStartGate::DesignProposalPending {
-            design_epoch,
-            prompt_generation,
-            graph_version,
-            proposal_id,
-            summary,
-            source_delivery_id,
-        } => {
-            output.push(4);
-            for value in [
-                design_epoch,
-                prompt_generation,
-                graph_version,
-                proposal_id,
-                summary,
-                source_delivery_id,
-            ] {
-                push_string(output, value)?;
-            }
-        }
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_lifecycle(output: &mut Vec<u8>, lifecycle: &GraphRunLifecycle) -> Result<(), StoreFault> {
     push_string(output, lifecycle.creation_idempotency_key())?;
     match lifecycle.state() {
@@ -1731,6 +1839,7 @@ fn encode_lifecycle(output: &mut Vec<u8>, lifecycle: &GraphRunLifecycle) -> Resu
     Ok(())
 }
 
+#[cfg(test)]
 fn push_optional_runtime(
     output: &mut Vec<u8>,
     runtime: Option<&RunRuntimeReceipt>,
@@ -1754,13 +1863,36 @@ fn push_optional_runtime(
     Ok(())
 }
 
+pub(in crate::store) fn decode_historical_definition(
+    schema: u8,
+    bytes: &[u8],
+) -> Result<crate::GraphDefinition, StoreFault> {
+    if !matches!(schema, 25 | 26) {
+        return Err(StoreFault::CorruptRecord);
+    }
+    let mut reader = Reader::with_schema(bytes, schema);
+    let definition = reader.graph_definition()?;
+    reader.finish()?;
+    Ok(definition)
+}
+
 struct Reader<'a> {
     remaining: &'a [u8],
+    schema25: bool,
+    schema: u8,
 }
 
 impl<'a> Reader<'a> {
     const fn new(content: &'a [u8]) -> Self {
-        Self { remaining: content }
+        Self::with_schema(content, CURRENT_SCHEMA_VERSION)
+    }
+
+    const fn schema25(content: &'a [u8]) -> Self {
+        Self::with_schema(content, 25)
+    }
+
+    const fn with_schema(content: &'a [u8], schema: u8) -> Self {
+        Self { remaining: content, schema25: schema == 25, schema }
     }
 
     fn finish(self) -> Result<(), StoreFault> {
@@ -1962,20 +2094,29 @@ impl<'a> Reader<'a> {
         let run_id = self.string()?;
         let title = self.string()?;
         let status = self.string()?;
-        let groups = (0..self.count()?)
-            .map(|_| {
+        let mut historical_group_tasks = std::collections::BTreeSet::new();
+        if self.schema25 {
+            let mut group_ids = std::collections::BTreeSet::new();
+            for _ in 0..self.count()? {
                 let group_id = self.string()?;
                 let title = self.string()?;
-                let task_ids = (0..self.count()?)
-                    .map(|_| self.string())
-                    .collect::<Result<Vec<_>, StoreFault>>()?;
-                let join =
-                    crate::run::WorkflowJoinPolicy::new(self.bool()?, self.bool()?, self.u32()?);
-                Ok(crate::run::WorkflowGroup::new(
-                    group_id, title, task_ids, join,
-                ))
-            })
-            .collect::<Result<Vec<_>, StoreFault>>()?;
+                if group_id.trim().is_empty()
+                    || title.trim().is_empty()
+                    || !group_ids.insert(group_id)
+                {
+                    return Err(StoreFault::InvalidFacts);
+                }
+                for _ in 0..self.count()? {
+                    let task_id = self.string()?;
+                    if task_id.trim().is_empty() || !historical_group_tasks.insert(task_id) {
+                        return Err(StoreFault::InvalidFacts);
+                    }
+                }
+                self.bool()?;
+                self.bool()?;
+                self.u32()?;
+            }
+        }
         let tasks = (0..self.count()?)
             .map(|_| {
                 let task_id = self.string()?;
@@ -1996,12 +2137,23 @@ impl<'a> Reader<'a> {
                 ))
             })
             .collect::<Result<Vec<_>, StoreFault>>()?;
+        if !historical_group_tasks.is_empty() {
+            let task_ids = tasks
+                .iter()
+                .map(|task| task.task_id())
+                .collect::<std::collections::BTreeSet<_>>();
+            if historical_group_tasks
+                .iter()
+                .any(|task| !task_ids.contains(task.as_str()))
+            {
+                return Err(StoreFault::InvalidFacts);
+            }
+        }
         Ok(crate::run::WorkflowPlan::new(
             workflow_plan_id,
             run_id,
             title,
             status,
-            groups,
             tasks,
             self.string()?,
             self.u64()?,
@@ -2053,14 +2205,19 @@ impl<'a> Reader<'a> {
                 };
                 let work = match self.byte()? {
                     0 => None,
-                    1 => Some(DurableWorkAssignment {
-                        task_id: self.string()?,
-                        prompt: self.string()?,
-                        role_id: self.string()?,
-                        session_ref: self.string()?,
-                        output_artifact_kind: self.optional_string()?,
-                        group_id: self.optional_string()?,
-                    }),
+                    1 => {
+                        let work = DurableWorkAssignment {
+                            task_id: self.string()?,
+                            prompt: self.string()?,
+                            role_id: self.string()?,
+                            session_ref: self.string()?,
+                            output_artifact_kind: self.optional_string()?,
+                        };
+                        if self.schema25 {
+                            self.optional_string()?;
+                        }
+                        Some(work)
+                    }
                     _ => return Err(StoreFault::CorruptRecord),
                 };
                 let review = match self.byte()? {
@@ -2072,28 +2229,26 @@ impl<'a> Reader<'a> {
                     }),
                     _ => return Err(StoreFault::CorruptRecord),
                 };
-                let group = match self.byte()? {
-                    0 => None,
-                    1 => Some(DurableWorkGroup {
-                        group_id: self.string()?,
-                        require_completed: self.bool()?,
-                        allow_failed: self.bool()?,
-                        retry_limit: self.u32()?,
-                    }),
-                    _ => return Err(StoreFault::CorruptRecord),
-                };
+                let group = self.schema25_group()?;
+                let script_review_rule = if self.schema >= 27 { self.optional_script_review_rule()? } else { None };
+                if script_review_rule.is_some() && (kind != NodeKind::ScriptReview || !is_control) {
+                    return Err(StoreFault::InvalidFacts);
+                }
                 let valid_payload = match (kind, is_control) {
                     (crate::NodeKind::Start, false) => {
-                        work.is_none() && review.is_none() && group.is_none()
+                        work.is_none() && review.is_none() && !group
                     }
                     (crate::NodeKind::Work, false) => {
-                        trigger.is_none() && work.is_some() && review.is_none() && group.is_none()
+                        trigger.is_none() && work.is_some() && review.is_none() && !group
                     }
                     (crate::NodeKind::Review, false) => {
-                        trigger.is_none() && work.is_none() && review.is_some() && group.is_none()
+                        trigger.is_none() && work.is_none() && review.is_some() && !group
                     }
                     (crate::NodeKind::Join, false) => {
-                        trigger.is_none() && work.is_none() && review.is_none() && group.is_some()
+                        trigger.is_none()
+                            && work.is_none()
+                            && review.is_none()
+                            && group == self.schema25
                     }
                     (
                         crate::NodeKind::Start
@@ -2103,7 +2258,7 @@ impl<'a> Reader<'a> {
                         | crate::NodeKind::Join
                         | crate::NodeKind::End,
                         true,
-                    ) => trigger.is_none() && work.is_none() && review.is_none() && group.is_none(),
+                    ) => trigger.is_none() && work.is_none() && review.is_none() && !group,
                     _ => false,
                 };
                 if !valid_payload {
@@ -2119,7 +2274,7 @@ impl<'a> Reader<'a> {
                     trigger,
                     work,
                     review,
-                    group,
+                    script_review_rule,
                 })
             })
             .collect::<Result<Vec<_>, StoreFault>>()?;
@@ -2429,7 +2584,19 @@ impl<'a> Reader<'a> {
         let observed_at = self.u64()?;
         let output = match self.byte()? {
             0 => None,
-            1 => Some(self.team_node_output()?),
+            1 => {
+                let output = self.team_node_output()?;
+                // Schema 25 tag 1 stored dispatch pairs after the immutable output snapshot.
+                for _ in 0..self.count()? {
+                    let role_id = self.string()?;
+                    let task = self.string()?;
+                    if role_id.trim().is_empty() || task.trim().is_empty() {
+                        return Err(StoreFault::InvalidFacts);
+                    }
+                }
+                Some(output)
+            }
+            2 => Some(self.team_node_output()?),
             _ => return Err(StoreFault::CorruptRecord),
         };
         let resolution = self.terminal_resolution()?;
@@ -2454,14 +2621,7 @@ impl<'a> Reader<'a> {
         let final_assistant_text = self.string()?;
         let summary = self.string()?;
         let decision = self.string()?;
-        let dispatch = (0..self.count()?)
-            .map(|_| {
-                let role_id = self.string()?;
-                let task = self.string()?;
-                TeamNodeOutputDispatch::new(role_id, task).map_err(|_| StoreFault::InvalidFacts)
-            })
-            .collect::<Result<Vec<_>, StoreFault>>()?;
-        TeamNodeOutput::restore(final_assistant_text, summary, decision, dispatch)
+        TeamNodeOutput::restore(final_assistant_text, summary, decision)
             .map_err(|_| StoreFault::InvalidFacts)
     }
 
@@ -2589,21 +2749,29 @@ impl<'a> Reader<'a> {
     fn start_gate(&mut self) -> Result<RunStartGate, StoreFault> {
         match self.byte()? {
             0 => Ok(RunStartGate::Intake),
-            1 => RunStartGate::proposal_pending(self.string()?, self.string()?, self.string()?)
-                .map_err(|_| StoreFault::InvalidFacts),
+            1 => {
+                // Retired proposal payload is consumed once when restoring existing facts.
+                for _ in 0..3 {
+                    self.string()?;
+                }
+                Ok(RunStartGate::Intake)
+            }
             2 => Ok(RunStartGate::Started),
             3 => Ok(RunStartGate::Designing {
                 design_epoch: self.string()?,
                 prompt_generation: self.optional_string()?,
             }),
-            4 => Ok(RunStartGate::DesignProposalPending {
-                design_epoch: self.string()?,
-                prompt_generation: self.string()?,
-                graph_version: self.string()?,
-                proposal_id: self.string()?,
-                summary: self.string()?,
-                source_delivery_id: self.string()?,
-            }),
+            4 => {
+                let design_epoch = self.string()?;
+                // Consume the retired proposal payload so existing facts logs remain readable.
+                for _ in 0..5 {
+                    self.string()?;
+                }
+                Ok(RunStartGate::Designing {
+                    design_epoch,
+                    prompt_generation: None,
+                })
+            }
             _ => Err(StoreFault::InvalidFacts),
         }
     }
@@ -2921,13 +3089,52 @@ impl<'a> Reader<'a> {
             1 => Ok(CommandPayload::NodeProgress(
                 NodeProgressCommand::with_event(self.opaque_id()?, self.node_event_kind()?),
             )),
+            3 if self.schema < CURRENT_SCHEMA_VERSION => self.historical_graph_replace(),
             3 => self.graph_definition().map(CommandPayload::GraphReplace),
+            tag @ (5 | 6) if (tag == 5 && self.schema >= 26) || (tag == 6 && self.schema >= 27) => {
+                let length = self.u32()? as usize;
+                if length > MAX_FACTS_BYTES {
+                    return Err(StoreFault::CorruptRecord);
+                }
+                let mut reader = Reader::with_schema(self.take(length)?, if tag == 5 { 25 } else { 26 });
+                let payload = reader.historical_graph_replace()?;
+                reader.finish()?;
+                Ok(payload)
+            }
             2 => Ok(CommandPayload::ApprovalRequest(ApprovalCommand::new(
                 self.opaque_id()?,
                 self.opaque_id()?,
                 self.opaque_id()?,
                 self.approval_action()?,
             ))),
+            _ => Err(StoreFault::CorruptRecord),
+        }
+    }
+
+    fn historical_graph_replace(&mut self) -> Result<CommandPayload, StoreFault> {
+        let raw = self.remaining;
+        let definition = self.graph_definition()?;
+        let length = raw.len() - self.remaining.len();
+        Ok(CommandPayload::historical_graph_replace(
+            self.schema,
+            definition,
+            raw[..length].to_vec(),
+        ))
+    }
+
+    fn schema25_group(&mut self) -> Result<bool, StoreFault> {
+        if !self.schema25 {
+            return Ok(false);
+        }
+        match self.byte()? {
+            0 => Ok(false),
+            1 => {
+                self.string()?;
+                self.bool()?;
+                self.bool()?;
+                self.u32()?;
+                Ok(true)
+            }
             _ => Err(StoreFault::CorruptRecord),
         }
     }
@@ -2956,17 +3163,22 @@ impl<'a> Reader<'a> {
                 };
                 let work = match self.byte()? {
                     0 => None,
-                    1 => Some(WorkAssignment::typed(
-                        self.string()?,
-                        self.string()?,
-                        crate::ExecutorPolicy::team_role_session(
+                    1 => {
+                        let work = WorkAssignment::typed(
                             self.string()?,
-                            crate::RoleSessionRef::try_new(self.string()?)
-                                .map_err(|_| StoreFault::InvalidFacts)?,
-                        ),
-                        self.optional_string()?,
-                        self.optional_string()?.map(crate::GroupId::new),
-                    )),
+                            self.string()?,
+                            crate::ExecutorPolicy::team_role_session(
+                                self.string()?,
+                                crate::RoleSessionRef::try_new(self.string()?)
+                                    .map_err(|_| StoreFault::InvalidFacts)?,
+                            ),
+                            self.optional_string()?,
+                        );
+                        if self.schema25 {
+                            self.optional_string()?;
+                        }
+                        Some(work)
+                    }
                     _ => return Err(StoreFault::CorruptRecord),
                 };
                 let review = match self.byte()? {
@@ -2981,22 +3193,24 @@ impl<'a> Reader<'a> {
                     )),
                     _ => return Err(StoreFault::CorruptRecord),
                 };
-                let group = match self.byte()? {
-                    0 => None,
-                    1 => Some(crate::WorkGroup::new(
-                        crate::GroupId::new(self.string()?),
-                        crate::JoinPolicy::new(self.bool()?, self.bool()?, self.u32()?),
-                    )),
-                    _ => return Err(StoreFault::CorruptRecord),
-                };
+                let group = self.schema25_group()?;
+                let script_review_rule = if self.schema >= 27 { self.optional_script_review_rule()? } else { None };
+                if let Some(rule) = script_review_rule {
+                    if kind != NodeKind::ScriptReview || !is_control || trigger.is_some()
+                        || work.is_some() || review.is_some() || group
+                    {
+                        return Err(StoreFault::InvalidFacts);
+                    }
+                    return Ok(NodeDefinition::script_review(id, title, max_attempts, rule));
+                }
                 let node = match (kind, is_control) {
                     (NodeKind::Start, false)
-                        if work.is_none() && review.is_none() && group.is_none() =>
+                        if work.is_none() && review.is_none() && !group =>
                     {
                         NodeDefinition::start(id, title, max_attempts, trigger)
                     }
                     (NodeKind::Work, false)
-                        if trigger.is_none() && review.is_none() && group.is_none() =>
+                        if trigger.is_none() && review.is_none() && !group =>
                     {
                         NodeDefinition::work(
                             id,
@@ -3006,7 +3220,7 @@ impl<'a> Reader<'a> {
                         )
                     }
                     (NodeKind::Review, false)
-                        if trigger.is_none() && work.is_none() && group.is_none() =>
+                        if trigger.is_none() && work.is_none() && !group =>
                     {
                         NodeDefinition::review(
                             id,
@@ -3016,14 +3230,12 @@ impl<'a> Reader<'a> {
                         )
                     }
                     (NodeKind::Join, false)
-                        if trigger.is_none() && work.is_none() && review.is_none() =>
+                        if trigger.is_none()
+                            && work.is_none()
+                            && review.is_none()
+                            && group == self.schema25 =>
                     {
-                        NodeDefinition::join(
-                            id,
-                            title,
-                            max_attempts,
-                            group.ok_or(StoreFault::InvalidFacts)?,
-                        )
+                        NodeDefinition::join(id, title, max_attempts)
                     }
                     (
                         NodeKind::Start
@@ -3036,7 +3248,7 @@ impl<'a> Reader<'a> {
                     ) if trigger.is_none()
                         && work.is_none()
                         && review.is_none()
-                        && group.is_none() =>
+                        && !group =>
                     {
                         NodeDefinition::control(id, kind, title, max_attempts)
                     }
@@ -3066,7 +3278,7 @@ impl<'a> Reader<'a> {
                 }))
             })
             .collect::<Result<Vec<_>, StoreFault>>()?;
-        crate::GraphDefinition::new(graph_id, workflow_plan_id, run_id, title, nodes, edges)
+        crate::GraphDefinition::from_durable(graph_id, workflow_plan_id, run_id, title, nodes, edges)
             .map_err(|_| StoreFault::InvalidFacts)
     }
 
@@ -3091,8 +3303,8 @@ impl<'a> Reader<'a> {
             2 => Ok(GraphPatchOperation::RemoveNode {
                 node_id: self.string()?,
             }),
-            3 => {
-                let (edge_id, source_node_id, target_node_id, action) = self.graph_edge()?;
+            tag @ (3 | 8) if tag == 3 || !self.schema25 => {
+                let (edge_id, source_node_id, target_node_id, action) = self.graph_edge(tag == 3)?;
                 Ok(GraphPatchOperation::AddEdge {
                     edge_id,
                     source_node_id,
@@ -3100,8 +3312,8 @@ impl<'a> Reader<'a> {
                     action,
                 })
             }
-            4 => {
-                let (edge_id, source_node_id, target_node_id, action) = self.graph_edge()?;
+            tag @ (4 | 9) if tag == 4 || !self.schema25 => {
+                let (edge_id, source_node_id, target_node_id, action) = self.graph_edge(tag == 4)?;
                 Ok(GraphPatchOperation::ReplaceEdge {
                     edge_id,
                     source_node_id,
@@ -3133,12 +3345,15 @@ impl<'a> Reader<'a> {
         ))
     }
 
-    fn graph_edge(&mut self) -> Result<(String, String, String, GraphEdgeAction), StoreFault> {
+    fn graph_edge(
+        &mut self,
+        explicit_action: bool,
+    ) -> Result<(String, String, String, Option<GraphEdgeAction>), StoreFault> {
         Ok((
             self.string()?,
             self.string()?,
             self.string()?,
-            self.graph_edge_action()?,
+            if explicit_action { Some(self.graph_edge_action()?) } else { None },
         ))
     }
 
@@ -3477,9 +3692,6 @@ impl<'a> Reader<'a> {
 
     fn string(&mut self) -> Result<String, StoreFault> {
         let length = usize::try_from(self.u32()?).map_err(|_| StoreFault::CorruptRecord)?;
-        if length > MAX_STRING_BYTES {
-            return Err(StoreFault::CorruptRecord);
-        }
         std::str::from_utf8(self.take(length)?)
             .map(str::to_owned)
             .map_err(|_| StoreFault::CorruptRecord)
@@ -3547,9 +3759,6 @@ fn push_count(output: &mut Vec<u8>, count: usize) -> Result<(), StoreFault> {
 }
 
 fn push_string(output: &mut Vec<u8>, value: &str) -> Result<(), StoreFault> {
-    if value.len() > MAX_STRING_BYTES {
-        return Err(StoreFault::RecordTooLarge);
-    }
     output.extend_from_slice(
         &u32::try_from(value.len())
             .map_err(|_| StoreFault::RecordTooLarge)?
@@ -3593,6 +3802,7 @@ fn edge_action_tag(action: EdgeAction) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn task_status_tag(status: TaskStatus) -> u8 {
     match status {
         TaskStatus::Todo => 0,
@@ -3603,6 +3813,7 @@ fn task_status_tag(status: TaskStatus) -> u8 {
         TaskStatus::Failed => 5,
     }
 }
+#[cfg(test)]
 fn runner_status_tag(status: RunnerStatus) -> u8 {
     match status {
         RunnerStatus::Active => 0,
@@ -3610,6 +3821,7 @@ fn runner_status_tag(status: RunnerStatus) -> u8 {
         RunnerStatus::Closed => 2,
     }
 }
+#[cfg(test)]
 fn mailbox_kind_tag(kind: MailboxKind) -> u8 {
     match kind {
         MailboxKind::Question => 0,
@@ -3619,6 +3831,7 @@ fn mailbox_kind_tag(kind: MailboxKind) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn attempt_status_tag(status: crate::AttemptStatus) -> u8 {
     match status {
         crate::AttemptStatus::Pending => 0,
@@ -3631,6 +3844,7 @@ fn attempt_status_tag(status: crate::AttemptStatus) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn activity_failure_tag(failure: ActivityFailure) -> u8 {
     match failure {
         ActivityFailure::Rejected => 0,
@@ -3639,6 +3853,7 @@ fn activity_failure_tag(failure: ActivityFailure) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn delivery_failure_tag(failure: DeliveryFailure) -> u8 {
     match failure {
         DeliveryFailure::ReceiverRejected => 0,
@@ -3648,6 +3863,7 @@ fn delivery_failure_tag(failure: DeliveryFailure) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn trigger_source_tag(source: TriggerSource) -> u8 {
     match source {
         TriggerSource::Cron => 0,
@@ -3655,6 +3871,7 @@ fn trigger_source_tag(source: TriggerSource) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn evidence_reference_kind_tag(kind: EvidenceReferenceKind) -> u8 {
     match kind {
         EvidenceReferenceKind::WorkspacePath => 0,
@@ -3664,6 +3881,7 @@ fn evidence_reference_kind_tag(kind: EvidenceReferenceKind) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn native_terminal_tag(status: NativeTerminalStatus) -> u8 {
     match status {
         NativeTerminalStatus::Completed => 0,
@@ -3673,6 +3891,7 @@ fn native_terminal_tag(status: NativeTerminalStatus) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn authorized_graph_outcome_tag(outcome: AuthorizedGraphOutcome) -> u8 {
     match outcome {
         AuthorizedGraphOutcome::Completed => 0,
@@ -3680,6 +3899,7 @@ fn authorized_graph_outcome_tag(outcome: AuthorizedGraphOutcome) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn control_authority_tag(authority: ControlAuthority) -> u8 {
     match authority {
         ControlAuthority::HumanDecision => 0,
@@ -3697,6 +3917,7 @@ fn script_review_rule_tag(rule: crate::ScriptReviewRule) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn approval_origin_tag(origin: ApprovalOrigin) -> u8 {
     match origin {
         ApprovalOrigin::StageContinuation => 0,
@@ -3705,6 +3926,7 @@ fn approval_origin_tag(origin: ApprovalOrigin) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn approval_effect_tag(effect: ApprovalEffect) -> u8 {
     match effect {
         ApprovalEffect::ResumeStage => 0,
@@ -3713,6 +3935,7 @@ fn approval_effect_tag(effect: ApprovalEffect) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn approval_status_tag(status: ApprovalStatus) -> u8 {
     match status {
         ApprovalStatus::Pending => 0,
@@ -3722,6 +3945,7 @@ fn approval_status_tag(status: ApprovalStatus) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn approval_decision_tag(decision: ApprovalDecision) -> u8 {
     match decision {
         ApprovalDecision::Approve => 0,
@@ -3730,6 +3954,7 @@ fn approval_decision_tag(decision: ApprovalDecision) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn approval_resolution_cause_tag(cause: ApprovalResolutionCause) -> u8 {
     match cause {
         ApprovalResolutionCause::HumanDecision => 0,
@@ -3737,6 +3962,7 @@ fn approval_resolution_cause_tag(cause: ApprovalResolutionCause) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn command_status_tag(status: CommandStatus) -> u8 {
     match status {
         CommandStatus::Accepted => 0,
@@ -3744,6 +3970,7 @@ fn command_status_tag(status: CommandStatus) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn command_rejection_tag(rejection: CommandRejection) -> u8 {
     match rejection {
         CommandRejection::UnknownRun => 0,
@@ -3754,6 +3981,7 @@ fn command_rejection_tag(rejection: CommandRejection) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn node_event_kind_tag(event: NodeEventKind) -> u8 {
     match event {
         NodeEventKind::Progress => 0,
@@ -3763,6 +3991,7 @@ fn node_event_kind_tag(event: NodeEventKind) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn team_event_type_tag(event_type: TeamEventType) -> u8 {
     match event_type {
         TeamEventType::GraphPatchAccepted => 0,
@@ -3773,6 +4002,7 @@ fn team_event_type_tag(event_type: TeamEventType) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn graph_node_kind_tag(kind: GraphNodeKind) -> u8 {
     match kind {
         GraphNodeKind::Start => 0,
@@ -3785,6 +4015,7 @@ fn graph_node_kind_tag(kind: GraphNodeKind) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn graph_edge_action_tag(action: GraphEdgeAction) -> u8 {
     match action {
         GraphEdgeAction::Activate => 0,
@@ -3794,6 +4025,7 @@ fn graph_edge_action_tag(action: GraphEdgeAction) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn approval_action_tag(action: ApprovalAction) -> u8 {
     match action {
         ApprovalAction::ContinueNode => 0,
@@ -3813,7 +4045,7 @@ fn checksum_fn(content: &[u8]) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::{
         fs,
         io::Cursor,
@@ -3833,6 +4065,88 @@ mod tests {
     use super::*;
 
     static NEXT_TEST_PATH_ID: AtomicU64 = AtomicU64::new(1);
+
+    pub(in crate::store) fn assert_schema25_graph_metadata(definition: &GraphDefinition) {
+        let mut bytes = vec![3];
+        for value in [definition.graph_id(), definition.workflow_plan_id(), definition.run_id().as_str(), definition.title()] {
+            push_string(&mut bytes, value).unwrap();
+        }
+        push_count(&mut bytes, definition.nodes().len()).unwrap();
+        for node in definition.nodes() {
+            push_string(&mut bytes, node.id().as_str()).unwrap();
+            bytes.push(node_kind_tag(node.kind()));
+            push_string(&mut bytes, node.title()).unwrap();
+            bytes.extend_from_slice(&node.max_attempts().get().to_le_bytes());
+            bytes.push(u8::from(node.is_control()));
+            match node.trigger() {
+                None => bytes.push(0),
+                Some(StartTrigger::Webhook { path }) => {
+                    bytes.push(1);
+                    push_string(&mut bytes, path).unwrap();
+                }
+                Some(StartTrigger::Cron { expression }) => {
+                    bytes.push(2);
+                    push_string(&mut bytes, expression).unwrap();
+                }
+            }
+            match node.work_assignment() {
+                None => bytes.push(0),
+                Some(work) => {
+                    bytes.push(1);
+                    for value in [work.task_id(), work.prompt(), work.role_id(), work.session_ref().as_str()] {
+                        push_string(&mut bytes, value).unwrap();
+                    }
+                    push_optional_string(&mut bytes, work.output_artifact_kind()).unwrap();
+                    push_optional_string(&mut bytes, Some("group-work")).unwrap();
+                }
+            }
+            match node.review_assignment() {
+                None => bytes.push(0),
+                Some(review) => {
+                    bytes.push(1);
+                    for value in [review.role_id(), review.session_ref().as_str(), review.prompt()] {
+                        push_string(&mut bytes, value).unwrap();
+                    }
+                }
+            }
+            if node.kind() == NodeKind::Join && !node.is_control() {
+                bytes.push(1);
+                push_string(&mut bytes, if node.id().as_str() == "typed-join" { "group-typed" } else { "group-work" }).unwrap();
+                bytes.extend_from_slice(&[1, 0]);
+                bytes.extend_from_slice(&if node.id().as_str() == "typed-join" { 2u32 } else { 0u32 }.to_le_bytes());
+            } else {
+                bytes.push(0);
+            }
+        }
+        push_count(&mut bytes, definition.edges().len()).unwrap();
+        for edge in definition.edges() {
+            encode_edge_definition(&mut bytes, edge).unwrap();
+        }
+        let mut reader = Reader::schema25(&bytes);
+        let payload = reader.command_payload().unwrap();
+        reader.finish().unwrap();
+        let CommandPayload::HistoricalGraphReplace(historical) = &payload else {
+            panic!("schema25 graph replacement must retain historical bytes");
+        };
+        let historical_nodes = definition.nodes().iter().map(|node| {
+            if node.kind() == NodeKind::ScriptReview {
+                NodeDefinition::control(node.id().clone(), node.kind(), node.title(), node.max_attempts())
+            } else {
+                node.clone()
+            }
+        }).collect();
+        let expected = GraphDefinition::from_durable(
+            definition.graph_id(), definition.workflow_plan_id(), definition.run_id().clone(),
+            definition.title(), historical_nodes, definition.edges().to_vec(),
+        ).unwrap();
+        assert_eq!(historical.definition(), &expected);
+        assert_eq!(historical.encoded_definition(), &bytes[1..]);
+        let mut encoded = Vec::new();
+        encode_command_payload(&mut encoded, &payload).unwrap();
+        let mut reader = Reader::new(&encoded);
+        assert_eq!(reader.command_payload().unwrap(), payload);
+        reader.finish().unwrap();
+    }
 
     #[test]
     fn task_board_round_trips_through_facts_payload() {
@@ -3881,7 +4195,7 @@ mod tests {
         )
         .unwrap();
 
-        let restored = decode_facts(&encode_facts(&facts).unwrap()).unwrap();
+        let restored = decode_facts(&encode_facts(&facts).unwrap(), CURRENT_SCHEMA_VERSION).unwrap();
         let task = restored.task_board().task(&team, &run, &task_id).unwrap();
         assert_eq!(task.title(), "Task title");
         assert_eq!(task.instruction(), "Do the durable work");
@@ -3906,7 +4220,7 @@ mod tests {
             Err(StoreFault::CorruptRecord)
         ));
 
-        for version in [CURRENT_SCHEMA_VERSION - 1, CURRENT_SCHEMA_VERSION + 1] {
+        for version in [24, CURRENT_SCHEMA_VERSION + 1] {
             let mut unsupported_schema = initialized_log();
             unsupported_schema[LOG_MAGIC.len()] = version;
             assert!(matches!(
@@ -3961,7 +4275,7 @@ mod tests {
     }
 
     #[test]
-    fn reopen_truncates_partial_tail_and_selects_the_last_complete_valid_frame() {
+    fn offline_migration_preserves_source_and_selects_the_last_complete_valid_frame() {
         let path = test_path("frame-recovery");
         let facts = OrganizationFacts::restore(
             vec![TeamFacts::new(
@@ -3984,15 +4298,29 @@ mod tests {
         log.extend_from_slice(&second);
         log.extend_from_slice(&incomplete[..1 + FRAME_METADATA_LEN + 1]);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, log).unwrap();
+        fs::write(&path, &log).unwrap();
 
-        let reopened = super::super::OrganizationStore::open(&path).unwrap();
+        let recovered = recover_log(Cursor::new(&log)).unwrap();
+        assert_eq!(recovered.epoch, 2);
+        assert_eq!(recovered.committed_len, committed_len as u64);
+        assert_eq!(recovered.facts, facts);
+
+        let target = path.parent().unwrap().join("migrated").join("state.sqlite");
+        let report = super::super::migrate_legacy_log(&path, &target).unwrap();
+        let report = serde_json::to_value(report).unwrap();
+        assert_eq!(report["sourceEpoch"], 2);
+        assert_eq!(report["committedBytes"], committed_len as u64);
+        assert_eq!(report["ignoredTailBytes"], (log.len() - committed_len) as u64);
+        assert_eq!(report["contentHashesVerified"], true);
+        assert_eq!(fs::read(&path).unwrap(), log);
+
+        let reopened = super::super::OrganizationStore::open_live(&target).unwrap();
+        assert_eq!(reopened.facts(), &facts);
         assert_eq!(reopened.facts().teams().count(), 1);
         assert_eq!(
             reopened.facts().teams().next().unwrap().team_id().as_str(),
             "team:recovered"
         );
-        assert_eq!(fs::metadata(&path).unwrap().len(), committed_len as u64);
         drop(reopened);
         remove_test_path(&path);
     }
@@ -4122,7 +4450,7 @@ mod tests {
             let mut tampered = payload.clone();
             tampered[offset..offset + marker_len].fill(b' ');
             assert!(matches!(
-                decode_facts(&tampered),
+                decode_facts(&tampered, CURRENT_SCHEMA_VERSION),
                 Err(StoreFault::InvalidFacts)
             ));
         }
@@ -4166,7 +4494,7 @@ mod tests {
         .unwrap();
 
         let payload = encode_facts(&facts).unwrap();
-        let restored = decode_facts(&payload).unwrap();
+        let restored = decode_facts(&payload, CURRENT_SCHEMA_VERSION).unwrap();
         let receipt = restored.materializations().next().unwrap();
         assert_eq!(
             receipt
@@ -4196,7 +4524,7 @@ mod tests {
         let mut invalid_ownership = payload;
         invalid_ownership[ownership_tag] = 0xFF;
         assert!(matches!(
-            decode_facts(&invalid_ownership),
+            decode_facts(&invalid_ownership, CURRENT_SCHEMA_VERSION),
             Err(StoreFault::InvalidFacts)
         ));
     }
@@ -4251,7 +4579,7 @@ mod tests {
         )
         .unwrap();
 
-        let restored = decode_facts(&encode_facts(&facts).unwrap()).unwrap();
+        let restored = decode_facts(&encode_facts(&facts).unwrap(), CURRENT_SCHEMA_VERSION).unwrap();
         let lifecycle = restored.materialization_lifecycles().next().unwrap();
         assert!(matches!(
             lifecycle.cleanup(),
@@ -4305,7 +4633,7 @@ mod tests {
             let mut incomplete = payload.clone();
             incomplete.truncate(incomplete.len() - std::mem::size_of::<u32>() * missing_tails);
             assert!(matches!(
-                decode_facts(&incomplete),
+                decode_facts(&incomplete, CURRENT_SCHEMA_VERSION),
                 Err(StoreFault::CorruptRecord)
             ));
         }

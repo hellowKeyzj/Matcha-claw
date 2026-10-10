@@ -2548,7 +2548,8 @@ async function run(): Promise<CommanderCommand> {
         mainThreadAgentDefinition = agentDefinitions.activeAgents.find(agent => agent.agentType === agentSetting);
         if (!mainThreadAgentDefinition) {
           logForDebugging(
-            `Warning: agent "${agentSetting}" not found. ` +
+            () =>
+              `Warning: agent "${agentSetting}" not found. ` +
               `Available agents: ${agentDefinitions.activeAgents.map(a => a.agentType).join(', ')}. ` +
               `Using default behavior.`,
           );
@@ -3296,7 +3297,8 @@ async function run(): Promise<CommanderCommand> {
             }
             if (suppressed.size > 0) {
               logForDebugging(
-                `[MCP] Lazy dedup: suppressing ${suppressed.size} plugin server(s) that duplicate claude.ai connectors: ${[...suppressed].join(', ')}`,
+                () =>
+                  `[MCP] Lazy dedup: suppressing ${suppressed.size} plugin server(s) that duplicate claude.ai connectors: ${[...suppressed].join(', ')}`,
               );
               // Disconnect before filtering from state. Only connected
               // servers need cleanup — clearServerCache on a never-connected

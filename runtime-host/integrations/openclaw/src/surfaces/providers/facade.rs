@@ -92,34 +92,42 @@ pub async fn reconcile_native_configuration_evidence(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    eprintln!(
-        "[startup-trace] source=openclaw-driver phase=provider-config detail=start accounts={} retired={} plugin_ids={} required_auth={} auth_refresh={}",
-        command.accounts.len(),
-        command.retired.len(),
-        plugin_ids.join(","),
-        command.required_auth_accounts.len(),
-        command.auth_state_refresh_required
-    );
+    if platform::trace::enabled() {
+        eprintln!(
+            "[startup-trace] source=openclaw-driver phase=provider-config detail=start accounts={} retired={} plugin_ids={} required_auth={} auth_refresh={}",
+            command.accounts.len(),
+            command.retired.len(),
+            plugin_ids.join(","),
+            command.required_auth_accounts.len(),
+            command.auth_state_refresh_required
+        );
+    }
     let plugins = context.plugins;
     if plugins
         .reconcile_enabled_managed_plugins(&plugin_ids)
         .is_err()
     {
-        eprintln!(
-            "[startup-trace] source=openclaw-driver phase=provider-config detail=managed-plugin-reconcile-failed"
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=openclaw-driver phase=provider-config detail=managed-plugin-reconcile-failed"
+            );
+        }
         return provider_unavailable_evidence();
     }
     if plugins.reconcile_installed_records().is_err() {
-        eprintln!(
-            "[startup-trace] source=openclaw-driver phase=provider-config detail=installed-plugin-reconcile-failed"
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=openclaw-driver phase=provider-config detail=installed-plugin-reconcile-failed"
+            );
+        }
         return provider_unavailable_evidence();
     }
     if context.runtime_running {
-        eprintln!(
-            "[startup-trace] source=openclaw-driver phase=provider-config detail=gateway-reconcile-start"
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=openclaw-driver phase=provider-config detail=gateway-reconcile-start"
+            );
+        }
         return context
             .gateway
             .lock()
@@ -136,9 +144,11 @@ pub async fn reconcile_native_configuration_evidence(
             .await;
     }
 
-    eprintln!(
-        "[startup-trace] source=openclaw-driver phase=provider-config detail=private-reconcile-start"
-    );
+    if platform::trace::enabled() {
+        eprintln!(
+            "[startup-trace] source=openclaw-driver phase=provider-config detail=private-reconcile-start"
+        );
+    }
     private_provider_native_configuration_evidence(context.state_dir, command)
 }
 

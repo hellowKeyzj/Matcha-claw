@@ -145,7 +145,7 @@ async function resolveToken(
   // 检测 wiki token 并解析为真实的 spreadsheet_token
   const tokenType = getTokenType(token);
   if (tokenType === 'wik') {
-    log.info(`resolveToken: detected wiki token, resolving obj_token...`);
+    log.trace(() => `resolveToken: detected wiki token, resolving obj_token...`);
     const wikiNodeRes = await client.invoke(
       'feishu_sheet.info',
       (sdk: any, opts: any) =>
@@ -165,7 +165,7 @@ async function resolveToken(
     if (!objToken) {
       throw new Error(`Failed to resolve spreadsheet token from wiki token: ${token}`);
     }
-    log.info(`resolveToken: wiki resolved ${token} -> ${objToken}`);
+    log.trace(() => `resolveToken: wiki resolved ${token} -> ${objToken}`);
     token = objToken;
   }
 
@@ -508,7 +508,7 @@ export function registerFeishuSheetTool(api: OpenClawPluginApi): boolean {
             // -----------------------------------------------------------------
             case 'info': {
               const { token } = await resolveToken(p, client, log);
-              log.info(`info: token=${token}`);
+              log.trace(() => `info: token=${token}`);
 
               // 并行请求表格信息和工作表列表
               const [spreadsheetRes, sheetsRes] = await Promise.all([
@@ -554,7 +554,7 @@ export function registerFeishuSheetTool(api: OpenClawPluginApi): boolean {
               const { token, urlSheetId } = await resolveToken(p, client, log);
               const range = await resolveRange(token, p.range, p.sheet_id ?? urlSheetId, client, 'feishu_sheet.read');
 
-              log.info(`read: token=${token}, range=${range}`);
+              log.trace(() => `read: token=${token}, range=${range}`);
 
               const query: Record<string, string> = {
                 // 默认返回计算后的值（而非公式原文），日期转为可读字符串
@@ -618,7 +618,7 @@ export function registerFeishuSheetTool(api: OpenClawPluginApi): boolean {
 
               const range = await resolveRange(token, p.range, p.sheet_id ?? urlSheetId, client, 'feishu_sheet.write');
 
-              log.info(`write: token=${token}, range=${range}, rows=${p.values?.length}`);
+              log.trace(() => `write: token=${token}, range=${range}, rows=${p.values?.length}`);
 
               const res = await client.invokeByPath<{
                 code?: number;
@@ -664,7 +664,7 @@ export function registerFeishuSheetTool(api: OpenClawPluginApi): boolean {
 
               const range = await resolveRange(token, p.range, p.sheet_id ?? urlSheetId, client, 'feishu_sheet.append');
 
-              log.info(`append: token=${token}, range=${range}, rows=${p.values?.length}`);
+              log.trace(() => `append: token=${token}, range=${range}, rows=${p.values?.length}`);
 
               const res = await client.invokeByPath<{
                 code?: number;
@@ -710,7 +710,7 @@ export function registerFeishuSheetTool(api: OpenClawPluginApi): boolean {
             // -----------------------------------------------------------------
             case 'find': {
               const { token } = await resolveToken(p, client, log);
-              log.info(`find: token=${token}, sheet_id=${p.sheet_id}, find="${p.find}"`);
+              log.trace(() => `find: token=${token}, sheet_id=${p.sheet_id}, find="${p.find}"`);
 
               const findCondition: Record<string, unknown> = {
                 range: p.range ? `${p.sheet_id}!${p.range}` : p.sheet_id,
@@ -754,7 +754,7 @@ export function registerFeishuSheetTool(api: OpenClawPluginApi): boolean {
             // CREATE — 创建电子表格（支持带初始数据）
             // -----------------------------------------------------------------
             case 'create': {
-              log.info(
+              log.trace(() =>
                 `create: title="${p.title}", folder=${p.folder_token ?? '(root)'}, headers=${!!p.headers}, data=${p.data?.length ?? 0} rows`,
               );
 
@@ -805,7 +805,7 @@ export function registerFeishuSheetTool(api: OpenClawPluginApi): boolean {
                     const numCols = Math.max(...allRows.map((r) => r.length));
                     const range = `${sheetId}!A1:${colLetter(numCols)}${numRows}`;
 
-                    log.info(`create: writing ${numRows} rows to ${range}`);
+                    log.trace(() => `create: writing ${numRows} rows to ${range}`);
 
                     const writeRes = await client.invokeByPath<{ code?: number; msg?: string }>(
                       'feishu_sheet.create',
@@ -849,7 +849,7 @@ export function registerFeishuSheetTool(api: OpenClawPluginApi): boolean {
                 });
               }
 
-              log.info(`export: token=${token}, format=${p.file_extension}, output=${p.output_path ?? '(info only)'}`);
+              log.trace(() => `export: token=${token}, format=${p.file_extension}, output=${p.output_path ?? '(info only)'}`);
 
               // Step 1: 创建导出任务
               const createRes = await client.invoke(
@@ -907,7 +907,7 @@ export function registerFeishuSheetTool(api: OpenClawPluginApi): boolean {
                   return json({ error: result?.job_error_msg || `export failed (status=${jobStatus})` });
                 }
 
-                log.info(`export: polling ${i + 1}/${EXPORT_POLL_MAX_RETRIES}, status=${jobStatus}`);
+                log.trace(() => `export: polling ${i + 1}/${EXPORT_POLL_MAX_RETRIES}, status=${jobStatus}`);
               }
 
               if (!fileToken) {

@@ -1,3 +1,4 @@
+import { traceDebug } from '../../../../utils/trace-logger';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isBoundedText, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from '../client';
 import { isSkillsCallReceipt, type SkillsCallReceipt } from './management';
@@ -196,22 +197,22 @@ async function send<T>(
 }
 
 function traceExportTransport(detail: string, request: unknown): void {
-  console.info('[startup-trace]', {
+  traceDebug(() => ['[startup-trace]', {
     source: 'sealed-skills-export',
     phase: 'transport',
     detail,
     skillKey: skillKeyFromRequest(request),
-  });
+  }]);
 }
 
 function traceExportTransportResponse(detail: string, status: number, body: unknown): void {
-  console.info('[startup-trace]', {
+  traceDebug(() => ['[startup-trace]', {
     source: 'sealed-skills-export',
     phase: 'transport',
     detail,
     status,
     outcome: outcomeFromResponse(body),
-  });
+  }]);
 }
 
 function skillKeyFromRequest(request: unknown): string {

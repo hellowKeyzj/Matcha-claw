@@ -487,12 +487,12 @@ export class BrowserControlService {
       const created = await this.options.relay.openTarget(requestedUrl)
       relayDebugWarn(
         this.options.logger,
-        `[browser-relay] open action created target requestedUrl="${requestedUrl}" targetId=${created.targetId}`,
+        () => `[browser-relay] open action created target requestedUrl="${requestedUrl}" targetId=${created.targetId}`,
       )
       const attachedTarget = await this.options.relay.resolveReadyTarget(String(created.targetId))
       relayDebugWarn(
         this.options.logger,
-        `[browser-relay] open action attached target requestedUrl="${requestedUrl}" targetId=${attachedTarget.targetId} sessionId=${attachedTarget.sessionId} windowId=${attachedTarget.windowId ?? 'null'} tabId=${attachedTarget.tabId ?? 'null'} url="${attachedTarget.url}" readyState="${attachedTarget.readyState}" mainFrameUrl="${attachedTarget.mainFrameUrl}"`,
+        () => `[browser-relay] open action attached target requestedUrl="${requestedUrl}" targetId=${attachedTarget.targetId} sessionId=${attachedTarget.sessionId} windowId=${attachedTarget.windowId ?? 'null'} tabId=${attachedTarget.tabId ?? 'null'} url="${attachedTarget.url}" readyState="${attachedTarget.readyState}" mainFrameUrl="${attachedTarget.mainFrameUrl}"`,
       )
       const targetId = attachedTarget.targetId
       const sessionKey = asString(params.sessionKey)

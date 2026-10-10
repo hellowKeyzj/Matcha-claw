@@ -22,6 +22,6 @@ pub use resolution::{
     ControlNodeResolutionOutcome, HumanDecision, ScriptReviewRule,
 };
 pub(crate) use resolution::{
-    ControlNodeResolutionInput, require_resolvable_control_node,
+    ControlNodeResolutionInput, require_join_ready, require_resolvable_control_node,
     script_review_output_port_with_evidence,
 };

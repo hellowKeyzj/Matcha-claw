@@ -189,7 +189,7 @@ impl ChannelHandle {
             .map_err(|_| {
                 platform::trace::channel_trace(
                     "channel.owner.delivery",
-                    "outcome=owner_unavailable",
+                    || "outcome=owner_unavailable",
                 );
                 ChannelOwnerUnavailable
             })?;
@@ -197,7 +197,7 @@ impl ChannelHandle {
             return Ok(ConfigureDelivery::Accepted(platform::call::CallReceipt { call_id: call.context.id().clone(), accepted: true }));
         }
         reply_rx.await.map_err(|_| {
-            platform::trace::channel_trace("channel.owner.delivery", "outcome=owner_unavailable");
+            platform::trace::channel_trace("channel.owner.delivery", || "outcome=owner_unavailable");
             ChannelOwnerUnavailable
         })?.map(ConfigureDelivery::Outcome)
     }
@@ -244,7 +244,7 @@ impl ChannelHandle {
             .map_err(|_| {
                 platform::trace::channel_trace(
                     "channel.owner.delivery",
-                    "outcome=owner_unavailable",
+                    || "outcome=owner_unavailable",
                 );
                 ChannelOwnerUnavailable
             })?;
@@ -258,7 +258,7 @@ impl ChannelHandle {
         reply_rx
             .await
             .map_err(|_| {
-                platform::trace::channel_trace("channel.owner.delivery", "outcome=owner_unavailable");
+                platform::trace::channel_trace("channel.owner.delivery", || "outcome=owner_unavailable");
                 ChannelOwnerUnavailable
             })?
             .map(ControlDelivery::Outcome)
@@ -289,12 +289,12 @@ impl ChannelHandle {
             .map_err(|_| {
                 platform::trace::channel_trace(
                     "channel.owner.delivery",
-                    "outcome=owner_unavailable",
+                    || "outcome=owner_unavailable",
                 );
                 ChannelOwnerUnavailable
             })?;
         reply_rx.await.map_err(|_| {
-            platform::trace::channel_trace("channel.owner.delivery", "outcome=owner_unavailable");
+            platform::trace::channel_trace("channel.owner.delivery", || "outcome=owner_unavailable");
             ChannelOwnerUnavailable
         })?.map(|outcome| (outcome, call_id))
     }
@@ -324,12 +324,12 @@ impl ChannelHandle {
             .map_err(|_| {
                 platform::trace::channel_trace(
                     "channel.owner.delivery",
-                    "outcome=owner_unavailable",
+                    || "outcome=owner_unavailable",
                 );
                 ChannelOwnerUnavailable
             })?;
         reply_rx.await.map_err(|_| {
-            platform::trace::channel_trace("channel.owner.delivery", "outcome=owner_unavailable");
+            platform::trace::channel_trace("channel.owner.delivery", || "outcome=owner_unavailable");
             ChannelOwnerUnavailable
         })?.map(|outcome| (outcome, call_id))
     }
@@ -349,12 +349,12 @@ impl ChannelHandle {
             .map_err(|_| {
                 platform::trace::channel_trace(
                     "channel.owner.delivery",
-                    "outcome=owner_unavailable",
+                    || "outcome=owner_unavailable",
                 );
                 ChannelOwnerUnavailable
             })?;
         reply_rx.await.map_err(|_| {
-            platform::trace::channel_trace("channel.owner.delivery", "outcome=owner_unavailable");
+            platform::trace::channel_trace("channel.owner.delivery", || "outcome=owner_unavailable");
             ChannelOwnerUnavailable
         })?
     }
@@ -390,12 +390,12 @@ impl ChannelHandle {
             .map_err(|_| {
                 platform::trace::channel_trace(
                     "channel.owner.delivery",
-                    "outcome=owner_unavailable",
+                    || "outcome=owner_unavailable",
                 );
                 ChannelOwnerUnavailable
             })?;
         reply_rx.await.map_err(|_| {
-            platform::trace::channel_trace("channel.owner.delivery", "outcome=owner_unavailable");
+            platform::trace::channel_trace("channel.owner.delivery", || "outcome=owner_unavailable");
             ChannelOwnerUnavailable
         })?
     }
@@ -486,12 +486,12 @@ impl ChannelHandle {
             .map_err(|_| {
                 platform::trace::channel_trace(
                     "channel.owner.delivery",
-                    "outcome=owner_unavailable",
+                    || "outcome=owner_unavailable",
                 );
                 ChannelOwnerUnavailable
             })?;
         reply_rx.await.map_err(|_| {
-            platform::trace::channel_trace("channel.owner.delivery", "outcome=owner_unavailable");
+            platform::trace::channel_trace("channel.owner.delivery", || "outcome=owner_unavailable");
             ChannelOwnerUnavailable
         })?
     }

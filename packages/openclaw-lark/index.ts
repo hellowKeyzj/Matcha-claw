@@ -136,8 +136,7 @@ const plugin = {
         runId: event.runId ?? ctx.runId,
       });
       if (!event.toolName.startsWith('feishu_')) return;
-      const paramsPreview = sanitizeParamsForLog(event.params);
-      log.info(`tool call: ${event.toolName} session=${ctx.sessionKey ?? '-'} params=${paramsPreview}`);
+      log.trace(() => `tool call: ${event.toolName} session=${ctx.sessionKey ?? '-'} params=${sanitizeParamsForLog(event.params)}`);
     });
 
     api.on('after_tool_call', (event, ctx) => {

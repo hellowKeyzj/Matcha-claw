@@ -33,6 +33,7 @@
     "subscription.ts",
     "files.ts",
     "gateway.ts",
+    "license.ts",
     "logs.ts",
     "runtime-host-process.ts",
     "runtime-host-usage.ts",
@@ -131,6 +132,11 @@
     "/api/files/read-text",
     "/api/files/list-dir",
     "/api/files/write-text",
+    "/api/license/gate",
+    "/api/license/stored-key",
+    "/api/license/validate",
+    "/api/license/revalidate",
+    "/api/license/clear",
     "/api/logs",
     "/api/logs/dir",
     "/api/logs/files",
@@ -140,6 +146,7 @@
     "/api/gateway/start",
     "/api/gateway/stop",
     "/api/gateway/restart",
+    "/api/gateway/repair",
     "/api/gateway/control-ui",
     "/api/openclaw/status",
     "/api/openclaw/ready",
@@ -158,6 +165,7 @@
     "/api/openclaw/logs",
     "/api/packages/mine",
     "/api/packages/market",
+    "/api/packages/installed",
     "/api/packages/upload",
     "/api/packages/upload/sealed-skill",
     "/api/packages/upload/sealed-skill/confirm",
@@ -593,6 +601,26 @@
     ],
     [
       "GET",
+      "/api/license/gate"
+    ],
+    [
+      "GET",
+      "/api/license/stored-key"
+    ],
+    [
+      "POST",
+      "/api/license/validate"
+    ],
+    [
+      "POST",
+      "/api/license/revalidate"
+    ],
+    [
+      "POST",
+      "/api/license/clear"
+    ],
+    [
+      "GET",
       "/api/logs"
     ],
     [
@@ -626,6 +654,14 @@
     [
       "POST",
       "/api/gateway/restart"
+    ],
+    [
+      "POST",
+      "/api/gateway/repair"
+    ],
+    [
+      "GET",
+      "/api/gateway/repair"
     ],
     [
       "GET",
@@ -702,6 +738,10 @@
     [
       "GET",
       "/api/packages/market"
+    ],
+    [
+      "GET",
+      "/api/packages/installed"
     ],
     [
       "POST",

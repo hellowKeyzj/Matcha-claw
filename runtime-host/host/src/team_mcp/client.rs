@@ -87,5 +87,10 @@ async fn call(
         }
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|_| ToolCallError::Internal)
+    let result: Value = serde_json::from_slice(&bytes).map_err(|_| ToolCallError::Internal)?;
+    if result.get("success").and_then(Value::as_bool) == Some(false) {
+        Err(ToolCallError::Execution(result))
+    } else {
+        Ok(result)
+    }
 }

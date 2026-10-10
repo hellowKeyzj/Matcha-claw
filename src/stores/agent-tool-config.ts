@@ -379,20 +379,20 @@ async function agentToolConfigCapabilityExecute<TResult>(
   try {
     scope = await resolveAgentToolConfigScope();
   } catch (error) {
-    logSessionTrace('renderer.subagent.tools.scope-error', traceId, {
+    logSessionTrace('renderer.subagent.tools.scope-error', traceId, () => ({
       operationId,
       targetAgentId: summarizeIdentifier(targetAgentId),
       error: summarizeError(error),
-    });
+    }));
     throw error;
   }
   const target = buildAgentToolConfigTarget(targetAgentId);
-  logSessionTrace('renderer.subagent.tools.request', traceId, {
+  logSessionTrace('renderer.subagent.tools.request', traceId, () => ({
     operationId,
     endpoint: summarizeEndpoint(scope.endpoint),
     scopeAgentId: summarizeIdentifier(scope.agentId),
     targetAgentId: summarizeIdentifier(targetAgentId),
-  });
+  }));
   try {
     const response = await hostApiFetch<unknown>('/api/capabilities/execute', {
       method: 'POST',
@@ -408,16 +408,16 @@ async function agentToolConfigCapabilityExecute<TResult>(
     const result = operationId === 'subagentTools.set'
       ? await waitForSubagentMutation<TResult>(response, operationId, scope.endpoint, targetAgentId)
       : response as TResult;
-    logSessionTrace('renderer.subagent.tools.response', traceId, {
+    logSessionTrace('renderer.subagent.tools.response', traceId, () => ({
       operationId,
       ...summarizeToolConfigPayload(result),
-    });
+    }));
     return result;
   } catch (error) {
-    logSessionTrace('renderer.subagent.tools.error', traceId, {
+    logSessionTrace('renderer.subagent.tools.error', traceId, () => ({
       operationId,
       error: summarizeError(error),
-    });
+    }));
     throw error;
   }
 }

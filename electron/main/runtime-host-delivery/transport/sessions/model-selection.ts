@@ -88,20 +88,20 @@ export function createSessionModelSelectionTransport(
 ): SessionModelSelectionTransport {
   return {
     async select(request: unknown, traceId?: string | null): Promise<SessionModelSelectionTransportResponse> {
-      const startedAt = Date.now();
+      const startedAt = traceId && isSessionTraceEnabled() ? Date.now() : 0;
       if (!isSessionModelSelectionRequest(request)) {
-        logSessionTrace('electron.model-selection.rejected', traceId, {
+        logSessionTrace('electron.model-selection.rejected', traceId, () => ({
           reason: 'request-invalid',
           envelope: summarizeRequestShape(request),
-        });
+        }));
         return { status: 503, body: UNAVAILABLE };
       }
-      logSessionTrace('electron.model-selection.request', traceId, {
+      logSessionTrace('electron.model-selection.request', traceId, () => ({
         adapter: request.input.endpoint.runtimeAdapterId,
         sessionKey: summarizeIdentifier(request.input.sessionKey),
         endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
         modelSelectionId: summarizeIdentifier(request.input.modelSelectionId),
-      });
+      }));
       let diagnosticHeaders: Headers | null = null;
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
@@ -123,23 +123,25 @@ export function createSessionModelSelectionTransport(
         headers: traceHeader(traceId),
       });
       if (response === null) {
-        logSessionTrace('electron.model-selection.failure', traceId, {
+        logSessionTrace('electron.model-selection.failure', traceId, () => ({
           elapsedMs: Date.now() - startedAt,
-        });
+        }));
         return { status: 503, body: UNAVAILABLE };
       }
       const body = response.body;
-      const outcome = response.status === 200 && isSessionModelSelectionResponse(body) ? body.outcome : null;
-      logSessionTrace('electron.model-selection.response', traceId, {
-        status: response.status,
-        contract: outcome ?? (response.status === 400 ? 'invalid' : response.status === 422 ? 'unsupported' : 'unavailable'),
-        elapsedMs: Date.now() - startedAt,
+      logSessionTrace('electron.model-selection.response', traceId, () => {
+        const outcome = response.status === 200 && isSessionModelSelectionResponse(body) ? body.outcome : null;
+        return {
+          status: response.status,
+          contract: outcome ?? (response.status === 400 ? 'invalid' : response.status === 422 ? 'unsupported' : 'unavailable'),
+          elapsedMs: Date.now() - startedAt,
+        };
       });
       if (
-        response.status === 200
+        isSessionTraceEnabled()
+        && response.status === 200
         && isSessionModelSelectionResponse(body)
         && body.outcome === 'target_rejected'
-        && isSessionTraceEnabled()
       ) {
         logger.warn('[SessionModelSelection] target rejected', {
           adapter: request.input.endpoint.runtimeAdapterId,

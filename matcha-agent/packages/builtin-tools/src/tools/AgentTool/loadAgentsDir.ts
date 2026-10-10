@@ -701,7 +701,8 @@ export function parseAgentFromMarkdown(
             return result.data
           }
           logForDebugging(
-            `Agent file ${filePath} has invalid mcpServers item: ${jsonStringify(item)}. Error: ${result.error.message}`,
+            () =>
+              `Agent file ${filePath} has invalid mcpServers item: ${jsonStringify(item)}. Error: ${result.error.message}`,
           )
           return null
         })

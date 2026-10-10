@@ -43,7 +43,7 @@ pub fn team_runtime_descriptor(
             operation("team.webhookTriggerFire", "Fire TeamRun webhook trigger by route", "team"),
             operation("team.runSnapshot", "Read TeamRun snapshot", "team-run"),
             operation("team.designStart", "Begin TeamRun workflow design", "team"),
-            operation("team.designContinue", "Continue TeamRun workflow design", "team"),
+            operation("team.runStart", "Start TeamRun workflow", "team"),
             operation("team.designExit", "Return TeamRun workflow design to discussion", "team"),
             operation("team.designSnapshot", "Read complete TeamRun workflow design", "team"),
             operation("team.designGraphPatch", "Save TeamRun workflow design patch", "team"),

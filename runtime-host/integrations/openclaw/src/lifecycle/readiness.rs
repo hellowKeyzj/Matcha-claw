@@ -29,7 +29,9 @@ impl ReadinessProbe for OpenClawReadiness {
         _: ProcessObservation,
         cancellation: CancellationToken,
     ) -> PolicyFuture<ReadinessResult> {
-        eprintln!("[startup-trace] source=openclaw-launch phase=process-start stage=activated");
+        if platform::trace::enabled() {
+            eprintln!("[startup-trace] source=openclaw-launch phase=process-start stage=activated");
+        }
         let client = Arc::clone(&self.client);
         Box::pin(wait_for_gateway_stability(
             cancellation,
@@ -64,13 +66,17 @@ where
             _ = sleep_until(deadline) => return ReadinessResult::Unavailable,
             ready = timeout(probe_timeout, listener()) => ready.is_ok_and(|ready| ready),
         };
-        eprintln!(
-            "[startup-trace] source=openclaw-readiness phase=http-ready-probe detail=healthz-readyz attempt={attempt} ready={ready}"
-        );
-        if ready {
+        if platform::trace::enabled() {
             eprintln!(
-                "[startup-trace] source=openclaw-readiness phase=http-ready detail=healthz-readyz-ready attempt={attempt}"
+                "[startup-trace] source=openclaw-readiness phase=http-ready-probe detail=healthz-readyz attempt={attempt} ready={ready}"
             );
+        }
+        if ready {
+            if platform::trace::enabled() {
+                eprintln!(
+                    "[startup-trace] source=openclaw-readiness phase=http-ready detail=healthz-readyz-ready attempt={attempt}"
+                );
+            }
             return ReadinessResult::Ready;
         }
         tokio::select! {

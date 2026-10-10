@@ -11,6 +11,7 @@ pub mod owner;
 pub mod package;
 pub mod ports;
 pub mod store;
+mod trace;
 
 use std::sync::Arc;
 
@@ -81,6 +82,8 @@ pub mod team {
 }
 
 pub mod run {
+    pub(crate) const MAX_SUMMARY_BYTES: usize = 4096;
+
     #[path = "activity/mod.rs"]
     pub mod activity;
     #[path = "approval/mod.rs"]
@@ -185,7 +188,7 @@ pub mod run {
         InvalidAuthorizedGraphResolution, InvalidAuthorizedGraphResolutionReceipt,
         NativeDeliveryCorrelation, NativeRunOutputResolutionError, RegisterDeliveryError,
         RegisterOutcome, RestoreDeliveryError, RestoreLedgerError, TeamNodeOutput,
-        TeamNodeOutputDispatch, TeamNodeOutputError, TerminalObservationError,
+        TeamNodeOutputError, TerminalObservationError,
         TerminalObservationOutcome, begin_delivery, recover_interrupted_delivery,
         register_delivery, settle_delivery,
     };
@@ -212,14 +215,13 @@ pub mod run {
     pub use graph::{
         AttemptId, AttemptProjection, AttemptReason, AttemptStatus, DefinitionError,
         DependencyMetadata, DurableDependencyMetadata, DurableEdgeDefinition, DurableGraphLayout,
-        DurableNodeDefinition, DurableNodePosition, DurableWorkAssignment, DurableWorkGroup,
-        EdgeAction, EdgeDefinition, EdgeId, EdgePayloadPolicy, EdgeProjection, EdgeStatus,
+        DurableNodeDefinition, DurableNodePosition, DurableWorkAssignment, EdgeAction, EdgeDefinition, EdgeId, EdgePayloadPolicy, EdgeProjection, EdgeStatus,
         ExecutionFence, ExecutorPolicy, GraphDefinition, GraphEvent, GraphLayout, GraphPatch,
         GraphPatchError, GraphPatchOperation, GraphProjection, GraphRunId, GraphState, GraphStatus,
-        GraphYamlError, GroupId, InputProjection, InputReceipt, JoinPolicy, NodeAttempt,
-        NodeDefinition, NodeExecutionHistory, NodeExecutionId, NodeId, NodeKind, NodePosition,
+        GraphYamlError, InputProjection, InputReceipt, NodeAttempt,
+        NodeDefinition, NodeExecutionHistory, NodeExecutionId, NodeId, NodeKind, NodeOutputPort, NodePosition,
         NodeProjection, ReadyQueueItem, ReduceError, RestoreError, ReviewAssignment, StartTrigger,
-        WorkAssignment, WorkGroup, WorkflowGroup, WorkflowJoinPolicy, WorkflowPlan,
+        WorkAssignment, WorkflowPlan,
         WorkflowPlanCompilation, WorkflowPlanCompileError, WorkflowTask, apply_graph_patch,
         compile_workflow_plan, export_yaml, import_for_run, import_yaml, project, reduce,
         restore_oracle,
@@ -251,8 +253,8 @@ pub mod run {
         TeamRunPurgeRequest, purge_team_run,
     };
     pub use query::{
-        TeamRoleSessionQueryOutcome, TeamRunProjection, TeamRunQuery, TeamRunQueryOutcome,
-        query_team_role_sessions, query_team_run,
+        TeamRoleSessionQueryOutcome, TeamRunListEntry, TeamRunProjection, TeamRunQuery,
+        TeamRunQueryOutcome, query_team_role_sessions, query_team_run, query_team_run_list,
     };
     pub use recovery::{
         AttemptRecoveryItem, CancellationRecoveryAction, DeliveryRecoveryAction,
@@ -290,8 +292,8 @@ pub use adapters::session_terminal::{
     TeamMessageRepairSessionOutcome, TeamMessageRepairSessionPort, TeamMessageRepairSessionRequest,
 };
 pub use adapters::start_gate_send_hook::{
-    PreparedStartGateSend, StartGateNativeEndpoint, StartGateRegistry, StartGateSendHook,
-    StartGateSendRequest, StartGateSendState,
+    PreparedStartGateSend, StartGateNativeEndpoint, StartGateSendHook,
+    StartGateSendRequest,
 };
 pub use api::{
     OrganizationModule, OrganizationOwnerInput, StartGatePromptPlan, StartGateRuntimeBindingLookup,
@@ -309,7 +311,7 @@ pub use application::{
     summarize_team_runtime_control_outcome, team_public_unavailable_section_name,
 };
 pub use owner::{
-    AdmissionState, ArmedTrigger, ManualTeamCreateOutcome, OrganizationCommand, OrganizationHandle,
+    ArmedTrigger, ManualTeamCreateOutcome, OrganizationCommand, OrganizationHandle,
     OrganizationOwner, OrganizationPhase, OrganizationQuery, RequestAdmissionClosed,
     TeamDeleteOutcome, TeamMaterializationCommandOutcome, TeamNodeTerminalResolution,
     TeamNodeTerminalResult, TeamRunAdmission, TeamRunCommandOutcome, TeamRunCoordinator,
@@ -375,13 +377,12 @@ pub use run::{
     EvidenceReferenceError, EvidenceReferenceKind, ExecutionFence, ExecutorPolicy, GraphDefinition,
     GraphEvent, GraphPatch, GraphPatchError, GraphPatchOperation, GraphProjection, GraphRunId,
     GraphRunPurgeOutcome, GraphRunPurgeRejection, GraphRunPurgeUnknown, GraphState, GraphStatus,
-    GraphYamlError, GroupId, HumanDecision, InputProjection, InputReceipt, InvalidAttemptIdentity,
-    InvalidAuthorizedGraphResolution, InvalidAuthorizedGraphResolutionReceipt, JoinPolicy,
-    LedgerRecoverySummary, MAX_DIAGNOSTICS_COUNT, MAX_DIAGNOSTICS_STALE_EXECUTIONS,
+    GraphYamlError, HumanDecision, InputProjection, InputReceipt, InvalidAttemptIdentity,
+    InvalidAuthorizedGraphResolution, InvalidAuthorizedGraphResolutionReceipt, LedgerRecoverySummary, MAX_DIAGNOSTICS_COUNT, MAX_DIAGNOSTICS_STALE_EXECUTIONS,
     NativeDeletionEvidence, NativeDeletionProof, NativeDeletionProofError,
     NativeDeliveryCorrelation, NativeRunOutputResolutionError, NodeAttempt, NodeDefinition,
-    NodeExecutionHistory, NodeExecutionId, NodeId, NodeKind, NodeProjection,
-    OrganizationRecoveryApply, OrganizationRecoveryPlan, ReadyQueueItem, RecordCommandError,
+    NodeExecutionHistory, NodeExecutionId, NodeId, NodeKind, NodeOutputPort, NodeProjection,
+    OrganizationRecoveryApply, OrganizationRecoveryPlan, ReadyQueueItem, ReadyScheduleError, RecordCommandError,
     RecordOutcome, RecoveryAction, RecoveryFault, RecoveryQueryError, ReduceError,
     RegisterDeliveryError, RegisterOutcome, ResolveApprovalError, RestoreActivityError,
     RestoreActivityLedgerError, RestoreDeliveryError, RestoreError, RestoreEvidenceLedgerError,
@@ -403,14 +404,14 @@ pub use run::{
     TeamRunDiagnosticsLifecycleStatus, TeamRunDiagnosticsLimits, TeamRunDiagnosticsProjection,
     TeamRunDiagnosticsQueryOutcome, TeamRunDiagnosticsRetrySummary,
     TeamRunDiagnosticsStaleExecution, TeamRunDiagnosticsStatus,
-    TeamRunDiagnosticsUnavailableReason, TeamRunDiagnosticsUnavailableSection, TeamRunProjection,
+    TeamRunDiagnosticsUnavailableReason, TeamRunDiagnosticsUnavailableSection, TeamRunListEntry,
+    TeamRunProjection,
     TeamRunPublicStartGate, TeamRunPurgeRequest, TeamRunQuery, TeamRunQueryOutcome,
     TeamRunRecoveryPlan, TeamRunRecoveryQuery, TeamRuntimeState, TeamTriggerFireOutcome,
     TeamTriggerFireRequest, TeamTriggerFireRequestError, TerminalObservationError,
     TerminalObservationOutcome, TerminalObservationPlan, TriggerFireError, TriggerFireRequest,
     TriggerFireRequestError, TriggerLedger, TriggerRegistration, TriggerSource, WaitOutcome,
-    WebhookTriggerResolution, WebhookTriggerResolutionError, WorkAssignment, WorkGroup,
-    WorkflowGroup, WorkflowJoinPolicy, WorkflowPlan, WorkflowTask, abort_pending_approvals,
+    WebhookTriggerResolution, WebhookTriggerResolutionError, WorkAssignment, WorkflowPlan, WorkflowTask, abort_pending_approvals,
     apply_graph_patch, apply_organization_recovery, begin_delivery, claim_activity,
     dispatch_activity, export_yaml, import_for_run, import_yaml, next_cron_slot_after,
     plan_due_cron_trigger, plan_organization_recovery, plan_terminal_observations, project,
@@ -420,18 +421,23 @@ pub use run::{
     resolve_webhook_trigger, restore_oracle, settle_activity, settle_delivery,
 };
 pub use store::{
-    ConfirmRunStartOutcome, ContinueRunDiscussionOutcome, GraphRunFacts,
+    GraphRunFacts, MigrationError, MigrationReport, migrate_legacy_log,
     NativeTerminalReceiptTarget, OrganizationFacts, OrganizationFactsError, OrganizationStore,
-    PendingWorkflowPlanAdmission, RunStartGate, SetRunStartProposalOutcome, StoreFault, TeamFacts,
+    PendingWorkflowPlanAdmission, RunStartGate, StoreFault, TeamFacts, TeamRunExecutionScope,
     TeamTombstoneOutcome, WorkflowPlanAdmissionOutcome, WorkflowPlanSubmitOutcome,
     WorkflowTemplateFacts,
 };
-const ORGANIZATION_FACTS_FILE: &str = "organization-facts.log";
-
 pub fn open_organization_store(
     state_dir: &std::path::Path,
 ) -> Result<OrganizationStore, StoreFault> {
-    OrganizationStore::open(state_dir.join(ORGANIZATION_FACTS_FILE))
+    let database = state_dir.join("organization").join("state.sqlite");
+    if !database.try_exists().map_err(|error| StoreFault::Read(error.kind()))?
+        && state_dir.join("organization-facts.log").try_exists()
+            .map_err(|error| StoreFault::Read(error.kind()))?
+    {
+        return Err(StoreFault::MigrationRequired);
+    }
+    OrganizationStore::open(database)
 }
 
 pub use team::{

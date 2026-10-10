@@ -1,7 +1,16 @@
+mod changes;
+mod refresh;
+mod transaction;
+
+use transaction::{DeliveryIndexes, FactsJournal};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
+
+use platform::trace::{identifier_hash, runtime_trace};
+use serde_json::json;
 
 use crate::{
     Activity, ActivityClaim, ActivityClaimOutcome, ActivityDispatchOutcome, ActivityId,
@@ -34,7 +43,7 @@ use crate::{
         },
         event::{EventLedger, EventLedgerSnapshot},
         evidence::{EvidenceLedger, EvidenceRecord, RecordOutcome},
-        graph::{GraphDurableSnapshot, GraphEvent, NodeId, reduce},
+        graph::{ExecutionFence, GraphDurableSnapshot, GraphEvent, NodeId},
         lifecycle::{
             BeginCancellationOutcome, CreateGraphRunOutcome, GraphRunLifecycle,
             GraphRunLifecycleState, ResumeOutcome, RoleAbortOutcome, SettleCancellationOutcome,
@@ -200,182 +209,20 @@ pub enum WorkflowPlanSubmitOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunStartGate {
     Intake,
-    ProposalPending {
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    },
     Designing {
         design_epoch: String,
         prompt_generation: Option<String>,
     },
-    DesignProposalPending {
-        design_epoch: String,
-        prompt_generation: String,
-        graph_version: String,
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    },
     Started,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SetRunStartProposalOutcome {
-    Recorded,
-    Replayed,
-    AlreadyStarted,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConfirmRunStartOutcome {
-    Started,
-    Replayed,
-    Intake,
-    ProposalMismatch,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ContinueRunDiscussionOutcome {
-    Intake,
-    Replayed,
-    AlreadyStarted,
-    ProposalMismatch,
 }
 
 impl RunStartGate {
-    pub fn proposal_id(&self) -> Option<&str> {
+    pub(super) fn exit_design(&mut self, epoch: &str) -> Result<bool, ()> {
         match self {
-            Self::ProposalPending { proposal_id, .. }
-            | Self::DesignProposalPending { proposal_id, .. } => Some(proposal_id),
-            Self::Intake | Self::Designing { .. } | Self::Started => None,
-        }
-    }
-
-    pub fn summary(&self) -> Option<&str> {
-        match self {
-            Self::ProposalPending { summary, .. } | Self::DesignProposalPending { summary, .. } => {
-                Some(summary)
-            }
-            Self::Intake | Self::Designing { .. } | Self::Started => None,
-        }
-    }
-
-    pub fn source_delivery_id(&self) -> Option<&str> {
-        match self {
-            Self::ProposalPending {
-                source_delivery_id, ..
-            }
-            | Self::DesignProposalPending {
-                source_delivery_id, ..
-            } => Some(source_delivery_id),
-            Self::Intake | Self::Designing { .. } | Self::Started => None,
-        }
-    }
-
-    pub(crate) fn proposal_pending(
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    ) -> Result<Self, ()> {
-        if proposal_id.trim().is_empty()
-            || summary.trim().is_empty()
-            || source_delivery_id.trim().is_empty()
-        {
-            return Err(());
-        }
-        Ok(Self::ProposalPending {
-            proposal_id,
-            summary,
-            source_delivery_id,
-        })
-    }
-
-    fn set_proposal(
-        &mut self,
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    ) -> Result<SetRunStartProposalOutcome, ()> {
-        let next = Self::proposal_pending(proposal_id, summary, source_delivery_id)?;
-        match self {
-            Self::Started => Ok(SetRunStartProposalOutcome::AlreadyStarted),
-            Self::Designing { .. } | Self::DesignProposalPending { .. } => Err(()),
-            current if *current == next => Ok(SetRunStartProposalOutcome::Replayed),
-            current => {
-                *current = next;
-                Ok(SetRunStartProposalOutcome::Recorded)
-            }
-        }
-    }
-
-    fn confirm_start(&mut self, proposal_id: &str) -> Result<ConfirmRunStartOutcome, ()> {
-        if proposal_id.trim().is_empty() {
-            return Err(());
-        }
-        match self {
-            Self::ProposalPending {
-                proposal_id: existing,
-                ..
-            } if existing == proposal_id => {
-                *self = Self::Started;
-                Ok(ConfirmRunStartOutcome::Started)
-            }
-            Self::DesignProposalPending {
-                proposal_id: existing,
-                ..
-            } if existing == proposal_id => {
-                *self = Self::Started;
-                Ok(ConfirmRunStartOutcome::Started)
-            }
-            Self::ProposalPending { .. } | Self::DesignProposalPending { .. } => {
-                Ok(ConfirmRunStartOutcome::ProposalMismatch)
-            }
-            Self::Intake | Self::Designing { .. } => Ok(ConfirmRunStartOutcome::Intake),
-            Self::Started => Ok(ConfirmRunStartOutcome::Replayed),
-        }
-    }
-
-    fn continue_discussion(
-        &mut self,
-        proposal_id: &str,
-    ) -> Result<ContinueRunDiscussionOutcome, ()> {
-        if proposal_id.trim().is_empty() {
-            return Err(());
-        }
-        match self {
-            Self::ProposalPending {
-                proposal_id: existing,
-                ..
-            } if existing == proposal_id => {
+            Self::Intake => Ok(false),
+            Self::Designing { design_epoch, .. } if design_epoch == epoch => {
                 *self = Self::Intake;
-                Ok(ContinueRunDiscussionOutcome::Intake)
-            }
-            Self::DesignProposalPending {
-                proposal_id: existing,
-                design_epoch,
-                ..
-            } if existing == proposal_id => {
-                let epoch = design_epoch.clone();
-                self.exit_design(&epoch)
-            }
-            Self::ProposalPending { .. } | Self::DesignProposalPending { .. } => {
-                Ok(ContinueRunDiscussionOutcome::ProposalMismatch)
-            }
-            Self::Intake | Self::Designing { .. } => Ok(ContinueRunDiscussionOutcome::Replayed),
-            Self::Started => Ok(ContinueRunDiscussionOutcome::AlreadyStarted),
-        }
-    }
-
-    pub(super) fn exit_design(&mut self, epoch: &str) -> Result<ContinueRunDiscussionOutcome, ()> {
-        match self {
-            Self::Intake => Ok(ContinueRunDiscussionOutcome::Replayed),
-            Self::Designing { design_epoch, .. }
-            | Self::DesignProposalPending { design_epoch, .. }
-                if design_epoch == epoch =>
-            {
-                *self = Self::Intake;
-                Ok(ContinueRunDiscussionOutcome::Intake)
+                Ok(true)
             }
             _ => Err(()),
         }
@@ -384,13 +231,6 @@ impl RunStartGate {
     pub(crate) fn valid(&self) -> bool {
         match self {
             Self::Intake | Self::Started => true,
-            Self::ProposalPending {
-                proposal_id,
-                summary,
-                source_delivery_id,
-            } => [proposal_id, summary, source_delivery_id]
-                .iter()
-                .all(|value| !value.trim().is_empty()),
             Self::Designing {
                 design_epoch,
                 prompt_generation,
@@ -400,31 +240,6 @@ impl RunStartGate {
                         .as_ref()
                         .is_none_or(|value| !value.trim().is_empty())
             }
-            Self::DesignProposalPending {
-                design_epoch,
-                prompt_generation,
-                graph_version,
-                proposal_id,
-                summary,
-                source_delivery_id,
-            } => {
-                [
-                    design_epoch,
-                    prompt_generation,
-                    proposal_id,
-                    source_delivery_id,
-                ]
-                .iter()
-                .all(|value| !value.trim().is_empty())
-                    && graph_version.len() == 64
-                    && graph_version
-                        .bytes()
-                        .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
-                    && !summary.trim().is_empty()
-                    && summary.lines().count() == 1
-                    && !summary.contains(['<', '>'])
-                    && proposal_id == prompt_generation
-            }
         }
     }
 
@@ -432,25 +247,15 @@ impl RunStartGate {
         if !self.valid() {
             return false;
         }
-        if matches!(
-            self,
-            Self::Designing { .. } | Self::DesignProposalPending { .. }
-        ) {
+        if matches!(self, Self::Designing { .. }) {
             return !matches!(previous, Self::Started);
         }
-        if matches!(
-            previous,
-            Self::Designing { .. } | Self::DesignProposalPending { .. }
-        ) {
+        if matches!(previous, Self::Designing { .. }) {
             return matches!(self, Self::Intake | Self::Started);
         }
         matches!(
             (previous, self),
-            (Self::Intake, Self::Intake | Self::ProposalPending { .. })
-                | (
-                    Self::ProposalPending { .. },
-                    Self::Intake | Self::ProposalPending { .. } | Self::Started,
-                )
+            (Self::Intake, Self::Intake | Self::Started)
                 | (Self::Started, Self::Started)
         )
     }
@@ -475,7 +280,6 @@ impl fmt::Debug for WorkflowTemplateFacts {
             .field("run_id", &self.plan.run_id())
             .field("title", &self.plan.title())
             .field("status", &self.plan.status())
-            .field("group_count", &self.plan.groups().len())
             .field("task_count", &self.plan.tasks().len())
             .field("created_at", &self.plan.created_at())
             .finish()
@@ -709,6 +513,21 @@ impl GraphRunFacts {
         &self.graph
     }
 
+    pub(crate) fn graph_mut(&mut self) -> &mut GraphState {
+        &mut self.graph
+    }
+
+    pub(crate) fn replace_header(
+        &mut self, team: TeamId, revision: TeamRevision, runtime: Option<RunRuntimeReceipt>,
+        lifecycle: GraphRunLifecycle, start_gate: RunStartGate,
+    ) {
+        self.team = team;
+        self.frozen_team_revision = revision;
+        self.runtime = runtime;
+        self.lifecycle = lifecycle;
+        self.start_gate = start_gate;
+    }
+
     pub fn runtime(&self) -> Option<&RunRuntimeReceipt> {
         self.runtime.as_ref()
     }
@@ -744,6 +563,8 @@ pub struct OrganizationFacts {
     pending_workflow_plan_admissions: BTreeMap<String, PendingWorkflowPlanAdmission>,
     task_board: crate::run::TaskBoardFacts,
     purged_runs: BTreeMap<String, PurgedRunMarker>,
+    journal: FactsJournal,
+    delivery_indexes: DeliveryIndexes,
 }
 
 impl OrganizationFacts {
@@ -1065,7 +886,7 @@ impl OrganizationFacts {
         let control_resolutions = ControlResolutionLedger::restore(control_resolutions)
             .map_err(|_| OrganizationFactsError::InvalidControlResolutionLedger)?;
         for resolution in control_resolutions.resolutions() {
-            validate_control_node_resolution(&run_facts, &evidence, resolution)?;
+            validate_control_node_resolution(&run_facts, resolution)?;
         }
 
         let mut approval_facts = BTreeMap::new();
@@ -1105,7 +926,7 @@ impl OrganizationFacts {
             }
         }
         validate_approval_resolution_events(&approval_facts, event_snapshot.events())?;
-        validate_human_decision_approvals(&run_facts, &approval_facts, &control_resolutions)?;
+        validate_human_decision_approvals(&run_facts, approval_facts.values(), &control_resolutions)?;
 
         let mut resolved_receipts = BTreeSet::new();
         let mut matcha_terminal_correlations = Vec::new();
@@ -1143,6 +964,7 @@ impl OrganizationFacts {
             }
         }
 
+        let delivery_indexes = DeliveryIndexes::restore(&deliveries)?;
         Ok(Self {
             teams: team_facts,
             materializations: materialization_facts,
@@ -1160,6 +982,8 @@ impl OrganizationFacts {
             decisions,
             task_board,
             purged_runs: purged_run_facts,
+            journal: FactsJournal::default(),
+            delivery_indexes,
         })
     }
 
@@ -1181,6 +1005,10 @@ impl OrganizationFacts {
         self.materializations
             .get(team_id.as_str())
             .and_then(TeamMaterializationLifecycle::receipt)
+    }
+
+    pub(crate) fn materialization_lifecycle(&self, team_id: &TeamId) -> Option<&TeamMaterializationLifecycle> {
+        self.materializations.get(team_id.as_str())
     }
 
     pub(crate) fn materialization_lifecycles(
@@ -1211,6 +1039,7 @@ impl OrganizationFacts {
             Some(team) if team.tombstoned() => return Err(OrganizationFactsError::TeamTombstoned),
             Some(_) => {}
             None => {
+                self.touch_team(definition.team_id().as_str());
                 self.teams.insert(
                     definition.team_id().as_str().to_owned(),
                     TeamFacts::new(definition.clone(), TeamRevision::initial(), false),
@@ -1234,6 +1063,7 @@ impl OrganizationFacts {
         }
         match self.materializations.get(team_id.as_str()) {
             None => {
+                self.touch_materialization(team_id.as_str());
                 self.materializations.insert(
                     team_id.as_str().to_owned(),
                     TeamMaterializationLifecycle::requested(request),
@@ -1253,6 +1083,7 @@ impl OrganizationFacts {
         team_id: &TeamId,
         outcome: MaterializationOperationOutcome,
     ) -> Result<MaterializationRecordOutcome, OrganizationFactsError> {
+        self.touch_materialization(team_id.as_str());
         self.materializations
             .get_mut(team_id.as_str())
             .ok_or(OrganizationFactsError::UnknownMaterializationTeam)?
@@ -1265,6 +1096,7 @@ impl OrganizationFacts {
         receipt: MaterializationReceipt,
     ) -> Result<MaterializationRecordOutcome, OrganizationFactsError> {
         let team_id = receipt.team().clone();
+        self.touch_materialization(team_id.as_str());
         self.materializations
             .get_mut(team_id.as_str())
             .ok_or(OrganizationFactsError::UnknownMaterializationTeam)?
@@ -1277,14 +1109,17 @@ impl OrganizationFacts {
         team_id: &TeamId,
         cleanup_idempotency_key: IdempotencyKey,
     ) -> Result<TeamTombstoneOutcome, OrganizationFactsError> {
+        self.touch_team(team_id.as_str());
         let outcome = self
             .teams
             .get_mut(team_id.as_str())
             .ok_or(OrganizationFactsError::UnknownTeam)?
             .tombstone();
         if outcome == TeamTombstoneOutcome::Tombstoned
-            && let Some(lifecycle) = self.materializations.remove(team_id.as_str())
+            && self.materializations.contains_key(team_id.as_str())
         {
+            self.touch_materialization(team_id.as_str());
+            let lifecycle = self.materializations.remove(team_id.as_str()).expect("existing materialization");
             self.materializations.insert(
                 team_id.as_str().to_owned(),
                 lifecycle.tombstone(|receipt| {
@@ -1362,6 +1197,7 @@ impl OrganizationFacts {
         team_id: &TeamId,
         outcome: MaterializationOperationOutcome,
     ) -> Result<MaterializationRecordOutcome, OrganizationFactsError> {
+        self.touch_materialization(team_id.as_str());
         self.materializations
             .get_mut(team_id.as_str())
             .ok_or(OrganizationFactsError::UnknownMaterializationTeam)?
@@ -1376,7 +1212,8 @@ impl OrganizationFacts {
     pub fn armed_trigger_facts(&self) -> impl Iterator<Item = crate::ArmedTriggerFacts> + '_ {
         self.runs
             .values()
-            .filter(|run| matches!(run.lifecycle().state(), GraphRunLifecycleState::Active))
+            .filter(|run| matches!(run.lifecycle().state(), GraphRunLifecycleState::Active)
+                && matches!(run.start_gate(), RunStartGate::Started))
             .flat_map(|run| {
                 run.graph()
                     .definition()
@@ -1433,6 +1270,7 @@ impl OrganizationFacts {
         {
             return Err(OrganizationFactsError::WorkflowTemplateChanged);
         }
+        self.touch_template(template.team().as_str());
         self.templates
             .insert(template.team().as_str().to_owned(), template);
         Ok(())
@@ -1479,6 +1317,7 @@ impl OrganizationFacts {
         if team.tombstoned() || team.revision().get() < admission.team_revision().get() {
             return Err(OrganizationFactsError::InvalidWorkflowPlanAdmission);
         }
+        self.touch_admission(&run_id);
         self.pending_workflow_plan_admissions
             .insert(run_id, admission.clone());
         Ok(WorkflowPlanAdmissionOutcome::Recorded(admission))
@@ -1592,12 +1431,15 @@ impl OrganizationFacts {
         let run = GraphRunFacts::new(team.clone(), team_revision, graph, None)?;
         match self.create_graph_run(run, creation_idempotency_key)? {
             CreateGraphRunOutcome::Created(run_id) => {
+                self.touch_template(team.as_str());
+                self.touch_admission(run_id.as_str());
                 self.templates.insert(team.as_str().to_owned(), template);
                 self.pending_workflow_plan_admissions
                     .remove(run_id.as_str());
                 Ok(WorkflowPlanSubmitOutcome::Submitted(run_id))
             }
             CreateGraphRunOutcome::Replayed(run_id) => {
+                self.touch_admission(run_id.as_str());
                 self.pending_workflow_plan_admissions
                     .remove(run_id.as_str());
                 Ok(WorkflowPlanSubmitOutcome::Replayed(run_id))
@@ -1657,6 +1499,7 @@ impl OrganizationFacts {
             source_identity.clone(),
             created_at,
         )?;
+        self.touch_admission(run_id.as_str());
         self.pending_workflow_plan_admissions
             .insert(run_id.as_str().to_owned(), admission);
         match self.submit_workflow_plan_with_template_revision(
@@ -1682,56 +1525,17 @@ impl OrganizationFacts {
     }
 
     pub(super) fn design_run_mut(&mut self, run_id: &GraphRunId) -> Option<&mut GraphRunFacts> {
+        self.touch_run(run_id.as_str());
         self.runs.get_mut(run_id.as_str())
     }
 
-    pub(crate) fn set_run_start_proposal(
-        &mut self,
-        run_id: &GraphRunId,
-        proposal_id: String,
-        summary: String,
-        source_delivery_id: String,
-    ) -> Result<SetRunStartProposalOutcome, OrganizationFactsError> {
-        self.runs
-            .get_mut(run_id.as_str())
-            .ok_or(OrganizationFactsError::UnknownRun)?
-            .start_gate
-            .set_proposal(proposal_id, summary, source_delivery_id)
-            .map_err(|_| OrganizationFactsError::InvalidRunStartGate)
-    }
-
-    pub(crate) fn confirm_run_start(
-        &mut self,
-        run_id: &GraphRunId,
-        proposal_id: &str,
-    ) -> Result<ConfirmRunStartOutcome, OrganizationFactsError> {
-        let run = self
-            .runs
-            .get_mut(run_id.as_str())
-            .ok_or(OrganizationFactsError::UnknownRun)?;
-        if let RunStartGate::DesignProposalPending { graph_version, .. } = run.start_gate()
-            && crate::store::codec::graph_version(run.graph().definition())
-                .map_err(|_| OrganizationFactsError::InvalidRunStartGate)?
-                != *graph_version
-        {
-            return Err(OrganizationFactsError::InvalidRunStartGate);
-        }
-        run.start_gate
-            .confirm_start(proposal_id)
-            .map_err(|_| OrganizationFactsError::InvalidRunStartGate)
-    }
-
-    pub(crate) fn continue_run_discussion(
-        &mut self,
-        run_id: &GraphRunId,
-        proposal_id: &str,
-    ) -> Result<ContinueRunDiscussionOutcome, OrganizationFactsError> {
-        self.runs
-            .get_mut(run_id.as_str())
-            .ok_or(OrganizationFactsError::UnknownRun)?
-            .start_gate
-            .continue_discussion(proposal_id)
-            .map_err(|_| OrganizationFactsError::InvalidRunStartGate)
+    pub(super) fn apply_graph_event(&mut self, run_id: &GraphRunId, event: GraphEvent) -> Result<(), super::StoreFault> {
+        self.require_started_run(run_id).map_err(|_| super::StoreFault::InvalidFacts)?;
+        self.touch_run(run_id.as_str());
+        self.runs.get_mut(run_id.as_str()).expect("validated run")
+            .graph.apply_event(event).map_err(super::StoreFault::GraphReduce)?;
+        self.cancel_superseded_pending_activities(run_id);
+        Ok(())
     }
 
     pub(crate) fn purged_run_marker(&self, run_id: &GraphRunId) -> Option<&PurgedRunMarker> {
@@ -1752,6 +1556,10 @@ impl OrganizationFacts {
 
     pub fn triggers(&self) -> &TriggerLedger {
         &self.triggers
+    }
+
+    pub(crate) fn decision_ledger(&self) -> &TeamDecisionLedger {
+        &self.decisions
     }
 
     pub fn decisions(&self) -> impl Iterator<Item = &crate::TeamDecision> {
@@ -1795,6 +1603,10 @@ impl OrganizationFacts {
 
     pub(crate) fn events_for_run(&self, run_id: &str) -> Vec<&crate::run::event::TeamEvent> {
         self.events.events_for_run(run_id).collect()
+    }
+
+    pub(crate) fn evidence(&self) -> &EvidenceLedger {
+        &self.evidence
     }
 
     pub(crate) fn evidence_records(&self) -> impl Iterator<Item = &EvidenceRecord> {
@@ -1857,6 +1669,78 @@ impl OrganizationFacts {
         }
     }
 
+    pub(crate) fn require_started_run(&self, run_id: &GraphRunId) -> Result<&GraphRunFacts, OrganizationFactsError> {
+        self.run(run_id).filter(|run| {
+            matches!(run.start_gate(), RunStartGate::Started)
+                && matches!(run.lifecycle().state(), GraphRunLifecycleState::Active)
+                && self.team(run.team()).is_some_and(|team| !team.tombstoned())
+        }).ok_or(OrganizationFactsError::InvalidGraphRun)
+    }
+
+    pub(crate) fn request_human_decision(
+        &mut self,
+        run_id: &GraphRunId,
+        node_id: NodeId,
+        fence: ExecutionFence,
+        requested_at: u64,
+    ) -> Result<bool, OrganizationFactsError> {
+        use sha2::{Digest, Sha256};
+        use crate::run::event::{ApprovalAction, ApprovalCommand, CommandPayload, OpaqueId, RunCommand};
+        let run = self.require_started_run(run_id)?;
+        if run.graph().definition().node(&node_id).is_none_or(|node| node.kind() != NodeKind::HumanDecision) {
+            return Err(OrganizationFactsError::InvalidApprovalLedger);
+        }
+        let attempt = run.graph().current_attempt(&node_id)
+            .filter(|attempt| attempt.fence() == &fence)
+            .ok_or(OrganizationFactsError::InvalidApprovalLedger)?;
+        if self.approvals.values().any(|approval| {
+            let facts = approval.facts();
+            facts.run_id == run_id.as_str()
+                && facts.subject == (crate::ApprovalSubject::HumanDecision { node_id: node_id.as_str().to_owned() })
+                && facts.execution_fence.as_deref() == Some(fence.node_execution_id().as_str())
+        }) {
+            return Ok(false);
+        }
+        if attempt.status() != crate::AttemptStatus::Ready {
+            return Err(OrganizationFactsError::InvalidApprovalLedger);
+        }
+        let team = self.team(run.team()).ok_or(OrganizationFactsError::UnknownTeam)?;
+        let leader = team.definition().roles().iter().find(|role| role.kind() == crate::RoleKind::Leader)
+            .ok_or(OrganizationFactsError::InvalidApprovalLedger)?;
+        if !run.runtime().is_some_and(|runtime| runtime.bindings().iter().any(|binding| binding.role() == leader.role_id())) {
+            return Err(OrganizationFactsError::InvalidApprovalLedger);
+        }
+        let mut digest = Sha256::new();
+        for part in [run_id.as_str(), node_id.as_str(), fence.attempt_id().as_str(), fence.node_execution_id().as_str()] {
+            digest.update((part.len() as u64).to_le_bytes());
+            digest.update(part.as_bytes());
+        }
+        let identity = format!("human-decision-{:x}", digest.finalize());
+        let opaque = |value: &str| OpaqueId::try_new(value).map_err(|_| OrganizationFactsError::InvalidEventLedger);
+        let approval_id = opaque(&identity)?;
+        let role_id = opaque(leader.role_id().as_str())?;
+        let command = RunCommand::new(opaque(run_id.as_str())?, approval_id.clone(), approval_id.clone(),
+            CommandPayload::ApprovalRequest(ApprovalCommand::new(approval_id.clone(), opaque(fence.node_execution_id().as_str())?, role_id.clone(), ApprovalAction::ContinueNode)), requested_at);
+        let approval = Approval::request(crate::ApprovalRequest {
+            approval_id: identity.clone(), run_id: run_id.as_str().to_owned(), stage_id: node_id.as_str().to_owned(),
+            role_id: role_id.as_str().to_owned(), reason: "Human decision required.".to_owned(),
+            requested_action: "continue_node".to_owned(), risk_summary: "Review this decision before continuing.".to_owned(),
+            idempotency_key: identity.clone(), requested_at,
+            subject: crate::ApprovalSubject::HumanDecision { node_id: node_id.as_str().to_owned() },
+            origin: crate::ApprovalOrigin::HumanDecision, effect: crate::ApprovalEffect::RouteDecisionPorts,
+            execution_fence: Some(fence.node_execution_id().as_str().to_owned()),
+        });
+        self.touch_run(run_id.as_str());
+        self.runs.get_mut(run_id.as_str()).expect("validated run").graph
+            .apply_event(GraphEvent::NodeWaiting { node_id, fence, waiting_at: requested_at })
+            .map_err(|_| OrganizationFactsError::InvalidGraphRun)?;
+        if self.events.try_accept(command).map_err(|_| OrganizationFactsError::InvalidEventLedger)?.is_replay() {
+            return Err(OrganizationFactsError::InvalidApprovalLedger);
+        }
+        self.insert_approval(approval);
+        Ok(true)
+    }
+
     pub(crate) fn resolve_human_decision(
         &mut self,
         command: HumanDecisionCommand,
@@ -1869,60 +1753,57 @@ impl OrganizationFacts {
         if facts.run_id != command.run_id().as_str() {
             return Err(OrganizationFactsError::UnknownApprovalRun);
         }
-        let (node_id, execution_fence) = match (&facts.subject, facts.execution_fence.as_deref()) {
+        let (node_id, execution_fence, route_decision) = match (&facts.subject, facts.execution_fence.as_deref()) {
             (crate::ApprovalSubject::HumanDecision { node_id }, Some(execution_fence))
                 if facts.origin == crate::ApprovalOrigin::HumanDecision
                     && facts.effect == crate::ApprovalEffect::RouteDecisionPorts =>
             {
-                (node_id, execution_fence)
+                (node_id, execution_fence, true)
+            }
+            (crate::ApprovalSubject::WorkNode { node_id }, Some(execution_fence))
+                if facts.origin == crate::ApprovalOrigin::WorkNode
+                    && facts.effect == crate::ApprovalEffect::KeepNodeWaiting =>
+            {
+                (node_id, execution_fence, false)
             }
             _ => return Err(OrganizationFactsError::InvalidApprovalResolution),
         };
-        let run = self
-            .runs
-            .get(command.run_id().as_str())
-            .ok_or(OrganizationFactsError::UnknownApprovalRun)?;
+        if approval.resolution_for_idempotency(command.idempotency_key()).is_some() {
+            return if approval.resolution_receipt_matches(command.idempotency_key(), command.decision(), command.note(), command.resolved_at(), crate::run::approval::ApprovalResolutionCause::HumanDecision) {
+                Ok(HumanDecisionOutcome::Replayed)
+            } else {
+                Err(OrganizationFactsError::ConflictingApprovalResolution)
+            };
+        }
+        let run = self.require_started_run(command.run_id())?;
         let node_id = NodeId::new(node_id.clone());
         let attempt = run
             .graph()
             .current_attempt(&node_id)
             .filter(|attempt| attempt.fence().node_execution_id().as_str() == execution_fence)
             .ok_or(OrganizationFactsError::InvalidApprovalResolution)?;
-        let resolution = ControlNodeResolution::human_decision(
-            command.run_id().clone(),
-            node_id,
-            attempt.fence().clone(),
-            match command.decision() {
-                crate::ApprovalDecision::Approve => crate::HumanDecision::Approve,
-                crate::ApprovalDecision::Deny => crate::HumanDecision::Deny,
-                crate::ApprovalDecision::Abort => crate::HumanDecision::Abort,
-            },
-            command.resolved_at(),
-        )
-        .map_err(|_| OrganizationFactsError::InvalidApprovalResolution)?;
-        if approval
-            .resolution_for_idempotency(command.idempotency_key())
-            .is_some()
-        {
-            if !approval.resolution_receipt_matches(
-                command.idempotency_key(),
-                command.decision(),
-                command.note(),
-                command.resolved_at(),
-                crate::run::approval::ApprovalResolutionCause::HumanDecision,
-            ) {
-                return Err(OrganizationFactsError::ConflictingApprovalResolution);
-            }
-            return match self.apply_control_node_resolution(resolution) {
-                Ok(
-                    ControlNodeResolutionOutcome::Recorded | ControlNodeResolutionOutcome::Replayed,
-                ) => Ok(HumanDecisionOutcome::Replayed),
-                Err(_) => Err(OrganizationFactsError::InvalidApprovalResolution),
-            };
+        if attempt.status() != crate::AttemptStatus::Waiting {
+            return Err(OrganizationFactsError::InvalidApprovalResolution);
         }
+        let node = run.graph().definition().node(&node_id)
+            .ok_or(OrganizationFactsError::InvalidApprovalResolution)?;
+        if !route_decision && node.work_assignment().map(|assignment| assignment.role_id())
+            .or_else(|| node.review_assignment().map(|assignment| assignment.role_id())) != Some(facts.role_id.as_str())
+        {
+            return Err(OrganizationFactsError::InvalidApprovalResolution);
+        }
+        let resolution = if route_decision {
+            Some(ControlNodeResolution::human_decision(
+                command.run_id().clone(), node_id, attempt.fence().clone(),
+                match command.decision() {
+                    crate::ApprovalDecision::Approve => crate::HumanDecision::Approve,
+                    crate::ApprovalDecision::Deny => crate::HumanDecision::Deny,
+                    crate::ApprovalDecision::Abort => crate::HumanDecision::Abort,
+                }, command.resolved_at(),
+            ).map_err(|_| OrganizationFactsError::InvalidApprovalResolution)?)
+        } else { None };
 
-        let mut candidate = self.clone();
-        let approval_outcome = candidate.resolve_approval(ApprovalResolutionInput {
+        let approval_outcome = self.resolve_approval(ApprovalResolutionInput {
             run_id: command.run_id().clone(),
             approval_id: command.approval_id().to_owned(),
             stage_id: facts.stage_id.clone(),
@@ -1935,15 +1816,14 @@ impl OrganizationFacts {
         if approval_outcome != ApprovalResolutionOutcome::Recorded {
             return Err(OrganizationFactsError::ConflictingApprovalResolution);
         }
-        match candidate.apply_control_node_resolution(resolution) {
-            Ok(ControlNodeResolutionOutcome::Recorded) => {
-                *self = candidate;
-                Ok(HumanDecisionOutcome::Recorded)
-            }
-            Ok(ControlNodeResolutionOutcome::Replayed) | Err(_) => {
-                Err(OrganizationFactsError::InvalidApprovalResolution)
+        if let Some(resolution) = resolution {
+            if self.apply_control_node_resolution(resolution)
+                .map_err(|_| OrganizationFactsError::InvalidApprovalResolution)? != ControlNodeResolutionOutcome::Recorded
+            {
+                return Err(OrganizationFactsError::InvalidApprovalResolution);
             }
         }
+        Ok(HumanDecisionOutcome::Recorded)
     }
 
     pub(crate) fn resolve_approval(
@@ -1971,6 +1851,7 @@ impl OrganizationFacts {
         }
         let idempotency_key = crate::run::event::OpaqueId::try_new(idempotency_key)
             .map_err(|_| OrganizationFactsError::InvalidEventLedger)?;
+        self.touch_approval(&approval_id);
         let approval = self
             .approvals
             .get_mut(&approval_id)
@@ -2019,68 +1900,99 @@ impl OrganizationFacts {
         endpoint_session_id: crate::EndpointSessionId,
         native_run_id: String,
     ) -> Result<bool, OrganizationFactsError> {
-        let delivery = self
-            .deliveries
-            .delivery(delivery_id)
-            .ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
-        let run = self
-            .runs
-            .get(&delivery.facts().run_id)
-            .ok_or(OrganizationFactsError::UnknownRun)?;
-        let binding = run
-            .runtime()
-            .and_then(|runtime| {
-                runtime.bindings().iter().find(|binding| {
-                    binding.role().as_str() == delivery.facts().role_id
-                        && binding.session_ref().as_str() == delivery.facts().session_ref
-                })
-            })
-            .ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
-        if binding.endpoint_session_id() != &endpoint_session_id {
-            return Err(OrganizationFactsError::InvalidTerminalObservation);
-        }
-        let crate::ActivityExecutionOutcome::Accepted {
-            receipt,
-            correlation,
-        } = crate::ActivityExecutionOutcome::accepted(endpoint_session_id, native_run_id)
-        else {
-            return Err(OrganizationFactsError::InvalidTerminalObservation);
-        };
-        match delivery.phase() {
-            DeliveryPhase::Delivered {
-                receipt: existing,
-                native_correlation,
-                ..
-            } if existing == &receipt && native_correlation.as_ref() == Some(&correlation) => {
-                Ok(false)
-            }
-            DeliveryPhase::TerminalObserved { observation }
-                if observation.delivered_receipt() == &receipt
-                    && observation.correlation() == &correlation =>
-            {
-                Ok(false)
-            }
-            DeliveryPhase::Delivering(claim) => {
-                let claim = claim.clone();
-                self.settle_delivery(
-                    &claim,
-                    crate::DeliveryReceipt::Accepted {
-                        receipt,
-                        native_correlation: Some(correlation),
-                        accepted_at: claim.claimed_at(),
-                    },
-                    0,
-                )
-                .map_err(|_| OrganizationFactsError::InvalidTerminalObservation)?;
-                Ok(true)
-            }
-            DeliveryPhase::OutcomeUnknown { .. } => Ok(self
+        let mut phase = "delivery_lookup";
+        let result = (|| {
+            let delivery = self
                 .deliveries
-                .delivery_mut(delivery_id)
-                .expect("validated delivery")
-                .confirm_unknown_native_delivery(receipt, correlation)),
-            _ => Err(OrganizationFactsError::InvalidTerminalObservation),
-        }
+                .delivery(delivery_id)
+                .ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
+            runtime_trace("runtime.team_run.terminal.facts.accept_context", || json!({
+                "deliveryHash": identifier_hash(delivery_id.as_str()),
+                "runHash": identifier_hash(&delivery.facts().run_id),
+                "nodeHash": identifier_hash(&delivery.facts().node_id),
+                "nativeRunHash": identifier_hash(&native_run_id), "outcome": "begin",
+            }));
+            phase = "run_lookup";
+            let run = self
+                .runs
+                .get(&delivery.facts().run_id)
+                .ok_or(OrganizationFactsError::UnknownRun)?;
+            phase = "binding_lookup";
+            let binding = run
+                .runtime()
+                .and_then(|runtime| {
+                    runtime.bindings().iter().find(|binding| {
+                        binding.role().as_str() == delivery.facts().role_id
+                            && binding.session_ref().as_str() == delivery.facts().session_ref
+                    })
+                })
+                .ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
+            phase = "endpoint_match";
+            if binding.endpoint_session_id() != &endpoint_session_id {
+                return Err(OrganizationFactsError::InvalidTerminalObservation);
+            }
+            phase = "receipt_correlation";
+            let crate::ActivityExecutionOutcome::Accepted { receipt, correlation } =
+                crate::ActivityExecutionOutcome::accepted(endpoint_session_id, native_run_id)
+            else {
+                return Err(OrganizationFactsError::InvalidTerminalObservation);
+            };
+            phase = "delivery_phase_or_correlation";
+            runtime_trace("runtime.team_run.terminal.facts.correlation", || {
+                let (delivery_phase, receipt_matches, correlation_matches) = match delivery.phase() {
+                    DeliveryPhase::Delivered { receipt: existing, native_correlation, .. } =>
+                        ("delivered", Some(existing == &receipt), Some(native_correlation.as_ref() == Some(&correlation))),
+                    DeliveryPhase::TerminalObserved { observation } =>
+                        ("terminal_observed", Some(observation.delivered_receipt() == &receipt), Some(observation.correlation() == &correlation)),
+                    DeliveryPhase::Delivering(_) => ("delivering", None, None),
+                    DeliveryPhase::OutcomeUnknown { .. } => ("outcome_unknown", None, None),
+                    _ => ("not_accepted", None, None),
+                };
+                json!({
+                    "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": delivery_phase,
+                    "receiptMatches": receipt_matches, "correlationMatches": correlation_matches,
+                })
+            });
+            match delivery.phase() {
+                DeliveryPhase::Delivered { receipt: existing, native_correlation, .. }
+                    if existing == &receipt && native_correlation.as_ref() == Some(&correlation) => Ok(false),
+                DeliveryPhase::TerminalObserved { observation }
+                    if observation.delivered_receipt() == &receipt && observation.correlation() == &correlation => Ok(false),
+                DeliveryPhase::Delivering(claim) => {
+                    phase = "settle_delivery";
+                    let claim = claim.clone();
+                    self.settle_delivery(
+                        &claim,
+                        crate::DeliveryReceipt::Accepted {
+                            receipt,
+                            native_correlation: Some(correlation),
+                            accepted_at: claim.claimed_at(),
+                        },
+                        0,
+                    )
+                    .map_err(|error| {
+                        runtime_trace("runtime.team_run.terminal.facts.accept_context", || json!({
+                            "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "settle_delivery",
+                            "outcome": "error", "error": crate::trace::terminal_error(&super::StoreFault::DeliveryReceipt(Box::new(error))),
+                        }));
+                        OrganizationFactsError::InvalidTerminalObservation
+                    })?;
+                    Ok(true)
+                }
+                DeliveryPhase::OutcomeUnknown { .. } => {
+                    phase = "confirm_unknown_delivery";
+                    Ok(self.deliveries.delivery_mut(delivery_id).expect("validated delivery")
+                        .confirm_unknown_native_delivery(receipt, correlation))
+                }
+                _ => Err(OrganizationFactsError::InvalidTerminalObservation),
+            }
+        })();
+        runtime_trace("runtime.team_run.terminal.facts.accept_context", || json!({
+            "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": phase,
+            "outcome": match &result { Ok(true) => "recorded", Ok(false) => "replayed", Err(_) => "error" },
+            "reason": result.as_ref().err().map(crate::trace::terminal_facts_reason),
+        }));
+        result
     }
 
     pub(super) fn native_terminal_target(
@@ -2288,6 +2200,11 @@ impl OrganizationFacts {
             }
             validate_activity_transition(activity, current)?;
         }
+        for activity in self.activities.activities() {
+            if previous.activities.activity(&activity.facts().activity_id).is_none() {
+                validate_new_activity_prompt(&self.runs, activity.facts())?;
+            }
+        }
         for request in previous.triggers.requests() {
             if self
                 .triggers
@@ -2393,6 +2310,7 @@ impl OrganizationFacts {
             run.runtime,
             GraphRunLifecycle::created(creation_idempotency_key.to_owned()),
         )?;
+        self.touch_run(&run_id);
         self.runs.insert(run_id.clone(), run);
         Ok(CreateGraphRunOutcome::Created(GraphRunId::new(run_id)))
     }
@@ -2406,14 +2324,15 @@ impl OrganizationFacts {
         if idempotency_key.trim().is_empty() {
             return Err(OrganizationFactsError::InvalidGraphRunLifecycle);
         }
+        self.touch_run(run_id.as_str());
         let run = self
             .runs
             .get_mut(run_id.as_str())
             .ok_or(OrganizationFactsError::UnknownRun)?;
-        let snapshot = run.clone();
+        let plan = crate::run::lifecycle::cancellation_plan(run);
         Ok(run
             .lifecycle
-            .begin_cancellation(&snapshot, idempotency_key, requested_at))
+            .begin_cancellation(plan, idempotency_key, requested_at))
     }
 
     pub(crate) fn settle_graph_run_cancellation(
@@ -2423,6 +2342,7 @@ impl OrganizationFacts {
         outcome: RoleAbortOutcome,
         observed_at: u64,
     ) -> Result<SettleCancellationOutcome, OrganizationFactsError> {
+        self.touch_run(run_id.as_str());
         let result = {
             let run = self
                 .runs
@@ -2450,7 +2370,7 @@ impl OrganizationFacts {
                     })
                     .collect::<Vec<_>>();
                 for event in events {
-                    run.graph = reduce(run.graph.clone(), event)
+                    run.graph.apply_event(event)
                         .map_err(|_| OrganizationFactsError::InvalidGraphRunLifecycle)?;
                 }
             }
@@ -2520,7 +2440,8 @@ impl OrganizationFacts {
             request.idempotency_key().to_owned(),
             purged_at,
         )?;
-        self.runs.remove(request.run_id().as_str());
+        self.remove_run(request.run_id().as_str());
+        self.touch_admission(request.run_id().as_str());
         self.pending_workflow_plan_admissions
             .remove(request.run_id().as_str());
         self.deliveries
@@ -2530,16 +2451,18 @@ impl OrganizationFacts {
         self.triggers.retain_without_run(request.run_id().as_str());
         self.control_resolutions
             .retain_without_run(request.run_id());
-        self.approvals
-            .retain(|_, approval| approval.facts().run_id != request.run_id().as_str());
+        let approvals = self.approvals.iter()
+            .filter(|(_, approval)| approval.facts().run_id == request.run_id().as_str())
+            .map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        for id in approvals { self.remove_approval(&id); }
         self.events.retain_without_run(request.run_id().as_str());
         self.evidence.retain_without_run(request.run_id().as_str());
         self.artifacts.retain_without_run(request.run_id().as_str());
         self.decisions.retain_without_run(request.run_id().as_str());
         self.task_board.retain_without_run(request.run_id());
+        self.touch_purged(request.run_id().as_str());
         self.purged_runs
             .insert(request.run_id().as_str().to_owned(), marker);
-        self.validate()?;
         Ok(GraphRunPurgeOutcome::Purged)
     }
 
@@ -2552,14 +2475,15 @@ impl OrganizationFacts {
         if idempotency_key.trim().is_empty() {
             return Err(OrganizationFactsError::InvalidGraphRunLifecycle);
         }
+        self.touch_run(run_id.as_str());
         let run = self
             .runs
             .get_mut(run_id.as_str())
             .ok_or(OrganizationFactsError::UnknownRun)?;
-        let snapshot = run.clone();
+        let plan = crate::run::lifecycle::cancellation_plan(run);
         Ok(run
             .lifecycle
-            .tombstone(&snapshot, idempotency_key, tombstoned_at))
+            .tombstone(plan, idempotency_key, tombstoned_at))
     }
 
     pub(crate) fn resume_graph_runs(&self, team_id: &TeamId) -> Vec<ResumeOutcome> {
@@ -2609,6 +2533,7 @@ impl OrganizationFacts {
             return Err(OrganizationFactsError::RuntimeAlreadyInstalled);
         }
 
+        self.touch_run(&run_id);
         self.runs
             .get_mut(&run_id)
             .expect("validated runtime receipt run must remain present")
@@ -2647,6 +2572,9 @@ impl OrganizationFacts {
         if !matches!(run.lifecycle().state(), GraphRunLifecycleState::Active) {
             return Err(TriggerFireError::RunMismatch);
         }
+        if !matches!(run.start_gate(), RunStartGate::Started) {
+            return Err(TriggerFireError::RunNotStarted);
+        }
         let node_id = NodeId::new(request.start_node_id.clone());
         let node = run
             .graph()
@@ -2664,8 +2592,8 @@ impl OrganizationFacts {
             return Err(TriggerFireError::SourceMismatch);
         }
 
-        let next_graph = reduce(
-            run.graph().clone(),
+        self.touch_run(&request.run_id);
+        self.runs.get_mut(&request.run_id).expect("validated trigger run").graph.apply_event(
             GraphEvent::TriggerFired {
                 node_id: NodeId::new(request.start_node_id.clone()),
                 fired_at,
@@ -2679,10 +2607,6 @@ impl OrganizationFacts {
         else {
             unreachable!("trigger ledger was checked before recording")
         };
-        self.runs
-            .get_mut(&recorded.run_id)
-            .expect("trigger run was validated before ledger registration")
-            .graph = next_graph;
         Ok(TriggerRegistration::Recorded(recorded))
     }
 
@@ -2698,10 +2622,10 @@ impl OrganizationFacts {
             .cloned()
             .ok_or(TerminalObservationError::DeliveryMismatch)?;
         let run_id = GraphRunId::new(delivery.facts().run_id.clone());
-        let mut run = self
+        self.touch_run(run_id.as_str());
+        let run = self
             .runs
-            .get(run_id.as_str())
-            .cloned()
+            .get_mut(run_id.as_str())
             .ok_or(TerminalObservationError::RunMismatch)?;
         let correlation = match delivery.phase() {
             DeliveryPhase::Delivered {
@@ -2711,6 +2635,13 @@ impl OrganizationFacts {
             DeliveryPhase::TerminalObserved { observation } => observation.correlation().clone(),
             _ => return Err(TerminalObservationError::DeliveryNotAccepted),
         };
+        runtime_trace("runtime.team_run.terminal.facts.observe", || json!({
+            "deliveryHash": identifier_hash(delivery_id.as_str()),
+            "runHash": identifier_hash(run_id.as_str()),
+            "nodeHash": identifier_hash(&delivery.facts().node_id),
+            "nativeRunHash": identifier_hash(correlation.native_run_receipt().as_str()),
+            "outcome": "begin",
+        }));
         let outcome = apply_terminal_observation(
             &mut delivery,
             &mut run.graph,
@@ -2721,7 +2652,13 @@ impl OrganizationFacts {
         )?;
         if !matches!(outcome, TerminalObservationOutcome::Replayed) {
             let activity_id = ActivityId::new(delivery_id.as_str().to_owned())
-                .map_err(|_| TerminalObservationError::DeliveryMismatch)?;
+                .map_err(|_| {
+                    runtime_trace("runtime.team_run.terminal.facts.activity", || json!({
+                        "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "observe",
+                        "outcome": "error", "reason": "invalid_activity_id",
+                    }));
+                    TerminalObservationError::DeliveryMismatch
+                })?;
             if let Some(activity) = self.activities.activity_mut(&activity_id) {
                 let settlement = match outcome {
                     TerminalObservationOutcome::RecordedAwaitingAuthorizedGraphResolution => {
@@ -2738,17 +2675,35 @@ impl OrganizationFacts {
                 };
                 if matches!(activity.phase(), ActivityPhase::OutcomeUnknown { .. }) {
                     activity.confirm_unknown_native_terminal(native_terminal, observed_at);
+                    runtime_trace("runtime.team_run.terminal.facts.activity", || json!({
+                        "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "observe",
+                        "outcome": "unknown_confirmed",
+                    }));
                 } else {
                     let claim = activity
                         .active_claim()
                         .cloned()
-                        .ok_or(TerminalObservationError::StaleFence)?;
-                    crate::settle_activity(activity, &claim, settlement)
-                        .map_err(|_| TerminalObservationError::StaleFence)?;
+                        .ok_or(TerminalObservationError::StaleFence)
+                        .inspect_err(|_| {
+                            runtime_trace("runtime.team_run.terminal.facts.activity", || json!({
+                                "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "observe",
+                                "outcome": "error", "reason": "active_claim_missing",
+                            }));
+                        })?;
+                    let result = crate::settle_activity(activity, &claim, settlement);
+                    runtime_trace("runtime.team_run.terminal.facts.activity", || json!({
+                        "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "observe",
+                        "outcome": if result.is_ok() { "recorded" } else { "error" },
+                        "error": result.as_ref().err().map(|error| crate::trace::terminal_error(&super::StoreFault::ActivityTransition(error.clone()))),
+                    }));
+                    result.map_err(|_| TerminalObservationError::StaleFence)?;
                 }
+            } else {
+                runtime_trace("runtime.team_run.terminal.facts.activity", || json!({
+                    "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "observe", "outcome": "absent",
+                }));
             }
         }
-        self.runs.insert(run_id.as_str().to_owned(), run);
         *self
             .deliveries
             .delivery_mut(delivery_id)
@@ -2761,16 +2716,12 @@ impl OrganizationFacts {
         run_id: &GraphRunId,
         graph: GraphState,
     ) -> Result<(), OrganizationFactsError> {
-        let run = self
-            .runs
-            .get(run_id.as_str())
-            .cloned()
-            .ok_or(OrganizationFactsError::UnknownRun)?;
         if graph.definition().run_id() != run_id {
             return Err(OrganizationFactsError::InvalidGraphRun);
         }
-        self.runs
-            .insert(run_id.as_str().to_owned(), GraphRunFacts { graph, ..run });
+        self.touch_run(run_id.as_str());
+        self.runs.get_mut(run_id.as_str()).ok_or(OrganizationFactsError::UnknownRun)?
+            .graph.replace_with(graph);
         self.cancel_superseded_pending_activities(run_id);
         Ok(())
     }
@@ -2817,28 +2768,30 @@ impl OrganizationFacts {
         run_id: &GraphRunId,
         patch: &crate::GraphPatch,
         applied_at: u64,
-    ) -> Result<(), crate::GraphPatchError> {
-        let run = self
-            .runs
-            .get(run_id.as_str())
-            .cloned()
-            .ok_or(crate::GraphPatchError::UnknownRun)?;
-        let graph = crate::apply_graph_patch(run.graph(), patch, applied_at)?;
-        let changed = graph.definition() != run.graph().definition();
-        if changed
-            && matches!(
-                run.start_gate(),
-                RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. }
-            )
-        {
-            crate::application::design::validate_definition(self, &run, graph.definition(), false)
-                .map_err(|_| crate::GraphPatchError::InvalidDefinition)?;
-        }
-        let mut updated = GraphRunFacts { graph, ..run };
+    ) -> Result<(), crate::StoreFault> {
+        self.touch_run(run_id.as_str());
+        let run = self.runs.get_mut(run_id.as_str())
+            .ok_or(crate::StoreFault::GraphPatch(crate::GraphPatchError::UnknownRun))?;
+        let previous_definition = run.graph.definition().clone();
+        crate::run::graph::apply_graph_patch_in_place(&mut run.graph, patch, applied_at)
+            .map_err(crate::StoreFault::GraphPatch)?;
+        let changed = run.graph.definition() != &previous_definition;
         if changed {
-            super::design::invalidate_graph_design(&mut updated);
+            let run = self.runs.get(run_id.as_str()).expect("validated run");
+            if matches!(run.start_gate(), RunStartGate::Started) {
+                run.graph.definition().validate_join_inputs().map_err(|error| {
+                    crate::StoreFault::GraphPatch(crate::GraphPatchError::Definition(error))
+                })?;
+            }
+            if matches!(run.start_gate(), RunStartGate::Designing { .. }) {
+                crate::application::design::validate_definition(self, run, run.graph.definition(), false)?;
+            } else {
+                crate::application::design::validate_assignments(
+                    self, run, run.graph.definition(), Some(&previous_definition),
+                )?;
+            }
+            super::design::invalidate_graph_design(self.runs.get_mut(run_id.as_str()).expect("validated run"));
         }
-        self.runs.insert(run_id.as_str().to_owned(), updated);
         Ok(())
     }
 
@@ -2846,49 +2799,53 @@ impl OrganizationFacts {
         &mut self,
         command: crate::RunCommand,
         definition: crate::GraphDefinition,
-    ) -> Result<crate::CommandReceipt, crate::RecordCommandError> {
+    ) -> Result<crate::CommandReceipt, crate::StoreFault> {
         let run_id = GraphRunId::new(command.run_id().as_str());
         if definition.run_id() != &run_id
             || command.payload() != &crate::CommandPayload::GraphReplace(definition.clone())
         {
-            return Err(crate::RecordCommandError::InvalidEventId);
+            return Err(crate::StoreFault::EventLedger(crate::RecordCommandError::InvalidEventId));
         }
         if let Some(existing) = self
             .events
             .command_by_idempotency(command.run_id(), command.idempotency_key())
         {
             if existing.command() != &command {
-                return Err(crate::RecordCommandError::IdempotencyConflict);
+                return Err(crate::StoreFault::EventLedger(crate::RecordCommandError::IdempotencyConflict));
             }
-            return self.events.try_accept(command);
+            return self.events.try_accept(command).map_err(crate::StoreFault::EventLedger);
         }
         let current = self
             .runs
             .get(run_id.as_str())
-            .cloned()
-            .ok_or(crate::RecordCommandError::InvalidEventId)?;
+            .ok_or(crate::StoreFault::GraphPatch(crate::GraphPatchError::UnknownRun))?;
+        definition.validate().and_then(|_| definition.validate_references(Some(current.graph().definition())))
+            .map_err(|error| crate::StoreFault::GraphPatch(crate::GraphPatchError::Definition(error)))?;
         let graph = GraphState::initialize(definition, command.created_at());
         let changed = graph.definition() != current.graph().definition();
-        if changed
-            && matches!(
-                current.start_gate(),
-                RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. }
-            )
+        if changed && matches!(current.start_gate(), RunStartGate::Started) {
+            graph.definition().validate_join_inputs().map_err(|error| {
+                crate::StoreFault::GraphPatch(crate::GraphPatchError::Definition(error))
+            })?;
+        }
+        if matches!(current.start_gate(), RunStartGate::Designing { .. })
         {
             crate::application::design::validate_definition(
                 self,
                 &current,
                 graph.definition(),
                 false,
-            )
-            .map_err(|_| crate::RecordCommandError::InvalidEventId)?;
+            )?;
+        } else {
+            crate::application::design::validate_assignments(self, &current, graph.definition(), None)?;
         }
-        let receipt = self.events.try_accept(command)?;
-        let mut updated = GraphRunFacts { graph, ..current };
+        let receipt = self.events.try_accept(command).map_err(crate::StoreFault::EventLedger)?;
+        self.touch_run(run_id.as_str());
+        let updated = self.runs.get_mut(run_id.as_str()).expect("validated run");
+        updated.graph.replace_with(graph);
         if changed {
-            super::design::invalidate_graph_design(&mut updated);
+            super::design::invalidate_graph_design(updated);
         }
-        self.runs.insert(run_id.as_str().to_owned(), updated);
         Ok(receipt)
     }
 
@@ -2896,43 +2853,46 @@ impl OrganizationFacts {
         &mut self,
         command: crate::RunCommand,
         patch: &crate::GraphPatch,
-    ) -> Result<crate::CommandReceipt, crate::RecordCommandError> {
+    ) -> Result<crate::CommandReceipt, crate::StoreFault> {
         let run_id = GraphRunId::new(command.run_id().as_str());
         if let Some(existing) = self
             .events
             .command_by_idempotency(command.run_id(), command.idempotency_key())
         {
             if existing.command() != &command {
-                return Err(crate::RecordCommandError::IdempotencyConflict);
+                return Err(crate::StoreFault::EventLedger(
+                    crate::RecordCommandError::IdempotencyConflict,
+                ));
             }
-            return self.events.try_accept(command);
+            return self
+                .events
+                .try_accept(command)
+                .map_err(crate::StoreFault::EventLedger);
         }
-        let current = self
-            .runs
-            .get(run_id.as_str())
-            .cloned()
-            .ok_or(crate::RecordCommandError::InvalidEventId)?;
-        let graph = crate::apply_graph_patch(current.graph(), patch, command.created_at())
-            .map_err(|_| crate::RecordCommandError::InvalidEventId)?;
-        let changed = graph.definition() != current.graph().definition();
-        if matches!(
-            current.start_gate(),
-            RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. }
-        ) {
-            crate::application::design::validate_definition(
-                self,
-                &current,
-                graph.definition(),
-                false,
-            )
-            .map_err(|_| crate::RecordCommandError::InvalidEventId)?;
+        self.touch_run(run_id.as_str());
+        let current = self.runs.get_mut(run_id.as_str())
+            .ok_or(crate::StoreFault::GraphPatch(crate::GraphPatchError::UnknownRun))?;
+        let previous_definition = current.graph.definition().clone();
+        crate::run::graph::apply_graph_patch_in_place(&mut current.graph, patch, command.created_at())
+            .map_err(crate::StoreFault::GraphPatch)?;
+        let changed = current.graph.definition() != &previous_definition;
+        let current = self.runs.get(run_id.as_str()).expect("validated run");
+        if changed && matches!(current.start_gate(), RunStartGate::Started) {
+            current.graph.definition().validate_join_inputs().map_err(|error| {
+                crate::StoreFault::GraphPatch(crate::GraphPatchError::Definition(error))
+            })?;
         }
-        let receipt = self.events.try_accept(command)?;
-        let mut updated = GraphRunFacts { graph, ..current };
+        if matches!(current.start_gate(), RunStartGate::Designing { .. }) {
+            crate::application::design::validate_definition(self, current, current.graph.definition(), false)?;
+        } else if changed {
+            crate::application::design::validate_assignments(
+                self, current, current.graph.definition(), Some(&previous_definition),
+            )?;
+        }
+        let receipt = self.events.try_accept(command).map_err(crate::StoreFault::EventLedger)?;
         if changed {
-            super::design::invalidate_graph_design(&mut updated);
+            super::design::invalidate_graph_design(self.runs.get_mut(run_id.as_str()).expect("validated run"));
         }
-        self.runs.insert(run_id.as_str().to_owned(), updated);
         Ok(receipt)
     }
 
@@ -2942,10 +2902,9 @@ impl OrganizationFacts {
         event: crate::TeamNodeEvent,
     ) -> Result<crate::TeamNodeEventOutcome, crate::RecordCommandError> {
         let run_id = GraphRunId::new(command.run_id().as_str());
-        let mut run = self
+        let run = self
             .runs
             .get(run_id.as_str())
-            .cloned()
             .ok_or(crate::RecordCommandError::InvalidEventId)?;
         let (node_id, fence, role_id) = current_node_event_target(run.graph(), &event)
             .ok_or(crate::RecordCommandError::InvalidEventId)?;
@@ -2985,11 +2944,12 @@ impl OrganizationFacts {
                 }
             });
         }
+        self.require_started_run(&run_id).map_err(|_| crate::RecordCommandError::InvalidEventId)?;
         let outcome = match event.kind() {
             crate::TeamNodeEventKind::Progress => crate::TeamNodeEventOutcome::Progressed,
             crate::TeamNodeEventKind::RequestInput => {
-                run.graph = reduce(
-                    run.graph,
+                self.touch_run(run_id.as_str());
+                self.runs.get_mut(run_id.as_str()).expect("validated run").graph.apply_event(
                     GraphEvent::NodeWaiting {
                         node_id,
                         fence,
@@ -3018,10 +2978,9 @@ impl OrganizationFacts {
                     effect: crate::ApprovalEffect::KeepNodeWaiting,
                     execution_fence: Some(fence.node_execution_id().as_str().to_owned()),
                 });
-                self.approvals
-                    .insert(approval.facts().approval_id.clone(), approval);
-                run.graph = reduce(
-                    run.graph,
+                self.insert_approval(approval);
+                self.touch_run(run_id.as_str());
+                self.runs.get_mut(run_id.as_str()).expect("validated run").graph.apply_event(
                     GraphEvent::NodeWaiting {
                         node_id,
                         fence,
@@ -3035,7 +2994,6 @@ impl OrganizationFacts {
                 return Err(crate::RecordCommandError::RejectionConflict);
             }
         };
-        self.runs.insert(run_id.as_str().to_owned(), run);
         Ok(outcome)
     }
 
@@ -3159,7 +3117,16 @@ impl OrganizationFacts {
         }
         // Only a verified delivery terminal can attach its completion to superseded history.
         validate_artifact_provenance(&self.runs, &artifact)?;
-        match self.artifacts.record(artifact) {
+        let recorded = self.artifacts.record(artifact);
+        runtime_trace("runtime.team_run.terminal.facts.artifact", || json!({
+            "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "record",
+            "outcome": match &recorded {
+                ArtifactRecordOutcome::Recorded(_) => "recorded",
+                ArtifactRecordOutcome::Replayed(_) => "replayed",
+                ArtifactRecordOutcome::ConflictingArtifactId { .. } => "conflicting_artifact_id",
+            },
+        }));
+        match recorded {
             ArtifactRecordOutcome::Recorded(_) | ArtifactRecordOutcome::Replayed(_) => Ok(()),
             ArtifactRecordOutcome::ConflictingArtifactId { .. } => {
                 Err(OrganizationFactsError::InvalidTerminalObservation)
@@ -3172,10 +3139,10 @@ impl OrganizationFacts {
         resolution: AuthorizedGraphResolution,
     ) -> Result<AuthorizedGraphResolutionOutcome, AuthorizedGraphResolutionError> {
         let run_id = GraphRunId::new(resolution.graph_run_id().to_owned());
-        let mut run = self
+        self.touch_run(run_id.as_str());
+        let run = self
             .runs
-            .get(run_id.as_str())
-            .cloned()
+            .get_mut(run_id.as_str())
             .ok_or(AuthorizedGraphResolutionError::RunMismatch)?;
         let mut delivery = self
             .deliveries
@@ -3193,7 +3160,6 @@ impl OrganizationFacts {
             self.settle_resolved_activity(&delivery_id, resolution.outcome(), resolved_at)
                 .map_err(|_| AuthorizedGraphResolutionError::GraphStateMismatch)?;
         }
-        self.runs.insert(run_id.as_str().to_owned(), run);
         self.cancel_superseded_pending_activities(&run_id);
         *self
             .deliveries
@@ -3209,19 +3175,29 @@ impl OrganizationFacts {
         final_assistant_text: String,
         resolved_at: u64,
     ) -> Result<AuthorizedGraphResolutionOutcome, crate::NativeRunOutputResolutionError> {
+        let output = crate::TeamNodeOutput::parse(final_assistant_text)
+            .map_err(|_| crate::NativeRunOutputResolutionError::InvalidOutput)?;
+        self.resolve_parsed_native_output(delivery_id, receipt, output, resolved_at)
+    }
+
+    fn resolve_parsed_native_output(
+        &mut self,
+        delivery_id: &crate::DeliveryId,
+        receipt: crate::AuthorizedGraphResolutionReceipt,
+        output: crate::TeamNodeOutput,
+        resolved_at: u64,
+    ) -> Result<AuthorizedGraphResolutionOutcome, crate::NativeRunOutputResolutionError> {
         let mut delivery = self.deliveries.delivery(delivery_id).cloned().ok_or(
             crate::NativeRunOutputResolutionError::AuthorizedResolution(
                 AuthorizedGraphResolutionError::DeliveryMismatch,
             ),
         )?;
         let run_id = GraphRunId::new(delivery.facts().run_id.clone());
-        let mut run = self.runs.get(run_id.as_str()).cloned().ok_or(
+        let run = self.runs.get(run_id.as_str()).ok_or(
             crate::NativeRunOutputResolutionError::AuthorizedResolution(
                 AuthorizedGraphResolutionError::RunMismatch,
             ),
         )?;
-        let output = crate::TeamNodeOutput::parse(final_assistant_text)
-            .map_err(|_| crate::NativeRunOutputResolutionError::InvalidOutput)?;
         let DeliveryPhase::TerminalObserved { observation } = delivery.phase() else {
             return Err(crate::NativeRunOutputResolutionError::AuthorizedResolution(
                 AuthorizedGraphResolutionError::DeliveryNotAwaitingAuthorizedResolution,
@@ -3231,6 +3207,8 @@ impl OrganizationFacts {
             observation.resolution(),
             TerminalObservationResolution::GraphResolved(_)
         ) {
+            self.touch_run(run_id.as_str());
+            let run = self.runs.get_mut(run_id.as_str()).expect("validated run");
             return apply_native_run_output(
                 &mut delivery,
                 &mut run.graph,
@@ -3267,11 +3245,32 @@ impl OrganizationFacts {
                 receipt.as_str(),
                 resolved_at,
             )
-            .map_err(|_| crate::NativeRunOutputResolutionError::InvalidOutput)?
+            .map_err(|error| {
+                runtime_trace("runtime.team_run.terminal.facts.artifact", || json!({
+                    "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "build",
+                    "outcome": "error", "reason": match error {
+                        crate::run::artifact::ArtifactRecordError::BlankIdentity => "blank_identity",
+                        crate::run::artifact::ArtifactRecordError::InvalidEvidenceProvenance => "invalid_evidence_provenance",
+                        crate::run::artifact::ArtifactRecordError::InvalidKind => "invalid_kind",
+                        crate::run::artifact::ArtifactRecordError::InvalidTitle => "invalid_title",
+                        crate::run::artifact::ArtifactRecordError::InvalidContentReference => "invalid_content_reference",
+                        crate::run::artifact::ArtifactRecordError::InvalidSummary => "invalid_summary",
+                    },
+                }));
+                crate::NativeRunOutputResolutionError::InvalidOutput
+            })?
             .artifact;
             self.record_terminal_completion_artifact(delivery_id, artifact)
-                .map_err(|_| crate::NativeRunOutputResolutionError::InvalidOutput)?;
+                .map_err(|error| {
+                    runtime_trace("runtime.team_run.terminal.facts.artifact", || json!({
+                        "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "record",
+                        "outcome": "error", "reason": crate::trace::terminal_facts_reason(&error),
+                    }));
+                    crate::NativeRunOutputResolutionError::InvalidOutput
+                })?;
         }
+        self.touch_run(run_id.as_str());
+        let run = self.runs.get_mut(run_id.as_str()).expect("validated run");
         let outcome =
             apply_native_run_output(&mut delivery, &mut run.graph, receipt, output, resolved_at)?;
         if matches!(outcome, AuthorizedGraphResolutionOutcome::Recorded)
@@ -3290,13 +3289,136 @@ impl OrganizationFacts {
                 )
             })?;
         }
-        self.runs.insert(run_id.as_str().to_owned(), run);
         *self
             .deliveries
             .delivery_mut(delivery_id)
             .expect("delivery ledger preserves its delivery identity index") = delivery;
         self.cancel_superseded_pending_activities(&run_id);
         Ok(outcome)
+    }
+
+    pub(crate) fn settle_native_terminal(
+        &mut self,
+        target: &super::NativeTerminalReceiptTarget,
+        status: NativeTerminalStatus,
+        output: Result<Option<crate::TeamNodeOutput>, crate::application::team_message::TeamMessageFailure>,
+        settled_at: u64,
+    ) -> Result<AuthorizedGraphResolutionOutcome, super::StoreFault> {
+        use super::StoreFault;
+        let existing = self.deliveries.delivery(target.delivery_id()).and_then(|delivery| match delivery.phase() {
+            DeliveryPhase::TerminalObserved { observation } => Some(observation),
+            _ => None,
+        });
+        let observed_at = existing.map_or(settled_at, TerminalObservation::observed_at);
+        let resolved_at = existing.and_then(|observation| match observation.resolution() {
+            TerminalObservationResolution::GraphResolved(resolution) => Some(resolution.resolved_at()),
+            _ => None,
+        }).unwrap_or(settled_at);
+        let mut phase = "observe_native_terminal";
+        let result = (|| {
+            let observed = self.observe_native_terminal(target.delivery_id(), status, observed_at)
+                .map_err(StoreFault::TerminalObservation)?;
+            runtime_trace("runtime.team_run.terminal.facts.observe", || json!({
+                "deliveryHash": identifier_hash(target.delivery_id().as_str()),
+                "runHash": identifier_hash(target.graph_run_id().as_str()),
+                "outcome": match observed {
+                    TerminalObservationOutcome::Replayed => "replayed",
+                    TerminalObservationOutcome::RecordedNodeCancelled => "node_cancelled",
+                    TerminalObservationOutcome::RecordedAwaitingAuthorizedGraphResolution => "awaiting_resolution",
+                },
+            }));
+            if status == NativeTerminalStatus::Cancelled {
+                return Ok(if observed == TerminalObservationOutcome::Replayed {
+                    AuthorizedGraphResolutionOutcome::Replayed
+                } else {
+                    AuthorizedGraphResolutionOutcome::Recorded
+                });
+            }
+            if let Ok(Some(output)) = output {
+                phase = "resolve_output";
+                return self.resolve_parsed_native_output(
+                    target.delivery_id(),
+                    crate::AuthorizedGraphResolutionReceipt::try_new(format!("native-settled:{}", target.delivery_id().as_str()))
+                        .map_err(|_| StoreFault::InvalidFacts)?,
+                    output,
+                    resolved_at,
+                ).map_err(StoreFault::NativeRunOutputResolution);
+            }
+            let failure = output.err();
+            phase = "completed_output_missing";
+            if failure.is_none() && status == NativeTerminalStatus::Completed {
+                return Err(StoreFault::InvalidFacts);
+            }
+            phase = "failure_receipt";
+            let receipt = match failure {
+                Some(failure) => failure.receipt(target.delivery_id()),
+                None => crate::AuthorizedGraphResolutionReceipt::try_new(format!("native-settled:{}", target.delivery_id().as_str()))
+                    .map_err(|_| StoreFault::InvalidFacts)?,
+            };
+            phase = "failure_observation";
+            let observation = match self.deliveries.delivery(target.delivery_id()).map(|delivery| delivery.phase()) {
+                Some(DeliveryPhase::TerminalObserved { observation }) => observation,
+                _ => return Err(StoreFault::InvalidFacts),
+            };
+            phase = "build_evidence";
+            let record = failure.map(|failure| failure.evidence(observation, resolved_at)).transpose()?;
+            phase = "build_failure_resolution";
+            let resolution = crate::AuthorizedGraphResolution::new(
+                receipt, target.delivery_id().clone(), target.graph_run_id().as_str(), observation.fence().clone(),
+                crate::AuthorizedGraphOutcome::Failed, "failed", resolved_at,
+            ).map_err(|error| {
+                runtime_trace("runtime.team_run.terminal.facts.resolution", || json!({
+                    "deliveryHash": identifier_hash(target.delivery_id().as_str()), "outcome": "error",
+                    "reason": match error {
+                        crate::run::delivery::InvalidAuthorizedGraphResolution::BlankGraphRunId => "blank_graph_run_id",
+                        crate::run::delivery::InvalidAuthorizedGraphResolution::BlankOutputPort => "blank_output_port",
+                        crate::run::delivery::InvalidAuthorizedGraphResolution::UnsafeOutputPort => "unsafe_output_port",
+                    },
+                }));
+                StoreFault::InvalidFacts
+            })?;
+            phase = "resolve_failure";
+            let outcome = self.apply_authorized_graph_resolution(resolution)
+                .map_err(StoreFault::AuthorizedGraphResolution)?;
+            if let Some(record) = record {
+                phase = "validate_evidence";
+                validate_evidence_provenance(&self.runs, &record).map_err(|error| {
+                    runtime_trace("runtime.team_run.terminal.facts.evidence", || json!({
+                        "deliveryHash": identifier_hash(target.delivery_id().as_str()),
+                        "outcome": "error", "reason": crate::trace::terminal_facts_reason(&error),
+                    }));
+                    StoreFault::InvalidFacts
+                })?;
+                phase = "record_evidence";
+                let recorded = self.evidence.record(record);
+                runtime_trace("runtime.team_run.terminal.facts.evidence", || json!({
+                    "deliveryHash": identifier_hash(target.delivery_id().as_str()),
+                    "outcome": match &recorded {
+                        RecordOutcome::Recorded(_) => "recorded",
+                        RecordOutcome::Replayed(_) => "replayed",
+                        RecordOutcome::ConflictingEvidenceId { .. } => "conflicting_evidence_id",
+                    },
+                }));
+                match recorded {
+                    RecordOutcome::Recorded(_) | RecordOutcome::Replayed(_) => {}
+                    RecordOutcome::ConflictingEvidenceId { .. } => return Err(StoreFault::InvalidFacts),
+                }
+            }
+            Ok(outcome)
+        })();
+        runtime_trace("runtime.team_run.terminal.facts.settle", || json!({
+            "deliveryHash": identifier_hash(target.delivery_id().as_str()),
+            "runHash": identifier_hash(target.graph_run_id().as_str()),
+            "nativeRunHash": identifier_hash(target.correlation().native_run_receipt().as_str()),
+            "phase": phase,
+            "outcome": match &result {
+                Ok(AuthorizedGraphResolutionOutcome::Recorded) => "recorded",
+                Ok(AuthorizedGraphResolutionOutcome::Replayed) => "replayed",
+                Err(_) => "error",
+            },
+            "error": result.as_ref().err().map(crate::trace::terminal_error),
+        }));
+        result
     }
 
     fn settle_resolved_activity(
@@ -3306,7 +3428,13 @@ impl OrganizationFacts {
         resolved_at: u64,
     ) -> Result<(), crate::ActivityTransitionError> {
         let activity_id = ActivityId::new(delivery_id.as_str().to_owned())
-            .map_err(|_| crate::ActivityTransitionError::StaleClaim)?;
+            .map_err(|_| {
+                runtime_trace("runtime.team_run.terminal.facts.activity", || json!({
+                    "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "resolve",
+                    "outcome": "error", "reason": "invalid_activity_id",
+                }));
+                crate::ActivityTransitionError::StaleClaim
+            })?;
         if let Some(activity) = self.activities.activity_mut(&activity_id) {
             let settlement = match resolution_outcome {
                 crate::AuthorizedGraphOutcome::Completed => ActivitySettlement::Completed {
@@ -3317,7 +3445,17 @@ impl OrganizationFacts {
                     failure: crate::ActivityFailure::Rejected,
                 },
             };
-            crate::run::activity::resolve_terminal_observed_activity(activity, settlement)?;
+            let result = crate::run::activity::resolve_terminal_observed_activity(activity, settlement);
+            runtime_trace("runtime.team_run.terminal.facts.activity", || json!({
+                "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "resolve",
+                "outcome": if result.is_ok() { "recorded" } else { "error" },
+                "error": result.as_ref().err().map(|error| crate::trace::terminal_error(&super::StoreFault::ActivityTransition(error.clone()))),
+            }));
+            result?;
+        } else {
+            runtime_trace("runtime.team_run.terminal.facts.activity", || json!({
+                "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "resolve", "outcome": "absent",
+            }));
         }
         Ok(())
     }
@@ -3337,13 +3475,30 @@ impl OrganizationFacts {
             None => {}
         }
 
-        let run = self
-            .runs
-            .get(resolution.graph_run_id().as_str())
-            .cloned()
-            .ok_or(ControlNodeResolutionError::GraphRunMismatch)?;
+        let run = self.require_started_run(resolution.graph_run_id())
+            .map_err(|_| ControlNodeResolutionError::GraphStateMismatch)?;
         if run.run_id() != resolution.graph_run_id() {
             return Err(ControlNodeResolutionError::GraphRunMismatch);
+        }
+        if resolution.authority() == ControlAuthority::HumanDecision
+            && !self.approvals.values().any(|approval| {
+                let facts = approval.facts();
+                facts.run_id == resolution.graph_run_id().as_str()
+                    && matches!(&facts.subject, crate::ApprovalSubject::HumanDecision { node_id } if node_id == resolution.node_id().as_str())
+                    && facts.execution_fence.as_deref() == Some(resolution.fence().node_execution_id().as_str())
+                    && approval.resolution().is_some_and(|receipt| {
+                        receipt.cause == crate::run::approval::ApprovalResolutionCause::HumanDecision
+                            && receipt.resolved_at == resolution.resolved_at()
+                            && resolution.outcome() == crate::AuthorizedGraphOutcome::Completed
+                            && resolution.output_port() == match receipt.decision {
+                                crate::ApprovalDecision::Approve => "approved",
+                                crate::ApprovalDecision::Deny => "rejected",
+                                crate::ApprovalDecision::Abort => "aborted",
+                            }
+                    })
+            })
+        {
+            return Err(ControlNodeResolutionError::GraphStateMismatch);
         }
         let expected_kind = match resolution.authority() {
             ControlAuthority::HumanDecision => crate::NodeKind::HumanDecision,
@@ -3356,6 +3511,12 @@ impl OrganizationFacts {
             resolution.fence(),
             expected_kind,
         )?;
+        if resolution.authority() == ControlAuthority::ScriptReview
+            && run.graph().definition().node(resolution.node_id()).and_then(|node| node.script_review_rule())
+                != resolution.script_review_rule()
+        {
+            return Err(ControlNodeResolutionError::GraphStateMismatch);
+        }
         if let Some(rule) = resolution.script_review_rule() {
             let output_port = crate::run::control::script_review_output_port_with_evidence(
                 rule,
@@ -3372,15 +3533,13 @@ impl OrganizationFacts {
                 return Err(ControlNodeResolutionError::GraphStateMismatch);
             }
         }
-        if resolution.authority() == ControlAuthority::Join
-            && (resolution.outcome() != crate::AuthorizedGraphOutcome::Completed
+        if resolution.authority() == ControlAuthority::Join {
+            if resolution.outcome() != crate::AuthorizedGraphOutcome::Completed
                 || resolution.output_port() != "joined"
-                || run
-                    .graph()
-                    .current_attempt(resolution.node_id())
-                    .is_none_or(|attempt| attempt.status() != crate::AttemptStatus::Ready))
-        {
-            return Err(ControlNodeResolutionError::GraphStateMismatch);
+            {
+                return Err(ControlNodeResolutionError::GraphStateMismatch);
+            }
+            crate::run::control::require_join_ready(run.graph(), resolution.node_id())?;
         }
         require_control_output_port(run.graph(), resolution.node_id(), resolution.output_port())?;
         let event = match resolution.outcome() {
@@ -3397,7 +3556,10 @@ impl OrganizationFacts {
                 failed_at: resolution.resolved_at(),
             },
         };
-        let graph = reduce(run.graph().clone(), event).map_err(|error| match error {
+        let run_id = resolution.graph_run_id().clone();
+        self.touch_run(run_id.as_str());
+        self.runs.get_mut(run_id.as_str()).expect("validated control run").graph
+            .apply_event(event).map_err(|error| match error {
             crate::ReduceError::UnknownNode(node_id) => {
                 ControlNodeResolutionError::UnknownNode(node_id)
             }
@@ -3414,10 +3576,6 @@ impl OrganizationFacts {
         else {
             return Err(ControlNodeResolutionError::ConflictingResolution);
         };
-        self.runs.insert(
-            run.run_id().as_str().to_owned(),
-            GraphRunFacts { graph, ..run },
-        );
         Ok(ControlNodeResolutionOutcome::Recorded)
     }
 
@@ -3433,6 +3591,19 @@ impl OrganizationFacts {
         request: ActivityRequest,
     ) -> Result<ActivityRegistrationOutcome, OrganizationFactsError> {
         validate_activity_request(&self.runs, &request)?;
+        if self.activities.activity(&request.activity_id).is_none()
+            && self.activities.activity_by_idempotency_key(
+                request.run_id.as_str(),
+                &request.idempotency_key,
+            ).is_none()
+        {
+            let run = self.require_started_run(&request.run_id)?;
+            if run.graph().current_attempt(&request.node_id).is_none_or(|attempt| attempt.fence() != &request.fence || attempt.status() != crate::AttemptStatus::Ready) {
+                return Err(OrganizationFactsError::InvalidActivity);
+            }
+            run.graph().definition().validate_node_configuration().map_err(|_| OrganizationFactsError::InvalidActivity)?;
+            validate_new_activity_prompt(&self.runs, &request)?;
+        }
         self.activities
             .register(request)
             .map_err(|_| OrganizationFactsError::InvalidActivity)
@@ -3519,23 +3690,29 @@ impl OrganizationFacts {
     /// has no readback receipt yet. Conservatively retain the intent as unknown rather
     /// than allowing startup to issue the external effect again.
     pub(crate) fn recover_interrupted_materializations(&mut self) -> bool {
-        let mut recovered = false;
-        for lifecycle in self.materializations.values_mut() {
+        let keys = self.materializations.iter()
+            .filter(|(_, value)| matches!(value, TeamMaterializationLifecycle::Requested(_)))
+            .map(|(key, _)| key.clone()).collect::<Vec<_>>();
+        for key in &keys {
+            self.touch_materialization(key);
+            let lifecycle = self.materializations.get_mut(key).expect("selected materialization");
             if let TeamMaterializationLifecycle::Requested(request) = lifecycle {
                 *lifecycle = TeamMaterializationLifecycle::OutcomeUnknown(request.clone());
-                recovered = true;
             }
         }
-        recovered
+        !keys.is_empty()
     }
 
     pub(crate) fn recover_interrupted_deliveries(&mut self, observed_at: u64) -> bool {
         let mut recovered = false;
-        for delivery in self.deliveries.deliveries().cloned().collect::<Vec<_>>() {
-            if matches!(delivery.phase(), crate::DeliveryPhase::Delivering(_)) {
+        let ids = self.deliveries.deliveries()
+            .filter(|delivery| matches!(delivery.phase(), crate::DeliveryPhase::Delivering(_)))
+            .map(|delivery| delivery.facts().delivery_id.clone()).collect::<Vec<_>>();
+        for id in ids {
+            {
                 let active = self
                     .deliveries
-                    .delivery_mut(&delivery.facts().delivery_id)
+                    .delivery_mut(&id)
                     .expect("delivery ledger preserves its delivery identity index");
                 let _ = crate::recover_interrupted_delivery(active, observed_at);
                 recovered = true;
@@ -3546,11 +3723,14 @@ impl OrganizationFacts {
 
     pub(crate) fn recover_interrupted_activities(&mut self, observed_at: u64) -> bool {
         let mut recovered = false;
-        for activity in self.activities.activities().cloned().collect::<Vec<_>>() {
-            if activity.active_claim().is_some() {
+        let ids = self.activities.activities()
+            .filter(|activity| activity.active_claim().is_some())
+            .map(|activity| activity.facts().activity_id.clone()).collect::<Vec<_>>();
+        for id in ids {
+            {
                 let active = self
                     .activities
-                    .activity_mut(&activity.facts().activity_id)
+                    .activity_mut(&id)
                     .expect("activity ledger preserves its activity identity index");
                 if crate::recover_interrupted_activity(active, observed_at)
                     == ActivitySettlementOutcome::OutcomeUnknown
@@ -3563,11 +3743,14 @@ impl OrganizationFacts {
     }
 
     pub(crate) fn recover_interrupted_graph_run_cancellations(&mut self, observed_at: u64) -> bool {
-        let mut recovered = false;
-        for run in self.runs.values_mut() {
-            recovered |= run.lifecycle.recover_interrupted_cancellation(observed_at);
+        let ids = self.runs.iter()
+            .filter(|(_, run)| matches!(run.lifecycle.state(), GraphRunLifecycleState::Cancelling { .. }))
+            .map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        for id in &ids {
+            self.touch_run(id);
+            self.runs.get_mut(id).expect("selected run").lifecycle.recover_interrupted_cancellation(observed_at);
         }
-        recovered
+        !ids.is_empty()
     }
 }
 
@@ -3585,7 +3768,8 @@ fn current_node_event_target(
     let node = graph.definition().node(attempt.node_id())?;
     let role_id = node
         .work_assignment()
-        .map(|assignment| assignment.role_id());
+        .map(|assignment| assignment.role_id())
+        .or_else(|| node.review_assignment().map(|assignment| assignment.role_id()));
     if event
         .role_id()
         .is_some_and(|role| role_id != Some(role.as_str()))
@@ -3736,12 +3920,12 @@ fn validate_approval_resolution_events(
         .ok_or(OrganizationFactsError::InvalidApprovalLedger)
 }
 
-fn validate_human_decision_approvals(
+fn validate_human_decision_approvals<'a>(
     runs: &BTreeMap<String, GraphRunFacts>,
-    approvals: &BTreeMap<String, Approval>,
+    approvals: impl Iterator<Item = &'a Approval>,
     resolutions: &ControlResolutionLedger,
 ) -> Result<(), OrganizationFactsError> {
-    for approval in approvals.values().filter(|approval| {
+    for approval in approvals.filter(|approval| {
         matches!(
             (
                 &approval.facts().subject,
@@ -3835,7 +4019,6 @@ fn require_control_output_port(
 
 fn validate_control_node_resolution(
     runs: &BTreeMap<String, GraphRunFacts>,
-    evidence: &EvidenceLedger,
     resolution: &ControlNodeResolution,
 ) -> Result<(), OrganizationFactsError> {
     let run = runs
@@ -3859,22 +4042,13 @@ fn validate_control_node_resolution(
     }
     require_control_output_port(run.graph(), resolution.node_id(), resolution.output_port())
         .map_err(|_| OrganizationFactsError::InvalidControlNodeResolution)?;
-    if let Some(rule) = resolution.script_review_rule() {
-        let output_port = crate::run::control::script_review_output_port_with_evidence(
-            rule,
-            resolution.graph_run_id(),
-            run.graph(),
-            resolution.node_id(),
-            resolution.fence(),
-            evidence,
-        )
-        .map_err(|_| OrganizationFactsError::InvalidControlNodeResolution)?;
-        if resolution.authority() != ControlAuthority::ScriptReview
+    // Settled receipts attest past decisions; current rules and evidence cannot re-evaluate them.
+    if resolution.authority() == ControlAuthority::ScriptReview
+        && (resolution.script_review_rule().is_none()
             || resolution.outcome() != crate::AuthorizedGraphOutcome::Completed
-            || resolution.output_port() != output_port
-        {
-            return Err(OrganizationFactsError::InvalidControlNodeResolution);
-        }
+            || !matches!(resolution.output_port(), "passed" | "failed"))
+    {
+        return Err(OrganizationFactsError::InvalidControlNodeResolution);
     }
     let attempt = run
         .graph()
@@ -4071,7 +4245,7 @@ fn validate_activity_request(
                 task_id,
                 role_id,
                 session_ref,
-                prompt,
+                ..
             },
             NodeKind::Work,
         ) => {
@@ -4081,7 +4255,6 @@ fn validate_activity_request(
             if work.task_id() != task_id
                 || work.role_id() != role_id
                 || work.session_ref().as_str() != session_ref
-                || !activity_prompt_matches(run.graph().definition(), node, work.prompt(), prompt)
             {
                 return Err(OrganizationFactsError::InvalidActivity);
             }
@@ -4091,7 +4264,6 @@ fn validate_activity_request(
             ActivityKind::AgentTask {
                 role_id,
                 session_ref,
-                prompt,
                 ..
             },
             NodeKind::Review,
@@ -4101,7 +4273,6 @@ fn validate_activity_request(
                 .ok_or(OrganizationFactsError::InvalidActivity)?;
             if review.role_id() != role_id
                 || review.session_ref().as_str() != session_ref
-                || !activity_prompt_matches(run.graph().definition(), node, review.prompt(), prompt)
             {
                 return Err(OrganizationFactsError::InvalidActivity);
             }
@@ -4112,26 +4283,45 @@ fn validate_activity_request(
     }
 }
 
-fn activity_prompt_matches(
-    definition: &GraphDefinition,
-    node: &crate::NodeDefinition,
-    base_prompt: &str,
-    prompt: &str,
-) -> bool {
-    let Some(composed) =
-        crate::run::scheduler::compose_agent_task_prompt(definition, node, base_prompt)
-    else {
-        return false;
+fn validate_new_activity_prompt(
+    runs: &BTreeMap<String, GraphRunFacts>,
+    request: &ActivityRequest,
+) -> Result<(), OrganizationFactsError> {
+    let ActivityKind::AgentTask { prompt, .. } = &request.activity_kind else {
+        return Ok(());
     };
-    if prompt == composed {
-        return true;
+    let run = runs
+        .get(request.run_id.as_str())
+        .ok_or(OrganizationFactsError::UnknownActivityRun)?;
+    let node = run.graph().definition().node(&request.node_id)
+        .ok_or(OrganizationFactsError::InvalidActivity)?;
+    let base_prompt = node.work_assignment().map(|work| work.prompt())
+        .or_else(|| node.review_assignment().map(|review| review.prompt()))
+        .ok_or(OrganizationFactsError::InvalidActivity)?;
+    let mut raw_request = request.clone();
+    if let ActivityKind::AgentTask { prompt, .. } = &mut raw_request.activity_kind {
+        *prompt = base_prompt.to_owned();
     }
-    let Some((prefix, suffix)) = composed.split_once("\n\n<teamrun_completion_protocol>") else {
-        return false;
+    let composed = crate::run::scheduler::compose_agent_task_prompt_with_upstream_context(
+        run.team(), node, &raw_request, &[],
+    ).ok_or(OrganizationFactsError::InvalidActivity)?;
+    if prompt == &composed {
+        return Ok(());
+    }
+    let Some((prefix, suffix)) = composed.rsplit_once("\n\n任务执行与调整：") else {
+        return Err(OrganizationFactsError::InvalidActivity);
     };
-    prompt.starts_with(prefix)
-        && prompt.contains("\n\n<teamrun_upstream_context>\n")
-        && prompt.ends_with(&format!("\n\n<teamrun_completion_protocol>{suffix}"))
+    let upstream = prompt.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(&format!("\n\n任务执行与调整：{suffix}")));
+    if upstream.is_some_and(|context| {
+        context.starts_with("\n\n<teamrun_upstream_context>\n")
+            && context.ends_with("\n</teamrun_upstream_context>")
+    })
+    {
+        Ok(())
+    } else {
+        Err(OrganizationFactsError::InvalidActivity)
+    }
 }
 
 fn validate_activity_target(
@@ -4218,6 +4408,8 @@ fn validate_activity_transition(
         (ActivityPhase::Failed { .. }, ActivityPhase::Failed { .. }) => Ok(()),
         (ActivityPhase::OutcomeUnknown { .. }, ActivityPhase::OutcomeUnknown { .. })
         | (ActivityPhase::OutcomeUnknown { .. }, ActivityPhase::TerminalObserved { .. })
+        | (ActivityPhase::OutcomeUnknown { .. }, ActivityPhase::Completed { .. })
+        | (ActivityPhase::OutcomeUnknown { .. }, ActivityPhase::Failed { .. })
         | (ActivityPhase::OutcomeUnknown { .. }, ActivityPhase::Cancelled { .. }) => Ok(()),
         (ActivityPhase::Cancelled { .. }, ActivityPhase::Cancelled { .. }) => Ok(()),
         _ => Err(OrganizationFactsError::InvalidActivityTransition),

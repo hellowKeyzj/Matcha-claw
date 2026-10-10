@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { OpenClawPendingQuestionRecord, OpenClawQuestion } from '@/types/openclaw-question';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
 
@@ -7,7 +8,7 @@ type QuestionDraft = {
   otherAnswers: Record<string, string>;
   otherSelected: Record<string, boolean>;
   index: number;
-  error: string | null;
+  error: 'questions.submitFailed' | null;
 };
 
 const EMPTY_DRAFT: QuestionDraft = {
@@ -35,11 +36,12 @@ export function ChatQuestionDock({
 }: {
   questions: OpenClawPendingQuestionRecord[];
   confirmed: boolean;
-  error: string | null;
+  error: 'questions.loadFailed' | null;
   submittingId: string | null;
   onRefresh: () => void;
   onResolve: (id: string, answers: Record<string, string[]>) => Promise<void>;
 }) {
+  const { t } = useTranslation('chat');
   const groupId = useId();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, QuestionDraft>>({});
@@ -60,8 +62,8 @@ export function ChatQuestionDock({
   if (!record) {
     return error ? (
       <div className={`${CHAT_LAYOUT_TOKENS.runtimeDockRail} flex items-center gap-2 rounded-[18px] border border-border/45 bg-card p-3 text-sm`} role="status">
-        <span>{error}</span>
-        <button type="button" className={NAV_BUTTON} onClick={onRefresh}>重试</button>
+        <span>{t(error)}</span>
+        <button type="button" className={NAV_BUTTON} onClick={onRefresh}>{t('questions.retry')}</button>
       </div>
     ) : null;
   }
@@ -76,6 +78,7 @@ export function ChatQuestionDock({
   const disabled = !confirmed || expired || submittingId !== null;
   const isLastQuestion = index === record.questions.length - 1;
   const canSubmit = record.questions.every((item) => answers[item.questionId].length > 0);
+  const statusError = error ?? (expired ? 'questions.expired' : draft.error);
   const updateDraft = (update: (current: QuestionDraft) => QuestionDraft) => {
     if (!mounted.current || !pending.current.some((item) => item.id === record.id)) return;
     setDrafts((current) => ({ ...current, [record.id]: update(current[record.id] ?? EMPTY_DRAFT) }));
@@ -117,90 +120,99 @@ export function ChatQuestionDock({
     try {
       await onResolve(record.id, answers);
     } catch {
-      updateDraft((current) => ({ ...current, error: '提交失败，请重试' }));
+      updateDraft((current) => ({ ...current, error: 'questions.submitFailed' }));
     }
   };
 
   return (
     <form
-      className={`${CHAT_LAYOUT_TOKENS.runtimeDockRail} max-h-[min(40vh,24rem)] overflow-y-auto overscroll-contain rounded-[18px] border border-border/45 bg-card p-3.5 text-sm shadow-sm`}
-      data-chat-composer-wheel-local="true"
+      className={`${CHAT_LAYOUT_TOKENS.runtimeDockRail} flex max-h-[min(40vh,24rem)] flex-col overflow-hidden rounded-[18px] border border-border/45 bg-card text-sm shadow-sm`}
       onSubmit={submit}
     >
-      {questions.length > 1 ? (
-        <div className="mb-3 flex items-center justify-end gap-1" aria-label="切换待答请求">
-          <button type="button" className={NAV_BUTTON} disabled={activeIndex === 0} aria-label="上一个请求" onClick={() => setActiveId(questions[activeIndex - 1].id)}>上一条</button>
-          <span className="text-[11px] text-muted-foreground">{activeIndex + 1}/{questions.length}</span>
-          <button type="button" className={NAV_BUTTON} disabled={activeIndex === questions.length - 1} aria-label="下一个请求" onClick={() => setActiveId(questions[activeIndex + 1].id)}>下一条</button>
-        </div>
-      ) : null}
-      <fieldset key={`${record.id}:${question.questionId}`} disabled={disabled} className="min-w-0 space-y-2">
-        <legend className="mb-2 w-full whitespace-pre-wrap break-words text-[13px] font-medium leading-5 text-foreground">{question.question}</legend>
-        <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-          {question.header ? <span className="rounded-full border border-border/45 bg-muted/55 px-2 py-0.5">{question.header}</span> : null}
-          {question.multiSelect ? <span>可多选</span> : null}
-          <span className="ml-auto">{index + 1}/{record.questions.length}</span>
-        </div>
-        <div className="grid gap-1.5">
-          {question.options.map((option) => {
-            const selected = currentAnswers.includes(option.label) && !(!question.multiSelect && otherSelected);
-            return (
-              <label key={option.label} className={`flex items-start gap-2 rounded-[12px] border px-3 py-2 text-[12px] ${selected ? 'border-sky-500/70 bg-sky-500/10' : 'border-border/50 bg-muted/45'} ${disabled ? 'opacity-60' : 'cursor-pointer hover:bg-muted'}`}>
-                <input
-                  type={question.multiSelect ? 'checkbox' : 'radio'}
-                  name={`${groupId}:${record.id}:${question.questionId}`}
-                  checked={selected}
-                  className="mt-0.5 shrink-0 accent-sky-500"
-                  onChange={() => toggleOption(option.label)}
-                />
-                <span className="min-w-0 whitespace-pre-wrap break-words">
-                  <strong className="block font-medium">{option.label}</strong>
-                  {option.description ? <small className="mt-0.5 block text-muted-foreground">{option.description}</small> : null}
-                </span>
-              </label>
-            );
-          })}
-          {question.options.length === 0 || question.isOther === true ? (
-            <div className="rounded-[12px] border border-border/50 bg-muted/45 px-3 py-2 focus-within:ring-2 focus-within:ring-border/50">
-              <label className="flex items-center gap-2 text-[12px] text-muted-foreground">
-                {!question.multiSelect && question.options.length > 0 ? (
-                  <input
-                    type="radio"
-                    name={`${groupId}:${record.id}:${question.questionId}`}
-                    checked={otherSelected}
-                    className="accent-sky-500"
-                    onChange={() => updateOther(otherAnswer)}
-                  />
-                ) : null}
-                <span>{question.options.length === 0 ? '你的回答' : '其他回答'}</span>
-              </label>
-              <textarea
-                aria-label={question.options.length === 0 ? '你的回答' : '其他回答'}
-                value={otherAnswer}
-                rows={2}
-                className="mt-1 w-full min-w-0 resize-y bg-transparent text-[12px] text-foreground outline-none"
-                onChange={(event) => updateOther(event.target.value)}
-              />
-            </div>
-          ) : null}
-        </div>
-      </fieldset>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        {index > 0 ? (
-          <button type="button" disabled={disabled} className={NAV_BUTTON} onClick={() => updateDraft((current) => ({ ...current, index: index - 1 }))}>上一步</button>
+      <div className="shrink-0 border-b border-border/45 px-3.5 py-2.5">
+        {questions.length > 1 ? (
+          <div className="mb-2 flex items-center justify-end gap-1" aria-label={t('questions.switchRequest')}>
+            <button type="button" className={NAV_BUTTON} disabled={activeIndex === 0} onClick={() => setActiveId(questions[activeIndex - 1].id)}>{t('questions.previousRequest')}</button>
+            <span className="text-[11px] text-muted-foreground">{activeIndex + 1}/{questions.length}</span>
+            <button type="button" className={NAV_BUTTON} disabled={activeIndex === questions.length - 1} onClick={() => setActiveId(questions[activeIndex + 1].id)}>{t('questions.nextRequest')}</button>
+          </div>
         ) : null}
-        {!isLastQuestion ? (
-          <button type="button" disabled={disabled || currentAnswers.length === 0} className={ACTION_BUTTON} onClick={() => updateDraft((current) => ({ ...current, index: index + 1 }))}>下一步</button>
-        ) : (
-          <button type="submit" disabled={disabled || !canSubmit} className={ACTION_BUTTON}>{submittingId === record.id ? '提交中…' : '提交回答'}</button>
-        )}
-      </div>
-      {error || expired || draft.error ? (
-        <div className="mt-2 flex items-center gap-2 text-[12px]" role="status">
-          <span className="text-destructive">{error ?? (expired ? '问题已到期，等待确认' : draft.error)}</span>
-          <button type="button" disabled={submittingId !== null} className={NAV_BUTTON} onClick={onRefresh}>重试</button>
+        <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+          {question.header ? <span className="min-w-0 truncate rounded-full border border-border/45 bg-muted/55 px-2 py-0.5" title={question.header}>{question.header}</span> : null}
+          {question.multiSelect ? <span className="shrink-0">{t('questions.multiple')}</span> : null}
+          <span className="ml-auto shrink-0" aria-live="polite">{t('questions.progress', { current: index + 1, total: record.questions.length })}</span>
         </div>
-      ) : !confirmed && submittingId === null ? <p className="mt-2 text-[12px] text-muted-foreground" role="status">正在确认待答问题…</p> : null}
+      </div>
+      <div
+        key={`${record.id}:${question.questionId}`}
+        className="min-h-0 overflow-y-auto overscroll-contain p-3.5"
+        data-chat-composer-wheel-local="true"
+      >
+        <fieldset disabled={disabled} className="min-w-0">
+          <legend className="mb-2 w-full whitespace-pre-wrap break-words text-[13px] font-medium leading-5 text-foreground">{question.question}</legend>
+          <div className="grid gap-1.5">
+            {question.options.map((option) => {
+              const selected = currentAnswers.includes(option.label) && !(!question.multiSelect && otherSelected);
+              return (
+                <label key={option.label} className={`flex items-start gap-2 rounded-[12px] border px-3 py-2 text-[12px] ${selected ? 'border-sky-500/70 bg-sky-500/10' : 'border-border/50 bg-muted/45'} ${disabled ? 'opacity-60' : 'cursor-pointer hover:bg-muted'}`}>
+                  <input
+                    type={question.multiSelect ? 'checkbox' : 'radio'}
+                    name={`${groupId}:${record.id}:${question.questionId}`}
+                    checked={selected}
+                    className="mt-0.5 shrink-0 accent-sky-500"
+                    onChange={() => toggleOption(option.label)}
+                  />
+                  <span className="min-w-0 whitespace-pre-wrap break-words">
+                    <strong className="block font-medium">{option.label}</strong>
+                    {option.description ? <small className="mt-0.5 block text-muted-foreground">{option.description}</small> : null}
+                  </span>
+                </label>
+              );
+            })}
+            {question.options.length === 0 || question.isOther === true ? (
+              <div className="rounded-[12px] border border-border/50 bg-muted/45 px-3 py-2 focus-within:ring-2 focus-within:ring-border/50">
+                <label className="flex items-center gap-2 text-[12px] text-muted-foreground">
+                  {!question.multiSelect && question.options.length > 0 ? (
+                    <input
+                      type="radio"
+                      name={`${groupId}:${record.id}:${question.questionId}`}
+                      checked={otherSelected}
+                      className="accent-sky-500"
+                      onChange={() => updateOther(otherAnswer)}
+                    />
+                  ) : null}
+                  <span>{t(question.options.length === 0 ? 'questions.yourAnswer' : 'questions.otherAnswer')}</span>
+                </label>
+                <textarea
+                  aria-label={t(question.options.length === 0 ? 'questions.yourAnswer' : 'questions.otherAnswer')}
+                  value={otherAnswer}
+                  rows={question.options.length === 0 ? 2 : 1}
+                  className="mt-1 block w-full min-w-0 resize-y bg-transparent text-[12px] text-foreground outline-none"
+                  onChange={(event) => updateOther(event.target.value)}
+                />
+              </div>
+            ) : null}
+          </div>
+        </fieldset>
+      </div>
+      <div className="shrink-0 border-t border-border/45 px-3.5 py-2.5">
+        <div className="flex flex-wrap items-center gap-2">
+          {index > 0 ? (
+            <button type="button" disabled={disabled} className={NAV_BUTTON} onClick={() => updateDraft((current) => ({ ...current, index: index - 1 }))}>{t('questions.previous')}</button>
+          ) : null}
+          {!isLastQuestion ? (
+            <button type="button" disabled={disabled || currentAnswers.length === 0} className={ACTION_BUTTON} onClick={() => updateDraft((current) => ({ ...current, index: index + 1 }))}>{t('questions.next')}</button>
+          ) : (
+            <button type="submit" disabled={disabled || !canSubmit} className={ACTION_BUTTON}>{t(submittingId === record.id ? 'questions.submitting' : 'questions.submit')}</button>
+          )}
+        </div>
+        {statusError ? (
+          <div className="mt-2 flex items-center gap-2 text-[12px]" role="status">
+            <span className="text-destructive">{t(statusError)}</span>
+            <button type="button" disabled={submittingId !== null} className={NAV_BUTTON} onClick={onRefresh}>{t('questions.retry')}</button>
+          </div>
+        ) : !confirmed && submittingId === null ? <p className="mt-2 text-[12px] text-muted-foreground" role="status">{t('questions.confirming')}</p> : null}
+      </div>
     </form>
   );
 }

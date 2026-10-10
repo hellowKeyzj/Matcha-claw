@@ -25,7 +25,7 @@ mod storage_root;
 const APP_SERVER_HOST: &str = "127.0.0.1";
 const FORCE_COLOR: &str = "FORCE_COLOR";
 const NO_COLOR: &str = "NO_COLOR";
-const MATCHACLAW_SESSION_TRACE: &str = "MATCHACLAW_SESSION_TRACE";
+const MATCHACLAW_TRACE: &str = "MATCHACLAW_TRACE";
 const MATCHACLAW_UV_BIN: &str = "MATCHACLAW_UV_BIN";
 const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 const MATCHA_SEALED_ENDPOINT: &str = "MATCHA_SEALED_ENDPOINT";
@@ -238,12 +238,14 @@ fn app_server_environment(
             push_environment(&mut environment, key, value.clone());
         }
     }
-    if source.iter().any(|(candidate, value)| {
-        environment_key_eq(candidate, OsStr::new(MATCHACLAW_SESSION_TRACE))
-            && value == OsStr::new("1")
-    }) {
-        push_environment(&mut environment, MATCHACLAW_SESSION_TRACE, "1".into());
-    }
+    let trace = source
+        .iter()
+        .find(|(candidate, _)| {
+            environment_key_eq(candidate, OsStr::new(MATCHACLAW_TRACE))
+        })
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| "0".into());
+    push_environment(&mut environment, MATCHACLAW_TRACE, trace);
     if let Some(toolchain) = toolchain {
         for variable in toolchain.patch() {
             push_environment(

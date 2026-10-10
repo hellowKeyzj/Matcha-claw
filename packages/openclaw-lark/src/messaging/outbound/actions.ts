@@ -96,7 +96,7 @@ function parseCardParam(raw: unknown): Record<string, unknown> | undefined {
     try {
       const parsed: unknown = JSON.parse(trimmed);
       if (typeof parsed === 'object' && parsed != null && !Array.isArray(parsed)) {
-        log.info('params.card was a JSON string, parsed successfully');
+        log.trace('params.card was a JSON string, parsed successfully');
         return parsed as Record<string, unknown>;
       }
       log.warn('params.card JSON parsed but is not a plain object, ignoring');
@@ -245,11 +245,11 @@ async function deliverMessage(
   const payloadType = card ? 'card' : mediaUrl ? 'media' : 'text';
   const target = to || replyToMessageId || 'unknown';
 
-  log.info(
-    `deliverMessage: type=${payloadType}, target=${target}, ` +
+  log.trace(
+    () => (`deliverMessage: type=${payloadType}, target=${target}, ` +
       `isReply=${Boolean(replyToMessageId)}, replyInThread=${replyInThread}, ` +
       `textLen=${text.trim().length}, hasMedia=${Boolean(mediaUrl)}, ` +
-      `fileName=${fileName ?? '(none)'}`,
+      `fileName=${fileName ?? '(none)'}`),
   );
 
   if (!text.trim() && !card && !mediaUrl) {
@@ -261,7 +261,7 @@ async function deliverMessage(
 
   // Send text first if both text and card/media are present.
   if (text.trim() && (card || mediaUrl)) {
-    log.info(`deliverMessage: sending preceding text ` + `(${text.length} chars) before ${payloadType}`);
+    log.trace(() => (`deliverMessage: sending preceding text ` + `(${text.length} chars) before ${payloadType}`));
     await sendTextLark({ ...sendCtx, text });
   }
 
@@ -294,7 +294,7 @@ async function deliverMedia(
 ) {
   const { to, mediaUrl, fileName, replyToMessageId, replyInThread } = sp;
 
-  log.info(`deliverMedia: url=${mediaUrl}, fileName=${fileName ?? '(auto)'}`);
+  log.trace(() => (`deliverMedia: url=${mediaUrl}, fileName=${fileName ?? '(auto)'}`));
 
   try {
     const result = await uploadAndSendMediaLark({

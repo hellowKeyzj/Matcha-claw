@@ -54,37 +54,6 @@ function getNodeModulePackageName(id: string): string | null {
 }
 
 function resolveManualChunk(id: string): string | undefined {
-  const normalizedId = id.replace(/\\/g, '/');
-
-  // App page chunks: prefer page-level split to avoid forcing shared stores
-  // into multiple chunks (which can introduce circular chunk warnings).
-  if (
-    normalizedId.includes('/src/pages/Chat/')
-  ) {
-    return 'page-chat';
-  }
-  if (
-    normalizedId.includes('/src/pages/Tasks/')
-  ) {
-    return 'page-tasks';
-  }
-  if (
-    normalizedId.includes('/src/pages/Channels/')
-  ) {
-    return 'page-channels';
-  }
-  if (
-    normalizedId.includes('/src/pages/Settings/')
-    || normalizedId.includes('/src/components/settings/')
-  ) {
-    return 'page-settings';
-  }
-  if (
-    normalizedId.includes('/src/pages/SubAgents/')
-  ) {
-    return 'page-subagents';
-  }
-
   const packageName = getNodeModulePackageName(id);
   if (!packageName) {
     return undefined;

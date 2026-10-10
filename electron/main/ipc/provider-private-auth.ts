@@ -1,3 +1,4 @@
+import { traceDebug } from '../../utils/trace-logger';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { existsSync } from 'node:fs';
@@ -160,28 +161,28 @@ export function registerProviderPrivateAuthHandlers(
 ): void {
   ipcMain.handle('providers:storeAccount', async (_, input: unknown) => {
     const value = input as { account?: unknown; apiKey?: unknown; token?: unknown };
-    providerPrivateAuthTrace('ipc.store.received', {
+    providerPrivateAuthTrace('ipc.store.received', () => ({
       hasAccount: Boolean(value?.account),
       privateAuthInputPresent: (typeof value?.apiKey === 'string' && value.apiKey.trim().length > 0)
         || (typeof value?.token === 'string' && value.token.trim().length > 0),
-    });
+    }));
     const account = parseAccount(value?.account);
     if (!account) {
-      providerPrivateAuthTrace('ipc.store.rejected', { detail: 'invalid-account' });
+      providerPrivateAuthTrace('ipc.store.rejected', () => ({ detail: 'invalid-account' }));
       throw new Error('Provider account request is invalid');
     }
-    providerPrivateAuthTrace('ipc.store.decoded', accountTrace(account));
+    providerPrivateAuthTrace('ipc.store.decoded', () => (accountTrace(account)));
     return await admitPrivateAccount(transport, await preparePrivateAccount(account, value.apiKey, value.token), account);
   });
 
   ipcMain.handle('providers:deleteAccount', async (_, input: unknown) => {
     const value = input as { accountId?: unknown; revision?: unknown };
-    providerPrivateAuthTrace('ipc.delete.received', {
+    providerPrivateAuthTrace('ipc.delete.received', () => ({
       accountId: idShape(typeof value?.accountId === 'string' ? value.accountId : undefined),
       revision: typeof value?.revision === 'number' ? value.revision : undefined,
-    });
+    }));
     if (!isId(value.accountId) || !isRevision(value.revision)) {
-      providerPrivateAuthTrace('ipc.delete.rejected', { detail: 'invalid-request' });
+      providerPrivateAuthTrace('ipc.delete.rejected', () => ({ detail: 'invalid-request' }));
       throw new Error('Provider account request is invalid');
     }
     return await admitPrivateDelete(transport, value.accountId, value.revision);
@@ -450,13 +451,13 @@ export type ProviderPrivateAccountMutationResult = Readonly<{
 
 type ProviderMutationTransportResponse = Awaited<ReturnType<ProviderAccountsTransport['execute']>>;
 
-function providerPrivateAuthTrace(phase: string, payload: Record<string, unknown> = {}): void {
-  console.info(JSON.stringify({
+function providerPrivateAuthTrace(phase: string, payload: () => Record<string, unknown> = () => ({})): void {
+  traceDebug(() => JSON.stringify({
     prefix: '[startup-trace]',
     source: 'provider-private-auth',
     phase,
     at: Date.now(),
-    ...payload,
+    ...payload(),
   }));
 }
 
@@ -640,7 +641,7 @@ async function accountCallResult(
     || detail.phase !== 'terminal' || detail.accountId !== accountId || detail.accountRevision !== revision) {
     return { status: 'unknown' };
   }
-  providerPrivateAuthTrace('mutation.terminal', { command, ...detailTrace(detail) });
+  providerPrivateAuthTrace('mutation.terminal', () => ({ command, ...detailTrace(detail) }));
   if (detail.diagnostic?.reason === 'private-transaction-settle-failed') return { status: 'unknown', detail };
   const outcome = command === 'providerAccounts.replace' ? 'stored' : 'deleted';
   if (detail.outcome === outcome && detail.persisted === 'confirmed' && detail.commit === 'committed') {
@@ -804,12 +805,12 @@ async function applyPrivateProfile(
   authMode: CredentialAuthMode,
   openClawStateDir: string,
 ): Promise<void> {
-  providerPrivateAuthTrace('store.private-profile-before', {
+  providerPrivateAuthTrace('store.private-profile-before', () => ({
     provider: profileProvider,
     sourceProvider: credentialProvider,
     authMode,
     reference: idShape(reference),
-  });
+  }));
   const encrypted = await readPrivateCredential(reference);
   const credential = decryptPrivateCredential(encrypted);
   const profileId = privateProfileId(profileProvider);
@@ -839,14 +840,14 @@ async function applyPrivateProfile(
     }
     markProfileCurrent(state, profileProvider, profileId);
   });
-  providerPrivateAuthTrace('store.private-profile-after', {
+  providerPrivateAuthTrace('store.private-profile-after', () => ({
     provider: profileProvider,
     sourceProvider: credentialProvider,
     authMode,
     reference: idShape(reference),
     profileId: idShape(profileId),
     legacyProfileId: idShape(legacyProfileId),
-  });
+  }));
 }
 
 function oauthProfile(
@@ -860,12 +861,12 @@ function oauthProfile(
 async function removePrivateProfile(reference: string, profileProvider: string, openClawStateDir: string): Promise<void> {
   const profileId = privateProfileId(profileProvider);
   const legacyProfileId = legacyPrivateProfileId(reference);
-  providerPrivateAuthTrace('delete.private-profile-before', {
+  providerPrivateAuthTrace('delete.private-profile-before', () => ({
     provider: profileProvider,
     reference: idShape(reference),
     profileId: idShape(profileId),
     legacyProfileId: idShape(legacyProfileId),
-  });
+  }));
   await updateAuthProfileProjection(openClawStateDir, ({ store, state }) => {
     delete store.profiles[profileId];
     removeProfileReferences(state, profileId);
@@ -874,12 +875,12 @@ async function removePrivateProfile(reference: string, profileProvider: string, 
       removeProfileReferences(state, legacyProfileId);
     }
   });
-  providerPrivateAuthTrace('delete.private-profile-after', {
+  providerPrivateAuthTrace('delete.private-profile-after', () => ({
     provider: profileProvider,
     reference: idShape(reference),
     profileId: idShape(profileId),
     legacyProfileId: idShape(legacyProfileId),
-  });
+  }));
 }
 
 function readPrivateCredential(reference: string): Promise<string> {

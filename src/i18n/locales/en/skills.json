@@ -113,7 +113,6 @@
         "packageActions": "Skill package actions",
         "viewCloudPackages": "View cloud packages",
         "installedDescription": "Manage locally installed skill packages.",
-        "marketDescription": "Discover and install skill packages from the cloud.",
         "search": "Search skill packages",
         "runtimeLabel": "Runtime: {{runtime}}",
         "runtimeAny": "Any",
@@ -135,7 +134,7 @@
             "MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE": "This version cannot be published. Refresh your uploaded packages."
         },
         "cloudTitle": "Cloud skill package market",
-        "cloudEmpty": "No cloud skill packages yet.",
+        "cloudEmpty": "No cloud skill packages yet",
         "cloudUnavailableTitle": "Cloud skill packages unavailable",
         "cloudUnavailableDescription": "Cannot connect to the backend platform. Refresh later.",
         "cloudAvailable": "Cloud available",

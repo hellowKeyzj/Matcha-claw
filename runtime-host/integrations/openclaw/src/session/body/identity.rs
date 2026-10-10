@@ -66,7 +66,7 @@ impl Body {
     pub(super) fn durable_owns(&self, message: &Message) -> bool {
         if message.identity_message_id().is_some() {
             if super::super::trace::enabled() {
-                super::super::trace::log_unscoped("runtime.openclaw.body.final.durable_owns", serde_json::json!({ "commitState": "candidate_only",
+                super::super::trace::log_unscoped("runtime.openclaw.body.final.durable_owns", || serde_json::json!({ "commitState": "candidate_only",
                     "runHash": message.identity_run_id().map(trace::fingerprint), "sdkIdPresent": true,
                     "candidateCountCapped2": null, "moreThanOne": null, "owns": false, "reason": "sdk_id_present" }));
             }
@@ -79,7 +79,7 @@ impl Body {
         let more_than_one = first.is_some() && candidates.next().is_some();
         let owns = first.is_some() && !more_than_one;
         if super::super::trace::enabled() {
-            super::super::trace::log_unscoped("runtime.openclaw.body.final.durable_owns", serde_json::json!({ "commitState": "candidate_only",
+            super::super::trace::log_unscoped("runtime.openclaw.body.final.durable_owns", || serde_json::json!({ "commitState": "candidate_only",
                 "runHash": message.identity_run_id().map(trace::fingerprint), "sdkIdPresent": false,
                 "sdkSeq": message.identity_sequence(), "afterSequenceState": match message.after_sequence() { None => "missing", Some(None) => "null", Some(Some(_)) => "number" },
                 "afterSequence": message.after_sequence().flatten(),

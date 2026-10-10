@@ -34,16 +34,16 @@ export async function handleChannelConfigureRoutes(
   try {
     body = await parseJsonBody(req);
   } catch {
-    beginChannelTrace('route.invalid', traceId)(400, { outcome: 'rejected' });
+    beginChannelTrace('route.invalid', traceId)?.(400, { outcome: 'rejected' });
     sendJson(res, 400, INVALID);
     return true;
   }
 
-  const finish = beginChannelTrace(isApplyRequest(body) ? 'route.configure.apply' : 'route.configure.form', traceId);
+  const finish = beginChannelTrace(() => isApplyRequest(body) ? 'route.configure.apply' : 'route.configure.form', traceId);
   try {
     if (isFormRequest(body)) {
       const response = await transport.form(body.channel, traceId);
-      finish(response.status, response.body);
+      finish?.(response.status, response.body);
       sendJson(res, response.status, response.body);
       return true;
     }
@@ -54,17 +54,17 @@ export async function handleChannelConfigureRoutes(
         ...(body.agentId ? { agentId: body.agentId } : {}),
         values: body.values,
       }, traceId);
-      finish(response.status, response.body);
+      finish?.(response.status, response.body);
       sendJson(res, response.status, response.body);
       return true;
     }
   } catch (error) {
-    finish(503, UNAVAILABLE, channelTraceError(error));
+    finish?.(503, UNAVAILABLE, channelTraceError(error));
     sendJson(res, 503, UNAVAILABLE);
     return true;
   }
 
-  finish(400, { outcome: 'rejected' });
+  finish?.(400, { outcome: 'rejected' });
   sendJson(res, 400, INVALID);
   return true;
 }

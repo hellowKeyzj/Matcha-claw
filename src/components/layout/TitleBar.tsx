@@ -12,6 +12,8 @@ import logoSvg from '@/assets/logo.svg';
 import { invokeIpc } from '@/lib/api-client';
 import { preloadLazyRouteForPath } from '@/lib/route-preload';
 import { useLayoutStore } from '@/stores/layout';
+import { useLocalLicenseLocked } from '@/stores/license';
+import { buildSettingsSectionLink } from '@/lib/sections';
 
 export function TitleBar() {
   const platform = window.electron?.platform;
@@ -48,9 +50,10 @@ function SidebarToggleButton() {
 function SettingsButton() {
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const licenseLocked = useLocalLicenseLocked();
 
   const handleOpenSettings = () => {
-    navigate('/settings');
+    navigate(licenseLocked ? buildSettingsSectionLink('license') : '/settings');
   };
 
   const handleSettingsHover = () => {

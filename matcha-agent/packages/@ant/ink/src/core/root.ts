@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { isTraceEnabled } from '../../../../../src/utils/trace.js'
 import { Stream } from 'stream'
 import type { FrameEvent } from './frame.js'
 import Ink, { type Options as InkOptions } from './ink.js'
@@ -113,7 +114,7 @@ const wrappedRender = async (
   // write overwrites scrollback instead of appending below the logo.
   await Promise.resolve()
   const instance = renderSync(node, options)
-  if (process.env.CLAUDE_CODE_DEBUG_REPAINTS === '1') {
+  if (isTraceEnabled()) {
     console.warn(
       `[render] first ink render: ${Math.round(process.uptime() * 1000)}ms since process start`,
     )

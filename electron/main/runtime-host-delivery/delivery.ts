@@ -92,7 +92,7 @@ export async function createRuntimeHostDelivery(
 function runtimeHostLaunchEnvironment(): Readonly<Record<string, string>> {
   return {
     MATCHACLAW_RUNTIME_HOST_PORT: String(getPort('MATCHACLAW_RUNTIME_HOST')),
-    ...(process.env.MATCHACLAW_SESSION_TRACE === '1' ? { MATCHACLAW_SESSION_TRACE: '1' } : {}),
+    MATCHACLAW_TRACE: process.env.MATCHACLAW_TRACE === '1' ? '1' : '0',
     ...(isE2EMode ? { MATCHACLAW_DEBUG_CRON_PROVIDER: '1' } : {}),
     ...providerStoreMigrationEnvironment(),
   };

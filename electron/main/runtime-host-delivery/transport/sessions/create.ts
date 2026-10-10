@@ -1,7 +1,7 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import { decodeSessionView, type SessionView } from './session-contract';
-import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 
 const ROUTE = '/api/sessions/create';
 const UNAVAILABLE = {
@@ -55,15 +55,15 @@ export function createSessionCreateTransport(
   return {
     async create(request: unknown, traceId?: string | null): Promise<SessionCreateTransportResponse> {
       if (!isSessionCreateRequest(request)) {
-        logSessionTrace('electron.create.rejected', traceId, {});
+        logSessionTrace('electron.create.rejected', traceId);
         return { status: 503, body: UNAVAILABLE };
       }
-      const startedAt = Date.now();
-      logSessionTrace('electron.create.request', traceId, {
+      const startedAt = traceId && isSessionTraceEnabled() ? Date.now() : 0;
+      logSessionTrace('electron.create.request', traceId, () => ({
         adapter: request.input.endpoint.runtimeAdapterId,
         agentId: summarizeIdentifier(request.input.agentId),
         endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
-      });
+      }));
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: ROUTE,
@@ -80,16 +80,16 @@ export function createSessionCreateTransport(
         headers: traceHeader(traceId),
       });
       if (response === null) {
-        logSessionTrace('electron.create.failure', traceId, {
+        logSessionTrace('electron.create.failure', traceId, () => ({
           elapsedMs: Date.now() - startedAt,
-        });
+        }));
         return { status: 503, body: UNAVAILABLE };
       }
-      logSessionTrace('electron.create.response', traceId, {
+      logSessionTrace('electron.create.response', traceId, () => ({
         status: response.status,
         contract: isSessionCreateResponse(response.body) ? 'valid' : 'invalid',
         elapsedMs: Date.now() - startedAt,
-      });
+      }));
       if (response.status === 200 && isSessionCreateResponse(response.body)) {
         return { status: 200, body: response.body };
       }

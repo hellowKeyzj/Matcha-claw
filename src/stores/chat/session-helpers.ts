@@ -46,7 +46,8 @@ export function stripAutomaticWorkingDirectoryTitlePrefix(value: string): string
 
 export function normalizeAutomaticSessionTitle(value: string | null | undefined): string | null {
   const normalized = normalizeSessionLabel(value);
-  return normalized ? stripAutomaticWorkingDirectoryTitlePrefix(normalized) : null;
+  const title = normalized ? stripAutomaticWorkingDirectoryTitlePrefix(normalized) : null;
+  return title?.startsWith('<team_run_context>') ? null : title;
 }
 
 export interface SessionCatalogStatusShell {
@@ -88,7 +89,7 @@ export function resolveSessionListLabel(
     return automaticLabel;
   }
   const displayName = normalizeAutomaticSessionTitle(meta.displayName);
-  if (displayName && displayName !== sessionKey) {
+  if (displayName && displayName !== sessionKey && displayName !== meta.sessionIdentity?.sessionKey) {
     return displayName;
   }
   const items = getSessionItems(state, sessionKey);

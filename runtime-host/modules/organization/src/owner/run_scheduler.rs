@@ -3,7 +3,9 @@ use organization::{
     RoleSessionReceipt, StoreFault,
 };
 
+use platform::trace::{identifier_hash, runtime_trace};
 use runtime_directory::RuntimeDriverIdentity;
+use serde_json::json;
 
 use crate::owner::team_run::{TeamRunActivityTarget, TeamRunOwner};
 
@@ -16,9 +18,17 @@ pub(crate) fn schedule_ready_nodes(
     now: u64,
 ) -> Result<Vec<ActivityId>, StoreFault> {
     let Some(run) = store.facts().run(&run_id).cloned() else {
+        runtime_trace("runtime.team_run.schedule.plan.skip", || json!({
+            "runHash": identifier_hash(run_id.as_str()), "reason": "run_missing",
+        }));
         return Ok(Vec::new());
     };
-    let plan = TeamRunStepPlanner::new(store).plan(&run, now)?;
+    let plan = TeamRunStepPlanner::new(store).plan(&run, now).inspect_err(|error| {
+        runtime_trace("runtime.team_run.schedule.plan.error", || json!({
+            "runHash": identifier_hash(run_id.as_str()),
+            "errorKind": super::actor::store_fault_label(error),
+        }));
+    })?;
     commit_team_run_step_plan(team_run, store, &run_id, plan, now)
 }
 
@@ -30,13 +40,35 @@ fn commit_team_run_step_plan(
     now: u64,
 ) -> Result<Vec<ActivityId>, StoreFault> {
     let (control_steps, ready_activity_requests) = plan.into_parts();
-    for step in control_steps {
-        team_run.apply_control_execution_step(store, run_id, step)?;
+    runtime_trace("runtime.team_run.schedule.plan.end", || json!({
+        "runHash": identifier_hash(run_id.as_str()),
+        "controlCount": control_steps.len(), "readyCount": ready_activity_requests.len(),
+    }));
+    for (step_index, step) in control_steps.into_iter().enumerate() {
+        let node_hash = platform::trace::enabled().then(|| identifier_hash(step.node_id().as_str()));
+        let outcome = team_run.apply_control_execution_step(store, run_id, step);
+        runtime_trace("runtime.team_run.schedule.control.commit", || json!({
+            "runHash": identifier_hash(run_id.as_str()), "stepIndex": step_index,
+            "nodeHash": node_hash,
+            "outcome": outcome.as_ref().map_or_else(super::actor::store_fault_label, |_| "committed"),
+        }));
+        outcome?;
     }
 
     let mut activity_ids = Vec::new();
-    for activity in ready_activity_requests {
-        match store.register_activity_and_start_attempt(activity, now)? {
+    for (activity_index, activity) in ready_activity_requests.into_iter().enumerate() {
+        let outcome = store.register_activity_and_start_attempt(activity, now);
+        runtime_trace("runtime.team_run.schedule.activity.register", || json!({
+            "runHash": identifier_hash(run_id.as_str()), "activityIndex": activity_index,
+            "outcome": match &outcome {
+                Ok(organization::ActivityRegistrationOutcome::Recorded(_)) => "recorded",
+                Ok(organization::ActivityRegistrationOutcome::Replayed(_)) => "replayed",
+                Ok(organization::ActivityRegistrationOutcome::ConflictingIdempotencyKey) => "conflicting_idempotency_key",
+                Ok(organization::ActivityRegistrationOutcome::ConflictingActivityId { .. }) => "conflicting_activity_id",
+                Err(error) => super::actor::store_fault_label(error),
+            },
+        }));
+        match outcome? {
             organization::ActivityRegistrationOutcome::Recorded(activity)
             | organization::ActivityRegistrationOutcome::Replayed(activity) => {
                 activity_ids.push(activity.facts().activity_id.clone());

@@ -222,6 +222,6 @@ fn effect_outcome(effect: &ChannelMutationEffect) -> ChannelCallOutcome {
 
 pub(crate) fn record_error(result: Result<(), CallLogError>) {
     if let Err(error) = result {
-        platform::trace::channel_trace("channel.call_log", &format!("outcome=failed code={error:?}"));
+        eprintln!("[channels] call log recording failed: {error:?}");
     }
 }

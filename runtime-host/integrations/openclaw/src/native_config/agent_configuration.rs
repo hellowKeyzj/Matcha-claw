@@ -28,8 +28,8 @@ const SKILL_STATUS_METHODS: [&str; 1] = [SKILLS_STATUS_METHOD];
 const TOOL_CATALOG_METHODS: [&str; 1] = [TOOLS_CATALOG_METHOD];
 const AGENT_FACING_INTERNAL_TOOL_DENY: [&str; 2] = ["gateway", "nodes"];
 
-fn log_session_trace(stage: &str, trace_id: Option<&str>, payload: Value) {
-    if trace_id.is_none() || std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1") {
+fn log_session_trace(stage: &str, trace_id: Option<&str>, payload: impl FnOnce() -> Value) {
+    if trace_id.is_none() || !platform::trace::enabled() {
         return;
     }
     let mut event = Map::new();
@@ -41,7 +41,7 @@ fn log_session_trace(stage: &str, trace_id: Option<&str>, payload: Value) {
     );
     event.insert("stage".into(), Value::String(stage.into()));
     event.insert("at".into(), Value::Number(now_millis().into()));
-    if let Value::Object(fields) = payload {
+    if let Value::Object(fields) = payload() {
         event.extend(fields);
     }
     eprintln!("{}", Value::Object(event));
@@ -129,7 +129,7 @@ impl AgentConfiguration {
         log_session_trace(
             "runtime.openclaw.agent-config.skill.request",
             self.trace_id.as_deref(),
-            serde_json::json!({ "agentId": id_shape(Some(&agent_id)) }),
+            || serde_json::json!({ "agentId": id_shape(Some(&agent_id)) }),
         );
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
@@ -139,7 +139,7 @@ impl AgentConfiguration {
             log_session_trace(
                 "runtime.openclaw.agent-config.skill.outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({ "result": "agentNotConfigured" }),
+                || serde_json::json!({ "result": "agentNotConfigured" }),
             );
             return SkillConfigurationOutcome::View(snapshot.skill_view_without_catalog(agent_id));
         }
@@ -152,7 +152,7 @@ impl AgentConfiguration {
                 log_session_trace(
                     "runtime.openclaw.agent-config.skill.outcome",
                     self.trace_id.as_deref(),
-                    serde_json::json!({
+                    || serde_json::json!({
                         "result": "view",
                         "optionCount": view.options.len(),
                         "effectiveSkillCount": view.effective_skill_keys.len(),
@@ -164,7 +164,7 @@ impl AgentConfiguration {
                 log_session_trace(
                     "runtime.openclaw.agent-config.skill.outcome",
                     self.trace_id.as_deref(),
-                    serde_json::json!({ "result": "protocol" }),
+                    || serde_json::json!({ "result": "protocol" }),
                 );
                 SkillConfigurationOutcome::Unavailable(ReadFailure::Protocol)
             }
@@ -180,7 +180,7 @@ impl AgentConfiguration {
         log_session_trace(
             "runtime.openclaw.agent-config.skill.set-request",
             self.trace_id.as_deref(),
-            serde_json::json!({
+            || serde_json::json!({
                 "agentId": id_shape(Some(&agent_id)),
                 "revision": id_shape(Some(&revision)),
             }),
@@ -193,7 +193,7 @@ impl AgentConfiguration {
             log_session_trace(
                 "runtime.openclaw.agent-config.skill.set-outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({ "result": "staleRevision" }),
+                || serde_json::json!({ "result": "staleRevision" }),
             );
             return match self.skill_configuration(agent_id).await {
                 SkillConfigurationOutcome::View(view) => SkillConfigurationOutcome::Stale(view),
@@ -207,7 +207,7 @@ impl AgentConfiguration {
             log_session_trace(
                 "runtime.openclaw.agent-config.skill.set-outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({ "result": "agentNotConfigured" }),
+                || serde_json::json!({ "result": "agentNotConfigured" }),
             );
             return SkillConfigurationOutcome::Unsupported;
         }
@@ -223,7 +223,7 @@ impl AgentConfiguration {
                     log_session_trace(
                         "runtime.openclaw.agent-config.skill.set-outcome",
                         self.trace_id.as_deref(),
-                        serde_json::json!({
+                        || serde_json::json!({
                             "result": "invalidSkillKeys",
                             "unknownCount": unknown_skill_keys.len(),
                             "nonCanonicalCount": non_canonical_skill_keys.len(),
@@ -243,7 +243,7 @@ impl AgentConfiguration {
                     log_session_trace(
                         "runtime.openclaw.agent-config.skill.set-outcome",
                         self.trace_id.as_deref(),
-                        serde_json::json!({ "result": "unsupported" }),
+                        || serde_json::json!({ "result": "unsupported" }),
                     );
                     return SkillConfigurationOutcome::Unsupported;
                 }
@@ -262,7 +262,7 @@ impl AgentConfiguration {
         log_session_trace(
             "runtime.openclaw.agent-config.tool.request",
             self.trace_id.as_deref(),
-            serde_json::json!({ "agentId": id_shape(Some(&agent_id)) }),
+            || serde_json::json!({ "agentId": id_shape(Some(&agent_id)) }),
         );
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
@@ -272,7 +272,7 @@ impl AgentConfiguration {
             log_session_trace(
                 "runtime.openclaw.agent-config.tool.outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({ "result": "agentNotConfigured" }),
+                || serde_json::json!({ "result": "agentNotConfigured" }),
             );
             return ToolConfigurationOutcome::View(snapshot.tool_view_without_catalog(agent_id));
         }
@@ -285,7 +285,7 @@ impl AgentConfiguration {
                 log_session_trace(
                     "runtime.openclaw.agent-config.tool.outcome",
                     self.trace_id.as_deref(),
-                    serde_json::json!({
+                    || serde_json::json!({
                         "result": "view",
                         "toolProfileCount": view.catalog().profiles().len(),
                         "toolGroupCount": view.catalog().groups().len(),
@@ -298,7 +298,7 @@ impl AgentConfiguration {
                 log_session_trace(
                     "runtime.openclaw.agent-config.tool.outcome",
                     self.trace_id.as_deref(),
-                    serde_json::json!({ "result": "protocol" }),
+                    || serde_json::json!({ "result": "protocol" }),
                 );
                 ToolConfigurationOutcome::Unavailable(ReadFailure::Protocol)
             }
@@ -318,7 +318,7 @@ impl AgentConfiguration {
         log_session_trace(
             "runtime.openclaw.agent-config.tool.set-request",
             self.trace_id.as_deref(),
-            serde_json::json!({
+            || serde_json::json!({
                 "agentId": id_shape(Some(&agent_id)),
                 "revision": id_shape(Some(&revision)),
             }),
@@ -331,7 +331,7 @@ impl AgentConfiguration {
             log_session_trace(
                 "runtime.openclaw.agent-config.tool.set-outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({ "result": "staleRevision" }),
+                || serde_json::json!({ "result": "staleRevision" }),
             );
             return match self.tool_configuration(agent_id).await {
                 ToolConfigurationOutcome::View(view) => ToolConfigurationOutcome::Stale(view),
@@ -345,7 +345,7 @@ impl AgentConfiguration {
             log_session_trace(
                 "runtime.openclaw.agent-config.tool.set-outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({ "result": "agentNotConfigured" }),
+                || serde_json::json!({ "result": "agentNotConfigured" }),
             );
             return ToolConfigurationOutcome::Unsupported;
         }
@@ -360,7 +360,7 @@ impl AgentConfiguration {
                 log_session_trace(
                     "runtime.openclaw.agent-config.tool.set-outcome",
                     self.trace_id.as_deref(),
-                    serde_json::json!({
+                    || serde_json::json!({
                         "result": "invalidToolKeys",
                         "unknownCount": unknown.len(),
                     }),
@@ -375,7 +375,7 @@ impl AgentConfiguration {
                     log_session_trace(
                         "runtime.openclaw.agent-config.tool.set-outcome",
                         self.trace_id.as_deref(),
-                        serde_json::json!({ "result": "unsupported" }),
+                        || serde_json::json!({ "result": "unsupported" }),
                     );
                     return ToolConfigurationOutcome::Unsupported;
                 }
@@ -394,7 +394,7 @@ impl AgentConfiguration {
         log_session_trace(
             "runtime.openclaw.agent-config.tools-catalog.request",
             self.trace_id.as_deref(),
-            serde_json::json!({ "agentId": id_shape(Some(agent_id)) }),
+            || serde_json::json!({ "agentId": id_shape(Some(agent_id)) }),
         );
         let request = tool_catalog_request(agent_id).map_err(|_| ReadFailure::Protocol)?;
         let _ = TOOL_CATALOG_METHODS;
@@ -407,7 +407,7 @@ impl AgentConfiguration {
             Ok(catalog) => log_session_trace(
                 "runtime.openclaw.agent-config.tools-catalog.outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({
+                || serde_json::json!({
                     "result": "catalog",
                     "toolProfileCount": catalog.profiles().len(),
                     "toolGroupCount": catalog.groups().len(),
@@ -417,7 +417,7 @@ impl AgentConfiguration {
             Err(error) => log_session_trace(
                 "runtime.openclaw.agent-config.tools-catalog.outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({ "result": read_failure_reason(*error) }),
+                || serde_json::json!({ "result": read_failure_reason(*error) }),
             ),
         }
         outcome
@@ -427,7 +427,7 @@ impl AgentConfiguration {
         log_session_trace(
             "runtime.openclaw.agent-config.skills-status.request",
             self.trace_id.as_deref(),
-            serde_json::json!({ "agentId": id_shape(Some(agent_id)) }),
+            || serde_json::json!({ "agentId": id_shape(Some(agent_id)) }),
         );
         let request = skill_catalog_request(agent_id).map_err(|_| ReadFailure::Protocol)?;
         let _ = SKILL_STATUS_METHODS;
@@ -440,12 +440,12 @@ impl AgentConfiguration {
             Ok(catalog) => log_session_trace(
                 "runtime.openclaw.agent-config.skills-status.outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({ "result": "catalog", "optionCount": catalog.options().len() }),
+                || serde_json::json!({ "result": "catalog", "optionCount": catalog.options().len() }),
             ),
             Err(error) => log_session_trace(
                 "runtime.openclaw.agent-config.skills-status.outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({ "result": read_failure_reason(*error) }),
+                || serde_json::json!({ "result": read_failure_reason(*error) }),
             ),
         }
         outcome
@@ -473,7 +473,7 @@ impl AgentConfiguration {
         log_session_trace(
             "runtime.openclaw.agent-config.config-get.request",
             self.trace_id.as_deref(),
-            serde_json::json!({}),
+            || serde_json::json!({}),
         );
         let request = wire::operations_request(
             next_request_id("configuration-get"),
@@ -491,7 +491,7 @@ impl AgentConfiguration {
             Ok(snapshot) => log_session_trace(
                 "runtime.openclaw.agent-config.config-get.outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({
+                || serde_json::json!({
                     "result": "snapshot",
                     "configBytes": snapshot.document.len(),
                     "hasBaseHash": snapshot.base_hash.is_some(),
@@ -500,7 +500,7 @@ impl AgentConfiguration {
             Err(error) => log_session_trace(
                 "runtime.openclaw.agent-config.config-get.outcome",
                 self.trace_id.as_deref(),
-                serde_json::json!({ "result": read_failure_reason(*error) }),
+                || serde_json::json!({ "result": read_failure_reason(*error) }),
             ),
         }
         outcome
@@ -515,7 +515,7 @@ impl AgentConfiguration {
         log_session_trace(
             "runtime.openclaw.agent-config.config-patch.request",
             self.trace_id.as_deref(),
-            serde_json::json!({ "requestBytes": encoded.len() }),
+            || serde_json::json!({ "requestBytes": encoded.len() }),
         );
         let _ = CONFIG_WRITE_METHODS;
         let outcome = match self.gateway.rpc_encoded_mutation(request_id, encoded).await {
@@ -533,7 +533,7 @@ impl AgentConfiguration {
         log_session_trace(
             "runtime.openclaw.agent-config.config-patch.outcome",
             self.trace_id.as_deref(),
-            serde_json::json!({ "result": mutation_outcome_reason(outcome) }),
+            || serde_json::json!({ "result": mutation_outcome_reason(outcome) }),
         );
         outcome
     }

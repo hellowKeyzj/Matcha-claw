@@ -134,7 +134,7 @@ export function registerFeishuTaskSubtaskTool(api: OpenClawPluginApi): void {
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.info(`create: task_guid=${p.task_guid}, summary=${p.summary}`);
+              log.trace(() => `create: task_guid=${p.task_guid}, summary=${p.summary}`);
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const data: any = {
@@ -213,7 +213,7 @@ export function registerFeishuTaskSubtaskTool(api: OpenClawPluginApi): void {
             // LIST
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: task_guid=${p.task_guid}, page_size=${p.page_size ?? 50}`);
+              log.trace(() => `list: task_guid=${p.task_guid}, page_size=${p.page_size ?? 50}`);
 
               const res = await client.invoke(
                 'feishu_task_subtask.list',

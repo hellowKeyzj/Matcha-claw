@@ -223,8 +223,8 @@ pub fn extract_pdf_markdown(
     // emit `prefix + "/" + name` without producing `path//name`.
     let prefix = media_url_prefix.trim_end_matches('/');
 
-    let page_count = doc.pages().len();
-    if media_dest_dir.is_some() {
+    if platform::trace::enabled() && media_dest_dir.is_some() {
+        let page_count = doc.pages().len();
         eprintln!(
             "[extract_pdf_markdown] '{path}': {page_count} page(s), images→{:?}",
             media_dest_dir.map(|d| d.display().to_string())
@@ -329,7 +329,8 @@ pub fn extract_pdf_markdown(
         }
     }
 
-    if media_dest_dir.is_some() {
+    if platform::trace::enabled() && media_dest_dir.is_some() {
+        let page_count = doc.pages().len();
         eprintln!("[extract_pdf_markdown] '{path}' DONE — pages={page_count}, saved={total_saved}");
     }
 
@@ -771,21 +772,28 @@ pub fn extract_and_save_pdf_images(
     let mut filtered_decode_err: u32 = 0;
     let mut filtered_encode_err: u32 = 0;
 
-    let page_count = doc.pages().len();
-    eprintln!(
-        "[extract_and_save_pdf_images] '{path}': {} page(s), filter=({}x{}) min, max={}",
-        page_count, options.min_width, options.min_height, options.max_images
-    );
+    let tracing = platform::trace::enabled();
+    if tracing {
+        let page_count = doc.pages().len();
+        eprintln!(
+            "[extract_and_save_pdf_images] '{path}': {} page(s), filter=({}x{}) min, max={}",
+            page_count, options.min_width, options.min_height, options.max_images
+        );
+    }
 
     'pages: for (page_idx, page) in doc.pages().iter().enumerate() {
         let mut page_has_meaningful_text: Option<bool> = None;
         for object in page.objects().iter() {
-            total_objects += 1;
+            if tracing {
+                total_objects += 1;
+            }
             let image = match object.as_image_object() {
                 Some(img) => img,
                 None => continue,
             };
-            total_image_objects += 1;
+            if tracing {
+                total_image_objects += 1;
+            }
             let should_skip = if options.skip_full_page_images {
                 let has_meaningful_text = *page_has_meaningful_text.get_or_insert_with(|| {
                     pdf_page_has_meaningful_text(&page, options.full_page_min_text_chars)
@@ -801,17 +809,21 @@ pub fn extract_and_save_pdf_images(
                 false
             };
             if should_skip {
-                filtered_full_page += 1;
-                eprintln!(
-                    "[extract_and_save_pdf_images] page {} image covers most of page — skipped",
-                    page_idx + 1
-                );
+                if tracing {
+                    filtered_full_page += 1;
+                    eprintln!(
+                        "[extract_and_save_pdf_images] page {} image covers most of page — skipped",
+                        page_idx + 1
+                    );
+                }
                 continue;
             }
             let dyn_img = match image.get_raw_image() {
                 Ok(b) => b,
                 Err(e) => {
-                    filtered_decode_err += 1;
+                    if tracing {
+                        filtered_decode_err += 1;
+                    }
                     eprintln!(
                         "[extract_and_save_pdf_images] page {} image read failed: {e}",
                         page_idx + 1
@@ -822,15 +834,17 @@ pub fn extract_and_save_pdf_images(
             let width = dyn_img.width();
             let height = dyn_img.height();
             if width < options.min_width || height < options.min_height {
-                filtered_too_small += 1;
-                eprintln!(
-                    "[extract_and_save_pdf_images] page {} image {}x{} < min ({}x{}) — skipped",
-                    page_idx + 1,
-                    width,
-                    height,
-                    options.min_width,
-                    options.min_height
-                );
+                if tracing {
+                    filtered_too_small += 1;
+                    eprintln!(
+                        "[extract_and_save_pdf_images] page {} image {}x{} < min ({}x{}) — skipped",
+                        page_idx + 1,
+                        width,
+                        height,
+                        options.min_width,
+                        options.min_height
+                    );
+                }
                 continue;
             }
 
@@ -839,7 +853,9 @@ pub fn extract_and_save_pdf_images(
                 &mut std::io::Cursor::new(&mut png_bytes),
                 image::ImageFormat::Png,
             ) {
-                filtered_encode_err += 1;
+                if tracing {
+                    filtered_encode_err += 1;
+                }
                 eprintln!(
                     "[extract_and_save_pdf_images] page {} PNG encode failed: {e}",
                     page_idx + 1
@@ -873,16 +889,18 @@ pub fn extract_and_save_pdf_images(
         }
     }
 
-    eprintln!(
-        "[extract_and_save_pdf_images] '{path}' DONE — saved={}, total_objects={}, image_objects={}, too_small={}, full_page={}, decode_err={}, encode_err={}",
-        out.len(),
-        total_objects,
-        total_image_objects,
-        filtered_too_small,
-        filtered_full_page,
-        filtered_decode_err,
-        filtered_encode_err,
-    );
+    if tracing {
+        eprintln!(
+            "[extract_and_save_pdf_images] '{path}' DONE — saved={}, total_objects={}, image_objects={}, too_small={}, full_page={}, decode_err={}, encode_err={}",
+            out.len(),
+            total_objects,
+            total_image_objects,
+            filtered_too_small,
+            filtered_full_page,
+            filtered_decode_err,
+            filtered_encode_err,
+        );
+    }
 
     Ok(out)
 }

@@ -38,9 +38,6 @@ pub struct TeamPublicProjection {
     team_revision: u64,
     runtime: TeamRuntimeState,
     start_gate: TeamRunPublicStartGate,
-    proposal_id: Option<String>,
-    proposal_summary: Option<String>,
-    proposal_source_delivery_id: Option<String>,
     graph: TeamPublicGraph,
 }
 
@@ -63,18 +60,6 @@ impl TeamPublicProjection {
 
     pub const fn start_gate(&self) -> TeamRunPublicStartGate {
         self.start_gate
-    }
-
-    pub fn proposal_id(&self) -> Option<&str> {
-        self.proposal_id.as_deref()
-    }
-
-    pub fn proposal_summary(&self) -> Option<&str> {
-        self.proposal_summary.as_deref()
-    }
-
-    pub fn proposal_source_delivery_id(&self) -> Option<&str> {
-        self.proposal_source_delivery_id.as_deref()
     }
 
     pub fn graph(&self) -> &TeamPublicGraph {
@@ -177,23 +162,43 @@ pub enum TeamPublicGraphStatus {
 pub struct TeamPublicNode {
     node_id: String,
     kind: TeamPublicNodeKind,
+    source_ports: &'static [crate::NodeOutputPort],
+    target_ports: &'static [&'static str],
+    source_port_actions: BTreeMap<&'static str, Vec<TeamPublicEdgeAction>>,
     title: String,
     role_id: Option<String>,
     task_id: Option<String>,
     max_attempts: u32,
     trigger: Option<TeamPublicStartTrigger>,
+    script_review_rule: Option<crate::ScriptReviewRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status_reason: Option<&'static str>,
     attempt: TeamPublicAttempt,
 }
 
 impl TeamPublicNode {
+    pub fn script_review_rule(&self) -> Option<crate::ScriptReviewRule> {
+        self.script_review_rule
+    }
+
     pub fn node_id(&self) -> &str {
         &self.node_id
     }
 
     pub const fn kind(&self) -> TeamPublicNodeKind {
         self.kind
+    }
+
+    pub fn source_ports(&self) -> &'static [crate::NodeOutputPort] {
+        self.source_ports
+    }
+
+    pub fn target_ports(&self) -> &'static [&'static str] {
+        self.target_ports
+    }
+
+    pub fn source_port_actions(&self) -> &BTreeMap<&'static str, Vec<TeamPublicEdgeAction>> {
+        &self.source_port_actions
     }
 
     pub fn title(&self) -> &str {
@@ -425,9 +430,6 @@ pub struct TeamRunPublicRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     graph_version: Option<String>,
     start_gate: TeamRunPublicStartGate,
-    proposal_id: Option<String>,
-    proposal_summary: Option<String>,
-    proposal_source_delivery_id: Option<String>,
 }
 
 impl TeamRunPublicRun {
@@ -463,26 +465,13 @@ impl TeamRunPublicRun {
         self.start_gate
     }
 
-    pub fn proposal_id(&self) -> Option<&str> {
-        self.proposal_id.as_deref()
-    }
-
-    pub fn proposal_summary(&self) -> Option<&str> {
-        self.proposal_summary.as_deref()
-    }
-
-    pub fn proposal_source_delivery_id(&self) -> Option<&str> {
-        self.proposal_source_delivery_id.as_deref()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamRunPublicStartGate {
     Intake,
-    ProposalPending,
     Designing,
-    DesignProposalPending,
     Started,
 }
 
@@ -659,6 +648,9 @@ pub enum TeamPublicTerminalResolution {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamRunPublicApproval {
+    #[serde(serialize_with = "serialize_approval_subject")]
+    subject: crate::ApprovalSubject,
+    node_id: Option<String>,
     approval_id: String,
     run_id: String,
     stage_id: String,
@@ -672,7 +664,23 @@ pub struct TeamRunPublicApproval {
     cause: Option<TeamPublicApprovalResolutionCause>,
 }
 
+fn serialize_approval_subject<S: serde::Serializer>(subject: &crate::ApprovalSubject, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(match subject {
+        crate::ApprovalSubject::Stage { .. } => "stage",
+        crate::ApprovalSubject::WorkNode { .. } => "work_node",
+        crate::ApprovalSubject::HumanDecision { .. } => "human_decision",
+    })
+}
+
 impl TeamRunPublicApproval {
+    pub fn subject(&self) -> &crate::ApprovalSubject {
+        &self.subject
+    }
+
+    pub fn node_id(&self) -> Option<&str> {
+        self.node_id.as_deref()
+    }
+
     pub fn approval_id(&self) -> &str {
         &self.approval_id
     }
@@ -1244,25 +1252,18 @@ fn build_public_snapshot(
             runtime,
             lifecycle: lifecycle_status(run.lifecycle().state()),
             design_epoch: match run.start_gate() {
-                RunStartGate::Designing { design_epoch, .. }
-                | RunStartGate::DesignProposalPending { design_epoch, .. } => {
+                RunStartGate::Designing { design_epoch, .. } => {
                     Some(design_epoch.clone())
                 }
                 _ => None,
             },
             graph_version: match run.start_gate() {
-                RunStartGate::Designing { .. } | RunStartGate::DesignProposalPending { .. } => {
+                RunStartGate::Designing { .. } => {
                     crate::store::codec::graph_version(run.graph().definition()).ok()
                 }
                 _ => None,
             },
             start_gate: start_gate_status(run.start_gate()),
-            proposal_id: run.start_gate().proposal_id().map(ToOwned::to_owned),
-            proposal_summary: run.start_gate().summary().map(ToOwned::to_owned),
-            proposal_source_delivery_id: run
-                .start_gate()
-                .source_delivery_id()
-                .map(ToOwned::to_owned),
         },
         graph,
         attempts,
@@ -1372,6 +1373,11 @@ fn public_approval(approval: &crate::run::approval::Approval) -> TeamRunPublicAp
     let facts = approval.facts();
     let resolution = approval.resolution();
     TeamRunPublicApproval {
+        subject: facts.subject.clone(),
+        node_id: match &facts.subject {
+            crate::ApprovalSubject::Stage { .. } => None,
+            crate::ApprovalSubject::WorkNode { node_id } | crate::ApprovalSubject::HumanDecision { node_id } => Some(node_id.clone()),
+        },
         approval_id: facts.approval_id.clone(),
         run_id: facts.run_id.clone(),
         stage_id: facts.stage_id.clone(),
@@ -1478,10 +1484,8 @@ pub fn project_team_run_public_event(event: &crate::run::event::TeamEvent) -> Te
 fn start_gate_status(start_gate: &RunStartGate) -> TeamRunPublicStartGate {
     match start_gate {
         RunStartGate::Intake => TeamRunPublicStartGate::Intake,
-        RunStartGate::ProposalPending { .. } => TeamRunPublicStartGate::ProposalPending,
         RunStartGate::Started => TeamRunPublicStartGate::Started,
         RunStartGate::Designing { .. } => TeamRunPublicStartGate::Designing,
-        RunStartGate::DesignProposalPending { .. } => TeamRunPublicStartGate::DesignProposalPending,
     }
 }
 
@@ -1654,9 +1658,6 @@ pub fn query_team_public_projection(
         team_revision: team.revision().get(),
         runtime: runtime_state(facts, run_id, run.runtime().is_some()),
         start_gate: start_gate_status(run.start_gate()),
-        proposal_id: run.start_gate().proposal_id().map(ToOwned::to_owned),
-        proposal_summary: run.start_gate().summary().map(ToOwned::to_owned),
-        proposal_source_delivery_id: run.start_gate().source_delivery_id().map(ToOwned::to_owned),
         graph: graph_projection(facts, run.graph()),
     })
 }
@@ -1749,14 +1750,23 @@ pub(crate) fn graph_projection(facts: &OrganizationFacts, graph: &GraphState) ->
             .map(|(definition, current)| TeamPublicNode {
                 node_id: definition.id().as_str().to_owned(),
                 kind: node_kind(definition.kind()),
+                source_ports: definition.kind().source_ports(),
+                target_ports: definition.kind().target_ports(),
+                source_port_actions: definition.kind().source_ports().iter().map(|port| {
+                    (port.as_str(), definition.kind().source_port_actions(port.as_str())
+                        .iter().copied().map(edge_action).collect())
+                }).collect(),
                 title: definition.title().to_owned(),
                 role_id: definition
                     .work_assignment()
-                    .map(|assignment| assignment.role_id().to_owned()),
+                    .map(|assignment| assignment.role_id())
+                    .or_else(|| definition.review_assignment().map(|assignment| assignment.role_id()))
+                    .map(ToOwned::to_owned),
                 task_id: definition
                     .work_assignment()
                     .map(|assignment| assignment.task_id().to_owned()),
                 max_attempts: definition.max_attempts().get(),
+                script_review_rule: definition.script_review_rule(),
                 trigger: definition.trigger().map(|trigger| match trigger {
                     StartTrigger::Webhook { .. } => TeamPublicStartTrigger::Webhook,
                     StartTrigger::Cron { expression } => TeamPublicStartTrigger::Cron {
@@ -1885,17 +1895,19 @@ mod tests {
 
         let json = serde_json::to_string(&projection).unwrap();
         let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        for node in document["graph"]["nodes"].as_array().unwrap() {
+            assert_eq!(node["sourcePortActions"], serde_json::json!({
+                "completed": ["activate", "gate", "finish"],
+            }));
+        }
         let object = document.as_object().unwrap();
-        assert_eq!(object.len(), 9);
+        assert_eq!(object.len(), 6);
         for field in [
             "teamId",
             "runId",
             "teamRevision",
             "runtime",
             "startGate",
-            "proposalId",
-            "proposalSummary",
-            "proposalSourceDeliveryId",
             "graph",
         ] {
             assert!(object.contains_key(field));
@@ -2107,7 +2119,7 @@ mod tests {
                 vec![crate::EdgeDefinition::new(
                     crate::EdgeId::new("start-to-draft"),
                     NodeId::new("start"),
-                    "done",
+                    "completed",
                     NodeId::new("draft"),
                     "input",
                     EdgeAction::Activate,

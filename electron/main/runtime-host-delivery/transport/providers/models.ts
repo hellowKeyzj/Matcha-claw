@@ -1,4 +1,5 @@
 import { logger } from '../../../../utils/logger';
+import { traceDebug } from '../../../../utils/trace-logger';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 import type { CallReceipt } from '../../../../../src/types/call-log';
@@ -142,7 +143,7 @@ export function createProviderModelsTransport(
       if (!isDiscoverRequest(request)) return { status: 400, body: INVALID_REQUEST };
       const startedAt = Date.now();
       const status = { value: null as number | null };
-      logger.info('[ProviderModels] discover start');
+      traceDebug('[ProviderModels] discover start');
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: PROVIDER_MODELS_PATH,
@@ -161,7 +162,7 @@ export function createProviderModelsTransport(
       if (response?.status === 202) {
         try {
           const receipt = decodeCallReceipt(response.body);
-          logger.info('[ProviderModels] discover admitted', { status: status.value, elapsedMs: Date.now() - startedAt });
+          traceDebug(() => ['[ProviderModels] discover admitted', { status: status.value, elapsedMs: Date.now() - startedAt }]);
           return { status: 202, body: receipt };
         } catch { /* closed public admission boundary */ }
       }

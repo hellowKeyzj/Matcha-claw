@@ -5,6 +5,7 @@ use crate::{
     run::{
         GraphRunId, delivery::TerminalObservationResolution, lifecycle::GraphRunLifecycleState,
         project,
+        public_projection::{TeamRunPublicLifecycle, TeamRuntimeState},
     },
 };
 
@@ -95,6 +96,50 @@ impl fmt::Debug for TeamRunProjection {
             .field("role_session_count", &self.role_sessions.len())
             .finish()
     }
+}
+
+/// An extant run's list view, not an authorization or execution-readiness result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TeamRunListEntry {
+    pub projection: TeamRunProjection,
+    pub lifecycle: TeamRunPublicLifecycle,
+    pub runtime: TeamRuntimeState,
+}
+
+pub fn query_team_run_list(facts: &OrganizationFacts, team_id: &TeamId) -> Vec<TeamRunListEntry> {
+    let Some(team) = facts.team(team_id).filter(|team| !team.tombstoned()) else {
+        return Vec::new();
+    };
+    facts
+        .runs()
+        .filter(|run| run.team() == team_id)
+        .filter_map(|run| {
+            let lifecycle = match run.lifecycle().state() {
+                GraphRunLifecycleState::Active => TeamRunPublicLifecycle::Active,
+                GraphRunLifecycleState::Cancelling { .. } => TeamRunPublicLifecycle::Cancelling,
+                GraphRunLifecycleState::Cancelled { .. } => TeamRunPublicLifecycle::Cancelled,
+                GraphRunLifecycleState::OutcomeUnknown { .. } => {
+                    TeamRunPublicLifecycle::OutcomeUnknown
+                }
+                GraphRunLifecycleState::Tombstoned { .. } => return None,
+            };
+            let (runtime, sessions) = match run.runtime() {
+                Some(runtime) => (TeamRuntimeState::Confirmed, runtime.bindings().to_vec()),
+                None => (TeamRuntimeState::Unknown, Vec::new()),
+            };
+            Some(TeamRunListEntry {
+                projection: TeamRunProjection::new(
+                    team_id.clone(),
+                    run.run_id().clone(),
+                    team.revision(),
+                    project(run.graph()).status,
+                    sessions,
+                ),
+                lifecycle,
+                runtime,
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Eq, PartialEq)]

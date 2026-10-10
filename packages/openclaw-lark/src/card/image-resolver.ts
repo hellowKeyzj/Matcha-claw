@@ -86,7 +86,7 @@ export class ImageResolver {
     this.resolveImages(text);
 
     if (this.pending.size > 0) {
-      log.info('resolveImagesAwait: waiting for uploads', { count: this.pending.size, timeoutMs });
+      log.trace('resolveImagesAwait: waiting for uploads', { count: this.pending.size, timeoutMs });
 
       const allUploads = Promise.all(this.pending.values());
       const timeout = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs));
@@ -110,7 +110,7 @@ export class ImageResolver {
 
   private async doUpload(url: string): Promise<string | null> {
     try {
-      log.info('uploading image', { url });
+      log.trace('uploading image', { url });
       const buffer = await fetchRemoteImageBuffer(url);
       const { imageKey } = await uploadImageLark({
         cfg: this.cfg,
@@ -119,7 +119,7 @@ export class ImageResolver {
         accountId: this.accountId,
       });
 
-      log.info('image uploaded', { url, imageKey });
+      log.trace('image uploaded', { url, imageKey });
       this.resolved.set(url, imageKey);
       this.pending.delete(url);
       this.onImageResolved();

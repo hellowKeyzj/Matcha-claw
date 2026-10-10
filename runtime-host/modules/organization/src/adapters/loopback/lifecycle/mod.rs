@@ -48,7 +48,7 @@ pub(crate) enum Request {
 }
 
 pub(crate) enum Delivery {
-    Listed(Vec<organization::TeamRunQueryOutcome>),
+    Listed(Vec<organization::TeamRunListEntry>),
     Created {
         run_id: String,
         outcome: CreateState,
@@ -309,10 +309,10 @@ pub(crate) async fn handle(
     observed_at: u64,
 ) -> Delivery {
     match request {
-        Request::List { team_id } => owner
-            .run_list(team_id)
-            .await
-            .map_or(Delivery::Unavailable, Delivery::Listed),
+        Request::List { team_id } => match owner.run_list(team_id).await {
+            Ok(Ok(runs)) => Delivery::Listed(runs),
+            Ok(Err(_)) | Err(_) => Delivery::Unavailable,
+        },
         Request::Create {
             team_id,
             run_id,
@@ -438,18 +438,24 @@ fn purge_state(outcome: organization::GraphRunPurgeOutcome) -> TombstoneState {
     }
 }
 
-fn run_json(outcome: &organization::TeamRunQueryOutcome) -> Value {
-    match outcome {
-        organization::TeamRunQueryOutcome::Available(run) => json!({
-            "state": "available",
-            "teamId": run.team().as_str(),
-            "runId": run.run().as_str(),
-            "teamRevision": run.team_revision().get(),
-            "graphStatus": graph_status_name(run.graph_status()),
-        }),
-        organization::TeamRunQueryOutcome::Unavailable => json!({ "state": "unavailable" }),
-        organization::TeamRunQueryOutcome::OutcomeUnknown => json!({ "state": "outcome_unknown" }),
+fn run_json(entry: &organization::TeamRunListEntry) -> Value {
+    if entry.runtime == organization::TeamRuntimeState::Unknown
+        || matches!(
+            entry.lifecycle,
+            organization::run::TeamRunPublicLifecycle::Cancelling
+                | organization::run::TeamRunPublicLifecycle::OutcomeUnknown
+        )
+    {
+        return json!({ "state": "outcome_unknown" });
     }
+    let run = &entry.projection;
+    json!({
+        "state": "available",
+        "teamId": run.team().as_str(),
+        "runId": run.run().as_str(),
+        "teamRevision": run.team_revision().get(),
+        "graphStatus": graph_status_name(run.graph_status()),
+    })
 }
 
 fn resume_json(outcome: &organization::ResumeOutcome) -> Value {
@@ -528,16 +534,9 @@ fn decode_workflow_plan(value: Option<&Value>) -> Result<organization::WorkflowP
     let Value::Object(plan) = value.ok_or(DecodeError::Invalid)? else {
         return Err(DecodeError::Invalid);
     };
-    if plan.len() != 8 {
+    if !has_keys(plan, &["workflowPlanId", "runId", "title", "status", "tasks", "idempotencyKey", "createdAt"]) {
         return Err(DecodeError::Invalid);
     }
-    let groups = plan
-        .get("groups")
-        .and_then(Value::as_array)
-        .ok_or(DecodeError::Invalid)?
-        .iter()
-        .map(decode_workflow_group)
-        .collect::<Result<Vec<_>, _>>()?;
     let tasks = plan
         .get("tasks")
         .and_then(Value::as_array)
@@ -550,7 +549,6 @@ fn decode_workflow_plan(value: Option<&Value>) -> Result<organization::WorkflowP
         text_field(plan, "runId")?,
         text_field(plan, "title")?,
         text_field(plan, "status")?,
-        groups,
         tasks,
         text_field(plan, "idempotencyKey")?,
         plan.get("createdAt")
@@ -590,50 +588,6 @@ fn decode_workflow_task(value: &Value) -> Result<organization::WorkflowTask, Dec
         text_field(task, "prompt")?,
         dependencies,
         output,
-    ))
-}
-
-fn decode_workflow_group(value: &Value) -> Result<organization::WorkflowGroup, DecodeError> {
-    let Value::Object(group) = value else {
-        return Err(DecodeError::Invalid);
-    };
-    if group.len() != 4 {
-        return Err(DecodeError::Invalid);
-    }
-    let task_ids = group
-        .get("taskIds")
-        .and_then(Value::as_array)
-        .ok_or(DecodeError::Invalid)?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(ToOwned::to_owned)
-                .ok_or(DecodeError::Invalid)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let Value::Object(join) = group.get("join").ok_or(DecodeError::Invalid)? else {
-        return Err(DecodeError::Invalid);
-    };
-    if join.len() != 3 {
-        return Err(DecodeError::Invalid);
-    }
-    Ok(organization::WorkflowGroup::new(
-        text_field(group, "groupId")?,
-        text_field(group, "title")?,
-        task_ids,
-        organization::WorkflowJoinPolicy::new(
-            join.get("requireCompleted")
-                .and_then(Value::as_bool)
-                .ok_or(DecodeError::Invalid)?,
-            join.get("allowFailed")
-                .and_then(Value::as_bool)
-                .ok_or(DecodeError::Invalid)?,
-            join.get("retryLimit")
-                .and_then(Value::as_u64)
-                .and_then(|value| value.try_into().ok())
-                .ok_or(DecodeError::Invalid)?,
-        ),
     ))
 }
 
@@ -704,12 +658,6 @@ mod tests {
                     "runId": "run:one",
                     "title": "Team plan",
                     "status": "planned",
-                    "groups": [{
-                        "groupId": "group:one",
-                        "title": "Primary work",
-                        "taskIds": ["task:one"],
-                        "join": { "requireCompleted": true, "allowFailed": false, "retryLimit": 0 }
-                    }],
                     "tasks": [{
                         "taskId": "task:one",
                         "roleId": "role:one",

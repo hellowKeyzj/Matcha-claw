@@ -2,6 +2,7 @@ import type { CallReceipt } from '../../../../../src/types/call-log';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import {
+  isSessionTraceEnabled,
   logSessionTrace,
   traceHeader,
 } from '../sessions/trace';
@@ -219,10 +220,10 @@ export function createSecurityPolicyTransport(
       return { status: 503, body: OPERATION_UNAVAILABLE };
     },
     async read(traceId?: string | null): Promise<Record<string, unknown> | null> {
-      const startedAt = Date.now();
-      logSessionTrace('electron.security.policy.transport.request', traceId, {
+      const startedAt = traceId && isSessionTraceEnabled() ? Date.now() : 0;
+      logSessionTrace('electron.security.policy.transport.request', traceId, () => ({
         endpoint: POLICY_READ_ENDPOINT,
-      });
+      }));
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: POLICY_READ_ENDPOINT,
@@ -238,18 +239,18 @@ export function createSecurityPolicyTransport(
         headers: traceHeader(traceId),
       });
       if (response === null) {
-        logSessionTrace('electron.security.policy.transport.failure', traceId, {
+        logSessionTrace('electron.security.policy.transport.failure', traceId, () => ({
           elapsedMs: Date.now() - startedAt,
-        });
+        }));
         return null;
       }
       const contract = response.status === 200 ? policyContract(response.body) : 'http-status';
       const valid = contract === 'policy';
-      logSessionTrace('electron.security.policy.transport.response', traceId, {
+      logSessionTrace('electron.security.policy.transport.response', traceId, () => ({
         status: response.status,
         contract,
         elapsedMs: Date.now() - startedAt,
-      });
+      }));
       return valid ? response.body as Record<string, unknown> : null;
     },
     async readAudit(page: number, pageSize: number): Promise<SecurityAuditResponse | null> {

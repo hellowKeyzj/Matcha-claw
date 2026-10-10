@@ -10,6 +10,35 @@ mod windows;
 
 const REJECTED: &str = "state directory rejected";
 
+/// Publishes a flushed file without replacing an existing destination or copying across volumes.
+#[cfg(windows)]
+pub fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::{io, os::windows::ffi::OsStrExt};
+
+    fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+        let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if value.contains(&0) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        value.push(0);
+        Ok(value)
+    }
+
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    let source = wide_path(source)?;
+    let target = wide_path(target)?;
+    // SAFETY: both buffers are live, NUL-terminated UTF-16 paths for the synchronous call.
+    if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct CanonicalStateDir {
     path: PathBuf,

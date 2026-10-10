@@ -17,6 +17,7 @@
 
 import type { ToolClient } from '../../../core/tool-client';
 import { isInvokeError } from '../helpers';
+import { isTraceEnabled } from '../../../core/lark-logger';
 
 // ---------------------------------------------------------------------------
 // 独立缓存：accountId → Map<openId, { name, expireAt }>
@@ -112,7 +113,7 @@ export async function batchResolveUserNamesAsUser(params: {
 
   // 2. 分批通过 SDK 调用 contact/v3/users/basic_batch（UAT）
   const totalBatches = Math.ceil(uniqueMissing.length / BATCH_SIZE);
-  log(`batchResolveUserNamesAsUser: resolving ${uniqueMissing.length} user(s) in ${totalBatches} batch(es), ${result.size} cache hit(s)`);
+  if (isTraceEnabled()) log(`batchResolveUserNamesAsUser: resolving ${uniqueMissing.length} user(s) in ${totalBatches} batch(es), ${result.size} cache hit(s)`);
 
   for (let i = 0; i < uniqueMissing.length; i += BATCH_SIZE) {
     const chunk = uniqueMissing.slice(i, i + BATCH_SIZE);

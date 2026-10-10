@@ -1,6 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
-import { logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 
 const ROUTE = '/api/sessions/abort';
 const MAX_RUN_ID_BYTES = 4096;
@@ -44,26 +44,28 @@ export function createSessionAbortTransport(
 ): SessionAbortTransport {
   return {
     async abort(request: unknown, traceId?: string | null): Promise<SessionAbortTransportResponse> {
-      const startedAt = Date.now();
+      const startedAt = traceId && isSessionTraceEnabled() ? Date.now() : 0;
       if (!isSessionAbortRequest(request)) {
-        const input = isRecord(request) && isRecord(request.input) ? request.input : null;
-        logSessionTrace('electron.abort.rejected', traceId, {
-          reason: 'request-validation',
-          approvalIdsCount: Array.isArray(input?.approvalIds) ? input.approvalIds.length : null,
-          emptyApprovalIds: Array.isArray(input?.approvalIds) && input.approvalIds.length === 0,
-          publicOutcome: 'unknown',
-          elapsedMs: Date.now() - startedAt,
+        logSessionTrace('electron.abort.rejected', traceId, () => {
+          const input = isRecord(request) && isRecord(request.input) ? request.input : null;
+          return {
+            reason: 'request-validation',
+            approvalIdsCount: Array.isArray(input?.approvalIds) ? input.approvalIds.length : null,
+            emptyApprovalIds: Array.isArray(input?.approvalIds) && input.approvalIds.length === 0,
+            publicOutcome: 'unknown',
+            elapsedMs: Date.now() - startedAt,
+          };
         });
         return unknownOutcome();
       }
-      logSessionTrace('electron.abort.request', traceId, {
+      logSessionTrace('electron.abort.request', traceId, () => ({
         adapter: request.input.identity.endpoint.runtimeAdapterId,
         sessionKey: summarizeIdentifier(request.input.identity.sessionKey),
         endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
         runId: summarizeIdentifier(request.input.runId),
         approvalIdsCount: request.input.approvalIds?.length ?? null,
         emptyApprovalIds: request.input.approvalIds?.length === 0,
-      });
+      }));
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: ROUTE,
@@ -82,14 +84,14 @@ export function createSessionAbortTransport(
       const result: SessionAbortTransportResponse = response?.status === 200 && isSessionAbortResponse(response.body)
         ? { status: 200, body: response.body }
         : unknownOutcome();
-      logSessionTrace('electron.abort.response', traceId, {
+      logSessionTrace('electron.abort.response', traceId, () => ({
         upstreamStatus: response?.status ?? null,
         contract: isSessionAbortResponse(response?.body) ? 'valid' : 'invalid',
         publicOutcome: result.body.outcome,
         approvalIdsCount: request.input.approvalIds?.length ?? null,
         emptyApprovalIds: request.input.approvalIds?.length === 0,
         elapsedMs: Date.now() - startedAt,
-      });
+      }));
       return result;
     },
   };

@@ -29,115 +29,115 @@ export function handlePageLifecycleEvent(method, tabId, params, _ctx) {
     // ── Load events ──
 
     case 'Page.loadEventFired':
-      log.debug('page loaded:', tabId, 'ts:', params?.timestamp)
+      log.debug(() => ['page loaded:', tabId, 'ts:', params?.timestamp])
       break
 
     case 'Page.domContentEventFired':
-      log.debug('DOM content loaded:', tabId, 'ts:', params?.timestamp)
+      log.debug(() => ['DOM content loaded:', tabId, 'ts:', params?.timestamp])
       break
 
     case 'Page.lifecycleEvent':
-      log.debug(
+      log.debug(() => [
         'lifecycle:', tabId,
         params?.name,
         'frameId:', params?.frameId,
         'loaderId:', params?.loaderId,
-      )
+      ])
       break
 
     // ── Frame events ──
 
     case 'Page.frameNavigated':
-      log.debug(
+      log.debug(() => [
         'frame navigated:', tabId,
         'url:', truncate(params?.frame?.url || '', 100),
         'id:', params?.frame?.id,
         'type:', params?.type,
-      )
+      ])
       break
 
     case 'Page.frameAttached':
-      log.debug(
+      log.debug(() => [
         'frame attached:', tabId,
         'frameId:', params?.frameId,
         'parentFrameId:', params?.parentFrameId,
-      )
+      ])
       break
 
     case 'Page.frameDetached':
-      log.debug(
+      log.debug(() => [
         'frame detached:', tabId,
         'frameId:', params?.frameId,
         'reason:', params?.reason,
-      )
+      ])
       break
 
     case 'Page.frameStartedLoading':
-      log.debug('frame loading started:', tabId, 'frameId:', params?.frameId)
+      log.debug(() => ['frame loading started:', tabId, 'frameId:', params?.frameId])
       break
 
     case 'Page.frameStoppedLoading':
-      log.debug('frame loading stopped:', tabId, 'frameId:', params?.frameId)
+      log.debug(() => ['frame loading stopped:', tabId, 'frameId:', params?.frameId])
       break
 
     case 'Page.frameStartedNavigating':
-      log.debug(
+      log.debug(() => [
         'frame navigating:', tabId,
         'frameId:', params?.frameId,
         'url:', truncate(params?.url || '', 100),
         'type:', params?.navigationType,
-      )
+      ])
       break
 
     case 'Page.navigatedWithinDocument':
-      log.debug(
+      log.debug(() => [
         'SPA navigation:', tabId,
         'frameId:', params?.frameId,
         'url:', truncate(params?.url || '', 100),
         'type:', params?.navigationType,
-      )
+      ])
       break
 
     // ── Window / popup events ──
 
     case 'Page.windowOpen':
-      log.info(
+      log.info(() => [
         'window.open:', tabId,
         'url:', truncate(params?.url || '', 100),
         'name:', params?.windowName || '(none)',
         'features:', params?.windowFeatures?.join(',') || '(none)',
         'userGesture:', params?.userGesture,
-      )
+      ])
       break
 
     // ── Download events ──
 
     case 'Page.downloadWillBegin':
-      log.info(
+      log.info(() => [
         'download starting:', tabId,
         'url:', truncate(params?.url || '', 100),
         'filename:', params?.suggestedFilename,
         'guid:', params?.guid,
-      )
+      ])
       break
 
     case 'Page.downloadProgress':
       if (params?.state === 'completed') {
-        log.info('download completed:', tabId, 'guid:', params?.guid, 'bytes:', params?.totalBytes)
+        log.info(() => ['download completed:', tabId, 'guid:', params?.guid, 'bytes:', params?.totalBytes])
       } else if (params?.state === 'canceled') {
-        log.info('download canceled:', tabId, 'guid:', params?.guid)
+        log.info(() => ['download canceled:', tabId, 'guid:', params?.guid])
       }
       break
 
     // ── File chooser (requires Page.setInterceptFileChooserDialog) ──
 
     case 'Page.fileChooserOpened':
-      log.info(
+      log.info(() => [
         'file chooser opened:', tabId,
         'mode:', params?.mode,
         'frameId:', params?.frameId,
         'backendNodeId:', params?.backendNodeId,
-      )
+      ])
       break
 
     // ── Interstitial (SSL/security pages) ──
@@ -147,7 +147,7 @@ export function handlePageLifecycleEvent(method, tabId, params, _ctx) {
       break
 
     case 'Page.interstitialHidden':
-      log.info('interstitial hidden:', tabId)
+      log.info(() => ['interstitial hidden:', tabId])
       break
   }
 }

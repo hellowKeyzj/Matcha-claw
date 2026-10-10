@@ -18,16 +18,25 @@ impl RuntimeControlOps for OpenClawDriver {
     ) -> OwnedRuntimeFuture<Result<RuntimeLogSnapshot, RuntimeControlFailure>> {
         let lifecycle_logs = self.lifecycle_logs.clone();
         let gateway = Arc::clone(&self.gateway);
+        let running = self.supervisor_handle().snapshot().phase() == SupervisorPhase::Running;
         Box::pin(async move {
             let lifecycle = lifecycle_logs.snapshot_with_coverage();
-            let gateway = gateway
-                .lock()
-                .await
-                .tail_logs(cursor, 500, 250_000)
-                .await
-                .map_err(|_| RuntimeControlFailure::Unavailable)?;
-            let mut seen = HashSet::with_capacity(lifecycle.entries.len() + gateway.lines.len());
-            let mut entries = Vec::with_capacity(lifecycle.entries.len() + gateway.lines.len());
+            let gateway = if running {
+                Some(
+                    gateway
+                        .lock()
+                        .await
+                        .tail_logs(cursor, 500, 250_000)
+                        .await
+                        .map_err(|_| RuntimeControlFailure::Unavailable)?,
+                )
+            } else {
+                None
+            };
+            let capacity =
+                lifecycle.entries.len() + gateway.as_ref().map_or(0, |tail| tail.lines.len());
+            let mut seen = HashSet::with_capacity(capacity);
+            let mut entries = Vec::with_capacity(capacity);
             for entry in lifecycle.entries {
                 let source = match entry.stream() {
                     crate::lifecycle::logs::LogStream::Stdout => "stdout",
@@ -38,20 +47,26 @@ impl RuntimeControlOps for OpenClawDriver {
                     entries.push(RuntimeLogEntry { source, line });
                 }
             }
-            for line in gateway.lines {
-                let line = sanitize_log_line(line.as_bytes());
-                if !line.is_empty() && seen.insert(("gateway", line.clone())) {
-                    entries.push(RuntimeLogEntry {
-                        source: "gateway",
-                        line,
-                    });
+            let (cursor, reset, truncated) = match gateway {
+                Some(gateway) => {
+                    for line in gateway.lines {
+                        let line = sanitize_log_line(line.as_bytes());
+                        if !line.is_empty() && seen.insert(("gateway", line.clone())) {
+                            entries.push(RuntimeLogEntry {
+                                source: "gateway",
+                                line,
+                            });
+                        }
+                    }
+                    (gateway.cursor, gateway.reset, gateway.truncated)
                 }
-            }
+                None => (cursor.unwrap_or(0), false, false),
+            };
             Ok(RuntimeLogSnapshot {
                 entries,
-                cursor: gateway.cursor,
-                reset: gateway.reset,
-                truncated: gateway.truncated,
+                cursor,
+                reset,
+                truncated,
                 lifecycle_tail_evicted: lifecycle.tail_evicted,
             })
         })

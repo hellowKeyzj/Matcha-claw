@@ -1,150 +1,31 @@
-use std::{future::Future, pin::Pin};
-
-use serde_json::Value;
+use platform::trace::{identifier_hash, runtime_trace};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
-const TEAM_MESSAGE_OPEN: &str = "<team_message>";
-const TEAM_MESSAGE_CLOSE: &str = "</team_message>";
+use crate::{GraphState, NodeId, TeamNodeOutput, TeamNodeOutputError};
+
 pub const MAX_REPAIR_ATTEMPTS: usize = 3;
 
-type TeamMessageRepairFuture<'a> = Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>>;
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TeamMessage {
-    summary: String,
-    decision: String,
-    dispatch: Vec<TeamMessageDispatch>,
-}
-
-impl TeamMessage {
-    pub(crate) fn summary(&self) -> &str {
-        &self.summary
-    }
-
-    pub(crate) fn decision(&self) -> &str {
-        &self.decision
-    }
-
-    pub(crate) fn dispatch(&self) -> &[TeamMessageDispatch] {
-        &self.dispatch
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TeamMessageDispatch {
-    role_id: String,
-    task: String,
-}
-
-impl TeamMessageDispatch {
-    pub(crate) fn role_id(&self) -> &str {
-        &self.role_id
-    }
-
-    pub(crate) fn task(&self) -> &str {
-        &self.task
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TeamMessageError {
-    MissingEnvelope,
-    Json(String),
-    ErrorList(Vec<TeamMessageValidationError>),
+enum TeamMessageError {
+    Output(TeamNodeOutputError),
+    ConflictingOutputs,
 }
 
 impl TeamMessageError {
-    fn repair_errors(&self) -> Vec<String> {
+    fn repair_error(&self) -> String {
         match self {
-            Self::MissingEnvelope => {
-                vec!["missing <team_message>...</team_message> envelope".to_owned()]
-            }
-            Self::Json(error) => vec![format!("invalid JSON: {error}")],
-            Self::ErrorList(errors) => errors.iter().map(ToString::to_string).collect(),
+            Self::Output(TeamNodeOutputError::MissingEnvelope) => "missing <team_message>...</team_message> envelope".to_owned(),
+            Self::Output(TeamNodeOutputError::InvalidEnvelope) => "exactly one <team_message> envelope must end the final reply".to_owned(),
+            Self::Output(TeamNodeOutputError::InvalidJson) => "invalid JSON".to_owned(),
+            Self::Output(TeamNodeOutputError::MissingField(field)) => format!("missing required field `{field}`"),
+            Self::Output(TeamNodeOutputError::UnexpectedField(_)) => "only summary and decision fields are allowed".to_owned(),
+            Self::Output(TeamNodeOutputError::InvalidField(field)) => format!("invalid field `{field}`"),
+            Self::Output(TeamNodeOutputError::InvalidSummary) => "summary must be non-empty, at most 512 UTF-8 bytes, without control characters".to_owned(),
+            Self::Output(TeamNodeOutputError::UnsafeDecision | TeamNodeOutputError::DecisionNotAllowed) => "decision must be one of the current node's allowed output ports".to_owned(),
+            Self::ConflictingOutputs => "conflicting valid team_message outputs; provide one unambiguous result".to_owned(),
         }
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TeamMessageValidationError {
-    RootNotObject,
-    MissingField(&'static str),
-    UnexpectedField(String),
-    FieldType {
-        field: &'static str,
-        expected: &'static str,
-    },
-    EmptyString(&'static str),
-    StringTooLong {
-        field: &'static str,
-        max: usize,
-    },
-    ControlCharacter(&'static str),
-}
-
-impl std::fmt::Display for TeamMessageValidationError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::RootNotObject => write!(formatter, "root must be a JSON object"),
-            Self::MissingField(field) => write!(formatter, "missing required field `{field}`"),
-            Self::UnexpectedField(field) => write!(formatter, "unexpected field `{field}`"),
-            Self::FieldType { field, expected } => {
-                write!(formatter, "field `{field}` must be {expected}")
-            }
-            Self::EmptyString(field) => write!(formatter, "field `{field}` must not be empty"),
-            Self::StringTooLong { field, max } => {
-                write!(
-                    formatter,
-                    "field `{field}` must be at most {max} characters"
-                )
-            }
-            Self::ControlCharacter(field) => {
-                write!(
-                    formatter,
-                    "field `{field}` must not contain control characters"
-                )
-            }
-        }
-    }
-}
-
-pub(crate) fn extract_last_team_message(text: &str) -> Result<&str, TeamMessageError> {
-    let close = text
-        .rfind(TEAM_MESSAGE_CLOSE)
-        .ok_or(TeamMessageError::MissingEnvelope)?;
-    let before_close = &text[..close];
-    let open = before_close
-        .rfind(TEAM_MESSAGE_OPEN)
-        .ok_or(TeamMessageError::MissingEnvelope)?;
-    Ok(&before_close[open + TEAM_MESSAGE_OPEN.len()..])
-}
-
-pub(crate) fn parse_team_message(text: &str) -> Result<TeamMessage, TeamMessageError> {
-    let json = extract_last_team_message(text)?;
-    let value = serde_json::from_str::<Value>(json.trim())
-        .map_err(|error| TeamMessageError::Json(error.to_string()))?;
-    validate_team_message(&value)
-}
-
-fn parse_or_normalize_team_message_text(text: &str) -> Result<String, TeamMessageError> {
-    match parse_team_message(text) {
-        Ok(_) => return Ok(text.to_owned()),
-        Err(TeamMessageError::MissingEnvelope) => {}
-        Err(error) => return Err(error),
-    }
-    let Some(json) = text
-        .get(text.find('{').ok_or(TeamMessageError::MissingEnvelope)?..)
-        .and_then(|suffix| suffix.get(..suffix.rfind('}')? + 1))
-    else {
-        return Err(TeamMessageError::MissingEnvelope);
-    };
-    let value = serde_json::from_str::<Value>(json.trim())
-        .map_err(|error| TeamMessageError::Json(error.to_string()))?;
-    validate_team_message(&value)?;
-    Ok(format!(
-        "{TEAM_MESSAGE_OPEN}{}{TEAM_MESSAGE_CLOSE}",
-        json.trim()
-    ))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -186,7 +67,6 @@ pub struct TeamMessageRepairDispatch {
     requested_run_id: String,
     endpoint_session_id: organization::EndpointSessionId,
     prompt: String,
-    last_invalid_output: String,
 }
 
 impl TeamMessageRepairDispatch {
@@ -206,17 +86,13 @@ impl TeamMessageRepairDispatch {
         &self.prompt
     }
 
-    pub fn last_invalid_output(&self) -> &str {
-        &self.last_invalid_output
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TeamMessageTerminalPlan {
-    Settle {
-        final_assistant_text: Option<String>,
-    },
+    Settle { output: TeamNodeOutput },
     Repair(TeamMessageRepairDispatch),
+    Failed,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,32 +105,115 @@ pub enum TeamMessageTerminalObservation {
 pub fn plan_team_message_terminal(
     context: &TeamMessageTerminalContext,
     attempt: usize,
-    final_assistant_text: Option<String>,
+    assistant_texts: Vec<String>,
+    graph: &GraphState,
+    node_id: &NodeId,
 ) -> TeamMessageTerminalPlan {
-    let Some(text) = final_assistant_text else {
-        return TeamMessageTerminalPlan::Settle {
-            final_assistant_text: None,
-        };
-    };
-    match parse_or_normalize_team_message_text(&text) {
-        Ok(normalized) => TeamMessageTerminalPlan::Settle {
-            final_assistant_text: Some(normalized),
-        },
+    let plan = match select_team_message(&assistant_texts, graph, node_id) {
+        Ok(output) => TeamMessageTerminalPlan::Settle { output },
         Err(error) if attempt < MAX_REPAIR_ATTEMPTS => {
             let next_attempt = attempt + 1;
-            let prompt = build_team_message_repair_prompt(next_attempt, &text, &error);
             TeamMessageTerminalPlan::Repair(TeamMessageRepairDispatch {
                 attempt: next_attempt,
                 requested_run_id: team_message_repair_run_id(context.delivery_id(), next_attempt),
                 endpoint_session_id: context.endpoint_session_id().clone(),
-                prompt: prompt.as_str().to_owned(),
-                last_invalid_output: text,
+                prompt: build_team_message_repair_prompt(&assistant_texts.join("\n\n"), &error, graph, node_id),
             })
         }
-        Err(_) => TeamMessageTerminalPlan::Settle {
-            final_assistant_text: Some(text),
+        Err(_) => TeamMessageTerminalPlan::Failed,
+    };
+    runtime_trace("runtime.team_run.terminal.plan", || json!({
+        "runHash": identifier_hash(context.run_id().as_str()),
+        "deliveryHash": identifier_hash(context.delivery_id().as_str()),
+        "nodeHash": identifier_hash(node_id.as_str()),
+        "attempt": attempt, "maxAttempts": MAX_REPAIR_ATTEMPTS,
+        "remainingAttempts": MAX_REPAIR_ATTEMPTS.saturating_sub(attempt),
+        "candidateTotal": assistant_texts.len(),
+        "outcome": match &plan {
+            TeamMessageTerminalPlan::Settle { .. } => "settle",
+            TeamMessageTerminalPlan::Repair(_) => "repair",
+            TeamMessageTerminalPlan::Failed => "failed",
         },
+        "repair": match &plan {
+            TeamMessageTerminalPlan::Repair(repair) => Some(json!({
+                "nativeRunHash": identifier_hash(repair.requested_run_id()),
+                "attempt": repair.attempt(),
+            })),
+            _ => None,
+        },
+    }));
+    plan
+}
+
+fn select_team_message(
+    assistant_texts: &[String],
+    graph: &GraphState,
+    node_id: &NodeId,
+) -> Result<TeamNodeOutput, TeamMessageError> {
+    let mut selected: Option<TeamNodeOutput> = None;
+    let mut error = TeamMessageError::Output(TeamNodeOutputError::MissingEnvelope);
+    for (index, text) in assistant_texts.iter().enumerate() {
+        let candidate = TeamNodeOutput::parse(text.clone()).and_then(|output| {
+            output.validate_decision_for(graph, node_id)?;
+            Ok(output)
+        });
+        if index < 16 {
+            runtime_trace("runtime.team_run.terminal.candidate", || json!({
+                "runHash": identifier_hash(graph.definition().run_id().as_str()),
+                "nodeHash": identifier_hash(node_id.as_str()),
+                "index": index, "utf8Bytes": text.len(),
+                "total": assistant_texts.len(), "truncated": assistant_texts.len() > 16,
+                "error": candidate.as_ref().err().map(|error| match error {
+                    TeamNodeOutputError::MissingEnvelope => "missing_envelope",
+                    TeamNodeOutputError::InvalidEnvelope => "invalid_envelope",
+                    TeamNodeOutputError::InvalidJson => "invalid_json",
+                    TeamNodeOutputError::MissingField(_) => "missing_field",
+                    TeamNodeOutputError::UnexpectedField(_) => "unexpected_field",
+                    TeamNodeOutputError::InvalidField(_) => "invalid_field",
+                    TeamNodeOutputError::InvalidSummary => "invalid_summary",
+                    TeamNodeOutputError::UnsafeDecision => "unsafe_decision",
+                    TeamNodeOutputError::DecisionNotAllowed => "decision_not_allowed",
+                }),
+                "decisionAllowed": match &candidate {
+                    Ok(_) => Some(true),
+                    Err(TeamNodeOutputError::UnsafeDecision | TeamNodeOutputError::DecisionNotAllowed) => Some(false),
+                    Err(_) => None,
+                },
+                "decision": candidate.as_ref().ok().map(|output| crate::trace::port(output.decision())),
+                "selection": match (&candidate, &selected) {
+                    (Err(_), _) => "invalid",
+                    (Ok(_), None) => "selected",
+                    (Ok(output), Some(existing)) if existing.summary() == output.summary()
+                        && existing.decision() == output.decision() => "equivalent_duplicate",
+                    _ => "conflicting",
+                },
+            }));
+        }
+        match candidate {
+            Ok(output) => match &selected {
+                Some(existing) if existing.summary() != output.summary()
+                    || existing.decision() != output.decision() => {
+                    runtime_trace("runtime.team_run.terminal.selection", || json!({
+                        "runHash": identifier_hash(graph.definition().run_id().as_str()),
+                        "nodeHash": identifier_hash(node_id.as_str()),
+                        "outcome": "conflicting", "index": index,
+                        "processed": index + 1, "total": assistant_texts.len(),
+                    }));
+                    return Err(TeamMessageError::ConflictingOutputs);
+                }
+                Some(_) => {}
+                None => selected = Some(output),
+            },
+            Err(next_error) => error = TeamMessageError::Output(next_error),
+        }
     }
+    runtime_trace("runtime.team_run.terminal.selection", || json!({
+        "runHash": identifier_hash(graph.definition().run_id().as_str()),
+        "nodeHash": identifier_hash(node_id.as_str()),
+        "outcome": if selected.is_some() { "unique" } else { "no_valid_output" },
+        "total": assistant_texts.len(), "truncated": assistant_texts.len() > 16,
+    }));
+    selected.ok_or(error)
 }
 
 fn team_message_repair_run_id(delivery_id: &organization::DeliveryId, attempt: usize) -> String {
@@ -265,180 +224,17 @@ fn team_message_repair_run_id(delivery_id: &organization::DeliveryId, attempt: u
     format!("tmr-{:x}", digest.finalize())
 }
 
-pub(crate) fn validate_team_message(value: &Value) -> Result<TeamMessage, TeamMessageError> {
-    let Some(object) = value.as_object() else {
-        return Err(TeamMessageError::ErrorList(vec![
-            TeamMessageValidationError::RootNotObject,
-        ]));
-    };
-    let mut errors = Vec::new();
-    for field in object.keys() {
-        if !matches!(field.as_str(), "summary" | "decision" | "dispatch") {
-            errors.push(TeamMessageValidationError::UnexpectedField(field.clone()));
-        }
-    }
-    let summary = required_string(object, "summary", &mut errors);
-    let decision = required_string(object, "decision", &mut errors);
-    if let Some(summary) = summary {
-        validate_summary(summary, &mut errors);
-    }
-    let dispatch = required_dispatch(object.get("dispatch"), &mut errors);
-    if !errors.is_empty() {
-        return Err(TeamMessageError::ErrorList(errors));
-    }
-    Ok(TeamMessage {
-        summary: summary.expect("validated summary is present").to_owned(),
-        decision: decision.expect("validated decision is present").to_owned(),
-        dispatch: dispatch.expect("validated dispatch is present"),
-    })
-}
-
-fn required_string<'a>(
-    object: &'a serde_json::Map<String, Value>,
-    field: &'static str,
-    errors: &mut Vec<TeamMessageValidationError>,
-) -> Option<&'a str> {
-    required_string_value(object.get(field), field, errors)
-}
-
-fn required_string_value<'a>(
-    value: Option<&'a Value>,
-    field: &'static str,
-    errors: &mut Vec<TeamMessageValidationError>,
-) -> Option<&'a str> {
-    match value {
-        Some(Value::String(value)) if value.trim().is_empty() => {
-            errors.push(TeamMessageValidationError::EmptyString(field));
-            None
-        }
-        Some(Value::String(value)) => Some(value.as_str()),
-        Some(_) => {
-            errors.push(TeamMessageValidationError::FieldType {
-                field,
-                expected: "a string",
-            });
-            None
-        }
-        None => {
-            errors.push(TeamMessageValidationError::MissingField(field));
-            None
-        }
-    }
-}
-
-fn required_dispatch(
-    value: Option<&Value>,
-    errors: &mut Vec<TeamMessageValidationError>,
-) -> Option<Vec<TeamMessageDispatch>> {
-    let Some(Value::Array(items)) = value else {
-        match value {
-            Some(_) => errors.push(TeamMessageValidationError::FieldType {
-                field: "dispatch",
-                expected: "an array",
-            }),
-            None => errors.push(TeamMessageValidationError::MissingField("dispatch")),
-        }
-        return None;
-    };
-    let mut dispatch = Vec::with_capacity(items.len());
-    for item in items {
-        let Some(object) = item.as_object() else {
-            errors.push(TeamMessageValidationError::FieldType {
-                field: "dispatch",
-                expected: "an array of objects",
-            });
-            continue;
-        };
-        for field in object.keys() {
-            if !matches!(field.as_str(), "role_id" | "task") {
-                errors.push(TeamMessageValidationError::UnexpectedField(format!(
-                    "dispatch.{field}"
-                )));
-            }
-        }
-        let role_id = required_string(object, "role_id", errors);
-        let task = required_string(object, "task", errors);
-        if let (Some(role_id), Some(task)) = (role_id, task) {
-            dispatch.push(TeamMessageDispatch {
-                role_id: role_id.to_owned(),
-                task: task.to_owned(),
-            });
-        }
-    }
-    Some(dispatch)
-}
-
-fn validate_summary(summary: &str, errors: &mut Vec<TeamMessageValidationError>) {
-    if summary.len() > 512 {
-        errors.push(TeamMessageValidationError::StringTooLong {
-            field: "summary",
-            max: 512,
-        });
-    }
-    if summary.chars().any(char::is_control) {
-        errors.push(TeamMessageValidationError::ControlCharacter("summary"));
-    }
-}
-
-pub(crate) trait TeamMessageRepairer {
-    fn repair_team_message<'a>(
-        &'a mut self,
-        prompt: TeamMessageRepairPrompt<'a>,
-    ) -> TeamMessageRepairFuture<'a>;
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TeamMessageRepairPrompt<'a> {
-    pub(crate) attempt: usize,
-    pub(crate) max_attempts: usize,
-    pub(crate) original_output: &'a str,
-    pub(crate) errors: Vec<String>,
-    pub(crate) correct_format: &'static str,
-    prompt: String,
-}
-
-impl TeamMessageRepairPrompt<'_> {
-    pub fn as_str(&self) -> &str {
-        &self.prompt
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum TeamMessageRepairOutcome {
-    Valid(TeamMessage),
-    Failed(TeamMessageError),
-}
-
-pub(crate) async fn parse_or_repair_team_message(
+fn build_team_message_repair_prompt(
     original_output: &str,
-    repairer: &mut impl TeamMessageRepairer,
-) -> TeamMessageRepairOutcome {
-    let mut candidate = original_output.to_owned();
-    let mut error = match parse_team_message(&candidate) {
-        Ok(message) => return TeamMessageRepairOutcome::Valid(message),
-        Err(error) => error,
-    };
-    for attempt in 1..=MAX_REPAIR_ATTEMPTS {
-        let prompt = build_team_message_repair_prompt(attempt, original_output, &error);
-        let Some(repaired) = repairer.repair_team_message(prompt).await else {
-            return TeamMessageRepairOutcome::Failed(error);
-        };
-        candidate = repaired;
-        match parse_team_message(&candidate) {
-            Ok(message) => return TeamMessageRepairOutcome::Valid(message),
-            Err(next_error) => error = next_error,
-        }
-    }
-    TeamMessageRepairOutcome::Failed(error)
-}
-
-fn build_team_message_repair_prompt<'a>(
-    attempt: usize,
-    original_output: &'a str,
     error: &TeamMessageError,
-) -> TeamMessageRepairPrompt<'a> {
-    let errors = error.repair_errors();
-    let correct_format = r#"<team_message>{"summary":"中文交付摘要","decision":"completed","dispatch":[]}</team_message>"#;
+    graph: &GraphState,
+    node_id: &NodeId,
+) -> String {
+    let decisions = graph.definition().node(node_id).into_iter()
+        .flat_map(|node| node.kind().source_ports())
+        .map(|port| port.as_str())
+        .collect::<Vec<_>>().join(" / ");
+    let correct_format = r#"<team_message>{"summary":"中文交付摘要","decision":"completed"}</team_message>"#;
     let prompt = format!(
         "<teamrun_message_repair>\n\
 你正在修复 TeamRun 节点最终回复中的 `<team_message>` 控制块。\n\n\
@@ -448,23 +244,102 @@ fn build_team_message_repair_prompt<'a>(
 校验错误：\n{}\n\n\
 目标结构：\n{correct_format}\n\n\
 修复规则：\n\
-- JSON 顶层只能包含 `summary`、`decision`、`dispatch`\n\
-- `summary`：用中文概括原始输出里的完成内容、关键结论、产物/改动、风险、下游必要上下文\n\
-- `decision`：保留原始输出表达的后续流向；如果无法判断，填 `completed`\n\
-- `dispatch`：必须是数组；没有明确下游任务时填 `[]`\n\
-- `dispatch` 每项只能包含非空字符串字段 `role_id` 和 `task`\n\
-- JSON 字符串里的换行和引号必须正确转义\n\
+- 只输出一个完整控制块，不用 Markdown 代码围栏包裹；结束标签后不再输出内容，字段值中不写控制块标签\n\
+- 块内直接写一个 JSON 对象，不写数组或把整个对象编码成字符串；只含 `summary`、`decision`，各出现一次，值均为非空字符串，不用 null、数字、布尔值或嵌套对象代替\n\
+- JSON 结构使用英文双引号、冒号和逗号；不用单引号或中文标点代替，不写注释、省略号或尾逗号\n\
+- `summary`：用中文概括原始输出里的完成内容、关键结论、产物/改动、风险、下游必要上下文；非空，不超过 512 UTF-8 字节，不含控制字符\n\
+- 摘要引用优先用中文引号，如“不可核实”；字符串值内部的英文双引号写为 `\\\"`，反斜杠写为 `\\\\`，不要用 HTML 实体代替 JSON 转义\n\
+- 摘要写成单段，用空格或分号分隔，不含换行、制表符等控制字符，即使写成 JSON 转义也不允许；超长时精简内容，不截断 JSON\n\
+- `decision`：保留原始输出表达的后续流向，只能选择当前节点允许的值：{decisions}；不得把失败或返工改为成功，也不翻译、不加空格或解释\n\
+- 提交前检查对象与字符串闭合、转义和字段类型\n\
 </teamrun_message_repair>",
-        errors.join("\n")
+        error.repair_error()
     );
-    TeamMessageRepairPrompt {
-        attempt,
-        max_attempts: MAX_REPAIR_ATTEMPTS,
-        original_output,
-        errors,
-        correct_format,
-        prompt,
+    prompt
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TeamMessageFailure {
+    RepairExhausted,
+    RepairRejected,
+    RepairFailed,
+    InvalidOutput,
+}
+
+impl TeamMessageFailure {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::RepairExhausted => "team_message_repair_exhausted",
+            Self::RepairRejected => "team_message_repair_rejected",
+            Self::RepairFailed => "team_message_repair_failed",
+            Self::InvalidOutput => "team_message_invalid_output",
+        }
     }
+
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::RepairExhausted => "节点最终回复仍不符合完成协议，三次补答已耗尽。",
+            Self::RepairRejected => "节点最终回复不符合完成协议，补答发送被拒绝。",
+            Self::RepairFailed => "节点最终回复不符合完成协议，补答未成功完成。",
+            Self::InvalidOutput => "节点最终回复不符合完成协议，无法结算为成功。",
+        }
+    }
+
+    pub(crate) fn receipt(self, delivery_id: &crate::DeliveryId) -> crate::AuthorizedGraphResolutionReceipt {
+        crate::AuthorizedGraphResolutionReceipt::try_new(format!("{}:{}", self.code(), delivery_id.as_str()))
+            .expect("fixed terminal failure receipt is non-empty")
+    }
+
+    pub(crate) fn evidence(
+        self,
+        observation: &crate::run::delivery::TerminalObservation,
+        recorded_at: u64,
+    ) -> Result<crate::EvidenceRecord, crate::StoreFault> {
+        let evidence_id = Self::evidence_id(observation.delivery_id());
+        crate::EvidenceRecord::new(
+            evidence_id,
+            observation.graph_run_id(),
+            observation.fence().node_execution_id().as_str(),
+            crate::EvidenceReference::opaque(crate::EvidenceReferenceKind::InlineText, self.code(), Some(self.message().to_owned()))
+                .map_err(|_| crate::StoreFault::InvalidFacts)?,
+            recorded_at,
+        ).map_err(|_| crate::StoreFault::InvalidFacts)
+    }
+
+    fn evidence_id(delivery_id: &crate::DeliveryId) -> crate::EvidenceId {
+        crate::EvidenceId::new(format!("team-message-failure:{:x}", Sha256::digest(delivery_id.as_str().as_bytes())))
+            .expect("fixed prefix and digest fit evidence identity")
+    }
+}
+
+pub(crate) fn terminal_failure(
+    facts: &crate::OrganizationFacts,
+    run_id: &crate::GraphRunId,
+) -> Option<(crate::NodeId, &'static str, &'static str)> {
+    let run = facts.run(run_id)?;
+    facts.deliveries().deliveries().find_map(|delivery| {
+        let crate::DeliveryPhase::TerminalObserved { observation } = delivery.phase() else { return None; };
+        if observation.graph_run_id() != run_id.as_str() || observation.output().is_some() {
+            return None;
+        }
+        let node_id = crate::NodeId::new(observation.node_id());
+        let attempt = run.graph().current_attempt(&node_id)?;
+        if attempt.fence() != observation.fence() || attempt.status() != crate::AttemptStatus::Failed {
+            return None;
+        }
+        let crate::run::delivery::TerminalObservationResolution::GraphResolved(resolution) = observation.resolution() else { return None; };
+        if resolution.outcome() != crate::AuthorizedGraphOutcome::Failed || resolution.output_port() != "failed" {
+            return None;
+        }
+        let failure = [TeamMessageFailure::RepairExhausted, TeamMessageFailure::RepairRejected, TeamMessageFailure::RepairFailed, TeamMessageFailure::InvalidOutput]
+            .into_iter().find(|failure| &failure.receipt(&delivery.facts().delivery_id) == resolution.receipt())?;
+        let evidence_id = TeamMessageFailure::evidence_id(observation.delivery_id());
+        facts.evidence_records().find(|record| record.evidence_id() == &evidence_id
+            && record.matches_execution(run_id.as_str(), observation.fence())
+            && record.reference().kind() == crate::EvidenceReferenceKind::InlineText
+            && record.reference().reference() == failure.code())?;
+        Some((node_id, failure.code(), failure.message()))
+    })
 }
 
 #[cfg(test)]
@@ -474,128 +349,104 @@ mod tests {
     use super::*;
 
     #[test]
-    fn multiple_envelopes_extracts_last() {
-        let text = "noise <team_message>{\"summary\":\"旧摘要\",\"decision\":\"completed\",\"dispatch\":[]}</team_message> tail <team_message>{\"summary\":\"新摘要\",\"decision\":\"completed\",\"dispatch\":[]}</team_message>";
+    fn multiple_envelopes_are_rejected() {
+        let text = "noise <team_message>{\"summary\":\"旧摘要\",\"decision\":\"completed\"}</team_message> tail <team_message>{\"summary\":\"新摘要\",\"decision\":\"completed\"}</team_message>";
 
-        assert_eq!(
-            extract_last_team_message(text).unwrap(),
-            "{\"summary\":\"新摘要\",\"decision\":\"completed\",\"dispatch\":[]}"
-        );
-        assert_eq!(parse_team_message(text).unwrap().summary(), "新摘要");
+        assert_eq!(TeamNodeOutput::parse(text), Err(TeamNodeOutputError::InvalidEnvelope));
     }
 
     #[test]
     fn json_syntax_error_is_reported() {
         let error =
-            parse_team_message("<team_message>{\"summary\":\"摘要\",\"decision\":</team_message>")
+            TeamNodeOutput::parse("<team_message>{\"summary\":\"摘要\",\"decision\":</team_message>")
                 .unwrap_err();
 
-        assert!(matches!(error, TeamMessageError::Json(_)));
+        assert_eq!(error, TeamNodeOutputError::InvalidJson);
     }
 
     #[test]
-    fn schema_validation_collects_multiple_errors() {
-        let error = validate_team_message(&json!({
+    fn schema_validation_reports_first_error() {
+        let value = json!({
             "summary": "bad\nsummary",
-            "decision": "",
-            "dispatch": [{"role_id": "", "task": false, "extra": true}]
-        }))
-        .unwrap_err();
+            "decision": ""
+        });
+        let error = TeamNodeOutput::parse(format!("<team_message>{value}</team_message>"))
+            .unwrap_err();
 
-        assert_eq!(
-            error,
-            TeamMessageError::ErrorList(vec![
-                TeamMessageValidationError::EmptyString("decision"),
-                TeamMessageValidationError::ControlCharacter("summary"),
-                TeamMessageValidationError::UnexpectedField("dispatch.extra".to_owned()),
-                TeamMessageValidationError::EmptyString("role_id"),
-                TeamMessageValidationError::FieldType {
-                    field: "task",
-                    expected: "a string"
-                },
-            ])
-        );
+        assert_eq!(error, TeamNodeOutputError::InvalidSummary);
     }
 
     #[test]
-    fn dispatch_accepts_role_tasks() {
-        let message = parse_team_message(
+    fn dispatch_is_rejected() {
+        let error = TeamNodeOutput::parse(
             "<team_message>{\"summary\":\"已完成交付\",\"decision\":\"completed\",\"dispatch\":[{\"role_id\":\"reviewer\",\"task\":\"复核结果\"}]}</team_message>",
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(message.decision(), "completed");
-        assert_eq!(message.dispatch().len(), 1);
-        assert_eq!(message.dispatch()[0].role_id(), "reviewer");
-        assert_eq!(message.dispatch()[0].task(), "复核结果");
+        assert_eq!(error, TeamNodeOutputError::UnexpectedField("dispatch".to_owned()));
     }
 
     #[test]
-    fn normalize_wraps_bare_valid_json_only_after_validation() {
-        let normalized = parse_or_normalize_team_message_text(
-            "before {\"summary\":\"已完成交付\",\"decision\":\"completed\",\"dispatch\":[]} after",
+    fn bare_json_requires_envelope_instead_of_normalization() {
+        let error = TeamNodeOutput::parse(
+            "before {\"summary\":\"已完成交付\",\"decision\":\"completed\"} after",
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(
-            normalized,
-            "<team_message>{\"summary\":\"已完成交付\",\"decision\":\"completed\",\"dispatch\":[]}</team_message>"
-        );
+        assert_eq!(error, TeamNodeOutputError::MissingEnvelope);
 
-        let error = parse_or_normalize_team_message_text(
+        let error = TeamNodeOutput::parse(
             "before {\"summary\":\"已完成交付\",\"output_port\":\"done\",\"payload\":{}} after",
         )
         .unwrap_err();
 
-        assert!(matches!(error, TeamMessageError::ErrorList(_)));
+        assert_eq!(error, TeamNodeOutputError::MissingEnvelope);
     }
 
     #[test]
     fn schema_rejects_unexpected_top_level_fields() {
-        let error = validate_team_message(&json!({
+        let value = json!({
             "summary": "已完成",
             "decision": "completed",
-            "dispatch": [],
             "extra": true
-        }))
-        .unwrap_err();
+        });
+        let error = TeamNodeOutput::parse(format!("<team_message>{value}</team_message>"))
+            .unwrap_err();
 
-        assert_eq!(
-            error,
-            TeamMessageError::ErrorList(vec![TeamMessageValidationError::UnexpectedField(
-                "extra".to_owned()
-            )])
-        );
+        assert_eq!(error, TeamNodeOutputError::UnexpectedField("extra".to_owned()));
     }
 
-    #[tokio::test]
-    async fn repair_stops_after_three_failed_attempts() {
-        struct AlwaysBroken {
-            attempts: usize,
+    #[test]
+    fn repair_stops_after_three_failed_attempts() {
+        let graph = crate::owner::actor::tests::native_cycle_graph(2);
+        let node_id = NodeId::new("work");
+        let context = TeamMessageTerminalContext::new(
+            crate::GraphRunId::new("run:one"),
+            crate::DeliveryId::new("delivery:one").unwrap(),
+            crate::EndpointSessionId::try_new("native-session:one").unwrap(),
+        );
+        let mut original_output = "broken";
+        assert_eq!(MAX_REPAIR_ATTEMPTS, 3);
+        for attempt in 0..3 {
+            let TeamMessageTerminalPlan::Repair(repair) = plan_team_message_terminal(
+                &context, attempt, vec![original_output.to_owned()], &graph, &node_id,
+            ) else {
+                panic!("invalid output must request repair within the three-attempt budget");
+            };
+            assert_eq!(repair.attempt(), attempt + 1);
+            assert!(repair.prompt().contains("不调用工具"));
+            assert!(repair.prompt().contains("不重新执行任务"));
+            assert!(repair.prompt().contains(
+                "{\"summary\":\"中文交付摘要\",\"decision\":\"completed\"}"
+            ));
+            assert!(repair.prompt().contains(&format!("原始输出：\n{original_output}\n\n校验错误：")));
+            original_output = "still broken";
         }
-
-        impl TeamMessageRepairer for AlwaysBroken {
-            fn repair_team_message<'a>(
-                &'a mut self,
-                prompt: TeamMessageRepairPrompt<'a>,
-            ) -> TeamMessageRepairFuture<'a> {
-                self.attempts += 1;
-                assert_eq!(prompt.attempt, self.attempts);
-                assert_eq!(prompt.max_attempts, 3);
-                assert!(prompt.as_str().contains("不调用工具"));
-                assert!(prompt.as_str().contains("不重新执行任务"));
-                assert!(prompt.as_str().contains(
-                    "{\"summary\":\"中文交付摘要\",\"decision\":\"completed\",\"dispatch\":[]}"
-                ));
-                assert_eq!(prompt.original_output, "broken");
-                Box::pin(async { Some("still broken".to_owned()) })
-            }
-        }
-
-        let mut repairer = AlwaysBroken { attempts: 0 };
-        let outcome = parse_or_repair_team_message("broken", &mut repairer).await;
-
-        assert_eq!(repairer.attempts, 3);
-        assert!(matches!(outcome, TeamMessageRepairOutcome::Failed(_)));
+        assert_eq!(
+            plan_team_message_terminal(
+                &context, 3, vec![original_output.to_owned()], &graph, &node_id,
+            ),
+            TeamMessageTerminalPlan::Failed
+        );
     }
 }

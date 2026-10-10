@@ -378,7 +378,8 @@ export async function extractLspServersFromPlugins(
       plugin.lspServers = servers
 
       logForDebugging(
-        `Loaded ${Object.keys(servers).length} LSP servers from plugin ${plugin.name}`,
+        () =>
+          `Loaded ${Object.keys(servers).length} LSP servers from plugin ${plugin.name}`,
       )
     }
   }

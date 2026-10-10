@@ -578,7 +578,8 @@ export async function cleanupSessionTeams(): Promise<void> {
   if (sessionCreatedTeams.size === 0) return
   const teams = Array.from(sessionCreatedTeams)
   logForDebugging(
-    `cleanupSessionTeams: removing ${teams.length} orphan team dir(s): ${teams.join(', ')}`,
+    () =>
+      `cleanupSessionTeams: removing ${teams.length} orphan team dir(s): ${teams.join(', ')}`,
   )
   // Kill panes first — on SIGINT the teammate processes are still running;
   // deleting directories alone would orphan them in open tmux/iTerm2 panes.

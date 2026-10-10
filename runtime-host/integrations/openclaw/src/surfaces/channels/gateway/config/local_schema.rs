@@ -26,8 +26,8 @@ pub(super) async fn read(
     managed_root: &Path,
     channel: &str,
 ) -> Result<Value, LocalSchemaError> {
-    let started = Instant::now();
-    super::channel_trace("schema.local.begin", "path=local");
+    let started = platform::trace::enabled().then(Instant::now);
+    super::channel_trace("schema.local.begin", || "path=local");
     let result = async {
     if !super::valid_read_key(channel) {
         return Err(LocalSchemaError::Invalid);
@@ -37,7 +37,7 @@ pub(super) async fn read(
         ("managed", managed_root.to_path_buf()),
         ("bundled", openclaw_root.join("dist/extensions")),
     ] {
-        super::channel_trace("schema.local.select", &format!("source={source}"));
+        super::channel_trace("schema.local.select", || format!("source={source}"));
         let Some((plugin_root, manifest)) = select_plugin(&root, channel)? else {
             continue;
         };
@@ -84,7 +84,7 @@ pub(super) async fn read(
     };
     super::channel_trace(
         "schema.local.end",
-        &format!("code={code} elapsedMs={}", started.elapsed().as_millis()),
+        || format!("code={code} elapsedMs={}", started.map(|started| started.elapsed().as_millis()).unwrap_or_default()),
     );
     result
 }
@@ -242,15 +242,15 @@ async fn native_descriptor(
         "SystemRoot",
         foundation::process::windows_system_root().map_err(|_| LocalSchemaError::Unavailable)?,
     );
-    let started = Instant::now();
-    super::channel_trace("schema.native.begin", "execution=descriptor_process");
+    let started = platform::trace::enabled().then(Instant::now);
+    super::channel_trace("schema.native.begin", || "execution=descriptor_process");
     let mut child = command.spawn().map_err(|error| {
         super::channel_trace(
             "schema.native.end",
-            &format!(
+            || format!(
                 "outcome=spawn_failed ioKind={:?} elapsedMs={}",
                 error.kind(),
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         LocalSchemaError::Unavailable
@@ -272,7 +272,7 @@ async fn native_descriptor(
             .map_err(|_| LocalSchemaError::Unavailable)?;
         super::channel_trace(
             "schema.native.exit",
-            &format!(
+            || format!(
                 "success={} statusCode={:?}",
                 status.success(),
                 status.code()
@@ -292,7 +292,7 @@ async fn native_descriptor(
     };
     super::channel_trace(
         "schema.native.end",
-        &format!("code={code} elapsedMs={}", started.elapsed().as_millis()),
+        || format!("code={code} elapsedMs={}", started.map(|started| started.elapsed().as_millis()).unwrap_or_default()),
     );
     match result {
         Ok(result) => result,

@@ -17,10 +17,10 @@ pub(super) fn plan(
     account: Option<&str>,
     native_working_directory: Option<&Path>,
 ) -> Result<CleanupPlan, ()> {
-    let started = Instant::now();
+    let started = platform::trace::enabled().then(Instant::now);
     channel_trace(
         "cleanup.plan.begin",
-        &format!("accountPresent={}", account.is_some()),
+        || format!("accountPresent={}", account.is_some()),
     );
     let result = (|| {
         let whatsapp = if channel == "whatsapp" {
@@ -37,10 +37,10 @@ pub(super) fn plan(
     })();
     channel_trace(
         "cleanup.plan.end",
-        &format!(
+        || format!(
             "planned={} elapsedMs={}",
             result.is_ok(),
-            started.elapsed().as_millis()
+            started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
         ),
     );
     result
@@ -53,10 +53,10 @@ impl CleanupPlan {
         channel: &str,
         account: Option<&str>,
     ) -> Result<(), ()> {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         channel_trace(
             "cleanup.execute.begin",
-            &format!("accountPresent={}", account.is_some()),
+            || format!("accountPresent={}", account.is_some()),
         );
         let result = (|| {
             if let Some(whatsapp) = self.whatsapp {
@@ -64,15 +64,15 @@ impl CleanupPlan {
             }
             clear_pairing(state_dir, channel, account)?;
             if channel == "openclaw-weixin" {
-                let files_started = Instant::now();
-                channel_trace("cleanup.weixin_files.begin", "storage=native_account_files");
+                let files_started = platform::trace::enabled().then(Instant::now);
+                channel_trace("cleanup.weixin_files.begin", || "storage=native_account_files");
                 let result = super::super::weixin_login::clear_account_state(state_dir, account);
                 channel_trace(
                     "cleanup.weixin_files.end",
-                    &format!(
+                    || format!(
                         "success={} elapsedMs={}",
                         result.is_ok(),
-                        files_started.elapsed().as_millis()
+                        files_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                     ),
                 );
                 result?;
@@ -81,10 +81,10 @@ impl CleanupPlan {
         })();
         channel_trace(
             "cleanup.execute.end",
-            &format!(
+            || format!(
                 "success={} elapsedMs={}",
                 result.is_ok(),
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         result
@@ -95,10 +95,10 @@ pub(super) fn is_last_weixin_account(
     state_dir: &CanonicalStateDir,
     account: Option<&str>,
 ) -> Result<bool, ()> {
-    let started = Instant::now();
+    let started = platform::trace::enabled().then(Instant::now);
     channel_trace(
         "delete.account_index.begin",
-        &format!("accountPresent={}", account.is_some()),
+        || format!("accountPresent={}", account.is_some()),
     );
     let result = (|| {
         let Some(account) = account else {
@@ -121,16 +121,16 @@ pub(super) fn is_last_weixin_account(
     match &result {
         Ok(last) => channel_trace(
             "delete.account_index.end",
-            &format!(
+            || format!(
                 "lastAccount={last} elapsedMs={}",
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         ),
         Err(()) => channel_trace(
             "delete.account_index.end",
-            &format!(
+            || format!(
                 "code=index_read_failed elapsedMs={}",
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         ),
     }
@@ -142,17 +142,17 @@ fn clear_pairing(
     channel: &str,
     account: Option<&str>,
 ) -> Result<(), ()> {
-    let started = Instant::now();
-    channel_trace("cleanup.sqlite.begin", "storage=native_pairing");
+    let started = platform::trace::enabled().then(Instant::now);
+    channel_trace("cleanup.sqlite.begin", || "storage=native_pairing");
     let result = (|| {
         let path = state_dir.as_path().join("state").join("openclaw.sqlite");
         if !path.try_exists().map_err(|error| {
             channel_trace(
                 "cleanup.sqlite.exists",
-                &format!("ioKind={:?}", error.kind()),
+                || format!("ioKind={:?}", error.kind()),
             );
         })? {
-            channel_trace("cleanup.sqlite.noop", "reason=store_absent");
+            channel_trace("cleanup.sqlite.noop", || "reason=store_absent");
             return Ok(());
         }
         let mut connection = Connection::open_with_flags(
@@ -160,17 +160,17 @@ fn clear_pairing(
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|_| {
-            channel_trace("cleanup.sqlite.open", "code=sqlite_error");
+            channel_trace("cleanup.sqlite.open", || "code=sqlite_error");
         })?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| {
-                channel_trace("cleanup.sqlite.timeout_setup", "code=sqlite_error");
+                channel_trace("cleanup.sqlite.timeout_setup", || "code=sqlite_error");
             })?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| {
-                channel_trace("cleanup.sqlite.transaction", "code=sqlite_error");
+                channel_trace("cleanup.sqlite.transaction", || "code=sqlite_error");
             })?;
         let channel = channel.to_ascii_lowercase().replace("..", "_");
         let account = account.map(str::to_ascii_lowercase);
@@ -182,10 +182,10 @@ fn clear_pairing(
                     |row| row.get(0),
                 )
                 .map_err(|_| {
-                    channel_trace("cleanup.sqlite.table_lookup", "code=sqlite_error");
+                    channel_trace("cleanup.sqlite.table_lookup", || "code=sqlite_error");
                 })?;
             if !exists {
-                channel_trace("cleanup.sqlite.noop", "reason=table_absent");
+                channel_trace("cleanup.sqlite.noop", || "reason=table_absent");
                 continue;
             }
             let query = format!(
@@ -194,20 +194,20 @@ fn clear_pairing(
             let removed = transaction
                 .execute(&query, rusqlite::params![channel, account])
                 .map_err(|_| {
-                    channel_trace("cleanup.sqlite.delete", "outcome=failed code=sqlite_error");
+                    channel_trace("cleanup.sqlite.delete", || "outcome=failed code=sqlite_error");
                 })?;
-            channel_trace("cleanup.sqlite.delete", &format!("removedCount={removed}"));
+            channel_trace("cleanup.sqlite.delete", || format!("removedCount={removed}"));
         }
         transaction.commit().map_err(|_| {
-            channel_trace("cleanup.sqlite.commit", "outcome=failed code=sqlite_error");
+            channel_trace("cleanup.sqlite.commit", || "outcome=failed code=sqlite_error");
         })
     })();
     channel_trace(
         "cleanup.sqlite.end",
-        &format!(
+        || format!(
             "success={} elapsedMs={}",
             result.is_ok(),
-            started.elapsed().as_millis()
+            started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
         ),
     );
     result

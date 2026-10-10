@@ -58,7 +58,7 @@ export function createChannelDeleteConfigTransport(
         outcome = UNKNOWN;
         errorCode = response === null ? 'UNAVAILABLE' : 'INVALID_RESPONSE';
       } finally {
-        finish(status, outcome, errorCode);
+        finish?.(status, outcome, errorCode);
       }
       return { status: 503, body: UNKNOWN };
     },

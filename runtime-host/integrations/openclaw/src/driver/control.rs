@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use foundation::process::supervision::SupervisorPhase;
 use serde_json::{Value, json};
@@ -10,7 +10,6 @@ use crate::{
         project_control_readiness, project_gateway_snapshot, unavailable_control_readiness,
         unavailable_gateway_snapshot,
     },
-    lifecycle::logs::sanitize_log_line,
     port::{OpenClawControlReadiness, OpenClawGateway},
 };
 
@@ -57,41 +56,22 @@ pub fn project_logs(logs: OpenClawLogSnapshot) -> Value {
 
 impl OpenClawDriver {
     pub async fn logs(&self, cursor: Option<u64>) -> Result<OpenClawLogSnapshot, ()> {
-        let lifecycle = self.lifecycle_logs.snapshot_with_coverage();
-        let gateway = self
-            .gateway
-            .lock()
-            .await
-            .tail_logs(cursor, 500, 250_000)
+        let logs = runtime_directory::RuntimeControlOps::logs(self, cursor)
             .await
             .map_err(|_| ())?;
-        let mut seen = HashSet::with_capacity(lifecycle.entries.len() + gateway.lines.len());
-        let mut entries = Vec::with_capacity(lifecycle.entries.len() + gateway.lines.len());
-        for entry in lifecycle.entries {
-            let source = match entry.stream() {
-                crate::lifecycle::logs::LogStream::Stdout => "stdout",
-                crate::lifecycle::logs::LogStream::Stderr => "stderr",
-            };
-            let line = sanitize_log_line(entry.line().as_bytes());
-            if seen.insert((source, line.clone())) {
-                entries.push(OpenClawLogEntry { source, line });
-            }
-        }
-        for line in gateway.lines {
-            let line = sanitize_log_line(line.as_bytes());
-            if !line.is_empty() && seen.insert(("gateway", line.clone())) {
-                entries.push(OpenClawLogEntry {
-                    source: "gateway",
-                    line,
-                });
-            }
-        }
         Ok(OpenClawLogSnapshot {
-            entries,
-            cursor: gateway.cursor,
-            reset: gateway.reset,
-            truncated: gateway.truncated,
-            lifecycle_tail_evicted: lifecycle.tail_evicted,
+            entries: logs
+                .entries
+                .into_iter()
+                .map(|entry| OpenClawLogEntry {
+                    source: entry.source,
+                    line: entry.line,
+                })
+                .collect(),
+            cursor: logs.cursor,
+            reset: logs.reset,
+            truncated: logs.truncated,
+            lifecycle_tail_evicted: logs.lifecycle_tail_evicted,
         })
     }
 

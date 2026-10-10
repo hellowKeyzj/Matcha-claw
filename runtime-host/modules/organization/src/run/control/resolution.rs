@@ -1,7 +1,7 @@
 use crate::run::{
     delivery::AuthorizedGraphOutcome,
     evidence::EvidenceLedger,
-    graph::{ExecutionFence, GraphRunId, GraphState, NodeId, NodeKind},
+    graph::{EdgeDefinition, ExecutionFence, GraphRunId, GraphState, NodeAttempt, NodeId, NodeKind},
 };
 
 /// The producer channel that decided a control node outcome.
@@ -22,7 +22,8 @@ pub enum HumanDecision {
     Abort,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ScriptReviewRule {
     PassThrough,
     AssertAllUpstreamCompleted,
@@ -324,55 +325,55 @@ pub(crate) fn script_review_output_port(
 ) -> Result<&'static str, ControlNodeResolutionError> {
     match rule {
         ScriptReviewRule::PassThrough => Ok("passed"),
-        ScriptReviewRule::AssertAllUpstreamCompleted => {
-            let attempt = graph
-                .executions()
-                .get(node_id)
-                .and_then(|history| {
-                    history
-                        .attempts()
-                        .iter()
-                        .find(|attempt| attempt.fence() == fence)
-                })
-                .ok_or_else(|| ControlNodeResolutionError::StaleFence {
-                    node_id: node_id.clone(),
-                })?;
-            let satisfied = graph
-                .definition()
-                .incoming_edges(node_id)
-                .filter(|edge| edge.action() == crate::EdgeAction::Gate)
-                .all(|edge| {
-                    attempt.inputs().iter().any(|input| {
-                        input.edge_id() == edge.id()
-                            && input.source_port() == edge.source_port()
-                            && input.action() == crate::EdgeAction::Gate
-                    })
-                });
+        ScriptReviewRule::AssertAllUpstreamCompleted | ScriptReviewRule::AssertNoBlockingGate => {
+            let attempt = script_review_attempt(graph, node_id, fence)?;
+            let mut edges = graph.definition().incoming_edges(node_id).filter(|edge| {
+                if rule == ScriptReviewRule::AssertAllUpstreamCompleted {
+                    edge.action() != crate::EdgeAction::Rework
+                } else {
+                    edge.action() == crate::EdgeAction::Gate
+                }
+            }).peekable();
+            let has_inputs = edges.peek().is_some();
+            let satisfied = edges.all(|edge| completed_input_source(graph, attempt, edge))
+                && (has_inputs || rule == ScriptReviewRule::AssertNoBlockingGate);
             Ok(if satisfied { "passed" } else { "failed" })
-        }
-        ScriptReviewRule::AssertNoBlockingGate => {
-            let blocked = graph
-                .definition()
-                .incoming_edges(node_id)
-                .filter(|edge| edge.action() == crate::EdgeAction::Gate)
-                .any(|edge| {
-                    let Some(source) = graph.current_attempt(edge.source_node_id()) else {
-                        return true;
-                    };
-                    !(source.status().is_terminal()
-                        && source.output_port() == Some(edge.source_port()))
-                });
-            Ok(if blocked { "failed" } else { "passed" })
         }
         ScriptReviewRule::AssertArtifactExists => Ok("failed"),
     }
 }
 
+fn script_review_attempt<'a>(
+    graph: &'a GraphState,
+    node_id: &NodeId,
+    fence: &ExecutionFence,
+) -> Result<&'a NodeAttempt, ControlNodeResolutionError> {
+    graph.executions().get(node_id)
+        .and_then(|history| history.attempts().iter().find(|attempt| attempt.fence() == fence))
+        .ok_or_else(|| ControlNodeResolutionError::StaleFence { node_id: node_id.clone() })
+}
+
+fn completed_input_source(graph: &GraphState, attempt: &NodeAttempt, edge: &EdgeDefinition) -> bool {
+    attempt.inputs().iter().any(|input| {
+        input.edge_id() == edge.id()
+            && input.source_node_id() == edge.source_node_id()
+            && input.source_port() == edge.source_port()
+            && input.target_port() == edge.target_port()
+            && input.action() == edge.action()
+            && graph.executions().get(input.source_node_id()).is_some_and(|history| {
+                history.attempts().iter().any(|source| {
+                    source.fence() == input.source_fence()
+                        && source.status() == crate::AttemptStatus::Completed
+                        && source.output_port() == Some(input.source_port())
+                })
+            })
+    })
+}
+
 /// Resolves a script review using the persisted evidence ledger.
 ///
-/// Artifact status is derived only from an explicitly typed artifact reference whose
-/// run and node execution identities match this active fence. Other evidence kinds
-/// are intentionally ignored.
+/// Only typed artifacts from this attempt's consumed direct input executions in the
+/// same run count; the script's own execution and arbitrary ancestors do not.
 pub(crate) fn script_review_output_port_with_evidence(
     rule: ScriptReviewRule,
     graph_run_id: &GraphRunId,
@@ -382,21 +383,19 @@ pub(crate) fn script_review_output_port_with_evidence(
     evidence: &EvidenceLedger,
 ) -> Result<&'static str, ControlNodeResolutionError> {
     match rule {
-        ScriptReviewRule::AssertArtifactExists => Ok(
-            if evidence
-                .artifact_reference_for_execution(graph_run_id.as_str(), fence)
-                .is_some()
-            {
-                "passed"
-            } else {
-                "failed"
-            },
-        ),
+        ScriptReviewRule::AssertArtifactExists => {
+            let attempt = script_review_attempt(graph, node_id, fence)?;
+            let exists = attempt.inputs().iter().any(|input| {
+                evidence.artifact_reference_for_execution(graph_run_id.as_str(), input.source_fence())
+                    .is_some()
+            });
+            Ok(if exists { "passed" } else { "failed" })
+        }
         _ => script_review_output_port(rule, graph, node_id, fence),
     }
 }
 
-fn require_join_ready(
+pub(crate) fn require_join_ready(
     graph: &GraphState,
     node_id: &NodeId,
 ) -> Result<(), ControlNodeResolutionError> {
@@ -408,6 +407,37 @@ fn require_join_ready(
             node_id: node_id.clone(),
             status: attempt.status(),
         });
+    }
+    let edges = graph
+        .definition()
+        .incoming_edges(node_id)
+        .collect::<Vec<_>>();
+    if edges.is_empty() || edges.len() != attempt.inputs().len() {
+        return Err(ControlNodeResolutionError::GraphStateMismatch);
+    }
+    let inputs = attempt
+        .inputs()
+        .iter()
+        .map(|input| (input.edge_id(), input))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for edge in edges {
+        let source = graph
+            .current_attempt(edge.source_node_id())
+            .ok_or(ControlNodeResolutionError::GraphStateMismatch)?;
+        let input = inputs
+            .get(edge.id())
+            .ok_or(ControlNodeResolutionError::GraphStateMismatch)?;
+        if edge.action() != crate::EdgeAction::Gate
+            || source.status() != crate::AttemptStatus::Completed
+            || source.output_port() != Some(edge.source_port())
+            || input.source_node_id() != edge.source_node_id()
+            || input.source_port() != edge.source_port()
+            || input.target_port() != edge.target_port()
+            || input.action() != edge.action()
+            || input.source_fence() != source.fence()
+        {
+            return Err(ControlNodeResolutionError::GraphStateMismatch);
+        }
     }
     Ok(())
 }
@@ -468,11 +498,11 @@ mod tests {
                 "plan:script-review",
                 GraphRunId::new("run:one"),
                 "script review",
-                vec![NodeDefinition::control(
+                vec![NodeDefinition::script_review(
                     NodeId::new("review"),
-                    NodeKind::ScriptReview,
                     "review",
                     NonZeroU32::new(1).unwrap(),
+                    ScriptReviewRule::AssertArtifactExists,
                 )],
                 Vec::new(),
             )
@@ -528,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_rule_requires_run_and_current_fence_provenance() {
+    fn artifact_rule_rejects_self_fence_and_foreign_run_provenance() {
         let graph = graph();
         let fence = graph
             .current_attempt(&NodeId::new("review"))
@@ -551,7 +581,7 @@ mod tests {
                 &ledger,
             )
             .unwrap(),
-            "passed"
+            "failed"
         );
         assert_eq!(
             script_review_output_port_with_evidence(

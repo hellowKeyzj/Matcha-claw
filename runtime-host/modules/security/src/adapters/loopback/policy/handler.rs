@@ -59,7 +59,7 @@ async fn handle_request(
             security_trace(
                 "runtime.security.policy.request",
                 trace_id,
-                json!({ "method": &request.method, "endpoint": READ_ENDPOINT }),
+                || json!({ "method": &request.method, "endpoint": READ_ENDPOINT }),
             );
             if !verify_read(
                 &verifier,
@@ -69,28 +69,20 @@ async fn handle_request(
             )
             .await
             {
-                security_trace(
-                    "runtime.security.policy.authorization-rejected",
-                    trace_id,
-                    json!({ "status": 401, "contract": "unauthorized" }),
-                );
+                eprintln!("[security] policy read authorization rejected");
                 return Ok(Response::unauthorized());
             }
             let policy = match security.current_policy().await {
                 Ok(policy) => policy,
                 Err(_) => {
-                    security_trace(
-                        "runtime.security.policy.owner-error",
-                        trace_id,
-                        json!({ "status": 503, "contract": "owner-error" }),
-                    );
+                    eprintln!("[security] policy owner request failed");
                     return Err(io::Error::from(io::ErrorKind::Other));
                 }
             };
             security_trace(
                 "runtime.security.policy.response",
                 trace_id,
-                json!({ "status": 200, "contract": "policy" }),
+                || json!({ "status": 200, "contract": "policy" }),
             );
             return Ok(Response::policy(policy));
         }

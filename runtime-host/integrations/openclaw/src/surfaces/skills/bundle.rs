@@ -206,18 +206,24 @@ impl SkillBundleStore {
     }
 
     pub fn import(&self, bundles: Vec<SkillBundle>) -> ImportOutcome {
-        eprintln!(
-            "[startup-trace] source=skills-import phase=store detail=begin bundleCount={}",
-            bundles.len()
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=skills-import phase=store detail=begin bundleCount={}",
+                bundles.len()
+            );
+        }
         if self.state_dir.open().is_err() {
-            eprintln!("[startup-trace] source=skills-import phase=state-dir detail=open-rejected");
+            if platform::trace::enabled() {
+                eprintln!("[startup-trace] source=skills-import phase=state-dir detail=open-rejected");
+            }
             return ImportOutcome::Unknown;
         }
         let bundles = match normalize_bundles(bundles) {
             Ok(bundles) => bundles,
             Err(_) => {
-                eprintln!("[startup-trace] source=skills-import phase=normalize detail=rejected");
+                if platform::trace::enabled() {
+                    eprintln!("[startup-trace] source=skills-import phase=normalize detail=rejected");
+                }
                 return ImportOutcome::Rejected;
             }
         };
@@ -541,9 +547,11 @@ fn import_all(root: &Path, staging: &Path, bundles: Vec<SkillBundle>) -> Result<
         let target = root.join(bundle.skill_key());
         match fs::symlink_metadata(&target) {
             Ok(_) => {
-                eprintln!(
-                    "[startup-trace] source=skills-import phase=check-target detail=already-exists"
-                );
+                if platform::trace::enabled() {
+                    eprintln!(
+                        "[startup-trace] source=skills-import phase=check-target detail=already-exists"
+                    );
+                }
                 return Err(BundleError::Rejected);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -573,9 +581,11 @@ fn publish_staged(staged: Vec<(PathBuf, PathBuf)>) -> Result<(), BundleError> {
     for (_, target) in &staged {
         match fs::symlink_metadata(target) {
             Ok(_) => {
-                eprintln!(
-                    "[startup-trace] source=skills-import phase=publish-check detail=already-exists"
-                );
+                if platform::trace::enabled() {
+                    eprintln!(
+                        "[startup-trace] source=skills-import phase=publish-check detail=already-exists"
+                    );
+                }
                 return Err(BundleError::Rejected);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

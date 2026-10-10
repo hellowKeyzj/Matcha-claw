@@ -1,6 +1,5 @@
 use std::{
-    fs::{self, OpenOptions},
-    io::Write,
+    fs,
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -20,7 +19,7 @@ use crate::{
     DeliveryStart, DependencyMetadata, EdgeAction, EdgeDefinition, EdgeId, EdgePayloadPolicy,
     EndpointSessionId, EvidenceId, EvidenceRecord, EvidenceReference, ExecutorPolicy,
     GraphDefinition, GraphEvent, GraphPatch, GraphPatchOperation, GraphRunId, GraphRunLifecycle,
-    GraphRunLifecycleState, GraphState, GroupId, HumanDecision, IdempotencyKey, JoinPolicy,
+    GraphRunLifecycleState, GraphState, IdempotencyKey,
     ManagedAgentReference, MaterializationOperationOutcome, MaterializationReceipt,
     MaterializationRecordOutcome, MaterializationRejection, MaterializationSource, MemberId,
     NativeDeliveryCorrelation, NodeDefinition, NodeId, NodeKind, RegisterOutcome, ReviewAssignment,
@@ -29,7 +28,7 @@ use crate::{
     StartTrigger, TeamDecisionCommand, TeamDecisionType, TeamDefinition, TeamId, TeamMember,
     TeamNodeEvent, TeamNodeEventOutcome, TeamRevision, TeamRole, TeamRunQuery, TeamRunQueryOutcome,
     TerminalObservationOutcome, TriggerFireError, TriggerFireRequest, TriggerRegistration,
-    TriggerSource, WorkAssignment, WorkGroup, begin_delivery,
+    TriggerSource, WorkAssignment, begin_delivery,
     ports::materialization::NativeWorkspaceReceipt,
     query_team_run, reduce,
     run::event::NodeProgressCommand,
@@ -73,9 +72,9 @@ fn decision_ledger_commits_replays_conflicts_and_reopens() {
     .unwrap();
     let first = store.record_decision(command.clone()).unwrap();
     assert!(!first.is_replay());
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     assert!(store.record_decision(command).unwrap().is_replay());
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     let conflict = TeamDecisionCommand::try_new(
         "decision:other",
         "run:one",
@@ -147,14 +146,14 @@ fn graph_replace_records_once_replays_exactly_and_survives_reopen() {
             workflow_plan_id,
         } if graph_id == "graph:replacement" && workflow_plan_id == "plan:replacement"
     ));
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     assert!(
         store
             .replace_team_graph(command.clone(), definition.clone())
             .unwrap()
             .is_replay()
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
 
     let conflicting_definition = GraphDefinition::new(
         "graph:conflict",
@@ -183,7 +182,7 @@ fn graph_replace_records_once_replays_exactly_and_survives_reopen() {
             crate::RecordCommandError::IdempotencyConflict
         ))
     ));
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
 
     let mut reopened = OrganizationStore::open(&path).unwrap();
@@ -210,10 +209,11 @@ fn graph_replace_records_once_replays_exactly_and_survives_reopen() {
 fn graph_replace_reopen_preserves_full_definition_metadata_and_command_payload() {
     let path = test_path("graph-replace-rich");
     let mut store = OrganizationStore::open(&path).unwrap();
-    store
-        .replace_facts(facts_with_run("display", false))
-        .unwrap();
-    let definition = rich_replacement_definition();
+    store.replace_facts(provisionable_facts()).unwrap();
+    let runtime = provisionable_runtime("agent:one");
+    let binding = runtime.bindings()[0].clone();
+    store.install_runtime_receipt(runtime).unwrap();
+    let definition = rich_replacement_definition(&binding);
     let command = RunCommand::new(
         OpaqueId::try_new("run:one").unwrap(),
         OpaqueId::try_new("graph-replace:rich").unwrap(),
@@ -228,7 +228,7 @@ fn graph_replace_reopen_preserves_full_definition_metadata_and_command_payload()
             .unwrap()
             .is_replay()
     );
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     drop(store);
 
     let mut reopened = OrganizationStore::open(&path).unwrap();
@@ -251,23 +251,13 @@ fn graph_replace_reopen_preserves_full_definition_metadata_and_command_payload()
             .output_artifact_kind(),
         Some("artifact-report")
     );
-    assert_eq!(
-        restored.nodes()[2]
-            .work_assignment()
-            .unwrap()
-            .group_id()
-            .unwrap()
-            .as_str(),
-        "group-work"
-    );
+    super::codec::tests::assert_schema25_graph_metadata(restored);
     assert_eq!(
         restored.nodes()[3].review_assignment().unwrap().prompt(),
         "review instruction"
     );
-    assert_eq!(
-        restored.nodes()[4].work_group().unwrap().join_policy(),
-        &JoinPolicy::new(true, false, 2)
-    );
+    assert_eq!(restored.nodes()[4].kind(), NodeKind::Join);
+    assert!(!restored.nodes()[4].is_control());
     assert!(!restored.edges()[1].payload().include_upstream_result());
     assert_eq!(
         restored.edges()[1]
@@ -294,7 +284,7 @@ fn graph_replace_reopen_preserves_full_definition_metadata_and_command_payload()
             .unwrap()
             .is_replay()
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(reopened);
     remove_test_path(&path);
 }
@@ -310,7 +300,6 @@ fn workflow_template_debug_redacts_source_identity_and_task_prompt() {
             "run-template",
             "Template title",
             "active",
-            Vec::new(),
             vec![crate::run::WorkflowTask::new(
                 "task-template",
                 "role-template",
@@ -350,15 +339,14 @@ fn reopen_round_trip_preserves_complete_team_definition_without_private_canaries
     store.replace_facts(facts).unwrap();
     drop(store);
 
-    let bytes = fs::read(&path).unwrap();
-    assert!(contains(&bytes, definition.name().as_bytes()));
+    assert!(persisted_contains(&path, definition.name().as_bytes()));
     for private_canary in [
         "teamskill-root-private-canary",
         "workspace-path-private-canary",
         "native-config-private-canary",
         "secret-private-canary",
     ] {
-        assert!(!contains(&bytes, private_canary.as_bytes()));
+        assert!(!persisted_contains(&path, private_canary.as_bytes()));
     }
 
     let reopened = OrganizationStore::open(&path).unwrap();
@@ -380,8 +368,7 @@ fn reopen_round_trip_preserves_graph_display_facts() {
     store.replace_facts(facts).unwrap();
     drop(store);
 
-    let bytes = fs::read(&path).unwrap();
-    assert!(contains(&bytes, graph_title.as_bytes()));
+    assert!(persisted_contains(&path, graph_title.as_bytes()));
     let reopened = OrganizationStore::open(&path).unwrap();
     assert_eq!(reopened.facts().teams().count(), 1);
     assert_eq!(reopened.facts().runs().count(), 1);
@@ -401,7 +388,7 @@ fn reopen_round_trip_preserves_graph_display_facts() {
 }
 
 #[test]
-fn reopen_round_trip_preserves_teamrun_approval_and_event_ledgers_in_one_frame() {
+fn reopen_round_trip_preserves_teamrun_approval_and_event_ledgers_in_one_transaction() {
     let path = test_path("teamrun-ledgers");
     let mut approval = Approval::request(ApprovalRequest {
         approval_id: "approval:one".to_owned(),
@@ -476,7 +463,7 @@ fn reopen_round_trip_preserves_teamrun_approval_and_event_ledgers_in_one_frame()
 
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(facts).unwrap();
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     assert_eq!(receipt.events().len(), 1);
     drop(store);
 
@@ -499,7 +486,7 @@ fn reopen_round_trip_preserves_teamrun_approval_and_event_ledgers_in_one_frame()
             status: ApprovalStatus::Approved,
         } if approval_id.as_str() == "approval:one"
     ));
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(reopened);
     remove_test_path(&path);
 }
@@ -511,7 +498,7 @@ fn resolving_an_unknown_approval_fails_closed_without_appending_a_frame() {
     store
         .replace_facts(facts_with_run("display", false))
         .unwrap();
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
 
     assert_eq!(
         store.resolve_approval(ApprovalResolutionInput {
@@ -528,7 +515,7 @@ fn resolving_an_unknown_approval_fails_closed_without_appending_a_frame() {
     );
     assert_eq!(store.facts().approvals().count(), 0);
     assert_eq!(store.facts().event_snapshot().events().len(), 0);
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
     remove_test_path(&path);
 }
@@ -556,7 +543,7 @@ fn approval_resolution_replays_exact_receipts_without_a_frame_and_rejects_confli
             .unwrap(),
         ApprovalResolutionOutcome::Recorded
     );
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     assert_eq!(store.facts().event_snapshot().events().len(), 1);
 
     assert_eq!(
@@ -574,7 +561,7 @@ fn approval_resolution_replays_exact_receipts_without_a_frame_and_rejects_confli
             .unwrap(),
         ApprovalResolutionOutcome::Replayed
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     assert_eq!(store.facts().event_snapshot().events().len(), 1);
 
     assert_eq!(
@@ -590,7 +577,7 @@ fn approval_resolution_replays_exact_receipts_without_a_frame_and_rejects_confli
         }),
         Err(StoreFault::InvalidFacts)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     let approval = store.facts().approvals().next().unwrap();
     assert_eq!(approval.status(), ApprovalStatus::Approved);
     assert_eq!(approval.resolutions().len(), 1);
@@ -600,7 +587,7 @@ fn approval_resolution_replays_exact_receipts_without_a_frame_and_rejects_confli
 }
 
 #[test]
-fn team_graph_patch_replays_without_appending_a_frame_and_conflicts_fail_closed() {
+fn team_graph_patch_replays_without_committing_and_conflicts_fail_closed() {
     let path = test_path("team-graph-patch-idempotency");
     let mut store = OrganizationStore::open(&path).unwrap();
     store
@@ -634,7 +621,7 @@ fn team_graph_patch_replays_without_appending_a_frame_and_conflicts_fail_closed(
             .team_graph_patch(command.clone(), patch.clone())
             .is_err()
     );
-    let before = fs::metadata(&path).unwrap().len();
+    let before = sqlite_snapshot(&path);
     let valid = GraphPatch::new(
         "graph:one",
         "plan:one",
@@ -666,11 +653,11 @@ fn team_graph_patch_replays_without_appending_a_frame_and_conflicts_fail_closed(
     );
     let recorded = store.team_graph_patch(audit.clone(), valid).unwrap();
     assert!(!recorded.is_replay());
-    let committed = fs::metadata(&path).unwrap().len();
-    assert!(committed > before);
+    let committed = sqlite_snapshot(&path);
+    assert_eq!(committed.0, before.0 + 1);
     let replay = store.team_graph_patch(audit, patch).unwrap();
     assert!(replay.is_replay());
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
     remove_test_path(&path);
 }
@@ -842,7 +829,7 @@ fn unknown_approval_resolution_fails_closed_for_existing_and_missing_runs() {
     let path = test_path("unknown-approval-run-context");
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(delivered_terminal_facts()).unwrap();
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
 
     for run_id in ["run:two", "run:missing"] {
         assert_eq!(
@@ -861,7 +848,7 @@ fn unknown_approval_resolution_fails_closed_for_existing_and_missing_runs() {
     }
     assert_eq!(store.facts().approvals().count(), 0);
     assert_eq!(store.facts().event_snapshot().events().len(), 0);
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
     remove_test_path(&path);
 }
@@ -1059,49 +1046,83 @@ fn work_node_approval_resolution_does_not_complete_a_waiting_attempt() {
 
 #[test]
 fn open_creates_nested_durable_path_and_enforces_single_writer() {
-    let path = test_path("nested").join("a").join("b").join("facts.log");
-    let store = OrganizationStore::open(&path).unwrap();
+    let root = test_path("nested");
+    let path = root
+        .parent()
+        .unwrap()
+        .join("a")
+        .join("b")
+        .join("state.sqlite");
+    let mut store = OrganizationStore::open(&path).unwrap();
     assert!(path.is_file());
-    drop(store);
-    let mut lock_path = path.as_os_str().to_owned();
-    lock_path.push(".lock");
-    let lock_path = PathBuf::from(lock_path);
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
+    let before = sqlite_snapshot(&path);
+    let mut writer = rusqlite::Connection::open(&path).unwrap();
+    let mode: String = writer
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .unwrap();
+    assert_eq!(mode, "wal");
+    let transaction = writer
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    assert_eq!(
+        store.replace_facts(facts_with_run("display", false)),
+        Err(StoreFault::WriterBusy)
+    );
     assert!(matches!(
         OrganizationStore::open(&path),
         Err(StoreFault::WriterBusy)
     ));
-    fs::remove_file(lock_path).unwrap();
+    transaction.rollback().unwrap();
+    assert_eq!(sqlite_snapshot(&path), before);
+    store
+        .replace_facts(facts_with_run("display", false))
+        .unwrap();
+    assert_eq!(sqlite_snapshot(&path).0, before.0 + 1);
+    drop(writer);
+    drop(store);
     assert!(OrganizationStore::open(&path).is_ok());
-    remove_test_path(&path);
+    remove_test_path(&root);
 }
 
 #[test]
-fn incomplete_trailing_frame_is_discarded_on_reopen() {
-    let path = test_path("trailing");
+fn uncommitted_sqlite_changes_are_discarded_on_reopen() {
+    let path = test_path("uncommitted-transaction");
     let mut store = OrganizationStore::open(&path).unwrap();
     store
         .replace_facts(facts_with_run("display", false))
         .unwrap();
+    let committed = sqlite_snapshot(&path);
+    let expected = store.facts().clone();
     drop(store);
-    let committed_len = fs::metadata(&path).unwrap().len();
-    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
-    file.write_all(&[0xA1, 0, 1]).unwrap();
-    file.sync_all().unwrap();
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE; UPDATE records SET payload=NULL; UPDATE organization_meta SET epoch=epoch+1;").unwrap();
+    // A separate WAL reader must not observe the uncommitted transaction.
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    let visible_epoch: u64 = reader
+        .query_row("SELECT epoch FROM organization_meta", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(visible_epoch, committed.0);
+    let visible_records: usize = reader
+        .query_row(
+            "SELECT count(*) FROM records WHERE payload IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(visible_records, committed.1.len());
+    drop(reader);
+    drop(writer);
 
     let reopened = OrganizationStore::open(&path).unwrap();
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
+    assert_eq!(reopened.facts(), &expected);
     assert_eq!(reopened.facts().runs().count(), 1);
     drop(reopened);
     remove_test_path(&path);
 }
 
 #[test]
-fn checksum_and_schema_corruption_fail_closed_without_echoing_bytes() {
+fn record_and_schema_corruption_fail_closed_without_echoing_bytes() {
     let path = test_path("corrupt");
     let mut store = OrganizationStore::open(&path).unwrap();
     store
@@ -1109,20 +1130,31 @@ fn checksum_and_schema_corruption_fail_closed_without_echoing_bytes() {
         .unwrap();
     drop(store);
 
-    let mut corrupt = fs::read(&path).unwrap();
-    *corrupt.last_mut().unwrap() ^= 0xFF;
-    fs::write(&path, corrupt).unwrap();
-    assert!(matches!(
-        OrganizationStore::open(&path),
-        Err(StoreFault::CorruptRecord)
-    ));
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let sentinel = b"invalid-json-private-record-sentinel";
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE records SET payload=?1 WHERE kind='team'",
+                rusqlite::params![sentinel.as_slice()],
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+    let error = match OrganizationStore::open(&path) {
+        Err(error) => error,
+        Ok(_) => panic!("corrupt record must fail closed"),
+    };
+    assert_eq!(error, StoreFault::CorruptRecord);
+    assert!(!contains(format!("{error:?} {error}").as_bytes(), sentinel));
 
     let schema_path = test_path("schema");
     let schema_store = OrganizationStore::open(&schema_path).unwrap();
     drop(schema_store);
-    let mut unsupported = fs::read(&schema_path).unwrap();
-    unsupported[8] = 99;
-    fs::write(&schema_path, unsupported).unwrap();
+    let connection = rusqlite::Connection::open(&schema_path).unwrap();
+    connection.pragma_update(None, "user_version", 99).unwrap();
+    drop(connection);
     assert!(matches!(
         OrganizationStore::open(&schema_path),
         Err(StoreFault::UnsupportedSchemaVersion(99))
@@ -1289,16 +1321,23 @@ fn durable_trigger_fire_records_once_replays_without_refiring_and_survives_reope
             .reason(),
         &crate::AttemptReason::Trigger
     );
-    let len_after_first_fire = fs::metadata(&path).unwrap().len();
-    let bytes = fs::read(&path).unwrap();
-    assert!(contains(&bytes, b"/team/release"));
-    assert!(contains(&bytes, b"request:one"));
+    let after_first_fire = sqlite_snapshot(&path);
+    let (_, persisted) = sqlite_facts(&path);
+    assert_eq!(
+        persisted.triggers().request("run:one", "request:one"),
+        Some(&request)
+    );
+    assert!(matches!(
+        persisted.run(&GraphRunId::new("run:one")).unwrap().graph().definition()
+            .nodes().iter().find(|node| node.id() == &NodeId::new("start")).unwrap().trigger(),
+        Some(StartTrigger::Webhook { path }) if path == "/team/release"
+    ));
 
     assert_eq!(
         store.fire_trigger(request.clone(), 3),
         Ok(TriggerRegistration::Replayed(request.clone()))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), len_after_first_fire);
+    assert_eq!(sqlite_snapshot(&path), after_first_fire);
     assert_eq!(
         store
             .facts()
@@ -1336,7 +1375,7 @@ fn durable_trigger_fire_records_once_replays_without_refiring_and_survives_reope
         reopened.fire_trigger(request.clone(), 4),
         Ok(TriggerRegistration::Replayed(request))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), len_after_first_fire);
+    assert_eq!(sqlite_snapshot(&path), after_first_fire);
     drop(reopened);
     remove_test_path(&path);
 }
@@ -1353,7 +1392,7 @@ fn team_tombstone_is_logical_idempotent_and_preserves_materialization() {
         store.tombstone_team(&team_id, cleanup_key.clone()),
         Ok(super::facts::TeamTombstoneOutcome::Tombstoned)
     );
-    let after_tombstone = fs::metadata(&path).unwrap().len();
+    let after_tombstone = sqlite_snapshot(&path);
     assert!(store.facts().team(&team_id).unwrap().tombstoned());
     assert_eq!(
         store.facts().materialization(&team_id),
@@ -1374,7 +1413,7 @@ fn team_tombstone_is_logical_idempotent_and_preserves_materialization() {
         store.tombstone_team(&team_id, cleanup_key.clone()),
         Ok(super::facts::TeamTombstoneOutcome::Replayed)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), after_tombstone);
+    assert_eq!(sqlite_snapshot(&path), after_tombstone);
     drop(store);
 
     let reopened = OrganizationStore::open(&path).unwrap();
@@ -1438,8 +1477,7 @@ fn manual_materialization_round_trips_and_keeps_external_agents_opaque() {
             .iter()
             .all(|agent| matches!(agent.agent(), RoleMaterializationAgent::External { .. }))
     );
-    let persisted = fs::read(&path).unwrap();
-    assert!(!contains(&persisted, b"workspace-path-private-canary"));
+    assert!(!persisted_contains(&path, b"workspace-path-private-canary"));
     drop(store);
 
     let reopened = OrganizationStore::open(&path).unwrap();
@@ -1575,8 +1613,10 @@ fn external_manual_removal_stays_opaque_and_does_not_create_runs() {
         crate::RoleMaterializationOwnership::External
     ));
     assert_eq!(store.facts().runs().count(), 0);
-    let persisted = fs::read(&path).unwrap();
-    assert!(!contains(&persisted, b"external-workspace-path-canary"));
+    assert!(!persisted_contains(
+        &path,
+        b"external-workspace-path-canary"
+    ));
     drop(store);
     remove_test_path(&path);
 }
@@ -1587,7 +1627,7 @@ fn only_confirmed_tombstoned_materializations_produce_fenced_removals() {
     let team = TeamId::try_new("team:one").unwrap();
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(provisionable_facts()).unwrap();
-    let before = fs::metadata(&path).unwrap().len();
+    let before = sqlite_snapshot(&path);
 
     assert_eq!(
         store.tombstone_team(&team, IdempotencyKey::try_new("cleanup:one").unwrap()),
@@ -1614,8 +1654,8 @@ fn only_confirmed_tombstoned_materializations_produce_fenced_removals() {
         .expect("confirmed tombstone has one removal after all runs tombstone");
     assert_eq!(removal.receipt(), &terminal_materialization());
     assert_eq!(removal.idempotency_key().as_str(), "cleanup:one");
-    let tombstoned_len = fs::metadata(&path).unwrap().len();
-    assert!(tombstoned_len > before);
+    let tombstoned = sqlite_snapshot(&path);
+    assert_eq!(tombstoned.0, before.0 + 4);
     assert_eq!(
         store.tombstone_team(&team, IdempotencyKey::try_new("cleanup:other").unwrap()),
         Ok(crate::TeamTombstoneOutcome::Replayed)
@@ -1624,7 +1664,7 @@ fn only_confirmed_tombstoned_materializations_produce_fenced_removals() {
         store.team_materialization_removal(&team),
         Some(removal.clone())
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), tombstoned_len);
+    assert_eq!(sqlite_snapshot(&path), tombstoned);
 
     assert_eq!(
         store.record_team_materialization_cleanup_outcome(
@@ -1635,7 +1675,7 @@ fn only_confirmed_tombstoned_materializations_produce_fenced_removals() {
         ),
         Ok(MaterializationRecordOutcome::Recorded)
     );
-    let confirmed_len = fs::metadata(&path).unwrap().len();
+    let confirmed = sqlite_snapshot(&path);
     assert_eq!(
         store.record_team_materialization_cleanup_outcome(
             &team,
@@ -1645,7 +1685,7 @@ fn only_confirmed_tombstoned_materializations_produce_fenced_removals() {
         ),
         Ok(MaterializationRecordOutcome::Replayed)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), confirmed_len);
+    assert_eq!(sqlite_snapshot(&path), confirmed);
     assert!(matches!(
         store
             .facts()
@@ -1764,12 +1804,12 @@ fn graph_run_lifecycle_is_append_only_idempotent_and_recovers_tombstones() {
         store.create_graph_run(run.clone(), "create:one"),
         Ok(CreateGraphRunOutcome::Created(GraphRunId::new("run:one")))
     );
-    let after_create = fs::metadata(&path).unwrap().len();
+    let after_create = sqlite_snapshot(&path);
     assert_eq!(
         store.create_graph_run(run.clone(), "create:one"),
         Ok(CreateGraphRunOutcome::Replayed(GraphRunId::new("run:one")))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), after_create);
+    assert_eq!(sqlite_snapshot(&path), after_create);
     assert_eq!(
         store.create_graph_run(run, "create:other"),
         Ok(CreateGraphRunOutcome::ExistingRun)
@@ -1790,15 +1830,12 @@ fn graph_run_lifecycle_is_append_only_idempotent_and_recovers_tombstones() {
         store.begin_graph_run_cancellation(&GraphRunId::new("run:one"), "cancel:one", 2),
         Ok(BeginCancellationOutcome::Started(_))
     ));
-    let after_cancellation_started = fs::metadata(&path).unwrap().len();
+    let after_cancellation_started = sqlite_snapshot(&path);
     assert!(matches!(
         store.begin_graph_run_cancellation(&GraphRunId::new("run:one"), "cancel:one", 3),
         Ok(BeginCancellationOutcome::Replayed(_))
     ));
-    assert_eq!(
-        fs::metadata(&path).unwrap().len(),
-        after_cancellation_started
-    );
+    assert_eq!(sqlite_snapshot(&path), after_cancellation_started);
     assert_eq!(
         store.settle_graph_run_cancellation(
             &GraphRunId::new("run:one"),
@@ -1808,7 +1845,7 @@ fn graph_run_lifecycle_is_append_only_idempotent_and_recovers_tombstones() {
         ),
         Ok(SettleCancellationOutcome::Cancelled)
     );
-    let after_cancellation_settled = fs::metadata(&path).unwrap().len();
+    let after_cancellation_settled = sqlite_snapshot(&path);
     assert_eq!(
         store.settle_graph_run_cancellation(
             &GraphRunId::new("run:one"),
@@ -1818,20 +1855,17 @@ fn graph_run_lifecycle_is_append_only_idempotent_and_recovers_tombstones() {
         ),
         Ok(SettleCancellationOutcome::Replayed)
     );
-    assert_eq!(
-        fs::metadata(&path).unwrap().len(),
-        after_cancellation_settled
-    );
+    assert_eq!(sqlite_snapshot(&path), after_cancellation_settled);
     assert_eq!(
         store.tombstone_graph_run(&GraphRunId::new("run:one"), "delete:one", 6),
         Ok(TombstoneOutcome::Tombstoned)
     );
-    let after_tombstone = fs::metadata(&path).unwrap().len();
+    let after_tombstone = sqlite_snapshot(&path);
     assert_eq!(
         store.tombstone_graph_run(&GraphRunId::new("run:one"), "delete:one", 7),
         Ok(TombstoneOutcome::Replayed)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), after_tombstone);
+    assert_eq!(sqlite_snapshot(&path), after_tombstone);
     assert_eq!(
         store.resume_graph_runs(&team_id()),
         vec![ResumeOutcome::Tombstoned(GraphRunId::new("run:one"))]
@@ -1871,9 +1905,9 @@ fn workflow_plan_run_persists_complete_template_and_is_idempotent() {
         )
         .unwrap();
 
-    let before_create = super::codec::recover_log(fs::File::open(&path).unwrap()).unwrap();
-    assert_eq!(before_create.facts.templates().count(), 0);
-    assert_eq!(before_create.facts.runs().count(), 0);
+    let (before_epoch, before_create) = sqlite_facts(&path);
+    assert_eq!(before_create.templates().count(), 0);
+    assert_eq!(before_create.runs().count(), 0);
     assert_eq!(
         store.create_workflow_plan_run(
             team.clone(),
@@ -1887,14 +1921,14 @@ fn workflow_plan_run_persists_complete_template_and_is_idempotent() {
         Ok(CreateGraphRunOutcome::Created(run_id.clone()))
     );
 
-    let after_create = super::codec::recover_log(fs::File::open(&path).unwrap()).unwrap();
-    assert_eq!(after_create.epoch, before_create.epoch + 1);
-    let persisted_template = after_create.facts.template(&team).unwrap();
+    let (after_epoch, after_create) = sqlite_facts(&path);
+    assert_eq!(after_epoch, before_epoch + 1);
+    let persisted_template = after_create.template(&team).unwrap();
     assert_eq!(persisted_template.team(), &team);
     assert_eq!(persisted_template.source_identity(), "source:workflow-plan");
     assert_eq!(persisted_template.revision(), 7);
     assert_eq!(persisted_template.plan(), &plan);
-    let persisted_run = after_create.facts.run(&run_id).unwrap();
+    let persisted_run = after_create.run(&run_id).unwrap();
     let compiled = crate::run::compile_workflow_plan(&plan).unwrap();
     assert_eq!(persisted_run.graph().definition().run_id(), &run_id);
     assert_eq!(
@@ -1914,7 +1948,7 @@ fn workflow_plan_run_persists_complete_template_and_is_idempotent() {
         compiled.definition().edges()
     );
 
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     assert_eq!(
         store.create_workflow_plan_run(
             team.clone(),
@@ -1927,7 +1961,7 @@ fn workflow_plan_run_persists_complete_template_and_is_idempotent() {
         ),
         Ok(CreateGraphRunOutcome::Replayed(run_id.clone()))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     assert_eq!(
         store.create_workflow_plan_run(
             team.clone(),
@@ -1940,7 +1974,7 @@ fn workflow_plan_run_persists_complete_template_and_is_idempotent() {
         ),
         Ok(CreateGraphRunOutcome::ExistingRun)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     assert_eq!(
         store.create_workflow_plan_run(
             team.clone(),
@@ -1953,7 +1987,7 @@ fn workflow_plan_run_persists_complete_template_and_is_idempotent() {
         ),
         Ok(CreateGraphRunOutcome::ConflictingIdempotency)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
 
     drop(store);
     let reopened = OrganizationStore::open(&path).unwrap();
@@ -2059,9 +2093,7 @@ fn workflow_plan_run_rejects_invalid_inputs_without_durable_side_effects() {
         )
         .unwrap();
     let before_facts = store.facts().clone();
-    let before_epoch = super::codec::recover_log(fs::File::open(&missing_receipt_path).unwrap())
-        .unwrap()
-        .epoch;
+    let before_commit = sqlite_snapshot(&missing_receipt_path);
     assert_eq!(
         store.create_workflow_plan_run(
             team.clone(),
@@ -2075,12 +2107,7 @@ fn workflow_plan_run_rejects_invalid_inputs_without_durable_side_effects() {
         Err(StoreFault::InvalidFacts)
     );
     assert_eq!(store.facts(), &before_facts);
-    assert_eq!(
-        super::codec::recover_log(fs::File::open(&missing_receipt_path).unwrap())
-            .unwrap()
-            .epoch,
-        before_epoch
-    );
+    assert_eq!(sqlite_snapshot(&missing_receipt_path), before_commit);
     drop(store);
     let reopened = OrganizationStore::open(&missing_receipt_path).unwrap();
     assert_eq!(reopened.facts(), &before_facts);
@@ -2105,15 +2132,12 @@ fn workflow_plan_run_rejects_invalid_inputs_without_durable_side_effects() {
         )
         .unwrap();
     let before_facts = store.facts().clone();
-    let before_epoch = super::codec::recover_log(fs::File::open(&invalid_plan_path).unwrap())
-        .unwrap()
-        .epoch;
+    let before_commit = sqlite_snapshot(&invalid_plan_path);
     let invalid_plan = crate::run::WorkflowPlan::new(
         "plan:invalid",
         "run:invalid",
         "",
         "active",
-        Vec::new(),
         vec![crate::run::WorkflowTask::new(
             "task:invalid",
             "leader",
@@ -2138,12 +2162,7 @@ fn workflow_plan_run_rejects_invalid_inputs_without_durable_side_effects() {
         Err(StoreFault::InvalidFacts)
     );
     assert_eq!(store.facts(), &before_facts);
-    assert_eq!(
-        super::codec::recover_log(fs::File::open(&invalid_plan_path).unwrap())
-            .unwrap()
-            .epoch,
-        before_epoch
-    );
+    assert_eq!(sqlite_snapshot(&invalid_plan_path), before_commit);
     drop(store);
     let reopened = OrganizationStore::open(&invalid_plan_path).unwrap();
     assert_eq!(reopened.facts(), &before_facts);
@@ -2201,7 +2220,7 @@ fn graph_run_cancellation_unknown_blocks_tombstone_and_resume_reports_unknown() 
     store
         .replace_facts(facts_with_run("unknown", false))
         .unwrap();
-    let before = fs::metadata(&path).unwrap().len();
+    let before = sqlite_snapshot(&path);
 
     assert!(matches!(
         store.begin_graph_run_cancellation(&GraphRunId::new("run:one"), "cancel:one", 2),
@@ -2224,13 +2243,13 @@ fn graph_run_cancellation_unknown_blocks_tombstone_and_resume_reports_unknown() 
         store.resume_graph_runs(&team_id()),
         vec![ResumeOutcome::OutcomeUnknown(GraphRunId::new("run:one"))]
     );
-    assert!(fs::metadata(&path).unwrap().len() > before);
+    assert_eq!(sqlite_snapshot(&path).0, before.0 + 2);
     drop(store);
     remove_test_path(&path);
 }
 
 #[test]
-fn durable_delivery_registration_records_once_replays_without_appending_and_survives_reopen() {
+fn durable_delivery_registration_records_once_replays_without_committing_and_survives_reopen() {
     let path = test_path("delivery-registration");
     let mut store = OrganizationStore::open(&path).unwrap();
     store
@@ -2242,21 +2261,19 @@ fn durable_delivery_registration_records_once_replays_without_appending_and_surv
         store.register_delivery(request.clone()),
         Ok(RegisterOutcome::Recorded(_))
     ));
-    let len_after_first_registration = fs::metadata(&path).unwrap().len();
-    let bytes = fs::read(&path).unwrap();
-    assert!(contains(&bytes, b"delivery:one"));
+    let after_first_registration = sqlite_snapshot(&path);
+    assert!(after_first_registration.1.iter().any(|record| {
+        record.key.kind == super::schema::RecordKind::Delivery && record.key.id == "delivery:one"
+    }));
     for secret in [b"prompt-sentinel".as_slice(), b"workspace-grant-sentinel"] {
-        assert!(!contains(&bytes, secret));
+        assert!(!persisted_contains(&path, secret));
     }
 
     assert!(matches!(
         store.register_delivery(request.clone()),
         Ok(RegisterOutcome::Replayed(_))
     ));
-    assert_eq!(
-        fs::metadata(&path).unwrap().len(),
-        len_after_first_registration
-    );
+    assert_eq!(sqlite_snapshot(&path), after_first_registration);
     drop(store);
 
     let mut reopened = OrganizationStore::open(&path).unwrap();
@@ -2272,10 +2289,7 @@ fn durable_delivery_registration_records_once_replays_without_appending_and_surv
         reopened.register_delivery(request),
         Ok(RegisterOutcome::Replayed(_))
     ));
-    assert_eq!(
-        fs::metadata(&path).unwrap().len(),
-        len_after_first_registration
-    );
+    assert_eq!(sqlite_snapshot(&path), after_first_registration);
     drop(reopened);
     remove_test_path(&path);
 }
@@ -2435,12 +2449,12 @@ fn trigger_fire_rejects_conflicts_and_invalid_run_or_trigger_without_committing(
     let path = test_path("trigger-fire-reject");
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(facts_with_armed_webhook_run()).unwrap();
-    let baseline = fs::metadata(&path).unwrap().len();
+    let baseline = sqlite_snapshot(&path);
     let original =
         TriggerFireRequest::try_new("run:one", "start", TriggerSource::Webhook, "request:one")
             .unwrap();
     store.fire_trigger(original, 2).unwrap();
-    let after_first_fire = fs::metadata(&path).unwrap().len();
+    let after_first_fire = sqlite_snapshot(&path);
 
     let conflict = TriggerFireRequest::try_new(
         "run:one",
@@ -2455,7 +2469,7 @@ fn trigger_fire_rejects_conflicts_and_invalid_run_or_trigger_without_committing(
             idempotency_key: "request:one".to_owned(),
         })
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), after_first_fire);
+    assert_eq!(sqlite_snapshot(&path), after_first_fire);
 
     let wrong_run = TriggerFireRequest::try_new(
         "run:missing",
@@ -2468,7 +2482,7 @@ fn trigger_fire_rejects_conflicts_and_invalid_run_or_trigger_without_committing(
         store.fire_trigger(wrong_run, 3),
         Err(StoreFault::TriggerFire(TriggerFireError::RunMismatch))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), after_first_fire);
+    assert_eq!(sqlite_snapshot(&path), after_first_fire);
 
     let wrong_node = TriggerFireRequest::try_new(
         "run:one",
@@ -2483,7 +2497,7 @@ fn trigger_fire_rejects_conflicts_and_invalid_run_or_trigger_without_committing(
             crate::ReduceError::UnknownNode(node)
         ))) if node == NodeId::new("missing")
     ));
-    assert_eq!(fs::metadata(&path).unwrap().len(), after_first_fire);
+    assert_eq!(sqlite_snapshot(&path), after_first_fire);
 
     let source_mismatch =
         TriggerFireRequest::try_new("run:one", "start", TriggerSource::Cron, "request:cron")
@@ -2492,18 +2506,18 @@ fn trigger_fire_rejects_conflicts_and_invalid_run_or_trigger_without_committing(
         store.fire_trigger(source_mismatch, 3),
         Err(StoreFault::TriggerFire(TriggerFireError::SourceMismatch))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), after_first_fire);
-    assert!(baseline < after_first_fire);
+    assert_eq!(sqlite_snapshot(&path), after_first_fire);
+    assert_eq!(after_first_fire.0, baseline.0 + 1);
     drop(store);
     remove_test_path(&path);
 }
 
 #[test]
-fn observe_native_terminal_commits_once_replays_without_appending_and_survives_reopen() {
+fn observe_native_terminal_commits_once_replays_without_committing_and_survives_reopen() {
     let path = test_path("terminal-observation-transaction");
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(delivered_terminal_facts()).unwrap();
-    let before_observation = fs::metadata(&path).unwrap().len();
+    let before_observation = sqlite_snapshot(&path);
 
     assert_eq!(
         store.observe_native_terminal(
@@ -2513,8 +2527,8 @@ fn observe_native_terminal_commits_once_replays_without_appending_and_survives_r
         ),
         Ok(TerminalObservationOutcome::RecordedAwaitingAuthorizedGraphResolution)
     );
-    let after_observation = fs::metadata(&path).unwrap().len();
-    assert!(after_observation > before_observation);
+    let after_observation = sqlite_snapshot(&path);
+    assert_eq!(after_observation.0, before_observation.0 + 1);
     assert_terminal_observation_projection(store.facts(), NativeTerminalStatus::Completed);
 
     assert_eq!(
@@ -2525,7 +2539,7 @@ fn observe_native_terminal_commits_once_replays_without_appending_and_survives_r
         ),
         Ok(TerminalObservationOutcome::Replayed)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), after_observation);
+    assert_eq!(sqlite_snapshot(&path), after_observation);
     drop(store);
 
     let mut reopened = OrganizationStore::open(&path).unwrap();
@@ -2538,7 +2552,7 @@ fn observe_native_terminal_commits_once_replays_without_appending_and_survives_r
         ),
         Ok(TerminalObservationOutcome::Replayed)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), after_observation);
+    assert_eq!(sqlite_snapshot(&path), after_observation);
     drop(reopened);
     remove_test_path(&path);
 }
@@ -2727,7 +2741,7 @@ fn agent_node_event_resolution_commits_once_replays_and_requires_terminal_observ
     let unobserved_path = test_path("agent-node-event-unobserved");
     let mut unobserved_store = OrganizationStore::open(&unobserved_path).unwrap();
     unobserved_store.replace_facts(unobserved_facts).unwrap();
-    let unobserved_size = fs::metadata(&unobserved_path).unwrap().len();
+    let unobserved_commit = sqlite_snapshot(&unobserved_path);
     assert_eq!(
         unobserved_store.apply_agent_node_event_resolution(resolution.clone()),
         Err(StoreFault::AgentNodeEventResolution(
@@ -2736,10 +2750,7 @@ fn agent_node_event_resolution_commits_once_replays_and_requires_terminal_observ
             ),
         ))
     );
-    assert_eq!(
-        fs::metadata(&unobserved_path).unwrap().len(),
-        unobserved_size
-    );
+    assert_eq!(sqlite_snapshot(&unobserved_path), unobserved_commit);
     drop(unobserved_store);
     remove_test_path(&unobserved_path);
 
@@ -2747,12 +2758,12 @@ fn agent_node_event_resolution_commits_once_replays_and_requires_terminal_observ
         store.apply_agent_node_event_resolution(resolution.clone()),
         Ok(crate::AuthorizedGraphResolutionOutcome::Recorded)
     );
-    let size_after_first = fs::metadata(&path).unwrap().len();
+    let after_first_commit = sqlite_snapshot(&path);
     assert_eq!(
         store.apply_agent_node_event_resolution(resolution),
         Ok(crate::AuthorizedGraphResolutionOutcome::Replayed)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), size_after_first);
+    assert_eq!(sqlite_snapshot(&path), after_first_commit);
     drop(store);
 
     let reopened = OrganizationStore::open(&path).unwrap();
@@ -2805,7 +2816,7 @@ fn agent_node_event_completion_summary_persists_and_replays_with_command_identit
         store.apply_agent_node_event_resolution(resolution.clone()),
         Ok(crate::AuthorizedGraphResolutionOutcome::Recorded)
     );
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     let artifact = store.facts().artifacts().next().unwrap();
     assert_eq!(artifact.summary(), Some("completed work"));
     assert_eq!(artifact.source_envelope_id(), "command:summary");
@@ -2816,7 +2827,7 @@ fn agent_node_event_completion_summary_persists_and_replays_with_command_identit
         store.apply_agent_node_event_resolution(resolution),
         Ok(crate::AuthorizedGraphResolutionOutcome::Replayed)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     assert_eq!(store.facts().artifacts().count(), 1);
     drop(store);
 
@@ -2830,13 +2841,15 @@ fn agent_node_event_completion_summary_persists_and_replays_with_command_identit
 }
 
 #[test]
-fn agent_node_event_resolution_defaults_review_completion_to_passed() {
+fn agent_node_event_resolution_rejects_ambiguous_review_completion() {
     let path = test_path("agent-node-event-review");
     let mut store = OrganizationStore::open(&path).unwrap();
     let (delivery, graph, binding) = observed_review_delivery_and_graph();
+    let original_graph = graph.clone();
     store
         .replace_facts(agent_event_facts(delivery, graph, binding))
         .unwrap();
+    let committed = sqlite_snapshot(&path);
     let resolution = AgentNodeEventResolution::complete(
         AuthorizedGraphResolutionReceipt::try_new("agent-event:review").unwrap(),
         DeliveryId::new("delivery:one").unwrap(),
@@ -2857,19 +2870,21 @@ fn agent_node_event_resolution_defaults_review_completion_to_passed() {
 
     assert_eq!(
         store.apply_agent_node_event_resolution(resolution),
-        Ok(crate::AuthorizedGraphResolutionOutcome::Recorded)
+        Err(StoreFault::AgentNodeEventResolution(
+            crate::AgentNodeEventResolutionError::AuthorizedResolution(
+                crate::AuthorizedGraphResolutionError::OutputPortDoesNotMatchEdge,
+            )
+        ))
     );
     assert_eq!(
         store
             .facts()
             .run(&GraphRunId::new("run:one"))
             .unwrap()
-            .graph()
-            .current_attempt(&NodeId::new("review"))
-            .unwrap()
-            .output_port(),
-        Some("passed")
+            .graph(),
+        &original_graph
     );
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
     remove_test_path(&path);
 }
@@ -2949,7 +2964,7 @@ fn agent_node_event_resolution_requires_an_explicit_port_to_match_an_outgoing_ed
         5,
     )
     .unwrap();
-    let size_before = fs::metadata(&path).unwrap().len();
+    let before_commit = sqlite_snapshot(&path);
 
     assert_eq!(
         store.apply_agent_node_event_resolution(wrong_port),
@@ -2959,7 +2974,7 @@ fn agent_node_event_resolution_requires_an_explicit_port_to_match_an_outgoing_ed
             ),
         ))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), size_before);
+    assert_eq!(sqlite_snapshot(&path), before_commit);
 
     let routed = AgentNodeEventResolution::complete(
         AuthorizedGraphResolutionReceipt::try_new("agent-event:routed").unwrap(),
@@ -3048,7 +3063,9 @@ fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
         .replace_facts(facts_with_delivery(delivery, graph, binding, Vec::new()))
         .unwrap();
     let target = native_terminal_target(&store);
-    let final_text = r#"noise <team_message>{"summary":"已安全完成","decision":"completed","dispatch":[{"role_id":"leader","task":"复核结果"}]}</team_message>"#.to_owned();
+    let final_text =
+        r#"noise <team_message>{"summary":"已安全完成","decision":"completed"}</team_message>"#
+            .to_owned();
 
     assert_eq!(
         store.resolve_native_run_output(
@@ -3059,7 +3076,7 @@ fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
         ),
         Ok(crate::AuthorizedGraphResolutionOutcome::Recorded)
     );
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     let delivery = store
         .facts()
         .deliveries()
@@ -3074,9 +3091,6 @@ fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
     assert_eq!(output.final_assistant_text(), final_text);
     assert_eq!(output.summary(), "已安全完成");
     assert_eq!(output.decision(), "completed");
-    assert_eq!(output.dispatch().len(), 1);
-    assert_eq!(output.dispatch()[0].role_id(), "leader");
-    assert_eq!(output.dispatch()[0].task(), "复核结果");
     assert!(matches!(
         observation.resolution(),
         TerminalObservationResolution::GraphResolved(resolution)
@@ -3104,7 +3118,7 @@ fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
         ),
         Ok(crate::AuthorizedGraphResolutionOutcome::Replayed)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
 
     let reopened = OrganizationStore::open(&path).unwrap();
@@ -3120,9 +3134,6 @@ fn native_run_output_parses_team_message_resolves_graph_and_survives_reopen() {
         .output()
         .expect("native output should survive reopen");
     assert_eq!(output.decision(), "completed");
-    assert_eq!(output.dispatch().len(), 1);
-    assert_eq!(output.dispatch()[0].role_id(), "leader");
-    assert_eq!(output.dispatch()[0].task(), "复核结果");
     drop(reopened);
     remove_test_path(&path);
 }
@@ -3155,7 +3166,6 @@ fn activity_registration_accepts_deterministic_teamrun_completion_prompt_only() 
                     "private prompt",
                     ExecutorPolicy::team_role("leader"),
                     None,
-                    None,
                 ),
             )],
             Vec::new(),
@@ -3173,11 +3183,13 @@ fn activity_registration_accepts_deterministic_teamrun_completion_prompt_only() 
                 )],
                 materializations: vec![terminal_materialization()],
                 runs: vec![
-                    GraphRunFacts::new(
+                    GraphRunFacts::with_lifecycle_and_start_gate(
                         team_id(),
                         TeamRevision::initial(),
                         graph,
                         Some(runtime(binding)),
+                        GraphRunLifecycle::active(),
+                        crate::RunStartGate::Started,
                     )
                     .unwrap(),
                 ],
@@ -3205,6 +3217,12 @@ fn activity_registration_accepts_deterministic_teamrun_completion_prompt_only() 
         .unwrap();
     accepted.activity_id = crate::ActivityId::new("activity:accepted").unwrap();
     accepted.idempotency_key = "activity:accepted".to_owned();
+    let composed = crate::run::scheduler::compose_agent_task_prompt_with_upstream_context(
+        run.team(), run.graph().definition().node(&accepted.node_id).unwrap(), &accepted, &[],
+    ).unwrap();
+    if let crate::ActivityKind::AgentTask { prompt, .. } = &mut accepted.activity_kind {
+        *prompt = composed;
+    }
     assert!(matches!(
         store.register_activity(accepted),
         Ok(crate::ActivityRegistrationOutcome::Recorded(_))
@@ -3240,7 +3258,7 @@ fn native_run_output_rejects_invalid_team_message_without_appending() {
         .replace_facts(facts_with_delivery(delivery, graph, binding, Vec::new()))
         .unwrap();
     let target = native_terminal_target(&store);
-    let before = fs::metadata(&path).unwrap().len();
+    let before = sqlite_snapshot(&path);
 
     assert_eq!(
         store.resolve_native_run_output(
@@ -3253,7 +3271,7 @@ fn native_run_output_rejects_invalid_team_message_without_appending() {
             crate::NativeRunOutputResolutionError::InvalidOutput,
         ))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), before);
+    assert_eq!(sqlite_snapshot(&path), before);
     drop(store);
     remove_test_path(&path);
 }
@@ -3508,12 +3526,12 @@ fn durable_evidence_records_once_in_the_organization_frame_and_survives_reopen()
         store.record_evidence(record.clone()),
         Ok(crate::RecordOutcome::Recorded(record.clone()))
     );
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     assert_eq!(
         store.record_evidence(record.clone()),
         Ok(crate::RecordOutcome::Replayed(record.clone()))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
 
     let reopened = OrganizationStore::open(&path).unwrap();
@@ -3574,13 +3592,13 @@ fn durable_evidence_replays_after_its_node_is_reworked_without_appending() {
         })
         .unwrap();
     store.replace_facts(reworked_facts).unwrap();
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
 
     assert_eq!(
         store.record_evidence(record.clone()),
         Ok(crate::RecordOutcome::Replayed(record))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
     remove_test_path(&path);
 }
@@ -3594,7 +3612,7 @@ fn durable_evidence_rejects_conflict_foreign_and_stale_provenance_without_append
         .unwrap();
     let record = evidence_record("evidence:one", "run:one", "start:attempt:1");
     store.record_evidence(record).unwrap();
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
 
     assert!(matches!(
         store.record_evidence(evidence_record(
@@ -3620,7 +3638,7 @@ fn durable_evidence_rejects_conflict_foreign_and_stale_provenance_without_append
         )),
         Err(StoreFault::Evidence(_))
     ));
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
     remove_test_path(&path);
 }
@@ -3630,7 +3648,7 @@ fn durable_claim_is_committed_before_the_external_effect_handoff() {
     let path = test_path("delivery-claim");
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(facts_with_pending_delivery()).unwrap();
-    let before_claim = fs::metadata(&path).unwrap().len();
+    let before_claim = sqlite_snapshot(&path);
 
     let claim = match store
         .claim_delivery(&DeliveryId::new("delivery:one").unwrap(), 2)
@@ -3639,8 +3657,13 @@ fn durable_claim_is_committed_before_the_external_effect_handoff() {
         DeliveryStart::Claimed(claim) => claim,
         other => panic!("expected durable delivery claim, got {other:?}"),
     };
-    let after_claim = fs::metadata(&path).unwrap().len();
-    assert!(after_claim > before_claim);
+    let after_claim = sqlite_snapshot(&path);
+    assert_eq!(after_claim.0, before_claim.0 + 1);
+    let (_, persisted) = sqlite_facts(&path);
+    assert!(matches!(
+        persisted.deliveries().delivery(claim.delivery_id()).unwrap().phase(),
+        DeliveryPhase::Delivering(active) if active == &claim
+    ));
     assert!(matches!(
         store
             .facts()
@@ -3667,11 +3690,11 @@ fn durable_claim_is_committed_before_the_external_effect_handoff() {
 }
 
 #[test]
-fn durable_claim_replay_returns_the_same_claim_without_appending() {
+fn durable_claim_replay_returns_the_same_claim_without_committing() {
     let path = test_path("delivery-claim-replay");
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(facts_with_pending_delivery()).unwrap();
-    let before_claim = fs::metadata(&path).unwrap().len();
+    let before_claim = sqlite_snapshot(&path);
     let claim = match store
         .claim_delivery(&DeliveryId::new("delivery:one").unwrap(), 2)
         .unwrap()
@@ -3679,27 +3702,26 @@ fn durable_claim_replay_returns_the_same_claim_without_appending() {
         DeliveryStart::Claimed(claim) => claim,
         other => panic!("expected durable delivery claim, got {other:?}"),
     };
-    let after_claim = fs::metadata(&path).unwrap().len();
-    assert!(after_claim > before_claim);
+    let after_claim = sqlite_snapshot(&path);
+    assert_eq!(after_claim.0, before_claim.0 + 1);
 
     assert_eq!(
         store.claim_delivery(&DeliveryId::new("delivery:one").unwrap(), 3),
         Ok(DeliveryStart::AlreadyClaimed(claim.clone()))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), after_claim);
+    assert_eq!(sqlite_snapshot(&path), after_claim);
     drop(store);
 
-    let recovered = super::codec::recover_log(fs::File::open(&path).unwrap()).unwrap();
+    let (recovered_epoch, recovered) = sqlite_facts(&path);
     assert!(matches!(
         recovered
-            .facts
             .deliveries()
             .delivery(&DeliveryId::new("delivery:one").unwrap())
             .unwrap()
             .phase(),
         DeliveryPhase::Delivering(active) if active == &claim
     ));
-    assert!(recovered.had_interrupted_delivery);
+    assert_eq!(recovered_epoch, after_claim.0);
 
     let reopened = OrganizationStore::open(&path).unwrap();
     assert!(matches!(
@@ -3716,7 +3738,7 @@ fn durable_claim_replay_returns_the_same_claim_without_appending() {
 }
 
 #[test]
-fn durable_delivery_settlement_appends_once_and_survives_reopen() {
+fn durable_delivery_settlement_commits_once_and_survives_reopen() {
     let cases = [
         (
             "accepted",
@@ -3747,11 +3769,11 @@ fn durable_delivery_settlement_appends_once_and_survives_reopen() {
         let mut store = OrganizationStore::open(&path).unwrap();
         store.replace_facts(facts_with_pending_delivery()).unwrap();
         let claim = claimed_delivery(&mut store);
-        let before_settlement = fs::metadata(&path).unwrap().len();
+        let before_settlement = sqlite_snapshot(&path);
 
         assert_eq!(store.settle_delivery(&claim, receipt, 4), Ok(expected));
-        let after_settlement = fs::metadata(&path).unwrap().len();
-        assert!(after_settlement > before_settlement);
+        let after_settlement = sqlite_snapshot(&path);
+        assert_eq!(after_settlement.0, before_settlement.0 + 1);
         assert_settled_delivery(store.facts(), expected);
 
         assert_eq!(
@@ -3766,7 +3788,7 @@ fn durable_delivery_settlement_appends_once_and_survives_reopen() {
                 },
             )))
         );
-        assert_eq!(fs::metadata(&path).unwrap().len(), after_settlement);
+        assert_eq!(sqlite_snapshot(&path), after_settlement);
         drop(store);
 
         let reopened = OrganizationStore::open(&path).unwrap();
@@ -3800,7 +3822,7 @@ fn stale_delivery_settlement_rejects_without_appending() {
         DeliveryStart::Claimed(claim) => claim,
         other => panic!("expected next delivery claim, got {other:?}"),
     };
-    let before_stale_settlement = fs::metadata(&path).unwrap().len();
+    let before_stale_settlement = sqlite_snapshot(&path);
 
     assert_eq!(
         store.settle_delivery(
@@ -3814,7 +3836,7 @@ fn stale_delivery_settlement_rejects_without_appending() {
             },
         )))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), before_stale_settlement);
+    assert_eq!(sqlite_snapshot(&path), before_stale_settlement);
     assert!(matches!(
         store
             .facts()
@@ -3859,87 +3881,25 @@ fn reopen_converts_interrupted_delivery_to_outcome_unknown_without_replay() {
 #[test]
 fn human_approval_decision_commits_graph_and_approval_once() {
     let path = test_path("human-approval-decision");
-    let approval = Approval::request(ApprovalRequest {
-        approval_id: "approval:decision".to_owned(),
-        run_id: "run:one".to_owned(),
-        stage_id: "decision".to_owned(),
-        role_id: "leader".to_owned(),
-        reason: "Human decision required.".to_owned(),
-        requested_action: "Route the decision port.".to_owned(),
-        risk_summary: "A human must select the route.".to_owned(),
-        idempotency_key: "approval-request:decision".to_owned(),
-        requested_at: 1,
-        subject: ApprovalSubject::HumanDecision {
-            node_id: "decision".to_owned(),
-        },
-        origin: ApprovalOrigin::HumanDecision,
-        effect: ApprovalEffect::RouteDecisionPorts,
-        execution_fence: Some("decision:attempt:1".to_owned()),
-    });
-    let facts = OrganizationFacts::restore_with_teamrun_ledgers(TeamRunFactsRestoreInput {
-        teams: vec![TeamFacts::new(
-            team_definition(),
-            TeamRevision::initial(),
-            false,
-        )]
-        .into_iter()
-        .collect(),
-        materializations: [].into_iter().collect(),
-        runs: vec![
-            GraphRunFacts::new(
-                team_id(),
-                TeamRevision::initial(),
-                GraphState::initialize(
-                    GraphDefinition::new(
-                        "graph:decision",
-                        "plan:decision",
-                        GraphRunId::new("run:one"),
-                        "decision graph",
-                        vec![NodeDefinition::control(
-                            NodeId::new("decision"),
-                            NodeKind::HumanDecision,
-                            "decision",
-                            NonZeroU32::new(1).unwrap(),
-                        )],
-                        Vec::new(),
-                    )
-                    .unwrap(),
-                    1,
-                ),
-                None,
-            )
-            .unwrap(),
-        ]
-        .into_iter()
-        .collect(),
-        pending_workflow_plan_admissions: Vec::new(),
-        templates: Vec::new(),
-        deliveries: DeliveryLedgerSnapshot::new(Vec::new()),
-        activities: crate::ActivityLedgerSnapshot::new(Vec::new()),
-        triggers: [].into_iter().collect(),
-        control_resolutions: [].into_iter().collect(),
-        approvals: vec![approval.durable_snapshot()].into_iter().collect(),
-        events: EventLedger::default().snapshot(),
-        evidence: [].into_iter().collect(),
-    })
-    .unwrap();
+    let mut store = OrganizationStore::open(&path).unwrap();
+    store
+        .replace_facts(control_facts(NodeKind::HumanDecision))
+        .unwrap();
+    let approval_id = request_human_approval(&mut store, "decision");
     let command = HumanDecisionCommand::new(
         GraphRunId::new("run:one"),
-        OpaqueId::try_new("approval:decision").unwrap(),
+        approval_id.clone(),
         ApprovalDecision::Approve,
         Some("safe note".to_owned()),
         OpaqueId::try_new("approval-decision:one").unwrap(),
         2,
     )
     .unwrap();
-
-    let mut store = OrganizationStore::open(&path).unwrap();
-    store.replace_facts(facts).unwrap();
     assert_eq!(
         store.resolve_human_decision(command.clone()),
         Ok(HumanDecisionOutcome::Recorded)
     );
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     assert_eq!(
         store
             .facts()
@@ -3967,11 +3927,11 @@ fn human_approval_decision_commits_graph_and_approval_once() {
         store.resolve_human_decision(command.clone()),
         Ok(HumanDecisionOutcome::Replayed)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
 
     let conflicting = HumanDecisionCommand::new(
         GraphRunId::new("run:one"),
-        OpaqueId::try_new("approval:decision").unwrap(),
+        approval_id,
         ApprovalDecision::Deny,
         Some("different note".to_owned()),
         OpaqueId::try_new("approval-decision:one").unwrap(),
@@ -3982,7 +3942,7 @@ fn human_approval_decision_commits_graph_and_approval_once() {
         store.resolve_human_decision(conflicting),
         Err(StoreFault::InvalidFacts)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
 
     let mut reopened = OrganizationStore::open(&path).unwrap();
@@ -4019,10 +3979,10 @@ fn human_decision_resolution_commits_once_replays_and_survives_reopen() {
     .unwrap();
 
     assert_eq!(
-        store.apply_control_node_resolution(resolution.clone()),
-        Ok(ControlNodeResolutionOutcome::Recorded)
+        approve_human_node(&mut store, "decision"),
+        Ok(HumanDecisionOutcome::Recorded)
     );
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     assert_eq!(
         store
             .facts()
@@ -4043,7 +4003,7 @@ fn human_decision_resolution_commits_once_replays_and_survives_reopen() {
         store.apply_control_node_resolution(resolution.clone()),
         Ok(ControlNodeResolutionOutcome::Replayed)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
 
     drop(store);
     let mut reopened = OrganizationStore::open(&path).unwrap();
@@ -4066,7 +4026,7 @@ fn control_resolution_requires_an_exact_outgoing_port_and_rejects_rewrites() {
     let path = test_path("control-resolution-port");
     let mut store = OrganizationStore::open(&path).unwrap();
     store
-        .replace_facts(control_facts_with_output_port("custom-outcome_2"))
+        .replace_facts(control_facts_with_output_port("approved"))
         .unwrap();
     let fence = store
         .facts()
@@ -4077,7 +4037,7 @@ fn control_resolution_requires_an_exact_outgoing_port_and_rejects_rewrites() {
         .unwrap()
         .fence()
         .clone();
-    let before = fs::metadata(&path).unwrap().len();
+    let before = sqlite_snapshot(&path);
     let unmatched = ControlNodeResolution::try_new(
         ControlAuthority::HumanDecision,
         GraphRunId::new("run:one"),
@@ -4092,12 +4052,10 @@ fn control_resolution_requires_an_exact_outgoing_port_and_rejects_rewrites() {
     assert_eq!(
         store.apply_control_node_resolution(unmatched),
         Err(StoreFault::ControlNodeResolution(
-            ControlNodeResolutionError::OutputPortDoesNotMatchEdge {
-                node_id: NodeId::new("decision"),
-            }
+            ControlNodeResolutionError::GraphStateMismatch
         ))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), before);
+    assert_eq!(sqlite_snapshot(&path), before);
 
     let resolution = ControlNodeResolution::try_new(
         ControlAuthority::HumanDecision,
@@ -4105,15 +4063,15 @@ fn control_resolution_requires_an_exact_outgoing_port_and_rejects_rewrites() {
         NodeId::new("decision"),
         fence,
         AuthorizedGraphOutcome::Completed,
-        "custom-outcome_2",
+        "approved",
         2,
     )
     .unwrap();
     assert_eq!(
-        store.apply_control_node_resolution(resolution.clone()),
-        Ok(ControlNodeResolutionOutcome::Recorded)
+        approve_human_node(&mut store, "decision"),
+        Ok(HumanDecisionOutcome::Recorded)
     );
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     let conflicting = ControlNodeResolution::try_new(
         ControlAuthority::HumanDecision,
         GraphRunId::new("run:one"),
@@ -4131,7 +4089,7 @@ fn control_resolution_requires_an_exact_outgoing_port_and_rejects_rewrites() {
             ControlNodeResolutionError::ConflictingResolution
         ))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
     remove_test_path(&path);
 }
@@ -4141,24 +4099,7 @@ fn script_review_derives_its_resolution_from_durable_gate_facts() {
     let path = test_path("script-review-gate");
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(script_review_facts()).unwrap();
-    let upstream_fence = store
-        .facts()
-        .run(&GraphRunId::new("run:one"))
-        .unwrap()
-        .graph()
-        .current_attempt(&NodeId::new("upstream"))
-        .unwrap()
-        .fence()
-        .clone();
-    let upstream = ControlNodeResolution::human_decision(
-        GraphRunId::new("run:one"),
-        NodeId::new("upstream"),
-        upstream_fence,
-        HumanDecision::Approve,
-        2,
-    )
-    .unwrap();
-    store.apply_control_node_resolution(upstream).unwrap();
+    approve_human_node(&mut store, "upstream").unwrap();
     let graph = store
         .facts()
         .run(&GraphRunId::new("run:one"))
@@ -4197,55 +4138,47 @@ fn script_review_derives_its_resolution_from_durable_gate_facts() {
 
 #[test]
 fn script_review_rejects_rules_without_durable_facts() {
-    let graph = GraphState::initialize(
-        GraphDefinition::new(
-            "graph:script-review",
-            "plan:script-review",
-            GraphRunId::new("run:one"),
-            "script review",
-            vec![NodeDefinition::control(
-                NodeId::new("review"),
-                crate::NodeKind::ScriptReview,
-                "review",
-                NonZeroU32::new(1).unwrap(),
-            )],
-            Vec::new(),
-        )
-        .unwrap(),
-        1,
-    );
-    let fence = graph
-        .current_attempt(&NodeId::new("review"))
-        .unwrap()
-        .fence()
-        .clone();
+    for (rule, expected) in [
+        (ScriptReviewRule::AssertNoBlockingGate, "passed"),
+        (ScriptReviewRule::AssertArtifactExists, "failed"),
+    ] {
+        let graph = GraphState::initialize(
+            GraphDefinition::new(
+                "graph:script-review",
+                "plan:script-review",
+                GraphRunId::new("run:one"),
+                "script review",
+                vec![NodeDefinition::script_review(
+                    NodeId::new("review"),
+                    "review",
+                    NonZeroU32::new(1).unwrap(),
+                    rule,
+                )],
+                Vec::new(),
+            )
+            .unwrap(),
+            1,
+        );
+        let fence = graph
+            .current_attempt(&NodeId::new("review"))
+            .unwrap()
+            .fence()
+            .clone();
 
-    assert_eq!(
-        ControlNodeResolution::script_review(
-            GraphRunId::new("run:one"),
-            NodeId::new("review"),
-            fence.clone(),
-            ScriptReviewRule::AssertNoBlockingGate,
-            &graph,
-            2,
-        )
-        .unwrap()
-        .output_port(),
-        "passed"
-    );
-    assert_eq!(
-        ControlNodeResolution::script_review(
-            GraphRunId::new("run:one"),
-            NodeId::new("review"),
-            fence,
-            ScriptReviewRule::AssertArtifactExists,
-            &graph,
-            2,
-        )
-        .unwrap()
-        .output_port(),
-        "failed"
-    );
+        assert_eq!(
+            ControlNodeResolution::script_review(
+                GraphRunId::new("run:one"),
+                NodeId::new("review"),
+                fence,
+                rule,
+                &graph,
+                2,
+            )
+            .unwrap()
+            .output_port(),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -4253,27 +4186,7 @@ fn join_resolution_commits_after_gate_readiness_without_a_delivery_or_session_te
     let path = test_path("join-resolution");
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(join_facts()).unwrap();
-    let upstream_fence = store
-        .facts()
-        .run(&GraphRunId::new("run:one"))
-        .unwrap()
-        .graph()
-        .current_attempt(&NodeId::new("upstream"))
-        .unwrap()
-        .fence()
-        .clone();
-    store
-        .apply_control_node_resolution(
-            ControlNodeResolution::human_decision(
-                GraphRunId::new("run:one"),
-                NodeId::new("upstream"),
-                upstream_fence,
-                HumanDecision::Approve,
-                2,
-            )
-            .unwrap(),
-        )
-        .unwrap();
+    approve_human_node(&mut store, "upstream").unwrap();
     assert_eq!(store.facts().deliveries().deliveries().count(), 0);
     let graph = store
         .facts()
@@ -4297,7 +4210,7 @@ fn join_resolution_commits_after_gate_readiness_without_a_delivery_or_session_te
         store.apply_control_node_resolution(resolution.clone()),
         Ok(ControlNodeResolutionOutcome::Recorded)
     );
-    let committed_len = fs::metadata(&path).unwrap().len();
+    let committed = sqlite_snapshot(&path);
     let attempt = store
         .facts()
         .run(&GraphRunId::new("run:one"))
@@ -4311,7 +4224,7 @@ fn join_resolution_commits_after_gate_readiness_without_a_delivery_or_session_te
         store.apply_control_node_resolution(resolution.clone()),
         Ok(ControlNodeResolutionOutcome::Replayed)
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+    assert_eq!(sqlite_snapshot(&path), committed);
     drop(store);
     let reopened = OrganizationStore::open(&path).unwrap();
     assert_eq!(
@@ -4340,7 +4253,7 @@ fn runtime_receipt_installs_once_and_survives_reopen() {
             .runtime(),
         Some(&receipt)
     );
-    let bytes_after_install = fs::metadata(&path).unwrap().len();
+    let after_install = sqlite_snapshot(&path);
 
     assert_eq!(
         store.install_runtime_receipt(receipt),
@@ -4348,7 +4261,7 @@ fn runtime_receipt_installs_once_and_survives_reopen() {
             super::OrganizationFactsError::RuntimeAlreadyInstalled
         ))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), bytes_after_install);
+    assert_eq!(sqlite_snapshot(&path), after_install);
 
     drop(store);
     let reopened = OrganizationStore::open(&path).unwrap();
@@ -4397,7 +4310,7 @@ fn tombstoned_team_rejects_runtime_receipt_without_appending() {
     store
         .replace_facts(tombstoned_provisionable_facts())
         .unwrap();
-    let bytes_before = fs::metadata(&path).unwrap().len();
+    let before_commit = sqlite_snapshot(&path);
 
     assert_eq!(
         store.install_runtime_receipt(provisionable_runtime("agent:one")),
@@ -4405,7 +4318,7 @@ fn tombstoned_team_rejects_runtime_receipt_without_appending() {
             super::OrganizationFactsError::RuntimeTeamTombstoned
         ))
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), bytes_before);
+    assert_eq!(sqlite_snapshot(&path), before_commit);
     assert!(
         store
             .facts()
@@ -4484,7 +4397,7 @@ fn invalid_facts_do_not_commit_or_leak_secret_sentinel() {
     )
     .unwrap();
     store.replace_facts(invalid).unwrap();
-    let size_before = fs::metadata(&path).unwrap().len();
+    let before_commit = sqlite_snapshot(&path);
 
     let bad_run = GraphRunFacts::new(
         team_id(),
@@ -4509,9 +4422,31 @@ fn invalid_facts_do_not_commit_or_leak_secret_sentinel() {
             .to_string()
             .contains("secret-sentinel-must-not-reach-the-log")
     );
-    assert_eq!(fs::metadata(&path).unwrap().len(), size_before);
+    assert_eq!(sqlite_snapshot(&path), before_commit);
     drop(store);
     remove_test_path(&path);
+}
+
+fn request_human_approval(store: &mut OrganizationStore, node_id: &str) -> OpaqueId {
+    let run_id = GraphRunId::new("run:one");
+    let node_id = NodeId::new(node_id);
+    let fence = store.facts().run(&run_id).unwrap().graph()
+        .current_attempt(&node_id).unwrap().fence().clone();
+    store.apply_control_execution_step(&run_id, crate::ControlExecutionStep::HumanDecisionApproval {
+        node_id: node_id.clone(), fence, requested_at: 1,
+    }).unwrap();
+    let approval = store.facts().approvals().find(|approval| {
+        approval.facts().subject == ApprovalSubject::HumanDecision { node_id: node_id.as_str().to_owned() }
+    }).unwrap();
+    OpaqueId::try_new(approval.facts().approval_id.clone()).unwrap()
+}
+
+fn approve_human_node(store: &mut OrganizationStore, node_id: &str) -> Result<HumanDecisionOutcome, StoreFault> {
+    let approval_id = request_human_approval(store, node_id);
+    store.resolve_human_decision(HumanDecisionCommand::new(
+        GraphRunId::new("run:one"), approval_id, ApprovalDecision::Approve, None,
+        OpaqueId::try_new(format!("approve:{node_id}")).unwrap(), 2,
+    ).unwrap())
 }
 
 fn control_facts(kind: crate::NodeKind) -> OrganizationFacts {
@@ -4538,8 +4473,12 @@ fn control_facts(kind: crate::NodeKind) -> OrganizationFacts {
             TeamRevision::initial(),
             false,
         )],
-        [],
-        vec![GraphRunFacts::new(team_id(), TeamRevision::initial(), graph, None).unwrap()],
+        vec![terminal_materialization()],
+        vec![GraphRunFacts::with_lifecycle_and_start_gate(
+            team_id(), TeamRevision::initial(), graph,
+            Some(provisionable_runtime("agent:one")),
+            GraphRunLifecycle::active(), crate::RunStartGate::Started,
+        ).unwrap()],
         DeliveryLedgerSnapshot::new(Vec::new()),
     )
     .unwrap()
@@ -4572,7 +4511,7 @@ fn control_facts_with_output_port(output_port: &str) -> OrganizationFacts {
                 output_port,
                 NodeId::new("next"),
                 "input",
-                EdgeAction::Activate,
+                EdgeAction::Gate,
             )],
         )
         .unwrap(),
@@ -4584,8 +4523,12 @@ fn control_facts_with_output_port(output_port: &str) -> OrganizationFacts {
             TeamRevision::initial(),
             false,
         )],
-        [],
-        vec![GraphRunFacts::new(team_id(), TeamRevision::initial(), graph, None).unwrap()],
+        vec![terminal_materialization()],
+        vec![GraphRunFacts::with_lifecycle_and_start_gate(
+            team_id(), TeamRevision::initial(), graph,
+            Some(provisionable_runtime("agent:one")),
+            GraphRunLifecycle::active(), crate::RunStartGate::Started,
+        ).unwrap()],
         DeliveryLedgerSnapshot::new(Vec::new()),
     )
     .unwrap()
@@ -4605,11 +4548,11 @@ fn script_review_facts() -> OrganizationFacts {
                     "upstream",
                     NonZeroU32::new(1).unwrap(),
                 ),
-                NodeDefinition::control(
+                NodeDefinition::script_review(
                     NodeId::new("review"),
-                    crate::NodeKind::ScriptReview,
                     "review",
                     NonZeroU32::new(1).unwrap(),
+                    ScriptReviewRule::AssertAllUpstreamCompleted,
                 ),
             ],
             vec![EdgeDefinition::new(
@@ -4630,8 +4573,12 @@ fn script_review_facts() -> OrganizationFacts {
             TeamRevision::initial(),
             false,
         )],
-        [],
-        vec![GraphRunFacts::new(team_id(), TeamRevision::initial(), graph, None).unwrap()],
+        vec![terminal_materialization()],
+        vec![GraphRunFacts::with_lifecycle_and_start_gate(
+            team_id(), TeamRevision::initial(), graph,
+            Some(provisionable_runtime("agent:one")),
+            GraphRunLifecycle::active(), crate::RunStartGate::Started,
+        ).unwrap()],
         DeliveryLedgerSnapshot::new(Vec::new()),
     )
     .unwrap()
@@ -4676,8 +4623,12 @@ fn join_facts() -> OrganizationFacts {
             TeamRevision::initial(),
             false,
         )],
-        [],
-        vec![GraphRunFacts::new(team_id(), TeamRevision::initial(), graph, None).unwrap()],
+        vec![terminal_materialization()],
+        vec![GraphRunFacts::with_lifecycle_and_start_gate(
+            team_id(), TeamRevision::initial(), graph,
+            Some(provisionable_runtime("agent:one")),
+            GraphRunLifecycle::active(), crate::RunStartGate::Started,
+        ).unwrap()],
         DeliveryLedgerSnapshot::new(Vec::new()),
     )
     .unwrap()
@@ -5110,7 +5061,6 @@ fn agent_graph(kind: NodeKind, edges: Vec<EdgeDefinition>) -> GraphState {
                 "private prompt",
                 ExecutorPolicy::team_role("leader"),
                 None,
-                None,
             ),
         ),
         NodeKind::Review => NodeDefinition::review(
@@ -5245,11 +5195,13 @@ fn facts_with_armed_webhook_run() -> OrganizationFacts {
         )],
         [],
         vec![
-            GraphRunFacts::new(
+            GraphRunFacts::with_lifecycle_and_start_gate(
                 team_id(),
                 TeamRevision::initial(),
                 GraphState::initialize(definition, 1),
                 None,
+                GraphRunLifecycle::active(),
+                crate::RunStartGate::Started,
             )
             .unwrap(),
         ],
@@ -5283,7 +5235,10 @@ fn facts_with_work_root() -> OrganizationFacts {
             false,
         )],
         [],
-        [GraphRunFacts::new(team_id(), TeamRevision::initial(), graph, None).unwrap()],
+        [GraphRunFacts::with_lifecycle_and_start_gate(
+            team_id(), TeamRevision::initial(), graph, None,
+            GraphRunLifecycle::active(), crate::RunStartGate::Started,
+        ).unwrap()],
         DeliveryLedgerSnapshot::new(Vec::new()),
     )
     .unwrap()
@@ -5332,12 +5287,6 @@ fn workflow_plan(run_id: &str, idempotency_key: &str) -> crate::run::WorkflowPla
         run_id,
         "Workflow title",
         "active",
-        vec![crate::run::WorkflowGroup::new(
-            "group:primary",
-            "Primary work",
-            vec!["task:one".to_owned(), "task:two".to_owned()],
-            crate::run::WorkflowJoinPolicy::new(true, false, 2),
-        )],
         vec![
             crate::run::WorkflowTask::new(
                 "task:one",
@@ -5373,7 +5322,9 @@ fn graph(display_text: &str) -> GraphState {
     graph_for_run("run:one", display_text)
 }
 
-fn rich_replacement_definition() -> GraphDefinition {
+fn rich_replacement_definition(binding: &RoleSessionReceipt) -> GraphDefinition {
+    let executor =
+        ExecutorPolicy::team_role_session(binding.role().as_str(), binding.session_ref().clone());
     let attempts = NonZeroU32::new(3).unwrap();
     let node = |id| NodeId::new(id);
     let edge = |id, source, port, target, action| {
@@ -5406,28 +5357,26 @@ fn rich_replacement_definition() -> GraphDefinition {
                 WorkAssignment::typed(
                     "task-work",
                     "work instruction",
-                    ExecutorPolicy::team_role("role-work"),
+                    executor.clone(),
                     Some("artifact-report".to_owned()),
-                    Some(GroupId::new("group-work")),
                 ),
             ),
             NodeDefinition::review(
                 node("review"),
                 "Review",
                 attempts,
-                ReviewAssignment::new("role-review", "review instruction"),
+                ReviewAssignment::with_executor(executor.clone(), "review instruction"),
             ),
             NodeDefinition::join(
                 node("typed-join"),
                 "Typed join",
                 attempts,
-                WorkGroup::new(GroupId::new("group-typed"), JoinPolicy::new(true, false, 2)),
             ),
-            NodeDefinition::control(
+            NodeDefinition::review(
                 node("control-review"),
-                NodeKind::Review,
                 "Review gate",
                 attempts,
+                ReviewAssignment::with_executor(executor, "Gate review instruction"),
             ),
             NodeDefinition::control(
                 node("human-decision"),
@@ -5435,21 +5384,25 @@ fn rich_replacement_definition() -> GraphDefinition {
                 "Human decision",
                 attempts,
             ),
-            NodeDefinition::control(
+            NodeDefinition::script_review(
                 node("script-review"),
-                NodeKind::ScriptReview,
                 "Script review",
                 attempts,
+                ScriptReviewRule::PassThrough,
             ),
-            NodeDefinition::control(node("control-join"), NodeKind::Join, "Join gate", attempts),
+            NodeDefinition::join(
+                node("control-join"),
+                "Join gate",
+                attempts,
+            ),
             NodeDefinition::control(node("end"), NodeKind::End, "End", attempts),
         ],
         vec![
             edge(
-                "control-start-start",
+                "control-start-work",
                 "control-start",
                 "completed",
-                "start",
+                "work",
                 EdgeAction::Activate,
             ),
             edge(
@@ -5485,7 +5438,7 @@ fn rich_replacement_definition() -> GraphDefinition {
             edge(
                 "control-review-human-decision",
                 "control-review",
-                "approved",
+                "completed",
                 "human-decision",
                 EdgeAction::Activate,
             ),
@@ -5499,7 +5452,7 @@ fn rich_replacement_definition() -> GraphDefinition {
             edge(
                 "script-review-control-join",
                 "script-review",
-                "approved",
+                "passed",
                 "control-join",
                 EdgeAction::Gate,
             ),
@@ -5557,6 +5510,49 @@ fn team_definition() -> TeamDefinition {
         )],
     )
     .unwrap()
+}
+
+fn sqlite_snapshot(path: &Path) -> (u64, Vec<super::schema::StoredRecord>) {
+    super::sqlite::Database::open(path)
+        .unwrap()
+        .read_all()
+        .unwrap()
+}
+
+fn persisted_contains(path: &Path, needle: &[u8]) -> bool {
+    if sqlite_snapshot(path)
+        .1
+        .iter()
+        .any(|record| contains(&record.payload, needle))
+    {
+        return true;
+    }
+    let root = path.parent().unwrap().join("teams");
+    let mut directories = if root.exists() {
+        vec![root]
+    } else {
+        Vec::new()
+    };
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                directories.push(entry.path());
+            } else if contains(&fs::read(entry.path()).unwrap(), needle) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn sqlite_facts(path: &Path) -> (u64, OrganizationFacts) {
+    let (epoch, records) = sqlite_snapshot(path);
+    let contents = super::content::ContentStore::new(path.parent().unwrap().to_owned());
+    (
+        epoch,
+        super::records::decode_all(&records, &contents).unwrap(),
+    )
 }
 
 fn test_path(name: &str) -> PathBuf {

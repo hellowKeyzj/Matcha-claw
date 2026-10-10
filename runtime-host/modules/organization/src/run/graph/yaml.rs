@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt, num::NonZeroU32};
 
 use super::{
-    EdgeAction, EdgeDefinition, EdgeId, ExecutorPolicy, GraphDefinition, GraphRunId, GroupId,
+    EdgeAction, EdgeDefinition, EdgeId, ExecutorPolicy, GraphDefinition, GraphRunId,
     NodeDefinition, NodeId, NodeKind, StartTrigger, WorkAssignment,
 };
 
@@ -81,6 +81,14 @@ pub fn export(definition: &GraphDefinition) -> String {
             yaml.push_str(&quoted(expression));
             yaml.push('\n');
         }
+        if let Some(rule) = node.script_review_rule() {
+            write_indented_scalar(&mut yaml, "scriptReviewRule", match rule {
+                crate::ScriptReviewRule::PassThrough => "pass_through",
+                crate::ScriptReviewRule::AssertAllUpstreamCompleted => "assert_all_upstream_completed",
+                crate::ScriptReviewRule::AssertNoBlockingGate => "assert_no_blocking_gate",
+                crate::ScriptReviewRule::AssertArtifactExists => "assert_artifact_exists",
+            });
+        }
         if let Some(assignment) = node.work_assignment() {
             yaml.push_str("    taskId: ");
             yaml.push_str(&quoted(assignment.task_id()));
@@ -99,11 +107,6 @@ pub fn export(definition: &GraphDefinition) -> String {
                 yaml.push_str(&quoted(kind));
                 yaml.push('\n');
             }
-            if let Some(group_id) = assignment.group_id() {
-                yaml.push_str("    groupId: ");
-                yaml.push_str(&quoted(group_id.as_str()));
-                yaml.push('\n');
-            }
         }
         if let Some(assignment) = node.review_assignment() {
             yaml.push_str("    roleId: ");
@@ -114,28 +117,6 @@ pub fn export(definition: &GraphDefinition) -> String {
             yaml.push('\n');
             yaml.push_str("    prompt: ");
             yaml.push_str(&quoted(assignment.prompt()));
-            yaml.push('\n');
-        }
-        if let Some(group) = node.work_group() {
-            yaml.push_str("    groupId: ");
-            yaml.push_str(&quoted(group.id().as_str()));
-            yaml.push('\n');
-            yaml.push_str("    requireCompleted: ");
-            yaml.push_str(if group.join_policy().require_completed() {
-                "true"
-            } else {
-                "false"
-            });
-            yaml.push('\n');
-            yaml.push_str("    allowFailed: ");
-            yaml.push_str(if group.join_policy().allow_failed() {
-                "true"
-            } else {
-                "false"
-            });
-            yaml.push('\n');
-            yaml.push_str("    retryLimit: ");
-            yaml.push_str(&group.join_policy().retry_limit().to_string());
             yaml.push('\n');
         }
     }
@@ -362,10 +343,10 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
     let role_id = fields.remove("roleId");
     let session_ref = fields.remove("sessionRef");
     let output_artifact_kind = fields.remove("outputArtifactKind");
-    let group_id = fields.remove("groupId");
-    let require_completed = fields.remove("requireCompleted");
-    let allow_failed = fields.remove("allowFailed");
-    let retry_limit = fields.remove("retryLimit");
+    let script_rule = fields.remove("scriptReviewRule");
+    if script_rule.is_some() && kind != NodeKind::ScriptReview {
+        return Err(GraphYamlError::InvalidNode);
+    }
     if !fields.is_empty() {
         return Err(GraphYamlError::UnknownField);
     }
@@ -382,10 +363,6 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
                 || role_id.is_some()
                 || session_ref.is_some()
                 || output_artifact_kind.is_some()
-                || group_id.is_some()
-                || require_completed.is_some()
-                || allow_failed.is_some()
-                || retry_limit.is_some()
             {
                 return Err(GraphYamlError::InvalidNode);
             }
@@ -403,34 +380,20 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
             session_ref,
             webhook_path,
             cron_expression,
-            group_id,
-            require_completed,
-            allow_failed,
-            retry_limit,
         ) {
-            (
-                Some(task_id),
-                Some(prompt),
-                Some(role_id),
-                session_ref,
-                None,
-                None,
-                group_id,
-                None,
-                None,
-                None,
-            ) => Ok(NodeDefinition::work(
-                NodeId::new(id),
-                title,
-                max_attempts,
-                WorkAssignment::typed(
-                    task_id,
-                    prompt,
-                    ExecutorPolicy::team_role_session(role_id, role_session_ref(session_ref)?),
-                    output_artifact_kind,
-                    group_id.map(GroupId::new),
-                ),
-            )),
+            (Some(task_id), Some(prompt), Some(role_id), session_ref, None, None) => {
+                Ok(NodeDefinition::work(
+                    NodeId::new(id),
+                    title,
+                    max_attempts,
+                    WorkAssignment::typed(
+                        task_id,
+                        prompt,
+                        ExecutorPolicy::team_role_session(role_id, role_session_ref(session_ref)?),
+                        output_artifact_kind,
+                    ),
+                ))
+            }
             _ => Err(GraphYamlError::InvalidNode),
         },
         (NodeKind::Review, false) => match (
@@ -441,80 +404,31 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
             cron_expression,
             task_id,
             output_artifact_kind,
-            group_id,
-            require_completed,
-            allow_failed,
-            retry_limit,
         ) {
-            (
-                Some(role_id),
-                session_ref,
-                Some(prompt),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ) => Ok(NodeDefinition::review(
-                NodeId::new(id),
-                title,
-                max_attempts,
-                super::ReviewAssignment::with_executor(
-                    ExecutorPolicy::team_role_session(role_id, role_session_ref(session_ref)?),
-                    prompt,
-                ),
-            )),
-            _ => Err(GraphYamlError::InvalidNode),
-        },
-        (NodeKind::Join, false) => match (
-            group_id,
-            require_completed,
-            allow_failed,
-            retry_limit,
-            webhook_path,
-            cron_expression,
-            task_id,
-            prompt,
-            role_id,
-            session_ref,
-            output_artifact_kind,
-        ) {
-            (
-                Some(group_id),
-                Some(require_completed),
-                Some(allow_failed),
-                Some(retry_limit),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ) => Ok(NodeDefinition::join(
-                NodeId::new(id),
-                title,
-                max_attempts,
-                super::WorkGroup::new(
-                    GroupId::new(group_id),
-                    super::JoinPolicy::new(
-                        require_completed
-                            .parse()
-                            .map_err(|_| GraphYamlError::InvalidNode)?,
-                        allow_failed
-                            .parse()
-                            .map_err(|_| GraphYamlError::InvalidNode)?,
-                        retry_limit
-                            .parse()
-                            .map_err(|_| GraphYamlError::InvalidNode)?,
+            (Some(role_id), session_ref, Some(prompt), None, None, None, None) => {
+                Ok(NodeDefinition::review(
+                    NodeId::new(id),
+                    title,
+                    max_attempts,
+                    super::ReviewAssignment::with_executor(
+                        ExecutorPolicy::team_role_session(role_id, role_session_ref(session_ref)?),
+                        prompt,
                     ),
-                ),
-            )),
+                ))
+            }
             _ => Err(GraphYamlError::InvalidNode),
         },
+        (NodeKind::Join, false)
+            if webhook_path.is_none()
+                && cron_expression.is_none()
+                && task_id.is_none()
+                && prompt.is_none()
+                && role_id.is_none()
+                && session_ref.is_none()
+                && output_artifact_kind.is_none() =>
+        {
+            Ok(NodeDefinition::join(NodeId::new(id), title, max_attempts))
+        }
         (kind, true)
             if matches!(
                 kind,
@@ -530,30 +444,28 @@ fn read_node(mut fields: BTreeMap<String, String>) -> Result<NodeDefinition, Gra
                 && prompt.is_none()
                 && role_id.is_none()
                 && session_ref.is_none()
-                && output_artifact_kind.is_none()
-                && group_id.is_none()
-                && require_completed.is_none()
-                && allow_failed.is_none()
-                && retry_limit.is_none() =>
+                && output_artifact_kind.is_none() =>
         {
-            Ok(NodeDefinition::control(
-                NodeId::new(id),
-                kind,
-                title,
-                max_attempts,
-            ))
+            if kind == NodeKind::ScriptReview {
+                let rule = match script_rule.as_deref() {
+                    Some("pass_through") => crate::ScriptReviewRule::PassThrough,
+                    Some("assert_all_upstream_completed") => crate::ScriptReviewRule::AssertAllUpstreamCompleted,
+                    Some("assert_no_blocking_gate") => crate::ScriptReviewRule::AssertNoBlockingGate,
+                    Some("assert_artifact_exists") => crate::ScriptReviewRule::AssertArtifactExists,
+                    _ => return Err(GraphYamlError::InvalidNode),
+                };
+                Ok(NodeDefinition::script_review(NodeId::new(id), title, max_attempts, rule))
+            } else {
+                Ok(NodeDefinition::control(NodeId::new(id), kind, title, max_attempts))
+            }
         }
         _ => Err(GraphYamlError::InvalidNode),
     }
 }
 
 fn role_session_ref(value: Option<String>) -> Result<crate::RoleSessionRef, GraphYamlError> {
-    match value {
-        Some(value) => {
-            crate::RoleSessionRef::try_new(value).map_err(|_| GraphYamlError::InvalidNode)
-        }
-        None => Ok(crate::RoleSessionRef::initial()),
-    }
+    crate::RoleSessionRef::try_new(value.ok_or(GraphYamlError::InvalidNode)?)
+        .map_err(|_| GraphYamlError::InvalidNode)
 }
 
 fn read_edge(mut fields: BTreeMap<String, String>) -> Result<EdgeDefinition, GraphYamlError> {
@@ -647,9 +559,7 @@ fn scalar(field: &str, value: &str) -> Result<String, GraphYamlError> {
                 | "action"
                 | "includeUpstreamResult"
                 | "sessionRef"
-                | "requireCompleted"
-                | "allowFailed"
-                | "retryLimit"
+                | "scriptReviewRule"
         )
     {
         return Err(GraphYamlError::InvalidScalar);

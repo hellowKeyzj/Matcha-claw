@@ -396,11 +396,13 @@ fn facts_with_armed_webhook_run() -> OrganizationFacts {
         )],
         [],
         vec![
-            GraphRunFacts::new(
+            GraphRunFacts::with_lifecycle_and_start_gate(
                 team,
                 TeamRevision::initial(),
                 GraphState::initialize(definition, 1),
                 None,
+                organization::GraphRunLifecycle::active(),
+                organization::RunStartGate::Started,
             )
             .expect("graph run facts"),
         ],
@@ -445,11 +447,13 @@ fn facts_with_duplicate_webhook_run() -> OrganizationFacts {
         )],
         [],
         vec![
-            GraphRunFacts::new(
+            GraphRunFacts::with_lifecycle_and_start_gate(
                 team,
                 TeamRevision::initial(),
                 GraphState::initialize(definition, 1),
                 None,
+                organization::GraphRunLifecycle::active(),
+                organization::RunStartGate::Started,
             )
             .expect("graph run facts"),
         ],

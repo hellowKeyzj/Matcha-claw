@@ -420,13 +420,13 @@ impl GatewayClient {
 
     pub(crate) fn prepare_observation(&self, request: sessions_module::ports::SessionObservationRequest) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.prepare.request", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.prepare.request", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(&request.identity), "generation": request.generation,
                 "ingestPresent": self.event_ingest.is_some() }));
         }
         if self.event_ingest.is_none() {
             if trace::enabled() {
-                trace::log_unscoped("runtime.openclaw.observation.prepare.rejected", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.prepare.rejected", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&request.identity), "generation": request.generation, "reason": "ingest_missing" }));
             }
             return Err(sessions_module::ports::RuntimeOperationFailure::Unavailable);
@@ -437,7 +437,7 @@ impl GatewayClient {
     async fn subscribe_observation(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.subscribe.request", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.subscribe.request", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
                 "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()) }));
         }
@@ -446,7 +446,7 @@ impl GatewayClient {
             let mut entries = self.observations.entries.lock().expect("observation registry lock poisoned");
             if trace::enabled() {
                 let entry = entries.get(&identity_key(identity));
-                trace::log_unscoped("runtime.openclaw.observation.subscribe.binding", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.subscribe.binding", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "sourceEpoch": epoch,
                     "entryPresent": entry.is_some(), "entryGeneration": entry.map(|entry| entry.generation),
                     "entrySourceEpoch": entry.and_then(|entry| entry.source_epoch), "subscribedEpoch": entry.and_then(|entry| entry.subscribed_epoch),
@@ -455,15 +455,16 @@ impl GatewayClient {
             let entry = entries.get_mut(&identity_key(identity)).filter(|entry| entry.generation == generation && entry.source_epoch.is_none_or(|source| source == epoch)).ok_or(RuntimeOperationFailure::Unavailable)?;
             if entry.subscribed_epoch == Some(epoch) {
                 if trace::enabled() {
-                    trace::log_unscoped("runtime.openclaw.observation.subscribe.reused", serde_json::json!({
+                    trace::log_unscoped("runtime.openclaw.observation.subscribe.reused", || serde_json::json!({
                         "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "sourceEpoch": epoch, "paused": entry.paused }));
                 }
                 return Ok(());
             }
+            if entry.source_epoch != Some(epoch) { entry.ingress_receipt = None; }
             entry.source_epoch = Some(epoch);
             entry.paused = false;
             if trace::enabled() {
-                trace::log_unscoped("runtime.openclaw.observation.subscribe.admitted", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.subscribe.admitted", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
                     "sourceEpoch": entry.source_epoch, "subscribedEpoch": entry.subscribed_epoch, "paused": entry.paused }));
             }
@@ -478,7 +479,7 @@ impl GatewayClient {
         let ordered_elapsed_ms = ordered_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
         self.observations.pending.lock().expect("observation pending lock poisoned").remove(&id);
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.subscribe.transport", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.subscribe.transport", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "sourceEpoch": epoch,
                 "requestHash": sessions_module::trace::fingerprint(&id), "received": response.is_ok(),
                 "orderedQueryElapsedMs": ordered_elapsed_ms, "timingScope": "dispatcher_queue_socket_and_ordered_ingress_including_trace" }));
@@ -490,7 +491,7 @@ impl GatewayClient {
         if trace::enabled() {
             let entries = self.observations.entries.lock().expect("observation registry lock poisoned");
             let entry = entries.get(&identity_key(identity));
-            trace::log_unscoped("runtime.openclaw.observation.subscribe.result", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.subscribe.result", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "sourceEpoch": epoch,
                 "requestHash": sessions_module::trace::fingerprint(&id), "replyReceived": result.is_ok(),
                 "routerReplyWaitElapsedMs": reply_elapsed_ms, "timingScope": "router_reply_wait_after_ordered_query_excluding_outer_trace",
@@ -592,7 +593,7 @@ impl GatewayClient {
             let id = next_request_id("chat-history");
             if let Some(mut payload) = request_trace {
                 payload["requestHash"] = serde_json::json!(sessions_module::trace::fingerprint(&id));
-                trace::log_unscoped("runtime.openclaw.observation.history.request", payload);
+                trace::log_unscoped("runtime.openclaw.observation.history.request", || payload);
             }
             let request = wire::session_request(id.clone(), crate::session::protocol::CHAT_HISTORY_METHOD, serde_json::to_value(params).map_err(|_| RuntimeOperationFailure::Unknown)?).map_err(|_| RuntimeOperationFailure::Unknown)?;
             let (reply, result) = tokio::sync::oneshot::channel();
@@ -603,7 +604,7 @@ impl GatewayClient {
             let ordered_elapsed_ms = ordered_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
             self.observations.pending.lock().expect("observation pending lock poisoned").remove(&id);
             if trace::enabled() {
-                trace::log_unscoped("runtime.openclaw.observation.history.transport", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.history.transport", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
                     "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempt": attempt + 1,
                     "requestHash": sessions_module::trace::fingerprint(&id), "received": response.is_ok(),
@@ -625,7 +626,7 @@ impl GatewayClient {
             if trace::enabled() {
                 let entries = self.observations.entries.lock().expect("observation registry lock poisoned");
                 let entry = entries.get(&identity_key(identity));
-                trace::log_unscoped("runtime.openclaw.observation.history.result", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.history.result", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
                     "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempt": attempt + 1,
                     "requestHash": sessions_module::trace::fingerprint(&id),
@@ -666,7 +667,7 @@ impl GatewayClient {
             }
             resets += 1;
             if trace::enabled() {
-                trace::log_unscoped("runtime.openclaw.observation.history.reset", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.history.reset", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
                     "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "attempt": attempt + 1,
                     "retry": resets < 3 }));
@@ -674,7 +675,7 @@ impl GatewayClient {
             if resets == 3 { break; }
         }
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.history.exhausted", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.history.exhausted", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation,
                 "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "hostEpoch": host_epoch, "resets": resets, "rebased": rebased }));
         }
@@ -684,7 +685,7 @@ impl GatewayClient {
     pub(crate) async fn sync_observation(&self, identity: &sessions_module::state::SessionIdentity, generation: u64, page: crate::session::window::PageRequest, host_epoch: u64) -> Result<sessions_module::ports::SessionSync, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.sync.request", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.sync.request", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "hostEpoch": host_epoch,
                 "direction": match page.direction() { crate::session::window::Direction::Latest => "latest", crate::session::window::Direction::Older => "older", crate::session::window::Direction::Newer => "newer" }, "limit": page.limit(), "offset": page.offset() }));
         }
@@ -693,7 +694,7 @@ impl GatewayClient {
         let result = async {
         let control = self.control_dispatcher().await.map_err(|_| {
             if trace::enabled() {
-                trace::log_unscoped("runtime.openclaw.observation.sync.unavailable", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.sync.unavailable", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "hostEpoch": host_epoch, "reason": "control_unavailable" }));
             }
             RuntimeOperationFailure::Unavailable
@@ -702,7 +703,7 @@ impl GatewayClient {
         let _native = self.observations.native.lock().await;
         let native_wait_elapsed_ms = native_wait_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.sync.native_acquired", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.sync.native_acquired", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "hostEpoch": host_epoch,
                 "nativeMutexWaitElapsedMs": native_wait_elapsed_ms, "lockScope": "all_openclaw_observations",
                 "timingScope": "native_mutex_lock_await_only" }));
@@ -721,7 +722,7 @@ impl GatewayClient {
             history
         }.await;
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.sync.result", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.sync.result", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "hostEpoch": host_epoch,
                 "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()), "succeeded": result.is_ok(),
                 "nativeMutexWaitElapsedMs": native_wait_elapsed_ms, "subscribeWithTraceElapsedMs": subscribe_elapsed_ms,
@@ -734,27 +735,37 @@ impl GatewayClient {
         }
         result
         }.await;
-        let retry_pending = ingest.history_finished(identity.clone(), generation, read).await;
-        if result.is_err() && retry_pending { Err(RuntimeOperationFailure::HistoryRetryPending) } else { result }
+        let retry_pending = ingest.history_finished(identity.clone(), generation, read).await?;
+        match result {
+            Ok(sync) => {
+                let epoch = sync.source_epoch.ok_or(RuntimeOperationFailure::Unavailable)?;
+                // The ordered history has returned and the native lock is released. Wait only
+                // here: blocking ingress or a Sessions lane would deadlock their RPC replies.
+                self.observations.await_ingress(identity, generation, epoch).await?;
+                Ok(sync)
+            }
+            Err(_) if retry_pending => Err(RuntimeOperationFailure::HistoryRetryPending),
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) async fn restart_observation(&self, identity: &sessions_module::state::SessionIdentity, generation: u64, next_generation: u64) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.restart.request", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.restart.request", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "nextGeneration": next_generation }));
         }
         let _native = self.observations.native.lock().await;
         if !self.observations.contains(identity, generation, None) {
             if trace::enabled() {
-                trace::log_unscoped("runtime.openclaw.observation.restart.rejected", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.restart.rejected", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "nextGeneration": next_generation, "reason": "binding_unavailable" }));
             }
             return Err(RuntimeOperationFailure::Unavailable);
         }
         if next_generation <= generation || next_generation > 9_007_199_254_740_991 {
             if trace::enabled() {
-                trace::log_unscoped("runtime.openclaw.observation.restart.rejected", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.restart.rejected", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "nextGeneration": next_generation, "reason": "invalid_generation" }));
             }
             self.close_observation_locked(identity.clone(), generation).await;
@@ -772,7 +783,7 @@ impl GatewayClient {
             None => Err(RuntimeOperationFailure::Unavailable),
         };
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.restart.handoff", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.restart.handoff", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "nextGeneration": next_generation,
                 "completed": result.is_ok(), "failure": result.as_ref().err().map(observation_failure_kind) }));
         }
@@ -793,7 +804,7 @@ impl GatewayClient {
             let mut entries = self.observations.entries.lock().expect("observation registry lock poisoned");
             if trace::enabled() {
                 let entry = entries.get(&identity_key(&identity));
-                trace::log_unscoped("runtime.openclaw.observation.close.request", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.close.request", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
                     "entryPresent": entry.is_some(), "entryGeneration": entry.map(|entry| entry.generation),
                     "sourceEpoch": entry.and_then(|entry| entry.source_epoch), "subscribedEpoch": entry.and_then(|entry| entry.subscribed_epoch),
@@ -812,12 +823,12 @@ impl GatewayClient {
         });
         if let Some(ingest) = &self.event_ingest { ingest.close_observation(identity.clone(), generation).await; }
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.close.ingress_returned", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.close.ingress_returned", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(&identity), "generation": generation, "ingestPresent": self.event_ingest.is_some() }));
         }
         if self.observations.entries.lock().expect("observation registry lock poisoned").contains_key(&identity_key(&identity)) {
             if trace::enabled() {
-                trace::log_unscoped("runtime.openclaw.observation.close.unsubscribe_skipped", serde_json::json!({
+                trace::log_unscoped("runtime.openclaw.observation.close.unsubscribe_skipped", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&identity), "generation": generation, "reason": "binding_replaced" }));
             }
             return;
@@ -827,7 +838,7 @@ impl GatewayClient {
             match &*state { GatewayControlConnectionState::Ready { control, .. } => Some(Arc::clone(control)), _ => None }
         };
         if trace::enabled() {
-            trace::log_unscoped("runtime.openclaw.observation.close.unsubscribe", serde_json::json!({
+            trace::log_unscoped("runtime.openclaw.observation.close.unsubscribe", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(&identity), "generation": generation, "controlReady": control.is_some(),
                 "sourceEpoch": control.as_ref().and_then(|control| control.epoch.map(|epoch| epoch.as_u64())) }));
         }
@@ -835,7 +846,7 @@ impl GatewayClient {
             if let Ok(request) = wire::sessions_messages_unsubscribe_request(next_request_id("sessions-messages-unsubscribe"), identity.session_key.clone(), identity.agent_id.clone()) {
                 let result = control.dispatcher.query(request).await;
                 if trace::enabled() {
-                    trace::log_unscoped("runtime.openclaw.observation.close.result", serde_json::json!({
+                    trace::log_unscoped("runtime.openclaw.observation.close.result", || serde_json::json!({
                         "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
                         "sourceEpoch": control.epoch.map(|epoch| epoch.as_u64()),
                         "outcome": match &result { Ok(wire::GatewayResponse::Success { .. }) => "ok", Ok(wire::GatewayResponse::Failure { .. }) => "native_failed", Err(_) => "transport_failed" } }));
@@ -876,11 +887,13 @@ impl GatewayClient {
     pub async fn http_ready(&self) -> bool {
         let healthz = http_status(self.endpoint.http_url("/healthz")).await;
         let readyz = http_status(self.endpoint.http_url("/readyz")).await;
-        eprintln!(
-            "[startup-trace] source=openclaw-gateway phase=http-ready detail=probe-results healthz={} readyz={}",
-            healthz.map_or_else(|| "none".to_owned(), |status| status.to_string()),
-            readyz.map_or_else(|| "none".to_owned(), |status| status.to_string())
-        );
+        if platform::trace::enabled() {
+            eprintln!(
+                "[startup-trace] source=openclaw-gateway phase=http-ready detail=probe-results healthz={} readyz={}",
+                healthz.map_or_else(|| "none".to_owned(), |status| status.to_string()),
+                readyz.map_or_else(|| "none".to_owned(), |status| status.to_string())
+            );
+        }
         healthz == Some(200) && readyz == Some(200)
     }
 
@@ -1051,9 +1064,11 @@ impl GatewayClient {
         let mut transient_attempt = GatewayControlAttempt::transient();
         let mut starting_attempt = GatewayControlAttempt::starting();
         let last_error = loop {
-            eprintln!(
-                "[startup-trace] source=openclaw-control phase=connecting detail=control-connect-attempt attempt={attempt_number}"
-            );
+            if platform::trace::enabled() {
+                eprintln!(
+                    "[startup-trace] source=openclaw-control phase=connecting detail=control-connect-attempt attempt={attempt_number}"
+                );
+            }
             {
                 let mut state = self.control_state.lock().await;
                 if matches!(
@@ -1109,10 +1124,12 @@ impl GatewayClient {
                     return;
                 }
                 Err(error) => {
-                    eprintln!(
-                        "[startup-trace] source=openclaw-control phase=connect-failed detail=control-connect-attempt-failed attempt={attempt_number} retryable={} error={error}",
-                        is_retryable_control_connection_error(error)
-                    );
+                    if platform::trace::enabled() {
+                        eprintln!(
+                            "[startup-trace] source=openclaw-control phase=connect-failed detail=control-connect-attempt-failed attempt={attempt_number} retryable={} error={error}",
+                            is_retryable_control_connection_error(error)
+                        );
+                    }
                     if !is_retryable_control_connection_error(error) {
                         break error;
                     }

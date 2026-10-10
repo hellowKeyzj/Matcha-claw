@@ -73,7 +73,7 @@ export function registerChatMembersTool(api: OpenClawPluginApi): boolean {
         try {
           const client = toolClient();
 
-          log.info(`chat_members: chat_id="${p.chat_id}", page_size=${p.page_size ?? 20}`);
+          log.trace(() => `chat_members: chat_id="${p.chat_id}", page_size=${p.page_size ?? 20}`);
 
           const res = await client.invoke(
             'feishu_chat_members.default',

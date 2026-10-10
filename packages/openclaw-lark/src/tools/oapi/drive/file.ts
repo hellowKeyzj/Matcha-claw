@@ -331,7 +331,7 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
             // LIST FILES
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: folder_token=${p.folder_token || '(root)'}, page_size=${p.page_size ?? 200}`);
+              log.trace(() => `list: folder_token=${p.folder_token || '(root)'}, page_size=${p.page_size ?? 200}`);
 
               const res = await client.invoke(
                 'feishu_drive_file.list',
@@ -373,7 +373,7 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
                 });
               }
 
-              log.info(`get_meta: querying ${p.request_docs.length} documents`);
+              log.trace(() => `get_meta: querying ${p.request_docs.length} documents`);
 
               const res = await client.invoke(
                 'feishu_drive_file.get_meta',
@@ -404,7 +404,7 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
               // 兼容处理：parent_node 作为 folder_token 的别名
               const targetFolderToken = p.folder_token || p.parent_node;
 
-              log.info(
+              log.trace(() =>
                 `copy: file_token=${p.file_token}, name=${p.name}, type=${p.type}, folder_token=${targetFolderToken ?? '(root)'}`,
               );
 
@@ -438,7 +438,7 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
             // MOVE FILE
             // -----------------------------------------------------------------
             case 'move': {
-              log.info(`move: file_token=${p.file_token}, type=${p.type}, folder_token=${p.folder_token}`);
+              log.trace(() => `move: file_token=${p.file_token}, type=${p.type}, folder_token=${p.folder_token}`);
 
               const res = await client.invoke(
                 'feishu_drive_file.move',
@@ -472,7 +472,7 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
             // DELETE FILE
             // -----------------------------------------------------------------
             case 'delete': {
-              log.info(`delete: file_token=${p.file_token}, type=${p.type}`);
+              log.trace(() => `delete: file_token=${p.file_token}, type=${p.type}`);
 
               const res = await client.invoke(
                 'feishu_drive_file.delete',
@@ -510,7 +510,7 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
 
               // 优先使用 file_path
               if (p.file_path) {
-                log.info(`upload: reading from local file: ${p.file_path}`);
+                log.trace(() => `upload: reading from local file: ${p.file_path}`);
 
                 try {
                   // 读取文件内容
@@ -522,7 +522,7 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
                   // 计算文件大小（如果未提供）
                   fileSize = p.size || fileBuffer.length;
 
-                  log.info(`upload: file_name=${fileName}, size=${fileSize}, parent=${p.parent_node || '(root)'}`);
+                  log.trace(() => `upload: file_name=${fileName}, size=${fileSize}, parent=${p.parent_node || '(root)'}`);
                 } catch (err) {
                   return json({
                     error: `failed to read local file: ${err instanceof Error ? err.message : String(err)}`,
@@ -536,7 +536,7 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
                   });
                 }
 
-                log.info(
+                log.trace(() =>
                   `upload: using base64 content, file_name=${p.file_name}, size=${p.size}, parent=${p.parent_node}`,
                 );
 
@@ -553,7 +553,7 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
               // 根据文件大小选择上传方式
               if (fileSize <= SMALL_FILE_THRESHOLD) {
                 // 小文件：使用一次上传
-                log.info(`upload: using upload_all (file size ${fileSize} <= 15MB)`);
+                log.trace(() => `upload: using upload_all (file size ${fileSize} <= 15MB)`);
 
                 const res: any = await client.invoke(
                   'feishu_drive_file.upload',
@@ -583,10 +583,10 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
                 });
               } else {
                 // 大文件：使用分片上传
-                log.info(`upload: using chunked upload (file size ${fileSize} > 15MB)`);
+                log.trace(() => `upload: using chunked upload (file size ${fileSize} > 15MB)`);
 
                 // 1. 预上传
-                log.info(`upload: step 1 - prepare upload`);
+                log.trace(() => `upload: step 1 - prepare upload`);
                 const prepareRes: any = await client.invoke(
                   'feishu_drive_file.upload',
                   (sdk, opts) =>
@@ -604,7 +604,7 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
                   { as: 'user' },
                 );
 
-                log.info(`upload: prepareRes = ${JSON.stringify(prepareRes)}`);
+                log.trace(() => `upload: prepareRes = ${JSON.stringify(prepareRes)}`);
 
                 if (!prepareRes) {
                   return json({ error: 'pre-upload failed: empty response' });
@@ -613,16 +613,16 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
                 assertLarkOk(prepareRes);
 
                 const { upload_id, block_size, block_num } = prepareRes.data;
-                log.info(`upload: got upload_id=${upload_id}, block_num=${block_num}, block_size=${block_size}`);
+                log.trace(() => `upload: got upload_id=${upload_id}, block_num=${block_num}, block_size=${block_size}`);
 
                 // 2. 上传分片
-                log.info(`upload: step 2 - uploading ${block_num} chunks`);
+                log.trace(() => `upload: step 2 - uploading ${block_num} chunks`);
                 for (let seq = 0; seq < block_num; seq++) {
                   const start = seq * block_size;
                   const end = Math.min(start + block_size, fileSize);
                   const chunkBuffer = fileBuffer.subarray(start, end);
 
-                  log.info(`upload: uploading chunk ${seq + 1}/${block_num} (${chunkBuffer.length} bytes)`);
+                  log.trace(() => `upload: uploading chunk ${seq + 1}/${block_num} (${chunkBuffer.length} bytes)`);
 
                   await client.invoke(
                     'feishu_drive_file.upload',
@@ -641,11 +641,11 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
                     { as: 'user' },
                   );
 
-                  log.info(`upload: chunk ${seq + 1}/${block_num} uploaded successfully`);
+                  log.trace(() => `upload: chunk ${seq + 1}/${block_num} uploaded successfully`);
                 }
 
                 // 3. 完成上传
-                log.info(`upload: step 3 - finish upload`);
+                log.trace(() => `upload: step 3 - finish upload`);
                 const finishRes: any = await client.invoke(
                   'feishu_drive_file.upload',
                   (sdk, opts) =>
@@ -678,7 +678,7 @@ export function registerFeishuDriveFileTool(api: OpenClawPluginApi): boolean {
             // DOWNLOAD FILE
             // -----------------------------------------------------------------
             case 'download': {
-              log.info(`download: file_token=${p.file_token}`);
+              log.trace(() => `download: file_token=${p.file_token}`);
 
               const res: any = await client.invoke(
                 'feishu_drive_file.download',

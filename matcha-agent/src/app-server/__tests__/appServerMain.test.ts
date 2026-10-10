@@ -306,8 +306,7 @@ describe('createDefaultAppServerServices', () => {
     const spawnedEnvs: NodeJS.ProcessEnv[] = []
     await withProcessEnv(
       {
-        MATCHACLAW_SESSION_TRACE: '1',
-        MATCHA_AGENT_RUN_TRACE: '1',
+        MATCHACLAW_TRACE: '1',
         PATH: 'C:\\Python312;C:\\Windows\\System32',
         Path: 'C:\\Python312;C:\\Windows\\System32',
         SystemRoot: 'C:\\Windows',
@@ -351,8 +350,7 @@ describe('createDefaultAppServerServices', () => {
 
     expect(spawnedEnvs).toHaveLength(1)
     const env = spawnedEnvs[0]!
-    expect(env.MATCHACLAW_SESSION_TRACE).toBe('1')
-    expect(env.MATCHA_AGENT_RUN_TRACE).toBe('1')
+    expect(env.MATCHACLAW_TRACE).toBe('1')
     expect(env.PATH ?? env.Path).toContain('C:\\Python312')
     expect(env.SystemRoot).toBe('C:\\Windows')
     expect(env.ComSpec).toBe('C:\\Windows\\System32\\cmd.exe')

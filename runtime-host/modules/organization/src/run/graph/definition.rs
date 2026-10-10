@@ -53,8 +53,97 @@ pub enum NodeKind {
     End,
 }
 
-const COMPLETED_PORT: &str = "completed";
-const REWORK_PORT: &str = "rework";
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeOutputPort {
+    Completed,
+    Rework,
+    Approved,
+    Rejected,
+    Aborted,
+    Passed,
+    Failed,
+    Joined,
+}
+
+impl NodeOutputPort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Rework => "rework",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::Aborted => "aborted",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Joined => "joined",
+        }
+    }
+}
+
+impl NodeKind {
+    pub const fn source_ports(self) -> &'static [NodeOutputPort] {
+        use NodeOutputPort::*;
+        match self {
+            Self::Start | Self::Work => &[Completed],
+            Self::Review => &[Completed, Rework],
+            Self::HumanDecision => &[Approved, Rejected, Aborted],
+            Self::ScriptReview => &[Passed, Failed],
+            Self::Join => &[Joined],
+            Self::End => &[],
+        }
+    }
+
+    pub const fn target_ports(self) -> &'static [&'static str] {
+        match self {
+            Self::Start => &[],
+            _ => &["input"],
+        }
+    }
+
+    pub fn resolve_source_port(self, supplied: Option<&str>) -> Option<&'static str> {
+        match supplied {
+            Some(supplied) => self.source_ports().iter().map(|port| port.as_str()).find(|port| *port == supplied),
+            None => match self.source_ports() {
+                [port] => Some(port.as_str()),
+                _ => None,
+            },
+        }
+    }
+
+    pub fn resolve_target_port(self, supplied: Option<&str>) -> Option<&'static str> {
+        match supplied {
+            Some(supplied) => self.target_ports().iter().copied().find(|port| *port == supplied),
+            None => match self.target_ports() {
+                [port] => Some(*port),
+                _ => None,
+            },
+        }
+    }
+
+    pub fn source_port_actions(self, port: &str) -> &'static [EdgeAction] {
+        use EdgeAction::*;
+        if self.resolve_source_port(Some(port)).is_none() {
+            return &[];
+        }
+        match (self, port) {
+            (Self::Review, "rework") => &[Rework],
+            (Self::HumanDecision, "rejected" | "aborted") | (Self::ScriptReview, "failed") => {
+                &[Activate, Rework, Gate, Finish]
+            }
+            _ => &[Activate, Gate, Finish],
+        }
+    }
+
+    pub fn accepts_edge_action(self, port: &str, action: EdgeAction) -> bool {
+        self.source_port_actions(port).contains(&action)
+    }
+
+    pub fn accepts_completed_output(self, port: &str) -> bool {
+        self.resolve_source_port(Some(port)).is_some()
+            || (self == Self::End && port == NodeOutputPort::Completed.as_str())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EdgeAction {
@@ -74,68 +163,6 @@ impl EdgeAction {
 pub enum StartTrigger {
     Webhook { path: String },
     Cron { expression: String },
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct GroupId(String);
-
-impl GroupId {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JoinPolicy {
-    require_completed: bool,
-    allow_failed: bool,
-    retry_limit: u32,
-}
-
-impl JoinPolicy {
-    pub const fn new(require_completed: bool, allow_failed: bool, retry_limit: u32) -> Self {
-        Self {
-            require_completed,
-            allow_failed,
-            retry_limit,
-        }
-    }
-
-    pub const fn require_completed(&self) -> bool {
-        self.require_completed
-    }
-
-    pub const fn allow_failed(&self) -> bool {
-        self.allow_failed
-    }
-
-    pub const fn retry_limit(&self) -> u32 {
-        self.retry_limit
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkGroup {
-    id: GroupId,
-    join_policy: JoinPolicy,
-}
-
-impl WorkGroup {
-    pub fn new(id: GroupId, join_policy: JoinPolicy) -> Self {
-        Self { id, join_policy }
-    }
-
-    pub fn id(&self) -> &GroupId {
-        &self.id
-    }
-
-    pub fn join_policy(&self) -> &JoinPolicy {
-        &self.join_policy
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -180,7 +207,6 @@ pub struct WorkAssignment {
     prompt: String,
     executor: ExecutorPolicy,
     output_artifact_kind: Option<String>,
-    group_id: Option<GroupId>,
 }
 
 impl WorkAssignment {
@@ -190,7 +216,6 @@ impl WorkAssignment {
             String::new(),
             ExecutorPolicy::team_role(role_id),
             None,
-            None,
         )
     }
 
@@ -199,14 +224,12 @@ impl WorkAssignment {
         prompt: impl Into<String>,
         executor: ExecutorPolicy,
         output_artifact_kind: Option<String>,
-        group_id: Option<GroupId>,
     ) -> Self {
         Self {
             task_id: task_id.into(),
             prompt: prompt.into(),
             executor,
             output_artifact_kind,
-            group_id,
         }
     }
 
@@ -234,9 +257,6 @@ impl WorkAssignment {
         self.output_artifact_kind.as_deref()
     }
 
-    pub fn group_id(&self) -> Option<&GroupId> {
-        self.group_id.as_ref()
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -324,7 +344,7 @@ pub struct NodeDefinition {
     trigger: Option<StartTrigger>,
     work: Option<WorkAssignment>,
     review: Option<ReviewAssignment>,
-    group: Option<WorkGroup>,
+    script_review_rule: Option<crate::ScriptReviewRule>,
 }
 
 impl NodeDefinition {
@@ -343,7 +363,7 @@ impl NodeDefinition {
             trigger,
             work: None,
             review: None,
-            group: None,
+            script_review_rule: None,
         }
     }
 
@@ -362,8 +382,24 @@ impl NodeDefinition {
             trigger: None,
             work: None,
             review: None,
-            group: None,
+            script_review_rule: None,
         }
+    }
+
+    pub fn script_review(
+        id: NodeId,
+        title: impl Into<String>,
+        max_attempts: NonZeroU32,
+        rule: crate::ScriptReviewRule,
+    ) -> Self {
+        Self {
+            script_review_rule: Some(rule),
+            ..Self::control(id, NodeKind::ScriptReview, title, max_attempts)
+        }
+    }
+
+    pub fn script_review_rule(&self) -> Option<crate::ScriptReviewRule> {
+        self.script_review_rule
     }
 
     pub fn work(
@@ -381,7 +417,7 @@ impl NodeDefinition {
             trigger: None,
             work: Some(assignment),
             review: None,
-            group: None,
+            script_review_rule: None,
         }
     }
 
@@ -400,7 +436,7 @@ impl NodeDefinition {
             trigger: None,
             work: None,
             review: Some(assignment),
-            group: None,
+            script_review_rule: None,
         }
     }
 
@@ -408,7 +444,6 @@ impl NodeDefinition {
         id: NodeId,
         title: impl Into<String>,
         max_attempts: NonZeroU32,
-        group: WorkGroup,
     ) -> Self {
         Self {
             id,
@@ -419,7 +454,7 @@ impl NodeDefinition {
             trigger: None,
             work: None,
             review: None,
-            group: Some(group),
+            script_review_rule: None,
         }
     }
 
@@ -455,8 +490,15 @@ impl NodeDefinition {
         self.review.as_ref()
     }
 
-    pub fn work_group(&self) -> Option<&WorkGroup> {
-        self.group.as_ref()
+    pub(crate) fn set_agent_prompt(&mut self, prompt: String) -> bool {
+        if let Some(work) = &mut self.work {
+            work.prompt = prompt;
+        } else if let Some(review) = &mut self.review {
+            review.prompt = prompt;
+        } else {
+            return false;
+        }
+        true
     }
 
     pub(crate) fn is_armed_start(&self) -> bool {
@@ -545,39 +587,6 @@ impl EdgeDefinition {
     }
 }
 
-fn validate_edge_source_contract(
-    edge: &EdgeDefinition,
-    source_node: &NodeDefinition,
-) -> Result<(), DefinitionError> {
-    if edge.source_port() == REWORK_PORT && edge.action() != EdgeAction::Rework {
-        return Err(DefinitionError::InvalidReworkEdgeAction(edge.id().clone()));
-    }
-    if edge.source_port() == COMPLETED_PORT && edge.action() == EdgeAction::Rework {
-        return Err(DefinitionError::InvalidCompletedEdgeAction(
-            edge.id().clone(),
-        ));
-    }
-    match source_node.kind() {
-        NodeKind::Work if edge.source_port() != COMPLETED_PORT => {
-            Err(DefinitionError::InvalidWorkEdgeSourcePort {
-                edge_id: edge.id().clone(),
-                source_port: edge.source_port().to_owned(),
-            })
-        }
-        NodeKind::Review
-            if source_node.review_assignment().is_some()
-                && edge.source_port() != COMPLETED_PORT
-                && edge.source_port() != REWORK_PORT =>
-        {
-            Err(DefinitionError::InvalidReviewEdgeSourcePort {
-                edge_id: edge.id().clone(),
-                source_port: edge.source_port().to_owned(),
-            })
-        }
-        _ => Ok(()),
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphDefinition {
     graph_id: String,
@@ -597,6 +606,20 @@ impl GraphDefinition {
         nodes: Vec<NodeDefinition>,
         edges: Vec<EdgeDefinition>,
     ) -> Result<Self, DefinitionError> {
+        let definition = Self::from_durable(graph_id, workflow_plan_id, run_id, title, nodes, edges)?;
+        definition.validate_ports()?;
+        definition.validate_node_configuration()?;
+        Ok(definition)
+    }
+
+    pub(crate) fn from_durable(
+        graph_id: impl Into<String>,
+        workflow_plan_id: impl Into<String>,
+        run_id: GraphRunId,
+        title: impl Into<String>,
+        nodes: Vec<NodeDefinition>,
+        edges: Vec<EdgeDefinition>,
+    ) -> Result<Self, DefinitionError> {
         let definition = Self {
             graph_id: graph_id.into(),
             workflow_plan_id: workflow_plan_id.into(),
@@ -605,7 +628,7 @@ impl GraphDefinition {
             nodes,
             edges,
         };
-        definition.validate()?;
+        definition.validate_structure()?;
         Ok(definition)
     }
 
@@ -653,7 +676,7 @@ impl GraphDefinition {
         self.nodes
             .iter()
             .filter(|node| {
-                !self
+                node.kind() != NodeKind::Join && !self
                     .incoming_edges(&node.id)
                     .any(|edge| edge.action.activates_target())
             })
@@ -676,6 +699,95 @@ impl GraphDefinition {
     }
 
     pub fn validate(&self) -> Result<(), DefinitionError> {
+        self.validate_structure()?;
+        self.validate_ports()?;
+        self.validate_node_configuration()
+    }
+
+    pub fn validate_node_configuration(&self) -> Result<(), DefinitionError> {
+        for node in &self.nodes {
+            if node.kind() == NodeKind::Review && node.review_assignment().is_none() {
+                return Err(DefinitionError::InvalidReviewAssignment(node.id().clone()));
+            }
+            if node.kind() == NodeKind::ScriptReview && node.script_review_rule().is_none() {
+                return Err(DefinitionError::MissingScriptReviewRule(node.id().clone()));
+            }
+            if let Some(StartTrigger::Cron { expression }) = node.trigger() {
+                crate::run::scheduler::validate_cron_expression(expression)
+                    .map_err(|_| DefinitionError::InvalidStartCronExpression(node.id().clone()))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_ports(&self) -> Result<(), DefinitionError> {
+        let nodes = self.nodes.iter().map(|node| (node.id(), node)).collect::<BTreeMap<_, _>>();
+        for edge in &self.edges {
+            let source = nodes[edge.source_node_id()];
+            let target = nodes[edge.target_node_id()];
+            if source.kind().resolve_source_port(Some(edge.source_port())).is_none() {
+                return Err(DefinitionError::InvalidEdgeSourcePort {
+                    edge_id: edge.id().clone(),
+                    node_id: source.id().clone(),
+                    source_port: edge.source_port().to_owned(),
+                });
+            }
+            if target.kind().resolve_target_port(Some(edge.target_port())).is_none() {
+                return Err(DefinitionError::InvalidEdgeTargetPort {
+                    edge_id: edge.id().clone(),
+                    node_id: target.id().clone(),
+                    target_port: edge.target_port().to_owned(),
+                });
+            }
+            if !source.kind().accepts_edge_action(edge.source_port(), edge.action())
+                || (target.kind() == NodeKind::Join && edge.action() != EdgeAction::Gate)
+            {
+                return Err(DefinitionError::InvalidEdgeAction(edge.id().clone()));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_join_inputs(&self) -> Result<(), DefinitionError> {
+        let gated = self.edges.iter().filter(|edge| edge.action() == EdgeAction::Gate)
+            .map(EdgeDefinition::target_node_id).collect::<BTreeSet<_>>();
+        if let Some(node) = self.nodes.iter()
+            .find(|node| node.kind() == NodeKind::Join && !gated.contains(node.id())) {
+            return Err(DefinitionError::JoinWithoutIncomingGate(node.id().clone()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_references(&self, previous: Option<&Self>) -> Result<(), DefinitionError> {
+        let nodes = self.nodes.iter().map(|node| (node.id(), node)).collect::<BTreeMap<_, _>>();
+        let previous_nodes = previous.into_iter().flat_map(|graph| &graph.nodes)
+            .map(|node| (node.id(), node)).collect::<BTreeMap<_, _>>();
+        let previous_edges = previous.into_iter().flat_map(|graph| &graph.edges)
+            .map(|edge| (edge.id(), edge)).collect::<BTreeMap<_, _>>();
+        for edge in &self.edges {
+            let Some(dependency) = edge.dependency() else { continue };
+            let source = nodes[edge.source_node_id()].work_assignment();
+            let target = nodes[edge.target_node_id()].work_assignment();
+            let (Some(source), Some(target)) = (source, target) else { continue };
+            let unchanged = previous_edges.get(edge.id()).is_some_and(|prior| {
+                prior.dependency() == Some(dependency)
+                    && prior.source_node_id() == edge.source_node_id()
+                    && prior.target_node_id() == edge.target_node_id()
+                    && previous_nodes.get(edge.source_node_id())
+                        .and_then(|node| node.work_assignment()).map(WorkAssignment::task_id) == Some(source.task_id())
+                    && previous_nodes.get(edge.target_node_id())
+                        .and_then(|node| node.work_assignment()).map(WorkAssignment::task_id) == Some(target.task_id())
+            });
+            if !unchanged && (dependency.dependency_task_id() != source.task_id()
+                || dependency.task_id() != target.task_id()) {
+                return Err(DefinitionError::DependencyTaskMismatch(edge.id().clone()));
+            }
+        }
+        Ok(())
+    }
+
+    // Restoring historical facts must not apply today's editable port vocabulary.
+    pub(crate) fn validate_structure(&self) -> Result<(), DefinitionError> {
         if self.graph_id.trim().is_empty() {
             return Err(DefinitionError::EmptyGraphId);
         }
@@ -760,7 +872,7 @@ impl GraphDefinition {
             if !edge_ids.insert(edge.id.clone()) {
                 return Err(DefinitionError::DuplicateEdgeId(edge.id.clone()));
             }
-            let Some(source_node) = nodes.get(&edge.source_node_id) else {
+            if !nodes.contains_key(&edge.source_node_id) {
                 return Err(DefinitionError::UnknownEdgeSource {
                     edge_id: edge.id.clone(),
                     node_id: edge.source_node_id.clone(),
@@ -775,12 +887,14 @@ impl GraphDefinition {
             if edge.source_port.trim().is_empty() || edge.target_port.trim().is_empty() {
                 return Err(DefinitionError::EmptyEdgePort(edge.id.clone()));
             }
-            validate_edge_source_contract(edge, source_node)?;
         }
 
         self.validate_activation_graph_acyclic()?;
 
-        let roots = self.execution_root_ids();
+        // Structural restore and editable drafts allow an unconnected Join; it is not an execution root.
+        let roots = self.nodes.iter().filter(|node| !self.incoming_edges(node.id())
+            .any(|edge| edge.action().activates_target()))
+            .map(|node| node.id().clone()).collect::<Vec<_>>();
         if roots.is_empty() {
             return Err(DefinitionError::NoExecutionRoot);
         }
@@ -854,6 +968,13 @@ pub enum DefinitionError {
     EmptyNodeTitle(NodeId),
     InvalidWorkAssignment(NodeId),
     InvalidReviewAssignment(NodeId),
+    MissingScriptReviewRule(NodeId),
+    InvalidStartCronExpression(NodeId),
+    MissingAssignmentRole(NodeId),
+    MissingAssignmentSession(NodeId),
+    JoinWithoutIncomingGate(NodeId),
+    DependencyTaskMismatch(EdgeId),
+    MissingDependencyTask(EdgeId),
     WorkAssignmentOnControlNode(NodeId),
     ReviewAssignmentOnControlNode(NodeId),
     DuplicateWorkTaskId(String),
@@ -870,16 +991,26 @@ pub enum DefinitionError {
         node_id: NodeId,
     },
     EmptyEdgePort(EdgeId),
-    InvalidWorkEdgeSourcePort {
+    InvalidEdgeSourcePort {
         edge_id: EdgeId,
+        node_id: NodeId,
         source_port: String,
     },
-    InvalidReviewEdgeSourcePort {
+    InvalidEdgeTargetPort {
         edge_id: EdgeId,
-        source_port: String,
+        node_id: NodeId,
+        target_port: String,
     },
-    InvalidReworkEdgeAction(EdgeId),
-    InvalidCompletedEdgeAction(EdgeId),
+    MissingEdgeSourcePort {
+        edge_id: EdgeId,
+        node_id: NodeId,
+    },
+    MissingEdgeTargetPort {
+        edge_id: EdgeId,
+        node_id: NodeId,
+    },
+    InvalidEdgeAction(EdgeId),
+    AmbiguousEdgeAction(EdgeId),
     NoExecutionRoot,
     UnreachableNode(NodeId),
     ActivationCycle(NodeId),

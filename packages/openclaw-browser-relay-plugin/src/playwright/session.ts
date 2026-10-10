@@ -3,7 +3,7 @@ import { BrowserTabState } from '../state/browser-tab-state.js'
 import { waitForBrowserCdpReady } from './cdp-readiness.js'
 import { loadPlaywrightCore } from './dependency.js'
 import type { RoleRef } from './role-refs.js'
-import { relayDebugWarn } from '../debug-logging.js'
+import { isRelayDebugEnabled, relayDebugWarn } from '../debug-logging.js'
 
 type ConnectionMode = 'relay' | 'direct-cdp'
 
@@ -285,38 +285,35 @@ export class PlaywrightSession {
     page.on('frameattached', (frame: any) => {
       relayDebugWarn(
         this.logger,
-        `[browser-playwright] frameattached targetId=${this.targetIdByPage.get(page) ?? 'unknown'} isMainFrame=${frame === page.mainFrame()} frameName="${safeFrameName(frame)}" frameUrl="${safeFrameUrl(frame)}" frameDetached=${safeFrameDetached(frame)}`,
+        () => `[browser-playwright] frameattached targetId=${this.targetIdByPage.get(page) ?? 'unknown'} isMainFrame=${frame === page.mainFrame()} frameName="${safeFrameName(frame)}" frameUrl="${safeFrameUrl(frame)}" frameDetached=${safeFrameDetached(frame)}`,
       )
     })
 
     page.on('framenavigated', (frame: any) => {
       relayDebugWarn(
         this.logger,
-        `[browser-playwright] framenavigated targetId=${this.targetIdByPage.get(page) ?? 'unknown'} isMainFrame=${frame === page.mainFrame()} frameName="${safeFrameName(frame)}" frameUrl="${safeFrameUrl(frame)}" frameDetached=${safeFrameDetached(frame)}`,
+        () => `[browser-playwright] framenavigated targetId=${this.targetIdByPage.get(page) ?? 'unknown'} isMainFrame=${frame === page.mainFrame()} frameName="${safeFrameName(frame)}" frameUrl="${safeFrameUrl(frame)}" frameDetached=${safeFrameDetached(frame)}`,
       )
     })
 
     page.on('framedetached', (frame: any) => {
       relayDebugWarn(
         this.logger,
-        `[browser-playwright] framedetached targetId=${this.targetIdByPage.get(page) ?? 'unknown'} isMainFrame=${frame === page.mainFrame()} frameName="${safeFrameName(frame)}" frameUrl="${safeFrameUrl(frame)}" frameDetached=${safeFrameDetached(frame)}`,
+        () => `[browser-playwright] framedetached targetId=${this.targetIdByPage.get(page) ?? 'unknown'} isMainFrame=${frame === page.mainFrame()} frameName="${safeFrameName(frame)}" frameUrl="${safeFrameUrl(frame)}" frameDetached=${safeFrameDetached(frame)}`,
       )
     })
 
     page.on('crash', () => {
-      const mainFrame = page.mainFrame?.()
       relayDebugWarn(
         this.logger,
-        `[browser-playwright] page crashed targetId=${this.targetIdByPage.get(page) ?? 'unknown'} pageUrl="${safePageUrl(page)}" mainFrameUrl="${safeFrameUrl(mainFrame)}"`,
+        () => `[browser-playwright] page crashed targetId=${this.targetIdByPage.get(page) ?? 'unknown'} pageUrl="${safePageUrl(page)}" mainFrameUrl="${safeFrameUrl(page.mainFrame?.())}"`,
       )
     })
 
     page.on('close', () => {
-      const targetId = this.targetIdByPage.get(page) ?? null
-      const mainFrame = page.mainFrame?.()
       relayDebugWarn(
         this.logger,
-        `[browser-playwright] page closed targetId=${targetId ?? 'unknown'} pageUrl="${safePageUrl(page)}" mainFrameUrl="${safeFrameUrl(mainFrame)}"`,
+        () => `[browser-playwright] page closed targetId=${this.targetIdByPage.get(page) ?? 'unknown'} pageUrl="${safePageUrl(page)}" mainFrameUrl="${safeFrameUrl(page.mainFrame?.())}"`,
       )
       this.pageState.delete(page)
       this.pageStateInitialized.delete(page)
@@ -507,7 +504,7 @@ export class PlaywrightSession {
     if (existing) {
       relayDebugWarn(
         this.logger,
-        `[browser-playwright] resolved page immediately targetId=${input.targetId} mode=${mode} pageUrl="${safePageUrl(existing)}"`,
+        () => `[browser-playwright] resolved page immediately targetId=${input.targetId} mode=${mode} pageUrl="${safePageUrl(existing)}"`,
       )
       await this.logPageSnapshot('getPageForTargetId resolved immediately', existing, input.targetId)
       return existing
@@ -520,7 +517,7 @@ export class PlaywrightSession {
       if (retried) {
         relayDebugWarn(
           this.logger,
-          `[browser-playwright] resolved page after retry targetId=${input.targetId} attempt=${attempt + 1} mode=${mode} pageUrl="${safePageUrl(retried)}"`,
+          () => `[browser-playwright] resolved page after retry targetId=${input.targetId} attempt=${attempt + 1} mode=${mode} pageUrl="${safePageUrl(retried)}"`,
         )
         await this.logPageSnapshot('getPageForTargetId resolved after retry', retried, input.targetId)
         return retried
@@ -530,14 +527,14 @@ export class PlaywrightSession {
     if (mode === 'relay') {
       relayDebugWarn(
         this.logger,
-        `[browser-playwright] rebuilding relay projection after page miss targetId=${input.targetId}`,
+        () => `[browser-playwright] rebuilding relay projection after page miss targetId=${input.targetId}`,
       )
       await this.closeConnections('relay')
       const rebuilt = await this.findExistingPage({ ...input, mode })
       if (rebuilt) {
         relayDebugWarn(
           this.logger,
-          `[browser-playwright] resolved page after relay rebuild targetId=${input.targetId} mode=${mode} pageUrl="${safePageUrl(rebuilt)}"`,
+          () => `[browser-playwright] resolved page after relay rebuild targetId=${input.targetId} mode=${mode} pageUrl="${safePageUrl(rebuilt)}"`,
         )
         await this.logPageSnapshot('getPageForTargetId resolved after relay rebuild', rebuilt, input.targetId)
         return rebuilt
@@ -546,16 +543,18 @@ export class PlaywrightSession {
 
     const connection = await this.connectBrowser(input.cdpUrl, mode)
     const pages = connection.browser.contexts().flatMap((context: any) => context.pages())
-    const pageSummaries = await Promise.all(
-      pages.map(async (page: any, index: number) => {
-        const resolvedTargetId = await this.resolveTargetId(page)
-        return `#${index + 1} targetId=${resolvedTargetId ?? 'null'} url="${safePageUrl(page)}"`
-      }),
-    )
-    relayDebugWarn(
-      this.logger,
-      `[browser-playwright] failed to resolve page targetId=${input.targetId} mode=${mode} openPages=${pageSummaries.join('; ')}`,
-    )
+    if (isRelayDebugEnabled()) {
+      const pageSummaries = await Promise.all(
+        pages.map(async (page: any, index: number) => {
+          const resolvedTargetId = await this.resolveTargetId(page)
+          return `#${index + 1} targetId=${resolvedTargetId ?? 'null'} url="${safePageUrl(page)}"`
+        }),
+      )
+      relayDebugWarn(
+        this.logger,
+        () => `[browser-playwright] failed to resolve page targetId=${input.targetId} mode=${mode} openPages=${pageSummaries.join('; ')}`,
+      )
+    }
     throw new Error(
       `Page not found for targetId="${input.targetId}" after retries. There are ${pages.length} open page(s): ${pages.map((page: any) => page.url()).join(', ')}`,
     )
@@ -566,6 +565,7 @@ export class PlaywrightSession {
   }
 
   async logPageSnapshot(label: string, page: any, expectedTargetId?: string, error?: unknown): Promise<void> {
+    if (!isRelayDebugEnabled()) return
     const cachedTargetId = this.targetIdByPage.get(page) ?? this.targetIdCache.get(page)
     const resolvedTargetId = cachedTargetId ?? await this.resolveTargetId(page)
     const mainFrame = page.mainFrame?.()
@@ -573,7 +573,7 @@ export class PlaywrightSession {
     const suffix = errorText ? ` error="${errorText}"` : ''
     relayDebugWarn(
       this.logger,
-      `[browser-playwright] ${label} expectedTargetId=${expectedTargetId ?? 'null'} resolvedTargetId=${resolvedTargetId ?? 'null'} pageUrl="${safePageUrl(page)}" pageClosed=${safePageClosed(page)} mainFrameName="${safeFrameName(mainFrame)}" mainFrameUrl="${safeFrameUrl(mainFrame)}" mainFrameDetached=${safeFrameDetached(mainFrame)}${suffix}`,
+      () => `[browser-playwright] ${label} expectedTargetId=${expectedTargetId ?? 'null'} resolvedTargetId=${resolvedTargetId ?? 'null'} pageUrl="${safePageUrl(page)}" pageClosed=${safePageClosed(page)} mainFrameName="${safeFrameName(mainFrame)}" mainFrameUrl="${safeFrameUrl(mainFrame)}" mainFrameDetached=${safeFrameDetached(mainFrame)}${suffix}`,
     )
   }
 
@@ -662,7 +662,7 @@ export class PlaywrightSession {
     }
     relayDebugWarn(
       this.logger,
-      `[browser-playwright] targetId miss targetId=${input.targetId} mode=${input.mode ?? 'auto'} scannedPages=${pages.length}`,
+      () => `[browser-playwright] targetId miss targetId=${input.targetId} mode=${input.mode ?? 'auto'} scannedPages=${pages.length}`,
     )
     return null
   }
@@ -682,7 +682,7 @@ export class PlaywrightSession {
           this.targetIdByPage.set(page, targetId)
           relayDebugWarn(
             this.logger,
-            `[browser-playwright] resolved Target.getTargetInfo targetId=${targetId} pageUrl="${safePageUrl(page)}"`,
+            () => `[browser-playwright] resolved Target.getTargetInfo targetId=${targetId} pageUrl="${safePageUrl(page)}"`,
           )
           return targetId
         }
@@ -691,7 +691,7 @@ export class PlaywrightSession {
     } catch (error) {
       relayDebugWarn(
         this.logger,
-        `[browser-playwright] resolveTargetId failed pageUrl="${safePageUrl(page)}" error=${error instanceof Error ? error.message : String(error)}`,
+        () => `[browser-playwright] resolveTargetId failed pageUrl="${safePageUrl(page)}" error=${error instanceof Error ? error.message : String(error)}`,
       )
       return null
     }

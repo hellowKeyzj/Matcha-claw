@@ -228,7 +228,7 @@ export function registerFeishuOAuthTool(api: OpenClawPluginApi): void {
     { name: 'feishu_oauth' },
   );
 
-  api.logger.debug?.('feishu_oauth: Registered feishu_oauth tool');
+  log.debug('feishu_oauth: Registered feishu_oauth tool');
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ export async function executeAuthorize(
         const newScopes = effectiveScope?.split(/\s+/).filter(Boolean) ?? [];
         const merged = new Set([...oldScopes, ...newScopes]);
         effectiveScope = [...merged].join(' ');
-        log.info(`scope merge on reuse: [${[...merged].join(', ')}]`);
+        log.trace(() => `scope merge on reuse: [${[...merged].join(', ')}]`);
       }
 
       log.info(`same message, replacing flow for user=${senderOpenId}, app=${appId}, reusing cardId=${reuseCardId}`);
@@ -470,7 +470,7 @@ export async function executeAuthorize(
         sequence: newSeq,
         accountId,
       });
-      log.info(`updated existing card ${reuseCardId} with merged scopes, seq=${newSeq}`);
+      log.trace(() => `updated existing card ${reuseCardId} with merged scopes, seq=${newSeq}`);
     } catch (err) {
       log.warn(`failed to update existing card, creating new one: ${err}`);
       // 降级：创建新卡片
@@ -543,7 +543,7 @@ export async function executeAuthorize(
     .then(async (result) => {
       // 被新流替换后，跳过所有卡片更新，避免覆盖新流的卡片内容
       if (currentFlow.superseded) {
-        log.info(`flow superseded, skipping card update for cardId=${cardId}`);
+        log.trace(() => `flow superseded, skipping card update for cardId=${cardId}`);
         return;
       }
       if (result.ok) {
@@ -615,7 +615,7 @@ export async function executeAuthorize(
         }
 
         if (skipSyntheticMessage) {
-          log.info('skipSyntheticMessage=true, skipping synthetic message');
+          log.trace('skipSyntheticMessage=true, skipping synthetic message');
         } else
           try {
             const syntheticMsgId = `${ticket.messageId}:auth-complete`;

@@ -58,7 +58,7 @@ export function createChannelLoginTransport(
   return {
     async login(input, traceId): Promise<ChannelLoginTransportResponse> {
       if (!isRequest(input)) return { status: 503, body: UNKNOWN };
-      const finish = beginChannelTrace(`transport.login.${input.action}`, traceId);
+      const finish = beginChannelTrace(() => `transport.login.${input.action}`, traceId);
       let status = 503;
       let outcome: unknown;
       let errorCode: 'UNAVAILABLE' | 'ABORTED' | 'INVALID_RESPONSE' | undefined;
@@ -110,7 +110,7 @@ export function createChannelLoginTransport(
         outcome = UNKNOWN;
         errorCode = 'INVALID_RESPONSE';
       } finally {
-        finish(status, outcome, errorCode);
+        finish?.(status, outcome, errorCode);
         if (pending.get(key) === controller) pending.delete(key);
       }
       return { status: 503, body: UNKNOWN };

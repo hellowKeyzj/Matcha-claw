@@ -218,31 +218,31 @@ export class RendererSessionObservationRegistry {
       }
       const attempt = entry ? this.beginObservation(page, identity, entry.leaseId) : undefined;
       const leaseId = attempt?.nativeLeaseId ?? randomBytes(24).toString('base64url');
-      const trace = (stage: string, extra: Record<string, unknown> = {}) => {
+      const trace = (stage: string, extra?: () => Record<string, unknown>) => {
         if (isSessionTraceEnabled()) logSessionTrace(stage, 'session-route-boundary', {
           identity: summarizeSessionIdentity(identity), pageHash: summarizeIdentifier(page.token).hash,
-          leaseHash: summarizeIdentifier(leaseId).hash, ...extra,
+          leaseHash: summarizeIdentifier(leaseId).hash, ...extra?.(),
         });
       };
       let completed = false;
       try {
         trace('electron.session.route.resync.request');
         const result = await observe(identity, leaseId).catch((error) => {
-          if (isSessionTraceEnabled()) trace('electron.session.route.resync.failed', { error: summarizeIdentifier(error instanceof Error ? error.message : String(error)) });
+          trace('electron.session.route.resync.failed', () => ({ error: summarizeIdentifier(error instanceof Error ? error.message : String(error)) }));
           return null;
         });
         if (!result || result.leaseId !== leaseId || !this.isCurrent(page)) {
-          trace('electron.session.route.resync.drop', { reason: !result ? 'observe-unavailable' : result.leaseId !== leaseId ? 'lease-mismatch' : 'page-not-current',
-            epoch: result && 'view' in result ? result.view.epoch : null, seq: result && 'view' in result ? result.view.seq : null });
+          trace('electron.session.route.resync.drop', () => ({ reason: !result ? 'observe-unavailable' : result.leaseId !== leaseId ? 'lease-mismatch' : 'page-not-current',
+            epoch: result && 'view' in result ? result.view.epoch : null, seq: result && 'view' in result ? result.view.seq : null }));
           return;
         }
         if ('outcome' in result) {
-          trace('electron.session.route.resync.drop', { reason: 'observation-released' });
+          trace('electron.session.route.resync.drop', () => ({ reason: 'observation-released' }));
           return;
         }
-        trace('electron.session.route.resync.response', { epoch: result.view.epoch, seq: result.view.seq });
+        trace('electron.session.route.resync.response', () => ({ epoch: result.view.epoch, seq: result.view.seq }));
         if (attempt && !(completed = this.completeObservation(attempt, result.leaseId))) {
-          trace('electron.session.route.resync.drop', { reason: 'observation-not-current', epoch: result.view.epoch, seq: result.view.seq });
+          trace('electron.session.route.resync.drop', () => ({ reason: 'observation-not-current', epoch: result.view.epoch, seq: result.view.seq }));
           return;
         }
         if (typeof result.view.runtime === 'object' && result.view.runtime !== null) {
@@ -254,13 +254,13 @@ export class RendererSessionObservationRegistry {
         if (this.active().some((candidate) => candidate.page === page && sameSessionIdentity(candidate.identity, identity))) {
           try {
             page.contents.send('host:event', { eventName: 'session.resync', payload: { identity, epoch: result.view.epoch, seq: result.view.seq } });
-            trace('electron.session.route.resync.delivered', { epoch: result.view.epoch, seq: result.view.seq });
+            trace('electron.session.route.resync.delivered', () => ({ epoch: result.view.epoch, seq: result.view.seq }));
           } catch (error) {
-            if (isSessionTraceEnabled()) trace('electron.session.route.resync.failed', { epoch: result.view.epoch, seq: result.view.seq,
-              error: summarizeIdentifier(error instanceof Error ? error.message : String(error)) });
+            trace('electron.session.route.resync.failed', () => ({ epoch: result.view.epoch, seq: result.view.seq,
+              error: summarizeIdentifier(error instanceof Error ? error.message : String(error)) }));
             throw error;
           }
-        } else trace('electron.session.route.resync.drop', { epoch: result.view.epoch, seq: result.view.seq, reason: 'no-active-demand' });
+        } else trace('electron.session.route.resync.drop', () => ({ epoch: result.view.epoch, seq: result.view.seq, reason: 'no-active-demand' }));
       } finally {
         if (!attempt) await this.releaseLease(identity, leaseId);
         else if (!completed) await this.rollbackObservation(attempt);

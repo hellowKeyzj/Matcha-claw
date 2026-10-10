@@ -79,8 +79,8 @@ impl TeamProvider {
     }
 
     pub(crate) async fn list_agents(&self) -> Result<TeamAgents, ReadFailure> {
-        let started = Instant::now();
-        session_trace("runtime.team.native-list.request", json!({}));
+        let started = platform::trace::enabled().then(Instant::now);
+        session_trace("runtime.team.native-list.request", || json!({}));
         OpenClawAgents::new(Arc::clone(&self.gateway))
             .list()
             .await
@@ -94,8 +94,8 @@ impl TeamProvider {
                 )
             })
             .map_err(ReadFailure::from)
-            .inspect(|agents| session_trace("runtime.team.native-list.end", json!({"outcome":"Succeeded","count":agents.as_slice().len(),"elapsedMs":started.elapsed().as_millis()})))
-            .inspect_err(|failure| session_trace("runtime.team.native-list.end", json!({"outcome":format!("{failure:?}"),"elapsedMs":started.elapsed().as_millis()})))
+            .inspect(|agents| session_trace("runtime.team.native-list.end", || json!({"outcome":"Succeeded","count":agents.as_slice().len(),"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()})))
+            .inspect_err(|failure| session_trace("runtime.team.native-list.end", || json!({"outcome":format!("{failure:?}"),"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()})))
     }
 
     pub(crate) async fn recover(
@@ -119,27 +119,27 @@ impl TeamProvider {
         request: TeamMaterializationRequest,
         observer: Option<TeamProvisionObserver>,
     ) -> MaterializationOperationOutcome {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         let unknown = |reason| {
             session_trace(
                 "runtime.team.recovery.end",
-                json!({"outcome":"OutcomeUnknown","reason":reason,"elapsedMs":started.elapsed().as_millis()}),
+                || json!({"outcome":"OutcomeUnknown","reason":reason,"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             MaterializationOperationOutcome::OutcomeUnknown
         };
         session_trace(
             "runtime.team.recovery.request",
-            json!({"count":request.intent().agents().len()}),
+            || json!({"count":request.intent().agents().len()}),
         );
         session_trace(
             "runtime.team.undo.read.request",
-            json!({"operation":"recovery"}),
+            || json!({"operation":"recovery"}),
         );
         let undo = match ConfigUndo::load(&self.config.state_dir(), request.intent().team()) {
             Ok(Some(undo)) => {
                 session_trace(
                     "runtime.team.undo.read.end",
-                    json!({"outcome":"Succeeded","present":true}),
+                    || json!({"outcome":"Succeeded","present":true}),
                 );
                 undo
             }
@@ -168,7 +168,7 @@ impl TeamProvider {
                     .has_marker(std::path::Path::new(workspace.as_str()));
                 session_trace(
                     "runtime.team.recovery.compensated-marker.end",
-                    json!({"present":present.as_ref().ok(),"reason":if matches!(present, Ok(false)) {"marker-absent"} else {"marker-unresolved"}}),
+                    || json!({"present":present.as_ref().ok(),"reason":if matches!(present, Ok(false)) {"marker-absent"} else {"marker-unresolved"}}),
                 );
                 if !matches!(present, Ok(false)) {
                     return unknown("compensated-marker-unresolved");
@@ -176,14 +176,14 @@ impl TeamProvider {
             }
             session_trace(
                 "runtime.team.recovery.end",
-                json!({"outcome":"Rejected","reason":"compensated","elapsedMs":started.elapsed().as_millis()}),
+                || json!({"outcome":"Rejected","reason":"compensated","elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             return permanent_rejection();
         }
         let (facts, receipt) = (undo.facts(), undo.receipt());
         session_trace(
             "runtime.team.undo.decode",
-            json!({"factsValid":facts.is_ok(),"receiptValid":receipt.is_ok()}),
+            || json!({"factsValid":facts.is_ok(),"receiptValid":receipt.is_ok()}),
         );
         let (Ok(facts), Ok(receipt)) = (facts, receipt) else {
             return unknown("undo-decode");
@@ -224,7 +224,7 @@ impl TeamProvider {
         for (index, role) in receipt.roles().iter().enumerate() {
             session_trace(
                 "runtime.team.recovery.workspace",
-                json!({"index":index,"roleHash":identifier_hash(role.role().as_str()),"agentHash":identifier_hash(role.agent().as_str()),"workspacePresent":role.native_workspace().is_some()}),
+                || json!({"index":index,"roleHash":identifier_hash(role.role().as_str()),"agentHash":identifier_hash(role.agent().as_str()),"workspacePresent":role.native_workspace().is_some()}),
             );
             let Some(workspace) = role.native_workspace() else {
                 return unknown("receipt-workspace-missing");
@@ -236,21 +236,21 @@ impl TeamProvider {
             }) {
                 session_trace(
                     "runtime.team.recovery.workspace.end",
-                    json!({"index":index,"reason":"native-workspace-mismatch","outcome":"OutcomeUnknown"}),
+                    || json!({"index":index,"reason":"native-workspace-mismatch","outcome":"OutcomeUnknown"}),
                 );
                 return unknown("native-workspace-mismatch");
             }
             session_trace(
                 "runtime.team.recovery.workspace.end",
-                json!({"index":index,"outcome":"Confirmed"}),
+                || json!({"index":index,"outcome":"Confirmed"}),
             );
         }
         // Durable expected config and all native identities are verified above.
         // Finish only missing markers after an interrupted materialization.
         for (index, role) in receipt.roles().iter().enumerate() {
-            let marker_started = Instant::now();
-            let role_hash = identifier_hash(role.role().as_str());
-            let agent_hash = identifier_hash(role.agent().as_str());
+            let marker_started = platform::trace::enabled().then(Instant::now);
+            let role_hash = platform::trace::enabled().then(|| identifier_hash(role.role().as_str()));
+            let agent_hash = platform::trace::enabled().then(|| identifier_hash(role.agent().as_str()));
             let workspace = std::path::Path::new(
                 role.native_workspace()
                     .expect("verified workspace")
@@ -260,36 +260,36 @@ impl TeamProvider {
                 .with_content(role.agents_markdown().unwrap_or(""));
             session_trace(
                 "runtime.team.marker.recover.request",
-                json!({"index":index,"roleHash":role_hash,"agentHash":agent_hash}),
+                || json!({"index":index,"roleHash":role_hash,"agentHash":agent_hash}),
             );
             let recovered = marker.recover(workspace);
             session_trace(
                 "runtime.team.marker.recover.end",
-                json!({"index":index,"matched":recovered.as_ref().ok(),"ioKind":recovered.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.elapsed().as_millis()}),
+                || json!({"index":index,"matched":recovered.as_ref().ok(),"ioKind":recovered.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             match recovered {
                 Ok(true) => {}
                 Ok(false) => {
                     session_trace(
                         "runtime.team.marker.write.request",
-                        json!({"index":index,"roleHash":role_hash,"agentHash":agent_hash}),
+                        || json!({"index":index,"roleHash":role_hash,"agentHash":agent_hash}),
                     );
                     let written = marker.write(workspace);
                     session_trace(
                         "runtime.team.marker.write.end",
-                        json!({"index":index,"succeeded":written.is_ok(),"ioKind":written.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.elapsed().as_millis()}),
+                        || json!({"index":index,"succeeded":written.is_ok(),"ioKind":written.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
                     );
                     if written.is_err() {
                         return unknown("marker-write");
                     }
                     session_trace(
                         "runtime.team.marker.readback.request",
-                        json!({"index":index}),
+                        || json!({"index":index}),
                     );
                     let readback = marker.recover(workspace);
                     session_trace(
                         "runtime.team.marker.readback.end",
-                        json!({"index":index,"matched":readback.as_ref().ok(),"ioKind":readback.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.elapsed().as_millis()}),
+                        || json!({"index":index,"matched":readback.as_ref().ok(),"ioKind":readback.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
                     );
                     if !matches!(readback, Ok(true)) {
                         return unknown("marker-readback");
@@ -300,7 +300,7 @@ impl TeamProvider {
         }
         session_trace(
             "runtime.team.recovery.end",
-            json!({"outcome":"Confirmed","elapsedMs":started.elapsed().as_millis()}),
+            || json!({"outcome":"Confirmed","elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
         );
         MaterializationOperationOutcome::Confirmed { receipt }
     }
@@ -317,21 +317,21 @@ impl TeamProvider {
         request: TeamMaterializationRequest,
         observer: Option<TeamProvisionObserver>,
     ) -> MaterializationOperationOutcome {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         session_trace(
             "runtime.team.materialize.request",
-            json!({"count":request.intent().agents().len()}),
+            || json!({"count":request.intent().agents().len()}),
         );
         let outcome = async {
             session_trace(
                 "runtime.team.undo.read.request",
-                json!({"operation":"materialize"}),
+                || json!({"operation":"materialize"}),
             );
             match ConfigUndo::load(&self.config.state_dir(), request.intent().team()) {
                 Ok(Some(_)) => {
                     session_trace(
                         "runtime.team.undo.read.end",
-                        json!({"present":true,"outcome":"Succeeded","reason":"recover-existing"}),
+                        || json!({"present":true,"outcome":"Succeeded","reason":"recover-existing"}),
                     );
                     return self
                         .recover_materialization_observed(request, observer)
@@ -339,12 +339,12 @@ impl TeamProvider {
                 }
                 Ok(None) => session_trace(
                     "runtime.team.undo.read.end",
-                    json!({"present":false,"outcome":"Succeeded"}),
+                    || json!({"present":false,"outcome":"Succeeded"}),
                 ),
                 Err(()) => {
                     session_trace(
                         "runtime.team.undo.read.end",
-                        json!({"outcome":"OutcomeUnknown","reason":"undo-read"}),
+                        || json!({"outcome":"OutcomeUnknown","reason":"undo-read"}),
                     );
                     return MaterializationOperationOutcome::OutcomeUnknown;
                 }
@@ -369,7 +369,7 @@ impl TeamProvider {
         .await;
         session_trace(
             "runtime.team.materialize.end",
-            json!({"outcome":match &outcome { MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", MaterializationOperationOutcome::Rejected { .. } => "Rejected", _ => "OutcomeUnknown" },"elapsedMs":started.elapsed().as_millis()}),
+            || json!({"outcome":match &outcome { MaterializationOperationOutcome::Confirmed { .. } => "Confirmed", MaterializationOperationOutcome::Rejected { .. } => "Rejected", _ => "OutcomeUnknown" },"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
         );
         outcome
     }
@@ -387,14 +387,14 @@ impl TeamProvider {
         for (index, role) in request.intent().agents().iter().enumerate() {
             session_trace(
                 "runtime.team.materialize.role.request",
-                json!({"index":index,"roleHash":identifier_hash(role.role().as_str()),"agentHash":match role.agent() { RoleMaterializationAgent::External { agent } => Some(identifier_hash(agent.as_str())), _ => None },"managed":matches!(role.agent(), RoleMaterializationAgent::Managed { .. })}),
+                || json!({"index":index,"roleHash":identifier_hash(role.role().as_str()),"agentHash":match role.agent() { RoleMaterializationAgent::External { agent } => Some(identifier_hash(agent.as_str())), _ => None },"managed":matches!(role.agent(), RoleMaterializationAgent::Managed { .. })}),
             );
             match role.agent() {
                 RoleMaterializationAgent::Managed { name } => {
                     let Some(workspace) = workspaces.resolve(role.role()) else {
                         session_trace(
                             "runtime.team.materialize.role.end",
-                            json!({"index":index,"reason":"managed-workspace-missing","outcome":"Rejected"}),
+                            || json!({"index":index,"reason":"managed-workspace-missing","outcome":"Rejected"}),
                         );
                         return self
                             .fail_materialization(&mut progress, permanent_rejection(), observer)
@@ -414,7 +414,7 @@ impl TeamProvider {
                         .await;
                     session_trace(
                         "runtime.team.materialize.role.end",
-                        json!({"index":index,"reason":"managed-agent","outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" },"agentHash":created_agent.as_ref().map(|agent| identifier_hash(agent.as_str()))}),
+                        || json!({"index":index,"reason":"managed-agent","outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" },"agentHash":created_agent.as_ref().map(|agent| identifier_hash(agent.as_str()))}),
                     );
                     if let Some(agent_id) = created_agent {
                         progress.created_agents.push(agent_id);
@@ -461,7 +461,7 @@ impl TeamProvider {
                     let Some(workspace) = external_workspaces.resolve(&agent_id) else {
                         session_trace(
                             "runtime.team.materialize.role.end",
-                            json!({"index":index,"reason":"external-workspace-missing","outcome":"Rejected"}),
+                            || json!({"index":index,"reason":"external-workspace-missing","outcome":"Rejected"}),
                         );
                         return self
                             .fail_materialization(&mut progress, permanent_rejection(), observer)
@@ -469,7 +469,7 @@ impl TeamProvider {
                     };
                     session_trace(
                         "runtime.team.materialize.role.end",
-                        json!({"index":index,"outcome":"Resolved","workspacePresent":true}),
+                        || json!({"index":index,"outcome":"Resolved","workspacePresent":true}),
                     );
                     config_agents.push(TeamConfigAgent::external(&agent_id, role.tools()));
                     verified_roles.push(VerifiedRole::external(
@@ -486,7 +486,7 @@ impl TeamProvider {
                 Err(_) => {
                     session_trace(
                         "runtime.team.materialize.failed",
-                        json!({"reason":"config-read","outcome":"OutcomeUnknown"}),
+                        || json!({"reason":"config-read","outcome":"OutcomeUnknown"}),
                     );
                     return self
                         .fail_materialization(&mut progress, permanent_rejection(), observer)
@@ -532,7 +532,7 @@ impl TeamProvider {
                 MutationOutcome::Rejected => {
                     session_trace(
                         "runtime.team.materialize.failed",
-                        json!({"reason":"config-apply","outcome":"Rejected"}),
+                        || json!({"reason":"config-apply","outcome":"Rejected"}),
                     );
                     return self
                         .fail_materialization(&mut progress, permanent_rejection(), observer)
@@ -541,7 +541,7 @@ impl TeamProvider {
                 MutationOutcome::OutcomeUnknown => {
                     session_trace(
                         "runtime.team.materialize.failed",
-                        json!({"reason":"config-apply","outcome":"OutcomeUnknown","undoRetained":true}),
+                        || json!({"reason":"config-apply","outcome":"OutcomeUnknown","undoRetained":true}),
                     );
                     // A late config write may still arrive; retain its durable undo.
                     return MaterializationOperationOutcome::OutcomeUnknown;
@@ -553,7 +553,7 @@ impl TeamProvider {
             Err(_) => {
                 session_trace(
                     "runtime.team.materialize.failed",
-                    json!({"reason":"native-readback-list","outcome":"OutcomeUnknown"}),
+                    || json!({"reason":"native-readback-list","outcome":"OutcomeUnknown"}),
                 );
                 return self
                     .fail_materialization(&mut progress, permanent_rejection(), observer)
@@ -568,7 +568,7 @@ impl TeamProvider {
         {
             session_trace(
                 "runtime.team.materialize.native-readback.request",
-                json!({"index":index,"roleHash":identifier_hash(verified.role.as_str()),"agentHash":identifier_hash(verified.agent_id.as_str())}),
+                || json!({"index":index,"roleHash":identifier_hash(verified.role.as_str()),"agentHash":identifier_hash(verified.agent_id.as_str())}),
             );
             let Some(agent) = agents.as_slice().iter().find(|agent| {
                 agent.id().as_str() == verified.agent_id.0
@@ -578,7 +578,7 @@ impl TeamProvider {
             }) else {
                 session_trace(
                     "runtime.team.materialize.native-readback.end",
-                    json!({"index":index,"reason":"agent-workspace-mismatch","outcome":"OutcomeUnknown"}),
+                    || json!({"index":index,"reason":"agent-workspace-mismatch","outcome":"OutcomeUnknown"}),
                 );
                 return self
                     .fail_materialization(&mut progress, permanent_rejection(), observer)
@@ -593,7 +593,7 @@ impl TeamProvider {
             {
                 session_trace(
                     "runtime.team.materialize.native-readback.end",
-                    json!({"index":index,"reason":"duplicate-agent","outcome":"OutcomeUnknown"}),
+                    || json!({"index":index,"reason":"duplicate-agent","outcome":"OutcomeUnknown"}),
                 );
                 return self
                     .fail_materialization(&mut progress, permanent_rejection(), observer)
@@ -601,7 +601,7 @@ impl TeamProvider {
             }
             session_trace(
                 "runtime.team.materialize.native-readback.end",
-                json!({"index":index,"outcome":"Confirmed","workspacePresent":true}),
+                || json!({"index":index,"outcome":"Confirmed","workspacePresent":true}),
             );
             let agent = ManagedAgentReference::try_new(verified.agent_id.0)
                 .expect("native readback agent ID must be a valid materialization reference");
@@ -635,20 +635,20 @@ impl TeamProvider {
         while progress.written_markers < progress.markers.len() {
             let index = progress.written_markers;
             let (marker, workspace) = &progress.markers[index];
-            let marker_started = Instant::now();
+            let marker_started = platform::trace::enabled().then(Instant::now);
             session_trace(
                 "runtime.team.marker.write.request",
-                json!({"index":index,"roleHash":identifier_hash(confirmed_roles[index].role().as_str()),"agentHash":identifier_hash(confirmed_roles[index].agent().as_str())}),
+                || json!({"index":index,"roleHash":identifier_hash(confirmed_roles[index].role().as_str()),"agentHash":identifier_hash(confirmed_roles[index].agent().as_str())}),
             );
             let written = marker.write(std::path::Path::new(workspace.as_str()));
             session_trace(
                 "runtime.team.marker.write.end",
-                json!({"index":index,"succeeded":written.is_ok(),"ioKind":written.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.elapsed().as_millis()}),
+                || json!({"index":index,"succeeded":written.is_ok(),"ioKind":written.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             if written.is_err() {
                 session_trace(
                     "runtime.team.materialize.failed",
-                    json!({"index":index,"reason":"marker-write","outcome":"OutcomeUnknown"}),
+                    || json!({"index":index,"reason":"marker-write","outcome":"OutcomeUnknown"}),
                 );
                 return self
                     .fail_materialization(&mut progress, permanent_rejection(), observer)
@@ -657,17 +657,17 @@ impl TeamProvider {
             progress.written_markers += 1;
             session_trace(
                 "runtime.team.marker.readback.request",
-                json!({"index":index}),
+                || json!({"index":index}),
             );
             let readback = marker.recover(std::path::Path::new(workspace.as_str()));
             session_trace(
                 "runtime.team.marker.readback.end",
-                json!({"index":index,"matched":readback.as_ref().ok(),"ioKind":readback.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.elapsed().as_millis()}),
+                || json!({"index":index,"matched":readback.as_ref().ok(),"ioKind":readback.as_ref().err().map(|error| format!("{:?}", error.kind())),"elapsedMs":marker_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             if !matches!(readback, Ok(true)) {
                 session_trace(
                     "runtime.team.materialize.failed",
-                    json!({"index":index,"reason":"marker-readback","outcome":"OutcomeUnknown"}),
+                    || json!({"index":index,"reason":"marker-readback","outcome":"OutcomeUnknown"}),
                 );
                 return self
                     .fail_materialization(&mut progress, permanent_rejection(), observer)
@@ -727,7 +727,7 @@ impl TeamProvider {
         let compensated = progress.compensate(self, effects_known).await;
         session_trace(
             "runtime.team.materialize.rollback.end",
-            json!({"outcome":if compensated {"Rejected"} else {"OutcomeUnknown"},"reason":if !effects_known {"native-effect-unresolved"} else if compensated {"rollback-confirmed"} else {"rollback-unresolved"}}),
+            || json!({"outcome":if compensated {"Rejected"} else {"OutcomeUnknown"},"reason":if !effects_known {"native-effect-unresolved"} else if compensated {"rollback-confirmed"} else {"rollback-unresolved"}}),
         );
         if compensated {
             outcome
@@ -740,15 +740,15 @@ impl TeamProvider {
         &self,
         request: TeamMaterializationRequest,
     ) -> MaterializationOperationOutcome {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         let unknown = |reason| {
             session_trace(
                 "runtime.team.unconfirmed-remove.end",
-                json!({"outcome":"OutcomeUnknown","reason":reason,"elapsedMs":started.elapsed().as_millis()}),
+                || json!({"outcome":"OutcomeUnknown","reason":reason,"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
             MaterializationOperationOutcome::OutcomeUnknown
         };
-        session_trace("runtime.team.unconfirmed-remove.request", json!({}));
+        session_trace("runtime.team.unconfirmed-remove.request", || json!({}));
         let undo = match ConfigUndo::load(&self.config.state_dir(), request.intent().team()) {
             Ok(Some(undo)) => undo,
             Ok(None) => return unknown("undo-missing"),
@@ -774,7 +774,7 @@ impl TeamProvider {
             let removed = marker.remove(workspace);
             session_trace(
                 "runtime.team.unconfirmed-remove.marker.end",
-                json!({"index":index,"succeeded":removed.is_ok(),"reason":if removed.is_ok() {"marker-removed"} else {"marker-remove"},"ioKind":removed.as_ref().err().map(|error| format!("{:?}", error.kind()))}),
+                || json!({"index":index,"succeeded":removed.is_ok(),"reason":if removed.is_ok() {"marker-removed"} else {"marker-remove"},"ioKind":removed.as_ref().err().map(|error| format!("{:?}", error.kind()))}),
             );
             if removed.is_err() {
                 return unknown("marker-remove");
@@ -782,7 +782,7 @@ impl TeamProvider {
             let present = marker.has_marker(workspace);
             session_trace(
                 "runtime.team.unconfirmed-remove.marker-readback.end",
-                json!({"index":index,"present":present.as_ref().ok(),"reason":if matches!(present, Ok(false)) {"marker-absent"} else {"marker-unresolved"}}),
+                || json!({"index":index,"present":present.as_ref().ok(),"reason":if matches!(present, Ok(false)) {"marker-absent"} else {"marker-unresolved"}}),
             );
             if !matches!(present, Ok(false)) {
                 return unknown("marker-readback");
@@ -793,7 +793,7 @@ impl TeamProvider {
         }
         session_trace(
             "runtime.team.unconfirmed-remove.end",
-            json!({"outcome":"Confirmed","reason":"cleanup-confirmed","elapsedMs":started.elapsed().as_millis()}),
+            || json!({"outcome":"Confirmed","reason":"cleanup-confirmed","elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
         );
         MaterializationOperationOutcome::Confirmed { receipt }
     }
@@ -887,14 +887,14 @@ impl TeamProvider {
         }
         session_trace(
             "runtime.team.external-workspaces.request",
-            json!({"count":requested.len()}),
+            || json!({"count":requested.len()}),
         );
         self.list_agents()
             .await
             .map_err(|_| {
                 session_trace(
                     "runtime.team.external-workspaces.end",
-                    json!({"reason":"native-list","outcome":"OutcomeUnknown"}),
+                    || json!({"reason":"native-list","outcome":"OutcomeUnknown"}),
                 );
                 WorkspaceProjectionError::Unknown
             })?
@@ -902,13 +902,13 @@ impl TeamProvider {
             .inspect(|_| {
                 session_trace(
                     "runtime.team.external-workspaces.end",
-                    json!({"outcome":"Resolved"}),
+                    || json!({"outcome":"Resolved"}),
                 )
             })
             .map_err(|_| {
                 session_trace(
                     "runtime.team.external-workspaces.end",
-                    json!({"reason":"native-workspace-invalid","outcome":"Rejected"}),
+                    || json!({"reason":"native-workspace-invalid","outcome":"Rejected"}),
                 );
                 WorkspaceProjectionError::Rejected
             })
@@ -918,21 +918,21 @@ impl TeamProvider {
         &self,
         request: &TeamMaterializationRequest,
     ) -> Result<TeamWorkspaceProjection, WorkspaceProjectionError> {
-        let started = Instant::now();
-        session_trace("runtime.team.config-read.request", json!({}));
+        let started = platform::trace::enabled().then(Instant::now);
+        session_trace("runtime.team.config-read.request", || json!({}));
         let canonical_config = self
             .config
             .read()
-            .inspect(|_| session_trace("runtime.team.config-read.end", json!({"outcome":"Succeeded","elapsedMs":started.elapsed().as_millis()})))
+            .inspect(|_| session_trace("runtime.team.config-read.end", || json!({"outcome":"Succeeded","elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()})))
             .map_err(|_| {
-                session_trace("runtime.team.config-read.end", json!({"reason":"config-store-read","outcome":"OutcomeUnknown","elapsedMs":started.elapsed().as_millis()}));
+                session_trace("runtime.team.config-read.end", || json!({"reason":"config-store-read","outcome":"OutcomeUnknown","elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
                 WorkspaceProjectionError::Unknown
             })?;
         let _ = canonical_config.get("agents");
         TeamWorkspaceProjection::for_request(self.config.state_dir_path(), request).map_err(|_| {
             session_trace(
                 "runtime.team.workspace-projection.end",
-                json!({"reason":"workspace-projection","outcome":"Rejected"}),
+                || json!({"reason":"workspace-projection","outcome":"Rejected"}),
             );
             WorkspaceProjectionError::Rejected
         })
@@ -1026,18 +1026,18 @@ impl TeamProvider {
     }
 
     pub(crate) async fn config_snapshot(&self) -> Result<TeamConfigSnapshot, ReadFailure> {
-        let started = Instant::now();
-        session_trace("runtime.team.config-get.request", json!({}));
+        let started = platform::trace::enabled().then(Instant::now);
+        session_trace("runtime.team.config-get.request", || json!({}));
         let request = wire::team::config_get_request(next_request_id("config-get"))
             .map_err(|_| {
-                session_trace("runtime.team.config-get.end", json!({"reason":"request-shape","outcome":"Protocol","elapsedMs":started.elapsed().as_millis()}));
+                session_trace("runtime.team.config-get.end", || json!({"reason":"request-shape","outcome":"Protocol","elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
                 ReadFailure::Protocol
             })?;
         let result = match self.gateway.rpc_query(request).await {
             Ok(GatewayResponse::Failure { .. }) => {
                 session_trace(
                     "runtime.team.config-get.rpc-end",
-                    json!({"reason":"target-rejected","outcome":"Rejected"}),
+                    || json!({"reason":"target-rejected","outcome":"Rejected"}),
                 );
                 Err(ReadFailure::Rejected)
             }
@@ -1046,7 +1046,7 @@ impl TeamProvider {
                 .map_err(|_| {
                     session_trace(
                         "runtime.team.config-get.rpc-end",
-                        json!({"reason":"decode","outcome":"Protocol"}),
+                        || json!({"reason":"decode","outcome":"Protocol"}),
                     );
                     ReadFailure::Protocol
                 }),
@@ -1054,14 +1054,14 @@ impl TeamProvider {
                 let failure = map_read_connection_failure(error);
                 session_trace(
                     "runtime.team.config-get.rpc-end",
-                    json!({"reason":"transport","outcome":format!("{failure:?}")}),
+                    || json!({"reason":"transport","outcome":format!("{failure:?}")}),
                 );
                 Err(failure)
             }
         };
         session_trace(
             "runtime.team.config-get.end",
-            json!({"outcome":result.as_ref().map_or_else(|failure| format!("{failure:?}"), |_| "Succeeded".to_owned()),"elapsedMs":started.elapsed().as_millis()}),
+            || json!({"outcome":result.as_ref().map_or_else(|failure| format!("{failure:?}"), |_| "Succeeded".to_owned()),"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
         );
         result
     }
@@ -1083,7 +1083,7 @@ impl TeamProvider {
             Err(_) => {
                 session_trace(
                     "runtime.team.config-apply.end",
-                    json!({"reason":"patch-agents","outcome":"Rejected"}),
+                    || json!({"reason":"patch-agents","outcome":"Rejected"}),
                 );
                 return MutationOutcome::Rejected;
             }
@@ -1094,20 +1094,20 @@ impl TeamProvider {
             Err(()) => {
                 session_trace(
                     "runtime.team.undo.prepare.end",
-                    json!({"reason":"undo-prepare","outcome":"Rejected"}),
+                    || json!({"reason":"undo-prepare","outcome":"Rejected"}),
                 );
                 return MutationOutcome::Rejected;
             }
         };
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         session_trace(
             "runtime.team.undo.write.request",
-            json!({"operation":"prepare"}),
+            || json!({"operation":"prepare"}),
         );
         let persisted = undo.persist(&self.config.state_dir());
         session_trace(
             "runtime.team.undo.write.end",
-            json!({"operation":"prepare","succeeded":persisted.is_ok(),"elapsedMs":started.elapsed().as_millis()}),
+            || json!({"operation":"prepare","succeeded":persisted.is_ok(),"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
         );
         if persisted.is_err() {
             return MutationOutcome::OutcomeUnknown;
@@ -1119,7 +1119,7 @@ impl TeamProvider {
                 Err(_) => {
                     session_trace(
                         "runtime.team.config-apply.end",
-                        json!({"reason":"config-set-shape","outcome":"Rejected"}),
+                        || json!({"reason":"config-set-shape","outcome":"Rejected"}),
                     );
                     return MutationOutcome::Rejected;
                 }
@@ -1149,21 +1149,21 @@ impl TeamProvider {
                     Ok(snapshot) if snapshot.0.matches_agents(&facts) => {
                         session_trace(
                             "runtime.team.config-apply.end",
-                            json!({"reason":"readback","outcome":"Applied"}),
+                            || json!({"reason":"readback","outcome":"Applied"}),
                         );
                         MutationOutcome::Applied(())
                     }
                     Ok(_) => {
                         session_trace(
                             "runtime.team.config-apply.end",
-                            json!({"reason":"readback-mismatch","outcome":"OutcomeUnknown"}),
+                            || json!({"reason":"readback-mismatch","outcome":"OutcomeUnknown"}),
                         );
                         MutationOutcome::OutcomeUnknown
                     }
                     Err(_) => {
                         session_trace(
                             "runtime.team.config-apply.end",
-                            json!({"reason":"readback-unavailable","outcome":"OutcomeUnknown"}),
+                            || json!({"reason":"readback-unavailable","outcome":"OutcomeUnknown"}),
                         );
                         MutationOutcome::OutcomeUnknown
                     }
@@ -1214,15 +1214,15 @@ impl TeamProvider {
         &self,
         request: wire::team::ConfigRestoreRequest,
     ) -> MutationOutcome<()> {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         let is_set = matches!(&request, wire::team::ConfigRestoreRequest::Set(_));
-        session_trace("runtime.team.config-write.request", json!({"set":is_set}));
+        session_trace("runtime.team.config-write.request", || json!({"set":is_set}));
         let encoded = match request.encode() {
             Ok(encoded) => encoded,
             Err(_) => {
                 session_trace(
                     "runtime.team.config-write.end",
-                    json!({"reason":"encode","outcome":"Rejected"}),
+                    || json!({"reason":"encode","outcome":"Rejected"}),
                 );
                 return MutationOutcome::Rejected;
             }
@@ -1241,7 +1241,7 @@ impl TeamProvider {
         );
         session_trace(
             "runtime.team.config-write.end",
-            json!({"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" },"elapsedMs":started.elapsed().as_millis()}),
+            || json!({"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" },"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
         );
         outcome
     }
@@ -1268,7 +1268,7 @@ impl TeamProvider {
         method: &str,
         decode: impl FnOnce(GatewayResponse) -> Result<T, wire::WireError>,
     ) -> MutationOutcome<T> {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         let operation = match method {
             "agents.create" => "create",
             "agents.update" => "update",
@@ -1276,7 +1276,7 @@ impl TeamProvider {
         };
         session_trace(
             "runtime.team.agent-write.request",
-            json!({"operation":operation}),
+            || json!({"operation":operation}),
         );
         let outcome = map_write_response(
             self.gateway.rpc_encoded_mutation(request_id, encoded).await,
@@ -1284,7 +1284,7 @@ impl TeamProvider {
         );
         session_trace(
             "runtime.team.agent-write.end",
-            json!({"operation":operation,"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" },"elapsedMs":started.elapsed().as_millis()}),
+            || json!({"operation":operation,"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" },"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
         );
         outcome
     }
@@ -1318,10 +1318,10 @@ struct MaterializationProgress {
 
 impl MaterializationProgress {
     async fn compensate(&mut self, provider: &TeamProvider, effects_known: bool) -> bool {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         session_trace(
             "runtime.team.compensate.request",
-            json!({"markers":self.written_markers,"createdAgents":self.created_agents.len(),"configRestore":self.config_restore.is_some()}),
+            || json!({"markers":self.written_markers,"createdAgents":self.created_agents.len(),"configRestore":self.config_restore.is_some()}),
         );
         let mut confirmed = effects_known;
         while self.written_markers > 0 {
@@ -1330,7 +1330,7 @@ impl MaterializationProgress {
             let removed = marker.remove(std::path::Path::new(workspace.as_str()));
             session_trace(
                 "runtime.team.compensate.marker.end",
-                json!({"index":self.written_markers,"succeeded":removed.is_ok(),"ioKind":removed.as_ref().err().map(|error| format!("{:?}", error.kind()))}),
+                || json!({"index":self.written_markers,"succeeded":removed.is_ok(),"ioKind":removed.as_ref().err().map(|error| format!("{:?}", error.kind()))}),
             );
             if removed.is_err() {
                 confirmed = false;
@@ -1338,7 +1338,7 @@ impl MaterializationProgress {
                 let present = marker.has_marker(std::path::Path::new(workspace.as_str()));
                 session_trace(
                     "runtime.team.compensate.marker-readback.end",
-                    json!({"index":self.written_markers,"present":present.as_ref().ok(),"reason":if matches!(present, Ok(false)) {"marker-absent"} else {"marker-unresolved"}}),
+                    || json!({"index":self.written_markers,"present":present.as_ref().ok(),"reason":if matches!(present, Ok(false)) {"marker-absent"} else {"marker-unresolved"}}),
                 );
                 if !matches!(present, Ok(false)) {
                     confirmed = false;
@@ -1349,7 +1349,7 @@ impl MaterializationProgress {
             let outcome = provider.restore_config(undo, true).await;
             session_trace(
                 "runtime.team.compensate.config.end",
-                json!({"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" }}),
+                || json!({"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" }}),
             );
             match outcome {
                 MutationOutcome::Applied(()) => {}
@@ -1359,11 +1359,11 @@ impl MaterializationProgress {
             }
         }
         while let Some(agent_id) = self.created_agents.pop() {
-            let agent_hash = identifier_hash(agent_id.as_str());
+            let agent_hash = platform::trace::enabled().then(|| identifier_hash(agent_id.as_str()));
             let outcome = provider.delete_agent(agent_id).await;
             session_trace(
                 "runtime.team.compensate.agent.end",
-                json!({"agentHash":agent_hash,"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" }}),
+                || json!({"agentHash":agent_hash,"outcome":match &outcome { MutationOutcome::Applied(_) => "Applied", MutationOutcome::Rejected => "Rejected", MutationOutcome::OutcomeUnknown => "OutcomeUnknown" }}),
             );
             match outcome {
                 MutationOutcome::Applied(()) => {}
@@ -1376,20 +1376,20 @@ impl MaterializationProgress {
             if let Some(undo) = self.config_restore.take() {
                 session_trace(
                     "runtime.team.undo.write.request",
-                    json!({"operation":"compensate"}),
+                    || json!({"operation":"compensate"}),
                 );
                 confirmed = undo
                     .finish_compensation(&provider.config.state_dir())
                     .is_ok();
                 session_trace(
                     "runtime.team.undo.write.end",
-                    json!({"operation":"compensate","succeeded":confirmed}),
+                    || json!({"operation":"compensate","succeeded":confirmed}),
                 );
             }
         }
         session_trace(
             "runtime.team.compensate.end",
-            json!({"confirmed":confirmed,"reason":if !effects_known {"native-effect-unresolved"} else if confirmed {"rollback-confirmed"} else {"rollback-unresolved"},"elapsedMs":started.elapsed().as_millis()}),
+            || json!({"confirmed":confirmed,"reason":if !effects_known {"native-effect-unresolved"} else if confirmed {"rollback-confirmed"} else {"rollback-unresolved"},"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
         );
         confirmed
     }
@@ -1463,7 +1463,7 @@ fn map_write_response<T>(
         MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
             session_trace(
                 "runtime.team.mutation.end",
-                json!({"reason":"target-rejected","outcome":"Rejected"}),
+                || json!({"reason":"target-rejected","outcome":"Rejected"}),
             );
             MutationOutcome::Rejected
         }
@@ -1471,14 +1471,14 @@ fn map_write_response<T>(
             Ok(value) => {
                 session_trace(
                     "runtime.team.mutation.end",
-                    json!({"reason":"decoded","outcome":"Applied"}),
+                    || json!({"reason":"decoded","outcome":"Applied"}),
                 );
                 MutationOutcome::Applied(value)
             }
             Err(_) => {
                 session_trace(
                     "runtime.team.mutation.end",
-                    json!({"reason":"decode","outcome":"OutcomeUnknown"}),
+                    || json!({"reason":"decode","outcome":"OutcomeUnknown"}),
                 );
                 MutationOutcome::OutcomeUnknown
             }
@@ -1486,14 +1486,14 @@ fn map_write_response<T>(
         MutationDelivery::NotWritten(_) => {
             session_trace(
                 "runtime.team.mutation.end",
-                json!({"reason":"not-written","outcome":"Rejected"}),
+                || json!({"reason":"not-written","outcome":"Rejected"}),
             );
             MutationOutcome::Rejected
         }
         MutationDelivery::MayHaveReached(_) => {
             session_trace(
                 "runtime.team.mutation.end",
-                json!({"reason":"may-have-reached","outcome":"OutcomeUnknown"}),
+                || json!({"reason":"may-have-reached","outcome":"OutcomeUnknown"}),
             );
             MutationOutcome::OutcomeUnknown
         }

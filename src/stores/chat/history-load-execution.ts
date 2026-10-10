@@ -180,13 +180,13 @@ async function fetchHistoryWindowWithStartupRetry(input: {
     throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
     try {
       const target = resolveSessionOperationTarget(get(), requestedSessionKey);
-      logSessionTrace('history.target.resolved', traceId, {
+      logSessionTrace('history.target.resolved', traceId, () => ({
         requestedSessionKey: summarizeIdentifier(requestedSessionKey),
         sessionKey: summarizeIdentifier(target.sessionKey),
         endpointSessionId: summarizeIdentifier(target.endpointSessionId),
         sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
         attempt,
-      });
+      }));
       if (input.observeHistory && target.sessionIdentity.endpoint.kind === 'native-runtime' && target.sessionIdentity.endpoint.runtimeAdapterId === 'openclaw') {
         const view = await input.observeHistory(target.sessionIdentity, options);
         if (!view) throw createHistoryLoadAbortError('observation_released');
@@ -309,11 +309,11 @@ export async function executeViewportWindowLoad(
     const limit = request.mode === 'latest'
       ? CHAT_HISTORY_FULL_LIMIT
       : resolveViewportFetchLimit(getSessionItems(currentState, sessionKey).length);
-    if (traceId) logSessionTrace('session.window.readback.request', traceId, {
+    if (traceId) logSessionTrace('session.window.readback.request', traceId, () => ({
       ...traceContext,
       targetIdentity: summarizeSessionIdentity(target.sessionIdentity),
       limit,
-    });
+    }));
     readbackStage = 'request';
     const rawView = await hostSessionWindowFetch({
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
@@ -324,16 +324,16 @@ export async function executeViewportWindowLoad(
       includeCanonical: true,
     });
     readbackStage = 'response';
-    if (traceId) logSessionTrace('session.window.readback.response', traceId, {
+    if (traceId) logSessionTrace('session.window.readback.response', traceId, () => ({
       ...traceContext,
       rawType: rawView && typeof rawView === 'object' ? 'object' : typeof rawView,
-    });
+    }));
     const responseState = deps.get();
     if (!isCurrent(responseState)
       || (request.mode === 'older' && getSessionViewportState(responseState, sessionKey).windowStartOffset !== beforeViewport.windowStartOffset)
       || (request.mode === 'latest' && responseState.loadedSessions[sessionKey].runtime.pendingTurnKey
         && responseState.loadedSessions[sessionKey].runtime.pendingTurnKey !== currentState.loadedSessions[sessionKey].runtime.pendingTurnKey)) {
-      if (traceId) logSessionTrace('session.window.readback.drop', traceId, {
+      if (traceId) logSessionTrace('session.window.readback.drop', traceId, () => ({
         ...traceContext,
         reason: requests.get(sessionKey) !== requestId ? 'request-superseded'
           : !isHistorySessionIdentityCurrent(responseState, sessionKey, identity) ? 'identity-changed'
@@ -342,17 +342,17 @@ export async function executeViewportWindowLoad(
         currentIdentity: summarizeSessionIdentity(responseState.loadedSessions[sessionKey]?.meta.sessionIdentity),
         currentOffset: getSessionViewportState(responseState, sessionKey).windowStartOffset,
         currentPendingTurnHash: summarizeIdentifier(responseState.loadedSessions[sessionKey]?.runtime.pendingTurnKey).hash,
-      });
+      }));
       return;
     }
     readbackStage = 'decode';
     const view = decodeHistorySessionView(rawView);
-    if (traceId) logSessionTrace('session.window.readback.decoded', traceId, {
+    if (traceId) logSessionTrace('session.window.readback.decoded', traceId, () => ({
       ...traceContext,
       responseIdentity: summarizeSessionIdentity(view.identity),
       epoch: view.epoch, seq: view.seq, cursor: view.cursor,
       identityMatches: sessionIdentitiesEqual(view.identity, identity),
-    });
+    }));
     readbackStage = 'identity';
     if (!sessionIdentitiesEqual(view.identity, identity)) {
       throw new Error('Session view identity mismatch');
@@ -362,12 +362,12 @@ export async function executeViewportWindowLoad(
       set: deps.set,
       get: deps.get,
     }, view, { windowOnly: true, direction: request.mode });
-    if (traceId) logSessionTrace('session.window.readback.apply', traceId, {
+    if (traceId) logSessionTrace('session.window.readback.apply', traceId, () => ({
       ...traceContext,
       epoch: view.epoch, seq: view.seq, cursor: view.cursor,
       outcome: projectionResult.status,
       ...('reason' in projectionResult ? { reason: summarizeIdentifier(projectionResult.reason) } : {}),
-    });
+    }));
     if (projectionResult.status !== 'applied') return;
     readbackStage = 'hydrate';
     deps.set((state) => isCurrent(state) ? buildHydratedAttachmentItemsPatch(
@@ -376,12 +376,12 @@ export async function executeViewportWindowLoad(
       hydrateAttachedFilesFromItems(getSessionItems(state, sessionKey)),
     ) : state);
   } catch (error) {
-    if (traceId) logSessionTrace('session.window.readback.error', traceId, {
+    if (traceId) logSessionTrace('session.window.readback.error', traceId, () => ({
       ...traceContext,
       readbackStage,
       requestCurrent: requests.get(sessionKey) === requestId,
       ...summarizeError(error),
-    });
+    }));
     // Keep the current window when its read fails.
   } finally {
     if (isCurrent(deps.get())) {
@@ -549,12 +549,12 @@ export async function executeHistoryLoad(
   const mode = request.mode;
   const scope = request.scope;
   const traceId = request.traceId ?? createSessionTraceId(`history:${request.reason ?? mode}`);
-  logSessionTrace('history.start', traceId, {
+  logSessionTrace('history.start', traceId, () => ({
     requestedSessionKey: summarizeIdentifier(requestedSessionKey),
     mode,
     scope,
     reason: request.reason ?? null,
-  });
+  }));
   let failed = false;
   let recovered = false;
   let aborted = false;
@@ -629,23 +629,23 @@ export async function executeHistoryLoad(
       return;
     }
     const applyStatus = await applyLoadedMessages(window);
-    logSessionTrace(applyStatus === 'applied' ? 'history.applied' : 'history.ignored', traceId, {
+    logSessionTrace(applyStatus === 'applied' ? 'history.applied' : 'history.ignored', traceId, () => ({
       requestedSessionKey: summarizeIdentifier(requestedSessionKey),
       itemCount: projectSessionViewItems(window.view).length,
       thinkingLevel: window.thinkingLevel,
-    });
+    }));
   } catch (err) {
     if (isHistoryLoadAbortError(err) || shouldAbortHistoryProcessing()) {
       aborted = true;
-      logSessionTrace('history.aborted', traceId, {
+      logSessionTrace('history.aborted', traceId, () => ({
         requestedSessionKey: summarizeIdentifier(requestedSessionKey),
-      });
+      }));
     } else {
       failed = true;
-      logSessionTrace('history.error', traceId, {
+      logSessionTrace('history.error', traceId, () => ({
         requestedSessionKey: summarizeIdentifier(requestedSessionKey),
         ...summarizeError(err),
-      });
+      }));
       if (mode === 'quiet') {
         recovered = true;
         return;

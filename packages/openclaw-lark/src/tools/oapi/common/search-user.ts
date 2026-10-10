@@ -68,7 +68,7 @@ export function registerSearchUserTool(api: OpenClawPluginApi): void {
         try {
           const client = toolClient();
 
-          log.info(`search_user: query="${p.query}", page_size=${p.page_size ?? 20}`);
+          log.trace(() => `search_user: query="${p.query}", page_size=${p.page_size ?? 20}`);
 
           const requestQuery: Record<string, string> = {
             query: p.query,

@@ -39,13 +39,6 @@ const REQUIRED_LOCAL_PLUGINS = [
     sourceEntries: ['./src/index.ts'],
   },
   {
-    pluginId: 'memory-lancedb-pro',
-    sourceDir: 'packages/memory-lancedb-pro',
-    expectedExtensions: ['./dist/index.js'],
-    sourceDirs: ['./src'],
-    sourceEntries: ['./index.ts', './cli.ts', './src/embedder.ts'],
-  },
-  {
     pluginId: 'matchaclaw-media',
     sourceDir: 'packages/openclaw-matchaclaw-media-plugin',
     expectedExtensions: ['./dist/index.js'],

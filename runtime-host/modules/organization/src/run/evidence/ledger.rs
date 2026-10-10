@@ -4,10 +4,17 @@ use crate::run::graph::ExecutionFence;
 
 use super::{EvidenceId, EvidenceRecord, EvidenceReferenceKind};
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct EvidenceLedger {
     records: BTreeMap<EvidenceId, EvidenceRecord>,
+    undo: Option<BTreeMap<EvidenceId, Option<EvidenceRecord>>>,
 }
+impl PartialEq for EvidenceLedger {
+    fn eq(&self, other: &Self) -> bool {
+        self.records == other.records
+    }
+}
+impl Eq for EvidenceLedger {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordOutcome {
@@ -44,8 +51,7 @@ impl EvidenceLedger {
                 evidence_id: record.evidence_id().clone(),
             },
             None => {
-                self.records
-                    .insert(record.evidence_id().clone(), record.clone());
+                self.restore_record(record.clone());
                 RecordOutcome::Recorded(record)
             }
         }
@@ -111,7 +117,56 @@ impl EvidenceLedger {
             .filter(move |record| record.run_id() == run_id)
     }
 
+    pub(crate) fn restore_record(&mut self, record: EvidenceRecord) {
+        let id = record.evidence_id().clone();
+        if let Some(undo) = &mut self.undo {
+            undo.entry(id.clone())
+                .or_insert_with(|| self.records.get(&id).cloned());
+        }
+        self.records.insert(id, record);
+    }
+
+    pub(crate) fn remove_record(&mut self, id: &EvidenceId) {
+        if let Some(record) = self.records.remove(id)
+            && let Some(undo) = &mut self.undo
+        {
+            undo.entry(id.clone()).or_insert(Some(record));
+        }
+    }
+
+    pub(crate) fn begin_transaction(&mut self) {
+        assert!(self.undo.is_none(), "evidence transaction already active");
+        self.undo = Some(BTreeMap::new());
+    }
+
+    pub(crate) fn changed_ids(&self) -> impl Iterator<Item = &EvidenceId> {
+        self.undo.iter().flat_map(|undo| undo.keys())
+    }
+
+    pub(crate) fn commit_transaction(&mut self) {
+        self.undo = None;
+    }
+
+    pub(crate) fn rollback_transaction(&mut self) {
+        for (id, previous) in self.undo.take().into_iter().flatten() {
+            if let Some(record) = previous {
+                self.records.insert(id, record);
+            } else {
+                self.records.remove(&id);
+            }
+        }
+    }
+
     pub(crate) fn retain_without_run(&mut self, run_id: &str) {
-        self.records.retain(|_, record| record.run_id() != run_id);
+        self.records.retain(|id, record| {
+            if record.run_id() != run_id {
+                return true;
+            }
+            if let Some(undo) = &mut self.undo {
+                undo.entry(id.clone())
+                    .or_insert_with(|| Some(record.clone()));
+            }
+            false
+        });
     }
 }

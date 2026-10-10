@@ -1332,7 +1332,8 @@ async function hasPermissionsToUseToolInner(
 
   if (result.behavior === 'ask' && result.suggestions) {
     logForDebugging(
-      `Permission suggestions for ${tool.name}: ${jsonStringify(result.suggestions, null, 2)}`,
+      () =>
+        `Permission suggestions for ${tool.name}: ${jsonStringify(result.suggestions, null, 2)}`,
     )
   }
 

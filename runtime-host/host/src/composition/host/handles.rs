@@ -53,6 +53,5 @@ pub(crate) struct HostHandles {
     pub diagnostics: DiagnosticsModule,
     pub(crate) observation: ObservationSink,
     pub session_delta_source: sessions_module::SessionDeltaSource,
-    pub start_gate_registry: Arc<organization::StartGateRegistry>,
     pub runtime_directory: Arc<super::super::runtime_ports::RuntimeDriverDirectory>,
 }

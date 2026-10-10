@@ -8,11 +8,28 @@ use super::{
     TeamEventPayload,
 };
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct EventLedger {
     commands: BTreeMap<OpaqueId, Vec<CommandRecord>>,
     events: BTreeMap<OpaqueId, Vec<TeamEvent>>,
+    event_ids: BTreeSet<String>,
+    transaction: Option<BTreeMap<OpaqueId, EventUndo>>,
 }
+
+#[derive(Clone, Debug)]
+struct EventUndo {
+    commands: usize,
+    events: usize,
+    removed: Option<(Vec<CommandRecord>, Vec<TeamEvent>)>,
+}
+
+impl PartialEq for EventLedger {
+    fn eq(&self, other: &Self) -> bool {
+        self.commands == other.commands && self.events == other.events
+    }
+}
+
+impl Eq for EventLedger {}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EventLedgerSnapshot {
@@ -49,6 +66,121 @@ pub enum RestoreEventLedgerError {
 }
 
 impl EventLedger {
+    pub(crate) fn begin_transaction(&mut self) {
+        if self.transaction.is_none() { self.transaction = Some(BTreeMap::new()); }
+    }
+
+    pub(crate) fn commit_transaction(&mut self) { self.transaction = None; }
+
+    pub(crate) fn rollback_transaction(&mut self) {
+        let Some(transaction) = self.transaction.take() else { return };
+        for (run, undo) in transaction {
+            if let Some(events) = self.events.get(&run) {
+                for event in events.iter().skip(undo.events) { self.event_ids.remove(event.event_id()); }
+            }
+            if let Some((commands, events)) = undo.removed {
+                self.event_ids.extend(events.iter().take(undo.events).map(|event| event.event_id().to_owned()));
+                self.commands.insert(run.clone(), commands);
+                self.events.insert(run.clone(), events);
+            }
+            if undo.commands == 0 { self.commands.remove(&run); }
+            else if let Some(commands) = self.commands.get_mut(&run) { commands.truncate(undo.commands); }
+            if undo.events == 0 { self.events.remove(&run); }
+            else if let Some(events) = self.events.get_mut(&run) { events.truncate(undo.events); }
+        }
+    }
+
+    fn touch(&mut self, run: &OpaqueId) {
+        if let Some(transaction) = &mut self.transaction {
+            transaction.entry(run.clone()).or_insert_with(|| EventUndo {
+                commands: self.commands.get(run).map_or(0, Vec::len),
+                events: self.events.get(run).map_or(0, Vec::len),
+                removed: None,
+            });
+        }
+    }
+
+    pub(crate) fn changed_runs(&self) -> impl Iterator<Item = &OpaqueId> {
+        self.transaction.iter().flat_map(|transaction| transaction.keys())
+    }
+
+    pub(crate) fn new_commands(&self, run: &OpaqueId) -> &[CommandRecord] {
+        let start = self.transaction.as_ref().and_then(|transaction| transaction.get(run)).map_or(0, |undo| undo.commands);
+        self.commands.get(run).map_or(&[], |records| &records[start.min(records.len())..])
+    }
+
+    pub(crate) fn new_events(&self, run: &OpaqueId) -> &[TeamEvent] {
+        let start = self.transaction.as_ref().and_then(|transaction| transaction.get(run)).map_or(0, |undo| undo.events);
+        self.events.get(run).map_or(&[], |records| &records[start.min(records.len())..])
+    }
+
+    pub(crate) fn removed_commands(&self, run: &OpaqueId) -> &[CommandRecord] {
+        self.transaction.as_ref().and_then(|transaction| transaction.get(run))
+            .and_then(|undo| undo.removed.as_ref().map(|(commands, _)| &commands[..undo.commands]))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn removed_events(&self, run: &OpaqueId) -> &[TeamEvent] {
+        self.transaction.as_ref().and_then(|transaction| transaction.get(run))
+            .and_then(|undo| undo.removed.as_ref().map(|(_, events)| &events[..undo.events]))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn commands_for_run(&self, run: &OpaqueId) -> &[CommandRecord] {
+        self.commands.get(run).map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) fn events_for_run_id(&self, run: &OpaqueId) -> &[TeamEvent] {
+        self.events.get(run).map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) fn replay(&self, command: &RunCommand) -> Result<Option<CommandReceipt>, RecordCommandError> {
+        if let Some(existing) = self.command_by_idempotency(command.run_id(), command.idempotency_key()) {
+            return replay_or_conflict(existing, command, CommandStatus::Accepted, None).map(Some);
+        }
+        if self.commands_for_run(command.run_id()).iter().any(|record| record.command_id() == command.command_id()) {
+            return Err(RecordCommandError::CommandIdConflict);
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn import_command(&mut self, record: CommandRecord) -> Result<(), RestoreEventLedgerError> {
+        let records = self.commands.entry(record.run_id().clone()).or_default();
+        let index = usize::try_from(record.sequence()).ok().and_then(|value| value.checked_sub(1))
+            .ok_or(RestoreEventLedgerError::CommandSequenceGap)?;
+        if index < records.len() {
+            return if records[index] == record { Ok(()) } else { Err(RestoreEventLedgerError::DuplicateCommandId) };
+        }
+        if index != records.len() { return Err(RestoreEventLedgerError::CommandSequenceGap); }
+        if records.iter().any(|old| old.command_id() == record.command_id()) {
+            return Err(RestoreEventLedgerError::DuplicateCommandId);
+        }
+        if records.iter().any(|old| old.idempotency_key() == record.idempotency_key()) {
+            return Err(RestoreEventLedgerError::DuplicateIdempotencyKey);
+        }
+        records.push(record);
+        Ok(())
+    }
+
+    pub(crate) fn import_event(&mut self, event: TeamEvent) -> Result<(), RestoreEventLedgerError> {
+        let run = event.run_id_value().clone();
+        let index = usize::try_from(event.sequence()).ok().and_then(|value| value.checked_sub(1))
+            .ok_or(RestoreEventLedgerError::EventSequenceGap)?;
+        let records = self.events.get(&run).map_or(&[][..], Vec::as_slice);
+        if index < records.len() {
+            return if records[index] == event { Ok(()) } else { Err(RestoreEventLedgerError::DuplicateEventId) };
+        }
+        if index != records.len() { return Err(RestoreEventLedgerError::EventSequenceGap); }
+        if event.event_type() == super::TeamEventType::ApprovalResolved {
+            if !approval_resolution_event_is_canonical(&event) { return Err(RestoreEventLedgerError::EventDoesNotMatchCommand); }
+        } else if expected_event_for(self, &event).as_ref() != Some(&event) {
+            return Err(RestoreEventLedgerError::EventDoesNotMatchCommand);
+        }
+        if !self.event_ids.insert(event.event_id().to_owned()) { return Err(RestoreEventLedgerError::DuplicateEventId); }
+        self.events.entry(run).or_default().push(event);
+        Ok(())
+    }
+
     pub fn try_accept(
         &mut self,
         command: RunCommand,
@@ -101,6 +233,7 @@ impl EventLedger {
         idempotency_key: OpaqueId,
         resolved_at: u64,
     ) -> Result<TeamEvent, RecordCommandError> {
+        self.touch(&run_id);
         let events = self.events.entry(run_id.clone()).or_default();
         let sequence = next_sequence(events.len()).expect("event sequence cannot overflow");
         let event = TeamEvent::approval_resolved(
@@ -112,6 +245,7 @@ impl EventLedger {
             resolved_at,
         )
         .map_err(|_| RecordCommandError::InvalidEventId)?;
+        if !self.event_ids.insert(event.event_id().to_owned()) { return Err(RecordCommandError::InvalidEventId); }
         events.push(event.clone());
         Ok(event)
     }
@@ -150,9 +284,8 @@ impl EventLedger {
             records.push(record);
         }
 
-        let mut event_ids = BTreeSet::new();
         for event in snapshot.events {
-            if !event_ids.insert(event.event_id().to_owned()) {
+            if !ledger.event_ids.insert(event.event_id().to_owned()) {
                 return Err(RestoreEventLedgerError::DuplicateEventId);
             }
             let event_run_id = event.run_id_value().clone();
@@ -200,8 +333,14 @@ impl EventLedger {
     }
 
     pub(crate) fn retain_without_run(&mut self, run_id: &str) {
-        self.commands.retain(|key, _| key.as_str() != run_id);
-        self.events.retain(|key, _| key.as_str() != run_id);
+        let Ok(run) = OpaqueId::try_new(run_id) else { return };
+        self.touch(&run);
+        let commands = self.commands.remove(&run).unwrap_or_default();
+        let events = self.events.remove(&run).unwrap_or_default();
+        for event in &events { self.event_ids.remove(event.event_id()); }
+        if let Some(undo) = self.transaction.as_mut().and_then(|transaction| transaction.get_mut(&run)) {
+            undo.removed.get_or_insert((commands, events));
+        }
     }
 
     fn record(
@@ -211,6 +350,7 @@ impl EventLedger {
         rejection_reason: Option<CommandRejection>,
     ) -> Result<CommandReceipt, RecordCommandError> {
         let run_id = command.run_id().clone();
+        self.touch(&run_id);
         let records = self.commands.entry(run_id.clone()).or_default();
         if let Some(existing) = records
             .iter()
@@ -235,6 +375,7 @@ impl EventLedger {
         };
         let events = if record.is_accepted() {
             let event = next_event(&run_id, records, self.events.get(&run_id), record.command())?;
+            if !self.event_ids.insert(event.event_id().to_owned()) { return Err(RecordCommandError::InvalidEventId); }
             self.events.entry(run_id).or_default().push(event.clone());
             vec![event]
         } else {

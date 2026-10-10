@@ -1,6 +1,7 @@
 import pino from 'pino'
 import { join } from 'node:path'
 import { mkdirSync, existsSync } from 'node:fs'
+import { isTraceEnabled } from '../../../src/utils/trace.js'
 
 let rootLogger: pino.Logger
 
@@ -17,7 +18,8 @@ const PRETTY_CONFIG = {
 } as const
 
 export function initLogger(config: LoggerConfig): pino.Logger {
-  const { debug, logDir } = config
+  const { logDir } = config
+  const debug = isTraceEnabled()
 
   if (debug) {
     const dir = logDir || join(process.cwd(), '.acp-proxy')

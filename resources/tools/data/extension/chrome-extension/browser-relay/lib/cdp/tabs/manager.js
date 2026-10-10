@@ -20,7 +20,7 @@
  */
 
 import { TabType } from '../../constants.js'
-import { createLogger } from '../../logger.js'
+import { createLogger, isTraceEnabled } from '../../logger.js'
 import { attachDebugger, detachDebugger, detachAll } from './debugger-attach.js'
 import { SessionIndicators } from './session-indicators.js'
 import { cleanupTabQueue, cleanupAllTabQueues } from '../commands/dispatch.js'
@@ -444,11 +444,11 @@ export class TabManager {
   // ── Discovery (virtual registration) ──
 
   async discoverAll(isConnected) {
-    const t0 = performance.now()
+    const t0 = isTraceEnabled() ? performance.now() : 0
     if (!isConnected()) return
 
     const allTabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*', 'file:///*'] })
-    log.debug('discoverAll: query took', (performance.now() - t0).toFixed(1), 'ms,', allTabs.length, 'tabs')
+    log.debug(() => ['discoverAll: query took', (performance.now() - t0).toFixed(1), 'ms,', allTabs.length, 'tabs'])
 
     let count = 0
     for (const tab of allTabs) {
@@ -459,13 +459,13 @@ export class TabManager {
       })
       count++
     }
-    log.info('discoverAll: registered', count, 'virtual tabs in', (performance.now() - t0).toFixed(1), 'ms')
+    log.info(() => ['discoverAll: registered', count, 'virtual tabs in', (performance.now() - t0).toFixed(1), 'ms'])
   }
 
   discover(tabId, url, title, tabMeta = {}) {
     if (!this.#tabs.has(tabId) && isDebuggableUrl(url)) {
       this.#registerVirtual(tabId, url, title, tabMeta)
-      log.debug('discover: registered virtual tab', tabId)
+      log.debug(() => ['discover: registered virtual tab', tabId])
     }
   }
 
@@ -540,7 +540,7 @@ export class TabManager {
     const manual = options.manual === true
     this.#expectedDetach.delete(tabId)
     if (this.#autoAttachBlocked.has(tabId) && !manual) {
-      log.info('ensureAttached: auto-attach blocked for tab', tabId)
+      log.info(() => ['ensureAttached: auto-attach blocked for tab', tabId])
       return false
     }
     if (manual) {
@@ -565,18 +565,18 @@ export class TabManager {
     const attachGeneration = (this.#attachGeneration.get(tabId) ?? 0) + 1
     this.#attachGeneration.set(tabId, attachGeneration)
     entry.state = 'attaching'
-    log.info('physicalAttach: begin', tabId)
+    log.info(() => ['physicalAttach: begin', tabId])
 
     try {
       if (this.#shuttingDown) return false
       const { realTargetId } = await attachDebugger(tabId)
-      log.info('physicalAttach: debugger attached', {
+      log.info(() => ['physicalAttach: debugger attached', {
         tabId,
         sessionId: entry.sessionId,
         previousTargetId: entry.targetId,
         realTargetId: realTargetId || null,
         url: entry.url || '',
-      })
+      }])
 
       // Guard: tab may have been removed by clearAll/detach while we were awaiting
       if (!this.#tabs.has(tabId) || this.#attachGeneration.get(tabId) !== attachGeneration) {
@@ -612,7 +612,7 @@ export class TabManager {
           },
         },
       })
-      log.info('physicalAttach: emitted Target.attachedToTarget', {
+      log.info(() => ['physicalAttach: emitted Target.attachedToTarget', {
         tabId,
         sessionId: entry.sessionId,
         targetKey: entry.targetKey,
@@ -620,9 +620,9 @@ export class TabManager {
         windowId: entry.windowId ?? null,
         active: entry.active === true,
         url: entry.url || '',
-      })
+      }])
 
-      log.info('physicalAttach: done', tabId, 'in', (performance.now() - t0).toFixed(1), 'ms')
+      log.info(() => ['physicalAttach: done', tabId, 'in', (performance.now() - t0).toFixed(1), 'ms'])
       this.#schedulePersist()
       return true
     } catch (err) {
@@ -637,7 +637,7 @@ export class TabManager {
   async attach(tabId, options = {}) {
     const manual = options.manual === true
     if (this.#autoAttachBlocked.has(tabId) && !manual) {
-      log.info('attach: auto-attach blocked for tab', tabId)
+      log.info(() => ['attach: auto-attach blocked for tab', tabId])
       return null
     }
     const existing = this.#tabs.get(tabId)
@@ -645,7 +645,7 @@ export class TabManager {
       if (manual) {
         this.clearAutoAttachBlocked(tabId)
       }
-      log.debug('attach: already connected', tabId)
+      log.debug(() => ['attach: already connected', tabId])
       return existing
     }
 
@@ -681,14 +681,14 @@ export class TabManager {
   // ── Detach ──
 
   async detach(tabId, reason) {
-    const t0 = performance.now()
+    const t0 = isTraceEnabled() ? performance.now() : 0
     const entry = this.#tabs.get(tabId)
-    log.info('detach:', tabId, reason, 'state:', entry?.state)
+    log.info(() => ['detach:', tabId, reason, 'state:', entry?.state])
 
     const wasPhysical = entry?.state === 'connected' || entry?.state === 'attaching'
     if (wasPhysical) {
       await this.#detachPhysicalDebugger(tabId)
-      log.debug('detach: chrome.debugger cleanup', tabId, (performance.now() - t0).toFixed(1), 'ms')
+      log.debug(() => ['detach: chrome.debugger cleanup', tabId, (performance.now() - t0).toFixed(1), 'ms'])
     }
 
     if (entry?.sessionId) {
@@ -710,7 +710,7 @@ export class TabManager {
   }
 
   clearAll() {
-    const t0 = performance.now()
+    const t0 = isTraceEnabled() ? performance.now() : 0
     this.#shuttingDown = true
     this.stopSessionIndicators()
 
@@ -721,7 +721,7 @@ export class TabManager {
       }
     }
 
-    log.info('clearAll:', this.#tabs.size, 'total,', physical.length, 'physically attached')
+    log.info(() => ['clearAll:', this.#tabs.size, 'total,', physical.length, 'physically attached'])
 
     this.#tabs.clear()
     this.#bySession.clear()
@@ -741,7 +741,7 @@ export class TabManager {
     const settled = detachAll(physical)
     settled.then(() => {
       this.#shuttingDown = false
-      log.info('clearAll: done in', (performance.now() - t0).toFixed(1), 'ms')
+      log.info(() => ['clearAll: done in', (performance.now() - t0).toFixed(1), 'ms'])
     })
     return settled
   }
@@ -767,7 +767,7 @@ export class TabManager {
       || method === 'Target.detachedFromTarget'
       || method === 'Target.targetInfoChanged'
     ) {
-      log.info('onDebuggerEvent forwarding target event', {
+      log.info(() => ['onDebuggerEvent forwarding target event', {
         tabId,
         sourceSessionId: source.sessionId || null,
         method,
@@ -778,7 +778,7 @@ export class TabManager {
             : typeof params?.targetInfo?.targetId === 'string'
               ? params.targetInfo.targetId
               : null,
-      })
+      }])
     }
 
     this.#sendToRelay({
@@ -789,7 +789,7 @@ export class TabManager {
 
   async onDebuggerDetach(source, reason) {
     const tabId = source.tabId
-    log.info('onDebuggerDetach:', tabId, reason, 'tracked:', this.#tabs.has(tabId))
+    log.info(() => ['onDebuggerDetach:', tabId, reason, 'tracked:', this.#tabs.has(tabId)])
     if (!tabId || !this.#tabs.has(tabId)) return
     if (this.#expectedDetach.delete(tabId)) return
     if (reason === 'canceled_by_user') {
@@ -1145,7 +1145,7 @@ export class TabManager {
   #emitAttached(entry) {
     if (!entry?.sessionId || !entry?.targetId) return
     const tabId = this.#bySession.get(entry.sessionId)
-    log.info('emitAttached', {
+    log.info(() => ['emitAttached', {
       tabId: Number.isInteger(tabId) ? tabId : null,
       sessionId: entry.sessionId,
       targetKey: entry.targetKey,
@@ -1153,7 +1153,7 @@ export class TabManager {
       windowId: entry.windowId ?? null,
       active: entry.active === true,
       url: entry.url || '',
-    })
+    }])
     this.#sendToRelay({
       method: 'forwardCDPEvent',
       params: {

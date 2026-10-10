@@ -125,7 +125,7 @@ export function registerFeishuBitableAppTool(api: OpenClawPluginApi): void {
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.info(`create: name=${p.name}, folder_token=${p.folder_token ?? 'my_space'}`);
+              log.trace(() => `create: name=${p.name}, folder_token=${p.folder_token ?? 'my_space'}`);
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const data: any = { name: p.name };
@@ -157,7 +157,7 @@ export function registerFeishuBitableAppTool(api: OpenClawPluginApi): void {
             // GET
             // -----------------------------------------------------------------
             case 'get': {
-              log.info(`get: app_token=${p.app_token}`);
+              log.trace(() => `get: app_token=${p.app_token}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app.get',
@@ -185,7 +185,7 @@ export function registerFeishuBitableAppTool(api: OpenClawPluginApi): void {
             // LIST - 使用 Drive API 筛选 bitable 类型文件
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: folder_token=${p.folder_token ?? 'my_space'}, page_size=${p.page_size ?? 50}`);
+              log.trace(() => `list: folder_token=${p.folder_token ?? 'my_space'}, page_size=${p.page_size ?? 50}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app.list',
@@ -225,7 +225,7 @@ export function registerFeishuBitableAppTool(api: OpenClawPluginApi): void {
             // PATCH
             // -----------------------------------------------------------------
             case 'patch': {
-              log.info(`patch: app_token=${p.app_token}, name=${p.name}, is_advanced=${p.is_advanced}`);
+              log.trace(() => `patch: app_token=${p.app_token}, name=${p.name}, is_advanced=${p.is_advanced}`);
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const updateData: any = {};
@@ -259,7 +259,7 @@ export function registerFeishuBitableAppTool(api: OpenClawPluginApi): void {
             // COPY (P1)
             // -----------------------------------------------------------------
             case 'copy': {
-              log.info(`copy: app_token=${p.app_token}, name=${p.name}, folder_token=${p.folder_token ?? 'my_space'}`);
+              log.trace(() => `copy: app_token=${p.app_token}, name=${p.name}, folder_token=${p.folder_token ?? 'my_space'}`);
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const data: any = { name: p.name };

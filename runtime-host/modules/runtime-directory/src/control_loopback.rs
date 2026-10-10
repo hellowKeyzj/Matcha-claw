@@ -36,6 +36,8 @@ const LIFECYCLE_STATUS_ENDPOINT: &str = "/api/runtime-control/lifecycle/status";
 const LIFECYCLE_START_ENDPOINT: &str = "/api/runtime-control/lifecycle/start";
 const LIFECYCLE_STOP_ENDPOINT: &str = "/api/runtime-control/lifecycle/stop";
 const LIFECYCLE_RESTART_ENDPOINT: &str = "/api/runtime-control/lifecycle/restart";
+const LIFECYCLE_REPAIR_ENDPOINT: &str = "/api/runtime-control/lifecycle/repair";
+const REPAIR_STATUS_ENDPOINT: &str = "/api/runtime-control/repair/status";
 const LOGS_ENDPOINT: &str = "/api/runtime-control/logs";
 const CONTROL_READY_ENDPOINT: &str = "/api/runtime-control/control/ready";
 const GATEWAY_HEALTH_ENDPOINT: &str = "/api/runtime-control/gateway/health";
@@ -48,6 +50,8 @@ const LIFECYCLE_STATUS_CAPABILITY: &str = "runtime.lifecycle.status";
 const LIFECYCLE_START_CAPABILITY: &str = "runtime.lifecycle.start";
 const LIFECYCLE_STOP_CAPABILITY: &str = "runtime.lifecycle.stop";
 const LIFECYCLE_RESTART_CAPABILITY: &str = "runtime.lifecycle.restart";
+const LIFECYCLE_REPAIR_CAPABILITY: &str = "runtime.lifecycle.repair";
+const REPAIR_STATUS_CAPABILITY: &str = "runtime.repair.status";
 const LOGS_CAPABILITY: &str = "runtime.logs";
 const CONTROL_READY_CAPABILITY: &str = "runtime.control.ready";
 const GATEWAY_HEALTH_CAPABILITY: &str = "runtime.gateway.health";
@@ -58,6 +62,8 @@ const LIFECYCLE_STATUS_SUBJECT: &str = "runtime-lifecycle-status";
 const LIFECYCLE_START_SUBJECT: &str = "runtime-lifecycle-start";
 const LIFECYCLE_STOP_SUBJECT: &str = "runtime-lifecycle-stop";
 const LIFECYCLE_RESTART_SUBJECT: &str = "runtime-lifecycle-restart";
+const LIFECYCLE_REPAIR_SUBJECT: &str = "runtime-lifecycle-repair";
+const REPAIR_STATUS_SUBJECT: &str = "runtime-repair-status";
 const LOGS_SUBJECT: &str = "runtime-logs";
 const CONTROL_READY_SUBJECT: &str = "runtime-control-ready";
 const GATEWAY_HEALTH_SUBJECT: &str = "runtime-gateway-health";
@@ -73,6 +79,8 @@ pub enum RuntimeControlOperation {
     LifecycleStart,
     LifecycleStop,
     LifecycleRestart,
+    LifecycleRepair,
+    RepairStatus,
     Logs,
     ControlReady,
     GatewayHealth,
@@ -87,6 +95,8 @@ impl RuntimeControlOperation {
             Self::LifecycleStart => "lifecycle.start",
             Self::LifecycleStop => "lifecycle.stop",
             Self::LifecycleRestart => "lifecycle.restart",
+            Self::LifecycleRepair => "lifecycle.repair",
+            Self::RepairStatus => "repair.status",
             Self::Logs => "logs",
             Self::ControlReady => "control.ready",
             Self::GatewayHealth => "gateway.health",
@@ -116,6 +126,17 @@ pub trait RuntimeControlRouteFragment: Send + Sync {
 }
 
 pub trait RuntimeControlLifecyclePort: Send + Sync {
+    fn repair_status<'a>(
+        &'a self,
+        endpoint: RuntimeEndpoint,
+    ) -> RuntimeControlLifecycleFuture<'a, Result<crate::RuntimeRepairSnapshot, RuntimeControlLifecycleError>>;
+
+    fn admit_lifecycle_repair<'a>(
+        &'a self,
+        endpoint: RuntimeEndpoint,
+        call: RuntimeControlCallContext,
+    ) -> RuntimeControlLifecycleFuture<'a, Result<CallReceipt, RuntimeControlLifecycleError>>;
+
     fn lifecycle_status<'a>(
         &'a self,
         endpoint: RuntimeEndpoint,
@@ -258,6 +279,7 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
             RuntimeControlOperation::LifecycleStart
                 | RuntimeControlOperation::LifecycleStop
                 | RuntimeControlOperation::LifecycleRestart
+                | RuntimeControlOperation::LifecycleRepair
         ) {
             if let Some(call) = &call {
                 if let Err(error) = call.running().await {
@@ -319,6 +341,18 @@ fn route_authorization(
             capability: LIFECYCLE_RESTART_CAPABILITY,
             subject: LIFECYCLE_RESTART_SUBJECT,
         },
+        RuntimeControlOperation::LifecycleRepair => RouteAuthorization {
+            endpoint: LIFECYCLE_REPAIR_ENDPOINT,
+            scope: WRITE_SCOPE,
+            capability: LIFECYCLE_REPAIR_CAPABILITY,
+            subject: LIFECYCLE_REPAIR_SUBJECT,
+        },
+        RuntimeControlOperation::RepairStatus => RouteAuthorization {
+            endpoint: REPAIR_STATUS_ENDPOINT,
+            scope: READ_SCOPE,
+            capability: REPAIR_STATUS_CAPABILITY,
+            subject: REPAIR_STATUS_SUBJECT,
+        },
         RuntimeControlOperation::Logs => RouteAuthorization {
             endpoint: LOGS_ENDPOINT,
             scope: READ_SCOPE,
@@ -359,6 +393,8 @@ fn operation_for(method: &str, path: &str) -> Option<RuntimeControlOperation> {
         ("POST", LIFECYCLE_START_ENDPOINT) => Some(RuntimeControlOperation::LifecycleStart),
         ("POST", LIFECYCLE_STOP_ENDPOINT) => Some(RuntimeControlOperation::LifecycleStop),
         ("POST", LIFECYCLE_RESTART_ENDPOINT) => Some(RuntimeControlOperation::LifecycleRestart),
+        ("POST", LIFECYCLE_REPAIR_ENDPOINT) => Some(RuntimeControlOperation::LifecycleRepair),
+        ("POST", REPAIR_STATUS_ENDPOINT) => Some(RuntimeControlOperation::RepairStatus),
         ("POST", LOGS_ENDPOINT) => Some(RuntimeControlOperation::Logs),
         ("POST", CONTROL_READY_ENDPOINT) => Some(RuntimeControlOperation::ControlReady),
         ("POST", GATEWAY_HEALTH_ENDPOINT) => Some(RuntimeControlOperation::GatewayHealth),
@@ -437,6 +473,7 @@ where
 
 pub fn lifecycle_error_response(error: RuntimeControlLifecycleError) -> Response {
     match error {
+        RuntimeControlLifecycleError::Busy => Response::error(409, "Runtime control is busy"),
         RuntimeControlLifecycleError::Unsupported => unsupported(),
         RuntimeControlLifecycleError::Unavailable => unavailable(),
         RuntimeControlLifecycleError::CommandFailed => internal_error(),

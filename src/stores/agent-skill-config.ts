@@ -274,20 +274,20 @@ async function agentSkillConfigCapabilityExecute<TResult>(
   try {
     scope = await resolveAgentSkillConfigScope();
   } catch (error) {
-    logSessionTrace('renderer.subagent.skills.scope-error', traceId, {
+    logSessionTrace('renderer.subagent.skills.scope-error', traceId, () => ({
       operationId,
       targetAgentId: summarizeIdentifier(targetAgentId),
       error: summarizeError(error),
-    });
+    }));
     throw error;
   }
   const target = buildAgentSkillConfigTarget(targetAgentId);
-  logSessionTrace('renderer.subagent.skills.request', traceId, {
+  logSessionTrace('renderer.subagent.skills.request', traceId, () => ({
     operationId,
     endpoint: summarizeEndpoint(scope.endpoint),
     scopeAgentId: summarizeIdentifier(scope.agentId),
     targetAgentId: summarizeIdentifier(targetAgentId),
-  });
+  }));
   try {
     const response = await hostApiFetch<unknown>('/api/capabilities/execute', {
       method: 'POST',
@@ -303,16 +303,16 @@ async function agentSkillConfigCapabilityExecute<TResult>(
     const result = operationId === 'subagentSkills.set'
       ? await waitForSubagentMutation<TResult>(response, operationId, scope.endpoint, targetAgentId)
       : response as TResult;
-    logSessionTrace('renderer.subagent.skills.response', traceId, {
+    logSessionTrace('renderer.subagent.skills.response', traceId, () => ({
       operationId,
       ...summarizeSkillConfigPayload(result),
-    });
+    }));
     return result;
   } catch (error) {
-    logSessionTrace('renderer.subagent.skills.error', traceId, {
+    logSessionTrace('renderer.subagent.skills.error', traceId, () => ({
       operationId,
       error: summarizeError(error),
-    });
+    }));
     throw error;
   }
 }

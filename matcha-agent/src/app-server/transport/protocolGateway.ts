@@ -8,7 +8,10 @@ import {
   methodNotFound,
   parseJsonRpcMessage,
 } from '../protocol/jsonRpc.js'
-import { logProcessSessionTrace } from '../../query/runTrace.js'
+import {
+  isRunTraceEnabled,
+  logProcessSessionTrace,
+} from '../../query/runTrace.js'
 import {
   isNativeSessionId,
   nativeSessionIdErrorMessage,
@@ -233,6 +236,7 @@ export class ProtocolGateway {
 }
 
 function logSubscribeResponse(sessionId: string, result: unknown): void {
+  if (!isRunTraceEnabled()) return
   if (!isRecord(result)) {
     logProcessSessionTrace(
       'matcha-agent-app-server',

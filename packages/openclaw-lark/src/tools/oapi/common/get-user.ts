@@ -61,7 +61,7 @@ export function registerGetUserTool(api: OpenClawPluginApi): void {
 
           // 模式 1: 获取当前用户自己的信息
           if (!p.user_id) {
-            log.info('get_user: fetching current user info');
+            log.trace(() => 'get_user: fetching current user info');
 
             try {
               const res = await client.invoke(
@@ -95,7 +95,7 @@ export function registerGetUserTool(api: OpenClawPluginApi): void {
           }
 
           // 模式 2: 获取指定用户的信息
-          log.info(`get_user: fetching user ${p.user_id}`);
+          log.trace(() => `get_user: fetching user ${p.user_id}`);
 
           const userIdType = p.user_id_type || 'open_id';
 

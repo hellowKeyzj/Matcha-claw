@@ -1,4 +1,4 @@
-import { logger } from '../../utils/logger';
+import { isTraceEnabled, traceDebug } from '../../utils/trace-logger';
 import { CloudAccountClientError } from './client';
 import { unwrapCloudPackageDeviceEnvelope } from './device-key-store';
 import type { CloudPackageAuthorization, CloudPackageDownloadRequest, CloudPackageLocalDownload } from './types';
@@ -156,36 +156,36 @@ export function createPackageAuthorizationLifecycle(
   const restore = (): Promise<void> => {
     if (restoreTask) return restoreTask;
     const expected = epoch;
-    const startedAt = performance.now();
+    const startedAt = isTraceEnabled() ? performance.now() : 0;
     let stage: 'clear' | 'list' | 'renew' | undefined;
     let stageStartedAt = startedAt;
     let outcome: 'success' | 'skipped' | 'failed' = 'skipped';
     let packageCount: number | undefined;
-    logger.info('[startup-trace] source=cloud-package-authorization phase=restore stage=start');
+    traceDebug(() => '[startup-trace] source=cloud-package-authorization phase=restore stage=start');
     const task = (async () => {
       stage = 'clear';
-      stageStartedAt = performance.now();
-      logger.info('[startup-trace] source=cloud-package-authorization phase=restore stage=clear-start');
+      stageStartedAt = isTraceEnabled() ? performance.now() : 0;
+      traceDebug(() => '[startup-trace] source=cloud-package-authorization phase=restore stage=clear-start');
       await clear();
-      logger.info(`[startup-trace] source=cloud-package-authorization phase=restore stage=clear-end duration_ms=${(performance.now() - stageStartedAt).toFixed(1)}`);
+      traceDebug(() => `[startup-trace] source=cloud-package-authorization phase=restore stage=clear-end duration_ms=${(performance.now() - stageStartedAt).toFixed(1)}`);
       stage = undefined;
       if (!current(expected)) return;
       stage = 'list';
-      stageStartedAt = performance.now();
-      logger.info('[startup-trace] source=cloud-package-authorization phase=restore stage=list-start');
+      stageStartedAt = isTraceEnabled() ? performance.now() : 0;
+      traceDebug(() => '[startup-trace] source=cloud-package-authorization phase=restore stage=list-start');
       const response = await transport.listCloudPackages();
       if (response.status !== 200) throw new CloudAccountClientError(503, 503, 'Installed cloud packages are unavailable');
       packageCount = response.body.packages.length;
-      logger.info(`[startup-trace] source=cloud-package-authorization phase=restore stage=list-end duration_ms=${(performance.now() - stageStartedAt).toFixed(1)} package_count=${packageCount}`);
+      traceDebug(() => `[startup-trace] source=cloud-package-authorization phase=restore stage=list-end duration_ms=${(performance.now() - stageStartedAt).toFixed(1)} package_count=${packageCount}`);
       stage = undefined;
       if (!current(expected)) return;
       restoreRetryAt = Infinity;
       restoreRetryDelay = 0;
       stage = 'renew';
-      stageStartedAt = performance.now();
-      logger.info('[startup-trace] source=cloud-package-authorization phase=restore stage=renew-start');
+      stageStartedAt = isTraceEnabled() ? performance.now() : 0;
+      traceDebug(() => '[startup-trace] source=cloud-package-authorization phase=restore stage=renew-start');
       await renewBatch(response.body.packages, expected);
-      logger.info(`[startup-trace] source=cloud-package-authorization phase=restore stage=renew-end duration_ms=${(performance.now() - stageStartedAt).toFixed(1)}`);
+      traceDebug(() => `[startup-trace] source=cloud-package-authorization phase=restore stage=renew-end duration_ms=${(performance.now() - stageStartedAt).toFixed(1)}`);
       stage = undefined;
       if (current(expected)) {
         schedule();
@@ -193,7 +193,7 @@ export function createPackageAuthorizationLifecycle(
       }
     })().catch((error) => {
       outcome = 'failed';
-      if (stage) logger.info(`[startup-trace] source=cloud-package-authorization phase=restore stage=${stage}-end duration_ms=${(performance.now() - stageStartedAt).toFixed(1)} outcome=failed`);
+      if (stage) traceDebug(() => `[startup-trace] source=cloud-package-authorization phase=restore stage=${stage}-end duration_ms=${(performance.now() - stageStartedAt).toFixed(1)} outcome=failed`);
       if (current(expected) && isTransient(error)) {
         restoreRetryDelay = nextRetryDelay(restoreRetryDelay);
         restoreRetryAt = Date.now() + restoreRetryDelay;
@@ -202,7 +202,7 @@ export function createPackageAuthorizationLifecycle(
       throw error;
     }).finally(() => {
       if (restoreTask === task) restoreTask = undefined;
-      logger.info(`[startup-trace] source=cloud-package-authorization phase=restore stage=end duration_ms=${(performance.now() - startedAt).toFixed(1)} outcome=${outcome}${packageCount === undefined ? '' : ` package_count=${packageCount}`}`);
+      traceDebug(() => `[startup-trace] source=cloud-package-authorization phase=restore stage=end duration_ms=${(performance.now() - startedAt).toFixed(1)} outcome=${outcome}${packageCount === undefined ? '' : ` package_count=${packageCount}`}`);
     });
     restoreTask = task;
     return task;

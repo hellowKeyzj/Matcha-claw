@@ -35,6 +35,7 @@ const hoisted = vi.hoisted(() => {
     close: vi.fn(),
   };
   const electronAppMock = {
+    commandLine: { appendSwitch: vi.fn() },
     disableHardwareAcceleration: vi.fn(),
     setDesktopName: vi.fn(),
     setPath: vi.fn(),
@@ -191,7 +192,7 @@ describe('main quit lifecycle coordination', () => {
     hoisted.electronAppMock.isPackaged = true;
     processListeners = await importMainIndex();
 
-    expect(hoisted.electronAppMock.setAppUserModelId).toHaveBeenCalledWith('app.matchaclaw.desktop');
+    expect(hoisted.electronAppMock.setAppUserModelId).toHaveBeenCalledWith('app.MatchaClaw.desktop');
   });
 
   it('starts cleanup only once', () => {

@@ -147,7 +147,7 @@ export function registerFeishuBitableAppTableFieldTool(api: OpenClawPluginApi): 
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.info(
+              log.trace(() =>
                 `create: app_token=${p.app_token}, table_id=${p.table_id}, field_name=${p.field_name}, type=${p.type}`,
               );
 
@@ -197,7 +197,7 @@ export function registerFeishuBitableAppTableFieldTool(api: OpenClawPluginApi): 
             // LIST
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: app_token=${p.app_token}, table_id=${p.table_id}, view_id=${p.view_id ?? 'none'}`);
+              log.trace(() => `list: app_token=${p.app_token}, table_id=${p.table_id}, view_id=${p.view_id ?? 'none'}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table_field.list',
@@ -235,7 +235,7 @@ export function registerFeishuBitableAppTableFieldTool(api: OpenClawPluginApi): 
             // UPDATE
             // -----------------------------------------------------------------
             case 'update': {
-              log.info(`update: app_token=${p.app_token}, table_id=${p.table_id}, field_id=${p.field_id}`);
+              log.trace(() => `update: app_token=${p.app_token}, table_id=${p.table_id}, field_id=${p.field_id}`);
 
               // 如果缺少 type 或 field_name，自动查询当前字段信息
               let finalFieldName = p.field_name;
@@ -243,7 +243,7 @@ export function registerFeishuBitableAppTableFieldTool(api: OpenClawPluginApi): 
               let finalProperty = p.property;
 
               if (!finalType || !finalFieldName) {
-                log.info(`update: missing type or field_name, auto-querying field info`);
+                log.trace(() => `update: missing type or field_name, auto-querying field info`);
 
                 const listRes = await client.invoke(
                   'feishu_bitable_app_table_field.update',
@@ -283,7 +283,7 @@ export function registerFeishuBitableAppTableFieldTool(api: OpenClawPluginApi): 
                 finalType = p.type ?? currentField.type;
                 finalProperty = p.property !== undefined ? p.property : currentField.property;
 
-                log.info(`update: auto-filled type=${finalType}, field_name=${finalFieldName}`);
+                log.trace(() => `update: auto-filled type=${finalType}, field_name=${finalFieldName}`);
               }
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -326,7 +326,7 @@ export function registerFeishuBitableAppTableFieldTool(api: OpenClawPluginApi): 
             // DELETE
             // -----------------------------------------------------------------
             case 'delete': {
-              log.info(`delete: app_token=${p.app_token}, table_id=${p.table_id}, field_id=${p.field_id}`);
+              log.trace(() => `delete: app_token=${p.app_token}, table_id=${p.table_id}, field_id=${p.field_id}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table_field.delete',

@@ -3,6 +3,8 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { Settings } from '@/pages/Settings';
 import { useSettingsStore } from '@/stores/settings';
+import { useAccountStore } from '@/stores/account';
+import { useLicenseStore } from '@/stores/license';
 import { useRuntimeHostStore } from '@/stores/gateway';
 import { useUpdateStore } from '@/stores/update';
 import i18n from '@/i18n';
@@ -30,6 +32,8 @@ describe('settings user avatar', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     i18n.changeLanguage('en');
+    useAccountStore.setState({ status: 'signedIn' });
+    useLicenseStore.setState({ snapshot: null, error: null });
 
     useSettingsStore.setState((state) => ({
       ...state,

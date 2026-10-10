@@ -1,53 +1,34 @@
-/**
- * Debug logger — controlled by a module-level flag.
- *
- * When `DEBUG` is true, all log/warn/error calls forward to the console
- * with a [matchaclaw-relay] prefix and a module tag. When false, only warn/error emit.
- *
- * Usage:
- *   import { createLogger, setDebug } from './logger.js'
- *   const log = createLogger('relay')
- *   setDebug(true)
- *   log.debug('connected', { port: 9236 })  // → console.debug('[matchaclaw:relay] connected', {port:9236})
- *   log.info('ok')                           // → console.info('[matchaclaw:relay] ok')
- *   log.warn('slow')                         // always prints
- *   log.error('fail', err)                   // always prints
- */
+/** Diagnostic output is enabled only by the relay's encrypted handshake. */
+let traceEnabled = false
 
-let DEBUG = false
-
-export function setDebug(enabled) {
-  DEBUG = !!enabled
+export function setTraceEnabled(enabled) {
+  traceEnabled = enabled === true
 }
 
-export function isDebug() {
-  return DEBUG
+export function isTraceEnabled() {
+  return traceEnabled
 }
 
 /**
- * Create a tagged logger.
+ * Create a tagged logger. Diagnostic arguments are evaluated only when enabled.
  * @param {string} module — short tag (e.g. 'relay', 'tabs', 'cdp', 'bg')
  */
 export function createLogger(module) {
   const prefix = `[matchaclaw:${module}]`
 
   return {
-    /** Only prints when DEBUG is true */
-    debug(...args) {
-      if (DEBUG) console.debug(prefix, ...args)
+    debug(args) {
+      if (traceEnabled) console.debug(prefix, ...args())
     },
 
-    /** Only prints when DEBUG is true */
-    info(...args) {
-      if (DEBUG) console.info(prefix, ...args)
+    info(args) {
+      if (traceEnabled) console.info(prefix, ...args())
     },
 
-    /** Always prints */
     warn(...args) {
       console.warn(prefix, ...args)
     },
 
-    /** Always prints */
     error(...args) {
       console.error(prefix, ...args)
     },

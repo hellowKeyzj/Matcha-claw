@@ -181,7 +181,7 @@ async fn handle_content(
     session_trace::log(
         "runtime.content.request",
         trace_id,
-        serde_json::json!({ "method": method, "path": path }),
+        || serde_json::json!({ "method": method, "path": path }),
     );
     let Some(authorization) = headers
         .iter()
@@ -208,7 +208,7 @@ async fn handle_content(
     session_trace::log(
         "runtime.content.command",
         trace_id,
-        serde_json::json!({
+        || serde_json::json!({
             "provider": command.provider().as_str(),
             "sessionKey": session_trace::id_shape(Some(command.session_key())),
             "endpointSessionId": session_trace::id_shape(command.endpoint_session_id()),
@@ -230,7 +230,7 @@ async fn handle_content(
     session_trace::log(
         "runtime.content.outcome",
         trace_id,
-        serde_json::json!({
+        || serde_json::json!({
             "status": delivery.status_code(),
             "reason": reason,
         }),
@@ -250,7 +250,7 @@ async fn handle_history(
     session_trace::log(
         "runtime.history.request",
         trace_id,
-        serde_json::json!({ "method": method, "path": path }),
+        || serde_json::json!({ "method": method, "path": path }),
     );
     let Some(authorization) = headers
         .iter()
@@ -277,7 +277,7 @@ async fn handle_history(
     session_trace::log(
         "runtime.history.command",
         trace_id,
-        serde_json::json!({
+        || serde_json::json!({
             "endpoint": {
                 "runtimeAdapterId": command.endpoint().runtime_adapter_id(),
                 "runtimeInstanceId": command.endpoint().runtime_instance_id(),
@@ -295,7 +295,7 @@ async fn handle_history(
     session_trace::log(
         "runtime.history.outcome",
         trace_id,
-        serde_json::json!({ "status": delivery.status_code() }),
+        || serde_json::json!({ "status": delivery.status_code() }),
     );
     Response::from_history(delivery)
 }
@@ -312,7 +312,7 @@ async fn handle_timeline(
     session_trace::log(
         "runtime.timeline.request",
         trace_id,
-        serde_json::json!({ "method": method, "path": path }),
+        || serde_json::json!({ "method": method, "path": path }),
     );
     let Some(authorization) = headers
         .iter()
@@ -322,14 +322,14 @@ async fn handle_timeline(
         session_trace::log(
             "runtime.timeline.unauthorized",
             trace_id,
-            serde_json::json!({}),
+            || serde_json::json!({}),
         );
         return Response::timeline_unauthorized();
     };
     let value = match serde_json::from_slice::<Value>(body) {
         Ok(value) => value,
         Err(_) => {
-            session_trace::log("runtime.timeline.bad-json", trace_id, serde_json::json!({}));
+            session_trace::log("runtime.timeline.bad-json", trace_id, || serde_json::json!({}));
             return Response::timeline_bad_request();
         }
     };
@@ -346,7 +346,7 @@ async fn handle_timeline(
             session_trace::log(
                 "runtime.timeline.decode-unauthorized",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::timeline_unauthorized();
         }
@@ -354,7 +354,7 @@ async fn handle_timeline(
             session_trace::log(
                 "runtime.timeline.decode-invalid",
                 trace_id,
-                serde_json::json!({ "operation": expected_operation }),
+                || serde_json::json!({ "operation": expected_operation }),
             );
             return Response::timeline_bad_request();
         }
@@ -367,7 +367,7 @@ async fn handle_timeline(
     session_trace::log(
         "runtime.timeline.command",
         trace_id,
-        serde_json::json!({
+        || serde_json::json!({
             "operation": expected_operation,
             "provider": command.provider().as_str(),
             "sessionKey": session_trace::id_shape(Some(command.session_key())),
@@ -385,13 +385,13 @@ async fn handle_timeline(
             session_trace::log(
                 "runtime.timeline.owner-unavailable",
                 trace_id,
-                serde_json::json!({ "operation": expected_operation }),
+                || serde_json::json!({ "operation": expected_operation }),
             );
             return Response::timeline_unavailable();
         }
     };
     let unavailable_reason = outcome.unavailable_reason().map(|reason| reason.as_str());
-    let unavailable_diagnostic = outcome.unavailable_diagnostic().map(|diagnostic| {
+    let unavailable_diagnostic = (trace_id.is_some() && session_trace::enabled()).then(|| outcome.unavailable_diagnostic().map(|diagnostic| {
         serde_json::json!({
             "source": diagnostic.source(),
             "messageIndex": diagnostic.message_index(),
@@ -401,14 +401,14 @@ async fn handle_timeline(
             "reason": diagnostic.reason(),
             "actualType": diagnostic.actual(),
         })
-    });
+    })).flatten();
     let delivery = timeline::Delivery::from_outcome(&identity, outcome);
     let delivery_reason = unavailable_reason
         .or_else(|| (delivery.status_code() == 503).then_some("delivery.identity_mismatch"));
     session_trace::log(
         "runtime.timeline.outcome",
         trace_id,
-        serde_json::json!({
+        || serde_json::json!({
             "operation": expected_operation,
             "status": delivery.status_code(),
             "reason": delivery_reason,

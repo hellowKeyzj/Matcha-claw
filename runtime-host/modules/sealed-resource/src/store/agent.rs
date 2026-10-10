@@ -263,17 +263,21 @@ impl SealedAgentStore {
     pub(crate) fn cloud_packages(
         &self,
     ) -> Result<Vec<SealedCloudPackageEntry>, SealedResourceError> {
-        let started = Instant::now();
-        eprintln!(
-            "[startup-trace] source=sealed-resource phase=cloud-package-scan stage=start kind=agent"
-        );
+        let started = platform::trace::enabled().then(Instant::now);
+        if started.is_some() {
+            eprintln!(
+                "[startup-trace] source=sealed-resource phase=cloud-package-scan stage=start kind=agent"
+            );
+        }
         let mut lock_wait_ms = 0;
         let mut package_count = 0usize;
         let mut total_bytes = 0u64;
         let result = (|| {
-            let lock_started = Instant::now();
+            let lock_started = started.map(|_| Instant::now());
             let guard = self.operation_lock.lock();
-            lock_wait_ms = lock_started.elapsed().as_millis();
+            if let Some(lock_started) = lock_started {
+                lock_wait_ms = lock_started.elapsed().as_millis();
+            }
             let _guard = guard.map_err(|_| SealedResourceError::Unknown)?;
             let mut packages = Vec::new();
             for directory in self.root.maintenance_workspace_directories()? {
@@ -286,8 +290,10 @@ impl SealedAgentStore {
                         continue;
                     }
                     let bytes = read_package_file(&path, SealedResourceError::Unknown)?;
-                    package_count += 1;
-                    total_bytes += bytes.len() as u64;
+                    if started.is_some() {
+                        package_count += 1;
+                        total_bytes += bytes.len() as u64;
+                    }
                     let package_sha256 = hex_digest(&bytes);
                     let Some(metadata) = self.cloud_metadata(&package_sha256)? else {
                         continue;
@@ -300,11 +306,13 @@ impl SealedAgentStore {
             }
             Ok(packages)
         })();
-        eprintln!(
-            "[startup-trace] source=sealed-resource phase=cloud-package-scan stage=end kind=agent duration_ms={} lock_wait_ms={lock_wait_ms} package_count={package_count} total_bytes={total_bytes} outcome={}",
-            started.elapsed().as_millis(),
-            if result.is_ok() { "success" } else { "failed" }
-        );
+        if let Some(started) = started {
+            eprintln!(
+                "[startup-trace] source=sealed-resource phase=cloud-package-scan stage=end kind=agent duration_ms={} lock_wait_ms={lock_wait_ms} package_count={package_count} total_bytes={total_bytes} outcome={}",
+                started.elapsed().as_millis(),
+                if result.is_ok() { "success" } else { "failed" }
+            );
+        }
         result
     }
 

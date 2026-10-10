@@ -42,7 +42,7 @@ pub(in crate::composition::host) fn forward(
                             Ok(SessionIngestOutcome::RuntimeNoSessionSupport) => serde_json::json!({ "outcome": "runtime_no_session_support" }),
                             Err(()) => serde_json::json!({ "outcome": "owner_unavailable" }),
                         };
-                        trace::log_unscoped("host.ingress.outcome", serde_json::json!({
+                        trace::log_unscoped("host.ingress.outcome", || serde_json::json!({
                             "ingressHash": trace::fingerprint(effect_id), "event": context,
                             "receiptPresent": receipt.is_some(), "result": summary,
                         }));
@@ -54,7 +54,7 @@ pub(in crate::composition::host) fn forward(
                         );
                         let delivered = receipt.send(accepted).is_ok();
                         if sessions_module::trace::enabled() {
-                            sessions_module::trace::log_unscoped("host.ingress.receipt", serde_json::json!({
+                            sessions_module::trace::log_unscoped("host.ingress.receipt", || serde_json::json!({
                                 "ingressHash": sessions_module::trace::fingerprint(effect_id), "event": context,
                                 "accepted": accepted, "delivered": delivered,
                             }));

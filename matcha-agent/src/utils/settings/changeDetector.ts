@@ -97,7 +97,8 @@ export async function initialize(): Promise<void> {
   if (dirs.length === 0) return
 
   logForDebugging(
-    `Watching for changes in setting files ${[...settingsFiles].join(', ')}...${dropInDir ? ` and drop-in directory ${dropInDir}` : ''}`,
+    () =>
+      `Watching for changes in setting files ${[...settingsFiles].join(', ')}...${dropInDir ? ` and drop-in directory ${dropInDir}` : ''}`,
   )
 
   watcher = chokidar.watch(dirs, {

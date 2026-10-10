@@ -1,3 +1,4 @@
+import { isTraceEnabled } from '../../../../../src/utils/trace.js'
 import { log, error as logError } from '../../logger'
 import { Hono } from 'hono'
 import { uuidAuth } from '../../auth/middleware'
@@ -63,13 +64,15 @@ app.post('/sessions/:id/events', uuidAuth, async c => {
 
   const body = await c.req.json()
   const eventType = body.type || 'user'
-  log(
-    `[RC-DEBUG] web -> server: POST /web/sessions/${sessionId}/events type=${eventType} content=${JSON.stringify(body).slice(0, 200)}`,
-  )
+  if (isTraceEnabled())
+    log(
+      `[RC-DEBUG] web -> server: POST /web/sessions/${sessionId}/events type=${eventType} content=${JSON.stringify(body).slice(0, 200)}`,
+    )
   const event = publishSessionEvent(sessionId, eventType, body, 'outbound')
-  log(
-    `[RC-DEBUG] web -> server: published outbound event id=${event.id} type=${event.type} direction=${event.direction} subscribers=${getEventBus(sessionId).subscriberCount()}`,
-  )
+  if (isTraceEnabled())
+    log(
+      `[RC-DEBUG] web -> server: published outbound event id=${event.id} type=${event.type} direction=${event.direction} subscribers=${getEventBus(sessionId).subscriberCount()}`,
+    )
   return c.json({ status: 'ok', event }, 200)
 })
 

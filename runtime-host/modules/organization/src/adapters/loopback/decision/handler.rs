@@ -135,7 +135,7 @@ mod tests {
             serde_json::json!({
                 "success": false,
                 "outcome": "outcome-unknown",
-                "error": "Team human decision outcome is unknown",
+                "error": "Team approval outcome is unknown",
             })
         );
         assert_eq!(Delivery::Recorded.status_code(), 200);

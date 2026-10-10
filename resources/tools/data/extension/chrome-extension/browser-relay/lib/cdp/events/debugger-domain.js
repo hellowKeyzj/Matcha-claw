@@ -37,21 +37,21 @@ export function handleDebuggerDomainEvent(method, tabId, params, _ctx) {
       )
       chrome.debugger
         .sendCommand({ tabId }, 'Debugger.resume')
-        .then(() => log.debug('auto-resumed paused script:', tabId))
+        .then(() => log.debug(() => ['auto-resumed paused script:', tabId]))
         .catch((err) => log.warn('auto-resume failed:', tabId, err?.message || err))
       break
 
     case 'Debugger.resumed':
-      log.debug('script resumed:', tabId)
+      log.debug(() => ['script resumed:', tabId])
       break
 
     case 'Debugger.scriptParsed':
       if (params?.url) {
-        log.debug(
+        log.debug(() => [
           'script parsed:', tabId,
           'id:', params?.scriptId,
           'url:', truncate(params?.url, 100),
-        )
+        ])
       }
       break
 
@@ -64,11 +64,11 @@ export function handleDebuggerDomainEvent(method, tabId, params, _ctx) {
       break
 
     case 'Debugger.breakpointResolved':
-      log.debug(
+      log.debug(() => [
         'breakpoint resolved:', tabId,
         'id:', params?.breakpointId,
         'line:', params?.location?.lineNumber,
-      )
+      ])
       break
   }
 }

@@ -9,18 +9,13 @@ use crate::{
 
 impl SessionShared {
     pub(super) async fn handle_abort(&self, command: SessionAbortCommand) -> SessionAbortOutcome {
-        let started = std::time::Instant::now();
-        let trace_id = command.trace_id().map(str::to_owned);
-        let lane_key = session_identity_lane_key(&command.identity);
+        let trace_id = command.trace_id().filter(|_| session_trace::enabled()).map(str::to_owned);
+        let started = trace_id.as_ref().map(|_| std::time::Instant::now());
+        let lane_key = trace_id.as_ref().map(|_| session_identity_lane_key(&command.identity));
         let runtime_summary = || {
-            if trace_id.is_none() || std::env::var("MATCHACLAW_SESSION_TRACE").as_deref() != Ok("1")
-            {
-                return serde_json::Value::Null;
-            }
             let snapshot = self.snapshot.load();
-            let runtime = snapshot
-                .states
-                .get(&lane_key)
+            let runtime = lane_key.as_ref()
+                .and_then(|key| snapshot.states.get(key))
                 .map(|state| state.view().runtime);
             match runtime {
                 Some(crate::state::SessionFact::Complete(runtime))
@@ -36,12 +31,12 @@ impl SessionShared {
         session_trace::log(
             "runtime.abort.execution.start",
             trace_id.as_deref(),
-            serde_json::json!({
+            || serde_json::json!({
                 "endpoint": command.identity.provider().as_str(),
                 "sessionKey": session_trace::id_shape(Some(&command.identity.session_key)),
                 "runId": session_trace::id_shape(command.run_id.as_deref()),
                 "runtime": runtime_summary(),
-                "elapsedMs": started.elapsed().as_millis(),
+                "elapsedMs": started.map(|started| started.elapsed().as_millis()),
             }),
         );
         let command = match self.bind_matcha_abort_command(command) {
@@ -50,7 +45,7 @@ impl SessionShared {
                 session_trace::log(
                     "runtime.abort.binding-rejected",
                     trace_id.as_deref(),
-                    serde_json::json!({ "outcome": outcome, "elapsedMs": started.elapsed().as_millis() }),
+                    || serde_json::json!({ "outcome": outcome, "elapsedMs": started.map(|started| started.elapsed().as_millis()) }),
                 );
                 return outcome;
             }
@@ -71,7 +66,7 @@ impl SessionShared {
                 session_trace::log(
                     "runtime.abort.driver-unavailable",
                     trace_id.as_deref(),
-                    serde_json::json!({ "reason": format!("{failure:?}"), "outcome": outcome, "elapsedMs": started.elapsed().as_millis() }),
+                    || serde_json::json!({ "reason": format!("{failure:?}"), "outcome": outcome, "elapsedMs": started.map(|started| started.elapsed().as_millis()) }),
                 );
                 return outcome;
             }
@@ -80,24 +75,24 @@ impl SessionShared {
             session_trace::log(
                 "runtime.abort.driver-unavailable",
                 trace_id.as_deref(),
-                serde_json::json!({ "reason": "session-ops-unsupported", "elapsedMs": started.elapsed().as_millis() }),
+                || serde_json::json!({ "reason": "session-ops-unsupported", "elapsedMs": started.map(|started| started.elapsed().as_millis()) }),
             );
             return SessionAbortOutcome::Unsupported;
         };
         session_trace::log(
             "runtime.abort.native.invoke",
             trace_id.as_deref(),
-            serde_json::json!({
+            || serde_json::json!({
                 "endpointSessionId": session_trace::id_shape(command.endpoint_session_id.as_deref()),
                 "runtime": runtime_summary(),
-                "elapsedMs": started.elapsed().as_millis(),
+                "elapsedMs": started.map(|started| started.elapsed().as_millis()),
             }),
         );
         let outcome = ops.abort_session(command).await;
         session_trace::log(
             "runtime.abort.native.outcome",
             trace_id.as_deref(),
-            serde_json::json!({ "outcome": outcome, "runtime": runtime_summary(), "elapsedMs": started.elapsed().as_millis() }),
+            || serde_json::json!({ "outcome": outcome, "runtime": runtime_summary(), "elapsedMs": started.map(|started| started.elapsed().as_millis()) }),
         );
         outcome
     }

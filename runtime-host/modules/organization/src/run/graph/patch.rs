@@ -38,11 +38,13 @@ pub enum GraphPatchError {
     UnknownRun,
     StaleRevision,
     InvalidDefinition,
+    Definition(super::DefinitionError),
     NodeAlreadyExists(NodeId),
     UnknownNode(NodeId),
     NodeKindChanged(NodeId),
     EdgeAlreadyExists(EdgeId),
     UnknownEdge(EdgeId),
+    ConsumedEdge(EdgeId),
 }
 
 impl GraphPatch {
@@ -84,7 +86,27 @@ pub fn apply(
     patch: &GraphPatch,
     applied_at: u64,
 ) -> Result<GraphState, GraphPatchError> {
-    let definition = state.definition();
+    let mut patched = state.clone();
+    apply_in_place(&mut patched, patch, applied_at)?;
+    Ok(patched)
+}
+
+pub(crate) fn apply_in_place(
+    state: &mut GraphState,
+    patch: &GraphPatch,
+    applied_at: u64,
+) -> Result<(), GraphPatchError> {
+    let standalone = state.changes().is_none();
+    state.begin_mutation();
+    let result = apply_checked(state, patch, applied_at);
+    if standalone {
+        if result.is_ok() { state.commit_mutation(); } else { state.rollback_mutation(); }
+    }
+    result
+}
+
+fn apply_checked(state: &mut GraphState, patch: &GraphPatch, applied_at: u64) -> Result<(), GraphPatchError> {
+    let definition = state.definition().clone();
     if definition.graph_id() != patch.expected_graph_id
         || definition.workflow_plan_id() != patch.expected_workflow_plan_id
     {
@@ -92,8 +114,17 @@ pub fn apply(
     }
     validate_operations(state, &patch.operations)?;
 
-    let patched = super::reduce(
-        state.clone(),
+    let mut expected_metadata = state.metadata().clone();
+    let mut expected_layout = state.layout().clone();
+    for operation in patch.operations() {
+        match operation {
+            GraphPatchOperation::RemoveNode(node) => expected_layout.remove_node(node),
+            GraphPatchOperation::SetNodePosition { node_id, position } => expected_layout.set_node_position(node_id.clone(), *position),
+            GraphPatchOperation::SetMetadata { key, value } => { expected_metadata.insert(key.clone(), value.clone()); }
+            _ => {}
+        }
+    }
+    state.apply_event(
         GraphEvent::GraphPatched {
             expected_graph_id: patch.expected_graph_id.clone(),
             expected_workflow_plan_id: patch.expected_workflow_plan_id.clone(),
@@ -103,8 +134,32 @@ pub fn apply(
     )
     .map_err(map_reduce_error)?;
 
-    validate_metadata_and_layout_projection(state, patch, &patched)?;
-    Ok(patched)
+    if patch.operations().iter().any(|operation| matches!(operation,
+        GraphPatchOperation::ReplaceEdge(_) | GraphPatchOperation::RemoveEdge(_)
+            | GraphPatchOperation::RemoveNode(_)
+    )) {
+        let edges = state.definition().edges().iter()
+            .map(|edge| (edge.id(), edge)).collect::<BTreeMap<_, _>>();
+        for (node_id, history) in state.executions() {
+            for input in history.attempts().iter().flat_map(|attempt| attempt.inputs()) {
+                if edges.get(input.edge_id()).is_none_or(|edge| {
+                    edge.source_node_id() != input.source_node_id()
+                        || edge.target_node_id() != node_id
+                        || edge.source_port() != input.source_port()
+                        || edge.target_port() != input.target_port()
+                        || edge.action() != input.action()
+                }) {
+                    return Err(GraphPatchError::ConsumedEdge(input.edge_id().clone()));
+                }
+            }
+        }
+    }
+    if state.metadata() != &expected_metadata || state.layout() != &expected_layout {
+        return Err(GraphPatchError::InvalidDefinition);
+    }
+    state.definition().validate_references(Some(&definition))
+        .map_err(GraphPatchError::Definition)?;
+    Ok(())
 }
 
 fn validate_operations(
@@ -232,13 +287,17 @@ fn validate_node_payload(node: &NodeDefinition) -> Result<(), GraphPatchError> {
     match node.kind() {
         NodeKind::Work => {
             let Some(work) = node.work_assignment() else {
-                return Err(GraphPatchError::InvalidDefinition);
+                return Err(GraphPatchError::Definition(
+                    super::DefinitionError::InvalidWorkAssignment(node.id().clone()),
+                ));
             };
             if node.review_assignment().is_some()
                 || work.task_id().trim().is_empty()
                 || work.role_id().trim().is_empty()
             {
-                return Err(GraphPatchError::InvalidDefinition);
+                return Err(GraphPatchError::Definition(
+                    super::DefinitionError::InvalidWorkAssignment(node.id().clone()),
+                ));
             }
         }
         NodeKind::Review => {
@@ -247,7 +306,9 @@ fn validate_node_payload(node: &NodeDefinition) -> Result<(), GraphPatchError> {
                     review.role_id().trim().is_empty() || review.prompt().trim().is_empty()
                 })
             {
-                return Err(GraphPatchError::InvalidDefinition);
+                return Err(GraphPatchError::Definition(
+                    super::DefinitionError::InvalidReviewAssignment(node.id().clone()),
+                ));
             }
         }
         _ if node.work_assignment().is_some() || node.review_assignment().is_some() => {
@@ -272,39 +333,21 @@ fn validate_edge_payload<'a>(
         return Err(GraphPatchError::InvalidDefinition);
     }
     let node_ids = node_ids.collect::<BTreeSet<_>>();
-    if !node_ids.contains(edge.source_node_id()) || !node_ids.contains(edge.target_node_id()) {
-        return Err(GraphPatchError::InvalidDefinition);
+    if !node_ids.contains(edge.source_node_id()) {
+        return Err(GraphPatchError::Definition(
+            super::DefinitionError::UnknownEdgeSource {
+                edge_id: edge.id().clone(),
+                node_id: edge.source_node_id().clone(),
+            },
+        ));
     }
-    Ok(())
-}
-
-fn validate_metadata_and_layout_projection(
-    state: &GraphState,
-    patch: &GraphPatch,
-    patched: &GraphState,
-) -> Result<(), GraphPatchError> {
-    let mut expected_metadata = state.metadata().clone();
-    let mut expected_layout = state.layout().clone();
-    for operation in &patch.operations {
-        match operation {
-            GraphPatchOperation::RemoveNode(node_id) => {
-                expected_layout.remove_node(node_id);
-            }
-            GraphPatchOperation::SetNodePosition { node_id, position } => {
-                expected_layout.set_node_position(node_id.clone(), *position);
-            }
-            GraphPatchOperation::SetMetadata { key, value } => {
-                expected_metadata.insert(key.clone(), value.clone());
-            }
-            GraphPatchOperation::AddNode(_)
-            | GraphPatchOperation::ReplaceNode(_)
-            | GraphPatchOperation::AddEdge(_)
-            | GraphPatchOperation::ReplaceEdge(_)
-            | GraphPatchOperation::RemoveEdge(_) => {}
-        }
-    }
-    if patched.metadata() != &expected_metadata || patched.layout() != &expected_layout {
-        return Err(GraphPatchError::InvalidDefinition);
+    if !node_ids.contains(edge.target_node_id()) {
+        return Err(GraphPatchError::Definition(
+            super::DefinitionError::UnknownEdgeTarget {
+                edge_id: edge.id().clone(),
+                node_id: edge.target_node_id().clone(),
+            },
+        ));
     }
     Ok(())
 }
@@ -312,8 +355,10 @@ fn validate_metadata_and_layout_projection(
 fn map_reduce_error(error: ReduceError) -> GraphPatchError {
     match error {
         ReduceError::StaleGraphIdentity => GraphPatchError::StaleRevision,
+        ReduceError::InvalidDefinition(source) => GraphPatchError::Definition(source),
         ReduceError::InvalidGraphPatch
         | ReduceError::InvalidSettlementEvent
+        | ReduceError::InvalidOutputPort { .. }
         | ReduceError::UnknownNode(_)
         | ReduceError::TriggerNotArmed(_)
         | ReduceError::StaleFence { .. }

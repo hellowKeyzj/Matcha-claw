@@ -1,9 +1,9 @@
+import { isTraceEnabled, traceLog } from './trace-logger';
 import type { RuntimeEndpointRef } from '../types/desktop/runtime-address';
 import type { SessionDelta, SessionWireItem } from '../types/session/snapshot';
 import type { SessionRenderItem } from '../types/session/render-item';
 
 const SESSION_TRACE_PREFIX = 'session-trace';
-const SESSION_TRACE_STORAGE_KEY = 'matchaclaw:session-trace';
 
 type TracePayload = Record<string, unknown>;
 
@@ -14,14 +14,7 @@ type SessionIdentityLike = {
 };
 
 export function isSessionTraceEnabled(): boolean {
-  if (import.meta.env.VITE_MATCHACLAW_SESSION_TRACE === '1') {
-    return true;
-  }
-  try {
-    return window.localStorage.getItem(SESSION_TRACE_STORAGE_KEY) === '1';
-  } catch {
-    return false;
-  }
+  return isTraceEnabled();
 }
 
 export function createSessionTraceId(label: string): string | null {
@@ -31,18 +24,16 @@ export function createSessionTraceId(label: string): string | null {
   return `${SESSION_TRACE_PREFIX}:${label}:${crypto.randomUUID()}`;
 }
 
-export function logSessionTrace(stage: string, traceId: string | null | undefined, payload: TracePayload = {}): void {
-  if (!traceId || !isSessionTraceEnabled()) {
-    return;
-  }
-  console.info(JSON.stringify({
+export function logSessionTrace(stage: string, traceId: string | null | undefined, payload?: () => TracePayload): void {
+  if (!traceId) return;
+  traceLog(() => [JSON.stringify({
     prefix: SESSION_TRACE_PREFIX,
     source: 'renderer',
     traceId,
     stage,
     at: Date.now(),
-    ...payload,
-  }));
+    ...payload?.(),
+  })]);
 }
 
 export function summarizeText(value: string) {
@@ -61,6 +52,14 @@ export function summarizeText(value: string) {
 export function summarizeIdentifier(value: string | null | undefined) {
   return value ? { present: true, length: value.length, ...summarizeText(value) }
     : { present: false, length: 0, hash: null, utf8Bytes: 0, utf16Length: 0 };
+}
+
+export function summarizeTeamGraphPort(value: string | null | undefined) {
+  return {
+    value: value != null && ['completed', 'failed', 'rework', 'passed', 'approved', 'rejected', 'aborted', 'joined', 'input'].includes(value) ? value : null,
+    hash: summarizeIdentifier(value).hash,
+    length: value?.length ?? 0,
+  };
 }
 
 export function summarizeError(error: unknown) {

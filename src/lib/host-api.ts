@@ -299,7 +299,7 @@ function headersToRecord(headers?: HeadersInit): Record<string, string> {
 
 function withSessionTraceHeader(headers: HeadersInit | undefined, traceId: string | null | undefined): Record<string, string> {
   const record = headersToRecord(headers);
-  if (traceId) {
+  if (traceId && isSessionTraceEnabled()) {
     record[SESSION_TRACE_HEADER] = traceId;
   }
   return record;
@@ -346,9 +346,9 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
     signal.addEventListener('abort', abortListener, { once: true });
   }
   try {
-    if (tracing) logSessionTrace('hostapi.ipc.invoke', init?.traceId, {
+    if (tracing) logSessionTrace('hostapi.ipc.invoke', init?.traceId, () => ({
       requestIdHash, method, elapsedMs: Date.now() - startedAt,
-    });
+    }));
     const responsePromise = invokeIpc<unknown>('hostapi:fetch', {
       requestId,
       path,
@@ -367,20 +367,20 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
         }),
       ])
       : await responsePromise;
-    if (tracing) logSessionTrace('hostapi.ipc.response', init?.traceId, {
+    if (tracing) logSessionTrace('hostapi.ipc.response', init?.traceId, () => ({
       requestIdHash, elapsedMs: Date.now() - startedAt,
-    });
+    }));
     const decodeStartedAt = tracing ? performance.now() : 0;
     const envelope = decodeHostApiProxyEnvelope(response);
-    if (tracing) logSessionTrace('hostapi.ipc.decoded', init?.traceId, {
+    if (tracing) logSessionTrace('hostapi.ipc.decoded', init?.traceId, () => ({
       requestIdHash, decodeElapsedMs: performance.now() - decodeStartedAt,
       status: envelope.ok ? envelope.data.status : null, outcome: envelope.ok ? 'received' : 'proxy-failed',
-    });
+    }));
     return parseUnifiedProxyResponse<T>(envelope, path, method, startedAt);
   } catch (error) {
-    if (tracing) logSessionTrace('hostapi.ipc.error', init?.traceId, {
+    if (tracing) logSessionTrace('hostapi.ipc.error', init?.traceId, () => ({
       requestIdHash, elapsedMs: Date.now() - startedAt, ...summarizeError(error),
-    });
+    }));
     const normalized = normalizeAppError(error, { source: 'ipc-proxy', path, method });
     trackUiEvent('hostapi.fetch_error', {
       path,
@@ -1553,9 +1553,9 @@ async function hostCapabilityExecute<TResult = unknown>(
   const tracing = !!options?.traceId && isSessionTraceEnabled();
   const serializeStartedAt = tracing ? performance.now() : 0;
   const body = JSON.stringify(payload);
-  if (tracing) logSessionTrace('hostapi.capability.serialized', options?.traceId, {
+  if (tracing) logSessionTrace('hostapi.capability.serialized', options?.traceId, () => ({
     serializeElapsedMs: performance.now() - serializeStartedAt, requestLength: body.length,
-  });
+  }));
   return hostApiFetch('/api/capabilities/execute', {
     method: 'POST',
     body,
@@ -1885,26 +1885,26 @@ export async function hostSessionLoad(
 ): Promise<HostSessionLoadResult> {
   const input = bindSessionIdentityInput(payload);
   const startedAt = options?.traceId && isSessionTraceEnabled() ? performance.now() : null;
-  logSessionTrace('history.host-api.request', options?.traceId, {
+  logSessionTrace('history.host-api.request', options?.traceId, () => ({
     sessionKey: summarizeIdentifier(input.sessionKey),
     endpointSessionId: summarizeIdentifier(input.endpointSessionId),
     sessionIdentity: summarizeSessionIdentity(input.sessionIdentity),
     limit: input.limit ?? null,
     timeoutMs: options?.timeoutMs ?? SESSION_PEER_RPC_TIMEOUT_MS,
-  });
+  }));
   try {
     const result = await sessionIdentityCapabilityExecute<HostSessionLoadResult>({
       capabilityId: SESSION_PROMPT_CAPABILITY_ID,
       operationId: 'sessions.load',
       payload: input,
     }, options);
-    logSessionTrace('history.host-api.response', options?.traceId, {
+    logSessionTrace('history.host-api.response', options?.traceId, () => ({
       rawType: result && typeof result === 'object' ? 'object' : typeof result,
       elapsedMs: startedAt === null ? null : performance.now() - startedAt,
-    });
+    }));
     return result;
   } catch (error) {
-    logSessionTrace('history.host-api.error', options?.traceId, summarizeError(error));
+    logSessionTrace('history.host-api.error', options?.traceId, () => (summarizeError(error)));
     throw error;
   }
 }
@@ -2005,12 +2005,12 @@ export async function hostSessionPatch(
   options?: Pick<SessionCapabilityOptions, 'traceId'>,
 ): Promise<HostSessionModelSelectionResult> {
   const input = bindSessionIdentityInput(payload);
-  logSessionTrace('model-selection.host-api.request', options?.traceId, {
+  logSessionTrace('model-selection.host-api.request', options?.traceId, () => ({
     endpointSessionId: summarizeIdentifier(input.endpointSessionId),
     sessionIdentity: summarizeSessionIdentity(input.sessionIdentity),
     sessionKey: summarizeIdentifier(input.sessionKey),
     modelSelectionId: summarizeIdentifier(input.modelSelectionId),
-  });
+  }));
   try {
     const result = await sessionIdentityCapabilityExecute<HostSessionModelSelectionResult>({
       capabilityId: SESSION_MODEL_SELECTION_CAPABILITY_ID,
@@ -2018,10 +2018,10 @@ export async function hostSessionPatch(
       target: { kind: 'model-selection', identity: payload.sessionIdentity, modelSelectionId: payload.modelSelectionId },
       payload: input,
     }, { timeoutMs: SESSION_PEER_RPC_TIMEOUT_MS, traceId: options?.traceId });
-    logSessionTrace('model-selection.host-api.response', options?.traceId, { outcome: result.outcome });
+    logSessionTrace('model-selection.host-api.response', options?.traceId, () => ({ outcome: result.outcome }));
     return result;
   } catch (error) {
-    logSessionTrace('model-selection.host-api.error', options?.traceId, summarizeError(error));
+    logSessionTrace('model-selection.host-api.error', options?.traceId, () => (summarizeError(error)));
     throw error;
   }
 }

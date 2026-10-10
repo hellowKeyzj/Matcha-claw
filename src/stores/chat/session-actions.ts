@@ -251,7 +251,7 @@ function normalizeCatalogSession(session: ChatSession): ChatSession | null {
 async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarget): Promise<SessionCatalogLoadResult> {
   const traceId = createSessionTraceId('session.catalog.endpoint');
   const endpoint = traceId ? summarizeEndpoint(target.defaultSessionPromptScope.endpoint) : null;
-  if (traceId) logSessionTrace('session.catalog.endpoint.request', traceId, { endpoint, status: 'started' });
+  if (traceId) logSessionTrace('session.catalog.endpoint.request', traceId, () => ({ endpoint, status: 'started' }));
   const startedAt = traceId ? performance.now() : 0;
   let requestElapsedMs: number | null = null;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -297,17 +297,17 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
       ready: data.ready !== false,
       error: typeof data.error === 'string' ? data.error : null,
     };
-    if (traceId) logSessionTrace('session.catalog.endpoint.response', traceId, {
+    if (traceId) logSessionTrace('session.catalog.endpoint.response', traceId, () => ({
       endpoint, status: result.ready ? 'ready' : 'not-ready', requestElapsedMs,
       elapsedMs: performance.now() - startedAt, rawCount: rawSessions.length, count: result.sessions.length,
       error: summarizeIdentifier(result.error),
-    });
+    }));
     return result;
   } catch (error) {
-    if (traceId) logSessionTrace('session.catalog.endpoint.response', traceId, {
+    if (traceId) logSessionTrace('session.catalog.endpoint.response', traceId, () => ({
       endpoint, status: 'error', elapsedMs: performance.now() - startedAt,
       requestElapsedMs: requestElapsedMs ?? performance.now() - startedAt, count: 0, ...summarizeError(error),
-    });
+    }));
     return {
       target,
       sessions: [],
@@ -579,11 +579,11 @@ async function requestSessionLifecycleView(
   target: { sessionKey: string; endpointSessionId?: string; sessionIdentity: SessionIdentity },
   traceId?: string | null,
 ) {
-  logSessionTrace('session.lifecycle.request', traceId, {
+  logSessionTrace('session.lifecycle.request', traceId, () => ({
     sessionKey: summarizeIdentifier(target.sessionKey),
     endpointSessionId: summarizeIdentifier(target.endpointSessionId),
     sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
-  });
+  }));
   try {
     const view = decodeHistorySessionView(await hostSessionLoad({
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
@@ -591,16 +591,16 @@ async function requestSessionLifecycleView(
       limit: 200,
     }, { traceId }));
     if (!sessionIdentitiesEqual(view.identity, target.sessionIdentity)) throw new Error('Session view identity mismatch');
-    logSessionTrace('session.lifecycle.response', traceId, {
+    logSessionTrace('session.lifecycle.response', traceId, () => ({
       sessionKey: summarizeIdentifier(view.sessionKey),
       identity: summarizeSessionIdentity(view.identity),
       completeness: view.completeness,
-    });
+    }));
     return view;
   } catch (error) {
-    logSessionTrace('session.lifecycle.error', traceId, {
+    logSessionTrace('session.lifecycle.error', traceId, () => ({
       ...summarizeError(error),
-    });
+    }));
     throw resolveSessionViewError(error);
   }
 }
@@ -679,15 +679,15 @@ async function executeLoadSessionsNow(
   });
   const targets = readSessionRuntimeTargets(stateBeforeLoad);
   const traceId = createSessionTraceId('session.catalog.load');
-  if (traceId) logSessionTrace('session.catalog.request', traceId, {
+  if (traceId) logSessionTrace('session.catalog.request', traceId, () => ({
     requestSequence, endpointCount: targets.length, status: 'started',
     selectedEndpoint: summarizeEndpoint(currentConversationBeforeLoad?.endpoint),
-  });
+  }));
   const startedAt = traceId ? performance.now() : 0;
   if (targets.length === 0) {
-    if (traceId) logSessionTrace('session.catalog.response', traceId, {
+    if (traceId) logSessionTrace('session.catalog.response', traceId, () => ({
       requestSequence, elapsedMs: performance.now() - startedAt, status: 'runtime-not-ready', endpointCount: 0, count: 0,
-    });
+    }));
     if (sessionCatalogLoadSequence !== requestSequence) {
       return;
     }
@@ -702,12 +702,12 @@ async function executeLoadSessionsNow(
     SESSION_CATALOG_LIST_CONCURRENCY,
     loadEndpointSessionCatalog,
   );
-  if (traceId) logSessionTrace('session.catalog.response', traceId, {
+  if (traceId) logSessionTrace('session.catalog.response', traceId, () => ({
     requestSequence, elapsedMs: performance.now() - startedAt,
     status: sessionCatalogLoadSequence !== requestSequence ? 'superseded' : results.every((result) => result.ready) ? 'ready' : 'partial-or-unavailable',
     endpointCount: results.length, readyEndpointCount: results.filter((result) => result.ready).length,
     count: results.reduce((count, result) => count + result.sessions.length, 0),
-  });
+  }));
   if (sessionCatalogLoadSequence !== requestSequence) {
     return;
   }
@@ -938,11 +938,11 @@ export function executeOpenAgentConversation(
     contextEndpoint,
     normalized,
   );
-  logSessionTrace('open-agent.request', traceId, {
+  logSessionTrace('open-agent.request', traceId, () => ({
     agentId: summarizeIdentifier(normalized),
     preferredSessionKey: summarizeIdentifier(preferredSession?.sessionRecordKey),
     currentSessionKey: summarizeIdentifier(state.currentSessionKey),
-  });
+  }));
   if (preferredSession) {
     get().switchSession(preferredSession.sessionRecordKey, traceId);
     return;
@@ -970,12 +970,12 @@ export function executeOpenSessionIdentity(
   const endpointSessionId = normalizeCatalogString(target.endpointSessionId ?? undefined);
   const recordKey = findSessionRecordKey(get(), identity) ?? buildSessionRecordKey(identity);
   const existing = get().loadedSessions[recordKey];
-  logSessionTrace('open-session-identity.request', traceId, {
+  logSessionTrace('open-session-identity.request', traceId, () => ({
     recordKey: summarizeIdentifier(recordKey),
     endpointSessionId: summarizeIdentifier(endpointSessionId),
     sessionIdentity: summarizeSessionIdentity(identity),
     existing: Boolean(existing),
-  });
+  }));
   set((state) => {
     const currentMeta = getSessionMeta(state, recordKey);
     const loadedSessions = patchSessionMeta({
@@ -1091,13 +1091,13 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
     && get().loadedSessions[key]?.meta.sessionIdentity === requestedIdentity
     && (!get().loadedSessions[key]?.runtime.pendingTurnKey
       || get().loadedSessions[key]?.runtime.pendingTurnKey === pendingTurnKey);
-  logSessionTrace('switch-session.request', traceId, {
+  logSessionTrace('switch-session.request', traceId, () => ({
     requestedSessionKey: summarizeIdentifier(key),
     currentSessionKey: summarizeIdentifier(currentState.currentSessionKey),
     targetRecord: requestedRecord ? summarizeSwitchSessionRecord(resolveSessionRecord(requestedRecord)) : null,
-  });
+  }));
   if (key === currentState.currentSessionKey) {
-    logSessionTrace('switch-session.branch', traceId, { branch: 'same-current' });
+    logSessionTrace('switch-session.branch', traceId, () => ({ branch: 'same-current' }));
     const targetEndpoint = getSessionMeta(currentState, key).sessionIdentity?.endpoint;
     if (targetEndpoint) {
       set((stateValue) => ({
@@ -1113,17 +1113,17 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
     void (async () => {
       try {
         const target = resolveOperationTarget(get(), key);
-        logSessionTrace('switch-session.lifecycle-target', traceId, {
+        logSessionTrace('switch-session.lifecycle-target', traceId, () => ({
           sessionKey: summarizeIdentifier(target.sessionKey),
           endpointSessionId: summarizeIdentifier(target.endpointSessionId),
           sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
-        });
+        }));
         const result = await requestSessionLifecycleView(target, traceId);
         if (!isCurrent()) {
-          logSessionTrace('switch-session.lifecycle-stale', traceId, {
+          logSessionTrace('switch-session.lifecycle-stale', traceId, () => ({
             requestedSessionKey: summarizeIdentifier(key),
             currentSessionKey: summarizeIdentifier(get().currentSessionKey),
-          });
+          }));
           return;
         }
         applyBackendSessionView({
@@ -1132,18 +1132,18 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
           sessionKey: key,
           view: result,
         });
-        logSessionTrace('switch-session.lifecycle-applied', traceId, {
+        logSessionTrace('switch-session.lifecycle-applied', traceId, () => ({
           requestedSessionKey: summarizeIdentifier(key),
           targetRecord: summarizeSwitchSessionRecord(resolveSessionRecord(get().loadedSessions[key])),
-        });
+        }));
       } catch (error) {
         if (!isCurrent()) return;
         const starting = isSessionEndpointStarting(get(), key);
-        logSessionTrace('switch-session.lifecycle-error', traceId, {
+        logSessionTrace('switch-session.lifecycle-error', traceId, () => ({
           requestedSessionKey: summarizeIdentifier(key),
           starting,
           ...summarizeError(error),
-        });
+        }));
         set((state) => {
           const loadedSessions = patchSessionMeta(state, key, { historyStatus: starting ? 'loading' : 'ready' });
           return {
@@ -1175,12 +1175,12 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
     targetRecord = resolveSessionRecord(nextloadedSessions[key]);
   }
   const targetSessionReady = targetRecord.meta.historyStatus === 'ready' || getSessionItemCount(targetRecord) > 0;
-  logSessionTrace('switch-session.branch', traceId, {
+  logSessionTrace('switch-session.branch', traceId, () => ({
     branch: 'different-current',
     leavingEmpty,
     targetSessionReady,
     targetRecord: summarizeSwitchSessionRecord(targetRecord),
-  });
+  }));
 
   set((stateValue) => {
     const targetMeta = getSessionMeta({ loadedSessions: nextloadedSessions }, key);
@@ -1206,11 +1206,11 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
       } : {}),
     };
   });
-  logSessionTrace('switch-session.state-applied', traceId, {
+  logSessionTrace('switch-session.state-applied', traceId, () => ({
     requestedSessionKey: summarizeIdentifier(key),
     currentSessionKey: summarizeIdentifier(get().currentSessionKey),
     targetRecord: summarizeSwitchSessionRecord(resolveSessionRecord(get().loadedSessions[key])),
-  });
+  }));
 
   resumeActiveStoreSend({ set, get, sessionKey: key });
   if (requestedIdentity?.endpoint.kind === 'native-runtime' && requestedIdentity.endpoint.runtimeAdapterId === 'openclaw') return;
@@ -1218,17 +1218,17 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   void (async () => {
     try {
       const target = resolveOperationTarget(get(), key);
-      logSessionTrace('switch-session.lifecycle-target', traceId, {
+      logSessionTrace('switch-session.lifecycle-target', traceId, () => ({
         sessionKey: summarizeIdentifier(target.sessionKey),
         endpointSessionId: summarizeIdentifier(target.endpointSessionId),
         sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
-      });
+      }));
       const result = await requestSessionLifecycleView(target, traceId);
       if (!isCurrent()) {
-        logSessionTrace('switch-session.lifecycle-stale', traceId, {
+        logSessionTrace('switch-session.lifecycle-stale', traceId, () => ({
           requestedSessionKey: summarizeIdentifier(key),
           currentSessionKey: summarizeIdentifier(get().currentSessionKey),
-        });
+        }));
         return;
       }
       applyBackendSessionView({
@@ -1237,26 +1237,26 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
         sessionKey: key,
         view: result,
       });
-      logSessionTrace('switch-session.lifecycle-applied', traceId, {
+      logSessionTrace('switch-session.lifecycle-applied', traceId, () => ({
         requestedSessionKey: summarizeIdentifier(key),
         targetRecord: summarizeSwitchSessionRecord(resolveSessionRecord(get().loadedSessions[key])),
-      });
+      }));
     } catch (error) {
       if (!isCurrent()) {
-        logSessionTrace('switch-session.lifecycle-error-stale', traceId, {
+        logSessionTrace('switch-session.lifecycle-error-stale', traceId, () => ({
           requestedSessionKey: summarizeIdentifier(key),
           currentSessionKey: summarizeIdentifier(get().currentSessionKey),
           ...summarizeError(error),
-        });
+        }));
         return;
       }
       const starting = isSessionEndpointStarting(get(), key);
-      logSessionTrace('switch-session.lifecycle-error', traceId, {
+      logSessionTrace('switch-session.lifecycle-error', traceId, () => ({
         requestedSessionKey: summarizeIdentifier(key),
         starting,
         targetSessionReady,
         ...summarizeError(error),
-      });
+      }));
       set((state) => {
         const loadedSessions = patchSessionMeta(state, key, {
           historyStatus: starting ? 'loading' : targetSessionReady ? 'ready' : 'error',
@@ -1600,11 +1600,11 @@ async function executeNewSessionWithScopeResolver(
       clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
     }
     const agentScope = resolveAgentScope(state);
-    logSessionTrace('new-session.request', traceId, {
+    logSessionTrace('new-session.request', traceId, () => ({
       endpoint: summarizeEndpoint(agentScope.endpoint),
       agentId: summarizeIdentifier(agentScope.agentId),
       currentSessionKey: summarizeIdentifier(currentSessionKey),
-    });
+    }));
     const rawCreated = await hostSessionNew({
       endpoint: agentScope.endpoint,
       agentId: agentScope.agentId,
@@ -1619,11 +1619,11 @@ async function executeNewSessionWithScopeResolver(
       throw new Error(`Session create ${rawCreated.outcome}`);
     }
     const created = decodeHistorySessionView(rawCreated);
-    logSessionTrace('new-session.response', traceId, {
+    logSessionTrace('new-session.response', traceId, () => ({
       sessionKey: summarizeIdentifier(created.sessionKey),
       identity: summarizeSessionIdentity(created.identity),
       completeness: created.completeness,
-    });
+    }));
     const createdAgentId = created.identity.agentId;
     if (!createdAgentId) {
       throw new Error('Session view identity is incomplete');
@@ -1683,9 +1683,9 @@ async function executeNewSessionWithScopeResolver(
     });
     return { sessionRecordKey: newKey, sessionIdentity: created.identity };
   } catch (error) {
-    logSessionTrace('new-session.error', traceId, {
+    logSessionTrace('new-session.error', traceId, () => ({
       ...summarizeError(error),
-    });
+    }));
     if (isLatestNewSessionRequest(requestSequence)) {
       set({
         error: error instanceof Error ? error.message : String(error),

@@ -1,6 +1,7 @@
 //! Pure TeamRun control executor. Host integration should attribute emitted steps to
 //! `ActivityKind::Control`; this domain crate does not define the shared activity enum.
 
+use crate::run::evidence::EvidenceLedger;
 use crate::run::graph::{
     AttemptStatus, ExecutionFence, GraphDefinition, GraphEvent, GraphState, NodeId, NodeKind,
     ReduceError, reduce,
@@ -27,6 +28,11 @@ impl ControlExecutionPlan {
 pub enum ControlExecutionStep {
     GraphEvent(GraphEvent),
     ControlResolution(ControlNodeResolution),
+    HumanDecisionApproval {
+        node_id: NodeId,
+        fence: ExecutionFence,
+        requested_at: u64,
+    },
 }
 
 impl ControlExecutionStep {
@@ -34,6 +40,7 @@ impl ControlExecutionStep {
         match self {
             Self::GraphEvent(event) => graph_event_node_id(event),
             Self::ControlResolution(resolution) => resolution.node_id(),
+            Self::HumanDecisionApproval { node_id, .. } => node_id,
         }
     }
 
@@ -41,6 +48,7 @@ impl ControlExecutionStep {
         match self {
             Self::GraphEvent(event) => graph_event_fence(event),
             Self::ControlResolution(resolution) => Some(resolution.fence()),
+            Self::HumanDecisionApproval { fence, .. } => Some(fence),
         }
     }
 
@@ -48,6 +56,7 @@ impl ControlExecutionStep {
         match self {
             Self::GraphEvent(event) => graph_event_at(event),
             Self::ControlResolution(resolution) => resolution.resolved_at(),
+            Self::HumanDecisionApproval { requested_at, .. } => *requested_at,
         }
     }
 }
@@ -55,6 +64,7 @@ impl ControlExecutionStep {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlExecutionError {
     GraphDefinitionMismatch,
+    InvalidDefinition(crate::DefinitionError),
     UnknownReadyNode(NodeId),
     StaleReadyQueue(NodeId),
     OutputPortDoesNotMatchEdge { node_id: NodeId },
@@ -65,17 +75,28 @@ pub enum ControlExecutionError {
 pub fn plan_ready_control_execution(
     definition: &GraphDefinition,
     graph: &GraphState,
+    evidence: &EvidenceLedger,
     now: u64,
 ) -> Result<ControlExecutionPlan, ControlExecutionError> {
     if definition != graph.definition() {
         return Err(ControlExecutionError::GraphDefinitionMismatch);
     }
 
+    definition.validate_ports().map_err(ControlExecutionError::InvalidDefinition)?;
+    definition.validate_node_configuration().map_err(ControlExecutionError::InvalidDefinition)?;
+    definition.validate_join_inputs().map_err(ControlExecutionError::InvalidDefinition)?;
     let mut state = graph.clone();
     let mut steps = Vec::new();
-    while let Some(step) = next_ready_control_step(definition, &state, now)? {
+    while let Some(step) = next_ready_control_step(definition, &state, evidence, now)? {
         let event = graph_event_for_step(&step);
         state = reduce(state, event).map_err(ControlExecutionError::Reduce)?;
+        platform::trace::runtime_trace("runtime.team_run.control.step_planned", || serde_json::json!({
+            "runHash": platform::trace::identifier_hash(definition.run_id().as_str()),
+            "nodeHash": platform::trace::identifier_hash(step.node_id().as_str()),
+            "stepIndex": steps.len(),
+            "resolvedAt": step.resolved_at(),
+            "persisted": false,
+        }));
         steps.push(step);
     }
     Ok(ControlExecutionPlan { steps })
@@ -84,6 +105,7 @@ pub fn plan_ready_control_execution(
 fn next_ready_control_step(
     definition: &GraphDefinition,
     graph: &GraphState,
+    evidence: &EvidenceLedger,
     now: u64,
 ) -> Result<Option<ControlExecutionStep>, ControlExecutionError> {
     for item in graph.ready_queue() {
@@ -100,7 +122,7 @@ fn next_ready_control_step(
             .ok_or_else(|| ControlExecutionError::UnknownReadyNode(item.node_id().clone()))?;
         let step = match node.kind() {
             NodeKind::Start | NodeKind::End => {
-                let output_port = "completed";
+                let output_port = crate::NodeOutputPort::Completed.as_str();
                 require_existing_output_port(definition, item.node_id(), output_port)?;
                 ControlExecutionStep::GraphEvent(GraphEvent::NodeCompleted {
                     node_id: item.node_id().clone(),
@@ -110,7 +132,7 @@ fn next_ready_control_step(
                 })
             }
             NodeKind::Join => {
-                let output_port = "joined";
+                let output_port = crate::NodeOutputPort::Joined.as_str();
                 require_existing_output_port(definition, item.node_id(), output_port)?;
                 ControlExecutionStep::ControlResolution(
                     ControlNodeResolution::join(
@@ -123,12 +145,31 @@ fn next_ready_control_step(
                     .map_err(ControlExecutionError::ControlResolution)?,
                 )
             }
-            NodeKind::Work
-            | NodeKind::Review
-            | NodeKind::HumanDecision
-            | NodeKind::ScriptReview => {
-                continue;
+            NodeKind::ScriptReview => {
+                let rule = node.script_review_rule().ok_or(
+                    ControlExecutionError::ControlResolution(
+                        ControlNodeResolutionError::MissingScriptReviewRule,
+                    ),
+                )?;
+                ControlExecutionStep::ControlResolution(
+                    ControlNodeResolution::script_review_with_evidence(
+                        definition.run_id().clone(),
+                        item.node_id().clone(),
+                        item.fence().clone(),
+                        rule,
+                        graph,
+                        evidence,
+                        now,
+                    )
+                    .map_err(ControlExecutionError::ControlResolution)?,
+                )
             }
+            NodeKind::HumanDecision => ControlExecutionStep::HumanDecisionApproval {
+                node_id: item.node_id().clone(),
+                fence: item.fence().clone(),
+                requested_at: now,
+            },
+            NodeKind::Work | NodeKind::Review => continue,
         };
         return Ok(Some(step));
     }
@@ -141,14 +182,20 @@ fn require_existing_output_port(
     output_port: &str,
 ) -> Result<(), ControlExecutionError> {
     let mut outgoing = definition.outgoing_edges(node_id);
-    match outgoing.next() {
+    let result = match outgoing.next() {
         None => Ok(()),
         Some(first) if first.source_port() == output_port => Ok(()),
         Some(_) if outgoing.any(|edge| edge.source_port() == output_port) => Ok(()),
         Some(_) => Err(ControlExecutionError::OutputPortDoesNotMatchEdge {
             node_id: node_id.clone(),
         }),
-    }
+    };
+    platform::trace::runtime_trace("runtime.team_run.control.port_check", || {
+        let mut payload = crate::trace::control_port_check(definition, node_id, output_port);
+        payload["outcome"] = if result.is_ok() { "accepted" } else { "mismatched" }.into();
+        payload
+    });
+    result
 }
 
 fn graph_event_node_id(event: &GraphEvent) -> &NodeId {
@@ -195,6 +242,13 @@ fn graph_event_at(event: &GraphEvent) -> u64 {
 fn graph_event_for_step(step: &ControlExecutionStep) -> GraphEvent {
     match step {
         ControlExecutionStep::GraphEvent(event) => event.clone(),
+        ControlExecutionStep::HumanDecisionApproval { node_id, fence, requested_at } => {
+            GraphEvent::NodeWaiting {
+                node_id: node_id.clone(),
+                fence: fence.clone(),
+                waiting_at: *requested_at,
+            }
+        }
         ControlExecutionStep::ControlResolution(resolution) => match resolution.outcome() {
             crate::AuthorizedGraphOutcome::Completed => GraphEvent::NodeCompleted {
                 node_id: resolution.node_id().clone(),
@@ -334,7 +388,7 @@ mod tests {
         let definition = start_work_end_definition();
         let state = GraphState::initialize(definition.clone(), 10);
 
-        let plan = plan_ready_control_execution(&definition, &state, 11).unwrap();
+        let plan = plan_ready_control_execution(&definition, &state, &EvidenceLedger::default(), 11).unwrap();
 
         assert!(matches!(
             &plan.steps()[0],
@@ -358,11 +412,11 @@ mod tests {
         let state = GraphState::initialize(definition.clone(), 10);
         let state = apply_plan(
             state.clone(),
-            plan_ready_control_execution(&definition, &state, 11).unwrap(),
+            plan_ready_control_execution(&definition, &state, &EvidenceLedger::default(), 11).unwrap(),
         );
         let state = complete(state, "work", 12);
 
-        let plan = plan_ready_control_execution(&definition, &state, 13).unwrap();
+        let plan = plan_ready_control_execution(&definition, &state, &EvidenceLedger::default(), 13).unwrap();
 
         assert!(matches!(
             &plan.steps()[0],
@@ -379,7 +433,7 @@ mod tests {
         let state = GraphState::initialize(definition.clone(), 10);
         let state = complete(complete(state, "left", 11), "right", 12);
 
-        let plan = plan_ready_control_execution(&definition, &state, 13).unwrap();
+        let plan = plan_ready_control_execution(&definition, &state, &EvidenceLedger::default(), 13).unwrap();
 
         assert_eq!(plan.steps().len(), 2);
         match &plan.steps()[0] {
@@ -390,7 +444,7 @@ mod tests {
                 assert_eq!(plan.steps()[0].fence(), Some(resolution.fence()));
                 assert_eq!(plan.steps()[0].resolved_at(), 13);
             }
-            ControlExecutionStep::GraphEvent(_) => {
+            ControlExecutionStep::GraphEvent(_) | ControlExecutionStep::HumanDecisionApproval { .. } => {
                 panic!("join must resolve through control resolution")
             }
         }

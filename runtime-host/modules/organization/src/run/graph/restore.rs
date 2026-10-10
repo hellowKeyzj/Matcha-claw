@@ -59,7 +59,7 @@ pub enum RestoreError {
 pub fn restore_oracle(state: GraphState) -> Result<GraphState, RestoreError> {
     state
         .definition()
-        .validate()
+        .validate_structure()
         .map_err(RestoreError::InvalidDefinition)?;
     let expected_ids = state
         .definition()

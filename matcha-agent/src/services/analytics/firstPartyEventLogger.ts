@@ -186,7 +186,8 @@ async function logEventTo1PAsync(
     // Debug logging when debug mode is enabled
     if (process.env.USER_TYPE === 'ant') {
       logForDebugging(
-        `[ANT-ONLY] 1P event: ${eventName} ${jsonStringify(metadata, null, 0)}`,
+        () =>
+          `[ANT-ONLY] 1P event: ${eventName} ${jsonStringify(metadata, null, 0)}`,
       )
     }
 

@@ -26,12 +26,12 @@ pub use platform::trace::{
     channel_trace, current_channel_trace, with_channel_trace, with_channel_trace_sync,
 };
 
-fn trace_mutation_outcome(phase: &str, started: Instant, outcome: ChannelConfigMutationOutcome) {
+fn trace_mutation_outcome(phase: &str, started: Option<Instant>, outcome: ChannelConfigMutationOutcome) {
     channel_trace(
         phase,
-        &format!(
+        || format!(
             "outcome={outcome:?} elapsedMs={}",
-            started.elapsed().as_millis()
+            started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
         ),
     );
 }
@@ -193,10 +193,10 @@ impl ChannelConfigOperation {
     }
 
     async fn schema(&self, channel: &str) -> Result<GatewayResponse, OperationsReadError> {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         channel_trace(
             "schema.begin",
-            &format!(
+            || format!(
                 "path={}",
                 if self.runtime_running {
                     "gateway"
@@ -245,9 +245,9 @@ impl ChannelConfigOperation {
         };
         channel_trace(
             "schema.end",
-            &format!(
+            || format!(
                 "outcome={outcome} elapsedMs={}",
-                started.elapsed().as_millis()
+                started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
             ),
         );
         result
@@ -329,10 +329,10 @@ impl ChannelConfigOperation {
         channel: String,
         account_id: Option<String>,
     ) -> ChannelConfigReadEffect {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         channel_trace(
             "config.read.begin",
-            &format!(
+            || format!(
                 "runtimeRunning={} accountPresent={}",
                 self.runtime_running,
                 account_id.is_some()
@@ -363,15 +363,15 @@ impl ChannelConfigOperation {
                     Ok(request) => request,
                     Err(_) => return ChannelConfigReadEffect::OutcomeUnknown,
                 };
-                let read_started = Instant::now();
-                channel_trace("config.get.begin", "path=gateway purpose=public_read");
+                let read_started = platform::trace::enabled().then(Instant::now);
+                channel_trace("config.get.begin", || "path=gateway purpose=public_read");
                 let response = read_gateway(&self.gateway, config_request).await;
                 channel_trace(
                     "config.get.end",
-                    &format!(
+                    || format!(
                         "path=gateway responseReceived={} elapsedMs={}",
                         response.is_ok(),
-                        read_started.elapsed().as_millis()
+                        read_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                     ),
                 );
                 let config_response = match response {
@@ -390,8 +390,8 @@ impl ChannelConfigOperation {
                 let Some(state_dir) = &self.state_dir else {
                     return ChannelConfigReadEffect::OutcomeUnknown;
                 };
-                let read_started = Instant::now();
-                channel_trace("native.read.begin", "path=local purpose=public_read");
+                let read_started = platform::trace::enabled().then(Instant::now);
+                channel_trace("native.read.begin", || "path=local purpose=public_read");
                 let result =
                     crate::native_config::config_store::OpenClawConfigStore::new(state_dir.clone())
                         .read_private();
@@ -399,9 +399,9 @@ impl ChannelConfigOperation {
                     Ok(document) => {
                         channel_trace(
                             "native.read.end",
-                            &format!(
+                            || format!(
                                 "outcome=success elapsedMs={}",
-                                read_started.elapsed().as_millis()
+                                read_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                             ),
                         );
                         document.as_value()
@@ -409,9 +409,9 @@ impl ChannelConfigOperation {
                     Err(error) => {
                         channel_trace(
                             "native.read.end",
-                            &format!(
+                            || format!(
                                 "code={error:?} elapsedMs={}",
-                                read_started.elapsed().as_millis()
+                                read_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
                             ),
                         );
                         return ChannelConfigReadEffect::OutcomeUnknown;
@@ -437,7 +437,7 @@ impl ChannelConfigOperation {
         };
         channel_trace(
             "config.read.end",
-            &format!("outcome={code} elapsedMs={}", started.elapsed().as_millis()),
+            || format!("outcome={code} elapsedMs={}", started.map(|started| started.elapsed().as_millis()).unwrap_or_default()),
         );
         outcome
     }
@@ -447,10 +447,10 @@ impl ChannelConfigOperation {
         channel: String,
         account_id: Option<String>,
     ) -> DeleteConfigOutcome {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         channel_trace(
             "delete.begin",
-            &format!(
+            || format!(
                 "runtimeRunning={} accountPresent={}",
                 self.runtime_running,
                 account_id.is_some()
@@ -467,10 +467,10 @@ impl ChannelConfigOperation {
                     .as_deref()
                     .is_some_and(|id| !valid_identifier(id))
             {
-                channel_trace("delete.validate", "outcome=Rejected reason=invalid_input");
+                channel_trace("delete.validate", || "outcome=Rejected reason=invalid_input");
                 return DeleteConfigOutcome::Rejected;
             }
-            channel_trace("delete.validate", "outcome=valid");
+            channel_trace("delete.validate", || "outcome=valid");
             let account_id = if channel == "openclaw-weixin" {
                 match account_id {
                     Some(id) => match super::weixin_login::normalize_account_id(&id) {
@@ -527,7 +527,7 @@ impl ChannelConfigOperation {
             };
             let state_dir = state_dir.clone();
             let trace_id = current_channel_trace();
-            channel_trace("cleanup.dispatch", "execution=spawn_blocking");
+            channel_trace("cleanup.dispatch", || "execution=spawn_blocking");
             match tokio::task::spawn_blocking(move || {
                 with_channel_trace_sync(trace_id, || {
                     cleanup.execute(&state_dir, &channel, account_id.as_deref())
@@ -538,7 +538,7 @@ impl ChannelConfigOperation {
                 Ok(Ok(())) => DeleteConfigOutcome::Confirmed,
                 Ok(Err(())) => DeleteConfigOutcome::Unknown,
                 Err(_) => {
-                    channel_trace("cleanup.join", "outcome=failed code=join_error");
+                    channel_trace("cleanup.join", || "outcome=failed code=join_error");
                     DeleteConfigOutcome::Unknown
                 }
             }
@@ -580,10 +580,10 @@ impl ChannelConfigOperation {
         plugin_id: Option<String>,
         agent_id: Option<String>,
     ) -> ChannelConfigMutationOutcome {
-        let started = Instant::now();
+        let started = platform::trace::enabled().then(Instant::now);
         channel_trace(
             "configure.begin",
-            &format!(
+            || format!(
                 "runtimeRunning={} accountPresent={} fieldCount={} pluginPresent={} agentPresent={}",
                 self.runtime_running,
                 !account_id.is_empty(),
@@ -603,7 +603,7 @@ impl ChannelConfigOperation {
         {
             channel_trace(
                 "configure.validate",
-                "outcome=Rejected reason=invalid_input",
+                || "outcome=Rejected reason=invalid_input",
             );
             trace_mutation_outcome(
                 "configure.end",
@@ -612,7 +612,7 @@ impl ChannelConfigOperation {
             );
             return ChannelConfigMutationOutcome::Rejected;
         }
-        channel_trace("configure.validate", "outcome=valid");
+        channel_trace("configure.validate", || "outcome=valid");
         let mut target_account = Value::Object(patch);
         let outcome = self
             .mutate_config(|document| {
@@ -1007,10 +1007,7 @@ fn read_field_kind(property: &Map<String, Value>) -> Result<Option<ReadFieldKind
     read_field_kind_from_parts(
         declared_scalar_kind(property)?,
         property.get("enum").map(enum_scalar_kind).transpose()?,
-        property
-            .get("const")
-            .map(|value| Ok(scalar_kind(value)))
-            .transpose()?,
+        property.get("const").map(scalar_kind),
     )
 }
 

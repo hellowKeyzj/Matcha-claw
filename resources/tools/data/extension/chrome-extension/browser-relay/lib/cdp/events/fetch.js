@@ -36,14 +36,14 @@ const log = createLogger('evt:fetch')
 export function handleFetchEvent(method, tabId, params, _ctx) {
   switch (method) {
     case 'Fetch.requestPaused':
-      log.info(
+      log.info(() => [
         'request paused:', tabId,
         'requestId:', params?.requestId,
         'url:', truncate(params?.request?.url || '', 120),
         'method:', params?.request?.method,
         'resourceType:', params?.resourceType,
         'responseStatus:', params?.responseStatusCode || '(none)',
-      )
+      ])
       break
 
     case 'Fetch.authRequired':

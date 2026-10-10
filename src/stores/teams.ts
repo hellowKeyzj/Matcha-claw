@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { waitForCall } from '@/lib/call-log-await';
 import { subscribeBrowserRecovery, subscribeHostEvent } from '@/lib/host-events';
-import type { TeamDesignRecord, TeamDesignSnapshot, TeamDesignTarget } from '@/types/team-design';
+import { isTeamGraphSourcePortActions, type TeamDesignRecord, type TeamDesignSnapshot, type TeamDesignTarget } from '@/types/team-design';
 import { createSessionTraceId, logSessionTrace, summarizeError, summarizeIdentifier } from '@/lib/session-trace';
 import { matchesOrganizationIdentity } from '@/types/call-log/organization';
 import type { CallRecord } from '@/types/call-log';
@@ -14,9 +14,6 @@ import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types
 import { buildSessionIdentityKey, type SessionIdentity } from '../types/desktop/runtime-address';
 import {
   cancelTeamRun,
-  cancelTeamRunProposal,
-  confirmTeamRunProposal,
-  continueTeamRunProposal,
   createTeamRun,
   deleteTeamInstance,
   exportTeamRunGraphYaml,
@@ -27,7 +24,7 @@ import {
   readTeamRunSnapshot,
   readTeamDesignSnapshot,
   startTeamDesign,
-  continueTeamDesign,
+  startTeamRun,
   exitTeamDesign,
   patchTeamDesignGraph,
   resolveTeamApproval,
@@ -188,9 +185,8 @@ interface TeamsState {
   refreshDesignSnapshot: (target: TeamDesignTarget, options?: { invalidate?: boolean }) => Promise<void>;
   observeTeamDesign: (target: TeamDesignTarget) => () => void;
   startDesign: (target: TeamDesignTarget) => Promise<void>;
-  continueDesign: (target: TeamDesignTarget) => Promise<void>;
-  confirmDesign: (target: TeamDesignTarget) => Promise<void>;
-  continueDesignDiscussion: (target: TeamDesignTarget) => Promise<void>;
+  startRun: (target: TeamDesignTarget) => Promise<void>;
+  exitDesign: (target: TeamDesignTarget) => Promise<void>;
   submitRunGraphPatch: (target: TeamDesignTarget, operations: TeamGraphPatchOperation[]) => Promise<void>;
   createManualTeamWithProgress: (input: ManualTeamCandidate) => Promise<string>;
   resetManualTeamCreation: () => void;
@@ -208,9 +204,6 @@ interface TeamsState {
   importGraphYaml: (teamId: string, yaml: string) => Promise<TeamGraphYamlImportResult>;
   resumeRun: (teamId: string) => Promise<void>;
   cancelRun: (teamId: string, reason?: string) => Promise<void>;
-  confirmProposal: (teamId: string) => Promise<void>;
-  continueProposal: (teamId: string) => Promise<void>;
-  cancelProposal: (teamId: string) => Promise<void>;
   resolveApproval: (
     teamId: string,
     approvalId: string,
@@ -234,9 +227,42 @@ function designTargetKey(target: TeamDesignTarget): string {
   return JSON.stringify([target.teamId, target.runId]);
 }
 
+function summarizeTeamDesignSnapshot(snapshot: TeamDesignSnapshot) {
+  const nodeStatusCounts = { pending: 0, ready: 0, queued: 0, running: 0, waiting_for_user: 0, completed: 0, passed: 0, failed: 0, skipped: 0, cancelled: 0, other: 0 };
+  for (const node of snapshot.graph.nodes) {
+    const status = node.status && Object.hasOwn(nodeStatusCounts, node.status) ? node.status as keyof typeof nodeStatusCounts : 'other';
+    nodeStatusCounts[status] += 1;
+  }
+  return {
+    teamHash: summarizeIdentifier(snapshot.teamId).hash,
+    runHash: summarizeIdentifier(snapshot.runId).hash,
+    versionHash: summarizeIdentifier(snapshot.graphVersion).hash,
+    epochHash: summarizeIdentifier(snapshot.designEpoch).hash,
+    startGate: snapshot.startGate.status,
+    nodeCount: snapshot.graph.nodes.length,
+    nodeStatusCounts,
+    runtimeErrorCode: snapshot.runtimeError?.errorCode ?? null,
+  };
+}
+
+function teamRunErrorMessage(snapshot: TeamDesignSnapshot): string | null {
+  const failure = snapshot.runtimeError;
+  if (!failure) return null;
+  const nodeLabel = (nodeId: string) => snapshot.graph.nodes.find((node) => node.nodeId === nodeId)?.title || nodeId;
+  const edge = failure.edgeId && snapshot.graph.edges.find((edge) => edge.edgeId === failure.edgeId);
+  const location = edge
+    ? `${nodeLabel(edge.sourceNodeId)} → ${nodeLabel(edge.targetNodeId)}`
+    : failure.nodeId ? nodeLabel(failure.nodeId) : null;
+  return location ? `${location}: ${failure.error}` : failure.error;
+}
+
 function refreshObservedDesigns(): void {
+  const state = useTeamsStore.getState();
   for (const { target } of designObservers.values()) {
-    void useTeamsStore.getState().refreshDesignSnapshot(target, { invalidate: true }).catch(() => {});
+    void state.refreshDesignSnapshot(target, { invalidate: true }).catch(() => {});
+    if (state.teams.find((team) => team.id === target.teamId)?.activeRunId === target.runId) {
+      void state.refreshSnapshot(target.teamId, { force: true }).catch(() => {});
+    }
   }
 }
 
@@ -273,7 +299,7 @@ async function mutateTeamDesign(target: TeamDesignTarget, operation: string, act
     if (existing.operation !== operation || operation === 'run-graph-patch') throw new Error('Team run mutation is already pending');
     return existing.promise;
   }
-  const entry = { requestId: createRequestId(operation), operation, removed: false, promise: Promise.resolve() };
+  const entry = { requestId: createRequestId(operation.split(':', 1)[0]), operation, removed: false, promise: Promise.resolve() };
   entry.promise = Promise.resolve().then(async () => {
     if (entry.removed) return;
     try {
@@ -318,12 +344,7 @@ async function invalidateRunGraph(target: TeamDesignTarget): Promise<void> {
   }
 }
 
-function requireDesignProposal(snapshot: TeamDesignSnapshot | null | undefined, target: TeamDesignTarget): string {
-  if (snapshot?.teamId !== target.teamId || snapshot.runId !== target.runId || snapshot.startGate.status !== 'design_proposal_pending') throw new Error('Team design proposal is required');
-  return snapshot.startGate.proposal.proposalId;
-}
-
-const snapshotInFlightByTeamId = new Map<string, Promise<void>>();
+const snapshotInFlightByTeamId = new Map<string, { runId: string | undefined; dirty: boolean; promise: Promise<void> }>();
 const actionInFlightByKey = new Map<string, { requestId: string; promise: Promise<void>; operation?: string; removed?: boolean }>();
 
 export function planTeamSkillCreation(teams: TeamMeta[], candidate: TeamSkillCandidate): TeamSkillCreationPlan {
@@ -775,8 +796,9 @@ function normalizeTeamGraphNodes(nodes: unknown): TeamGraphSnapshotRecord['nodes
   return nodes.flatMap((node) => {
     if (!isRecord(node)) return [];
     const nodeId = readNonEmptyString(node.nodeId);
-    if (!nodeId) return [];
-    return [{ ...node, nodeId } satisfies TeamGraphSnapshotRecord['nodes'][number]];
+    const sourcePortActions = node.sourcePortActions;
+    if (!nodeId || !isTeamGraphSourcePortActions(sourcePortActions, node.sourcePorts)) return [];
+    return [{ ...node, nodeId, sourcePortActions } satisfies TeamGraphSnapshotRecord['nodes'][number]];
   });
 }
 
@@ -812,67 +834,6 @@ function normalizeTeamGraphProjection(graph: TeamGraphSnapshotRecord | null | un
     nodes: normalizeTeamGraphNodes((graph as { nodes?: unknown }).nodes),
     edges: normalizeTeamGraphEdges((graph as { edges?: unknown }).edges),
   };
-}
-
-function patchTeamGraphNodeProjection(
-  current: TeamGraphSnapshotRecord['nodes'][number],
-  patch: Record<string, unknown>,
-): TeamGraphSnapshotRecord['nodes'][number] {
-  const { roleId: _roleId, groupId: _groupId, taskId: _taskId, executor: _executor, config: _config, ...runtimeProjection } = current;
-  return { ...runtimeProjection, ...patch } as TeamGraphSnapshotRecord['nodes'][number];
-}
-
-function patchTeamGraphEdgeProjection(
-  current: TeamGraphSnapshotRecord['edges'][number],
-  patch: Record<string, unknown>,
-): TeamGraphSnapshotRecord['edges'][number] {
-  const { sourcePort: _sourcePort, targetPort: _targetPort, action: _action, payload: _payload, edgeType: _edgeType, kind: _kind, label: _label, ...runtimeProjection } = current;
-  return { ...runtimeProjection, ...patch } as TeamGraphSnapshotRecord['edges'][number];
-}
-
-function applyTeamGraphPatchOperations(
-  graph: TeamGraphSnapshotRecord,
-  operations: readonly TeamGraphPatchOperation[],
-): TeamGraphSnapshotRecord {
-  let nodes = [...graph.nodes];
-  let edges = [...graph.edges];
-  let metadata = graph.metadata;
-  let nodePositions = { ...(graph.layout?.nodePositions ?? {}) };
-  for (const operation of operations) {
-    switch (operation.op) {
-      case 'add_node': {
-        const [node] = normalizeTeamGraphNodes([operation.node]);
-        if (node) nodes = [...nodes, node];
-        break;
-      }
-      case 'replace_node':
-        nodes = nodes.map((node) => node.nodeId === operation.node.nodeId ? patchTeamGraphNodeProjection(node, operation.node) : node);
-        break;
-      case 'remove_node':
-        nodes = nodes.filter((node) => node.nodeId !== operation.nodeId);
-        edges = edges.filter((edge) => edge.sourceNodeId !== operation.nodeId && edge.targetNodeId !== operation.nodeId);
-        delete nodePositions[operation.nodeId];
-        break;
-      case 'add_edge': {
-        const [edge] = normalizeTeamGraphEdges([operation.edge]);
-        if (edge) edges = [...edges, edge];
-        break;
-      }
-      case 'replace_edge':
-        edges = edges.map((edge) => edge.edgeId === operation.edge.edgeId ? patchTeamGraphEdgeProjection(edge, operation.edge) : edge);
-        break;
-      case 'remove_edge':
-        edges = edges.filter((edge) => edge.edgeId !== operation.edgeId);
-        break;
-      case 'set_node_position':
-        nodePositions[operation.nodeId] = operation.position;
-        break;
-      case 'set_metadata':
-        metadata = { ...(metadata ?? {}), ...operation.metadata };
-        break;
-    }
-  }
-  return { ...graph, layout: { nodePositions }, nodes, edges, metadata, updatedAt: Date.now() };
 }
 
 type TeamRunSnapshotUnavailableSection =
@@ -977,9 +938,16 @@ export const useTeamsStore = create<TeamsState>()(
         const target = { ...requestedTarget };
         resolveTeamMeta(get().teams, target.teamId);
         const key = designTargetKey(target);
+        const traceId = createSessionTraceId('team-design-snapshot');
         const existing = designReads.get(key);
         if (existing) {
           if (options?.invalidate) existing.dirty = true;
+          logSessionTrace('renderer.team_run.design_snapshot.in_flight', traceId, () => ({
+            teamHash: summarizeIdentifier(target.teamId).hash,
+            runHash: summarizeIdentifier(target.runId).hash,
+            invalidated: options?.invalidate === true,
+            dirty: existing.dirty,
+          }));
           return existing.promise;
         }
         const frozenTarget = { ...target };
@@ -988,7 +956,7 @@ export const useTeamsStore = create<TeamsState>()(
         entry.promise = Promise.resolve().then(async () => {
           if (entry.removed) return;
           set((state) => ({ designByRunId: { ...state.designByRunId, [target.runId]: {
-            snapshot: state.designByRunId[target.runId]?.snapshot ?? null, loading: true, mutationPending: state.designByRunId[target.runId]?.mutationPending ?? false, error: null,
+            snapshot: state.designByRunId[target.runId]?.snapshot ?? null, loading: true, mutationPending: state.designByRunId[target.runId]?.mutationPending ?? false, error: state.designByRunId[target.runId]?.error ?? null,
           } } }));
           try {
             do {
@@ -997,14 +965,33 @@ export const useTeamsStore = create<TeamsState>()(
               try {
                 snapshot = await readTeamDesignSnapshot(frozenTarget);
               } catch (error) {
-                if (entry.dirty && !entry.removed) continue;
+                if (entry.dirty && !entry.removed) {
+                  logSessionTrace('renderer.team_run.design_snapshot.dirty_discarded', traceId, () => ({
+                    teamHash: summarizeIdentifier(target.teamId).hash,
+                    runHash: summarizeIdentifier(target.runId).hash,
+                    result: 'error',
+                    error: 'design_snapshot_failed',
+                  }));
+                  continue;
+                }
                 throw error;
               }
               if (entry.removed) return;
-              if (entry.dirty) continue;
+              if (entry.dirty) {
+                logSessionTrace('renderer.team_run.design_snapshot.dirty_discarded', traceId, () => ({
+                  ...summarizeTeamDesignSnapshot(snapshot), result: 'success',
+                }));
+                continue;
+              }
               set((state) => state.teams.some((team) => team.id === target.teamId) ? {
-                designByRunId: { ...state.designByRunId, [target.runId]: { snapshot, loading: false, mutationPending: state.designByRunId[target.runId]?.mutationPending ?? false, error: null } },
+                designByRunId: { ...state.designByRunId, [target.runId]: { snapshot, loading: false, mutationPending: state.designByRunId[target.runId]?.mutationPending ?? false, error: teamRunErrorMessage(snapshot) } },
               } : {});
+              if (traceId && get().designByRunId[target.runId]?.snapshot === snapshot) {
+                logSessionTrace('renderer.team_run.design_snapshot.applied', traceId, () => ({
+                  ...summarizeTeamDesignSnapshot(snapshot),
+                  mutationPending: get().designByRunId[target.runId]?.mutationPending ?? false,
+                }));
+              }
             } while (entry.dirty && !entry.removed);
           } catch (error) {
             if (!entry.removed) set((state) => {
@@ -1012,6 +999,19 @@ export const useTeamsStore = create<TeamsState>()(
               return current ? { designByRunId: { ...state.designByRunId, [target.runId]: {
                 ...current, loading: false, error: error instanceof Error ? error.message : String(error),
               } } } : {};
+            });
+            logSessionTrace('renderer.team_run.design_snapshot.error', traceId, () => {
+              const retained = get().designByRunId[target.runId]?.snapshot;
+              return {
+                teamHash: summarizeIdentifier(target.teamId).hash,
+                runHash: summarizeIdentifier(target.runId).hash,
+                error: 'design_snapshot_failed',
+                removed: entry.removed,
+                retainedSnapshot: Boolean(retained),
+                versionHash: summarizeIdentifier(retained?.graphVersion).hash,
+                epochHash: summarizeIdentifier(retained?.designEpoch).hash,
+                startGate: retained?.startGate.status ?? null,
+              };
             });
             throw error;
           } finally {
@@ -1049,26 +1049,54 @@ export const useTeamsStore = create<TeamsState>()(
         const frozenTarget = { ...target };
         await mutateTeamDesign(frozenTarget, 'design-start', (requestId) => startTeamDesign({ ...frozenTarget, idempotencyKey: requestId }));
       },
-      continueDesign: async (target) => {
-        const frozenTarget = { ...target };
-        const proposalId = requireDesignProposal(get().designByRunId[target.runId]?.snapshot, frozenTarget);
-        await mutateTeamDesign(frozenTarget, `design-continue:${proposalId}`, (requestId) => continueTeamDesign({ ...frozenTarget, proposalId, idempotencyKey: requestId }));
-      },
-      confirmDesign: async (target) => {
-        const frozenTarget = { ...target };
-        const proposalId = requireDesignProposal(get().designByRunId[target.runId]?.snapshot, frozenTarget);
-        await mutateTeamDesign(frozenTarget, `design-confirm:${proposalId}`, (requestId) => confirmTeamRunProposal({ runId: frozenTarget.runId, proposalId, idempotencyKey: requestId }));
-      },
-      continueDesignDiscussion: async (target) => {
+      startRun: async (target) => {
         const frozenTarget = { ...target };
         const snapshot = get().designByRunId[frozenTarget.runId]?.snapshot;
         if (snapshot?.teamId !== frozenTarget.teamId || snapshot.runId !== frozenTarget.runId
-          || (snapshot.startGate.status !== 'designing' && snapshot.startGate.status !== 'design_proposal_pending')
+          || !(snapshot.startGate.status === 'intake' && snapshot.designEpoch === null
+            || snapshot.startGate.status === 'designing' && snapshot.startGate.designEpoch === snapshot.designEpoch
+              && snapshot.startGate.graphVersion === snapshot.graphVersion)) {
+          throw new Error('Team run start snapshot is required');
+        }
+        const designEpoch = snapshot.designEpoch;
+        const expectedGraphVersion = snapshot.graphVersion;
+        await mutateTeamDesign(frozenTarget, `run-start:${JSON.stringify([designEpoch, expectedGraphVersion])}`, async (requestId) => {
+          const traceId = createSessionTraceId('team-run-start');
+          logSessionTrace('renderer.team_run.run_start.requested', traceId, () => summarizeTeamDesignSnapshot(snapshot));
+          try {
+            const result = await startTeamRun({
+              ...frozenTarget, designEpoch, expectedGraphVersion, idempotencyKey: requestId,
+            });
+            logSessionTrace('renderer.team_run.run_start.returned', traceId, () => ({
+              teamHash: summarizeIdentifier(frozenTarget.teamId).hash,
+              runHash: summarizeIdentifier(frozenTarget.runId).hash,
+              versionHash: summarizeIdentifier(expectedGraphVersion).hash,
+              epochHash: summarizeIdentifier(designEpoch).hash,
+              outcome: result.outcome,
+              readbackPending: true,
+            }));
+            return result;
+          } catch (error) {
+            logSessionTrace('renderer.team_run.run_start.error', traceId, () => ({
+              teamHash: summarizeIdentifier(frozenTarget.teamId).hash,
+              runHash: summarizeIdentifier(frozenTarget.runId).hash,
+              error: 'run_start_failed',
+              readbackPending: true,
+            }));
+            throw error;
+          }
+        });
+      },
+      exitDesign: async (target) => {
+        const frozenTarget = { ...target };
+        const snapshot = get().designByRunId[frozenTarget.runId]?.snapshot;
+        if (snapshot?.teamId !== frozenTarget.teamId || snapshot.runId !== frozenTarget.runId
+          || snapshot.startGate.status !== 'designing'
           || !snapshot.designEpoch || snapshot.startGate.designEpoch !== snapshot.designEpoch) {
           throw new Error('Team design snapshot is required');
         }
         const designEpoch = snapshot.designEpoch;
-        await mutateTeamDesign(frozenTarget, `design-discussion:${designEpoch}`, () => exitTeamDesign({ ...frozenTarget, designEpoch }));
+        await mutateTeamDesign(frozenTarget, `design-exit:${designEpoch}`, () => exitTeamDesign({ ...frozenTarget, designEpoch }));
       },
       submitRunGraphPatch: async (target, operations) => {
         if (operations.length === 0) return;
@@ -1077,7 +1105,7 @@ export const useTeamsStore = create<TeamsState>()(
         if (!snapshot || snapshot.teamId !== target.teamId || snapshot.runId !== target.runId) {
           throw new Error('Team run snapshot is required');
         }
-        const designActive = snapshot.startGate.status === 'designing' || snapshot.startGate.status === 'design_proposal_pending';
+        const designActive = snapshot.startGate.status === 'designing';
         const designEpoch = snapshot.designEpoch;
         if (designActive && !designEpoch) throw new Error('Team design snapshot is required');
         await mutateTeamDesign(frozenTarget, 'run-graph-patch', async (requestId) => {
@@ -1403,13 +1431,13 @@ export const useTeamsStore = create<TeamsState>()(
       },
       provisionTeamAgents: async (teamId, options) => {
         const team = resolveTeamMeta(get().teams, teamId);
-        const started = performance.now();
         let traceId = createSessionTraceId('team-provision');
-        logSessionTrace('renderer.team.provision.start', traceId, {
+        const started = traceId ? performance.now() : 0;
+        logSessionTrace('renderer.team.provision.start', traceId, () => ({
           teamHash: summarizeIdentifier(team.id).hash,
           sourceType: team.sourceType,
           memberCount: team.manualTeam?.members.length ?? null,
-        });
+        }));
         set((state) => ({
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
@@ -1422,12 +1450,12 @@ export const useTeamsStore = create<TeamsState>()(
             ...(team.sourceType ? { sourceType: team.sourceType } : {}),
             ...(team.manualTeam ? { manualTeam: team.manualTeam } : {}),
           });
-          const callTraceId = `session-trace:team-call:${receipt.callId.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5')}`;
-          logSessionTrace('renderer.team.provision.admitted', traceId, {
+          const callTraceId = traceId ? `session-trace:team-call:${receipt.callId.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5')}` : null;
+          logSessionTrace('renderer.team.provision.admitted', traceId, () => ({
             callId: receipt.callId,
             callTraceId,
             elapsedMs: performance.now() - started,
-          });
+          }));
           traceId = callTraceId;
           const call = await waitForCall(receipt, 'organization', options?.onUpdate ? { onUpdate: async (call) => {
             if (call.command !== 'team.provisionAgents'
@@ -1438,7 +1466,7 @@ export const useTeamsStore = create<TeamsState>()(
           } } : undefined);
           const identityMatches = call.command === 'team.provisionAgents'
             && await matchesOrganizationIdentity(call.detail.teamId, call.detail.teamIdHash, team.id);
-          logSessionTrace('renderer.team.provision.terminal', traceId, {
+          logSessionTrace('renderer.team.provision.terminal', traceId, () => ({
             callId: receipt.callId,
             commandMatches: call.command === 'team.provisionAgents',
             identityMatches,
@@ -1447,7 +1475,7 @@ export const useTeamsStore = create<TeamsState>()(
             nativeInstalled: call.detail.provision?.nativeInstalled ?? null,
             commit: call.detail.provision?.commit ?? null,
             elapsedMs: performance.now() - started,
-          });
+          }));
           if (call.command !== 'team.provisionAgents'
             || !identityMatches
             || call.status !== 'succeeded' || call.detail.outcome !== 'materialized'
@@ -1459,10 +1487,10 @@ export const useTeamsStore = create<TeamsState>()(
             throw new Error(message);
           }
         } catch (error) {
-          logSessionTrace('renderer.team.provision.error', traceId, {
+          logSessionTrace('renderer.team.provision.error', traceId, () => ({
             error: summarizeError(error),
             elapsedMs: performance.now() - started,
-          });
+          }));
           set((state) => ({
             errorByTeamId: {
               ...state.errorByTeamId,
@@ -1600,62 +1628,63 @@ export const useTeamsStore = create<TeamsState>()(
         }
       },
       refreshSnapshot: async (teamId, options) => {
-        while (true) {
-          const inFlight = snapshotInFlightByTeamId.get(teamId);
-          if (!inFlight) {
-            break;
-          }
-          await inFlight;
-          if (!options?.force) {
-            return;
-          }
+        const inFlight = snapshotInFlightByTeamId.get(teamId);
+        if (inFlight) {
+          if (options?.force || inFlight.runId !== get().teams.find((team) => team.id === teamId)?.activeRunId) inFlight.dirty = true;
+          return inFlight.promise;
         }
-
-        const run = async () => {
-          const state = get();
-          const team = resolveTeamMeta(state.teams, teamId);
-          const runId = team.activeRunId;
-          if (!runId) {
-            set((state) => emptyTeamRunProjection(teamId, state));
-            return;
-          }
-          const snapshot = await readTeamRunSnapshot({
-            runId,
-            eventCursor: state.eventCursorByRunId[runId],
-            eventLimit: 200,
-          });
-          set((state) => {
-            const isRequestedRunStillActive = state.teams.find((team) => team.id === teamId)?.activeRunId === runId;
-            const patch = teamRunSnapshotPatch(teamId, runId, snapshot, state);
-            if (!isRequestedRunStillActive) {
-              return {
-                runsById: patch.runsById,
-                eventsByRunId: patch.eventsByRunId,
-                eventCursorByRunId: patch.eventCursorByRunId,
-              };
+        const entry = { runId: get().teams.find((team) => team.id === teamId)?.activeRunId, dirty: false, promise: Promise.resolve() };
+        snapshotInFlightByTeamId.set(teamId, entry);
+        entry.promise = (async () => {
+          do {
+            entry.dirty = false;
+            const state = get();
+            const team = state.teams.find((team) => team.id === teamId);
+            if (!team) return;
+            const runId = team.activeRunId;
+            entry.runId = runId;
+            if (!runId) {
+              set((state) => emptyTeamRunProjection(teamId, state));
+              return;
             }
-            return patch;
-          });
-        };
-
-        const promise = run();
-        snapshotInFlightByTeamId.set(teamId, promise);
-        try {
-          await promise;
-        } finally {
-          snapshotInFlightByTeamId.delete(teamId);
-        }
+            let snapshot: TeamRunSnapshotRecord;
+            try {
+              snapshot = await readTeamRunSnapshot({
+                runId,
+                eventCursor: state.eventCursorByRunId[runId],
+                eventLimit: 200,
+              });
+            } catch (error) {
+              if (entry.dirty) continue;
+              if (get().teams.find((team) => team.id === teamId)?.activeRunId === runId) {
+                set((state) => ({ errorByTeamId: { ...state.errorByTeamId, [teamId]: error instanceof Error ? error.message : String(error) } }));
+              }
+              throw error;
+            }
+            if (entry.dirty) continue;
+            set((state) => {
+              if (!state.teams.some((team) => team.id === teamId)) return {};
+              const isRequestedRunStillActive = state.teams.find((team) => team.id === teamId)?.activeRunId === runId;
+              const patch = teamRunSnapshotPatch(teamId, runId, snapshot, state);
+              if (!isRequestedRunStillActive) {
+                return {
+                  runsById: patch.runsById,
+                  eventsByRunId: patch.eventsByRunId,
+                  eventCursorByRunId: patch.eventCursorByRunId,
+                };
+              }
+              return patch;
+            });
+          } while (entry.dirty);
+        })().finally(() => {
+          if (snapshotInFlightByTeamId.get(teamId) === entry) snapshotInFlightByTeamId.delete(teamId);
+        });
+        return entry.promise;
       },
       submitGraphPatch: async (teamId, operations) => {
         const state = get();
         const runId = resolveActiveRunId(state, teamId);
-        const currentGraph = normalizeTeamGraphProjection(state.graphByTeamId[teamId], runId) ?? {
-          runId,
-          status: 'draft',
-          layout: { nodePositions: {} },
-          nodes: [],
-          edges: [],
-        };
+        const currentGraph = state.graphByTeamId[teamId];
         if (operations.length === 0) return;
         set((state) => ({
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
@@ -1665,15 +1694,13 @@ export const useTeamsStore = create<TeamsState>()(
             runId,
             summary: 'graph_patch',
             patch: {
-              ...(currentGraph.graphId ? { baseGraphId: currentGraph.graphId } : {}),
-              ...(currentGraph.workflowPlanId ? { baseWorkflowPlanId: currentGraph.workflowPlanId } : {}),
+              ...(currentGraph?.graphId ? { baseGraphId: currentGraph.graphId } : {}),
+              ...(currentGraph?.workflowPlanId ? { baseWorkflowPlanId: currentGraph.workflowPlanId } : {}),
               operations,
             },
             idempotencyKey: createRequestId('graph-patch'),
           });
-          set((state) => ({
-            graphByTeamId: { ...state.graphByTeamId, [teamId]: applyTeamGraphPatchOperations(currentGraph, operations) },
-          }));
+          await get().refreshSnapshot(teamId, { force: true });
           await invalidateRunGraph({ teamId, runId });
         } catch (error) {
           await invalidateRunGraph({ teamId, runId });
@@ -1763,74 +1790,25 @@ export const useTeamsStore = create<TeamsState>()(
         });
         await get().refreshSnapshot(teamId, { force: true });
       },
-      confirmProposal: async (teamId) => {
-        const state = get();
-        const runId = resolveActiveRunId(state, teamId);
-        const proposal = state.startGateByTeamId[teamId]?.proposal;
-        if (!proposal?.proposalId) {
-          throw new Error(`Team run proposal is required: ${teamId}`);
-        }
-        const actionKey = idempotencyKey(teamId, `proposal-confirm:${runId}:${proposal.proposalId}`);
-        const result = await confirmTeamRunProposal({
-          runId,
-          proposalId: proposal.proposalId,
-          idempotencyKey: actionKey,
-        });
-        if (result.snapshot) {
-          set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
-        } else {
-          await get().refreshSnapshot(teamId, { force: true });
-        }
-      },
-      continueProposal: async (teamId) => {
-        const state = get();
-        const runId = resolveActiveRunId(state, teamId);
-        const proposal = state.startGateByTeamId[teamId]?.proposal;
-        if (!proposal?.proposalId) {
-          throw new Error(`Team run proposal is required: ${teamId}`);
-        }
-        const actionKey = idempotencyKey(teamId, `proposal-continue:${runId}:${proposal.proposalId}`);
-        const result = await continueTeamRunProposal({
-          runId,
-          proposalId: proposal.proposalId,
-          idempotencyKey: actionKey,
-        });
-        if (result.snapshot) {
-          set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
-        } else {
-          await get().refreshSnapshot(teamId, { force: true });
-        }
-      },
-      cancelProposal: async (teamId) => {
-        const state = get();
-        const runId = resolveActiveRunId(state, teamId);
-        const proposal = state.startGateByTeamId[teamId]?.proposal;
-        if (!proposal?.proposalId) {
-          throw new Error(`Team run proposal is required: ${teamId}`);
-        }
-        const actionKey = idempotencyKey(teamId, `proposal-cancel:${runId}:${proposal.proposalId}`);
-        const result = await cancelTeamRunProposal({
-          runId,
-          proposalId: proposal.proposalId,
-          idempotencyKey: actionKey,
-        });
-        if (result.snapshot) {
-          set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
-        } else {
-          await get().refreshSnapshot(teamId, { force: true });
-        }
-      },
       resolveApproval: async (teamId, approvalId, decision, note) => {
-        const state = get();
-        const runId = resolveActiveRunId(state, teamId);
-        await resolveTeamApproval({
-          runId,
-          approvalId,
-          decision,
-          note,
-          idempotencyKey: idempotencyKey(teamId, `approval:${runId}:${approvalId}:${decision}`),
+        const approval = get().approvalsByTeamId[teamId]?.find((approval) => approval.approvalId === approvalId);
+        if (!approval || approval.status !== 'pending' || (approval.subject !== 'work_node' && approval.subject !== 'human_decision')) {
+          throw new Error('A pending node approval is required');
+        }
+        const runId = approval.runId;
+        await mutateTeamDesign({ teamId, runId }, `approval:${approvalId}:${decision}`, async () => {
+          try {
+            await resolveTeamApproval({
+              runId,
+              approvalId,
+              decision,
+              note,
+              idempotencyKey: idempotencyKey(teamId, `approval:${runId}:${approvalId}:${decision}`),
+            });
+          } finally {
+            await get().refreshSnapshot(teamId, { force: true });
+          }
         });
-        await get().refreshSnapshot(teamId, { force: true });
       },
       submitDecision: async (teamId, decision, note) => {
         const state = get();

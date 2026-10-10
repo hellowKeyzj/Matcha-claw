@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { Channels } from '@/pages/Channels';
 import { useChannelsStore } from '@/stores/channels';
@@ -121,8 +121,16 @@ function clickAvailableChannel(name: string) {
 }
 
 describe('Channels page QR session lifecycle', () => {
+  let originalElectron: typeof window.electron;
+
+  afterEach(() => {
+    window.electron = originalElectron;
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
+    originalElectron = window.electron;
+    window.electron = { ...originalElectron, traceEnabled: true };
     Element.prototype.scrollIntoView = vi.fn();
     i18n.changeLanguage('en');
     useChannelsStore.setState({

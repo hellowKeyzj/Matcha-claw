@@ -31,6 +31,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { useAccountStore } from '@/stores/account';
+import { useLocalLicenseLocked } from '@/stores/license';
 import { useSubscriptionStore } from '@/stores/subscription';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -61,6 +62,7 @@ interface NavItemProps {
   icon: React.ReactNode;
   label: string;
   active?: boolean;
+  disabled?: boolean;
   onMouseEnter?: () => void;
   onFocus?: () => void;
   onNavigate?: (to: string) => void;
@@ -247,6 +249,7 @@ function accountStatusLabel(status: string, hasUser: boolean, t: (key: string) =
 }
 
 interface SidebarAccountCardProps {
+  licenseLocked: boolean;
   status: string;
   user: CloudUser | null;
   subscription: AccountSubscriptionProjection | null;
@@ -280,6 +283,7 @@ function SidebarAccountAvatar({ user, initial }: { user: CloudUser | null; initi
 }
 
 const SidebarAccountCard = memo(function SidebarAccountCard({
+  licenseLocked,
   status,
   user,
   subscription,
@@ -383,7 +387,7 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
         <DropdownMenuSeparator />
         {signedIn ? (
           <>
-            <DropdownMenuItem onSelect={onOpenSubscription}>
+            <DropdownMenuItem onSelect={onOpenSubscription} disabled={licenseLocked}>
               <CreditCard className="h-4 w-4" />
               <span className="min-w-0 flex-1 truncate">{t('sidebar.account.subscription')}</span>
             </DropdownMenuItem>
@@ -411,7 +415,7 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
               <UserPlus className="h-4 w-4" />
               <span className="min-w-0 flex-1 truncate">{t('sidebar.account.register')}</span>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onOpenSubscription}>
+            <DropdownMenuItem onSelect={onOpenSubscription} disabled={licenseLocked}>
               <CreditCard className="h-4 w-4" />
               <span className="min-w-0 flex-1 truncate">{t('sidebar.account.upgradeSubscription')}</span>
             </DropdownMenuItem>
@@ -516,7 +520,15 @@ function buildApprovalBlockerCards(input: {
   return cards;
 }
 
-function NavItem({ to, icon, label, active, onMouseEnter, onFocus, onNavigate }: NavItemProps) {
+function NavItem({ to, icon, label, active, disabled, onMouseEnter, onFocus, onNavigate }: NavItemProps) {
+  if (disabled) {
+    return (
+      <button type="button" disabled className="flex items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-left text-[13px] font-medium text-[hsl(var(--shell-text-muted))] opacity-45">
+        <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center">{icon}</span>
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+      </button>
+    );
+  }
   return (
     <NavLink
       to={to}
@@ -745,6 +757,7 @@ export function Sidebar({
   const initTaskCenter = useTaskCenterStore((state) => state.init);
   const refreshTaskCenter = useTaskCenterStore((state) => state.refreshTasks);
   const accountStatus = useAccountStore((state) => state.status);
+  const licenseLocked = useLocalLicenseLocked();
   const accountUser = useAccountStore((state) => state.user);
   const accountSubscription = useAccountStore((state) => state.subscription);
   const accountUsage = useAccountStore((state) => state.usage);
@@ -844,7 +857,7 @@ export function Sidebar({
   }, []);
 
   const scheduleNavPrefetch = useCallback((path: string) => {
-    if (prefetchHandlesRef.current.has(path)) {
+    if (licenseLocked || prefetchHandlesRef.current.has(path)) {
       return;
     }
 
@@ -861,14 +874,14 @@ export function Sidebar({
 
     const timeoutId = window.setTimeout(runPrefetch, SIDEBAR_PREFETCH_FALLBACK_DELAY_MS);
     prefetchHandlesRef.current.set(path, { type: 'timeout', id: timeoutId });
-  }, [prefetchNavPath]);
+  }, [licenseLocked, prefetchNavPath]);
 
   useEffect(() => () => {
     const paths = Array.from(prefetchHandlesRef.current.keys());
     for (const path of paths) {
       clearPrefetchHandle(path);
     }
-  }, [clearPrefetchHandle]);
+  }, [clearPrefetchHandle, licenseLocked]);
 
   const navigateToPath = useCallback((to: string) => {
     if (location.pathname === to) {
@@ -923,6 +936,7 @@ export function Sidebar({
       <nav className="flex flex-1 flex-col gap-1 overflow-hidden p-2.5">
         <button
           type="button"
+          disabled={licenseLocked}
           onClick={() => {
             const { currentSessionKey, loadedSessions } = useChatStore.getState();
             const hasItems = getSessionItemCount(loadedSessions[currentSessionKey]) > 0;
@@ -933,7 +947,7 @@ export function Sidebar({
               navigate('/');
             });
           }}
-          className="group flex items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-[hsl(var(--shell-text-muted))] transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))]"
+          className="group flex items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-[hsl(var(--shell-text-muted))] transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))] disabled:pointer-events-none disabled:opacity-45"
         >
           <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-[hsl(var(--shell-icon))] group-hover:text-[hsl(var(--shell-icon-active))]">
             <MessageSquare className="h-[17px] w-[17px]" />
@@ -945,6 +959,7 @@ export function Sidebar({
           <NavItem
             key={item.to}
             {...item}
+            disabled={licenseLocked}
             active={item.to === '/subagents' && ['/subagents', '/skills', '/plugins', '/connectors'].includes(location.pathname) ? true : undefined}
             onMouseEnter={() => scheduleNavPrefetch(item.to)}
             onFocus={() => scheduleNavPrefetch(item.to)}
@@ -952,7 +967,7 @@ export function Sidebar({
           />
         ))}
 
-        <SidebarPendingBlockers />
+        {!licenseLocked && <SidebarPendingBlockers />}
       </nav>
 
       <div className="space-y-1.5 p-2.5 pt-0">
@@ -962,6 +977,7 @@ export function Sidebar({
             size="sm"
             className="w-full justify-start"
             onClick={openDevConsole}
+            disabled={licenseLocked}
           >
             <Terminal className="mr-2 h-4 w-4" />
             {t('sidebar.devConsole')}
@@ -969,6 +985,7 @@ export function Sidebar({
           </Button>
         )}
         <SidebarAccountCard
+          licenseLocked={licenseLocked}
           status={accountStatus}
           user={accountUser}
           subscription={accountSubscription}
@@ -984,7 +1001,7 @@ export function Sidebar({
         />
       </div>
 
-      <SubscriptionPlanDialog open={subscriptionDialogOpen} onOpenChange={setSubscriptionDialogOpen} />
+      {!licenseLocked && <SubscriptionPlanDialog open={subscriptionDialogOpen} onOpenChange={setSubscriptionDialogOpen} />}
     </aside>
   );
 }

@@ -238,7 +238,7 @@ fn gateway_token_os_string(secret: &GatewaySecret) -> Result<OsString, LaunchErr
     Ok(value.into())
 }
 
-fn base_launch_environment(
+pub(super) fn base_launch_environment(
     working_directory: &Path,
 ) -> Result<Vec<(OsString, OsString)>, LaunchError> {
     let mut environment = sanitize_inherited_environment(std::env::vars_os());

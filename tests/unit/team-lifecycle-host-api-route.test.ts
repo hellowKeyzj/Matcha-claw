@@ -27,12 +27,6 @@ const workflowPlan = {
   runId: 'run-1',
   title: 'Team plan',
   status: 'planned',
-  groups: [{
-    groupId: 'group-1',
-    title: 'Primary work',
-    taskIds: ['task-1'],
-    join: { requireCompleted: true, allowFailed: false, retryLimit: 0 },
-  }],
   tasks: [{
     taskId: 'task-1',
     roleId: 'role-1',

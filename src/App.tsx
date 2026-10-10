@@ -15,6 +15,8 @@ import { useGatewayStore } from './stores/gateway';
 import { useProviderStore } from './stores/providers';
 import { useUpdateStore } from './stores/update';
 import { useAccountStore } from './stores/account';
+import { useLicenseStore, useLocalLicenseLocked } from './stores/license';
+import { buildSettingsSectionLink, parseSettingsSectionFromSearch } from './lib/sections';
 import { AuthPage } from './pages/Auth';
 import { AccountOrbitCore } from './components/account/AccountOrbitCore';
 import { prepareToolchain } from './lib/toolchain';
@@ -22,6 +24,7 @@ import { useDelayedFlag } from './lib/use-delayed-flag';
 import { applyResolvedTheme, useResolvedTheme } from './lib/use-resolved-theme';
 import { UpdateNotifier } from './components/update/UpdateNotifier';
 import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
+import { isTraceEnabled } from '@/lib/trace-logger';
 import {
   SkillsRoute,
   SecurityRoute,
@@ -75,7 +78,7 @@ function MainLayoutWithLazyToolchainPrepare() {
     }
     toolchainPrepareStarted = true;
     void prepareToolchain().catch((error) => {
-      console.debug('Toolchain prepare failed', error);
+      if (isTraceEnabled()) console.debug('Toolchain prepare failed', error);
     });
   }, []);
 
@@ -167,6 +170,10 @@ function App() {
   const initUpdate = useUpdateStore((state) => state.init);
   const initAccount = useAccountStore((state) => state.init);
   const accountStatus = useAccountStore((state) => state.status);
+  const licenseLocked = useLocalLicenseLocked();
+  const licenseSnapshot = useLicenseStore((state) => state.snapshot);
+  const licenseError = useLicenseStore((state) => state.error);
+  const subscribeLicense = useLicenseStore((state) => state.subscribe);
 
   useEffect(() => {
     initSettings();
@@ -211,13 +218,27 @@ function App() {
     setLocalAccountEntryAccepted(true);
   }, []);
 
+  if (accountStatus === 'signedIn' && localAccountEntryAccepted) {
+    setLocalAccountEntryAccepted(false);
+  }
   const localAccountEntryRequested = localAccountEntryAccepted || isLocalAccountEntryState(location.state);
+
+  const licenseRequired = localAccountEntryRequested && accountStatus !== 'signedIn';
+  const licenseChecking = licenseRequired && !licenseError
+    && (licenseSnapshot === null || licenseSnapshot.state === 'checking');
+  const licenseBlocked = localAccountEntryRequested && licenseLocked && !licenseChecking;
+  const isLicenseRoute = location.pathname === '/settings'
+    && parseSettingsSectionFromSearch(location.search) === 'license';
+  const observeLicense = licenseRequired || (accountStatus === 'signedIn' && isLicenseRoute);
+  useEffect(() => {
+    if (observeLicense) return subscribeLicense();
+  }, [observeLicense, subscribeLicense]);
   const shouldApplyAccountGate = !isAuthRoute;
   const showAccountBoot = shouldApplyAccountGate
     && accountStatus === 'checking'
     && !localAccountEntryRequested;
   const showAuthGate = shouldApplyAccountGate
-    && (accountStatus === 'signedOut' || accountStatus === 'offline')
+    && (accountStatus === 'signedOut' || accountStatus === 'offline' || accountStatus === 'requires2fa')
     && !localAccountEntryRequested;
 
   // Listen for navigation events from main process
@@ -278,9 +299,13 @@ function App() {
           <AccountBootSplash />
         ) : showAuthGate ? (
           <AuthPage onLocalEntry={acceptLocalAccountEntry} />
+        ) : licenseChecking && !isAuthRoute && !isLicenseRoute ? (
+          <RouteLoadingFallback />
+        ) : licenseBlocked && !isAuthRoute && !isLicenseRoute ? (
+          <Navigate to={buildSettingsSectionLink('license')} replace state={{ accountEntry: 'local' }} />
         ) : (
           <Routes>
-            <Route path="/login" element={<AuthPage />} />
+            <Route path="/login" element={<AuthPage onLocalEntry={acceptLocalAccountEntry} />} />
             <Route path="/register" element={<AuthPage />} />
 
             {/* Main application routes */}

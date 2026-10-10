@@ -186,7 +186,7 @@ fn diamond_and_external_join_rebuild_only_affected_inputs() {
             edge(
                 "join-review",
                 "join",
-                "completed",
+                "joined",
                 "review",
                 EdgeAction::Activate,
             ),
@@ -202,8 +202,13 @@ fn diamond_and_external_join_rebuild_only_affected_inputs() {
     let unrelated = state.executions()[&node("unrelated")].clone();
     let mut state = complete(state, "external", "completed", 11);
     let external = state.executions()[&node("external")].clone();
-    for (id, at) in [("work", 12), ("left", 13), ("right", 14), ("join", 15)] {
-        state = complete(state, id, "completed", at);
+    for (id, port, at) in [
+        ("work", "completed", 12),
+        ("left", "completed", 13),
+        ("right", "completed", 14),
+        ("join", "joined", 15),
+    ] {
+        state = complete(state, id, port, at);
     }
     let state = roundtrip(complete(state, "review", "rework", 16));
     assert_attempt(&state, "work", 2, AttemptStatus::Ready);
@@ -233,7 +238,7 @@ fn diamond_and_external_join_rebuild_only_affected_inputs() {
         .unwrap();
     assert_eq!(receipt.source_fence(), external.current().fence());
     assert_eq!(receipt.arrived_at(), 19);
-    let state = complete(state, "join", "completed", 20);
+    let state = complete(state, "join", "joined", 20);
     assert_attempt(&state, "review", 2, AttemptStatus::Ready);
 }
 
@@ -252,7 +257,7 @@ fn multiple_edges_deduplicate_targets_and_shared_paths() {
             edge(
                 "join-review",
                 "join",
-                "completed",
+                "joined",
                 "review",
                 EdgeAction::Activate,
             ),
@@ -281,7 +286,7 @@ fn multiple_edges_deduplicate_targets_and_shared_paths() {
     );
     let state = complete(state, "left", "completed", 11);
     let state = complete(state, "right", "completed", 12);
-    let state = complete(state, "join", "completed", 13);
+    let state = complete(state, "join", "joined", 13);
     let state = roundtrip(complete(state, "review", "rework", 14));
     for id in ["left", "right"] {
         assert_attempt(&state, id, 2, AttemptStatus::Ready);
@@ -427,7 +432,7 @@ fn shared_path_budget_failure_is_atomic_across_all_targets() {
             edge(
                 "join-review",
                 "join",
-                "completed",
+                "joined",
                 "review",
                 EdgeAction::Activate,
             ),
@@ -449,7 +454,7 @@ fn shared_path_budget_failure_is_atomic_across_all_targets() {
     );
     let state = complete(state, "left", "completed", 11);
     let state = complete(state, "right", "completed", 12);
-    let state = complete(state, "join", "completed", 13);
+    let state = complete(state, "join", "joined", 13);
     let before = state.clone();
     let state = roundtrip(complete(state, "review", "rework", 14));
     for id in ["left", "right", "join"] {

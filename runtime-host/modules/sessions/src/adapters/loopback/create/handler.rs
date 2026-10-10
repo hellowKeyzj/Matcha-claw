@@ -27,7 +27,7 @@ pub(crate) async fn handle(
     session: crate::SessionHandle,
 ) -> Response {
     let trace_id = session_trace::trace_id(headers);
-    session_trace::log("runtime.create.request", trace_id, serde_json::json!({}));
+    session_trace::log("runtime.create.request", trace_id, || serde_json::json!({}));
     let Some(authorization) = headers
         .iter()
         .find(|(name, _)| name == AUTHORIZATION_HEADER)
@@ -36,14 +36,14 @@ pub(crate) async fn handle(
         session_trace::log(
             "runtime.create.unauthorized",
             trace_id,
-            serde_json::json!({}),
+            || serde_json::json!({}),
         );
         return Response::unauthorized();
     };
     let value = match serde_json::from_slice::<Value>(body) {
         Ok(value) => value,
         Err(_) => {
-            session_trace::log("runtime.create.bad-json", trace_id, serde_json::json!({}));
+            session_trace::log("runtime.create.bad-json", trace_id, || serde_json::json!({}));
             return Response::bad_request();
         }
     };
@@ -55,7 +55,7 @@ pub(crate) async fn handle(
             session_trace::log(
                 "runtime.create.decode-unauthorized",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::unauthorized();
         }
@@ -63,7 +63,7 @@ pub(crate) async fn handle(
             session_trace::log(
                 "runtime.create.decode-invalid",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::bad_request();
         }
@@ -83,7 +83,7 @@ pub(crate) async fn handle(
             session_trace::log(
                 "runtime.create.owner-unavailable",
                 trace_id,
-                serde_json::json!({}),
+                || serde_json::json!({}),
             );
             return Response::unavailable();
         }
@@ -92,7 +92,7 @@ pub(crate) async fn handle(
     session_trace::log(
         "runtime.create.outcome",
         trace_id,
-        serde_json::json!({ "status": delivery.status_code() }),
+        || serde_json::json!({ "status": delivery.status_code() }),
     );
     Response::from_delivery(delivery)
 }

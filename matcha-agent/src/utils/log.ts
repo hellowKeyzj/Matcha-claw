@@ -20,6 +20,7 @@ import { isEnvTruthy } from './envUtils.js'
 import { toError, shortErrorStack } from './errors.js'
 import { isEssentialTrafficOnly } from './privacyLevel.js'
 import { jsonParse } from './slowOperations.js'
+import { isTraceEnabled } from './trace.js'
 
 /**
  * Gets the display title for a log/session with fallback logic.
@@ -310,7 +311,12 @@ export function logMCPError(serverName: string, error: unknown): void {
   }
 }
 
-export function logMCPDebug(serverName: string, message: string): void {
+export function logMCPDebug(
+  serverName: string,
+  message: string | (() => string),
+): void {
+  if (!isTraceEnabled()) return
+  message = typeof message === 'function' ? message() : message
   try {
     // If sink not attached, queue the event
     if (errorLogSink === null) {

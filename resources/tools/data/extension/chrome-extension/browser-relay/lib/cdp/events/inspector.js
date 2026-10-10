@@ -32,7 +32,7 @@ export function handleInspectorEvent(method, tabId, params, _ctx) {
       break
 
     case 'Inspector.targetReloadedAfterCrash':
-      log.info('target reloaded after crash:', tabId)
+      log.info(() => ['target reloaded after crash:', tabId])
       break
   }
 }

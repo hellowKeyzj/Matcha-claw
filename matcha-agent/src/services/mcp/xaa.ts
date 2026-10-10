@@ -435,7 +435,8 @@ export async function performCrossAppAccess(
   const prm = await discoverProtectedResource(serverUrl, { fetchFn })
   logMCPDebug(
     serverName,
-    `XAA: discovered resource=${prm.resource} ASes=[${prm.authorization_servers.join(', ')}]`,
+    () =>
+      `XAA: discovered resource=${prm.resource} ASes=[${prm.authorization_servers.join(', ')}]`,
   )
 
   // Try each advertised AS in order. grant_types_supported is OPTIONAL per

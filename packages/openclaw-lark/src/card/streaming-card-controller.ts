@@ -430,7 +430,7 @@ export class StreamingCardController {
       return false;
     }
     this.phase = to;
-    log.info('phase transition', { from, to, source, reason });
+    log.trace('phase transition', { from, to, source, reason });
     if (TERMINAL_PHASES.has(to)) {
       this._terminalReason = reason ?? null;
       this.onEnterTerminalPhase();
@@ -699,7 +699,7 @@ export class StreamingCardController {
         if (idleEffectiveCardId) {
           const seqBeforeClose = this.cardKit.cardKitSequence;
           this.cardKit.cardKitSequence += 1;
-          log.info('onIdle: closing streaming mode', {
+          log.trace('onIdle: closing streaming mode', {
             seqBefore: seqBeforeClose,
             seqAfter: this.cardKit.cardKitSequence,
           });
@@ -749,7 +749,7 @@ export class StreamingCardController {
         if (idleEffectiveCardId) {
           const seqBeforeUpdate = this.cardKit.cardKitSequence;
           this.cardKit.cardKitSequence += 1;
-          log.info('onIdle: updating final card', {
+          log.trace('onIdle: updating final card', {
             seqBefore: seqBeforeUpdate,
             seqAfter: this.cardKit.cardKitSequence,
           });
@@ -889,7 +889,7 @@ export class StreamingCardController {
           });
 
           if (this.isStaleCreate(epoch)) {
-            log.info('ensureCardCreated: stale epoch after createCardEntity, bailing out', {
+            log.trace('ensureCardCreated: stale epoch after createCardEntity, bailing out', {
               epoch,
               phase: this.phase,
             });
@@ -901,7 +901,7 @@ export class StreamingCardController {
             this.cardKit.originalCardKitCardId = cId;
             this.cardKit.cardKitSequence = 1;
             this.disposeShutdownHook = registerShutdownHook(`streaming-card:${cId}`, () => this.abortCard());
-            log.info('created CardKit entity', {
+            log.trace('created CardKit entity', {
               cardId: cId,
               initialSequence: this.cardKit.cardKitSequence,
             });
@@ -917,7 +917,7 @@ export class StreamingCardController {
             });
 
             if (this.isStaleCreate(epoch)) {
-              log.info('ensureCardCreated: stale epoch after sendCardByCardId, bailing out', {
+              log.trace('ensureCardCreated: stale epoch after sendCardByCardId, bailing out', {
                 epoch,
                 phase: this.phase,
               });
@@ -933,7 +933,7 @@ export class StreamingCardController {
               this.disposeShutdownHook = null;
               return;
             }
-            log.info('sent CardKit card', { messageId: result.messageId });
+            log.trace('sent CardKit card', { messageId: result.messageId });
           } else {
             throw new Error('card.create returned empty card_id');
           }
@@ -961,7 +961,7 @@ export class StreamingCardController {
           });
 
           if (this.isStaleCreate(epoch)) {
-            log.info('ensureCardCreated: stale epoch after IM fallback send, bailing out', {
+            log.trace('ensureCardCreated: stale epoch after IM fallback send, bailing out', {
               epoch,
               phase: this.phase,
             });
@@ -1128,7 +1128,7 @@ export class StreamingCardController {
         accountId: this.deps.accountId,
       });
     } catch (err) {
-      log.debug('updateToolUseStatus failed', { error: String(err) });
+      log.warn('updateToolUseStatus failed', { error: String(err) });
     }
   }
 
@@ -1150,7 +1150,7 @@ export class StreamingCardController {
   ): Promise<void> {
     const seqBeforeClose = this.cardKit.cardKitSequence;
     this.cardKit.cardKitSequence += 1;
-    log.info(`${label}: closing streaming mode`, {
+    log.trace(() => `${label}: closing streaming mode`, {
       seqBefore: seqBeforeClose,
       seqAfter: this.cardKit.cardKitSequence,
     });
@@ -1163,7 +1163,7 @@ export class StreamingCardController {
     });
     const seqBeforeUpdate = this.cardKit.cardKitSequence;
     this.cardKit.cardKitSequence += 1;
-    log.info(`${label}: updating card`, {
+    log.trace(() => `${label}: updating card`, {
       seqBefore: seqBeforeUpdate,
       seqAfter: this.cardKit.cardKitSequence,
     });

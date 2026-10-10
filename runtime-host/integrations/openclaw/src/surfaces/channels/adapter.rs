@@ -244,11 +244,12 @@ impl OpenClawDriver {
     }
 
     async fn restart_gateway_after_openclaw_receipt(&self) -> Result<(), ()> {
+        let _reservation = self.try_reserve_lifecycle().ok_or(())?;
         let supervisor = self.supervisor_handle();
         if supervisor.snapshot().phase() != SupervisorPhase::Running {
             channel_trace(
                 "host.composition.restart_receipt",
-                "outcome=skipped reason=gateway_restart_required state=not_running",
+                || "outcome=skipped reason=gateway_restart_required state=not_running",
             );
             return Ok(());
         }
@@ -319,7 +320,7 @@ impl OpenClawDriver {
             self.supervisor_handle().snapshot().phase() == SupervisorPhase::Running;
         channel_trace(
             "host.composition.config_save",
-            if runtime_running {
+            || if runtime_running {
                 "mode=running"
             } else {
                 "mode=offline"
@@ -374,7 +375,7 @@ impl OpenClawDriver {
         } else {
             channel_trace(
                 "host.composition.restart_receipt",
-                match outcome {
+                || match outcome {
                     crate::port::ChannelConfigMutationOutcome::Confirmed
                     | crate::port::ChannelConfigMutationOutcome::Noop => {
                         "outcome=skipped reason=native_reload"

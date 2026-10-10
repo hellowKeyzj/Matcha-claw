@@ -696,13 +696,11 @@
             "title": "Checking sign-in status"
         },
         "title": {
-            "login": "Sign in to MatchaClaw",
+            "login": "Sign in",
             "register": "Create an account",
             "twoFactor": "Two-factor authentication"
         },
         "description": {
-            "login": "Sign in to your account to continue using MatchaClaw.",
-            "register": "Create an account to get started with MatchaClaw.",
             "twoFactor": "Enter the code from your authenticator app to finish signing in."
         },
         "submit": {
@@ -718,8 +716,7 @@
         },
         "localEntry": {
             "offline": "Continue with local features",
-            "guest": "Continue without signing in",
-            "guestDescription": "Use local features now and sign in whenever you're ready."
+            "local": "Continue locally"
         },
         "fields": {
             "email": "Email",
@@ -747,7 +744,7 @@
             "hasAccount": "Already have an account?",
             "noAccount": "Don't have an account?",
             "login": "Sign in",
-            "register": "Register",
+            "register": "Create account",
             "registrationClosed": "Registration closed"
         },
         "legal": {
@@ -756,12 +753,6 @@
             "and": "and",
             "privacy": "Privacy Policy",
             "suffix": "."
-        },
-        "preview": {
-            "heading": "Welcome to MatchaClaw",
-            "copy": "Sign in to enter your AI workspace.",
-            "offlineHeading": "Keep working locally",
-            "offlineCopy": "The account service is temporarily unavailable. You can still open the app and use local features."
         }
     },
     "sidebar": {

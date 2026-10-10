@@ -120,7 +120,7 @@ export function registerFeishuWikiSpaceTool(api: OpenClawPluginApi): boolean {
             // LIST SPACES
             // -----------------------------------------------------------------
             case 'list': {
-              log.info(`list: page_size=${p.page_size ?? 10}`);
+              log.trace(() => `list: page_size=${p.page_size ?? 10}`);
 
               const res = await client.invoke(
                 'feishu_wiki_space.list',
@@ -153,7 +153,7 @@ export function registerFeishuWikiSpaceTool(api: OpenClawPluginApi): boolean {
             // GET SPACE
             // -----------------------------------------------------------------
             case 'get': {
-              log.info(`get: space_id=${p.space_id}`);
+              log.trace(() => `get: space_id=${p.space_id}`);
 
               const res = await client.invoke(
                 'feishu_wiki_space.get',
@@ -179,7 +179,7 @@ export function registerFeishuWikiSpaceTool(api: OpenClawPluginApi): boolean {
             // CREATE SPACE
             // -----------------------------------------------------------------
             case 'create': {
-              log.info(`create: name=${p.name ?? '(empty)'}, description=${p.description ?? '(empty)'}`);
+              log.trace(() => `create: name=${p.name ?? '(empty)'}, description=${p.description ?? '(empty)'}`);
 
               const res = await client.invoke(
                 'feishu_wiki_space.create',

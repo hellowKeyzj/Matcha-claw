@@ -293,15 +293,15 @@ async fn list_via_gateway(
     let response = match read_gateway(gateway, request).await {
         Ok(response) => response,
         Err(OperationsReadError::Rejected) => {
-            super::config::channel_trace("pairing.gateway.list", "outcome=rpc_rejected");
+            super::config::channel_trace("pairing.gateway.list", || "outcome=rpc_rejected");
             return ChannelPairingEffect::Rejected;
         }
         Err(OperationsReadError::Unavailable) => {
-            super::config::channel_trace("pairing.gateway.list", "outcome=unavailable");
+            super::config::channel_trace("pairing.gateway.list", || "outcome=unavailable");
             return ChannelPairingEffect::OutcomeUnknown;
         }
         Err(OperationsReadError::Protocol) => {
-            super::config::channel_trace("pairing.gateway.list", "outcome=protocol");
+            super::config::channel_trace("pairing.gateway.list", || "outcome=protocol");
             return ChannelPairingEffect::OutcomeUnknown;
         }
     };
@@ -309,7 +309,7 @@ async fn list_via_gateway(
         GatewayResponse::Failure { error, .. } => {
             super::config::channel_trace(
                 "pairing.gateway.list",
-                &format!("outcome=failure code={}", error.code()),
+                || format!("outcome=failure code={}", error.code()),
             );
             if error.code() == "INVALID_REQUEST"
                 && error.message().contains("unknown pairing channel")
@@ -322,7 +322,7 @@ async fn list_via_gateway(
         response => match decode_requests(response, &channel, account.as_deref()) {
             Ok(requests) => ChannelPairingEffect::Listed(requests),
             Err(()) => {
-                super::config::channel_trace("pairing.decode", "outcome=invalid");
+                super::config::channel_trace("pairing.decode", || "outcome=invalid");
                 ChannelPairingEffect::OutcomeUnknown
             }
         },

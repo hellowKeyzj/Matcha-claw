@@ -130,13 +130,13 @@ pub enum GraphPatchOperation {
         edge_id: String,
         source_node_id: String,
         target_node_id: String,
-        action: GraphEdgeAction,
+        action: Option<GraphEdgeAction>,
     },
     ReplaceEdge {
         edge_id: String,
         source_node_id: String,
         target_node_id: String,
-        action: GraphEdgeAction,
+        action: Option<GraphEdgeAction>,
     },
     RemoveEdge {
         edge_id: String,
@@ -362,19 +362,54 @@ pub enum CommandType {
     ApprovalRequest,
 }
 
+/// Historical command identity; original schema bytes remain audit facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalGraphReplace {
+    schema: u8,
+    definition: crate::GraphDefinition,
+    encoded_definition: Vec<u8>,
+}
+
+impl HistoricalGraphReplace {
+    pub(crate) fn schema(&self) -> u8 {
+        self.schema
+    }
+
+    pub fn definition(&self) -> &crate::GraphDefinition {
+        &self.definition
+    }
+
+    pub fn encoded_definition(&self) -> &[u8] {
+        &self.encoded_definition
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommandPayload {
     GraphPatch(GraphPatch),
     GraphReplace(crate::GraphDefinition),
+    HistoricalGraphReplace(HistoricalGraphReplace),
     NodeProgress(NodeProgressCommand),
     ApprovalRequest(ApprovalCommand),
 }
 
 impl CommandPayload {
+    pub(crate) fn historical_graph_replace(
+        schema: u8,
+        definition: crate::GraphDefinition,
+        encoded_definition: Vec<u8>,
+    ) -> Self {
+        Self::HistoricalGraphReplace(HistoricalGraphReplace {
+            schema,
+            definition,
+            encoded_definition,
+        })
+    }
+
     pub fn command_type(&self) -> CommandType {
         match self {
             Self::GraphPatch(_) => CommandType::GraphPatch,
-            Self::GraphReplace(_) => CommandType::GraphReplace,
+            Self::GraphReplace(_) | Self::HistoricalGraphReplace(_) => CommandType::GraphReplace,
             Self::NodeProgress(_) => CommandType::NodeProgress,
             Self::ApprovalRequest(_) => CommandType::ApprovalRequest,
         }
@@ -699,7 +734,8 @@ impl TeamEvent {
                         .expect("validated graph patches contain one operation"),
                 },
             ),
-            CommandPayload::GraphReplace(definition) => (
+            CommandPayload::GraphReplace(definition)
+            | CommandPayload::HistoricalGraphReplace(HistoricalGraphReplace { definition, .. }) => (
                 TeamEventType::GraphReplaced,
                 TeamEventPayload::GraphReplaced {
                     graph_id: definition.graph_id().to_owned(),

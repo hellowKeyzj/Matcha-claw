@@ -1,45 +1,50 @@
 use std::time::Instant;
 
-use platform::trace::{channel_trace, current_channel_trace, with_channel_trace_sync};
+use platform::trace::{channel_trace, current_channel_trace, enabled, with_channel_trace_sync};
 
 pub struct CommandTrace {
     pub(crate) trace_id: Option<String>,
-    queued_at: Instant,
+    queued_at: Option<Instant>,
     pub(crate) call: Option<super::call::ChannelCall>,
 }
 
 impl CommandTrace {
     pub(crate) fn capture() -> Self {
-        channel_trace("channel.owner.enqueue", "outcome=queued");
+        channel_trace("channel.owner.enqueue", || "outcome=queued");
         Self {
             trace_id: current_channel_trace(),
-            queued_at: Instant::now(),
+            queued_at: enabled().then(Instant::now),
             call: None,
         }
     }
 
     pub(crate) fn received(&self) {
-        channel_trace(
-            "channel.owner.receive",
-            &format!("queueMs={}", self.queued_at.elapsed().as_millis()),
-        );
+        if let Some(queued_at) = self.queued_at {
+            channel_trace("channel.owner.receive", || {
+                format!("queueMs={}", queued_at.elapsed().as_millis())
+            });
+        }
     }
 }
 
 pub struct ChannelTraceSpan {
     phase: &'static str,
     trace_id: Option<String>,
-    started: Instant,
+    started: Option<Instant>,
     outcome: &'static str,
 }
 
 impl ChannelTraceSpan {
     pub fn begin(phase: &'static str) -> Self {
-        channel_trace(phase, "boundary=begin");
+        channel_trace(phase, || "boundary=begin");
         Self {
             phase,
-            trace_id: current_channel_trace(),
-            started: Instant::now(),
+            trace_id: if enabled() {
+                current_channel_trace()
+            } else {
+                None
+            },
+            started: enabled().then(Instant::now),
             outcome: "interrupted",
         }
     }
@@ -51,15 +56,17 @@ impl ChannelTraceSpan {
 
 impl Drop for ChannelTraceSpan {
     fn drop(&mut self) {
+        let Some(started) = self.started else {
+            return;
+        };
         with_channel_trace_sync(self.trace_id.clone(), || {
-            channel_trace(
-                self.phase,
-                &format!(
+            channel_trace(self.phase, || {
+                format!(
                     "boundary=end outcome={} elapsedMs={}",
                     self.outcome,
-                    self.started.elapsed().as_millis()
-                ),
-            );
+                    started.elapsed().as_millis()
+                )
+            });
         });
     }
 }

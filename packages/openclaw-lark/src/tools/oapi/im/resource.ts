@@ -116,7 +116,7 @@ export function registerFeishuImUserFetchResourceTool(api: OpenClawPluginApi): b
         try {
           const client = toolClient();
 
-          log.info(`fetch_resource: message_id="${p.message_id}", file_key="${p.file_key}", type="${p.type}"`);
+          log.trace(() => `fetch_resource: message_id="${p.message_id}", file_key="${p.file_key}", type="${p.type}"`);
 
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const res: any = await client.invoke(
@@ -148,7 +148,7 @@ export function registerFeishuImUserFetchResourceTool(api: OpenClawPluginApi): b
 
           // 从响应头获取 Content-Type，并确定文件扩展名
           const contentType = res.headers?.['content-type'] || '';
-          log.info(`fetch_resource: content-type=${contentType}`);
+          log.trace(() => `fetch_resource: content-type=${contentType}`);
 
           // 从 Content-Type 推断扩展名，自动生成保存路径
           const mimeType = contentType ? contentType.split(';')[0].trim() : '';
@@ -158,7 +158,7 @@ export function registerFeishuImUserFetchResourceTool(api: OpenClawPluginApi): b
             prefix: 'im-resource',
             extension: mimeExt,
           });
-          log.info(`fetch_resource: saving to ${finalPath}`);
+          log.trace(() => `fetch_resource: saving to ${finalPath}`);
 
           // 确保父目录存在
           await fs.mkdir(path.dirname(finalPath), { recursive: true });

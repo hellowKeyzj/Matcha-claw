@@ -501,7 +501,7 @@ async fn handle_keyed_command(
                     finalize_login_effect_after_delivery(shared, lane, key, effect, call).await;
                 }
                 _ = cancellation.cancelled() => {
-                    channel_trace("channel.login.wait", "outcome=cancelled");
+                    channel_trace("channel.login.wait", || "outcome=cancelled");
                     lane.clear_login_configs();
                     if let Some(call) = &mut call {
                         record_error(call.finish(ChannelCallOutcome::Cancelled).await);
@@ -636,7 +636,7 @@ async fn finalize_login_effect(
     let Some((config_key, agent_id, config, connected_outcome)) =
         check_login_finalization(lane, &key, &effect)
     else {
-        channel_trace("channel.login.finalize", "outcome=skipped");
+        channel_trace("channel.login.finalize", || "outcome=skipped");
         lane.settle_login_effect(&key, &effect);
         return effect;
     };
@@ -653,7 +653,7 @@ async fn finalize_login_effect_after_delivery(
 ) {
     let Some((config_key, agent_id, config, _)) = check_login_finalization(lane, &key, &effect)
     else {
-        channel_trace("channel.login.finalize", "outcome=skipped");
+        channel_trace("channel.login.finalize", || "outcome=skipped");
         lane.settle_login_effect(&key, &effect);
         if let Some(call) = &mut call {
             record_error(call.effect(&effect).await);
@@ -703,11 +703,11 @@ fn check_login_finalization(
     if progress.status != LoginProgressStatus::Connected {
         return None;
     }
-    channel_trace("channel.login.confirmed", "outcome=connected");
+    channel_trace("channel.login.confirmed", || "outcome=connected");
     let Some((config_key, agent_id, config)) =
         lane.take_login_config(key, progress.account_id.as_deref())
     else {
-        channel_trace("channel.login.finalize", "outcome=no_pending_config");
+        channel_trace("channel.login.finalize", || "outcome=no_pending_config");
         return None;
     };
     Some((
@@ -797,7 +797,7 @@ async fn execute_mutation(
     let mut span = ChannelTraceSpan::begin(kind.trace_phase());
     let effect = async {
         let Some(ops) = runtime_directory.channel_ops(key.endpoint()) else {
-            channel_trace("channel.mutation.admission", "outcome=unavailable");
+            channel_trace("channel.mutation.admission", || "outcome=unavailable");
             return unknown_effect(&mutation);
         };
 

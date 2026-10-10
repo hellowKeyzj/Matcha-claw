@@ -7,6 +7,37 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DesignError {
+    UnknownRun,
+    TeamMismatch,
+    NotDesigning,
+    RunInactive,
+    StaleEpoch,
+    StaleGeneration,
+    StaleGraphVersion,
+    UnknownTeam,
+    MissingStartOrEnd,
+    IncompletePath(crate::NodeId),
+    MissingAssignment(crate::NodeId),
+    EmptyPrompt(crate::NodeId),
+    UnknownRole(crate::NodeId),
+    SessionBindingMismatch(crate::NodeId),
+    SessionBindingAmbiguous(crate::NodeId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeGraphError {
+    UnknownRun,
+    TeamMismatch,
+    RunInactive,
+    ExecutionInactive,
+    StaleGraphVersion,
+    UnknownNode(crate::NodeId),
+    InvalidNode(crate::NodeId),
+    EmptyPrompt(crate::NodeId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoreFault {
     WriterBusy,
     Lock(io::ErrorKind),
@@ -15,12 +46,16 @@ pub enum StoreFault {
     Commit(io::ErrorKind),
     CommitOutcomeUnknown(io::ErrorKind),
     RecoveryRequired,
+    MigrationRequired,
     RecordTooLarge,
     LogFull,
     EpochOverflow,
     CorruptRecord,
     UnsupportedSchemaVersion(u8),
     InvalidFacts,
+    Design(DesignError),
+    RuntimeGraph(RuntimeGraphError),
+    GraphPatchInput(crate::run::event::InvalidEventInput),
     RuntimeReceipt(crate::OrganizationFactsError),
     Evidence(crate::OrganizationFactsError),
     ActivityTransition(ActivityTransitionError),
@@ -34,6 +69,9 @@ pub enum StoreFault {
     GraphPatch(crate::GraphPatchError),
     EventLedger(crate::RecordCommandError),
     ControlNodeResolution(ControlNodeResolutionError),
+    ControlExecution(crate::run::control::ControlExecutionError),
+    ReadySchedule(crate::ReadyScheduleError),
+    GraphReduce(crate::ReduceError),
 }
 
 impl fmt::Display for StoreFault {
@@ -55,6 +93,8 @@ impl fmt::Display for StoreFault {
             ),
             Self::RecoveryRequired => formatter
                 .write_str("organization durable facts require reopening before another mutation"),
+            Self::MigrationRequired => formatter
+                .write_str("organization state requires explicit offline migration before startup"),
             Self::RecordTooLarge => {
                 formatter.write_str("organization durable facts record exceeds the durable limit")
             }
@@ -70,6 +110,15 @@ impl fmt::Display for StoreFault {
                 .write_str("organization durable facts schema requires an explicit upgrade"),
             Self::InvalidFacts => {
                 formatter.write_str("organization durable facts violate domain invariants")
+            }
+            Self::Design(_) => {
+                formatter.write_str("organization design request violates design invariants")
+            }
+            Self::RuntimeGraph(_) => {
+                formatter.write_str("organization runtime graph request violates execution invariants")
+            }
+            Self::GraphPatchInput(_) => {
+                formatter.write_str("organization graph patch audit input is invalid")
             }
             Self::RuntimeReceipt(_) => formatter
                 .write_str("organization runtime receipt violates TeamRun durable invariants"),
@@ -105,6 +154,9 @@ impl fmt::Display for StoreFault {
             Self::ControlNodeResolution(_) => formatter.write_str(
                 "organization control node resolution violates TeamRun durable invariants",
             ),
+            Self::ControlExecution(_) => formatter.write_str("organization control execution could not advance the graph"),
+            Self::ReadySchedule(_) => formatter.write_str("organization ready nodes could not be scheduled"),
+            Self::GraphReduce(_) => formatter.write_str("organization graph transition could not be applied"),
         }
     }
 }

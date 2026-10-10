@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::{
     MemberIntroductionError, MemberIntroductionRequest, OrganizationRuntimeDirectory,
-    OrganizationStore, RoleMaterializationAgent, TeamMaterialization, TeamMemberIntroductions,
+    OrganizationFacts, RoleMaterializationAgent, TeamMaterialization, TeamMemberIntroductions,
     TeamProvisionMemberStatus, TeamProvisionObserver, TeamProvisionProgress, TeamProvisionStage,
     TeamProvisionUpdate, team::LEADER_ROLE_ID,
 };
@@ -23,19 +23,19 @@ pub(super) enum PreparationError {
 
 pub(super) async fn prepare_manual_team(
     materialization: TeamMaterialization,
-    store: &OrganizationStore,
+    facts: &OrganizationFacts,
     runtimes: &dyn OrganizationRuntimeDirectory,
     introductions: Option<&Arc<dyn TeamMemberIntroductions>>,
     observer: Option<&TeamProvisionObserver>,
 ) -> Result<TeamMaterialization, PreparationError> {
-    let started = Instant::now();
+    let started = platform::trace::enabled().then(Instant::now);
     let definition = materialization.definition();
     let team_id = definition.team_id();
     session_trace(
         "runtime.team.prepare.start",
-        json!({"roleCount": definition.roles().len()}),
+        || json!({"roleCount": definition.roles().len()}),
     );
-    if let Some(existing) = store.facts().team(team_id) {
+    if let Some(existing) = facts.team(team_id) {
         if existing.tombstoned() || existing.definition() != definition {
             preparation_end(
                 started,
@@ -47,8 +47,8 @@ pub(super) async fn prepare_manual_team(
             );
             return Err(PreparationError::Unavailable);
         }
-        let saved = store
-            .team_materialization_recovery_request(team_id)
+        let saved = facts
+            .materialization_recovery_request(team_id)
             .ok_or_else(|| {
                 preparation_end(started, "saved_request_missing");
                 PreparationError::Unavailable
@@ -150,10 +150,10 @@ pub(super) async fn prepare_manual_team(
                 PreparationError::Unavailable
             })?;
         let pipeline = PipelineContext::silent_in_memory("manual-team-member-introductions");
-        let profiles_started = Instant::now();
+        let profiles_started = platform::trace::enabled().then(Instant::now);
         session_trace(
             "runtime.team.profiles.start",
-            json!({"memberCount": members.len()}),
+            || json!({"memberCount": members.len()}),
         );
         let profiles = pipeline
             .step("read-member-profiles", move |_| {
@@ -161,13 +161,13 @@ pub(super) async fn prepare_manual_team(
             })
             .await
             .map_err(|error| {
-                session_trace("runtime.team.profiles.end", json!({"reason": introduction_error(&error), "elapsedMs": profiles_started.elapsed().as_millis()}));
+                session_trace("runtime.team.profiles.end", || json!({"reason": introduction_error(&error), "elapsedMs": profiles_started.map(|started| started.elapsed().as_millis())}));
                 preparation_end(started, "read_profiles_failed");
                 PreparationError::Unavailable
             })?;
         session_trace(
             "runtime.team.profiles.end",
-            json!({"reason": "read", "profileCount": profiles.len(), "elapsedMs": profiles_started.elapsed().as_millis()}),
+            || json!({"reason": "read", "profileCount": profiles.len(), "elapsedMs": profiles_started.map(|started| started.elapsed().as_millis())}),
         );
         if profiles.len() != members.len() {
             preparation_end(started, "profile_count_mismatch");
@@ -208,9 +208,9 @@ pub(super) async fn prepare_manual_team(
                 }
                 let name = markdown_text(&request.name);
                 let role_id = markdown_text(request.role_id.as_str());
-                let role_hash = identifier_hash(request.role_id.as_str());
-                let generated_started = Instant::now();
-                session_trace("runtime.team.introduction.start", json!({"memberIndex": index, "roleIdHash": role_hash}));
+                let role_hash = platform::trace::enabled().then(|| identifier_hash(request.role_id.as_str()));
+                let generated_started = platform::trace::enabled().then(Instant::now);
+                session_trace("runtime.team.introduction.start", || json!({"memberIndex": index, "roleIdHash": role_hash}));
                 let result = pipeline
                     .step("generate-member-introduction", move |context| {
                         Box::pin(async move {
@@ -227,7 +227,7 @@ pub(super) async fn prepare_manual_team(
                                 || output.contains(TEAMRUN_MARKER_PREFIX)
                                 || output.len() > MAX_LEADER_MARKDOWN_BYTES
                             {
-                                session_trace("runtime.team.introduction.output", json!({
+                                session_trace("runtime.team.introduction.output", || json!({
                                     "memberIndex": index,
                                     "reason": if output.is_empty() { "empty_output" } else if output.contains(TEAMRUN_MARKER_PREFIX) { "reserved_marker" } else { "output_bytes_exceeded" },
                                     "outputBytes": output.len(),
@@ -251,11 +251,11 @@ pub(super) async fn prepare_manual_team(
                         },
                     }).await;
                 }
-                session_trace("runtime.team.introduction.end", json!({
+                session_trace("runtime.team.introduction.end", || json!({
                     "memberIndex": index, "roleIdHash": role_hash,
                     "reason": result.as_ref().map_or_else(introduction_error, |_| "generated"),
                     "outputBytes": result.as_ref().ok().map(String::len),
-                    "elapsedMs": generated_started.elapsed().as_millis(),
+                    "elapsedMs": generated_started.map(|started| started.elapsed().as_millis()),
                 }));
                 match result {
                     Ok(body) => Ok(format!(
@@ -292,10 +292,10 @@ pub(super) async fn prepare_manual_team(
     result
 }
 
-fn preparation_end(started: Instant, reason: &'static str) {
+fn preparation_end(started: Option<Instant>, reason: &'static str) {
     session_trace(
         "runtime.team.prepare.end",
-        json!({"reason": reason, "elapsedMs": started.elapsed().as_millis()}),
+        || json!({"reason": reason, "elapsedMs": started.map(|started| started.elapsed().as_millis())}),
     );
 }
 
