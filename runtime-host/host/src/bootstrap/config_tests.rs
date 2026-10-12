@@ -17,7 +17,7 @@ fn wire() -> serde_json::Value {
         "appVersion": "1.0.0",
         "appLogDir": format!("{ROOT}/userdata/logs"),
         "runtimeHostStateDir": format!("{ROOT}/runtime-host"),
-        "runtimeHostMcpExecutable": format!("{ROOT}/runtime-host-mcp"),
+        "runtimeHostMcpExecutable": format!("{ROOT}/runtime-host"),
         "parentCallbackBaseUrl": "http://127.0.0.1:34100",
         "parentCallbackDispatchToken": "test-parent-dispatch-token",
         "deliveryVerificationKey": "MCowBQYDK2VwAyEAI3qD__Jv49yWsjljbNRbVm11047IMl5xFBflSPOROKE",
@@ -96,7 +96,7 @@ fn materializable_wire(root: &TestRoot) -> serde_json::Value {
     let mut value = wire();
     value["appLogDir"] = serde_json::Value::String(root.path("userdata/logs"));
     value["runtimeHostStateDir"] = serde_json::Value::String(root.runtime_host_state_dir());
-    value["runtimeHostMcpExecutable"] = serde_json::Value::String(root.path("runtime-host-mcp"));
+    value["runtimeHostMcpExecutable"] = serde_json::Value::String(root.path("runtime-host"));
     value["matcha"]["bunExecutable"] = serde_json::Value::String(root.path("bun"));
     value["matcha"]["entry"] = serde_json::Value::String(root.path("app-server.mjs"));
     value["matcha"]["workingDirectory"] = serde_json::Value::String(root.path("work"));
@@ -266,7 +266,7 @@ fn materializes_host_and_organization_runtime_input() {
     assert_eq!(input.matcha.port, 34102);
     assert_eq!(
         input.open_claw.runtime_host_mcp_executable,
-        Path::new(&root.path("runtime-host-mcp"))
+        Path::new(&root.path("runtime-host"))
     );
     assert_eq!(
         input.open_claw.runtime_host_mcp_state_dir,

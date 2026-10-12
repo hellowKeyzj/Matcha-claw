@@ -130,10 +130,12 @@ export function createSessionModelSelectionTransport(
       }
       const body = response.body;
       logSessionTrace('electron.model-selection.response', traceId, () => {
-        const outcome = response.status === 200 && isSessionModelSelectionResponse(body) ? body.outcome : null;
+        const valid = response.status === 200 && isSessionModelSelectionResponse(body);
         return {
           status: response.status,
-          contract: outcome ?? (response.status === 400 ? 'invalid' : response.status === 422 ? 'unsupported' : 'unavailable'),
+          contract: response.status === 200 ? (valid ? 'valid' : 'invalid') : 'not-applicable',
+          outcome: valid ? body.outcome : null,
+          ...(valid && body.outcome === 'target_rejected' ? summarizeRejectionDiagnostic(diagnosticHeaders) : {}),
           elapsedMs: Date.now() - startedAt,
         };
       });
@@ -143,19 +145,29 @@ export function createSessionModelSelectionTransport(
         && isSessionModelSelectionResponse(body)
         && body.outcome === 'target_rejected'
       ) {
-        logger.warn('[SessionModelSelection] target rejected', {
-          adapter: request.input.endpoint.runtimeAdapterId,
-          reason: diagnosticHeaders?.get(REJECTION_REASON_HEADER) ?? 'unclassified',
-          openclawCode: diagnosticHeaders?.get(OPENCLAW_PEER_CODE_HEADER) ?? undefined,
-          openclawMessage: diagnosticHeaders?.get(OPENCLAW_PEER_MESSAGE_HEADER) ?? undefined,
-          accountId: diagnosticHeaders?.get(DIAGNOSTIC_ACCOUNT_HEADER) ?? undefined,
-          modelId: diagnosticHeaders?.get(DIAGNOSTIC_MODEL_HEADER) ?? undefined,
-          protocol: diagnosticHeaders?.get(DIAGNOSTIC_PROTOCOL_HEADER) ?? undefined,
-          authMode: diagnosticHeaders?.get(DIAGNOSTIC_AUTH_MODE_HEADER) ?? undefined,
-          modelSelectionId: request.input.modelSelectionId,
-          sessionKeyLength: request.input.sessionKey.length,
-          endpointSessionIdLength: request.input.endpointSessionId?.length,
-        });
+        if (request.input.endpoint.runtimeAdapterId === 'matcha-agent') {
+          logger.warn('[SessionModelSelection] target rejected', {
+            adapter: request.input.endpoint.runtimeAdapterId,
+            ...summarizeRejectionDiagnostic(diagnosticHeaders),
+            modelSelectionId: summarizeIdentifier(request.input.modelSelectionId),
+            sessionKey: summarizeIdentifier(request.input.sessionKey),
+            endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
+          });
+        } else {
+          logger.warn('[SessionModelSelection] target rejected', {
+            adapter: request.input.endpoint.runtimeAdapterId,
+            reason: diagnosticHeaders?.get(REJECTION_REASON_HEADER) ?? 'unclassified',
+            openclawCode: diagnosticHeaders?.get(OPENCLAW_PEER_CODE_HEADER) ?? undefined,
+            openclawMessage: diagnosticHeaders?.get(OPENCLAW_PEER_MESSAGE_HEADER) ?? undefined,
+            accountId: diagnosticHeaders?.get(DIAGNOSTIC_ACCOUNT_HEADER) ?? undefined,
+            modelId: diagnosticHeaders?.get(DIAGNOSTIC_MODEL_HEADER) ?? undefined,
+            protocol: diagnosticHeaders?.get(DIAGNOSTIC_PROTOCOL_HEADER) ?? undefined,
+            authMode: diagnosticHeaders?.get(DIAGNOSTIC_AUTH_MODE_HEADER) ?? undefined,
+            modelSelectionId: request.input.modelSelectionId,
+            sessionKeyLength: request.input.sessionKey.length,
+            endpointSessionIdLength: request.input.endpointSessionId?.length,
+          });
+        }
       }
       if (response.status === 200 && isSessionModelSelectionResponse(body)) {
         return { status: 200, body };
@@ -194,6 +206,25 @@ function isSessionModelState(value: unknown): value is SessionModelState {
     && (value.selectionId === undefined || typeof value.selectionId === 'string');
 }
 
+function summarizeRejectionDiagnostic(headers: Headers | null) {
+  const rejectionReason = headers?.get(REJECTION_REASON_HEADER) ?? '';
+  const protocol = headers?.get(DIAGNOSTIC_PROTOCOL_HEADER) ?? '';
+  const authMode = headers?.get(DIAGNOSTIC_AUTH_MODE_HEADER) ?? '';
+  return {
+    rejectionReason: [
+      'invalid_session_key', 'binding_mismatch', 'invalid_model', 'model_selection_not_found',
+      'openclaw_model_ref_invalid', 'matcha_provider_runtime_unavailable', 'session_not_found',
+      'runtime_target_rejected', 'openclaw_runtime_target_rejected',
+    ].includes(rejectionReason) ? rejectionReason : 'unclassified',
+    accountId: summarizeIdentifier(headers?.get(DIAGNOSTIC_ACCOUNT_HEADER)),
+    modelId: summarizeIdentifier(headers?.get(DIAGNOSTIC_MODEL_HEADER)),
+    protocol: ['anthropic_messages', 'google_generative_ai', 'open_ai_completions', 'open_ai_responses'].includes(protocol)
+      ? protocol : null,
+    authMode: ['api_key', 'token', 'cli_reuse', 'oauth_browser', 'oauth_device', 'local'].includes(authMode)
+      ? authMode : null,
+  };
+}
+
 function summarizeRequestShape(value: unknown) {
   if (!isRecord(value)) {
     return { type: typeof value };
@@ -201,10 +232,10 @@ function summarizeRequestShape(value: unknown) {
   const scope = isRecord(value.scope) ? value.scope : null;
   const input = isRecord(value.input) ? value.input : null;
   return {
-    bodyKeys: Object.keys(value).sort(),
-    scopeKeys: scope ? Object.keys(scope).sort() : null,
-    targetKeys: isRecord(value.target) ? Object.keys(value.target).sort() : null,
-    inputKeys: input ? Object.keys(input).sort() : null,
+    bodyKeyCount: Object.keys(value).length,
+    scopeKeyCount: scope ? Object.keys(scope).length : null,
+    targetKeyCount: isRecord(value.target) ? Object.keys(value.target).length : null,
+    inputKeyCount: input ? Object.keys(input).length : null,
     scopeSessionKey: summarizeIdentifier(typeof scope?.sessionKey === 'string' ? scope.sessionKey : null),
     inputSessionKey: summarizeIdentifier(typeof input?.sessionKey === 'string' ? input.sessionKey : null),
     endpointSessionId: summarizeIdentifier(typeof input?.endpointSessionId === 'string' ? input.endpointSessionId : null),

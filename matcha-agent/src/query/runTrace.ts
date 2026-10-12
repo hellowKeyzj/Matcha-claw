@@ -68,14 +68,25 @@ export function isRunTraceEnabled(
   return isTraceEnabled(env)
 }
 
+export function hashTraceIdentifier(value: string | undefined): string | null {
+  if (value === undefined) return null
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index++) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 16777619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
 export function logProcessSessionTrace(
   source: string,
   stage: string,
-  details?: RunTraceDetails,
+  details?: RunTraceDetails | (() => RunTraceDetails),
 ): void {
   if (!isRunTraceEnabled()) return
 
-  const sanitizedDetails = sanitizeRunTraceDetails(details)
+  const sanitizedDetails = sanitizeRunTraceDetails(
+    typeof details === 'function' ? details() : details,
+  )
   process.stderr.write(
     `${JSON.stringify({
       prefix: 'session-trace',

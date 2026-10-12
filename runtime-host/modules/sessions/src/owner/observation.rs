@@ -1009,7 +1009,7 @@ impl SessionLane {
         generation: u64,
         result: Result<SessionSync, RuntimeOperationFailure>,
     ) {
-        let (baseline, command) = {
+        let (baseline, command, items_mode) = {
             let mut entries = shared
                 .observations
                 .lock()
@@ -1045,8 +1045,9 @@ impl SessionLane {
             let Some(command) = entry.active_command.take() else {
                 return;
             };
+            let items_mode = entry.handle.as_ref().expect("sync observation handle").items_sync_mode();
             entry.task.take();
-            (baseline, command)
+            (baseline, command, items_mode)
         };
         let input_trace_started = crate::trace::enabled().then(Instant::now);
         if crate::trace::enabled() {
@@ -1125,7 +1126,7 @@ impl SessionLane {
                         "epoch": current.epoch, "seq": current.seq, "cursor": current.cursor,
                     }), || {
                         let started = Instant::now();
-                        let reconciled = next.reconcile_sync(&sync, &baseline);
+                        let reconciled = next.reconcile_sync(&sync, &baseline, items_mode);
                         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
                         let item_count = |view: &SessionView| match &view.items {
                             crate::state::SessionFact::Complete(items) | crate::state::SessionFact::Incomplete { facts: items, .. } => Some(items.len()),
@@ -1143,7 +1144,7 @@ impl SessionLane {
                         reconciled
                     })
                 } else {
-                    next.reconcile_sync(&sync, &baseline)
+                    next.reconcile_sync(&sync, &baseline, items_mode)
                 };
                 match reconciled {
                     Ok(mut view) => {

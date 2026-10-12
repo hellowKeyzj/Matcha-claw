@@ -271,12 +271,12 @@ pub(super) async fn select_session_model_with_handle(
         trace_id,
         || serde_json::json!({
             "sessionId": session_id_shape(),
-            "model": &model,
+            "model": session_trace::id_shape(Some(&model)),
             "modelSelectionId": session_trace::id_shape(Some(&command.model_selection_id)),
             "providerFingerprint": session_trace::id_shape(Some(&provider_fingerprint)),
             "providerRuntime": session_adapter::matcha_provider_runtime_trace(&provider_runtime),
-            "accountId": diagnostic.as_ref().map(|diagnostic| diagnostic.account_id()),
-            "modelId": diagnostic.as_ref().map(|diagnostic| diagnostic.model_id()),
+            "accountId": session_trace::id_shape(diagnostic.as_ref().map(|diagnostic| diagnostic.account_id())),
+            "modelId": session_trace::id_shape(diagnostic.as_ref().map(|diagnostic| diagnostic.model_id())),
             "protocol": diagnostic.as_ref().and_then(|diagnostic| diagnostic.protocol()),
             "authMode": diagnostic.as_ref().map(|diagnostic| diagnostic.auth_mode()),
         }),
@@ -294,7 +294,7 @@ pub(super) async fn select_session_model_with_handle(
                     || serde_json::json!({
                         "reason": SessionModelSelectionRejection::InvalidModel.as_str(),
                         "sessionId": session_id_shape(),
-                        "model": model,
+                        "model": session_trace::id_shape(Some(&model)),
                     }),
                 );
                 return SessionModelSelectionOutcome::target_rejected(
@@ -326,7 +326,7 @@ pub(super) async fn select_session_model_with_handle(
         trace_id,
         || serde_json::json!({
             "sessionId": session_id_shape(),
-            "model": model,
+            "model": session_trace::id_shape(Some(&model)),
             "outcome": session_adapter::session_model_selection_outcome_label(&outcome),
             "rejectionReason": outcome.rejection_reason(),
         }),

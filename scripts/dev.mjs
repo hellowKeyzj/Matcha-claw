@@ -29,7 +29,7 @@ function run(command, args, options = {}) {
 }
 
 run('node', ['scripts/download-bundled-protoc.mjs']);
-run('node', ['scripts/build-runtime-host-native.mjs', '--platform', 'win32', '--arch', 'x64']);
+run('node', ['scripts/build-runtime-host-native.mjs', '--platform', 'win32', '--arch', 'x64', '--profile', 'dev']);
 run('node', ['scripts/patch-dev-electron-icon.mjs']);
 await buildManagedOpenClawPlugins({ rootDir: projectRoot, pluginIds: ['openclaw-lark'] });
 run('vite', [], {

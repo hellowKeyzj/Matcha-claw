@@ -205,7 +205,7 @@ fn bootstrap(root: &TestRoot) -> (Value, DeliveryPorts) {
         "appVersion": "test",
         "appLogDir": root.path("userdata-logs"),
         "runtimeHostStateDir": root.path("runtime-host-state"),
-        "runtimeHostMcpExecutable": format!("{root_path}/missing-runtime-host-mcp"),
+        "runtimeHostMcpExecutable": format!("{root_path}/missing-runtime-host"),
         "parentCallbackBaseUrl": "http://127.0.0.1:1",
         "parentCallbackDispatchToken": "test-parent-dispatch-token",
         "deliveryVerificationKey": "MCowBQYDK2VwAyEAI3qD__Jv49yWsjljbNRbVm11047IMl5xFBflSPOROKE",

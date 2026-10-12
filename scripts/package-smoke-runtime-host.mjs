@@ -5,7 +5,7 @@ import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, read
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-const LEGACY_ENTRY_NAMES = new Set(['main-cli.js', 'host-process.cjs']);
+const LEGACY_ENTRY_NAMES = new Set(['main-cli.js', 'host-process.cjs', 'runtime-host-mcp', 'runtime-host-mcp.exe']);
 const EXECUTION_TIMEOUT_MS = 5_000;
 const EVIDENCE_MANIFEST_VERSION = 2;
 const EVIDENCE_RECEIPT_VERSION = 1;
@@ -231,7 +231,6 @@ function runtimeHostLayout(applicationRoot, platform, targetKey) {
     runtimeHostDirectory,
     bunPath: join(resourcesPath, 'bin', platform === 'win32' ? 'bun.exe' : 'bun'),
     runtimeHostPath: join(runtimeHostDirectory, platform === 'win32' ? 'runtime-host.exe' : 'runtime-host'),
-    runtimeHostMcpPath: join(runtimeHostDirectory, platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp'),
     guardianPath: join(runtimeHostDirectory, 'runtime-host-guardian'),
   };
 }
@@ -251,7 +250,6 @@ export function inspectRuntimeHostPackageInventory(plan, dependencies = {}) {
   return {
     bun: 'present',
     runtimeHost: 'present',
-    runtimeHostMcp: 'present',
     guardian: plan.platform === 'win32' ? 'not-applicable' : 'present',
     packageArtifact: plan.packageArtifactPath ? 'present' : 'not-provided',
     installedApplication: plan.installed ? 'present' : 'not-provided',
@@ -273,9 +271,6 @@ function inspectRuntimeHostLayout(layout, dependencies, label) {
   }
   if (!isFile(layout.runtimeHostPath)) {
     throw packageSmokeError(`missing ${label} runtime-host artifact: ${layout.runtimeHostPath}`);
-  }
-  if (!isFile(layout.runtimeHostMcpPath)) {
-    throw packageSmokeError(`missing ${label} runtime-host-mcp artifact: ${layout.runtimeHostMcpPath}`);
   }
   if (!isFile(layout.bunPath)) {
     throw packageSmokeError(`missing ${label} Bun artifact: ${layout.bunPath}`);
@@ -323,7 +318,7 @@ export function runRuntimeHostPackageSmoke(plan, dependencies = {}) {
     result.localReceiptPath = writeRuntimeHostLocalPackageExecutionReceipt(plan.localReceiptPath, receipt, dependencies);
   }
 
-  const inventoryDetail = `bun=${inventory.bun}; runtime-host=${inventory.runtimeHost}; runtime-host-mcp=${inventory.runtimeHostMcp}; guardian=${inventory.guardian}; package=${inventory.packageArtifact}; installed=${inventory.installedApplication}`;
+  const inventoryDetail = `bun=${inventory.bun}; runtime-host=${inventory.runtimeHost}; guardian=${inventory.guardian}; package=${inventory.packageArtifact}; installed=${inventory.installedApplication}`;
   const report = [
     `cell=${plan.platform}-${plan.arch} × ${plan.target}`,
     `inventory=passed-not-execution (${inventoryDetail})`,
@@ -450,8 +445,6 @@ function createRuntimeHostPackageInventoryBinding(plan, dependencies) {
     inventoryEntry('package', basename(plan.packageArtifactPath), plan.packageArtifactPath, dependencies),
     inventoryEntry('unpacked-runtime-host', runtimeHostInventoryPath(plan, plan.runtimeHostPath), plan.runtimeHostPath, dependencies),
     inventoryEntry('installed-runtime-host', runtimeHostInventoryPath(plan.installed, plan.installed.runtimeHostPath), plan.installed.runtimeHostPath, dependencies),
-    inventoryEntry('unpacked-runtime-host-mcp', runtimeHostInventoryPath(plan, plan.runtimeHostMcpPath), plan.runtimeHostMcpPath, dependencies),
-    inventoryEntry('installed-runtime-host-mcp', runtimeHostInventoryPath(plan.installed, plan.installed.runtimeHostMcpPath), plan.installed.runtimeHostMcpPath, dependencies),
     inventoryEntry('unpacked-bun', runtimeHostInventoryPath(plan, plan.bunPath), plan.bunPath, dependencies),
     inventoryEntry('installed-bun', runtimeHostInventoryPath(plan.installed, plan.installed.bunPath), plan.installed.bunPath, dependencies),
   ];

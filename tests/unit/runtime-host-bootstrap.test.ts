@@ -16,7 +16,7 @@ function unixInput(
     appVersion: '1.0.4',
     appLogDir: '/var/lib/matcha/userdata/logs',
     runtimeHostStateDir: '/var/lib/matcha/runtime-host',
-    runtimeHostMcpExecutable: '/opt/matcha/runtime-host-mcp',
+    runtimeHostMcpExecutable: '/opt/matcha/runtime-host',
     deliveryVerificationKey: 'MCowBQYDK2VwAyEAI3qD__Jv49yWsjljbNRbVm11047IMl5xFBflSPOROKE',
     parentCallbackBaseUrl: 'http://127.0.0.1:32110',
     parentCallbackDispatchToken: 'parent-callback-token',
@@ -50,7 +50,7 @@ function windowsInput(): WindowsRuntimeHostBootstrapInput {
     appVersion: '1.0.4',
     appLogDir: 'C:\\Users\\matcha\\AppData\\Roaming\\MatchaClaw\\logs',
     runtimeHostStateDir: 'C:\\Users\\matcha\\AppData\\Roaming\\MatchaClaw\\runtime-host',
-    runtimeHostMcpExecutable: 'C:\\Matcha\\runtime-host-mcp.exe',
+    runtimeHostMcpExecutable: 'C:\\Matcha\\runtime-host.exe',
     deliveryVerificationKey: 'MCowBQYDK2VwAyEAI3qD__Jv49yWsjljbNRbVm11047IMl5xFBflSPOROKE',
     parentCallbackBaseUrl: 'http://127.0.0.1:32110',
     parentCallbackDispatchToken: 'parent-callback-token',
@@ -109,7 +109,7 @@ describe('buildRuntimeHostBootstrap', () => {
       appVersion: '1.0.4',
       appLogDir: '/var/lib/matcha/userdata/logs',
       runtimeHostStateDir: '/var/lib/matcha/runtime-host',
-      runtimeHostMcpExecutable: '/opt/matcha/runtime-host-mcp',
+      runtimeHostMcpExecutable: '/opt/matcha/runtime-host',
       deliveryVerificationKey: 'MCowBQYDK2VwAyEAI3qD__Jv49yWsjljbNRbVm11047IMl5xFBflSPOROKE',
       parentCallbackBaseUrl: 'http://127.0.0.1:32110',
       parentCallbackDispatchToken: 'parent-callback-token',
@@ -255,7 +255,7 @@ describe('buildRuntimeHostBootstrap', () => {
     ['blank app log directory', unixInput({ appLogDir: '' }), 'appLogDir'],
     ['relative app log directory', unixInput({ appLogDir: 'userdata/logs' }), 'appLogDir'],
     ['relative runtime-host state directory', unixInput({ runtimeHostStateDir: 'runtime-host' }), 'runtimeHostStateDir'],
-    ['relative runtime-host MCP executable', unixInput({ runtimeHostMcpExecutable: 'runtime-host-mcp' }), 'runtimeHostMcpExecutable'],
+    ['relative runtime-host MCP executable', unixInput({ runtimeHostMcpExecutable: 'runtime-host' }), 'runtimeHostMcpExecutable'],
   ])('rejects %s', (_description, input, fieldName) => {
     expect(() => buildRuntimeHostBootstrap(input)).toThrow(
       new RuntimeHostBootstrapValidationError(fieldName)

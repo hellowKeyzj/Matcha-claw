@@ -52,25 +52,7 @@ describe('runtime-host native build script', () => {
       '--bin',
       'runtime-host',
     ]);
-    expect(plan.mcp).toEqual({
-      sourceBinaryPath: join(rootDir, 'runtime-host', 'target', cargoTarget, 'release', binaryName.replace('runtime-host', 'runtime-host-mcp')),
-      artifactBinaryPath: join(rootDir, 'runtime-host', 'dist', `${platform}-${arch}`, binaryName.replace('runtime-host', 'runtime-host-mcp')),
-      cargoArgs: [
-        'build',
-        '--release',
-        '--locked',
-        '--manifest-path',
-        join(rootDir, 'runtime-host', 'Cargo.toml'),
-        '--target',
-        cargoTarget,
-        '--target-dir',
-        join(rootDir, 'runtime-host', 'target'),
-        '--package',
-        'runtime-host',
-        '--bin',
-        'runtime-host-mcp',
-      ],
-    });
+    expect(plan).not.toHaveProperty('mcp');
   });
 
   it.each([
@@ -131,15 +113,22 @@ describe('runtime-host native build script', () => {
     })).toThrow(/unsupported platform\/architecture: freebsd-x64/);
   });
 
-  it('copies only the explicit Cargo output binary to the frozen artifact layout', () => {
+  it.each(['win32', 'linux'])('copies only the explicit Cargo output and retires the old MCP artifact for %s', (platform) => {
     const rootDir = createTempRoot();
-    const plan = createRuntimeHostNativeBuildPlan({ rootDir, platform: 'win32', arch: 'x64' });
+    const plan = createRuntimeHostNativeBuildPlan({ rootDir, platform, arch: 'x64' });
+    const artifactDir = dirname(plan.artifactBinaryPath);
+    const obsoleteMcp = join(artifactDir, platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp');
     mkdirSync(dirname(plan.sourceBinaryPath), { recursive: true });
+    mkdirSync(artifactDir, { recursive: true });
     writeFileSync(plan.sourceBinaryPath, 'native-runtime-host', { encoding: 'utf8', flush: true });
+    writeFileSync(obsoleteMcp, 'old-mcp');
+    writeFileSync(join(artifactDir, 'unrelated'), 'keep');
 
     copyRuntimeHostNativeBinary(plan, 'runtime-host');
 
     expect(readFileSync(plan.artifactBinaryPath, 'utf8')).toBe('native-runtime-host');
+    expect(existsSync(obsoleteMcp)).toBe(false);
+    expect(readFileSync(join(artifactDir, 'unrelated'), 'utf8')).toBe('keep');
   });
 
   it('copies the direct Unix guardian Cargo artifact to the same target-qualified directory', () => {
@@ -154,11 +143,16 @@ describe('runtime-host native build script', () => {
     expect(readFileSync(guardian.artifactBinaryPath, 'utf8')).toBe('native-runtime-host-guardian');
   });
 
-  it('fails when Cargo did not produce the expected binary', () => {
+  it('preserves existing artifacts when Cargo did not produce the expected binary', () => {
     const rootDir = createTempRoot();
     const plan = createRuntimeHostNativeBuildPlan({ rootDir, platform: 'linux', arch: 'x64' });
+    const obsoleteMcp = join(dirname(plan.artifactBinaryPath), 'runtime-host-mcp');
+    mkdirSync(dirname(plan.artifactBinaryPath), { recursive: true });
+    writeFileSync(plan.artifactBinaryPath, 'current-host');
+    writeFileSync(obsoleteMcp, 'current-mcp');
 
     expect(() => copyRuntimeHostNativeBinary(plan, 'runtime-host')).toThrow(/Cargo did not produce runtime-host/);
-    expect(existsSync(plan.artifactBinaryPath)).toBe(false);
+    expect(readFileSync(plan.artifactBinaryPath, 'utf8')).toBe('current-host');
+    expect(readFileSync(obsoleteMcp, 'utf8')).toBe('current-mcp');
   });
 });

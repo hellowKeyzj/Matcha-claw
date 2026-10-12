@@ -1603,13 +1603,15 @@ function adaptSessionModelSelectionRequest(body: Record<string, unknown>, traceI
   }
   const endpoint = body.scope.identity.endpoint;
   const sessionKey = body.scope.identity.sessionKey;
-  if (isSessionTraceEnabled()) logSessionTrace('electron.model-selection.route.adapted', traceId, {
+  const endpointSessionId = body.input.endpointSessionId;
+  const modelSelectionId = body.input.modelSelectionId;
+  logSessionTrace('electron.model-selection.route.adapted', traceId, () => ({
     adapter: endpoint.runtimeAdapterId,
     instance: endpoint.runtimeInstanceId,
     sessionKey: summarizeIdentifier(sessionKey),
-    endpointSessionId: summarizeIdentifier(body.input.endpointSessionId as string | undefined),
-    modelSelectionId: summarizeIdentifier(body.input.modelSelectionId as string),
-  });
+    endpointSessionId: summarizeIdentifier(endpointSessionId),
+    modelSelectionId: summarizeIdentifier(modelSelectionId),
+  }));
   return {
     id: 'session.modelSelection',
     operationId: 'sessions.patchModel',
@@ -1657,13 +1659,13 @@ function summarizeSessionModelSelectionBody(body: Record<string, unknown>) {
   const target = isRecord(body.target) ? body.target : null;
   const input = isRecord(body.input) ? body.input : null;
   return {
-    bodyKeys: Object.keys(body).sort(),
-    scopeKeys: scope ? Object.keys(scope).sort() : null,
-    targetKeys: target ? Object.keys(target).sort() : null,
-    inputKeys: input ? Object.keys(input).sort() : null,
-    scopeIdentity: summarizeIdentityShape(scope?.identity),
-    targetIdentity: summarizeIdentityShape(target?.identity),
-    inputIdentity: summarizeIdentityShape(input?.sessionIdentity),
+    bodyKeyCount: Object.keys(body).length,
+    scopeKeyCount: scope ? Object.keys(scope).length : null,
+    targetKeyCount: target ? Object.keys(target).length : null,
+    inputKeyCount: input ? Object.keys(input).length : null,
+    scopeSessionKey: summarizeString(isRecord(scope?.identity) ? scope.identity.sessionKey : null),
+    targetSessionKey: summarizeString(isRecord(target?.identity) ? target.identity.sessionKey : null),
+    inputIdentitySessionKey: summarizeString(isRecord(input?.sessionIdentity) ? input.sessionIdentity.sessionKey : null),
     inputSessionKey: summarizeString(input?.sessionKey),
     endpointSessionId: summarizeString(input?.endpointSessionId),
     targetModelSelectionId: summarizeString(target?.modelSelectionId),

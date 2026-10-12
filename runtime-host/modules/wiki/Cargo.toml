@@ -15,10 +15,11 @@ calamine.workspace = true
 chrono.workspace = true
 docx-rs.workspace = true
 epub.workspace = true
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 foundation = { version = "0.1.0", path = "../../foundation" }
 futures-util.workspace = true
 html2text.workspace = true
-image.workspace = true
+image = { workspace = true, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 mobi.workspace = true
 notify.workspace = true
 office_oxide.workspace = true

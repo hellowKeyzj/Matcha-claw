@@ -46,7 +46,11 @@ import {
   workerError,
   WorkerSupervisor,
 } from './workers/workerSupervisor.js'
-import { isRunTraceEnabled, logProcessSessionTrace } from '../query/runTrace.js'
+import {
+  hashTraceIdentifier,
+  isRunTraceEnabled,
+  logProcessSessionTrace,
+} from '../query/runTrace.js'
 import {
   listSessionHistorySummaries,
   loadSessionHistorySummary,
@@ -1037,25 +1041,24 @@ export function createDefaultAppServerServices(options: {
   ): Promise<SessionRecord> {
     logProcessSessionTrace(
       'matcha-agent-app-server',
-      'app-server.session.setModel.received',
-      {
-        sessionIdLength: params.sessionId.length,
-        model: params.model,
-        modelSelectionIdLength: params.modelSelectionId?.length ?? 0,
-        providerFingerprintLength: params.providerFingerprint?.length ?? 0,
-        ...providerRuntimeTraceDetails(params.providerRuntime),
-      },
+      'matcha.model-selection.session.received',
+      () => ({
+        sessionHash: hashTraceIdentifier(params.sessionId),
+        modelHash: hashTraceIdentifier(params.model),
+        selectionHash: hashTraceIdentifier(params.modelSelectionId),
+        providerRuntimePresent: params.providerRuntime !== undefined,
+      }),
     )
     const loaded = await ensureSessionRuntimeState(params.sessionId)
     if (!loaded) {
       logProcessSessionTrace(
         'matcha-agent-app-server',
-        'app-server.session.setModel.rejected',
-        {
-          sessionIdLength: params.sessionId.length,
-          model: params.model,
+        'matcha.model-selection.session.rejected',
+        () => ({
+          sessionHash: hashTraceIdentifier(params.sessionId),
+          modelHash: hashTraceIdentifier(params.model),
           reason: 'session-not-found',
-        },
+        }),
       )
       throw new Error(`Session not found: ${params.sessionId}`)
     }
@@ -1064,14 +1067,14 @@ export function createDefaultAppServerServices(options: {
     if (activeRun) {
       logProcessSessionTrace(
         'matcha-agent-app-server',
-        'app-server.session.setModel.rejected',
-        {
-          sessionIdLength: params.sessionId.length,
-          model: params.model,
+        'matcha.model-selection.session.rejected',
+        () => ({
+          sessionHash: hashTraceIdentifier(params.sessionId),
+          modelHash: hashTraceIdentifier(params.model),
           reason: 'active-run',
-          runId: activeRun.runId,
+          runHash: hashTraceIdentifier(activeRun.runId),
           runStatus: activeRun.status.type,
-        },
+        }),
       )
       throw new Error(
         `Cannot update session settings while run ${activeRun.runId} is ${activeRun.status.type}`,
@@ -1090,18 +1093,17 @@ export function createDefaultAppServerServices(options: {
       sameProvider && sameProviderRuntime ? 'warm-worker' : 'restart-worker'
     logProcessSessionTrace(
       'matcha-agent-app-server',
-      'app-server.session.setModel.resolved',
-      {
-        sessionIdLength: params.sessionId.length,
-        previousModel: loaded.model ?? null,
-        model: params.model,
+      'matcha.model-selection.session.resolved',
+      () => ({
+        sessionHash: hashTraceIdentifier(params.sessionId),
+        previousModelHash: hashTraceIdentifier(loaded.model),
+        modelHash: hashTraceIdentifier(params.model),
         sameProvider,
         sameProviderRuntime,
         action,
-        modelSelectionIdLength: modelSelectionId?.length ?? 0,
-        providerFingerprintLength: providerFingerprint?.length ?? 0,
-        ...providerRuntimeTraceDetails(providerRuntime),
-      },
+        selectionHash: hashTraceIdentifier(modelSelectionId),
+        providerRuntimePresent: providerRuntime !== undefined,
+      }),
     )
     const updated = sessionRegistry.update(params.sessionId, session => ({
       ...session,
@@ -1110,8 +1112,18 @@ export function createDefaultAppServerServices(options: {
       providerFingerprint,
       updatedAt: new Date().toISOString(),
     }))
-    if (updated.resultType !== 'updated')
+    if (updated.resultType !== 'updated') {
+      logProcessSessionTrace(
+        'matcha-agent-app-server',
+        'matcha.model-selection.session.rejected',
+        () => ({
+          sessionHash: hashTraceIdentifier(params.sessionId),
+          modelHash: hashTraceIdentifier(params.model),
+          reason: 'session-not-found-at-update',
+        }),
+      )
       throw new Error(`Session not found: ${params.sessionId}`)
+    }
 
     if (providerRuntime) {
       providerRuntimeBySessionId.set(params.sessionId, providerRuntime)
@@ -1125,12 +1137,13 @@ export function createDefaultAppServerServices(options: {
       await workerSupervisor.shutdownSession(params.sessionId, 'restart')
       logProcessSessionTrace(
         'matcha-agent-app-server',
-        'app-server.session.setModel.worker-action',
-        {
-          sessionIdLength: params.sessionId.length,
-          model: params.model,
+        'matcha.model-selection.worker.action',
+        () => ({
+          sessionHash: hashTraceIdentifier(params.sessionId),
+          modelHash: hashTraceIdentifier(params.model),
           action: 'restart-worker',
-        },
+          outcome: 'restart_deferred',
+        }),
       )
     }
     await appendEvent(params.sessionId, {
@@ -1139,13 +1152,14 @@ export function createDefaultAppServerServices(options: {
     })
     logProcessSessionTrace(
       'matcha-agent-app-server',
-      'app-server.session.setModel.updated',
-      {
-        sessionIdLength: params.sessionId.length,
-        model: updated.session.model ?? null,
-        modelSelectionIdLength: updated.session.modelSelectionId?.length ?? 0,
+      'matcha.model-selection.session.updated',
+      () => ({
+        sessionHash: hashTraceIdentifier(params.sessionId),
+        modelHash: hashTraceIdentifier(updated.session.model),
+        selectionHash: hashTraceIdentifier(updated.session.modelSelectionId),
+        outcome: 'registry_updated',
         action,
-      },
+      }),
     )
     return updated.session
   }
@@ -1169,45 +1183,68 @@ export function createDefaultAppServerServices(options: {
     if (!workerSupervisor.getWorker(sessionId)) {
       logProcessSessionTrace(
         'matcha-agent-app-server',
-        'app-server.session.setModel.worker-action',
-        {
-          sessionIdLength: sessionId.length,
-          model,
+        'matcha.model-selection.worker.action',
+        () => ({
+          sessionHash: hashTraceIdentifier(sessionId),
+          modelHash: hashTraceIdentifier(model),
           action: 'warm-worker-missing',
-        },
+          outcome: 'restart_deferred',
+        }),
       )
       return
     }
+    let requestId: string | undefined
     try {
+      requestId = crypto.randomUUID()
+      logProcessSessionTrace(
+        'matcha-agent-app-server',
+        'matcha.model-selection.worker.dispatch',
+        () => ({
+          sessionHash: hashTraceIdentifier(sessionId),
+          modelHash: hashTraceIdentifier(model),
+          requestHash: hashTraceIdentifier(requestId),
+        }),
+      )
       const response = await workerSupervisor.send(sessionId, {
-        id: crypto.randomUUID(),
+        id: requestId,
         type: 'worker.setModel',
         model,
       })
-      if (response.ok) {
-        logProcessSessionTrace(
-          'matcha-agent-app-server',
-          'app-server.session.setModel.worker-action',
-          {
-            sessionIdLength: sessionId.length,
-            model,
-            action: 'warm-worker-updated',
-          },
-        )
-        return
-      }
+      logProcessSessionTrace(
+        'matcha-agent-app-server',
+        'matcha.model-selection.worker.returned',
+        () => ({
+          sessionHash: hashTraceIdentifier(sessionId),
+          modelHash: hashTraceIdentifier(model),
+          requestHash: hashTraceIdentifier(requestId),
+          outcome: response.ok ? 'warm_acknowledged' : 'worker_rejected',
+        }),
+      )
+      if (response.ok) return
     } catch {
+      logProcessSessionTrace(
+        'matcha-agent-app-server',
+        'matcha.model-selection.worker.returned',
+        () => ({
+          sessionHash: hashTraceIdentifier(sessionId),
+          modelHash: hashTraceIdentifier(model),
+          requestHash: hashTraceIdentifier(requestId),
+          outcome: 'worker_request_failed',
+        }),
+      )
       // Fall through to restart the warm worker for the next prompt.
     }
     await workerSupervisor.shutdownSession(sessionId, 'restart')
     logProcessSessionTrace(
       'matcha-agent-app-server',
-      'app-server.session.setModel.worker-action',
-      {
-        sessionIdLength: sessionId.length,
-        model,
+      'matcha.model-selection.worker.action',
+      () => ({
+        sessionHash: hashTraceIdentifier(sessionId),
+        modelHash: hashTraceIdentifier(model),
+        requestHash: hashTraceIdentifier(requestId),
         action: 'warm-worker-restarted',
-      },
+        outcome: 'restart_deferred',
+      }),
     )
   }
 

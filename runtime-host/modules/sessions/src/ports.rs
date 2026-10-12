@@ -68,7 +68,18 @@ pub struct SessionObservationRequest {
     pub generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ItemsSyncMode {
+    Merge,
+    Replace,
+}
+
 pub trait SessionObservation: Send + Sync {
+    /// Whether a successful history read replaces the prior display window.
+    fn items_sync_mode(&self) -> ItemsSyncMode {
+        ItemsSyncMode::Merge
+    }
+
     /// Subscribe before reading; reconcile native replay/history inside the Integration.
     /// The returned view is not by itself proof that Host consumed the event frontier.
     fn sync<'a>(

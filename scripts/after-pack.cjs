@@ -12,16 +12,20 @@
  * bypassing electron-builder's glob filtering entirely.
  *
  * Additionally it performs two rounds of cleanup:
- *   1. General cleanup — removes dev artifacts (type defs, source maps, docs,
+ *   1. General cleanup — removes dev artifacts (type defs, source maps,
  *      test dirs) from both the openclaw root and its node_modules.
- *   2. Platform-specific cleanup — strips native binaries for non-target
- *      platforms (koffi multi-platform prebuilds, @napi-rs/canvas, @img/sharp,
- *      @mariozechner/clipboard).
+ *   2. Platform-specific cleanup — filters known package-owned native layouts
+ *      in copied dependencies (including nested deps/extensions) and vendors.
+ * The named beforePack hook selects main-app node-pty variants before ASAR.
  */
 
 const { cpSync, existsSync, readdirSync, rmSync, mkdirSync, realpathSync, readFileSync, writeFileSync } = require('fs');
 const { join, dirname, basename } = require('path');
 const { safeRmSync } = require('./lib/safe-delete.mjs');
+const {
+  PLATFORM_NATIVE_SCOPES, targetArchitectures, matchesTarget,
+  cleanupOnnxRuntimeBinaries, cleanupNativeDependencyTree,
+} = require('./lib/native-platform.cjs');
 const STRIP_LINKER_ARTIFACTS = process.env.MATCHACLAW_STRIP_LINKER_ARTIFACTS === '1';
 
 // On Windows, paths in pnpm's virtual store can exceed the default MAX_PATH
@@ -51,7 +55,9 @@ function realpathSafe(p) {
 const ARCH_MAP = { 0: 'ia32', 1: 'x64', 2: 'armv7l', 3: 'arm64', 4: 'universal' };
 
 function resolveArch(archEnum) {
-  return ARCH_MAP[archEnum] || 'x64';
+  const arch = ARCH_MAP[archEnum];
+  if (!arch) throw new Error(`Unsupported packaging architecture: ${archEnum}`);
+  return arch;
 }
 
 function readJsonSafe(filePath) {
@@ -86,14 +92,14 @@ function cleanupUnnecessaryFiles(dir) {
     '.d.ts', '.d.ts.map',
     '.d.mts', '.d.mts.map',
     '.d.cts', '.d.cts.map',
-    '.js.map', '.mjs.map', '.ts.map', '.map', '.markdown',
+    '.js.map', '.mjs.map', '.ts.map', '.map',
     // 调试符号文件，删除不影响运行。
     '.pdb', '.ipdb', '.iobj',
     // 链接中间产物默认不删；仅在显式开启激进瘦身时删除。
     ...(STRIP_LINKER_ARTIFACTS ? ['.lib', '.exp', '.ilk', '.obj', '.o'] : []),
   ];
   const REMOVE_FILE_NAMES = new Set([
-    '.DS_Store', 'README.md', 'CHANGELOG.md', 'LICENSE.md', 'CONTRIBUTING.md',
+    '.DS_Store',
     'tsconfig.json', '.npmignore', '.eslintrc', '.prettierrc', '.editorconfig',
   ]);
 
@@ -121,208 +127,6 @@ function cleanupUnnecessaryFiles(dir) {
 
   walk(dir);
   return removedCount;
-}
-
-// ── Platform-specific: koffi ─────────────────────────────────────────────────
-// koffi ships 18 platform pre-builds under koffi/build/koffi/{platform}_{arch}/.
-// We only need the one matching the target.
-
-function cleanupKoffi(nodeModulesDir, platform, arch) {
-  const koffiDir = join(nodeModulesDir, 'koffi', 'build', 'koffi');
-  if (!existsSync(koffiDir)) return 0;
-
-  const keepTarget = `${platform}_${arch}`;
-  let removed = 0;
-  for (const entry of readdirSync(koffiDir)) {
-    if (entry !== keepTarget) {
-      try { if (safeRmSync(join(koffiDir, entry), { root: koffiDir })) removed++; } catch { /* */ }
-    }
-  }
-  return removed;
-}
-
-// ── Platform-specific: scoped native packages ────────────────────────────────
-// Packages like @napi-rs/canvas-darwin-arm64, @img/sharp-linux-x64, etc.
-// Only the variant matching the target platform should survive.
-//
-// 某些包使用了非标准平台名：
-//   - @node-llama-cpp: "mac" 代替 "darwin"，"win" 代替 "win32"
-//   - sqlite-vec: "windows" 代替 "win32"（非 scoped，单独处理）
-// 在比较前统一归一化。
-
-const PLATFORM_ALIASES = {
-  darwin: 'darwin', mac: 'darwin',
-  linux: 'linux', linuxmusl: 'linux',
-  win32: 'win32', win: 'win32', windows: 'win32',
-};
-
-// 每个正则都必须满足：
-// - 捕获组 1 = platform
-// - 捕获组 2 = arch
-// 允许复合 arch 后缀（如 x64-msvc / arm64-gnu / arm64-metal），
-// 后续会截取首个 "-" 前作为基础架构。
-const PLATFORM_NATIVE_SCOPES = {
-  '@napi-rs': /^canvas-(darwin|linux|win32)-(x64|arm64)/,
-  '@img': /^sharp(?:-libvips)?-(darwin|linux(?:musl)?|win32)-(x64|arm64|arm|ppc64|riscv64|s390x)/,
-  '@mariozechner': /^clipboard-(darwin|linux|win32)-(x64|arm64|universal)/,
-  '@snazzah': /^davey-(darwin|linux|android|freebsd|win32|wasm32)-(x64|arm64|arm|ia32|arm64-gnu|arm64-musl|x64-gnu|x64-musl|x64-msvc|arm64-msvc|ia32-msvc|arm-eabi|arm-gnueabihf|wasi)/,
-  '@lydell': /^node-pty-(darwin|linux|win32)-(x64|arm64|ia32|armv7l)(?:-.+)?/,
-  '@reflink': /^reflink-(darwin|linux|win32)-(x64|arm64|x64-gnu|x64-musl|arm64-gnu|arm64-musl|x64-msvc|arm64-msvc)/,
-  '@node-llama-cpp': /^(mac|linux|win)-(arm64|x64|armv7l)(-metal|-cuda|-cuda-ext|-vulkan)?$/,
-  '@esbuild': /^(darwin|linux|win32|android|freebsd|netbsd|openbsd|sunos|aix|openharmony)-(x64|arm64|arm|ia32|loong64|mips64el|ppc64|riscv64|s390x)/,
-};
-
-// 非 scoped 的原生包，命名规则为 <name>-<platform>-<arch>。
-// 每个条目：{ pattern }，其中 pattern 需捕获 (platform, arch)。
-const UNSCOPED_NATIVE_PACKAGES = [
-  // sqlite-vec 使用 "windows" 而不是 "win32"
-  { pattern: /^sqlite-vec-(darwin|linux|windows)-(x64|arm64)$/ },
-];
-
-/**
- * 从复合架构值中提取基础 arch。
- * 例如："x64-msvc" → "x64"，"arm64-gnu" → "arm64"，"arm64-metal" → "arm64"
- */
-function baseArch(rawArch) {
-  const dash = rawArch.indexOf('-');
-  return dash > 0 ? rawArch.slice(0, dash) : rawArch;
-}
-
-function matchesTargetArch(pkgArch, targetArch) {
-  if (targetArch === 'universal') {
-    return pkgArch === 'x64' || pkgArch === 'arm64' || pkgArch === 'universal';
-  }
-  return pkgArch === targetArch || pkgArch === 'universal';
-}
-
-function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
-  let removed = 0;
-
-  // 1. 清理 scoped 原生包（如 @snazzah/davey-darwin-arm64）
-  for (const [scope, pattern] of Object.entries(PLATFORM_NATIVE_SCOPES)) {
-    const scopeDir = join(nodeModulesDir, scope);
-    if (!existsSync(scopeDir)) continue;
-
-    for (const entry of readdirSync(scopeDir)) {
-      const match = entry.match(pattern);
-      if (!match) continue; // not a platform-specific package, leave it
-
-      const pkgPlatform = PLATFORM_ALIASES[match[1]] || match[1];
-      const pkgArch = baseArch(match[2]);
-
-      const isMatch =
-        pkgPlatform === platform &&
-        matchesTargetArch(pkgArch, arch);
-
-      if (!isMatch) {
-        try {
-          if (safeRmSync(join(scopeDir, entry), { root: scopeDir })) {
-            removed++;
-          }
-        } catch { /* */ }
-      }
-    }
-  }
-
-  // 2. 清理非 scoped 原生包（如 sqlite-vec-darwin-arm64）
-  for (const { pattern } of UNSCOPED_NATIVE_PACKAGES) {
-    let entries;
-    try { entries = readdirSync(nodeModulesDir); } catch { continue; }
-
-    for (const entry of entries) {
-      const match = entry.match(pattern);
-      if (!match) continue;
-
-      const pkgPlatform = PLATFORM_ALIASES[match[1]] || match[1];
-      const pkgArch = baseArch(match[2]);
-
-      const isMatch =
-        pkgPlatform === platform &&
-        matchesTargetArch(pkgArch, arch);
-
-      if (!isMatch) {
-        try {
-          if (safeRmSync(join(nodeModulesDir, entry), { root: nodeModulesDir })) {
-            removed++;
-          }
-        } catch { /* */ }
-      }
-    }
-  }
-
-  return removed;
-}
-
-function cleanupLanceDbPlatformPackages(nodeModulesDir, platform, arch) {
-  let removed = 0;
-
-  const lancedbScopeDir = join(nodeModulesDir, '@lancedb');
-  if (!existsSync(lancedbScopeDir)) return 0;
-
-  const pattern = /^lancedb-(darwin|linux|win32)-(x64|arm64)(?:-.+)?$/;
-  let entries;
-  try { entries = readdirSync(lancedbScopeDir); } catch { return 0; }
-
-  for (const entry of entries) {
-    const match = entry.match(pattern);
-    if (!match) continue;
-
-    const pkgPlatform = PLATFORM_ALIASES[match[1]] || match[1];
-    const pkgArch = baseArch(match[2]);
-    const isMatch = pkgPlatform === platform && pkgArch === arch;
-    if (!isMatch) {
-      try {
-        if (safeRmSync(join(lancedbScopeDir, entry), { root: lancedbScopeDir })) {
-          removed++;
-        }
-      } catch { /* */ }
-    }
-  }
-
-  return removed;
-}
-
-function cleanupOnnxRuntimeNodeBinaries(nodeModulesDir, platform, arch) {
-  return cleanupOnnxRuntimeBinaries(join(nodeModulesDir, 'onnxruntime-node', 'bin', 'napi-v6'), platform, arch);
-}
-
-function cleanupOnnxRuntimeBinaries(napiDir, platform, arch) {
-  if (!existsSync(napiDir)) return 0;
-
-  let removed = 0;
-  let platformEntries;
-  try { platformEntries = readdirSync(napiDir, { withFileTypes: true }); } catch { return 0; }
-
-  for (const platformEntry of platformEntries) {
-    if (!platformEntry.isDirectory()) continue;
-    const platformDir = join(napiDir, platformEntry.name);
-    const pkgPlatform = PLATFORM_ALIASES[platformEntry.name] || platformEntry.name;
-
-    if (pkgPlatform !== platform) {
-      try {
-        if (safeRmSync(platformDir, { root: napiDir })) {
-          removed++;
-        }
-      } catch { /* */ }
-      continue;
-    }
-
-    let archEntries;
-    try { archEntries = readdirSync(platformDir, { withFileTypes: true }); } catch { continue; }
-    for (const archEntry of archEntries) {
-      if (!archEntry.isDirectory()) continue;
-      const pkgArch = baseArch(archEntry.name);
-      if (pkgArch !== arch) {
-        try {
-          if (safeRmSync(join(platformDir, archEntry.name), { root: platformDir })) {
-            removed++;
-          }
-        } catch { /* */ }
-      }
-    }
-  }
-
-  return removed;
 }
 
 // ── Broken module patcher ─────────────────────────────────────────────────────
@@ -564,6 +368,53 @@ function copyPluginFromLocalCandidates(pluginId, candidates, destDir) {
   return true;
 }
 
+function cleanupMatchaAgentVendor(vendorDir, platform, arch) {
+  for (const [name, binary] of [
+    ['audio-capture', 'audio-capture.node'],
+    ['ripgrep', platform === 'win32' ? 'rg.exe' : 'rg'],
+  ]) {
+    const dir = join(vendorDir, name);
+    for (const targetArch of targetArchitectures(arch)) {
+      const target = join(dir, `${targetArch}-${platform}`, binary);
+      if (!existsSync(target)) throw new Error(`Missing target MatchaAgent asset: ${target}`);
+    }
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const [pkgArch, pkgPlatform] = entry.name.split('-');
+      if (!['x64', 'arm64'].includes(pkgArch) || !['win32', 'darwin', 'linux'].includes(pkgPlatform)) continue;
+      if (!matchesTarget(platform, arch, pkgPlatform, pkgArch)) {
+        safeRmSync(join(dir, entry.name), { root: dir });
+      }
+    }
+  }
+}
+
+// FileMatcher exclusions run before AsarPackager, including asarUnpack selection.
+// Keep the same hook owner; do not prune shared source node_modules for one target.
+exports.beforePack = async function beforePack(context) {
+  const platform = context.electronPlatformName;
+  const arch = resolveArch(context.arch);
+  const pty = join(context.packager.info.appDir, 'node_modules', '@lydell', 'node-pty', 'package.json');
+  const pkg = JSON.parse(readFileSync(pty, 'utf8'));
+  const ptyRequire = require('module').createRequire(pty);
+  for (const targetArch of targetArchitectures(arch)) {
+    const target = ptyRequire.resolve(`@lydell/node-pty-${platform}-${targetArch}`);
+    if (!existsSync(target)) throw new Error(`Missing target node-pty asset: ${target}`);
+  }
+  const exclusions = [];
+  for (const name of Object.keys(pkg.optionalDependencies)) {
+    const match = name.slice('@lydell/'.length).match(PLATFORM_NATIVE_SCOPES['@lydell']);
+    if (match && !matchesTarget(platform, arch, match[1], match[2])) {
+      exclusions.push(`!**/node_modules/${name}{,/**/*}`);
+    }
+  }
+  // Extend the existing root whitelist; a separate exclusion-only set includes **/*.
+  const files = context.packager.config.files.find(fileSet => fileSet.from == null && fileSet.to == null);
+  // A packager can run x64 then arm64 with this same file set.
+  files.filter = files.filter.filter(pattern =>
+    !pattern.startsWith('!**/node_modules/@lydell/node-pty-')).concat(exclusions);
+};
+
 // ── Main hook ────────────────────────────────────────────────────────────────
 
 exports.default = async function afterPack(context) {
@@ -604,6 +455,7 @@ exports.default = async function afterPack(context) {
     rmSync(matchaAgentDest, { recursive: true, force: true });
     mkdirSync(dirname(matchaAgentDest), { recursive: true });
     cpSync(matchaAgentDist, matchaAgentDest, { recursive: true });
+    cleanupMatchaAgentVendor(join(matchaAgentDest, 'vendor'), platform, arch);
     console.log('[after-pack] ✅ matcha-agent dist copied.');
   } else {
     console.log('[after-pack] SKIP_MATCHA_AGENT_BUILD=1 set; skipping matcha-agent resource copy.');
@@ -689,20 +541,9 @@ exports.default = async function afterPack(context) {
       throw new Error(`Required OpenClaw plugin ${pluginId} was not bundled into packaged resources`);
     }
     if (ok) {
-      const pluginNM = join(pluginDestDir, 'node_modules');
       cleanupUnnecessaryFiles(pluginDestDir);
-      if (existsSync(pluginNM)) {
-        cleanupKoffi(pluginNM, platform, arch);
-        cleanupNativePlatformPackages(pluginNM, platform, arch);
-        const lancedbRemoved = cleanupLanceDbPlatformPackages(pluginNM, platform, arch);
-        if (lancedbRemoved > 0) {
-          console.log(`[after-pack] ✅ ${pluginId}: removed ${lancedbRemoved} non-target LanceDB platform package(s).`);
-        }
-        const onnxRuntimeRemoved = cleanupOnnxRuntimeNodeBinaries(pluginNM, platform, arch);
-        if (onnxRuntimeRemoved > 0) {
-          console.log(`[after-pack] ✅ ${pluginId}: removed ${onnxRuntimeRemoved} non-target onnxruntime-node binary directories.`);
-        }
-      }
+      const removed = cleanupNativeDependencyTree(join(pluginDestDir, 'node_modules'), platform, arch);
+      console.log(`[after-pack] ${pluginId}: removed ${removed} non-target native variants.`);
       patchPluginIds(pluginDestDir, pluginId);
     }
   }
@@ -835,25 +676,15 @@ exports.default = async function afterPack(context) {
   const removedRoot = cleanupUnnecessaryFiles(openclawRoot);
   console.log(`[after-pack] ✅ Removed ${removedRoot} unnecessary files/directories.`);
 
-  // 3. Platform-specific: strip koffi non-target platform binaries
-  const koffiRemoved = cleanupKoffi(dest, platform, arch);
-  if (koffiRemoved > 0) {
-    console.log(`[after-pack] ✅ koffi: removed ${koffiRemoved} non-target platform binaries (kept ${platform}_${arch}).`);
+  const nativeRemoved = cleanupNativeDependencyTree(dest, platform, arch);
+  if (existsSync(packExtDir)) {
+    for (const entry of readdirSync(packExtDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        cleanupNativeDependencyTree(join(packExtDir, entry.name, 'node_modules'), platform, arch);
+      }
+    }
   }
-
-  // 4. Platform-specific: strip wrong-platform native packages
-  const nativeRemoved = cleanupNativePlatformPackages(dest, platform, arch);
-  if (nativeRemoved > 0) {
-    console.log(`[after-pack] ✅ Removed ${nativeRemoved} non-target native platform packages.`);
-  }
-  const lancedbRemoved = cleanupLanceDbPlatformPackages(dest, platform, arch);
-  if (lancedbRemoved > 0) {
-    console.log(`[after-pack] ✅ Removed ${lancedbRemoved} non-target LanceDB platform package(s).`);
-  }
-  const onnxRuntimeRemoved = cleanupOnnxRuntimeNodeBinaries(dest, platform, arch);
-  if (onnxRuntimeRemoved > 0) {
-    console.log(`[after-pack] ✅ Removed ${onnxRuntimeRemoved} non-target onnxruntime-node binary directories.`);
-  }
+  console.log(`[after-pack] Removed ${nativeRemoved} non-target top-level/nested native variants.`);
 
   // 5. [Windows only] Ensure NSIS templates use the overwrite-upgrade path.
   if (platform === 'win32') {
@@ -866,12 +697,5 @@ exports.default = async function afterPack(context) {
 };
 
 exports.__test__ = {
-  PLATFORM_ALIASES,
-  PLATFORM_NATIVE_SCOPES,
-  UNSCOPED_NATIVE_PACKAGES,
-  baseArch,
-  matchesTargetArch,
-  cleanupNativePlatformPackages,
-  cleanupLanceDbPlatformPackages,
-  cleanupOnnxRuntimeNodeBinaries,
+  cleanupNativePlatformPackages: require('./lib/native-platform.cjs').cleanupNativePlatformPackages,
 };

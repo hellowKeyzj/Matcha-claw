@@ -748,7 +748,7 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
             .join("modules/organization/src/adapters/start_gate_send_hook.rs"),
     )
     .expect("read organization send hook");
-    let host_mcp = fs::read_to_string(Path::new(HOST_SRC).join("bin/runtime-host-mcp.rs"))
+    let host_mcp = fs::read_to_string(Path::new(HOST_SRC).join("mcp.rs"))
         .expect("read Host MCP composition");
     let organization_mcp_tools = fs::read_to_string(
         Path::new(RUNTIME_HOST_ROOT).join("modules/organization/src/adapters/mcp/tools.rs"),
@@ -805,7 +805,7 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
             && organization_send_hook.contains("start_gate_prompt_plan")
             && organization_terminal.contains("team_message_terminal_observed")
             && host_mcp.contains("ToolCatalog::new")
-            && host_mcp.contains("organization::team_run_mcp_provider")
+            && host_mcp.contains("runtime_host::team_mcp::team_provider")
             && host_mcp.contains("wiki::wiki_mcp_provider")
             && organization_mcp_tools.contains("impl ToolProvider for TeamRunMcpFacade")
             && organization_mcp_tools.contains("\"team_graph_context\"")

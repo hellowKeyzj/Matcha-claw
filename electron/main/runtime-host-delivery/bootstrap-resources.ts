@@ -102,7 +102,6 @@ export function resolveRuntimeHostBootstrap(
     layout.matcha.entry,
     layout.openClaw.entry,
     runtimeHostBinary,
-    layout.runtimeHostMcpExecutable,
     ...(platform === 'unix' ? [layout.guardianExecutable] : [layout.gitBash]),
   ]);
 
@@ -203,15 +202,11 @@ function resolveRuntimeLayout(input: RuntimeLayoutInput): RuntimeLayout {
           'bash.exe'
         );
   const runtimeHostDirectory = input.path.dirname(input.runtimeHostBinary);
-  const runtimeHostMcpExecutable = input.path.join(
-    runtimeHostDirectory,
-    input.platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp'
-  );
   const guardianExecutable = input.path.join(runtimeHostDirectory, 'runtime-host-guardian');
   return {
     appLogDir: input.path.join(userData, 'logs'),
     runtimeHostStateDir: input.getRuntimeHostStateDir(),
-    runtimeHostMcpExecutable,
+    runtimeHostMcpExecutable: input.runtimeHostBinary,
     runtimeHostTransportPort: input.getPort('MATCHACLAW_RUNTIME_HOST'),
     matcha: {
       bunExecutable,

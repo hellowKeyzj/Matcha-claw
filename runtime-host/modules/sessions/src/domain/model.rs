@@ -1698,6 +1698,7 @@ impl SessionState {
         &mut self,
         sync: &crate::ports::SessionSync,
         baseline: &SessionState,
+        items_mode: crate::ports::ItemsSyncMode,
     ) -> Result<SessionView, SessionStateError> {
         use crate::ports::SessionSyncCut;
         sync.view.validate()?;
@@ -1747,6 +1748,7 @@ impl SessionState {
             &baseline.items,
             sync.replay_baseline.as_ref().map(|view| &view.items),
             &sync.view.items,
+            items_mode,
             SessionItem::item_id,
             &sync.retired_item_ids,
             MAX_ITEMS,
@@ -1757,6 +1759,7 @@ impl SessionState {
             &baseline.tools,
             sync.replay_baseline.as_ref().map(|view| &view.tools),
             &sync.view.tools,
+            crate::ports::ItemsSyncMode::Merge,
             |tool| tool.tool_call_id.as_str(),
             &sync.retired_tool_ids,
             MAX_TOOLS,
@@ -1767,6 +1770,7 @@ impl SessionState {
             &baseline.approvals,
             sync.replay_baseline.as_ref().map(|view| &view.approvals),
             &sync.view.approvals,
+            crate::ports::ItemsSyncMode::Merge,
             |approval| approval.approval_id.as_str(),
             &sync.retired_approval_ids,
             MAX_APPROVALS,
@@ -2705,6 +2709,7 @@ fn reconcile_list<T: Clone + Eq>(
     baseline: &SessionFact<Vec<T>>,
     replay_baseline: Option<&SessionFact<Vec<T>>>,
     incoming: &SessionFact<Vec<T>>,
+    mode: crate::ports::ItemsSyncMode,
     id: impl Fn(&T) -> &str,
     retired: &[String],
     limit: usize,
@@ -2817,9 +2822,9 @@ fn reconcile_list<T: Clone + Eq>(
                 }));
             }
             previous = Some(index);
-        } else {
-            // Missing history rows are not retirement evidence.
-            // Preserve current relative order using the nearest surviving predecessor.
+        } else if mode == crate::ports::ItemsSyncMode::Merge || changed {
+            // Window replacement drops unchanged baseline rows, not native messages.
+            // Concurrent facts keep their order via the nearest surviving predecessor.
             let index = previous.map_or(0, |index| index + 1);
             if trace_enabled {
                 crate::trace::log_unscoped("sessions.reconcile_list.decision", || serde_json::json!({

@@ -8,7 +8,7 @@ use sessions_module::{
     RuntimeOperationFailure, SessionFuture, SessionObservation, SessionObservationRequest,
     SessionSync, SessionSyncCut, SessionTerminalRun,
     command::{SessionEvent, SessionIngressEvent},
-    ports::OwnedRuntimeFuture,
+    ports::{ItemsSyncMode, OwnedRuntimeFuture},
     state::{
         ApprovalPhase, ApprovalView, ItemAnchor, ItemStatus, MAX_ITEMS, MissingFact, RecoveryReason,
         RunPhase, RuntimeView, SessionApplyResult, SessionChange, SessionContent, SessionEventBinding,
@@ -105,6 +105,10 @@ pub(super) fn prepare(
 }
 
 impl SessionObservation for Observation {
+    fn items_sync_mode(&self) -> ItemsSyncMode {
+        ItemsSyncMode::Replace
+    }
+
     fn sync<'a>(
         &'a self,
         command: timeline::Command,
@@ -444,7 +448,7 @@ impl Projection {
             epoch,
         )
         .ok_or(RuntimeOperationFailure::Unknown)?;
-        let retired_item_ids = merge_event_facts(&mut view, self.state.view());
+        merge_event_facts(&mut view, self.state.view());
         snapshot_facts(&mut view, &snapshot);
         view.validate()
             .map_err(|_| RuntimeOperationFailure::Unknown)?;
@@ -466,17 +470,17 @@ impl Projection {
                     })
                 })
                 .collect(),
-            retired_item_ids,
+            retired_item_ids: Vec::new(),
             retired_tool_ids: Vec::new(),
             retired_approval_ids: Vec::new(),
             replay_baseline: Some(self.state.view()),
         };
         // Replay is already consumed; this baseline keeps the later transcript body
-        // while reconciliation retains missing event facts and private fences.
+        // while reconciliation retains tool/approval facts and private fences.
         let baseline = self.state.clone();
         sync.view = self
             .state
-            .reconcile_sync(&sync, &baseline)
+            .reconcile_sync(&sync, &baseline, ItemsSyncMode::Replace)
             .map_err(|_| RuntimeOperationFailure::Unknown)?;
         sync.view.epoch = epoch;
         Ok(sync)
@@ -774,29 +778,13 @@ fn project_tool_position(
     Ok(())
 }
 
-fn merge_event_facts(view: &mut SessionView, native: SessionView) -> Vec<String> {
-    let mut retired = Vec::new();
+fn merge_event_facts(view: &mut SessionView, native: SessionView) {
     if let (
         SessionFact::Complete(items) | SessionFact::Incomplete { facts: items, .. },
         SessionFact::Complete(events) | SessionFact::Incomplete { facts: events, .. },
     ) = (&mut view.items, native.items)
     {
-        let positions: Vec<_> = items
-            .iter()
-            .flat_map(|item| match item {
-                SessionItem::AssistantTurn { segments, .. } => segments
-                    .iter()
-                    .filter_map(|segment| match segment {
-                        SessionContent::ToolUse { tool_call_id, .. } => {
-                            Some((tool_call_id.clone(), item.item_id().to_owned()))
-                        }
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            })
-            .collect();
-        for mut event in events {
+        for event in events {
             if let SessionItem::AssistantTurn {
                 run_id: native_run,
                 segments,
@@ -824,29 +812,7 @@ fn merge_event_facts(view: &mut SessionView, native: SessionView) -> Vec<String>
                     }
                 }
             }
-            let id = event.item_id().to_owned();
-            if let SessionItem::AssistantTurn { segments, text, .. } = &mut event {
-                let before = segments.len();
-                segments.retain(|segment| !matches!(segment,
-                    SessionContent::ToolUse { tool_call_id, .. } if positions.iter().any(|(call, owner)|
-                        call == tool_call_id && owner != &id)
-                ));
-                if segments.len() != before {
-                    if segments.is_empty() && text.is_empty() {
-                        retired.push(id);
-                    } else if let Some(item) = items.iter_mut().find(|item| item.item_id() == id) {
-                        *item = event;
-                    } else {
-                        items.push(event);
-                    }
-                }
-            }
         }
-        let items = std::mem::take(items);
-        view.items = SessionFact::Incomplete {
-            facts: items,
-            gaps: vec![MissingFact::EventOnly],
-        };
     }
     if let (
         SessionFact::Complete(tools) | SessionFact::Incomplete { facts: tools, .. },
@@ -868,7 +834,6 @@ fn merge_event_facts(view: &mut SessionView, native: SessionView) -> Vec<String>
             gaps: vec![MissingFact::EventOnly],
         };
     }
-    retired
 }
 fn snapshot_facts(view: &mut SessionView, snapshot: &SessionSnapshot) {
     view.approvals = SessionFact::Complete(

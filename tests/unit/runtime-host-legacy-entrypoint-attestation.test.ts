@@ -99,20 +99,22 @@ describe('runtime-host legacy entrypoint attestation', () => {
 
   it('keeps the supported host and MCP command entrypoints native', () => {
     const hostMain = readFileSync(join(projectRoot, 'runtime-host', 'host', 'src', 'main.rs'), 'utf8');
-    const mcpMain = readFileSync(join(projectRoot, 'runtime-host', 'host', 'src', 'bin', 'runtime-host-mcp.rs'), 'utf8');
+    const mcpMain = readFileSync(join(projectRoot, 'runtime-host', 'host', 'src', 'mcp.rs'), 'utf8');
     const hostManifest = readFileSync(join(projectRoot, 'runtime-host', 'host', 'Cargo.toml'), 'utf8');
 
-    expect(hostMain).toContain('async fn main() -> ExitCode');
-    expect(mcpMain).toContain('fn main() -> ExitCode');
-    expect(mcpMain).toContain('runtime_host::run_matcha_mcp');
+    expect(hostMain).toContain('fn main() -> ExitCode');
+    expect(hostMain).toContain('command == "mcp"');
+    expect(hostMain).toContain('return mcp::run()');
+    expect(mcpMain).toContain('run_stdio');
     expect(hostManifest).toContain('name = "runtime-host"');
-    expect(hostManifest).toContain('name = "runtime-host-mcp"');
+    expect(hostManifest).not.toContain('name = "runtime-host-mcp"');
+    expect(existsSync(join(projectRoot, 'runtime-host', 'host', 'src', 'bin', 'runtime-host-mcp.rs'))).toBe(false);
     for (const reference of forbiddenLegacyReferences) {
       expect(hostMain.includes(reference) || mcpMain.includes(reference)).toBe(false);
     }
   });
 
-  it('requires exactly the Windows x64 Rust host and MCP artifacts in the target-qualified layout', () => {
+  it('requires only the Windows x64 dual-mode Rust host in the target-qualified layout', () => {
     const build = createRuntimeHostNativeBuildPlan({
       rootDir: projectRoot,
       platform: 'win32',
@@ -120,7 +122,7 @@ describe('runtime-host legacy entrypoint attestation', () => {
     });
     expect(build.cargoTarget).toBe('x86_64-pc-windows-msvc');
     expect(relative(projectRoot, build.artifactBinaryPath)).toBe(join('runtime-host', 'dist', 'win32-x64', 'runtime-host.exe'));
-    expect(relative(projectRoot, build.mcp.artifactBinaryPath)).toBe(join('runtime-host', 'dist', 'win32-x64', 'runtime-host-mcp.exe'));
+    expect(build).not.toHaveProperty('mcp');
     expect(build.guardian).toBeUndefined();
 
     const packaged = createRuntimeHostPackageSmokePlan({
@@ -130,12 +132,12 @@ describe('runtime-host legacy entrypoint attestation', () => {
       unpackedArtifactPath: join(projectRoot, 'release', 'win-unpacked'),
     });
     expect(relative(projectRoot, packaged.runtimeHostPath)).toBe(join('release', 'win-unpacked', 'resources', 'bin', 'win32-x64', 'runtime-host.exe'));
-    expect(relative(projectRoot, packaged.runtimeHostMcpPath)).toBe(join('release', 'win-unpacked', 'resources', 'bin', 'win32-x64', 'runtime-host-mcp.exe'));
+    expect(packaged).not.toHaveProperty('runtimeHostMcpPath');
     expect(packaged.guardianPath.endsWith('runtime-host-guardian')).toBe(true);
-    expect(() => inspectRuntimeHostPackageInventory(packaged, {
-      isDirectory: (path) => !path.endsWith('runtime-host-guardian') && !path.endsWith('runtime-host-mcp.exe'),
-      isFile: (path) => path.endsWith('runtime-host.exe'),
+    expect(inspectRuntimeHostPackageInventory(packaged, {
+      isDirectory: () => true,
+      isFile: (path) => path.endsWith('runtime-host.exe') || path.endsWith('bun.exe'),
       readDirectory: () => [],
-    })).toThrow(/runtime-host-mcp artifact/);
+    })).toMatchObject({ runtimeHost: 'present', guardian: 'not-applicable' });
   });
 });

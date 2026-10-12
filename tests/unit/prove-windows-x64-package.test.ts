@@ -20,7 +20,7 @@ function createPackageRoot(root: string): string {
   const bin = join(root, 'resources', 'bin', 'win32-x64');
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, 'runtime-host.exe'), 'runtime-host');
-  writeFileSync(join(bin, 'runtime-host-mcp.exe'), 'runtime-host-mcp');
+  writeFileSync(join(root, 'resources', 'bin', 'bun.exe'), 'bun');
   return root;
 }
 

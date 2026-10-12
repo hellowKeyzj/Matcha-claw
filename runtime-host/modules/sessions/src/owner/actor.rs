@@ -543,6 +543,11 @@ impl SessionShared {
         &self,
         command: MatchaSessionModelRuntimeCommand,
     ) -> Result<ResolvedSessionModelSelection, SessionModelSelectionOutcome> {
+        crate::trace::log("runtime.matcha.model-selection.prepare.start", command.trace_id.as_deref(), || serde_json::json!({
+            "sessionHash": crate::trace::fingerprint(&command.session_key),
+            "modelHash": crate::trace::fingerprint(&command.model),
+            "selectionHash": command.model_selection_id.as_deref().map(crate::trace::fingerprint),
+        }));
         let outcome = self
             .provider_handle
             .select_matcha_session_model_runtime(
@@ -562,6 +567,12 @@ impl SessionShared {
         &self,
         command: crate::model_selection::SessionModelSelectionCommand,
     ) -> Result<ResolvedSessionModelSelection, SessionModelSelectionOutcome> {
+        if command.endpoint == NativeEndpoint::MatchaAgentLocal {
+            crate::trace::log("runtime.matcha.model-selection.prepare.start", command.trace_id.as_deref(), || serde_json::json!({
+                "sessionHash": crate::trace::fingerprint(&command.session_key),
+                "selectionHash": crate::trace::fingerprint(&command.model_selection_id),
+            }));
+        }
         let outcome = self
             .provider_handle
             .select_session_model(
@@ -1653,17 +1664,53 @@ impl SessionLane {
         shared: &SessionShared,
         command: crate::model_selection::SessionModelSelectionCommand,
     ) -> SessionModelSelectionOutcome {
+        let trace_context = (crate::trace::enabled() && command.endpoint == NativeEndpoint::MatchaAgentLocal)
+            .then(|| (command.trace_id.clone(), command.session_key.clone(), command.model_selection_id.clone()));
+        let trace = |stage, category| {
+            if let Some((trace_id, session_key, selection_id)) = &trace_context {
+                crate::trace::log(stage, trace_id.as_deref(), || serde_json::json!({
+                    "sessionHash": crate::trace::fingerprint(session_key),
+                    "selectionHash": crate::trace::fingerprint(selection_id),
+                    "category": category,
+                }));
+            }
+        };
+        let trace_outcome = |stage, outcome: &SessionModelSelectionOutcome| {
+            trace(stage, match outcome {
+                SessionModelSelectionOutcome::Succeeded { .. } => "succeeded",
+                SessionModelSelectionOutcome::TargetRejected { reason, .. } => match reason {
+                    SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable => "provider_runtime_unavailable",
+                    _ => reason.as_str(),
+                },
+                SessionModelSelectionOutcome::OutcomeUnknown => "outcome_unknown",
+                SessionModelSelectionOutcome::Unsupported => "unsupported",
+                SessionModelSelectionOutcome::Unavailable => "unavailable",
+            });
+        };
+        trace("runtime.matcha.model-selection.bind.start", "binding");
         let command = match self.bind_matcha_model_selection_command(shared, command) {
             Ok(command) => command,
-            Err(outcome) => return outcome,
+            Err(outcome) => {
+                trace_outcome("runtime.matcha.model-selection.bind.failed", &outcome);
+                return outcome;
+            }
         };
         let Some(endpoint) = command.endpoint.runtime_endpoint() else {
+            trace("runtime.matcha.model-selection.driver.failed", "endpoint_unsupported");
             return SessionModelSelectionOutcome::Unsupported;
         };
+        trace("runtime.matcha.model-selection.driver.start", "checking");
         if let Err(failure) = shared
             .running_session_driver(Some(endpoint.clone()))
             .map(|_| ())
         {
+            trace("runtime.matcha.model-selection.driver.failed", match failure {
+                RuntimeOperationFailure::Unsupported => "unsupported",
+                RuntimeOperationFailure::Unavailable => "unavailable",
+                RuntimeOperationFailure::HistoryRetryPending => "history_retry_pending",
+                RuntimeOperationFailure::TargetRejected => "target_rejected",
+                RuntimeOperationFailure::Unknown => "outcome_unknown",
+            });
             return match failure {
                 RuntimeOperationFailure::Unsupported => SessionModelSelectionOutcome::Unsupported,
                 RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending => SessionModelSelectionOutcome::Unavailable,
@@ -1675,34 +1722,46 @@ impl SessionLane {
                 RuntimeOperationFailure::Unknown => SessionModelSelectionOutcome::OutcomeUnknown,
             };
         }
+        trace("runtime.matcha.model-selection.resolve.start", "resolving");
         let command = match shared.resolve_session_model_selection(command).await {
             Ok(command) => command,
-            Err(outcome) => return outcome,
+            Err(outcome) => {
+                trace_outcome("runtime.matcha.model-selection.resolve.failed", &outcome);
+                return outcome;
+            }
         };
         let diagnostic = command.diagnostic.clone();
         let driver = match shared.running_session_driver(Some(endpoint)) {
             Ok(driver) => driver,
             Err(RuntimeOperationFailure::Unsupported) => {
+                trace("runtime.matcha.model-selection.dispatch.failed", "unsupported");
                 return SessionModelSelectionOutcome::Unsupported;
             }
             Err(RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending) => {
+                trace("runtime.matcha.model-selection.dispatch.failed", "unavailable");
                 return SessionModelSelectionOutcome::Unavailable;
             }
             Err(RuntimeOperationFailure::TargetRejected) => {
+                trace("runtime.matcha.model-selection.dispatch.failed", "target_rejected");
                 return SessionModelSelectionOutcome::target_rejected(
                     SessionModelSelectionRejection::RuntimeTargetRejected,
                 );
             }
             Err(RuntimeOperationFailure::Unknown) => {
+                trace("runtime.matcha.model-selection.dispatch.failed", "outcome_unknown");
                 return SessionModelSelectionOutcome::OutcomeUnknown;
             }
         };
         let Some(ops) = driver.session_ops() else {
+            trace("runtime.matcha.model-selection.dispatch.failed", "session_ops_unsupported");
             return SessionModelSelectionOutcome::Unsupported;
         };
-        ops.select_session_model(command)
+        trace("runtime.matcha.model-selection.dispatch.start", "dispatching");
+        let outcome = ops.select_session_model(command)
             .await
-            .with_diagnostic(diagnostic)
+            .with_diagnostic(diagnostic);
+        trace_outcome("runtime.matcha.model-selection.dispatch.result", &outcome);
+        outcome
     }
 
     async fn handle_query(&mut self, shared: &SessionShared, query: SessionQuery) {
@@ -1919,10 +1978,12 @@ fn matcha_provider_runtime_config(
     selection: &ProviderSessionModelSelection,
     private_resolver: &StdMutex<Arc<dyn ConnectorSecretResolverPort>>,
 ) -> Result<MatchaProviderRuntimeConfig, SessionModelSelectionOutcome> {
+    trace_matcha_selection("runtime.matcha.model-selection.prepare.selected", selection, "selected");
     let api_key = match selection.auth_mode {
         "local" => None,
         "api_key" => Some(matcha_provider_api_key(selection, private_resolver)?),
         _ => {
+            trace_matcha_selection("runtime.matcha.model-selection.prepare.failed", selection, "auth_unsupported");
             return Err(
                 SessionModelSelectionOutcome::target_rejected_with_diagnostic(
                     SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable,
@@ -1932,7 +1993,7 @@ fn matcha_provider_runtime_config(
         }
     };
     let base_url = selection.account_endpoint.clone();
-    match selection.protocol {
+    let result = match selection.protocol {
         Some("anthropic_messages") => {
             Ok(MatchaProviderRuntimeConfig::AnthropicMessages { base_url, api_key })
         }
@@ -1945,13 +2006,20 @@ fn matcha_provider_runtime_config(
         Some("open_ai_responses") => {
             Ok(MatchaProviderRuntimeConfig::OpenAiResponses { base_url, api_key })
         }
-        _ => Err(
-            SessionModelSelectionOutcome::target_rejected_with_diagnostic(
-                SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable,
-                Some(selection_diagnostic(selection)),
-            ),
-        ),
+        _ => {
+            trace_matcha_selection("runtime.matcha.model-selection.prepare.failed", selection, "protocol_unsupported");
+            Err(
+                SessionModelSelectionOutcome::target_rejected_with_diagnostic(
+                    SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable,
+                    Some(selection_diagnostic(selection)),
+                ),
+            )
+        }
+    };
+    if result.is_ok() {
+        trace_matcha_selection("runtime.matcha.model-selection.prepare.succeeded", selection, "prepared");
     }
+    result
 }
 
 fn matcha_provider_api_key(
@@ -1960,6 +2028,7 @@ fn matcha_provider_api_key(
 ) -> Result<MatchaProviderSecret, SessionModelSelectionOutcome> {
     let diagnostic = Some(selection_diagnostic(selection));
     let reference = selection.credential_ref.as_ref().ok_or_else(|| {
+        trace_matcha_selection("runtime.matcha.model-selection.prepare.failed", selection, "credential_reference_missing");
         SessionModelSelectionOutcome::target_rejected_with_diagnostic(
             SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable,
             diagnostic.clone(),
@@ -1967,6 +2036,7 @@ fn matcha_provider_api_key(
     })?;
     let reference =
         ConnectorSecretRef::try_new(reference.as_str()).map_err(|InvalidConnectorSecretRef| {
+            trace_matcha_selection("runtime.matcha.model-selection.prepare.failed", selection, "credential_reference_invalid");
             SessionModelSelectionOutcome::target_rejected_with_diagnostic(
                 SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable,
                 diagnostic.clone(),
@@ -1976,12 +2046,19 @@ fn matcha_provider_api_key(
         .lock()
         .expect("Session private resolver lock poisoned")
         .clone();
+    trace_matcha_selection("runtime.matcha.model-selection.credential.resolve.start", selection, "credential_reference_valid");
     let resolved = resolver.resolve(&reference).map_err(|_| {
+        trace_matcha_selection("runtime.matcha.model-selection.credential.resolve.failed", selection, "credential_resolver_error");
         SessionModelSelectionOutcome::target_rejected_with_diagnostic(
             SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable,
             diagnostic.clone(),
         )
     })?;
+    trace_matcha_selection("runtime.matcha.model-selection.credential.resolve.result", selection, match &resolved {
+        ConnectorSecretResolution::Resolved { .. } => "resolved",
+        ConnectorSecretResolution::NotFound { .. } => "credential_not_found",
+        ConnectorSecretResolution::Unavailable { .. } => "credential_unavailable",
+    });
     let ConnectorSecretResolution::Resolved { value, .. } = resolved else {
         return Err(
             SessionModelSelectionOutcome::target_rejected_with_diagnostic(
@@ -1990,12 +2067,52 @@ fn matcha_provider_api_key(
             ),
         );
     };
-    MatchaProviderSecret::new(connector_secret_to_string(&value)?).map_err(|_| {
+    let secret = connector_secret_to_string(&value).map_err(|outcome| {
+        trace_matcha_selection("runtime.matcha.model-selection.prepare.failed", selection, "invalid_utf8");
+        outcome
+    })?;
+    let secret = MatchaProviderSecret::new(secret).map_err(|_| {
+        trace_matcha_selection("runtime.matcha.model-selection.prepare.failed", selection, "credential_secret_invalid");
         SessionModelSelectionOutcome::target_rejected_with_diagnostic(
             SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable,
             Some(selection_diagnostic(selection)),
         )
-    })
+    })?;
+    trace_matcha_selection("runtime.matcha.model-selection.credential.validated", selection, "valid");
+    Ok(secret)
+}
+
+fn trace_matcha_selection(
+    stage: &'static str,
+    selection: &ProviderSessionModelSelection,
+    category: &'static str,
+) {
+    crate::trace::log(stage, selection.trace_id.as_deref(), || serde_json::json!({
+        "category": category,
+        "sessionHash": crate::trace::fingerprint(&selection.session_key),
+        "endpointSessionIdHash": selection.endpoint_session_id.as_deref().map(crate::trace::fingerprint),
+        "selectionHash": crate::trace::fingerprint(&selection.model_selection_id),
+        "accountHash": crate::trace::fingerprint(&selection.account_id),
+        "modelHash": crate::trace::fingerprint(&selection.model_id),
+        "credentialReferencePresent": selection.credential_ref.is_some(),
+        "credentialReferenceHash": selection.credential_ref.as_deref().map(crate::trace::fingerprint),
+        "credentialReferenceValid": match category {
+            "credential_reference_missing" | "credential_reference_invalid" => Some(false),
+            "credential_reference_valid" | "credential_resolver_error" | "resolved"
+                | "credential_not_found" | "credential_unavailable" | "invalid_utf8"
+                | "credential_secret_invalid" | "valid" => Some(true),
+            _ => None,
+        },
+        "protocol": match selection.protocol {
+            Some(value @ ("anthropic_messages" | "google_generative_ai" | "open_ai_completions" | "open_ai_responses")) => value,
+            None => "missing",
+            _ => "unknown",
+        },
+        "authMode": match selection.auth_mode {
+            value @ ("api_key" | "token" | "cli_reuse" | "oauth_browser" | "oauth_device" | "local") => value,
+            _ => "unknown",
+        },
+    }));
 }
 
 fn selection_diagnostic(

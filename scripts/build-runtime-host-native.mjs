@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -22,7 +22,7 @@ export function parseRuntimeHostNativeBuildTargetArgs(args) {
 
   for (let index = 0; index < args.length; index += 2) {
     const option = args[index];
-    if (option !== '--platform' && option !== '--arch') {
+    if (option !== '--platform' && option !== '--arch' && option !== '--profile') {
       throw new Error(`[build-runtime-host-native] unexpected argument: ${option}`);
     }
     if (options.has(option)) {
@@ -42,10 +42,19 @@ export function parseRuntimeHostNativeBuildTargetArgs(args) {
     throw new Error('[build-runtime-host-native] required options: --platform <platform> --arch <arch>');
   }
 
-  return { arch, platform };
+  const profile = options.get('--profile');
+  if (profile !== undefined && profile !== 'dev' && profile !== 'release') {
+    throw new Error(`[build-runtime-host-native] unsupported profile: ${profile}. Supported profiles: dev, release`);
+  }
+
+  return { arch, platform, ...(profile !== undefined ? { profile } : {}) };
 }
 
-export function createRuntimeHostNativeBuildPlan({ rootDir: projectRootDir, platform, arch }) {
+export function createRuntimeHostNativeBuildPlan({ rootDir: projectRootDir, platform, arch, profile = 'release' }) {
+  if (profile !== 'dev' && profile !== 'release') {
+    throw new Error(`[build-runtime-host-native] unsupported profile: ${profile}. Supported profiles: dev, release`);
+  }
+
   const targetKey = `${platform}-${arch}`;
   const cargoTarget = RUNTIME_HOST_TARGETS[targetKey];
   if (!cargoTarget) {
@@ -59,9 +68,10 @@ export function createRuntimeHostNativeBuildPlan({ rootDir: projectRootDir, plat
   const targetDir = resolve(runtimeHostDir, 'target');
   const manifestPath = resolve(runtimeHostDir, 'Cargo.toml');
   const binaryName = platform === 'win32' ? 'runtime-host.exe' : 'runtime-host';
+  const cargoOutputDir = profile === 'dev' ? 'debug' : 'release';
   const cargoBuildArgs = [
     'build',
-    '--release',
+    ...(profile === 'release' ? ['--release'] : []),
     '--locked',
     '--manifest-path',
     manifestPath,
@@ -75,19 +85,13 @@ export function createRuntimeHostNativeBuildPlan({ rootDir: projectRootDir, plat
     : {
       artifactBinaryPath: resolve(artifactDir, 'runtime-host-guardian'),
       cargoArgs: [...cargoBuildArgs, '--package', 'foundation', '--bin', 'runtime-host-guardian'],
-      sourceBinaryPath: resolve(targetDir, cargoTarget, 'release', 'runtime-host-guardian'),
+      sourceBinaryPath: resolve(targetDir, cargoTarget, cargoOutputDir, 'runtime-host-guardian'),
     };
-  const mcpBinaryName = platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp';
   return {
     artifactBinaryPath: resolve(artifactDir, binaryName),
     cargoArgs: [...cargoBuildArgs, '--package', 'runtime-host', '--bin', 'runtime-host'],
     cargoTarget,
-    sourceBinaryPath: resolve(targetDir, cargoTarget, 'release', binaryName),
-    mcp: {
-      artifactBinaryPath: resolve(artifactDir, mcpBinaryName),
-      cargoArgs: [...cargoBuildArgs, '--package', 'runtime-host', '--bin', 'runtime-host-mcp'],
-      sourceBinaryPath: resolve(targetDir, cargoTarget, 'release', mcpBinaryName),
-    },
+    sourceBinaryPath: resolve(targetDir, cargoTarget, cargoOutputDir, binaryName),
     ...(guardian ? { guardian } : {}),
   };
 }
@@ -99,6 +103,10 @@ export function copyRuntimeHostNativeBinary({ sourceBinaryPath, artifactBinaryPa
 
   mkdirSync(dirname(artifactBinaryPath), { recursive: true });
   copyFileSync(sourceBinaryPath, artifactBinaryPath);
+  if (binaryName === 'runtime-host') {
+    const obsoleteMcpName = artifactBinaryPath.endsWith('.exe') ? 'runtime-host-mcp.exe' : 'runtime-host-mcp';
+    rmSync(join(dirname(artifactBinaryPath), obsoleteMcpName), { force: true });
+  }
 }
 
 function requirePath(path, label) {
@@ -125,7 +133,6 @@ function buildRuntimeHostNative(target) {
   requirePath(resolve(rootDir, 'runtime-host', 'Cargo.lock'), 'Cargo lockfile');
   const artifacts = [
     { binaryName: 'runtime-host', ...plan },
-    { binaryName: 'runtime-host-mcp', ...plan.mcp },
     ...(plan.guardian ? [{ binaryName: 'runtime-host-guardian', ...plan.guardian }] : []),
   ];
   const cargoEnv = createCargoBuildEnv(rootDir);

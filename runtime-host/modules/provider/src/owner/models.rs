@@ -820,6 +820,20 @@ impl ResolvedProviderModelSelection {
         endpoint_session_id: Option<String>,
         trace_id: Option<String>,
     ) -> ProviderSessionModelSelection {
+        if endpoint == ProviderSessionEndpoint::MatchaAgentLocal {
+            platform::trace::runtime_trace("runtime.provider.model-selection.selected", || json!({
+                "traceId": trace_id,
+                "sessionHash": identifier_hash(&session_key),
+                "endpointSessionIdHash": endpoint_session_id.as_deref().map(identifier_hash),
+                "selectionHash": identifier_hash(&self.selection_id),
+                "accountHash": identifier_hash(&self.view.account_id),
+                "modelHash": identifier_hash(&self.view.model_id),
+                "credentialReferencePresent": self.credential_ref.is_some(),
+                "credentialReferenceHash": self.credential_ref.as_deref().map(identifier_hash),
+                "protocol": self.protocol,
+                "authMode": self.auth_mode,
+            }));
+        }
         ProviderSessionModelSelection {
             endpoint,
             session_key,

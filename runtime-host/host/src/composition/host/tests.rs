@@ -1270,7 +1270,7 @@ fn host_input(root: &TestRoot) -> HostInput {
         },
         matcha_secret: Secret::new(entropy()).unwrap(),
         open_claw: OpenClawInput {
-            runtime_host_mcp_executable: absolute_path("runtime-host-mcp"),
+            runtime_host_mcp_executable: absolute_path("runtime-host"),
             runtime_host_mcp_state_dir: absolute_path("runtime-host"),
             electron_image: absolute_path("MatchaClaw"),
             working_directory: absolute_path("runtime"),

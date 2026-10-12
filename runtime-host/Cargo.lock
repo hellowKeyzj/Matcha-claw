@@ -3724,7 +3724,6 @@ checksum = "7fdf00e8af6d0b3e92d4bbf9b76f773d8b84ea80f310324ad16cbdc2e653e02c"
 dependencies = [
  "base64 0.22.1",
  "crc32fast",
- "image",
  "quick-xml 0.41.0",
  "serde",
  "serde_json",
@@ -10891,6 +10890,7 @@ dependencies = [
  "chrono",
  "docx-rs",
  "epub",
+ "flate2",
  "foundation",
  "futures-util",
  "html2text",
@@ -11450,7 +11450,6 @@ dependencies = [
  "indexmap 2.14.0",
  "memchr",
  "thiserror 2.0.20",
- "zopfli",
 ]
 
 [[package]]

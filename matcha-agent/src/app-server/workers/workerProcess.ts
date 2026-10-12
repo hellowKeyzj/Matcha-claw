@@ -11,6 +11,11 @@ import {
   NdjsonFrameParser,
 } from './workerProtocol.js'
 import { classifyWorkerError, errorToMessage } from './workerErrors.js'
+import { isRecord } from '../protocol/jsonRpc.js'
+import {
+  isRunTraceEnabled,
+  logProcessSessionTrace,
+} from '../../query/runTrace.js'
 
 export type WorkerProcessSpawnOptions = {
   command: string
@@ -121,6 +126,8 @@ export class WorkerProcess {
   private readonly exited: Promise<void>
   private resolveExited: () => void = () => {}
   private stderrTail = ''
+  private modelTraceLine = ''
+  private discardingModelTrace = false
   private closed = false
   private exitedProcess = false
 
@@ -149,6 +156,7 @@ export class WorkerProcess {
     })
     this.child.stderr.on('data', chunk => {
       this.appendStderrTail(chunk)
+      if (isRunTraceEnabled()) this.forwardModelTrace(chunk)
     })
     this.child.on('error', error => {
       this.rejectAllPending(error)
@@ -336,6 +344,71 @@ export class WorkerProcess {
       clearTimeout(pending.timeout)
       pending.reject(error)
     }
+  }
+
+  private forwardModelTrace(chunk: string | Buffer): void {
+    const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk
+    let start = 0
+    while (start < text.length) {
+      const newline = text.indexOf('\n', start)
+      const end = newline < 0 ? text.length : newline
+      if (!this.discardingModelTrace) {
+        if (this.modelTraceLine.length + end - start > 4096) {
+          this.modelTraceLine = ''
+          this.discardingModelTrace = true
+        } else {
+          this.modelTraceLine += text.slice(start, end)
+        }
+      }
+      if (newline < 0) return
+      if (!this.discardingModelTrace) this.emitModelTrace(this.modelTraceLine)
+      this.modelTraceLine = ''
+      this.discardingModelTrace = false
+      start = newline + 1
+    }
+  }
+
+  private emitModelTrace(line: string): void {
+    if (!line.includes('"prefix":"session-trace"')) return
+    let trace: unknown
+    try {
+      trace = JSON.parse(line)
+    } catch {
+      return
+    }
+    if (!isRecord(trace) || trace.prefix !== 'session-trace' ||
+        trace.source !== 'matcha-agent-worker') return
+    switch (trace.stage) {
+      case 'matcha.model-selection.worker.initialize':
+      case 'matcha.model-selection.worker.received':
+      case 'matcha.model-selection.worker.guard':
+      case 'matcha.model-selection.worker.setting':
+      case 'matcha.model-selection.worker.response':
+        break
+      default:
+        return
+    }
+    logProcessSessionTrace('matcha-agent-worker', trace.stage, () => {
+      const details: Record<string, string | number | boolean | null> = {}
+      for (const key of ['sessionHash', 'modelHash', 'requestHash']) {
+        const value = trace[key]
+        if (value === null || (typeof value === 'string' && /^[0-9a-f]{8}$/.test(value))) {
+          details[key] = value
+        }
+      }
+      if (typeof trace.at === 'number' && Number.isFinite(trace.at)) details.workerAt = trace.at
+      if (typeof trace.providerRuntimePresent === 'boolean') {
+        details.providerRuntimePresent = trace.providerRuntimePresent
+      }
+      if (trace.reason === 'worker_not_initialized' || trace.reason === 'prompt_running') {
+        details.reason = trace.reason
+      }
+      if (trace.outcome === 'model_configured' || trace.outcome === 'query_engine_missing' ||
+          trace.outcome === 'success' || trace.outcome === 'failed') {
+        details.outcome = trace.outcome
+      }
+      return details
+    })
   }
 
   private appendStderrTail(chunk: string | Buffer): void {

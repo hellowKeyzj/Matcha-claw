@@ -112,6 +112,7 @@ fn mcp_server(
     server.insert(
         "args".into(),
         Value::Array(vec![
+            Value::String("mcp".into()),
             Value::String("--state-dir".into()),
             Value::String(path_text(runtime_host_mcp_state_dir)?),
         ]),

@@ -31,7 +31,7 @@ interface RuntimeHostBootstrapBaseInput {
   readonly appLogDir: string;
   /** MatchaClaw Host-owned durable state root. */
   readonly runtimeHostStateDir: string;
-  /** Native Matcha MCP stdio executable started by OpenClaw. */
+  /** Runtime-host executable started in Matcha MCP stdio mode by peer runtimes. */
   readonly runtimeHostMcpExecutable: string;
   /** Sealed Main-only provider credential resolver. */
   readonly providerCredentialResolver?: Readonly<{

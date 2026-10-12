@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { delimiter, dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { prepareMatchaRipgrep } from './download-matcha-ripgrep.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, '..');
@@ -72,6 +73,9 @@ run(bunCommand, ['install', '--frozen-lockfile'], {
     HUSKY: '0',
   },
 });
+for (const arch of ['x64', 'arm64']) {
+  await prepareMatchaRipgrep(process.platform, arch);
+}
 run(bunCommand, ['run', 'build:vite']);
 
 requirePath(resolve(matchaAgentDir, 'dist', 'cli-node.js'), 'matcha-agent/dist/cli-node.js');

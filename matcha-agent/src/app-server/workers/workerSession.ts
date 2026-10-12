@@ -10,6 +10,7 @@ import type {
   RunTraceSink,
 } from '../../query/runTrace.js'
 import {
+  hashTraceIdentifier,
   isRunTraceEnabled,
   logProcessSessionTrace,
   sanitizeRunTraceDetails,
@@ -236,17 +237,6 @@ function applyOptionalEnv(key: string, value: string | undefined): void {
   }
 }
 
-function providerRuntimeTraceDetails(
-  providerRuntime: ProviderRuntimeConfig | undefined,
-): RunTraceDetails {
-  return {
-    hasProviderRuntime: providerRuntime !== undefined,
-    providerRuntimeKind: providerRuntime?.kind ?? null,
-    hasBaseUrl: Boolean(providerRuntime?.baseUrl),
-    hasApiKey: Boolean(providerRuntime?.apiKey),
-  }
-}
-
 export async function createWorkerSession(
   payload: WorkerInitializePayload,
   sink: WorkerSessionSink,
@@ -316,12 +306,12 @@ export async function createWorkerSession(
   applyHostProviderRuntime(payload.providerRuntime)
   logProcessSessionTrace(
     'matcha-agent-worker',
-    'worker.session.initialize.model',
-    {
-      sessionIdLength: payload.sessionId.length,
-      model: payload.model ?? null,
-      ...providerRuntimeTraceDetails(payload.providerRuntime),
-    },
+    'matcha.model-selection.worker.initialize',
+    () => ({
+      sessionHash: hashTraceIdentifier(payload.sessionId),
+      modelHash: hashTraceIdentifier(payload.model),
+      providerRuntimePresent: payload.providerRuntime !== undefined,
+    }),
   )
   const restoredLog = resolvedSessionFile
     ? await getLastSessionLog(payload.sessionId as UUID)
@@ -520,16 +510,26 @@ class QueryEngineWorkerSession implements WorkerSession {
 
   setModel(model: string): void {
     if (!this.queryEngine) {
+      logProcessSessionTrace(
+        'matcha-agent-worker',
+        'matcha.model-selection.worker.setting',
+        () => ({
+          sessionHash: hashTraceIdentifier(this.sessionId),
+          modelHash: hashTraceIdentifier(model),
+          outcome: 'query_engine_missing',
+        }),
+      )
       throw new Error('Worker session is not initialized')
     }
     this.queryEngine.setModel(model)
     logProcessSessionTrace(
       'matcha-agent-worker',
-      'worker.session.setModel.applied',
-      {
-        sessionIdLength: this.sessionId.length,
-        model,
-      },
+      'matcha.model-selection.worker.setting',
+      () => ({
+        sessionHash: hashTraceIdentifier(this.sessionId),
+        modelHash: hashTraceIdentifier(model),
+        outcome: 'model_configured',
+      }),
     )
   }
 

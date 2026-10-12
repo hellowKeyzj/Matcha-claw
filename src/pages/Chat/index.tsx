@@ -1459,9 +1459,26 @@ export function Chat({ isActive = true }: ChatProps) {
           modelState: result.modelState,
         }),
       }));
+      logSessionTrace('model-selection.applied', traceId, () => ({
+        recordKey: summarizeIdentifier(currentSessionRecordKey),
+        selected: {
+          provider: summarizeIdentifier(result.modelState.selected?.provider),
+          model: summarizeIdentifier(result.modelState.selected?.model),
+          ref: summarizeIdentifier(result.modelState.selected?.ref),
+        },
+        active: {
+          provider: summarizeIdentifier(result.modelState.active?.provider),
+          model: summarizeIdentifier(result.modelState.active?.model),
+          ref: summarizeIdentifier(result.modelState.active?.ref),
+        },
+        selectionId: summarizeIdentifier(result.modelState.selectionId),
+      }));
       void loadSessions();
     } catch (error) {
-      logSessionTrace('model-selection.error', traceId, () => (summarizeError(error)));
+      logSessionTrace('model-selection.error', traceId, () => ({
+        ...summarizeError(error),
+        errorName: error instanceof Error ? 'Error' : typeof error,
+      }));
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('input.modelSwitchFailed', { error: message }));
     }

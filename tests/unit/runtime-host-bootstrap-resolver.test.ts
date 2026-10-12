@@ -124,10 +124,6 @@ function expectedFiles(input: {
       runtimeHostDirectory,
       input.platform === 'win32' ? 'runtime-host.exe' : 'runtime-host'
     ),
-    path.join(
-      runtimeHostDirectory,
-      input.platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp'
-    ),
     input.platform === 'win32'
       ? input.isPackaged
         ? path.join(modeRoot, 'bin', 'git-for-windows', 'bin', 'bash.exe')
@@ -174,7 +170,7 @@ describe('resolveRuntimeHostBootstrap', () => {
         runtimeHostMcpExecutable: path.join(
           modeRoot,
           ...(isPackaged ? ['bin', target] : ['runtime-host', 'dist', target]),
-          platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp'
+          platform === 'win32' ? 'runtime-host.exe' : 'runtime-host'
         ),
         runtimeHostTransportPort: 32_111,
         matcha: {
@@ -256,20 +252,20 @@ describe('resolveRuntimeHostBootstrap', () => {
     });
   });
 
-  it('fails closed with a redacted typed error when runtime-host-mcp is absent', () => {
+  it('fails closed with a redacted typed error when the shared runtime-host is absent', () => {
     const files = expectedFiles({ isPackaged: true, platform: 'darwin', arch: 'arm64' });
-    const mcp = posix.join(resourcesRoot, 'bin', 'darwin-arm64', 'runtime-host-mcp');
+    const binary = posix.join(resourcesRoot, 'bin', 'darwin-arm64', 'runtime-host');
     const error = expectResolutionFailure(() =>
       resolveBootstrap({
         isPackaged: true,
         platform: 'darwin',
         arch: 'arm64',
-        files: files.filter((file) => file !== mcp),
+        files: files.filter((file) => file !== binary),
       })
     );
 
     expect(error.code).toBe('RUNTIME_HOST_BOOTSTRAP_ARTIFACT_NOT_FOUND');
-    expect(error.message).not.toContain(mcp);
+    expect(error.message).not.toContain(binary);
   });
 
   it('fails closed with a redacted typed error when a Unix guardian is absent', () => {

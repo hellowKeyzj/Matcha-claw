@@ -87,7 +87,7 @@ pub(crate) fn project_matcha(
     provision_private_directory(storage_root).map_err(|_| ())?;
     let body = serde_json::to_vec(&json!({
         "command": executable.to_str().ok_or(())?,
-        "args": ["--state-dir", state_dir.to_str().ok_or(())?],
+        "args": ["mcp", "--state-dir", state_dir.to_str().ok_or(())?],
     }))
     .map_err(|_| ())?;
     write_private(&storage_root.join("matcha-mcp.json"), &body)

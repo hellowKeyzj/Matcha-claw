@@ -9,6 +9,7 @@ import {
   parseJsonRpcMessage,
 } from '../protocol/jsonRpc.js'
 import {
+  hashTraceIdentifier,
   isRunTraceEnabled,
   logProcessSessionTrace,
 } from '../../query/runTrace.js'
@@ -54,6 +55,7 @@ type ScalarParseResult<TValue> =
 type MethodHandler = (
   clientId: string | undefined,
   params: unknown,
+  requestId?: JsonRpcId,
 ) => Promise<DispatchResult>
 
 type ParamsParser<TParams> = (params: unknown) => ParamsParseResult<TParams>
@@ -90,12 +92,30 @@ export class ProtocolGateway {
     clientId: string | undefined,
     message: JsonRpcMessage & { id: JsonRpcId },
   ): Promise<JsonRpcResponse> {
+    if (message.method === 'session.setModel') {
+      logProcessSessionTrace(
+        'matcha-agent-app-server',
+        'matcha.model-selection.request.received',
+        () => ({ requestHash: hashTraceIdentifier(String(message.id)) }),
+      )
+    }
     try {
       const dispatched = await this.dispatch(
         clientId,
         message.method,
         message.params,
+        message.id,
       )
+      if (message.method === 'session.setModel') {
+        logProcessSessionTrace(
+          'matcha-agent-app-server',
+          'matcha.model-selection.request.returned',
+          () => ({
+            requestHash: hashTraceIdentifier(String(message.id)),
+            outcome: dispatched.resultType,
+          }),
+        )
+      }
       switch (dispatched.resultType) {
         case 'success':
           return { jsonrpc: '2.0', id: message.id, result: dispatched.result }
@@ -105,6 +125,16 @@ export class ProtocolGateway {
           return methodNotFound(message.id, message.method)
       }
     } catch (error) {
+      if (message.method === 'session.setModel') {
+        logProcessSessionTrace(
+          'matcha-agent-app-server',
+          'matcha.model-selection.request.returned',
+          () => ({
+            requestHash: hashTraceIdentifier(String(message.id)),
+            outcome: 'internalError',
+          }),
+        )
+      }
       return internalError(message.id, error)
     }
   }
@@ -125,12 +155,13 @@ export class ProtocolGateway {
     clientId: string | undefined,
     method: string,
     params: unknown,
+    requestId?: JsonRpcId,
   ): Promise<DispatchResult> {
     const handler = this.methodHandlers[method]
     if (!handler) {
       return { resultType: 'methodNotFound' }
     }
-    return handler(clientId, params)
+    return handler(clientId, params, requestId)
   }
 
   private readonly methodHandlers: Record<string, MethodHandler> = {
@@ -179,10 +210,32 @@ export class ProtocolGateway {
       this.callWithParams(params, parseModelsListParams, value =>
         this.ports.models.list(value),
       ),
-    'session.setModel': async (_clientId, params) =>
-      this.callWithParams(params, parseSessionSetModelParams, value =>
-        this.ports.session.setModel(value),
-      ),
+    'session.setModel': async (_clientId, params, requestId) => {
+      const parsed = parseSessionSetModelParams(params)
+      logProcessSessionTrace(
+        'matcha-agent-app-server',
+        'matcha.model-selection.params.parsed',
+        () => ({
+          requestHash: hashTraceIdentifier(
+            requestId === undefined ? undefined : String(requestId),
+          ),
+          outcome: parsed.resultType,
+          ...(parsed.resultType === 'success'
+            ? {
+                sessionHash: hashTraceIdentifier(parsed.params.sessionId),
+                modelHash: hashTraceIdentifier(parsed.params.model),
+                selectionHash: hashTraceIdentifier(parsed.params.modelSelectionId),
+                providerRuntimePresent: parsed.params.providerRuntime !== undefined,
+              }
+            : {}),
+        }),
+      )
+      if (parsed.resultType === 'invalidParams') return parsed
+      return {
+        resultType: 'success',
+        result: await this.ports.session.setModel(parsed.params),
+      }
+    },
     'session.setMode': async (_clientId, params) =>
       this.callWithParams(params, parseSessionSetModeParams, value =>
         this.ports.session.setMode(value),

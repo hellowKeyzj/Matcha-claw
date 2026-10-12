@@ -8,9 +8,9 @@ use std::{
 
 use platform::mcp::{ToolCatalog, run_stdio};
 
-fn main() -> ExitCode {
+pub(super) fn run() -> ExitCode {
     let Ok(config) = McpInvocation::parse() else {
-        eprintln!("runtime-host-mcp: artifact configuration is invalid");
+        eprintln!("runtime-host mcp: artifact configuration is invalid");
         return ExitCode::FAILURE;
     };
 
@@ -38,8 +38,7 @@ struct McpInvocation {
 
 impl McpInvocation {
     fn parse() -> Result<Self, ()> {
-        let mut args = std::env::args_os();
-        let _program = args.next();
+        let mut args = std::env::args_os().skip(2);
         let mut state_dir = None;
         while let Some(flag) = args.next() {
             match flag.to_str() {

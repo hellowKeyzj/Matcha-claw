@@ -48,6 +48,10 @@ Rust 替换 child 与其内部实现；Renderer/preload contract 不因迁移改
 
 本目录记录的是当前仓库状态；不以旧的 [runtime-host-transport-v1.md](../runtime-host-transport-v1.md) 单独作为完整真相。后者是较早的最小 transport 说明，已知差异见 [open-items.md](open-items.md)。
 
+## Matcha MCP 启动契约
+
+Host 与 MCP 分发同一 `runtime-host` 二进制（Windows 为 `.exe`）。Host 无参数启动；MCP 使用 `runtime-host mcp --state-dir <absolute directory>`，在创建 Host runtime/bootstrap 前同步分流，仍保留独立 Wiki 进程及原 21 个工具协议。产品托管启动配置同步更新 executable/args；手工配置旧 `runtime-host-mcp` 路径的消费者须改为新命令，不分发兼容二进制。[VERIFY: runtime-host/host/src/main.rs:11-22] [VERIFY: runtime-host/host/src/mcp.rs:11-32] [VERIFY: runtime-host/host/src/team_mcp/discovery.rs:88-93] [VERIFY: runtime-host/integrations/openclaw/src/native_config/connector/preset.rs:108-121]
+
 ## Wiki MCP 当前库契约
 
 共用 `matcha` MCP 保留 TeamRun 6 项、Wiki 15 项工具。Wiki 工具不接受 `projectId`，也不开放模型选库；每次有效调用使用最新持久化全局当前库，启动后新增的库同样可用，已开始操作保持原目标。内部 Wiki 产品 API 的项目参数、返回与业务契约不变；此裁剪不是新增 HTTP、IPC 或会话绑定接口。[VERIFY: runtime-host/modules/wiki/src/adapters/mcp/mod.rs:56-99] [VERIFY: runtime-host/modules/wiki/src/api.rs:89-93] [VERIFY: runtime-host/modules/wiki/src/owner/actor.rs:318-336]
@@ -58,7 +62,7 @@ MCP `team_graph_patch` 不开放 `set_node_position` 或坐标参数，MCP 专�
 
 设计 `team_graph_context` / `team_graph_patch` 的业务失败保留 `success:false` 与可读 `error`，并返回明确的 `errorCode`；图校验可附安全 nodeId/edgeId，区分端口/action、缺失端点、图版本/base、设计凭据及幂等冲突。原因来自实际失败的原校验，不以重新预检推断。内部持久化错误不暴露细节，结果不确定时要求先读回；不承诺失败一定未落盘。无凭据脱敏 context 与设计成功 snapshot 保留；运行期 prompt 读写使用下述任务上下文与业务执行校验。`team_node_event` 只接收 progress/request_input/request_approval，删除 complete/reject 与 deliveryId/receipt/nodeId/attemptNumber/summary/outputPort 六个终态字段；真实 terminal hook、approval/decision/evidence 能力保留。[VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs:317-333] [VERIFY: runtime-host/modules/organization/src/application/team_mcp.rs:316-369][VERIFY: runtime-host/modules/organization/src/application/team_mcp.rs:101] [VERIFY: runtime-host/modules/organization/src/application/team_mcp.rs:167] [VERIFY: runtime-host/modules/organization/src/application/team_mcp.rs:399-640]
 
-Team 六工具名称不变；stdio facade 从独立 Team store 路径收束为 Host fixed caller，经现有 loopback listener 的私有 POST `/internal/team/mcp` 调用同一 OrganizationHandle。该入口不是 Renderer route 或通用 store API，不增加网络 listener/执行 queue；Wiki 15 项工具与当前库契约不变。[VERIFY: runtime-host/host/src/bin/runtime-host-mcp.rs:17-23] [VERIFY: runtime-host/modules/organization/src/adapters/mcp/team_run.rs:4-21] [VERIFY: runtime-host/host/src/team_mcp/route.rs:23-39] [VERIFY: runtime-host/host/src/app/service.rs:100-104]
+Team 六工具名称不变；stdio facade 从独立 Team store 路径收束为 Host fixed caller，经现有 loopback listener 的私有 POST `/internal/team/mcp` 调用同一 OrganizationHandle。该入口不是 Renderer route 或通用 store API，不增加网络 listener/执行 queue；Wiki 15 项工具与当前库契约不变。[VERIFY: runtime-host/host/src/mcp.rs:17-23] [VERIFY: runtime-host/modules/organization/src/adapters/mcp/team_run.rs:4-21] [VERIFY: runtime-host/host/src/team_mcp/route.rs:23-39] [VERIFY: runtime-host/host/src/app/service.rs:100-104]
 
 私有调用签名绑定 `team-mcp-local`、tool subject、body SHA256 revision 与 30 秒有效期；此 principal 不代表 native session/role 授权。Host 每启动的 discovery key 不进入 public DTO。Matcha 的私有 launch 投影仅含 command/args，worker env 只传文件路径并沿原 MCP policy；不改变 Renderer Sessions 输入或会话绑定。[VERIFY: runtime-host/host/src/team_mcp/client.rs:34-64] [VERIFY: runtime-host/host/src/team_mcp/route.rs:77-90] [VERIFY: runtime-host/host/src/team_mcp/discovery.rs:79-94] [VERIFY: matcha-agent/src/app-server/main.ts:210-216] [VERIFY: matcha-agent/src/services/mcp/config.ts:1097-1115] [VERIFY: matcha-agent/src/services/mcp/config.ts:1194-1266]
 

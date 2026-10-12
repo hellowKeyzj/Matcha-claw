@@ -9,6 +9,10 @@ import type {
 } from '../protocol/types.js'
 import { encodeWorkerFrame, NdjsonFrameParser } from './workerProtocol.js'
 import { classifyWorkerError } from './workerErrors.js'
+import {
+  hashTraceIdentifier,
+  logProcessSessionTrace,
+} from '../../query/runTrace.js'
 import { createWorkerSession } from './workerSession.js'
 import type { WorkerSession } from './workerSession.js'
 
@@ -147,7 +151,25 @@ class WorkerEntryRunner {
           await this.emitSuccess(command.id)
           return
         case 'worker.setModel':
+          logProcessSessionTrace(
+            'matcha-agent-worker',
+            'matcha.model-selection.worker.received',
+            () => ({
+              sessionHash: hashTraceIdentifier(this.session?.sessionId),
+              modelHash: hashTraceIdentifier(command.model),
+              requestHash: hashTraceIdentifier(command.id),
+            }),
+          )
           if (!this.session) {
+            logProcessSessionTrace(
+              'matcha-agent-worker',
+              'matcha.model-selection.worker.guard',
+              () => ({
+                modelHash: hashTraceIdentifier(command.model),
+                requestHash: hashTraceIdentifier(command.id),
+                reason: 'worker_not_initialized',
+              }),
+            )
             await this.emitFailure(
               command.id,
               new Error('Worker is not initialized'),
@@ -155,6 +177,16 @@ class WorkerEntryRunner {
             return
           }
           if (this.activePrompt) {
+            logProcessSessionTrace(
+              'matcha-agent-worker',
+              'matcha.model-selection.worker.guard',
+              () => ({
+                sessionHash: hashTraceIdentifier(this.session?.sessionId),
+                modelHash: hashTraceIdentifier(command.model),
+                requestHash: hashTraceIdentifier(command.id),
+                reason: 'prompt_running',
+              }),
+            )
             await this.emitFailure(
               command.id,
               new Error('A prompt is already running'),
@@ -163,6 +195,16 @@ class WorkerEntryRunner {
           }
           this.session.setModel(command.model)
           await this.emitSuccess(command.id)
+          logProcessSessionTrace(
+            'matcha-agent-worker',
+            'matcha.model-selection.worker.response',
+            () => ({
+              sessionHash: hashTraceIdentifier(this.session?.sessionId),
+              modelHash: hashTraceIdentifier(command.model),
+              requestHash: hashTraceIdentifier(command.id),
+              outcome: 'success',
+            }),
+          )
           return
         case 'worker.shutdown':
           await this.session?.shutdown(command.reason)
@@ -171,6 +213,18 @@ class WorkerEntryRunner {
           return
       }
     } catch (error) {
+      if (command.type === 'worker.setModel') {
+        logProcessSessionTrace(
+          'matcha-agent-worker',
+          'matcha.model-selection.worker.response',
+          () => ({
+            sessionHash: hashTraceIdentifier(this.session?.sessionId),
+            modelHash: hashTraceIdentifier(command.model),
+            requestHash: hashTraceIdentifier(command.id),
+            outcome: 'failed',
+          }),
+        )
+      }
       await this.emitFailure(command.id, error)
     }
   }

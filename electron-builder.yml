@@ -24,6 +24,7 @@ extraResources:
       - "!icons/*.md"
       - "!icons/*.svg"
       - "!bin/**"
+      - "!cli/**"
       - "!screenshot/**"
   # OpenClaw package (node_modules copied separately by afterPack hook
   # because electron-builder respects .gitignore which excludes node_modules/)
@@ -39,6 +40,7 @@ extraResources:
   # (after-pack.cjs). Third-party plugins come from node_modules, while
   # Matcha-managed plugins come from build/openclaw-plugins/.
 
+beforePack: ./scripts/after-pack.cjs
 afterPack: ./scripts/after-pack.cjs
 
 asar: true
@@ -46,10 +48,9 @@ asarUnpack:
   - "**/*.node"
 
 # Disable native module rebuilding.
-# The Electron renderer/main process has no native (.node) dependencies.
-# All native modules (opus, sharp, koffi …) belong to openclaw, which is
-# bundled separately (bundle-openclaw.mjs → extraResources) and runs in its
-# own process — @electron/rebuild must NOT touch them.
+# Main-process @lydell/node-pty ships prebuilds selected by beforePack.
+# OpenClaw native modules run in their own process and are copied/filtered
+# separately by afterPack — @electron/rebuild must NOT touch either boundary.
 npmRebuild: false
 
 # Auto-update configuration

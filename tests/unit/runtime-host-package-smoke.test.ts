@@ -34,10 +34,8 @@ function createUnpackedArtifact(root: string, platform: 'darwin' | 'linux' | 'wi
   const runtimeHostDir = join(resources, 'bin', `${platform}-${arch}`);
   mkdirSync(runtimeHostDir, { recursive: true });
   const runtimeHost = join(runtimeHostDir, platform === 'win32' ? 'runtime-host.exe' : 'runtime-host');
-  const runtimeHostMcp = join(runtimeHostDir, platform === 'win32' ? 'runtime-host-mcp.exe' : 'runtime-host-mcp');
   const bun = join(resources, 'bin', platform === 'win32' ? 'bun.exe' : 'bun');
   writeFileSync(runtimeHost, 'fixture-runtime-host');
-  writeFileSync(runtimeHostMcp, 'fixture-runtime-host-mcp');
   writeFileSync(bun, 'fixture-bun');
   if (platform !== 'win32') {
     writeFileSync(join(runtimeHostDir, 'runtime-host-guardian'), 'fixture-guardian');
@@ -160,23 +158,22 @@ describe('runtime-host package smoke runner', () => {
       guardian: 'present',
       packageArtifact: 'not-provided',
       runtimeHost: 'present',
-      runtimeHostMcp: 'present',
     });
 
     rmSync(join(unpacked, 'resources', 'bin', 'linux-x64'), { recursive: true });
     expect(() => inspectRuntimeHostPackageInventory(plan)).toThrow(/runtime-host directory is not a directory/);
   });
 
-  it('rejects a missing Rust MCP artifact from the target-qualified package layout', () => {
+  it('rejects an obsolete standalone Rust MCP artifact from the target-qualified package layout', () => {
     const root = createTempRoot();
     const unpacked = createUnpackedArtifact(root, 'win32', 'x64');
     const plan = createRuntimeHostPackageSmokePlan({
       platform: 'win32', arch: 'x64', target: 'nsis', unpackedArtifactPath: unpacked,
     });
 
-    rmSync(join(unpacked, 'resources', 'bin', 'win32-x64', 'runtime-host-mcp.exe'));
+    writeFileSync(join(unpacked, 'resources', 'bin', 'win32-x64', 'runtime-host-mcp.exe'), 'obsolete-mcp');
 
-    expect(() => inspectRuntimeHostPackageInventory(plan)).toThrow(/runtime-host-mcp artifact/);
+    expect(() => inspectRuntimeHostPackageInventory(plan)).toThrow(/legacy packaged entry.*runtime-host-mcp\.exe/);
   });
 
   it.each([
@@ -511,8 +508,6 @@ describe('runtime-host package smoke runner', () => {
       'package',
       'unpacked-runtime-host',
       'installed-runtime-host',
-      'unpacked-runtime-host-mcp',
-      'installed-runtime-host-mcp',
       'unpacked-bun',
       'installed-bun',
     ]);
@@ -546,7 +541,7 @@ describe('runtime-host package smoke runner', () => {
     const receiptPath = writeRuntimeHostPackageExecutionReceipt(join(root, 'evidence', 'receipt.json'), receipt);
     expect(JSON.parse(readFileSync(receiptPath, 'utf8'))).toEqual(receipt);
 
-    writeFileSync(installed + '/resources/bin/win32-x64/runtime-host-mcp.exe', 'changed');
+    writeFileSync(installed + '/resources/bin/win32-x64/runtime-host.exe', 'changed');
     expect(() => verifyRuntimeHostPackageExecutionReceipt(plan, receipt)).toThrow(/inventory does not bind/);
   });
 

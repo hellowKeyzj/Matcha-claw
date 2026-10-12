@@ -570,7 +570,6 @@ function cleanupBundle(outputDir) {
     'node_modules/pdfjs-dist/legacy',
     'node_modules/pdfjs-dist/types',
     'node_modules/node-llama-cpp/llama',
-    'node_modules/koffi/src',
     'node_modules/koffi/vendor',
     'node_modules/koffi/doc',
   ];

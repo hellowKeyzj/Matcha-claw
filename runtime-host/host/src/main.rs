@@ -1,14 +1,25 @@
 #![recursion_limit = "512"]
 
 mod bootstrap;
+mod mcp;
 
 use std::{path::PathBuf, process::ExitCode};
 
 use runtime_host::{AppInput, run_app_service};
 use tokio::io::{stdin, stdout};
 
+fn main() -> ExitCode {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|command| command == "mcp")
+    {
+        return mcp::run();
+    }
+    host_main()
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> ExitCode {
+async fn host_main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -91,7 +102,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Arguments => formatter.write_str(
-                "expected no arguments, or migrate-organization --source-log <absolute offline log> --target-db <absolute new offline database>; no automatic cutover",
+                "expected no arguments, mcp --state-dir <absolute directory>, or migrate-organization --source-log <absolute offline log> --target-db <absolute new offline database>; no automatic cutover",
             ),
             Self::Migration(error) => error.fmt(formatter),
             Self::MigrationReport => formatter.write_str("organization migration report could not be encoded"),

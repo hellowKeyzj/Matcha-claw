@@ -1,4 +1,5 @@
-import { traceDebug } from '../../utils/trace-logger';
+import { traceDebug, isTraceEnabled } from '../../utils/trace-logger';
+import { summarizeIdentifier } from '../runtime-host-delivery/transport/sessions/trace';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { existsSync } from 'node:fs';
@@ -232,6 +233,13 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
     if ((request.method !== 'POST' && request.method !== 'DELETE' && request.method !== 'PUT')
       || request.url !== '/resolve'
       || !authorized(request.headers.authorization, authorization)) {
+      if (request.method === 'POST') {
+        traceDebug(() => JSON.stringify({
+          prefix: 'session-trace', source: 'electron-main',
+          stage: 'electron.private-credential.resolve.result', at: Date.now(),
+          outcome: 'route-rejected', status: 404,
+        }));
+      }
       response.writeHead(404).end();
       return;
     }
@@ -239,7 +247,25 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
     const reference = body && isCredentialReference(body.reference) ? body.reference : undefined;
     const revision = body && isRevision(body.revision) ? body.revision : undefined;
     const profileProvider = body && isProfileProviderName(body.provider) ? body.provider : undefined;
+    const resolving = isTraceEnabled() && request.method === 'POST'
+      && (!body || !Object.hasOwn(body, 'revision') && !Object.hasOwn(body, 'operation'));
+    const started = resolving ? performance.now() : undefined;
+    const traceResolve = (stage: string, payload: () => Record<string, unknown>): void => {
+      if (!resolving) return;
+      traceDebug(() => JSON.stringify({
+        prefix: 'session-trace', source: 'electron-main', stage, at: Date.now(),
+        referenceHash: summarizeIdentifier(reference).hash,
+        referencePresent: body?.reference !== undefined,
+        referenceValid: reference !== undefined,
+        elapsedMs: started === undefined ? undefined : performance.now() - started,
+        ...payload(),
+      }));
+    };
+    traceResolve('electron.private-credential.resolve.request', () => ({}));
     if (!reference || !isPrivateResolverRequest(request.method, body)) {
+      traceResolve('electron.private-credential.resolve.result', () => ({
+        outcome: 'invalid-input', code: 'invalid-request', status: 400,
+      }));
       sendPrivateResolverFailure(response, 'invalid-request', 400);
       return;
     }
@@ -269,11 +295,14 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
         await removeCredentialReference(reference);
         response.writeHead(204).end();
       } else if (!revision) {
+        traceResolve('electron.private-credential.resolve.branch', () => ({ outcome: 'lookup' }));
         const value = await resolvePrivateCredential(reference);
         if (value === undefined) {
+          traceResolve('electron.private-credential.resolve.result', () => ({ outcome: 'not-found', status: 404 }));
           response.writeHead(404).end();
           return;
         }
+        traceResolve('electron.private-credential.resolve.result', () => ({ outcome: 'resolved', status: 200 }));
         response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ value }));
       } else {
         if (!body) {
@@ -291,6 +320,14 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
         response.writeHead(204).end();
       }
     } catch (error) {
+      traceResolve('electron.private-credential.resolve.result', () => ({
+        outcome: 'private-error', status: 503,
+        code: error instanceof ProviderPrivateResolverError && [
+          'invalid-request', 'credential-missing', 'credential-decrypt-failed',
+          'credential-provider-mismatch', 'credential-invalid', 'auth-profile-read-invalid',
+          'auth-profile-write-failed', 'credential-store-unavailable', 'unknown',
+        ].includes(error.code) ? error.code : 'unknown',
+      }));
       sendPrivateResolverFailure(
         response,
         error instanceof ProviderPrivateResolverError ? error.code : 'unknown',

@@ -2021,7 +2021,10 @@ export async function hostSessionPatch(
     logSessionTrace('model-selection.host-api.response', options?.traceId, () => ({ outcome: result.outcome }));
     return result;
   } catch (error) {
-    logSessionTrace('model-selection.host-api.error', options?.traceId, () => (summarizeError(error)));
+    logSessionTrace('model-selection.host-api.error', options?.traceId, () => ({
+      ...summarizeError(error),
+      errorName: error instanceof Error ? 'Error' : typeof error,
+    }));
     throw error;
   }
 }

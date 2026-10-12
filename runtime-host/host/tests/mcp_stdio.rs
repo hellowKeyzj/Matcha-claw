@@ -437,7 +437,7 @@ fn rejects_malformed_framing_and_unknown_tool_arguments_without_leaking_input() 
 
 #[test]
 fn artifact_contains_no_store_opening_or_static_signing_material() {
-    let source = include_str!("../src/bin/runtime-host-mcp.rs");
+    let source = include_str!("../src/mcp.rs");
     for forbidden in [
         "open_organization_store",
         "OrganizationStore",
@@ -552,7 +552,8 @@ impl Drop for Home {
 }
 
 fn run(home: &std::path::Path, input: &[u8]) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_runtime-host-mcp"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_runtime-host"))
+        .arg("mcp")
         .arg("--state-dir")
         .arg(home.join("state"))
         .stdin(Stdio::piped())
@@ -605,7 +606,7 @@ fn run_with_host(home: &Home, input: &[u8]) -> std::process::Output {
         )
         .unwrap(),
         open_claw: runtime_host::OpenClawInput {
-            runtime_host_mcp_executable: PathBuf::from(env!("CARGO_BIN_EXE_runtime-host-mcp")),
+            runtime_host_mcp_executable: PathBuf::from(env!("CARGO_BIN_EXE_runtime-host")),
             runtime_host_mcp_state_dir: home.0.join("state"),
             electron_image: home.0.join("missing-electron"),
             working_directory: home.0.clone(),

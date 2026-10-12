@@ -141,9 +141,9 @@ fn preset_mcp_projection_is_idempotent_and_preserves_other_servers() {
     let config_path = state_dir.as_path().join("openclaw.json");
     let runtime_host_state_dir = root.join("runtime-host");
     let executable = root.join(if cfg!(windows) {
-        "runtime-host-mcp.exe"
+        "runtime-host.exe"
     } else {
-        "runtime-host-mcp"
+        "runtime-host"
     });
     fs::write(
         &config_path,
@@ -169,7 +169,7 @@ fn preset_mcp_projection_is_idempotent_and_preserves_other_servers() {
     let first_document = config_document(&config_path);
     let expected = json!({
         "command": executable.to_str().unwrap(),
-        "args": ["--state-dir", runtime_host_state_dir.to_str().unwrap()],
+        "args": ["mcp", "--state-dir", runtime_host_state_dir.to_str().unwrap()],
         "transport": "stdio",
         "enabled": false,
         "cwd": "custom-workspace"

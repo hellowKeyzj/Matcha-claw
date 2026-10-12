@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, fmt, future::Future, pin::Pin, time::Duration};
+use std::{
+    collections::BTreeSet, fmt, future::Future, pin::Pin,
+    time::{Duration, Instant},
+};
+
+use platform::trace::{enabled, identifier_hash, runtime_trace};
 
 use connectors::{
     ConnectorSecretAuthorityPortError, ConnectorSecretRef, ConnectorSecretResolution,
@@ -531,7 +536,23 @@ impl Resolver {
         &self,
         reference: &str,
     ) -> Result<ConnectorSecretResolution, ConnectorSecretAuthorityPortError> {
+        let started = enabled().then(Instant::now);
+        let reference_hash = enabled().then(|| identifier_hash(reference));
+        let trace_result = |outcome: &'static str, status: Option<u16>| {
+            runtime_trace("runtime.private-credential.resolve.result", || serde_json::json!({
+                "referenceHash": reference_hash,
+                "outcome": outcome,
+                "status": status,
+                "elapsedMs": started.map(|started| started.elapsed().as_millis()),
+            }));
+        };
+        runtime_trace("runtime.private-credential.resolve.request", || serde_json::json!({
+            "referenceHash": reference_hash,
+            "referencePresent": !reference.is_empty(),
+            "endpointConfigured": !self.endpoint.is_empty(),
+        }));
         if self.endpoint.is_empty() {
+            trace_result("endpoint-unconfigured", None);
             return Ok(ConnectorSecretResolution::Unavailable {
                 metadata: ConnectorSecretResolutionMetadata {
                     source: ConnectorSecretSourceStatus::Unavailable,
@@ -543,8 +564,23 @@ impl Resolver {
                 reqwest::Method::POST,
                 serde_json::json!({ "reference": reference }),
             )
-            .map_err(|_| ConnectorSecretAuthorityPortError::SourceFailed)?;
-        if response.status().as_u16() == 404 {
+            .map_err(|error| {
+                let outcome = match error.reason.as_str() {
+                    "private-resolver-request-encode-failed" => "request-encode-failed",
+                    "private-resolver-request-too-large" => "request-too-large",
+                    "private-resolver-client-build-failed" => "client-build-failed",
+                    _ => "transport-error",
+                };
+                trace_result(outcome, None);
+                ConnectorSecretAuthorityPortError::SourceFailed
+            })?;
+        let status = response.status().as_u16();
+        runtime_trace("runtime.private-credential.resolve.branch", || serde_json::json!({
+            "referenceHash": reference_hash,
+            "status": status,
+        }));
+        if status == 404 {
+            trace_result("not-found", Some(status));
             return Ok(ConnectorSecretResolution::NotFound {
                 metadata: ConnectorSecretResolutionMetadata {
                     source: ConnectorSecretSourceStatus::NotFound,
@@ -552,25 +588,34 @@ impl Resolver {
             });
         }
         if !response.status().is_success() {
+            trace_result("http-status", Some(status));
             return Err(ConnectorSecretAuthorityPortError::SourceFailed);
         }
-        let bytes = response
-            .bytes()
-            .map_err(|_| ConnectorSecretAuthorityPortError::SourceFailed)?;
+        let bytes = response.bytes().map_err(|_| {
+            trace_result("body-read-failed", Some(status));
+            ConnectorSecretAuthorityPortError::SourceFailed
+        })?;
         if bytes.len() > MAX_RESOLVE_BYTES {
+            trace_result("body-too-large", Some(status));
             return Err(ConnectorSecretAuthorityPortError::SourceFailed);
         }
-        let value = serde_json::from_slice::<serde_json::Value>(&bytes)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("value")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .ok_or(ConnectorSecretAuthorityPortError::SourceFailed)?;
-        let value = ConnectorSecretValue::from_secret(value)
-            .map_err(|_| ConnectorSecretAuthorityPortError::SourceFailed)?;
+        let decoded = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
+            trace_result("body-decode-failed", Some(status));
+            ConnectorSecretAuthorityPortError::SourceFailed
+        })?;
+        let value = decoded
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                trace_result("value-invalid", Some(status));
+                ConnectorSecretAuthorityPortError::SourceFailed
+            })?;
+        let value = ConnectorSecretValue::from_secret(value).map_err(|_| {
+            trace_result("value-invalid", Some(status));
+            ConnectorSecretAuthorityPortError::SourceFailed
+        })?;
+        trace_result("resolved", Some(status));
         Ok(ConnectorSecretResolution::Resolved {
             value,
             metadata: ConnectorSecretResolutionMetadata {
