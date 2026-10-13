@@ -88,6 +88,14 @@
         "unconfirmed": "未确认",
         "incomplete": "未完成"
       },
+      "memberErrors": {
+        "credential_missing": "未配置模型密钥，请在模型设置中保存有效凭据。",
+        "credential_unavailable": "无法读取模型凭据，请检查模型设置和本机凭据服务。",
+        "unavailable": "模型服务不可用，请检查连接和模型设置。",
+        "unsupported": "没有可用模型，请检查默认模型设置。",
+        "invalid_output": "模型未返回有效的成员介绍。",
+        "cancelled": "本次准备已取消。"
+      },
       "noMembers": "仅有 Leader，无需准备其他成员介绍。",
       "preparationNotObserved": "成员介绍已就绪，本次准备过程未观测。",
       "originalError": "创建错误",

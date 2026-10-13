@@ -41,7 +41,7 @@ pub(in crate::composition::host) fn provision_provider_cascade(
             legacy_candidates.routing,
         ),
     )
-    .map_err(|_| ConstructionError::ProviderMigration)?;
+    .map_err(ConstructionError::ProviderMigration)?;
     ProviderCascade::open(paths.accounts, paths.models, paths.routing, paths.cascade)
         .map_err(|_| ConstructionError::ProviderAccounts)
 }

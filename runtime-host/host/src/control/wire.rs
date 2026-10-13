@@ -243,6 +243,29 @@ impl Ready {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum StartupFailure {
+    StartupFailed { version: u8, code: StartupFailureCode },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum StartupFailureCode {
+    ProviderMigrationFailed,
+}
+
+impl StartupFailure {
+    pub(crate) const fn provider_migration() -> Self {
+        Self::StartupFailed {
+            version: CONTROL_VERSION,
+            code: StartupFailureCode::ProviderMigrationFailed,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[cfg_attr(test, derive(Deserialize))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -457,6 +480,7 @@ impl Event {
 #[serde(untagged)]
 pub(crate) enum Output {
     Ready(Ready),
+    StartupFailure(StartupFailure),
     Outcome(Outcome),
     Event(Event),
 }

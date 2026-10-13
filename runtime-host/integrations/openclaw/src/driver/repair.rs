@@ -68,7 +68,7 @@ impl OpenClawDriver {
     pub async fn repair_native_state(
         &self,
         cancellation: CancellationToken,
-    ) -> Result<(), RuntimeRepairFailure> {
+    ) -> Result<DoctorRepairOutcome, RuntimeRepairFailure> {
         tokio::select! {
             _ = cancellation.cancelled() => return Err(RuntimeRepairFailure::DoctorCancelled),
             result = crate::lifecycle::port_guard::ensure_gateway_port_available(self.gateway_port) => {
@@ -80,11 +80,12 @@ impl OpenClawDriver {
             .run(cancellation, self.lifecycle_logs.clone())
             .await
         {
-            DoctorRepairOutcome::Succeeded => Ok(()),
-            DoctorRepairOutcome::Failed => Err(RuntimeRepairFailure::DoctorFailed),
-            DoctorRepairOutcome::TimedOut => Err(RuntimeRepairFailure::DoctorTimedOut),
+            outcome @ (DoctorRepairOutcome::Succeeded
+            | DoctorRepairOutcome::Failed
+            | DoctorRepairOutcome::TimedOut
+            | DoctorRepairOutcome::SpawnFailed) => Ok(outcome),
             DoctorRepairOutcome::Cancelled => Err(RuntimeRepairFailure::DoctorCancelled),
-            DoctorRepairOutcome::SpawnFailed => Err(RuntimeRepairFailure::DoctorSpawnFailed),
+            DoctorRepairOutcome::CleanupUnconfirmed => Err(RuntimeRepairFailure::DoctorFailed),
         }
     }
 

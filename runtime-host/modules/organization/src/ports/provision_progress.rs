@@ -1,4 +1,6 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+
+use super::member_introduction::MemberIntroductionError;
 
 use serde::Serialize;
 
@@ -7,6 +9,8 @@ use serde::Serialize;
 pub struct TeamProvisionProgress {
     pub stage: TeamProvisionStage,
     pub members: Vec<TeamProvisionMemberStatus>,
+    #[serde(rename = "memberErrors", skip_serializing_if = "BTreeMap::is_empty")]
+    pub member_errors: BTreeMap<usize, MemberIntroductionError>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -35,6 +39,7 @@ pub enum TeamProvisionUpdate {
     Member {
         index: usize,
         status: TeamProvisionMemberStatus,
+        error: Option<MemberIntroductionError>,
     },
 }
 

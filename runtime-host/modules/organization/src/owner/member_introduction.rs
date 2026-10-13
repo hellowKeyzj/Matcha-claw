@@ -80,6 +80,7 @@ pub(super) async fn prepare_manual_team(
                             .filter(|agent| agent.role().as_str() != LEADER_ROLE_ID)
                             .map(|_| TeamProvisionMemberStatus::Completed)
                             .collect(),
+                        member_errors: Default::default(),
                     }))
                     .await;
             }
@@ -134,6 +135,7 @@ pub(super) async fn prepare_manual_team(
                     TeamProvisionStage::ReadingProfiles
                 },
                 members: vec![TeamProvisionMemberStatus::Queued; members.len()],
+                member_errors: Default::default(),
             }))
             .await;
     }
@@ -204,6 +206,7 @@ pub(super) async fn prepare_manual_team(
                     observer.report(TeamProvisionUpdate::Member {
                         index,
                         status: TeamProvisionMemberStatus::Running,
+                        error: None,
                     }).await;
                 }
                 let name = markdown_text(&request.name);
@@ -249,6 +252,7 @@ pub(super) async fn prepare_manual_team(
                         } else {
                             TeamProvisionMemberStatus::Failed
                         },
+                        error: result.as_ref().err().copied(),
                     }).await;
                 }
                 session_trace("runtime.team.introduction.end", || json!({
@@ -301,6 +305,8 @@ fn preparation_end(started: Option<Instant>, reason: &'static str) {
 
 fn introduction_error(error: &MemberIntroductionError) -> &'static str {
     match error {
+        MemberIntroductionError::CredentialMissing => "credential_missing",
+        MemberIntroductionError::CredentialUnavailable => "credential_unavailable",
         MemberIntroductionError::Unavailable => "unavailable",
         MemberIntroductionError::Unsupported => "unsupported",
         MemberIntroductionError::InvalidOutput => "invalid_output",

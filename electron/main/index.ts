@@ -1,12 +1,13 @@
 /**
  * Electron Main Process Entry
  */
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, dialog } from 'electron';
 import { logger } from '../utils/logger';
 import { setQuitting } from './app-state';
 import { HostEventBus } from '../api/event-bus';
 import type { RuntimeHostLifecycleOwner } from './runtime-host-delivery/lifecycle-owner';
 import { bootstrapMainApplication } from './app-bootstrap';
+import { DirectRuntimeHostDeliveryError } from './runtime-host-delivery/direct-host';
 import { createMainWindow, loadMainWindowContent } from './main-window';
 import {
   clearPendingSecondInstanceFocus,
@@ -191,9 +192,24 @@ if (gotTheLock) {
       directRuntimeHost = result.directRuntimeHost;
       closeRuntimeHostDelivery = result.closeRuntimeHostDelivery;
       closeSessionObservations = result.closeSessionObservations;
-    }).catch((error) => {
+    }).catch(async (error: unknown) => {
       if (isE2EMode) {
         logger.error('Failed to bootstrap main application');
+        return;
+      }
+      if (error instanceof DirectRuntimeHostDeliveryError && error.startupFailure === 'provider-migration-failed') {
+        logger.error('Provider configuration migration failed during startup.');
+        try {
+          await dialog.showMessageBox({
+            type: 'error',
+            title: 'MatchaClaw',
+            message: '模型配置恢复未完成，应用无法启动。',
+            detail: '请检查磁盘空间和配置目录的读写权限后重启；仍无法启动请联系支持。请勿删除配置或备份。',
+            buttons: ['退出'],
+          });
+        } finally {
+          app.quit();
+        }
         return;
       }
       logger.error('Failed to bootstrap main application:', error);

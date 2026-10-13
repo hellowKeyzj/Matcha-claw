@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path, path::PathBuf};
+use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
@@ -9,20 +9,13 @@ use crate::{
     ProviderReference,
 };
 
-use super::{ProviderMigrationFault, legacy_source, write_atomic};
+use super::{ProviderMigrationFault, SelectedSource, legacy_source};
 
 const LEGACY_VERSION: u8 = 2;
 
-pub(super) fn migrate<Sources, Source>(
-    path: &Path,
-    sources: Sources,
-) -> Result<(), ProviderMigrationFault>
-where
-    Sources: IntoIterator<Item = Source>,
-    Source: Into<PathBuf>,
-{
-    let Some(legacy) = legacy_source::<_, _, LegacyAccounts>(sources, path)? else {
-        return Ok(());
+pub(super) fn prepare(source: &SelectedSource) -> Result<Option<Vec<u8>>, ProviderMigrationFault> {
+    let Some(legacy) = legacy_source::<LegacyAccounts>(source)? else {
+        return Ok(None);
     };
     if legacy.schema_version != LEGACY_VERSION {
         return Err(ProviderMigrationFault::Decode);
@@ -32,9 +25,14 @@ where
         accounts.push(account.into_account(id)?);
     }
     accounts.sort_by(|left, right| left.id().as_str().cmp(right.id().as_str()));
-    let bytes = crate::adapters::account_store::migration_bytes(&accounts)
-        .map_err(|_| ProviderMigrationFault::Encode)?;
-    write_atomic(path, &bytes)
+    crate::adapters::account_store::migration_bytes(&accounts)
+        .map(Some)
+        .map_err(|error| match error {
+            crate::ProviderAccountStoreFault::RecordTooLarge => {
+                ProviderMigrationFault::RecordTooLarge
+            }
+            _ => ProviderMigrationFault::Encode,
+        })
 }
 
 #[derive(Deserialize)]

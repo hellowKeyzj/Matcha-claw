@@ -40,6 +40,7 @@ import { handlePluginsRoutes } from './routes/plugins';
 import { handleProviderAccountsRoutes } from './routes/provider-accounts';
 import { handleProviderModelsRoutes } from './routes/provider-models';
 import { handleProviderRoutingRoutes } from './routes/provider-routing';
+import { handleProviderRecoveryRoutes } from './routes/provider-recovery';
 import { handleRuntimeHostProcessRoutes } from './routes/runtime-host-process';
 import { handleRuntimeHostUsageRoutes } from './routes/runtime-host-usage';
 import { handleRuntimeDirectoryRoutes } from './routes/runtime-directory';
@@ -136,6 +137,7 @@ const routeHandlers: readonly RouteHandler[] = [
   ),
   (req, res, url, deps) => handleProviderModelsRoutes(req, res, url, deps.runtimeHostTransports.providerModelsTransport),
   (req, res, url, deps) => handleProviderRoutingRoutes(req, res, url, deps.runtimeHostTransports.providerRoutingTransport),
+  (req, res, url, deps) => handleProviderRecoveryRoutes(req, res, url, deps.runtimeHostTransports.providerRecoveryTransport),
   (req, res, url, deps) => handleRuntimeHostProcessRoutes(req, res, url, deps),
   (req, res, url, deps) => handleRuntimeHostUsageRoutes(req, res, url, deps.runtimeHostTransports.usageTransport),
   (req, res, url, deps) => handleRuntimeDirectoryRoutes(req, res, url, deps.runtimeHostTransports.runtimeDirectoryTransport),

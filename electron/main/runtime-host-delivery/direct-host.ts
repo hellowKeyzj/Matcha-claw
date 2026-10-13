@@ -74,6 +74,7 @@ export class DirectRuntimeHostDeliveryError extends Error {
   constructor(
     readonly code: DirectRuntimeHostDeliveryErrorCode,
     readonly diagnostic?: DirectRuntimeHostLaunchDiagnostic,
+    readonly startupFailure?: 'provider-migration-failed',
   ) {
     super(directRuntimeHostDeliveryErrorMessage(code));
     this.name = 'DirectRuntimeHostDeliveryError';
@@ -156,7 +157,12 @@ export async function launchDirectRuntimeHost(
   } catch (error) {
     await terminateFailedLaunch(child, exit);
     if (error instanceof DirectRuntimeHostDeliveryError) throw error;
-    if (error instanceof RuntimeHostControlError) throw exit.controlFailure();
+    if (error instanceof RuntimeHostControlError) {
+      if (error.kind === 'provider-migration-failed') {
+        throw new DirectRuntimeHostDeliveryError('CHILD_FAILED', undefined, error.kind);
+      }
+      throw exit.controlFailure();
+    }
     throw new DirectRuntimeHostDeliveryError('CHILD_FAILED');
   }
 

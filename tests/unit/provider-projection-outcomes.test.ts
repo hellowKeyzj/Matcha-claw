@@ -46,7 +46,7 @@ describe('provider private mutation projection', () => {
 
     await expect(hostProviderDeleteAccount('openai-main', 1)).resolves.toMatchObject({
       success: false,
-      error: 'Provider account request outcome is unknown; reopen before retrying',
+      error: '删除结果暂时无法确认，操作可能已执行。请重新打开供应商设置核对状态，确认前不要重复操作。',
     });
     expect(waitForCall).toHaveBeenCalledWith(receipt, 'provider');
   });

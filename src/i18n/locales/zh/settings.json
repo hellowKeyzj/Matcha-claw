@@ -18,6 +18,16 @@
     "avatarCleared": "用户头像已清除",
     "avatarUpdateFailed": "更新用户头像失败: {{error}}"
   },
+  "providerRecovery": {
+    "title": "模型配置已重置",
+    "description": "旧模型配置无法转换，已备份。请重新添加模型。",
+    "backupDirectory": "备份位置",
+    "openBackup": "打开备份目录",
+    "acknowledge": "知道了",
+    "loadFailed": "无法读取模型配置恢复提示，请重启应用重试。",
+    "acknowledgeFailed": "确认未成功，请再次点击按钮重试。",
+    "openBackupFailed": "无法打开备份目录，请重试或按上方路径手动打开。"
+  },
   "aiProviders": {
     "title": "模型",
     "description": "配置模型和 API 密钥",
@@ -247,7 +257,7 @@
     "repair": {
       "action": "修复",
       "confirmTitle": "修复 OpenClaw？",
-      "confirmDescription": "这将停止 OpenClaw 并运行原生修复，可能修改配置及迁移旧数据，随后重新准备并启动 OpenClaw。正在执行的任务会被中断。是否继续？",
+      "confirmDescription": "这将停止 OpenClaw 并运行原生修复，可能修改配置及迁移旧数据。确认修复进程不再运行后，即使修复失败，也会重新准备并尝试启动 OpenClaw。正在执行的任务会被中断。是否继续？",
       "confirmAction": "停止并修复",
       "automatic": "自动修复",
       "manual": "手动修复",
@@ -266,12 +276,12 @@
       },
       "failures": {
         "stopFailed": "无法停止 OpenClaw，请查看日志。",
-        "doctorFailed": "OpenClaw 原生修复执行失败，请查看日志。",
+        "doctorFailed": "修复进程未能结束，请完全退出 Matcha 后重试。",
         "doctorTimedOut": "OpenClaw 原生修复执行超时，请查看日志。",
         "doctorCancelled": "OpenClaw 原生修复已取消，请查看日志。",
         "doctorSpawnFailed": "无法启动 OpenClaw 原生修复进程，请查看日志。",
         "preparationFailed": "修复后无法完成 OpenClaw 启动准备，请查看日志。",
-        "startFailed": "修复后无法启动 OpenClaw，请查看日志。"
+        "startFailed": "修复后仍无法启动 OpenClaw，请查看日志。"
       }
     },
     "tabs": {

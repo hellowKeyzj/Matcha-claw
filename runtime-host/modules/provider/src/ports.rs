@@ -356,6 +356,7 @@ const MAX_RESOLVER_ERROR_BYTES: usize = 4096;
 pub enum ResolverConfigurationError {
     InvalidEndpoint,
     InvalidAuthorization,
+    ClientBuildFailed,
 }
 
 impl fmt::Display for ResolverConfigurationError {
@@ -363,6 +364,7 @@ impl fmt::Display for ResolverConfigurationError {
         formatter.write_str(match self {
             Self::InvalidEndpoint => "provider credential resolver endpoint is invalid",
             Self::InvalidAuthorization => "provider credential resolver authorization is invalid",
+            Self::ClientBuildFailed => "provider credential resolver client could not be built",
         })
     }
 }
@@ -408,6 +410,7 @@ impl std::error::Error for ResolverFailure {}
 pub struct Resolver {
     endpoint: String,
     authorization: String,
+    client: Option<reqwest::Client>,
 }
 
 impl Resolver {
@@ -415,6 +418,7 @@ impl Resolver {
         Self {
             endpoint: String::new(),
             authorization: String::new(),
+            client: None,
         }
     }
 
@@ -438,13 +442,20 @@ impl Resolver {
         {
             return Err(ResolverConfigurationError::InvalidAuthorization);
         }
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .map_err(|_| ResolverConfigurationError::ClientBuildFailed)?;
         Ok(Self {
             endpoint,
             authorization,
+            client: Some(client),
         })
     }
 
-    pub fn claim_account_transaction(
+    pub async fn claim_account_transaction(
         &self,
         transaction_id: &str,
         reference: &str,
@@ -452,10 +463,10 @@ impl Resolver {
     ) -> Result<(), ResolverFailure> {
         self.request_no_content(reqwest::Method::POST, serde_json::json!({
             "operation": "claim", "transactionId": transaction_id, "reference": reference, "revision": revision,
-        }))
+        })).await
     }
 
-    pub fn settle_account_transaction(
+    pub async fn settle_account_transaction(
         &self,
         transaction_id: &str,
         reference: &str,
@@ -464,10 +475,10 @@ impl Resolver {
     ) -> Result<(), ResolverFailure> {
         self.request_no_content(reqwest::Method::POST, serde_json::json!({
             "operation": "settle", "transactionId": transaction_id, "reference": reference, "revision": revision, "settlement": settlement,
-        }))
+        })).await
     }
 
-    pub fn apply(
+    pub async fn apply(
         &self,
         reference: &str,
         profile_provider: &str,
@@ -484,10 +495,10 @@ impl Resolver {
                 "authMode": auth_mode_name(mode),
                 "revision": revision,
             }),
-        )
+        ).await
     }
 
-    pub fn delete(
+    pub async fn delete(
         &self,
         reference: &str,
         profile_provider: &str,
@@ -500,10 +511,10 @@ impl Resolver {
                 "provider": profile_provider,
                 "revision": revision,
             }),
-        )
+        ).await
     }
 
-    pub fn discard(
+    pub async fn discard(
         &self,
         reference: &str,
         profile_provider: &str,
@@ -516,23 +527,23 @@ impl Resolver {
                 "provider": profile_provider,
                 "revision": revision,
             }),
-        )
+        ).await
     }
 
-    fn request_no_content(
+    async fn request_no_content(
         &self,
         method: reqwest::Method,
         body: serde_json::Value,
     ) -> Result<(), ResolverFailure> {
-        let response = self.request(method, body)?;
+        let response = self.request(method, body).await?;
         let status = response.status().as_u16();
         if status == 204 {
             return Ok(());
         }
-        Err(resolver_response_failure(response, status))
+        Err(resolver_response_failure(response, status).await)
     }
 
-    fn resolve_private(
+    async fn resolve_private(
         &self,
         reference: &str,
     ) -> Result<ConnectorSecretResolution, ConnectorSecretAuthorityPortError> {
@@ -564,11 +575,11 @@ impl Resolver {
                 reqwest::Method::POST,
                 serde_json::json!({ "reference": reference }),
             )
+            .await
             .map_err(|error| {
                 let outcome = match error.reason.as_str() {
                     "private-resolver-request-encode-failed" => "request-encode-failed",
                     "private-resolver-request-too-large" => "request-too-large",
-                    "private-resolver-client-build-failed" => "client-build-failed",
                     _ => "transport-error",
                 };
                 trace_result(outcome, None);
@@ -591,14 +602,19 @@ impl Resolver {
             trace_result("http-status", Some(status));
             return Err(ConnectorSecretAuthorityPortError::SourceFailed);
         }
-        let bytes = response.bytes().map_err(|_| {
-            trace_result("body-read-failed", Some(status));
-            ConnectorSecretAuthorityPortError::SourceFailed
-        })?;
-        if bytes.len() > MAX_RESOLVE_BYTES {
-            trace_result("body-too-large", Some(status));
-            return Err(ConnectorSecretAuthorityPortError::SourceFailed);
-        }
+        let bytes = resolver_response_bytes(response, MAX_RESOLVE_BYTES)
+            .await
+            .map_err(|error| {
+                trace_result(
+                    if error.reason == "private-resolver-body-too-large" {
+                        "body-too-large"
+                    } else {
+                        "body-read-failed"
+                    },
+                    Some(status),
+                );
+                ConnectorSecretAuthorityPortError::SourceFailed
+            })?;
         let decoded = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
             trace_result("body-decode-failed", Some(status));
             ConnectorSecretAuthorityPortError::SourceFailed
@@ -624,14 +640,14 @@ impl Resolver {
         })
     }
 
-    fn request(
+    async fn request(
         &self,
         method: reqwest::Method,
         body: serde_json::Value,
-    ) -> Result<reqwest::blocking::Response, ResolverFailure> {
-        if self.endpoint.is_empty() {
+    ) -> Result<reqwest::Response, ResolverFailure> {
+        let Some(client) = &self.client else {
             return Err(ResolverFailure::new("private-resolver-disabled", None));
-        }
+        };
         let body = serde_json::to_vec(&body)
             .map_err(|_| ResolverFailure::new("private-resolver-request-encode-failed", None))?;
         if body.len() > MAX_REQUEST_BYTES {
@@ -640,28 +656,44 @@ impl Resolver {
                 None,
             ));
         }
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .map_err(|_| ResolverFailure::new("private-resolver-client-build-failed", None))?
-            .request(method, &self.endpoint)
+        client.request(method, &self.endpoint)
             .bearer_auth(&self.authorization)
             .header("content-type", "application/json")
             .header("content-length", body.len())
             .body(body)
             .send()
+            .await
             .map_err(|_| ResolverFailure::new("private-resolver-request-failed", None))
     }
 }
 
-fn resolver_response_failure(
-    response: reqwest::blocking::Response,
+async fn resolver_response_bytes(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, ResolverFailure> {
+    let status = Some(response.status().as_u16());
+    if response.content_length().is_some_and(|length| length > limit as u64) {
+        return Err(ResolverFailure::new("private-resolver-body-too-large", status));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await
+        .map_err(|_| ResolverFailure::new("private-resolver-body-read-failed", status))?
+    {
+        if chunk.len() > limit - bytes.len() {
+            return Err(ResolverFailure::new("private-resolver-body-too-large", status));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+async fn resolver_response_failure(
+    response: reqwest::Response,
     status: u16,
 ) -> ResolverFailure {
-    let reason = response
-        .bytes()
+    let reason = resolver_response_bytes(response, MAX_RESOLVER_ERROR_BYTES)
+        .await
         .ok()
-        .filter(|bytes| bytes.len() <= MAX_RESOLVER_ERROR_BYTES)
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|value| {
             value
@@ -683,11 +715,11 @@ fn is_safe_error_code(value: &str) -> bool {
 }
 
 impl ConnectorSecretResolverPort for Resolver {
-    fn resolve(
-        &self,
-        reference: &ConnectorSecretRef,
-    ) -> Result<ConnectorSecretResolution, ConnectorSecretAuthorityPortError> {
-        self.resolve_private(reference.as_str())
+    fn resolve<'a>(
+        &'a self,
+        reference: &'a ConnectorSecretRef,
+    ) -> connectors::ports::ConnectorFuture<'a, Result<ConnectorSecretResolution, ConnectorSecretAuthorityPortError>> {
+        Box::pin(self.resolve_private(reference.as_str()))
     }
 }
 

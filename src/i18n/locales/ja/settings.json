@@ -18,6 +18,16 @@
     "avatarCleared": "ユーザーアバターをクリアしました",
     "avatarUpdateFailed": "ユーザーアバターの更新に失敗しました: {{error}}"
   },
+  "providerRecovery": {
+    "title": "モデル設定をリセットしました",
+    "description": "以前のモデル設定を変換できなかったため、バックアップしました。モデルを追加し直してください。",
+    "backupDirectory": "バックアップの保存先",
+    "openBackup": "バックアップフォルダーを開く",
+    "acknowledge": "了解",
+    "loadFailed": "モデル設定の復旧通知を読み込めませんでした。アプリを再起動して再試行してください。",
+    "acknowledgeFailed": "確認できませんでした。ボタンをもう一度押してください。",
+    "openBackupFailed": "バックアップフォルダーを開けませんでした。再試行するか、上のパスを手動で開いてください。"
+  },
   "aiProviders": {
     "title": "モデル",
     "description": "モデルと API キーを設定",
@@ -246,7 +256,7 @@
     "repair": {
       "action": "修復",
       "confirmTitle": "OpenClaw を修復しますか？",
-      "confirmDescription": "OpenClaw を停止し、標準の修復ツールを実行します。設定の変更や旧データの移行が行われる場合があります。その後、起動準備をやり直して OpenClaw を起動します。実行中のタスクは中断されます。続行しますか？",
+      "confirmDescription": "OpenClaw を停止し、標準の修復ツールを実行します。設定の変更や旧データの移行が行われる場合があります。修復プロセスの終了を確認できれば、修復に失敗していても起動準備をやり直し、OpenClaw の起動を試みます。実行中のタスクは中断されます。続行しますか？",
       "confirmAction": "停止して修復",
       "automatic": "自動修復",
       "manual": "手動修復",
@@ -265,12 +275,12 @@
       },
       "failures": {
         "stopFailed": "OpenClaw を停止できませんでした。ログを確認してください。",
-        "doctorFailed": "OpenClaw の標準修復ツールによる修復に失敗しました。ログを確認してください。",
+        "doctorFailed": "修復プロセスを終了できませんでした。Matcha を完全に終了してから、もう一度お試しください。",
         "doctorTimedOut": "OpenClaw の標準修復ツールの実行がタイムアウトしました。ログを確認してください。",
         "doctorCancelled": "OpenClaw の標準修復ツールの実行がキャンセルされました。ログを確認してください。",
         "doctorSpawnFailed": "OpenClaw の標準修復ツールのプロセスを起動できませんでした。ログを確認してください。",
         "preparationFailed": "修復後の OpenClaw の起動準備に失敗しました。ログを確認してください。",
-        "startFailed": "修復後に OpenClaw を起動できませんでした。ログを確認してください。"
+        "startFailed": "修復後も OpenClaw を起動できませんでした。ログを確認してください。"
       }
     },
     "tabs": {

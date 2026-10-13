@@ -32,6 +32,15 @@ pub enum ProviderTextGenerationOutcome {
         model_limits: ProviderTextGenerationModelLimits,
     },
     Rejected,
-    Unavailable,
+    Unavailable {
+        reason: ProviderTextGenerationUnavailableReason,
+    },
     Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderTextGenerationUnavailableReason {
+    CredentialMissing,
+    CredentialUnavailable,
+    ProviderUnavailable,
 }

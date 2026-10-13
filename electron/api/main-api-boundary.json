@@ -47,6 +47,7 @@
     "provider-accounts.ts",
     "provider-models.ts",
     "provider-routing.ts",
+    "provider-recovery.ts",
     "security-emergency.ts",
     "team-approvals.ts",
     "team-decision.ts",
@@ -182,6 +183,9 @@
     "/api/provider-models/discover",
     "/api/provider-models/discovery-result",
     "/api/provider-routing",
+    "/api/providers/recovery",
+    "/api/providers/recovery/acknowledge",
+    "/api/providers/recovery/open-backup",
     "/api/external-connectors",
     "/api/external-connectors/mcp-server-programs",
     "/api/external-connectors/status",
@@ -806,6 +810,18 @@
     [
       "POST",
       "/api/provider-routing"
+    ],
+    [
+      "GET",
+      "/api/providers/recovery"
+    ],
+    [
+      "POST",
+      "/api/providers/recovery/acknowledge"
+    ],
+    [
+      "POST",
+      "/api/providers/recovery/open-backup"
     ],
     [
       "GET",

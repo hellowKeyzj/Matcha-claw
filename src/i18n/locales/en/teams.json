@@ -88,6 +88,14 @@
         "unconfirmed": "Unconfirmed",
         "incomplete": "Incomplete"
       },
+      "memberErrors": {
+        "credential_missing": "No model credential is configured. Save a valid credential in model settings.",
+        "credential_unavailable": "Cannot read the model credential. Check model settings and the local credential service.",
+        "unavailable": "The model service is unavailable. Check your connection and model settings.",
+        "unsupported": "No usable model is configured. Check the default model settings.",
+        "invalid_output": "The model did not return a valid member introduction.",
+        "cancelled": "This preparation was cancelled."
+      },
       "noMembers": "Only the Leader is selected. No other member introductions are needed.",
       "preparationNotObserved": "Member introductions are ready. Their preparation was not observed for this request.",
       "originalError": "Creation error",

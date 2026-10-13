@@ -129,10 +129,10 @@ pub enum ConnectorSecretResolution {
 }
 
 pub trait ConnectorSecretResolverPort: Send + Sync {
-    fn resolve(
-        &self,
-        reference: &ConnectorSecretRef,
-    ) -> Result<ConnectorSecretResolution, ConnectorSecretAuthorityPortError>;
+    fn resolve<'a>(
+        &'a self,
+        reference: &'a ConnectorSecretRef,
+    ) -> ConnectorFuture<'a, Result<ConnectorSecretResolution, ConnectorSecretAuthorityPortError>>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,35 +166,37 @@ impl<S> ConnectorSecretResolverPort for ConnectorSecretAuthority<S>
 where
     S: ConnectorSecretFactSource,
 {
-    fn resolve(
-        &self,
-        reference: &ConnectorSecretRef,
-    ) -> Result<ConnectorSecretResolution, ConnectorSecretAuthorityPortError> {
-        match self.source.lookup(reference).map_err(|error| match error {
-            ConnectorSecretFactSourceError::Unavailable => {
-                ConnectorSecretAuthorityPortError::SourceUnavailable
+    fn resolve<'a>(
+        &'a self,
+        reference: &'a ConnectorSecretRef,
+    ) -> ConnectorFuture<'a, Result<ConnectorSecretResolution, ConnectorSecretAuthorityPortError>> {
+        Box::pin(async move {
+            match self.source.lookup(reference).map_err(|error| match error {
+                ConnectorSecretFactSourceError::Unavailable => {
+                    ConnectorSecretAuthorityPortError::SourceUnavailable
+                }
+                ConnectorSecretFactSourceError::Failed => {
+                    ConnectorSecretAuthorityPortError::SourceFailed
+                }
+            })? {
+                ConnectorSecretFact::Resolved(value) => Ok(ConnectorSecretResolution::Resolved {
+                    value,
+                    metadata: ConnectorSecretResolutionMetadata {
+                        source: ConnectorSecretSourceStatus::Resolved,
+                    },
+                }),
+                ConnectorSecretFact::NotFound => Ok(ConnectorSecretResolution::NotFound {
+                    metadata: ConnectorSecretResolutionMetadata {
+                        source: ConnectorSecretSourceStatus::NotFound,
+                    },
+                }),
+                ConnectorSecretFact::Unavailable => Ok(ConnectorSecretResolution::Unavailable {
+                    metadata: ConnectorSecretResolutionMetadata {
+                        source: ConnectorSecretSourceStatus::Unavailable,
+                    },
+                }),
             }
-            ConnectorSecretFactSourceError::Failed => {
-                ConnectorSecretAuthorityPortError::SourceFailed
-            }
-        })? {
-            ConnectorSecretFact::Resolved(value) => Ok(ConnectorSecretResolution::Resolved {
-                value,
-                metadata: ConnectorSecretResolutionMetadata {
-                    source: ConnectorSecretSourceStatus::Resolved,
-                },
-            }),
-            ConnectorSecretFact::NotFound => Ok(ConnectorSecretResolution::NotFound {
-                metadata: ConnectorSecretResolutionMetadata {
-                    source: ConnectorSecretSourceStatus::NotFound,
-                },
-            }),
-            ConnectorSecretFact::Unavailable => Ok(ConnectorSecretResolution::Unavailable {
-                metadata: ConnectorSecretResolutionMetadata {
-                    source: ConnectorSecretSourceStatus::Unavailable,
-                },
-            }),
-        }
+        })
     }
 }
 

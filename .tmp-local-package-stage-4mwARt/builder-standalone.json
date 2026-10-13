@@ -1,0 +1,247 @@
+{
+  "appId": "app.MatchaClaw.desktop",
+  "productName": "MatchaClaw",
+  "copyright": "Copyright © 2026 MatchaClaw",
+  "compression": "maximum",
+  "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+  "directories": {
+    "output": "release/local-win-x64",
+    "buildResources": "resources"
+  },
+  "files": [
+    "dist",
+    "dist-electron/main/**",
+    "dist-electron/preload/**",
+    "package.json"
+  ],
+  "extraResources": [
+    {
+      "from": "resources/",
+      "to": "resources/",
+      "filter": [
+        "**/*",
+        "!icons/*.md",
+        "!icons/*.svg",
+        "!bin/**",
+        "!cli/**",
+        "!screenshot/**"
+      ]
+    },
+    {
+      "from": "build/openclaw/",
+      "to": "openclaw/"
+    },
+    {
+      "from": "build/preinstalled-skills/",
+      "to": "resources/preinstalled-skills/"
+    },
+    {
+      "from": "src/features/subagents/templates/",
+      "to": "resources/subagent-templates/"
+    }
+  ],
+  "beforePack": "./scripts/after-pack.cjs",
+  "afterPack": "./scripts/after-pack.cjs",
+  "asar": true,
+  "asarUnpack": [
+    "**/*.node"
+  ],
+  "npmRebuild": false,
+  "publish": [
+    {
+      "provider": "generic",
+      "url": "https://www.supercnm.top/claw-update",
+      "useMultipleRangeRequest": true
+    },
+    {
+      "provider": "github",
+      "owner": "hellowKeyzj",
+      "repo": "Matcha-claw"
+    }
+  ],
+  "mac": {
+    "extraResources": [
+      {
+        "from": "resources/bin/darwin-${arch}",
+        "to": "bin"
+      },
+      {
+        "from": "runtime-host/dist/darwin-${arch}",
+        "to": "bin/darwin-${arch}"
+      },
+      {
+        "from": "resources/cli/posix/",
+        "to": "cli/"
+      }
+    ],
+    "category": "public.app-category.productivity",
+    "icon": "resources/icons/icon.icns",
+    "target": [
+      {
+        "target": "dmg",
+        "arch": [
+          "x64",
+          "arm64"
+        ]
+      },
+      {
+        "target": "zip",
+        "arch": [
+          "x64",
+          "arm64"
+        ]
+      }
+    ],
+    "darkModeSupport": true,
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false,
+    "entitlements": "entitlements.mac.plist",
+    "entitlementsInherit": "entitlements.mac.plist",
+    "notarize": true,
+    "extendInfo": {
+      "NSMicrophoneUsageDescription": "MatchaClaw requires microphone access for voice features",
+      "NSCameraUsageDescription": "MatchaClaw requires camera access for video features"
+    }
+  },
+  "dmg": {
+    "size": "2g",
+    "background": "resources/dmg-background.png",
+    "icon": "resources/icons/icon.icns",
+    "iconSize": 100,
+    "window": {
+      "width": 540,
+      "height": 380
+    },
+    "contents": [
+      {
+        "type": "file",
+        "x": 130,
+        "y": 220
+      },
+      {
+        "type": "link",
+        "path": "/Applications",
+        "x": 410,
+        "y": 220
+      }
+    ]
+  },
+  "win": {
+    "verifyUpdateCodeSignature": false,
+    "extraResources": [
+      {
+        "from": "resources/bin/win32-${arch}",
+        "to": "bin"
+      },
+      {
+        "from": "E:/code/Matcha-claw/.tmp-local-package-stage-4mwARt/runtime-host/win32-${arch}",
+        "to": "bin/win32-${arch}",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/cli/win32/",
+        "to": "cli/"
+      }
+    ],
+    "icon": "resources/icons/icon.ico",
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64",
+          "arm64"
+        ]
+      }
+    ]
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "warningsAsErrors": false,
+    "allowToChangeInstallationDirectory": true,
+    "deleteAppDataOnUninstall": false,
+    "differentialPackage": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "MatchaClaw",
+    "uninstallDisplayName": "MatchaClaw",
+    "license": "LICENSE",
+    "include": "scripts/installer.nsh",
+    "installerIcon": "resources/icons/icon.ico",
+    "uninstallerIcon": "resources/icons/icon.ico"
+  },
+  "linux": {
+    "extraResources": [
+      {
+        "from": "resources/bin/linux-${arch}",
+        "to": "bin"
+      },
+      {
+        "from": "runtime-host/dist/linux-${arch}",
+        "to": "bin/linux-${arch}"
+      },
+      {
+        "from": "resources/cli/posix/",
+        "to": "cli/"
+      }
+    ],
+    "icon": "resources/icons",
+    "target": [
+      {
+        "target": "AppImage",
+        "arch": [
+          "x64",
+          "arm64"
+        ]
+      },
+      {
+        "target": "deb",
+        "arch": [
+          "x64",
+          "arm64"
+        ]
+      },
+      {
+        "target": "rpm",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "category": "Utility",
+    "maintainer": "MatchaClaw Team <public@valuecell.ai>",
+    "vendor": "MatchaClaw",
+    "synopsis": "AI Assistant powered by OpenClaw",
+    "description": "MatchaClaw is a graphical AI assistant application that integrates with OpenClaw Gateway to provide intelligent automation and assistance across multiple messaging platforms.",
+    "desktop": {
+      "entry": {
+        "Name": "MatchaClaw",
+        "Comment": "AI Assistant powered by OpenClaw",
+        "Categories": "Utility;Network;",
+        "Keywords": "ai;assistant;automation;chat;",
+        "StartupWMClass": "MatchaClaw"
+      }
+    }
+  },
+  "appImage": {
+    "license": "LICENSE"
+  },
+  "deb": {
+    "depends": [
+      "libgtk-3-0 | libgtk-3-0t64",
+      "libnotify4 | libnotify4t64",
+      "libnss3",
+      "libxss1 | libxss1t64",
+      "libxtst6 | libxtst6t64",
+      "xdg-utils",
+      "libatspi2.0-0 | libatspi2.0-0t64",
+      "libuuid1"
+    ],
+    "afterInstall": "scripts/linux/after-install.sh",
+    "afterRemove": "scripts/linux/after-remove.sh"
+  },
+  "extends": null,
+  "electronDist": "E:\\code\\Matcha-claw\\.tmp-local-package-stage-4mwARt\\electron-zi6yt7h9"
+}

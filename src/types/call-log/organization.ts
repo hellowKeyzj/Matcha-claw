@@ -3,6 +3,7 @@ import type {} from '../call-log';
 export interface OrganizationProvisionProgress {
   stage: 'reading_profiles' | 'generating_introductions' | 'configuring_team' | 'verifying_team' | 'saving_team' | 'rolling_back';
   members: Array<'queued' | 'running' | 'completed' | 'failed'>;
+  memberErrors?: Record<string, 'credential_missing' | 'credential_unavailable' | 'unavailable' | 'unsupported' | 'invalid_output' | 'cancelled'>;
 }
 
 type OrganizationCommit = {
@@ -83,14 +84,24 @@ function decodeProvision(value: unknown): OrganizationCallDetail['provision'] | 
   if (!commit) return undefined;
   if (!Object.hasOwn(value, 'progress')) return commit;
   const progress = value.progress;
-  if (!isRecord(progress) || !hasKeys(progress, ['stage', 'members'])
+  if (!isRecord(progress) || !hasKeys(progress, Object.hasOwn(progress, 'memberErrors')
+    ? ['stage', 'members', 'memberErrors'] : ['stage', 'members'])
     || !['reading_profiles', 'generating_introductions', 'configuring_team', 'verifying_team', 'saving_team', 'rolling_back']
       .includes(progress.stage as string)
     || !Array.isArray(progress.members)
     || !Array.from(progress.members).every((member) => ['queued', 'running', 'completed', 'failed'].includes(member))) return undefined;
+  const members = progress.members;
+  const memberErrors = progress.memberErrors;
+  if (Object.hasOwn(progress, 'memberErrors') && (!isRecord(memberErrors)
+    || !Object.entries(memberErrors).every(([index, error]) => /^(0|[1-9][0-9]*)$/.test(index)
+      && Number(index) < members.length && members[Number(index)] === 'failed'
+      && ['credential_missing', 'credential_unavailable', 'unavailable', 'unsupported', 'invalid_output', 'cancelled'].includes(error as string)))) return undefined;
   return {
     ...commit,
-    progress: { stage: progress.stage as OrganizationProvisionProgress['stage'], members: [...progress.members] },
+    progress: {
+      stage: progress.stage as OrganizationProvisionProgress['stage'], members: [...progress.members],
+      ...(memberErrors === undefined ? {} : { memberErrors: { ...memberErrors as NonNullable<OrganizationProvisionProgress['memberErrors']> } }),
+    },
   };
 }
 

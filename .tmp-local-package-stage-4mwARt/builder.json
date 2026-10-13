@@ -1,0 +1,22 @@
+{
+  "extends": "E:\\code\\Matcha-claw\\electron-builder.yml",
+  "win": {
+    "extraResources": [
+      {
+        "from": "resources/bin/win32-${arch}",
+        "to": "bin"
+      },
+      {
+        "from": "E:/code/Matcha-claw/.tmp-local-package-stage-4mwARt/runtime-host/win32-${arch}",
+        "to": "bin/win32-${arch}",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/cli/win32/",
+        "to": "cli/"
+      }
+    ]
+  }
+}

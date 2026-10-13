@@ -32,32 +32,37 @@ static NEXT_PROJECTION_ROOT: AtomicU64 = AtomicU64::new(1);
 struct MemoryConnectorSecretResolver;
 
 impl ConnectorSecretResolverPort for MemoryConnectorSecretResolver {
-    fn resolve(
-        &self,
-        reference: &ConnectorSecretRef,
-    ) -> Result<ConnectorSecretResolution, connectors::ConnectorSecretAuthorityPortError> {
-        let value = match reference.as_str() {
-            "credential:v1:stdio-token" => "resolved-stdio-token",
-            "credential:v1:http-token" => "resolved-http-token",
-            _ => {
-                return Ok(ConnectorSecretResolution::NotFound {
-                    metadata: connectors::ConnectorSecretResolutionMetadata {
-                        source: connectors::ConnectorSecretSourceStatus::NotFound,
-                    },
-                });
-            }
-        };
-        Ok(ConnectorSecretResolution::Resolved {
-            value: ConnectorSecretValue::from_secret(value).unwrap(),
-            metadata: connectors::ConnectorSecretResolutionMetadata {
-                source: connectors::ConnectorSecretSourceStatus::Resolved,
-            },
+    fn resolve<'a>(
+        &'a self,
+        reference: &'a ConnectorSecretRef,
+    ) -> connectors::ports::ConnectorFuture<
+        'a,
+        Result<ConnectorSecretResolution, connectors::ConnectorSecretAuthorityPortError>,
+    > {
+        Box::pin(async move {
+            let value = match reference.as_str() {
+                "credential:v1:stdio-token" => "resolved-stdio-token",
+                "credential:v1:http-token" => "resolved-http-token",
+                _ => {
+                    return Ok(ConnectorSecretResolution::NotFound {
+                        metadata: connectors::ConnectorSecretResolutionMetadata {
+                            source: connectors::ConnectorSecretSourceStatus::NotFound,
+                        },
+                    });
+                }
+            };
+            Ok(ConnectorSecretResolution::Resolved {
+                value: ConnectorSecretValue::from_secret(value).unwrap(),
+                metadata: connectors::ConnectorSecretResolutionMetadata {
+                    source: connectors::ConnectorSecretSourceStatus::Resolved,
+                },
+            })
         })
     }
 }
 
-#[test]
-fn connector_projection_is_idempotent_and_preserves_unmanaged_servers() {
+#[tokio::test(flavor = "current_thread")]
+async fn connector_projection_is_idempotent_and_preserves_unmanaged_servers() {
     let root = projection_root();
     let state_dir = canonical_state_dir(&root);
     let config_path = state_dir.as_path().join("openclaw.json");
@@ -86,6 +91,7 @@ fn connector_projection_is_idempotent_and_preserves_unmanaged_servers() {
         &catalog,
         &unavailable_connector_secret_authority(),
     )
+    .await
     .unwrap();
     assert_eq!(effect, ConnectorProjectionEffect::Written { changed: true });
     assert_eq!(report.projected, vec!["matcha-external.current"]);
@@ -122,6 +128,7 @@ fn connector_projection_is_idempotent_and_preserves_unmanaged_servers() {
         &catalog,
         &unavailable_connector_secret_authority(),
     )
+    .await
     .unwrap();
     assert_eq!(
         effect,
@@ -219,8 +226,8 @@ fn preset_mcp_projection_is_idempotent_and_preserves_other_servers() {
     remove_projection_root(root);
 }
 
-#[test]
-fn connector_projection_cleans_stale_entries_for_disabled_and_unsupported_connectors() {
+#[tokio::test(flavor = "current_thread")]
+async fn connector_projection_cleans_stale_entries_for_disabled_and_unsupported_connectors() {
     let root = projection_root();
     let state_dir = canonical_state_dir(&root);
     let config_path = state_dir.as_path().join("openclaw.json");
@@ -249,6 +256,7 @@ fn connector_projection_cleans_stale_entries_for_disabled_and_unsupported_connec
         &catalog,
         &unavailable_connector_secret_authority(),
     )
+    .await
     .unwrap();
 
     assert_eq!(effect, ConnectorProjectionEffect::Written { changed: true });
@@ -276,8 +284,8 @@ fn connector_projection_cleans_stale_entries_for_disabled_and_unsupported_connec
     remove_projection_root(root);
 }
 
-#[test]
-fn secret_ref_mcp_connectors_are_not_written_to_openclaw_config() {
+#[tokio::test(flavor = "current_thread")]
+async fn secret_ref_mcp_connectors_are_not_written_to_openclaw_config() {
     for connector in [
         mcp_stdio_secret_connector("matcha-external.stdio-secret", "credential:v1:opaque"),
         mcp_http_secret_connector("matcha-external.http-secret", "credential:v1:opaque"),
@@ -292,6 +300,7 @@ fn secret_ref_mcp_connectors_are_not_written_to_openclaw_config() {
             &catalog,
             &unavailable_connector_secret_authority(),
         )
+        .await
         .unwrap();
 
         assert_eq!(effect, ConnectorProjectionEffect::Unavailable);
@@ -308,8 +317,8 @@ fn secret_ref_mcp_connectors_are_not_written_to_openclaw_config() {
     }
 }
 
-#[test]
-fn secret_ref_mcp_connectors_project_resolved_private_values_to_openclaw_config() {
+#[tokio::test(flavor = "current_thread")]
+async fn secret_ref_mcp_connectors_project_resolved_private_values_to_openclaw_config() {
     let root = projection_root();
     let state_dir = canonical_state_dir(&root);
     let config_path = state_dir.as_path().join("openclaw.json");
@@ -320,7 +329,7 @@ fn secret_ref_mcp_connectors_project_resolved_private_values_to_openclaw_config(
     .unwrap();
     let secrets = MemoryConnectorSecretResolver;
 
-    let (effect, report) = project_external_connectors(state_dir, &catalog, &secrets).unwrap();
+    let (effect, report) = project_external_connectors(state_dir, &catalog, &secrets).await.unwrap();
 
     assert_eq!(effect, ConnectorProjectionEffect::Written { changed: true });
     assert_eq!(
@@ -344,8 +353,8 @@ fn secret_ref_mcp_connectors_project_resolved_private_values_to_openclaw_config(
     remove_projection_root(root);
 }
 
-#[test]
-fn secret_ref_mcp_connectors_fail_closed_when_private_resolver_is_unavailable() {
+#[tokio::test(flavor = "current_thread")]
+async fn secret_ref_mcp_connectors_fail_closed_when_private_resolver_is_unavailable() {
     let root = projection_root();
     let state_dir = canonical_state_dir(&root);
     let config_path = state_dir.as_path().join("openclaw.json");
@@ -358,6 +367,7 @@ fn secret_ref_mcp_connectors_fail_closed_when_private_resolver_is_unavailable() 
         &catalog,
         &unavailable_connector_secret_authority(),
     )
+    .await
     .unwrap();
 
     assert_eq!(effect, ConnectorProjectionEffect::Unavailable);

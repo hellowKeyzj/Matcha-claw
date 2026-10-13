@@ -31,8 +31,8 @@ const EFFECTS: &[EffectKind] = &[EffectKind::OwnerTask, EffectKind::Route];
 pub use adapters::account_store::{ProviderAccountStore, ProviderAccountStoreFault};
 pub use adapters::cascade::{ProviderCascade, ProviderCascadeFault};
 pub use adapters::migration::{
-    ProviderLegacyStoreCandidates, ProviderMigrationFault, locate_provider_legacy_store_candidates,
-    migrate_provider_legacy_stores,
+    ProviderLegacyStoreCandidates, ProviderMigrationFault, ProviderRecoveryNotice,
+    ProviderRecoveryStore, locate_provider_legacy_store_candidates, migrate_provider_legacy_stores,
 };
 pub use adapters::model_store::{ProviderModelStore, ProviderModelStoreFault};
 pub use adapters::routing_store::{ProviderRoutingStore, ProviderRoutingStoreFault};
@@ -52,6 +52,7 @@ pub use application::{
     InvalidProviderAccountDraft, ProviderAccountDraft, ProviderTextGenerationModelLimits,
     ProviderTextGenerationModelLimitsOutcome, ProviderTextGenerationModelLimitsRequest,
     ProviderTextGenerationOutcome, ProviderTextGenerationRequest,
+    ProviderTextGenerationUnavailableReason,
 };
 pub use owner::actor::ProviderOwnerInput;
 pub use ports::{
@@ -68,11 +69,20 @@ pub use ports::{
 #[derive(Clone)]
 pub struct ProviderModule {
     handle: ProviderHandle,
+    recovery: Option<Arc<Mutex<ProviderRecoveryStore>>>,
 }
 
 impl ProviderModule {
     fn new(handle: ProviderHandle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            recovery: None,
+        }
+    }
+
+    pub fn with_recovery_store(mut self, recovery: ProviderRecoveryStore) -> Self {
+        self.recovery = Some(Arc::new(Mutex::new(recovery)));
+        self
     }
 
     pub fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
@@ -107,6 +117,7 @@ impl ProviderModule {
         adapters::loopback::descriptor(adapters::loopback::Dependencies::new(
             verifier,
             self.handle.clone(),
+            self.recovery.clone(),
         ))
     }
 

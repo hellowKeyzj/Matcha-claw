@@ -563,6 +563,22 @@ impl ProviderCallOutcome for ProviderTextGenerationModelLimitsOutcome {
     }
 }
 
+impl crate::ProviderTextGenerationUnavailableReason {
+    pub(crate) fn diagnostic(self) -> (ProviderCallDiagnosticReason, Option<ProviderCallPrivateResolverCode>) {
+        match self {
+            Self::CredentialMissing => (
+                ProviderCallDiagnosticReason::ProviderCredentialUnavailable,
+                Some(ProviderCallPrivateResolverCode::CredentialMissing),
+            ),
+            Self::CredentialUnavailable => (
+                ProviderCallDiagnosticReason::PrivateResolverUnavailable,
+                Some(ProviderCallPrivateResolverCode::Unknown),
+            ),
+            Self::ProviderUnavailable => (ProviderCallDiagnosticReason::Unknown, None),
+        }
+    }
+}
+
 impl ProviderCallOutcome for ProviderTextGenerationOutcome {
     fn summarize(&self, detail: &mut ProviderCallDetail) -> CallStatus {
         match self {
@@ -574,8 +590,13 @@ impl ProviderCallOutcome for ProviderTextGenerationOutcome {
                 detail.outcome = Some(ProviderCallResult::Rejected);
                 CallStatus::Rejected
             }
-            Self::Unavailable => {
+            Self::Unavailable { reason } => {
                 detail.outcome = Some(ProviderCallResult::Unavailable);
+                let (reason, code) = reason.diagnostic();
+                detail.diagnostic = Some(ProviderCallDiagnostic {
+                    reason: Some(reason),
+                    private_resolver_code: code,
+                });
                 CallStatus::Failed
             }
             Self::Cancelled => {

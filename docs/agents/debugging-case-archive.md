@@ -91,6 +91,76 @@ DP-xxx 或 `none`
 
 ## 6. 当前归档案例
 
+## Case: Provider private resolver blocking client 关闭异步 owner
+
+### Status
+
+archived
+
+### Linked pattern
+
+DP-001；既有 P2 生产同款与 P6 闭环验证已覆盖，不新增同义规则。
+
+### Source incident
+
+2026-10-12，文本生成 calls 停在 running，Provider account list/delete 随后返回 503。主代理核现场 PID 73920 / parent 51968，运行 `runtime-host/dist/win32-x64/runtime-host.exe` 为 322,907,136 bytes、SHA256 `0c5773dedbf8627f8e2e47c6e66c380ec9a39ca512b67103161282d810f51242`，与 `target/x86_64-pc-windows-msvc/debug/runtime-host.exe` 一致；release 为 273,088,000 bytes、SHA256 `9b94b6b78c93d0a670df070dc186a2b8e6ab5aa2c4623d2653f90aca53b1a00c`。dev 启动显式选择 dev profile，reqwest fingerprint `rustflags=[]`。[VERIFY: scripts/dev.mjs:31-32] [VERIFY: runtime-host/target/x86_64-pc-windows-msvc/debug/.fingerprint/reqwest-47c8e06419532ad1/lib-reqwest.json:1]
+
+### Symptom
+
+生成无终态，随后账号查询/删除不可用；明确 `not-admitted` 又在 Main IPC catch 被映射为 unknown，UI 无法区分未接单与已接单但结果未知。
+
+### Surface path
+
+Wiki / Team 成员介绍 → Provider GenerateText Direct → private credential resolver；随后账号 list/delete → 同一 Provider owner admission/query → Main private-auth IPC → UI projection。
+
+### Real minimum loop
+
+运行 DEBUG artifact → Tokio 异步 handler 取私有凭据 → reqwest blocking `wait::enter` 的临时 Runtime 析构 → Tokio blocking pool 的必然 panic 路径 → Foundation 将 handler panic 结算为失败并关闭同一 Provider owner → 后继 list/delete 503。生成 call 已 running，handler 未到安全终态结算；未取得持久 panic stack，不把源码路径确证写成现场捕获堆栈或修后实测。[VERIFY: runtime-host/foundation/src/execution/owner_runtime.rs:1476-1519] [VERIFY: runtime-host/foundation/src/execution/owner_runtime.rs:1602-1645]
+
+### Wrong path taken
+
+此前未完整核对运行 artifact/profile/hash，局部源码或检查不能替代现场 DEBUG 身份，遗漏了 Tokio 异步上下文内 blocking client 的失败边界；把后继 503 或 UI unknown 当作原始失败也会误判。
+
+### Missed first probe
+
+先冻结实际加载的 executable、profile 与 hash，再用同款调用路径复现；同时核 resolver panic → Foundation handler settle/close → 后继 admission 的顺序，而非只查 UI 或凭据是否存在。
+
+### Root cause
+
+旧 Provider resolver 每个请求在异步 handler 内构建 `reqwest::blocking::Client`；reqwest 0.12.28 client 构建调用 `wait::timeout`，debug-only `wait::enter` 创建临时 current-thread Runtime，其析构进入 tokio 1.53.1 `BlockingPool::shutdown(None)` / `shutdown::Receiver::wait`，异步上下文不允许 blocking，必然 panic。当前本机 registry 已核 `reqwest-0.12.28/src/blocking/client.rs:1417`、`blocking/wait.rs:73-81` 与 `tokio-1.53.1/src/runtime/blocking/pool.rs:244-285`、`blocking/shutdown.rs:37-54`；依赖版本、源码及运行 DEBUG 身份共同确证这条路径，没有持久堆栈。Foundation 按既有 panic 关闭 owner；账号 IPC 的裸 catch 另抹掉已闭合的 admission failure。两者不是 secret 缺失、durable store 损坏或新的 owner/state 需求。[VERIFY: runtime-host/Cargo.lock:8604-8606] [VERIFY: runtime-host/Cargo.lock:10265-10267]
+
+### Root cause boundary
+
+ConnectorSecretResolverPort 共用凭据调用链及 Provider 私有 HTTP transport；UI unknown 属于 Main admission failure 传递边界。discovery 已在 `spawn_blocking` 内执行的真实 blocking HTTP 不属于该非法异步调用。
+
+### Correct first-round plan
+
+核现场 artifact/profile/hash → 同款异步 resolver probe → handler panic/owner close → query/admission；再分别确认凭据调用链与 typed UI 失败，不读取凭据正文、不把 call running 解释为模型仍在执行。
+
+### Fix boundary
+
+当前源码已核：原 Connector port 返回 object-safe `connectors::ports::ConnectorFuture`，Provider 复用 async `reqwest::Client` 并 await resolve/claim/settle/apply/delete/discard；Sessions/OpenClaw consumers await，FactSource 保持 sync；discovery 仅先 await 凭据，再保留合法 blocking HTTP。不新增 owner、state/store、队列或 fallback；保留 2 秒 private timeout、commit/unknown/rollback 及 secret/redaction 安全。Main closed not-admitted 返回 typed rejected，不再被裸 catch 抹成 unknown；内部 generation reason 经原 Team provision / CallScope / strict decoder 显示安全成员错误，不改变生成成功正文或另建 UI 状态。[VERIFY: runtime-host/modules/provider/src/ports.rs:409-455] [VERIFY: runtime-host/modules/provider/src/ports.rs:717-728] [VERIFY: runtime-host/modules/provider/src/owner/actor.rs:204-273] [VERIFY: runtime-host/modules/provider/src/owner/models.rs:663-688] [VERIFY: electron/main/ipc/provider-private-auth.ts:643-666] [VERIFY: src/lib/provider-projection.ts:235-248]
+
+### Verification closure
+
+事故根因已由 code 与运行 DEBUG artifact hash 确证；唯一 runner 的 TS typecheck exit 0，unit 217 PASS / 17 FAIL，主代理只读归属为非本轮失败路径且相关源码/fixture 对 HEAD 无 diff，未跑旧 revision，不称实测基线或全绿。Cargo 最终 Provider 74/74、Connectors 26/26、Organization 456/456（exit 0）；Sessions 111、OpenClaw 152 编译错误，均 0 tests 运行 / exit 101。主代理有界归属：Sessions 相关 fixture 本轮无 diff；OpenClaw 152 主诊断均在未改 security/gateway/session 链，Connector async / Provider 范围诊断 0、无 resolve/Future/await 签名错误。均未跑旧 revision，不称实测旧基线或 tests 通过。Host lib/bins check exit 101，另一会话 migration 的 `cascade.rs:298 journal.clear_locked()` 当时缺定义；随后补齐但本轮未复跑，不称通过。556 已运行 tests 全过不等于五 crate 全过。Connector、Provider producer、Sessions/OpenClaw await 链及 Main typed admission / Host Team 安全失败 consumers 已完整读取确认；源码收口、验证部分完成且有编译阻塞，修后真实生成/list/delete 未测，不宣称运行产物已替换、owner 恢复或旧 running calls 已结算。进度见 [Provider 验证边界](../architecture-knowledge/modules/provider-model-secret/dev.md#2026-10-12-resolver-共用链-async-修复)。
+
+### Reusable rule
+
+执行既有 P2：核生产同款 runtime/config/command/env/identity 时包含实际运行 artifact 与 profile 的一致性；本次是执行遗漏，不是规则缺失。
+
+### Applies to
+
+Tokio 异步 handler 内同步 HTTP runtime 的创建/销毁、共享 resolver 多消费者，以及 handler panic 后 owner admission 失败。
+
+### Does not apply to
+
+已隔离到 `spawn_blocking` 的 discovery HTTP、同步 FactSource、未经证据确认的凭据失效或 durable state 损坏。
+
+### Archive note
+
+既有 P2 / DP-001 已覆盖；保存可追溯触发、first probe、artifact/profile 身份与根因边界，不保存聊天流水或新增长期同义规则，归档不等于修复验收。
+
 ## Case: TeamRun terminal 已到达，但持久化容量耗尽阻断结算
 
 ### Status

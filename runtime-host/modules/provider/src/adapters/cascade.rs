@@ -272,6 +272,49 @@ impl std::fmt::Display for ProviderCascadeFault {
 
 impl std::error::Error for ProviderCascadeFault {}
 
+pub(super) fn complete_reset_deletion(
+    path: &Path,
+    original: &[u8],
+    targets: &[PathBuf; 3],
+) -> Result<(), ProviderCascadeFault> {
+    validate_reset_deletion(original)?;
+    let accounts =
+        ProviderAccountStore::open(&targets[0]).map_err(|_| ProviderCascadeFault::Open)?;
+    let models = ProviderModelStore::open(&targets[1]).map_err(|_| ProviderCascadeFault::Open)?;
+    let routing =
+        ProviderRoutingStore::open(&targets[2]).map_err(|_| ProviderCascadeFault::Open)?;
+    if !accounts.accounts().is_empty()
+        || !models.catalog().models().is_empty()
+        || !routing
+            .routing()
+            .is_some_and(|routing| routing.revision().get() == 1 && routing.routes().is_empty())
+    {
+        return Err(ProviderCascadeFault::Recovery);
+    }
+    let journal = ProviderCascadeJournal {
+        path: path.to_owned(),
+        lock_path: sibling_path(path, ".lock"),
+    };
+    let _lock = JournalLock::acquire(&journal.lock_path)?;
+    if fs::read(path).map_err(|error| ProviderCascadeFault::Journal(error.kind()))? != original {
+        return Err(ProviderCascadeFault::Recovery);
+    }
+    journal.clear_locked()
+}
+
+pub(super) fn validate_reset_deletion(bytes: &[u8]) -> Result<(), ProviderCascadeFault> {
+    let transaction: AccountDeletion =
+        serde_json::from_slice(bytes).map_err(|_| ProviderCascadeFault::Recovery)?;
+    ProviderAccountId::try_new(transaction.account_id)
+        .map_err(|_| ProviderCascadeFault::Recovery)?;
+    ProviderAccountRevision::try_new(transaction.revision)
+        .map_err(|_| ProviderCascadeFault::Recovery)?;
+    if transaction.routing_revision == Some(0) {
+        return Err(ProviderCascadeFault::Recovery);
+    }
+    Ok(())
+}
+
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct AccountDeletion {
@@ -323,6 +366,10 @@ impl ProviderCascadeJournal {
 
     fn clear(&self) -> Result<(), ProviderCascadeFault> {
         let _lock = JournalLock::acquire(&self.lock_path)?;
+        self.clear_locked()
+    }
+
+    fn clear_locked(&self) -> Result<(), ProviderCascadeFault> {
         match fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),

@@ -9,10 +9,11 @@ use platform::{
 };
 use tokio::sync::Mutex;
 
-use crate::ProviderHandle;
+use crate::{ProviderHandle, ProviderRecoveryStore};
 
 mod accounts;
 mod models;
+mod recovery;
 mod routing;
 
 const DEFAULT_REQUEST_BYTES: usize = 64 * 1024;
@@ -23,11 +24,20 @@ const TIMEOUT_ERROR: &str = "Runtime Host request deadline exceeded";
 pub struct Dependencies {
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     provider: ProviderHandle,
+    recovery: Option<Arc<Mutex<ProviderRecoveryStore>>>,
 }
 
 impl Dependencies {
-    pub fn new(verifier: Arc<Mutex<CapabilityDecisionVerifier>>, provider: ProviderHandle) -> Self {
-        Self { verifier, provider }
+    pub fn new(
+        verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
+        provider: ProviderHandle,
+        recovery: Option<Arc<Mutex<ProviderRecoveryStore>>>,
+    ) -> Self {
+        Self {
+            verifier,
+            provider,
+            recovery,
+        }
     }
 }
 
@@ -67,6 +77,9 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
             models::ENDPOINT | models::SELECTABLE_ENDPOINT | models::DISCOVERY_RESULT_ENDPOINT => {
                 models::handle(request, dependencies.verifier, dependencies.provider).await
             }
+            recovery::ENDPOINT | recovery::ACKNOWLEDGE_ENDPOINT => {
+                recovery::handle(request, dependencies.verifier, dependencies.recovery).await
+            }
             routing::ENDPOINT => {
                 routing::handle(request, dependencies.verifier, dependencies.provider).await
             }
@@ -77,7 +90,7 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
 }
 
 fn body_policy_for_method(method: &str, path: &str) -> BodyPolicy {
-    if method == "GET" {
+    if method == "GET" || path == recovery::ACKNOWLEDGE_ENDPOINT {
         BodyPolicy::Empty
     } else if method == "POST" && post_body_required(path) {
         BodyPolicy::Required {
@@ -111,6 +124,8 @@ fn is_route(path: &str) -> bool {
         || path == models::SELECTABLE_ENDPOINT
         || path == models::DISCOVERY_RESULT_ENDPOINT
         || path == routing::ENDPOINT
+        || path == recovery::ENDPOINT
+        || path == recovery::ACKNOWLEDGE_ENDPOINT
 }
 
 fn pathname(path: &str) -> &str {

@@ -16,6 +16,7 @@ import { createPluginsTransport } from './plugins';
 import { createProviderAccountsTransport } from './providers/accounts';
 import { createProviderModelsTransport } from './providers/models';
 import { createProviderRoutingTransport } from './providers/routing';
+import { createProviderRecoveryTransport } from './providers/recovery';
 import { createSecurityEmergencyTransport } from './security/emergency';
 import { createSecurityPolicyTransport } from './security/policy';
 import { createSecurityRuleCatalogTransport } from './security/rule-catalog';
@@ -162,6 +163,7 @@ export function createRuntimeHostTransportBundle(
     openClawGatewayTransport: createOpenClawGatewayTransport(issuer, runtimeHostTransportPort),
     openClawPlatformTransport: createOpenClawPlatformTransport(issuer, runtimeHostTransportPort),
     providerRoutingTransport: createProviderRoutingTransport(issuer, runtimeHostTransportPort),
+    providerRecoveryTransport: createProviderRecoveryTransport(issuer, runtimeHostTransportPort),
     clawHubSkillInstallTransport: createClawHubSkillInstallTransport(issuer, runtimeHostTransportPort),
     clawHubSkillSearchTransport: createClawHubSkillSearchTransport(issuer, runtimeHostTransportPort),
     skillBundleTransport: createSkillBundleTransport(issuer, runtimeHostTransportPort),

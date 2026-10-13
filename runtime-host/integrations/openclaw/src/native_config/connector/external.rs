@@ -81,15 +81,15 @@ impl fmt::Display for ConnectorProjectionError {
 
 impl std::error::Error for ConnectorProjectionError {}
 
-pub fn project_external_connectors(
+pub async fn project_external_connectors(
     state_dir: CanonicalStateDir,
     catalog: &ConnectorCatalog,
     secrets: &dyn ConnectorSecretResolverPort,
 ) -> Result<(ConnectorProjectionEffect, ConnectorProjectionReport), ConnectorProjectionError> {
-    project_runtime_mcp_connectors(state_dir, None, catalog, secrets)
+    project_runtime_mcp_connectors(state_dir, None, catalog, secrets).await
 }
 
-pub fn project_runtime_mcp_connectors(
+pub async fn project_runtime_mcp_connectors(
     state_dir: CanonicalStateDir,
     preset: Option<PresetMcpProjection<'_>>,
     catalog: &ConnectorCatalog,
@@ -114,7 +114,7 @@ pub fn project_runtime_mcp_connectors(
                 .push((connector.id().to_owned(), ConnectorProjectionSkip::Disabled));
             continue;
         }
-        match server_for(connector, secrets) {
+        match server_for(connector, secrets).await {
             Ok(Some(server)) => {
                 let server_id = managed_external_server_id(connector.id());
                 report.projected.push(server_id.clone());
@@ -233,7 +233,7 @@ pub(crate) fn projection_effect(error: OpenClawConfigStoreError) -> ConnectorPro
     }
 }
 
-fn server_for(
+async fn server_for(
     connector: &Connector,
     secrets: &dyn ConnectorSecretResolverPort,
 ) -> Result<Option<Value>, ConnectorProjectionError> {
@@ -249,7 +249,8 @@ fn server_for(
             server.insert("command".into(), Value::String(command.to_owned()));
             optional_strings(&mut server, "args", connector.args());
             let env =
-                merge_secret_values(connector.env(), connector.secret_env_references(), secrets)?;
+                merge_secret_values(connector.env(), connector.secret_env_references(), secrets)
+                    .await?;
             if !env.is_empty() {
                 server.insert("env".into(), Value::Object(env));
             }
@@ -279,7 +280,8 @@ fn server_for(
                 connector.headers(),
                 connector.secret_header_references(),
                 secrets,
-            )?;
+            )
+            .await?;
             if !headers.is_empty() {
                 server.insert("headers".into(), Value::Object(headers));
             }
@@ -292,7 +294,7 @@ fn server_for(
     }
 }
 
-fn merge_secret_values<'a>(
+async fn merge_secret_values<'a>(
     public: Option<&'a std::collections::BTreeMap<String, String>>,
     secret_refs: impl Iterator<Item = (&'a str, &'a str)>,
     secrets: &dyn ConnectorSecretResolverPort,
@@ -307,6 +309,7 @@ fn merge_secret_values<'a>(
             .map_err(|_| ConnectorProjectionError::InvalidSecretReference)?;
         let resolution = secrets
             .resolve(&reference)
+            .await
             .map_err(|_| ConnectorProjectionError::SecretUnavailable)?;
         let ConnectorSecretResolution::Resolved { value, .. } = resolution else {
             return Err(ConnectorProjectionError::SecretUnavailable);

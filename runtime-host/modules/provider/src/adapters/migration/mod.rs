@@ -1,7 +1,7 @@
 use std::{
     env,
-    fs::{self, File, OpenOptions},
-    io::{self, BufReader, Read, Write},
+    fs::File,
+    io::{self, BufReader, Read},
     path::{Path, PathBuf},
 };
 
@@ -10,7 +10,10 @@ use serde_json::Value;
 
 mod account;
 mod model;
+mod recovery;
 mod routing;
+
+pub use recovery::{ProviderRecoveryNotice, ProviderRecoveryStore};
 
 const MAX_STORE_BYTES: u64 = 1024 * 1024;
 const PROVIDER_ACCOUNTS_ENV: &str = "MATCHACLAW_RUNTIME_HOST_PROVIDER_STORE_FILE";
@@ -76,14 +79,49 @@ where
     ModelSource: Into<PathBuf>,
     RoutingSource: Into<PathBuf>,
 {
-    let accounts_path = accounts_path.into();
-    let models_path = models_path.into();
-    let routing_path = routing_path.into();
+    let paths = [
+        std::path::absolute(accounts_path.into()).map_err(read_fault)?,
+        std::path::absolute(models_path.into()).map_err(read_fault)?,
+        std::path::absolute(routing_path.into()).map_err(read_fault)?,
+    ];
+    let store =
+        ProviderRecoveryStore::new(paths[0].parent().ok_or(ProviderMigrationFault::Recovery)?);
+    let _lock = store.writer_lock()?;
+    store.recover_prepared(&paths)?;
     let (account_sources, model_sources, routing_sources) = sources;
-    account::migrate(&accounts_path, account_sources)?;
-    model::migrate(&models_path, model_sources)?;
-    routing::migrate(&routing_path, routing_sources)?;
-    Ok(())
+    let selected = [
+        select_source(&paths[0], account_sources)?,
+        select_source(&paths[1], model_sources)?,
+        select_source(&paths[2], routing_sources)?,
+    ];
+    if selected
+        .iter()
+        .all(|source| matches!(source.selection, SourceSelection::Unchanged))
+    {
+        return Ok(());
+    }
+    let backup = recovery::backup_sources(&store, &paths, &selected)?;
+    let prepared = [
+        account::prepare(&selected[0]),
+        model::prepare(&selected[1]),
+        routing::prepare(&selected[2]),
+    ];
+    let mut reset = false;
+    for result in &prepared {
+        match result {
+            Err(ProviderMigrationFault::Decode | ProviderMigrationFault::InputTooLarge) => {
+                reset = true;
+            }
+            Err(error) => return Err(*error),
+            Ok(_) => {}
+        }
+    }
+    let outputs = if reset {
+        empty_store_bytes()?.map(Some)
+    } else {
+        prepared.map(|result| result.expect("preparation faults were handled"))
+    };
+    recovery::commit(&store, backup, &paths, &outputs, reset)
 }
 
 fn legacy_store_candidates(
@@ -126,61 +164,121 @@ fn push_unique(sources: &mut Vec<PathBuf>, source: PathBuf) {
     }
 }
 
-fn legacy_source<Sources, Source, T>(
-    sources: Sources,
+struct SelectedSource {
+    target_exists: bool,
+    target_bytes: Option<Vec<u8>>,
+    path: Option<PathBuf>,
+    source_bytes: Option<Vec<u8>>,
+    selection: SourceSelection,
+}
+
+enum SourceSelection {
+    Unchanged,
+    Legacy(Vec<u8>),
+    Invalid(ProviderMigrationFault),
+}
+
+fn select_source<Sources, Source>(
     target: &Path,
-) -> Result<Option<T>, ProviderMigrationFault>
+    sources: Sources,
+) -> Result<SelectedSource, ProviderMigrationFault>
 where
     Sources: IntoIterator<Item = Source>,
     Source: Into<PathBuf>,
-    T: for<'de> Deserialize<'de>,
 {
-    match legacy_target(target)? {
-        TargetDocument::Legacy(legacy) => return Ok(Some(legacy)),
-        TargetDocument::Canonical => return Ok(None),
-        TargetDocument::Missing => {}
+    let mut selected = SelectedSource {
+        target_exists: false,
+        target_bytes: None,
+        path: None,
+        source_bytes: None,
+        selection: SourceSelection::Unchanged,
+    };
+    match read_bounded(target) {
+        Ok(Some(bytes)) if bytes.is_empty() => {
+            selected.target_exists = true;
+            selected.target_bytes = Some(bytes);
+        }
+        Ok(Some(bytes)) => {
+            selected.target_exists = true;
+            selected.path = Some(target.to_owned());
+            selected.selection = match legacy_document_shape(&bytes) {
+                Ok(true) => SourceSelection::Legacy(bytes.clone()),
+                Ok(false) => SourceSelection::Unchanged,
+                Err(error) => SourceSelection::Invalid(error),
+            };
+            selected.target_bytes = Some(bytes);
+            return Ok(selected);
+        }
+        Err(ProviderMigrationFault::InputTooLarge) => {
+            selected.target_exists = true;
+            selected.path = Some(target.to_owned());
+            selected.selection = SourceSelection::Invalid(ProviderMigrationFault::InputTooLarge);
+            return Ok(selected);
+        }
+        Err(error) => return Err(error),
+        Ok(None) => {}
     }
-    let mut visited_sources = Vec::new();
+    let mut visited = Vec::new();
     for source in sources {
         let source = source.into();
-        if source.as_os_str().is_empty()
-            || source == target
-            || visited_sources.iter().any(|candidate| candidate == &source)
-        {
+        if source.as_os_str().is_empty() {
             continue;
         }
-        visited_sources.push(source.clone());
-        let bytes = read_bounded(&source)?;
-        if bytes.is_empty() || !legacy_source_contains_facts(&bytes)? {
+        let source = std::path::absolute(source).map_err(read_fault)?;
+        if source == target || visited.contains(&source) {
             continue;
         }
-        return serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| ProviderMigrationFault::Decode);
+        visited.push(source.clone());
+        let selection = match read_bounded(&source) {
+            Ok(None) => continue,
+            Ok(Some(bytes)) if bytes.is_empty() => continue,
+            Ok(Some(bytes)) => match legacy_source_contains_facts(&bytes) {
+                Ok(false) => continue,
+                Ok(true) => SourceSelection::Legacy(bytes),
+                Err(error) => {
+                    selected.source_bytes = Some(bytes);
+                    SourceSelection::Invalid(error)
+                }
+            },
+            Err(ProviderMigrationFault::InputTooLarge) => {
+                SourceSelection::Invalid(ProviderMigrationFault::InputTooLarge)
+            }
+            Err(error) => return Err(error),
+        };
+        selected.path = Some(source);
+        selected.selection = selection;
+        break;
     }
-    Ok(None)
+    Ok(selected)
 }
 
-enum TargetDocument<T> {
-    Missing,
-    Canonical,
-    Legacy(T),
-}
-
-fn legacy_target<T>(target: &Path) -> Result<TargetDocument<T>, ProviderMigrationFault>
+fn legacy_source<T>(source: &SelectedSource) -> Result<Option<T>, ProviderMigrationFault>
 where
     T: for<'de> Deserialize<'de>,
 {
-    let bytes = read_bounded(target)?;
-    if bytes.is_empty() {
-        return Ok(TargetDocument::Missing);
+    match &source.selection {
+        SourceSelection::Unchanged => Ok(None),
+        SourceSelection::Invalid(error) => Err(*error),
+        SourceSelection::Legacy(bytes) => serde_json::from_slice(bytes)
+            .map(Some)
+            .map_err(|_| ProviderMigrationFault::Decode),
     }
-    if !legacy_document_shape(&bytes)? {
-        return Ok(TargetDocument::Canonical);
-    }
-    serde_json::from_slice(&bytes)
-        .map(TargetDocument::Legacy)
-        .map_err(|_| ProviderMigrationFault::Decode)
+}
+
+fn empty_store_bytes() -> Result<[Vec<u8>; 3], ProviderMigrationFault> {
+    let routing = crate::ProviderRouting::try_new(
+        crate::ProviderRoutingRevision::try_new(1).expect("one is valid"),
+        Vec::new(),
+    )
+    .map_err(|_| ProviderMigrationFault::Encode)?;
+    Ok([
+        crate::adapters::account_store::migration_bytes(&[])
+            .map_err(|_| ProviderMigrationFault::Encode)?,
+        crate::adapters::model_store::migration_bytes(&crate::ProviderModelCatalog::default())
+            .map_err(|_| ProviderMigrationFault::Encode)?,
+        crate::adapters::routing_store::migration_bytes(&routing)
+            .map_err(|_| ProviderMigrationFault::Encode)?,
+    ])
 }
 
 fn legacy_source_contains_facts(bytes: &[u8]) -> Result<bool, ProviderMigrationFault> {
@@ -221,7 +319,13 @@ fn non_empty_array(value: Option<&Value>) -> bool {
 pub enum ProviderMigrationFault {
     Decode,
     Encode,
+    InputTooLarge,
     RecordTooLarge,
+    Read(io::ErrorKind),
+    Backup(io::ErrorKind),
+    Permission,
+    Journal(io::ErrorKind),
+    Recovery,
     Commit(io::ErrorKind),
     CommitOutcomeUnknown(io::ErrorKind),
 }
@@ -231,77 +335,43 @@ impl std::fmt::Display for ProviderMigrationFault {
         formatter.write_str(match self {
             Self::Decode => "legacy provider facts are invalid",
             Self::Encode => "legacy provider facts could not be encoded",
-            Self::RecordTooLarge => "legacy provider facts exceed the durable limit",
-            Self::Commit(_) => "legacy provider facts could not be committed",
-            Self::CommitOutcomeUnknown(_) => "legacy provider migration commit outcome is unknown",
+            Self::InputTooLarge => "provider migration input exceeds the durable limit",
+            Self::RecordTooLarge => "provider migration output exceeds the durable limit; original configuration retained",
+            Self::Read(_) => "provider configuration could not be read; check file access and retry",
+            Self::Backup(_) => "provider configuration backup failed; original configuration retained; check disk space and file access",
+            Self::Permission => "provider recovery storage could not be made owner-only; original configuration retained; check permissions",
+            Self::Journal(_) => "provider recovery record could not be persisted; check disk space and file access before restarting",
+            Self::Recovery => "provider recovery record or deletion journal is invalid; restore from the provider backup before restarting",
+            Self::Commit(_) => "provider configuration migration failed; original configuration retained; check disk space and file access",
+            Self::CommitOutcomeUnknown(_) => "provider migration outcome is unknown; restart to recover the prepared backup before changing configuration",
         })
     }
 }
 
 impl std::error::Error for ProviderMigrationFault {}
 
-fn read_bounded(path: &Path) -> Result<Vec<u8>, ProviderMigrationFault> {
+fn read_fault(error: io::Error) -> ProviderMigrationFault {
+    ProviderMigrationFault::Read(error.kind())
+}
+
+fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, ProviderMigrationFault> {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(ProviderMigrationFault::Commit(error.kind())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(read_fault(error)),
     };
-    if file
-        .metadata()
-        .map_err(|error| ProviderMigrationFault::Commit(error.kind()))?
-        .len()
-        > MAX_STORE_BYTES
-    {
-        return Err(ProviderMigrationFault::RecordTooLarge);
+    if file.metadata().map_err(read_fault)?.len() > MAX_STORE_BYTES {
+        return Err(ProviderMigrationFault::InputTooLarge);
     }
     let mut bytes = Vec::new();
     BufReader::new(file)
         .take(MAX_STORE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| ProviderMigrationFault::Commit(error.kind()))?;
+        .map_err(read_fault)?;
     if bytes.len() > MAX_STORE_BYTES as usize {
-        return Err(ProviderMigrationFault::RecordTooLarge);
+        return Err(ProviderMigrationFault::InputTooLarge);
     }
-    Ok(bytes)
-}
-
-pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ProviderMigrationFault> {
-    if bytes.len() > MAX_STORE_BYTES as usize {
-        return Err(ProviderMigrationFault::RecordTooLarge);
-    }
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).map_err(|error| ProviderMigrationFault::Commit(error.kind()))?;
-    }
-    let temporary = temporary_path(path);
-    fs::remove_file(&temporary)
-        .or_else(|error| {
-            (error.kind() == io::ErrorKind::NotFound)
-                .then_some(())
-                .ok_or(error)
-        })
-        .map_err(|error| ProviderMigrationFault::Commit(error.kind()))?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|error| ProviderMigrationFault::Commit(error.kind()))?;
-    if let Err(error) = file.write_all(bytes) {
-        let _ = fs::remove_file(&temporary);
-        return Err(ProviderMigrationFault::Commit(error.kind()));
-    }
-    if let Err(error) = file.sync_data() {
-        let _ = fs::remove_file(&temporary);
-        return Err(ProviderMigrationFault::CommitOutcomeUnknown(error.kind()));
-    }
-    drop(file);
-    if let Err(error) = crate::persistence::replace_file(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(ProviderMigrationFault::CommitOutcomeUnknown(error.kind()));
-    }
-    Ok(())
+    Ok(Some(bytes))
 }
 
 fn temporary_path(path: &Path) -> PathBuf {

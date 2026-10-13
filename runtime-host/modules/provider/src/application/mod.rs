@@ -7,5 +7,5 @@ pub use account_draft::{InvalidProviderAccountDraft, ProviderAccountDraft};
 pub use generation::{
     ProviderTextGenerationModelLimits, ProviderTextGenerationModelLimitsOutcome,
     ProviderTextGenerationModelLimitsRequest, ProviderTextGenerationOutcome,
-    ProviderTextGenerationRequest,
+    ProviderTextGenerationRequest, ProviderTextGenerationUnavailableReason,
 };

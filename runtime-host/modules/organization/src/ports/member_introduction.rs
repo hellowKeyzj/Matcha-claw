@@ -41,8 +41,11 @@ pub struct MemberIntroductionRequest {
     pub profile: MemberProfile,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemberIntroductionError {
+    CredentialMissing,
+    CredentialUnavailable,
     Unavailable,
     Unsupported,
     InvalidOutput,
@@ -52,6 +55,8 @@ pub enum MemberIntroductionError {
 impl fmt::Display for MemberIntroductionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::CredentialMissing => "team member introduction credential missing",
+            Self::CredentialUnavailable => "team member introduction credential unavailable",
             Self::Unavailable => "team member introduction unavailable",
             Self::Unsupported => "team member introduction unsupported",
             Self::InvalidOutput => "team member introduction output invalid",

@@ -23,6 +23,7 @@ import { prepareToolchain } from './lib/toolchain';
 import { useDelayedFlag } from './lib/use-delayed-flag';
 import { applyResolvedTheme, useResolvedTheme } from './lib/use-resolved-theme';
 import { UpdateNotifier } from './components/update/UpdateNotifier';
+import { ProviderRecoveryDialog } from './components/settings/ProviderRecoveryDialog';
 import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
 import { isTraceEnabled } from '@/lib/trace-logger';
 import {
@@ -428,6 +429,8 @@ function App() {
           </Routes>
         )}
 
+        <ProviderRecoveryDialog ready={settingsInitialized && !isAuthRoute
+          && !showAccountBoot && !showAuthGate && !licenseChecking && !licenseBlocked} />
         <UpdateNotifier />
 
         {/* Global toast notifications */}

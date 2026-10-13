@@ -64,7 +64,7 @@ pub enum ConstructionError {
     ParentCallback(ParentCallbackConfigError),
     TeamSkillSelection,
     ProviderAccounts,
-    ProviderMigration,
+    ProviderMigration(provider_module::ProviderMigrationFault),
     ProviderModels,
     ProviderRouting,
     ExternalConnectors,
@@ -91,8 +91,8 @@ impl fmt::Display for ConstructionError {
             Self::ProviderAccounts => {
                 formatter.write_str("provider account owner could not be constructed")
             }
-            Self::ProviderMigration => {
-                formatter.write_str("provider legacy facts could not be migrated")
+            Self::ProviderMigration(error) => {
+                write!(formatter, "provider configuration recovery failed: {error}")
             }
             Self::ProviderModels => {
                 formatter.write_str("provider model owner could not be constructed")
@@ -128,9 +128,9 @@ impl std::error::Error for ConstructionError {
             Self::Diagnostics(error) => Some(error),
             Self::CallLog(error) => Some(error),
             Self::ParentCallback(error) => Some(error),
+            Self::ProviderMigration(error) => Some(error),
             Self::TeamSkillSelection
             | Self::ProviderAccounts
-            | Self::ProviderMigration
             | Self::ProviderModels
             | Self::ProviderRouting
             | Self::ExternalConnectors

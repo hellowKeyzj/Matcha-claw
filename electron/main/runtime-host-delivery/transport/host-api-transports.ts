@@ -23,6 +23,7 @@ import type { PluginsTransport } from './plugins';
 import type { ProviderAccountsTransport } from './providers/accounts';
 import type { ProviderModelsTransport } from './providers/models';
 import type { ProviderRoutingTransport } from './providers/routing';
+import type { ProviderRecoveryTransport } from './providers/recovery';
 import type { RuntimeControlTransport } from './runtime-control';
 import type { RuntimeEndpointDirectoryTransport } from './runtime-directory';
 import type { SealedResourceAuthorizationTransport } from './sealed-resource';
@@ -129,6 +130,7 @@ export interface RuntimeHostTransports {
   openClawGatewayTransport: OpenClawGatewayTransport;
   openClawPlatformTransport: OpenClawPlatformTransport;
   providerRoutingTransport: ProviderRoutingTransport;
+  providerRecoveryTransport: ProviderRecoveryTransport;
   clawHubSkillInstallTransport: ClawHubSkillInstallTransport;
   clawHubSkillSearchTransport: ClawHubSkillSearchTransport;
   skillBundleTransport: SkillBundleTransport;

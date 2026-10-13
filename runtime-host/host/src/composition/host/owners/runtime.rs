@@ -348,7 +348,11 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             runtime_directory: runtime_directory.clone(),
         },
     );
-    let provider_module = provider_module.with_call_recorder(calls.clone());
+    let provider_module = provider_module
+        .with_call_recorder(calls.clone())
+        .with_recovery_store(provider_module::ProviderRecoveryStore::new(
+            diagnostics_state_root.as_path(),
+        ));
     let provider_handle = provider_module.handle().clone();
 
     let (organization_module, organization_task) = organization::spawn_owner(

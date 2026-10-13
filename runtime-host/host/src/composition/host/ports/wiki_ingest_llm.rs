@@ -201,7 +201,7 @@ fn match_generation_outcome(
             "provider",
             "no usable provider is configured for wiki ingest",
         )),
-        ProviderTextGenerationOutcome::Unavailable => Err(WikiFailure::state(
+        ProviderTextGenerationOutcome::Unavailable { .. } => Err(WikiFailure::state(
             "provider text generation is unavailable",
         )),
         ProviderTextGenerationOutcome::Cancelled => Err(WikiFailure::cancelled()),

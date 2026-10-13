@@ -167,7 +167,7 @@ impl ProviderOwner {
                         &mut call,
                         transaction.as_ref(),
                         ProviderAccountsDelivery::Rejected,
-                    );
+                    ).await;
                     send_reply(call, reply, outcome).await;
                 }
                 ProviderCommand::DiscoverModels { reply, .. } => {
@@ -201,7 +201,7 @@ impl ProviderOwner {
                 reply,
                 ..
             } => {
-                if !self.claim_account_transaction(&mut call, transaction.as_ref()) {
+                if !self.claim_account_transaction(&mut call, transaction.as_ref()).await {
                     send_reply(call, reply, ProviderAccountsDelivery::Unavailable).await;
                     return;
                 }
@@ -211,13 +211,13 @@ impl ProviderOwner {
                         &mut call,
                         transaction.as_ref(),
                         ProviderAccountsDelivery::Unavailable,
-                    );
+                    ).await;
                     send_reply(call, reply, outcome).await;
                     return;
                 };
                 let outcome = self
                     .accounts
-                    .replace(&mut self.cascade, identity_ops, draft);
+                    .replace(&mut self.cascade, identity_ops, draft).await;
                 self.update_snapshot();
                 if matches!(
                     outcome.desired,
@@ -228,9 +228,9 @@ impl ProviderOwner {
                     ProviderCall::persisted(&mut call, outcome.persisted, outcome.commit).await;
                 }
                 self.record_private_profile_error(&mut call, &outcome);
-                let outcome = self.finish_account_mutation(outcome).await;
+                let outcome = self.finish_account_mutation(outcome, &mut call).await;
                 let outcome =
-                    self.settle_account_transaction(&mut call, transaction.as_ref(), outcome);
+                    self.settle_account_transaction(&mut call, transaction.as_ref(), outcome).await;
                 send_reply(call, reply, outcome).await;
             }
             ProviderCommand::DeleteAccount {
@@ -240,7 +240,7 @@ impl ProviderOwner {
                 reply,
                 ..
             } => {
-                if !self.claim_account_transaction(&mut call, transaction.as_ref()) {
+                if !self.claim_account_transaction(&mut call, transaction.as_ref()).await {
                     send_reply(call, reply, ProviderAccountsDelivery::Unavailable).await;
                     return;
                 }
@@ -250,13 +250,13 @@ impl ProviderOwner {
                         &mut call,
                         transaction.as_ref(),
                         ProviderAccountsDelivery::Unavailable,
-                    );
+                    ).await;
                     send_reply(call, reply, outcome).await;
                     return;
                 };
                 let outcome = self
                     .accounts
-                    .delete(&mut self.cascade, identity_ops, id, revision);
+                    .delete(&mut self.cascade, identity_ops, id, revision).await;
                 self.update_snapshot();
                 if matches!(
                     outcome.desired,
@@ -267,9 +267,9 @@ impl ProviderOwner {
                     ProviderCall::persisted(&mut call, outcome.persisted, outcome.commit).await;
                 }
                 self.record_private_profile_error(&mut call, &outcome);
-                let outcome = self.finish_account_mutation(outcome).await;
+                let outcome = self.finish_account_mutation(outcome, &mut call).await;
                 let outcome =
-                    self.settle_account_transaction(&mut call, transaction.as_ref(), outcome);
+                    self.settle_account_transaction(&mut call, transaction.as_ref(), outcome).await;
                 send_reply(call, reply, outcome).await;
             }
             ProviderCommand::DiscoverModels {
@@ -278,10 +278,15 @@ impl ProviderOwner {
                 reply,
                 ..
             } => {
+                let mut diagnostic = None;
                 let mut outcome = self
                     .models
-                    .discover(self.runtime_directory.as_ref(), &mut self.cascade, &account_id)
+                    .discover(self.runtime_directory.as_ref(), &mut self.cascade, &account_id, &mut diagnostic)
                     .await;
+                if let (Some(call), Some(reason)) = (call.as_mut(), diagnostic) {
+                    let (reason, code) = reason.diagnostic();
+                    call.diagnostic(reason, code);
+                }
                 if let crate::ProviderModelDiscoverOutcome::Discovered(models) = &outcome {
                     if reservation.complete(models.clone()).is_err() {
                         outcome = crate::ProviderModelDiscoverOutcome::Unavailable;
@@ -314,7 +319,7 @@ impl ProviderOwner {
                 {
                     ProviderCall::persisted(&mut call, *persisted, *commit).await;
                 }
-                let outcome = self.finish_model_mutation(outcome, returned_id).await;
+                let outcome = self.finish_model_mutation(outcome, returned_id, &mut call).await;
                 send_reply(call, reply, outcome).await;
             }
             ProviderCommand::ReplaceRouting { routing, reply, .. } => {
@@ -328,7 +333,7 @@ impl ProviderOwner {
                 {
                     ProviderCall::persisted(&mut call, *persisted, *commit).await;
                 }
-                let outcome = self.finish_routing_mutation(outcome).await;
+                let outcome = self.finish_routing_mutation(outcome, &mut call).await;
                 send_reply(call, reply, outcome).await;
             }
             ProviderCommand::PreparePrivateProjection { reply } => {
@@ -339,7 +344,7 @@ impl ProviderOwner {
         }
     }
 
-    fn claim_account_transaction(
+    async fn claim_account_transaction(
         &self,
         call: &mut Option<ProviderCall>,
         transaction: Option<&ProviderAccountPrivateTransaction>,
@@ -347,7 +352,7 @@ impl ProviderOwner {
         let Some(transaction) = transaction else {
             return true;
         };
-        let Err(error) = self.accounts.claim_transaction(transaction) else {
+        let Err(error) = self.accounts.claim_transaction(transaction).await else {
             return true;
         };
         if let Some(call) = call {
@@ -359,7 +364,7 @@ impl ProviderOwner {
         false
     }
 
-    fn settle_account_transaction(
+    async fn settle_account_transaction(
         &self,
         call: &mut Option<ProviderCall>,
         transaction: Option<&ProviderAccountPrivateTransaction>,
@@ -375,7 +380,7 @@ impl ProviderOwner {
             ProviderAccountsDelivery::Unknown { .. } => "unknown",
             _ => "rejected",
         };
-        let Err(error) = self.accounts.settle_transaction(transaction, settlement) else {
+        let Err(error) = self.accounts.settle_transaction(transaction, settlement).await else {
             return outcome;
         };
         if let Some(call) = call {
@@ -554,6 +559,7 @@ impl ProviderOwner {
     async fn finish_account_mutation(
         &mut self,
         mutation: ProviderAccountsMutation,
+        call: &mut Option<ProviderCall>,
     ) -> ProviderAccountsDelivery {
         let native = if mutation.private.is_err() {
             ProviderNativeConfigurationEffect::Unavailable
@@ -563,6 +569,7 @@ impl ProviderOwner {
                     &mutation.retired,
                     mutation.required_auth_accounts(),
                     mutation.auth_state_refresh_required,
+                    call,
                 )
                 .await;
             log_provider_native_effect("account-mutation", &native);
@@ -604,6 +611,7 @@ impl ProviderOwner {
         &mut self,
         outcome: crate::ProviderModelReplaceOutcome,
         account_id: Option<ProviderAccountId>,
+        call: &mut Option<ProviderCall>,
     ) -> crate::ProviderModelReplaceOutcome {
         let crate::ProviderModelReplaceOutcome::DesiredStored {
             persisted, commit, ..
@@ -616,7 +624,7 @@ impl ProviderOwner {
         };
         let mut required = self.routing.route_account_ids(&self.cascade);
         required.insert(account_id);
-        let native = self.reconcile(&[], &required, false).await;
+        let native = self.reconcile(&[], &required, false, call).await;
         crate::ProviderModelReplaceOutcome::DesiredStored {
             persisted,
             native: ProviderNativeConfigurationView::from_effect(&native),
@@ -627,6 +635,7 @@ impl ProviderOwner {
     async fn finish_routing_mutation(
         &mut self,
         outcome: crate::ProviderRoutingReplaceOutcome,
+        call: &mut Option<ProviderCall>,
     ) -> crate::ProviderRoutingReplaceOutcome {
         let crate::ProviderRoutingReplaceOutcome::DesiredStored {
             persisted, commit, ..
@@ -635,7 +644,7 @@ impl ProviderOwner {
             return outcome;
         };
         let required = self.routing.route_account_ids(&self.cascade);
-        let native = self.reconcile(&[], &required, false).await;
+        let native = self.reconcile(&[], &required, false, call).await;
         crate::ProviderRoutingReplaceOutcome::DesiredStored {
             persisted,
             native: ProviderNativeConfigurationView::from_effect(&native),
@@ -670,6 +679,7 @@ impl ProviderOwner {
         retired: &[ProviderAccount],
         required_auth_accounts: &BTreeSet<ProviderAccountId>,
         auth_state_refresh_required: bool,
+        call: &mut Option<ProviderCall>,
     ) -> ProviderNativeConfigurationEffect {
         let deadline = Instant::now() + Duration::from_secs(30);
         let effect = timeout_at(
@@ -679,13 +689,16 @@ impl ProviderOwner {
                 required_auth_accounts,
                 auth_state_refresh_required,
                 deadline,
+                call,
             ),
         )
         .await;
-        // Synchronous resolver/native file work cannot be preempted by timeout_at.
         match effect {
             Ok(effect) if Instant::now() < deadline => effect,
             _ => {
+                if let Some(call) = call {
+                    call.diagnostic(ProviderCallDiagnosticReason::PrivateProfileDeadline, None);
+                }
                 eprintln!(
                     "[startup-trace] source=provider-owner phase=reconcile detail=budget-exhausted budget_ms=30000"
                 );
@@ -700,6 +713,7 @@ impl ProviderOwner {
         required_auth_accounts: &BTreeSet<ProviderAccountId>,
         auth_state_refresh_required: bool,
         deadline: Instant,
+        call: &mut Option<ProviderCall>,
     ) -> ProviderNativeConfigurationEffect {
         if self.cascade.reload().is_err() || Instant::now() >= deadline {
             return ProviderNativeConfigurationEffect::Unavailable;
@@ -716,9 +730,15 @@ impl ProviderOwner {
                 &accounts,
                 required_auth_accounts,
                 deadline,
-            ) {
+            ).await {
                 Ok(applied) => auth_state_refresh_required || applied,
-                Err(_) => return ProviderNativeConfigurationEffect::Unavailable,
+                Err(error) => {
+                    if let Some(call) = call {
+                        let (reason, code) = error.diagnostic();
+                        call.diagnostic(reason, code);
+                    }
+                    return ProviderNativeConfigurationEffect::Unavailable;
+                },
             };
 
         let now_millis = now_millis();
@@ -866,7 +886,9 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
                                 .send(crate::api::ProviderStreamMessage::Failed(error))
                                 .await;
                         }
-                        crate::ProviderTextGenerationOutcome::Unavailable
+                        crate::ProviderTextGenerationOutcome::Unavailable {
+                            reason: crate::ProviderTextGenerationUnavailableReason::ProviderUnavailable,
+                        }
                     }
                 };
                 session_trace("provider-generation.direct-completed", || json!({
@@ -874,7 +896,7 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
                     "category": match &outcome {
                         crate::ProviderTextGenerationOutcome::Generated { .. } => "Generated",
                         crate::ProviderTextGenerationOutcome::Rejected => "Rejected",
-                        crate::ProviderTextGenerationOutcome::Unavailable => "Unavailable",
+                        crate::ProviderTextGenerationOutcome::Unavailable { .. } => "Unavailable",
                         crate::ProviderTextGenerationOutcome::Cancelled => "Cancelled",
                     },
                     "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),

@@ -168,12 +168,18 @@ export function registerProviderPrivateAuthHandlers(
         || (typeof value?.token === 'string' && value.token.trim().length > 0),
     }));
     const account = parseAccount(value?.account);
-    if (!account) {
+    if (!account
+      || value.apiKey !== undefined && (account.authMode !== 'apiKey' || !isSecret(value.apiKey))
+      || value.token !== undefined && (account.authMode !== 'token' || !isSecret(value.token))) {
       providerPrivateAuthTrace('ipc.store.rejected', () => ({ detail: 'invalid-account' }));
-      throw new Error('Provider account request is invalid');
+      return { status: 'rejected', reason: 'invalid-request' } satisfies PrivateAccountAdmissionFailure;
     }
     providerPrivateAuthTrace('ipc.store.decoded', () => (accountTrace(account)));
-    return await admitPrivateAccount(transport, await preparePrivateAccount(account, value.apiKey, value.token), account);
+    try {
+      return await admitPrivateAccount(transport, await preparePrivateAccount(account, value.apiKey, value.token), account);
+    } catch {
+      return { status: 'unknown', reason: 'outcome-unknown' } satisfies PrivateAccountAdmissionFailure;
+    }
   });
 
   ipcMain.handle('providers:deleteAccount', async (_, input: unknown) => {
@@ -182,11 +188,15 @@ export function registerProviderPrivateAuthHandlers(
       accountId: idShape(typeof value?.accountId === 'string' ? value.accountId : undefined),
       revision: typeof value?.revision === 'number' ? value.revision : undefined,
     }));
-    if (!isId(value.accountId) || !isRevision(value.revision)) {
+    if (!isId(value?.accountId) || !isRevision(value?.revision)) {
       providerPrivateAuthTrace('ipc.delete.rejected', () => ({ detail: 'invalid-request' }));
-      throw new Error('Provider account request is invalid');
+      return { status: 'rejected', reason: 'invalid-request' } satisfies PrivateAccountAdmissionFailure;
     }
-    return await admitPrivateDelete(transport, value.accountId, value.revision);
+    try {
+      return await admitPrivateDelete(transport, value.accountId, value.revision);
+    } catch {
+      return { status: 'unknown', reason: 'outcome-unknown' } satisfies PrivateAccountAdmissionFailure;
+    }
   });
 
   ipcMain.handle('providers:startOAuth', async (_, input: unknown) => {
@@ -484,7 +494,14 @@ type PublicReplaceResult = Readonly<{
 export type ProviderPrivateAccountMutationResult = Readonly<{
   status: PublicMutationOutcome | PublicDeleteOutcome;
   detail?: ProviderCallDetail;
+  reason?: 'invalid-request' | 'rejected' | 'not-admitted' | 'outcome-unknown';
 }>;
+
+type PrivateAccountAdmissionFailure = ProviderPrivateAccountMutationResult & (
+  | Readonly<{ status: 'rejected'; reason: 'invalid-request' | 'rejected' | 'not-admitted' }>
+  | Readonly<{ status: 'unknown'; reason: 'outcome-unknown' }>
+);
+type PrivateAccountAdmissionResult = CallReceipt | PrivateAccountAdmissionFailure;
 
 type ProviderMutationTransportResponse = Awaited<ReturnType<ProviderAccountsTransport['execute']>>;
 
@@ -527,13 +544,9 @@ export async function storeProviderPrivateAccount(
   token?: unknown,
 ): Promise<ProviderPrivateAccountMutationResult> {
   const transaction = await preparePrivateAccount(account, apiKey, token);
-  try {
-    const receipt = await admitPrivateAccount(deps.transport, transaction, account);
-    return await accountCallResult(deps, receipt, 'providerAccounts.replace', account.id, account.revision);
-  } catch (error) {
-    if (error instanceof ProviderAccountAdmissionFailure) return { status: error.outcome };
-    throw error;
-  }
+  const receipt = await admitPrivateAccount(deps.transport, transaction, account);
+  return 'status' in receipt ? receipt
+    : await accountCallResult(deps, receipt, 'providerAccounts.replace', account.id, account.revision);
 }
 
 async function preparePrivateAccount(
@@ -583,14 +596,10 @@ async function commitPrivateAccount(
   secret?: PrivateCredential,
 ): Promise<PublicReplaceResult> {
   const transaction = await preparePrivateAccountSecret(account, secret);
-  try {
-    const receipt = await admitPrivateAccount(deps.transport, transaction, account);
-    const result = await accountCallResult(deps, receipt, 'providerAccounts.replace', account.id, account.revision);
-    return { outcome: result.status as PublicMutationOutcome, accountId: account.id, detail: result.detail };
-  } catch (error) {
-    if (error instanceof ProviderAccountAdmissionFailure) return { outcome: error.outcome };
-    throw error;
-  }
+  const receipt = await admitPrivateAccount(deps.transport, transaction, account);
+  if ('status' in receipt) return { outcome: receipt.status };
+  const result = await accountCallResult(deps, receipt, 'providerAccounts.replace', account.id, account.revision);
+  return { outcome: result.status as PublicMutationOutcome, accountId: account.id, detail: result.detail };
 }
 
 function normalizeProviderToken(provider: string, token: string): string {
@@ -607,24 +616,14 @@ export async function deleteProviderPrivateAccount(
   accountId: string,
   revision: number,
 ): Promise<ProviderPrivateAccountMutationResult> {
-  try {
-    const receipt = await admitPrivateDelete(deps.transport, accountId, revision);
-    return await accountCallResult(deps, receipt, 'providerAccounts.delete', accountId, revision);
-  } catch (error) {
-    if (error instanceof ProviderAccountAdmissionFailure) return { status: error.outcome };
-    throw error;
-  }
-}
-
-class ProviderAccountAdmissionFailure extends Error {
-  constructor(readonly outcome: 'rejected' | 'unavailable') {
-    super(outcome === 'rejected' ? 'Provider account request was rejected' : 'Provider accounts are unavailable; reopen before retrying');
-  }
+  const receipt = await admitPrivateDelete(deps.transport, accountId, revision);
+  return 'status' in receipt ? receipt
+    : await accountCallResult(deps, receipt, 'providerAccounts.delete', accountId, revision);
 }
 
 async function admitPrivateAccount(
   transport: ProviderAccountsTransport, transaction: PrivateAccountTransaction, account: AccountIntent,
-): Promise<CallReceipt> {
+): Promise<PrivateAccountAdmissionResult> {
   return admitPrivateMutation(transport, transaction, 'providerAccounts.replace', {
     kind: 'replace', account, privateTransactionId: transaction.id,
   });
@@ -632,7 +631,7 @@ async function admitPrivateAccount(
 
 async function admitPrivateDelete(
   transport: ProviderAccountsTransport, accountId: string, revision: number,
-): Promise<CallReceipt> {
+): Promise<PrivateAccountAdmissionResult> {
   if (!isId(accountId) || !isRevision(revision)) throw new Error('Provider account request is invalid');
   const reference = credentialReference(accountId);
   const transaction = await beginPrivateAccountTransaction(reference, revision, () => credentialSnapshot(reference));
@@ -646,20 +645,25 @@ async function admitPrivateMutation(
   transaction: PrivateAccountTransaction,
   command: 'providerAccounts.replace' | 'providerAccounts.delete',
   input: unknown,
-): Promise<CallReceipt> {
+): Promise<PrivateAccountAdmissionResult> {
   let response: ProviderMutationTransportResponse;
   try { response = await transport.execute(accountRequest(command, input)); }
-  catch { throw new ProviderAccountAdmissionFailure('unavailable'); }
+  catch { return { status: 'unknown', reason: 'outcome-unknown' }; }
   if (response.status === 202) {
     try { return decodeCallReceipt(response.body); }
-    catch { throw new ProviderAccountAdmissionFailure('unavailable'); }
+    catch { return { status: 'unknown', reason: 'outcome-unknown' }; }
   }
   const notAdmitted = response.status === 400 || response.status === 422
     || response.status === 503 && 'code' in response.body && response.body.code === 'not-admitted';
   if (notAdmitted && !transaction.claimed) {
-    await settlePrivateAccountTransaction(transaction, 'rejected', restoreCredential);
+    try { await settlePrivateAccountTransaction(transaction, 'rejected', restoreCredential); }
+    catch { return { status: 'unknown', reason: 'outcome-unknown' }; }
+    return {
+      status: 'rejected',
+      reason: response.status === 400 ? 'invalid-request' : response.status === 422 ? 'rejected' : 'not-admitted',
+    };
   }
-  throw new ProviderAccountAdmissionFailure(response.status === 400 || response.status === 422 ? 'rejected' : 'unavailable');
+  return { status: 'unknown', reason: 'outcome-unknown' };
 }
 
 async function accountCallResult(

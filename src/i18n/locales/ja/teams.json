@@ -88,6 +88,14 @@
         "unconfirmed": "未確認",
         "incomplete": "未完了"
       },
+      "memberErrors": {
+        "credential_missing": "モデルの認証情報が未設定です。モデル設定で有効な認証情報を保存してください。",
+        "credential_unavailable": "モデルの認証情報を読み取れません。モデル設定とローカル認証サービスを確認してください。",
+        "unavailable": "モデルサービスを利用できません。接続とモデル設定を確認してください。",
+        "unsupported": "利用可能なモデルがありません。既定のモデル設定を確認してください。",
+        "invalid_output": "モデルから有効なメンバー紹介が返されませんでした。",
+        "cancelled": "今回の準備はキャンセルされました。"
+      },
       "noMembers": "Leader のみが選択されています。他のメンバー紹介は不要です。",
       "preparationNotObserved": "メンバー紹介は準備済みですが、今回の準備過程は観測されていません。",
       "originalError": "作成エラー",

@@ -20,7 +20,7 @@ use crate::{
     ProviderModelCapability, ProviderModelCatalog, ProviderModelReference, ProviderModelStoreFault,
     ProviderRouting, ProviderRoutingCapability, ProviderTextGenerationModelLimits,
     ProviderTextGenerationModelLimitsOutcome, ProviderTextGenerationModelLimitsRequest,
-    ProviderTextGenerationOutcome, ProviderTextGenerationRequest, Resolver,
+    ProviderTextGenerationOutcome, ProviderTextGenerationRequest, ProviderTextGenerationUnavailableReason, Resolver,
     application::{model_reference, receipts::*},
     llm_client::{LlmClient, LlmClientError, LlmCredential, LlmEndpoint, LlmRequest},
     ports::{ProviderModelDiscoveryPortOutcome, ProviderRuntimeDirectory},
@@ -131,11 +131,13 @@ impl ProviderModelOwner {
             }
             Err(()) => {
                 session_trace("provider-generation.candidates-failed", || trace(json!({ "reason": "identity_unavailable" })));
-                return Ok(ProviderTextGenerationOutcome::Unavailable);
+                return Ok(ProviderTextGenerationOutcome::Unavailable {
+                    reason: ProviderTextGenerationUnavailableReason::ProviderUnavailable,
+                });
             }
         };
         session_trace("provider-generation.candidates-resolved", || trace(json!({ "candidateCount": candidates.len() })));
-        let mut unavailable = false;
+        let mut unavailable = None;
         let mut stream_error = None;
         let mut response_sink = GenerationStreamSink::new(stream);
         let is_streaming = response_sink.sink.is_some();
@@ -161,19 +163,21 @@ impl ProviderModelOwner {
                 session_trace("provider-generation.candidate-skipped", || candidate_trace(json!({ "reason": "endpoint_invalid" })));
                 continue;
             };
-            let credential = match provider_generation_credential(account, &self.private_resolver) {
+            let credential = match provider_generation_credential(account, &self.private_resolver).await {
                 Ok(Some(credential)) => credential,
                 Ok(None) => {
                     session_trace("provider-generation.candidate-skipped", || candidate_trace(json!({ "reason": "credential_missing" })));
                     continue;
                 }
-                Err(()) => {
+                Err(reason) => {
                     session_trace("provider-generation.candidate-failed", || candidate_trace(json!({
-                        "reason": if account.configuration().credential().is_none() {
-                            "credential_missing"
-                        } else { "private_resolver_unavailable" },
+                        "reason": match reason {
+                            ProviderTextGenerationUnavailableReason::CredentialMissing => "credential_missing",
+                            ProviderTextGenerationUnavailableReason::CredentialUnavailable => "credential_unavailable",
+                            ProviderTextGenerationUnavailableReason::ProviderUnavailable => "provider_unavailable",
+                        },
                     })));
-                    unavailable = true;
+                    unavailable = Some(reason);
                     continue;
                 }
             };
@@ -269,7 +273,7 @@ impl ProviderModelOwner {
                     {
                         return Err(error);
                     }
-                    unavailable = true;
+                    unavailable = Some(ProviderTextGenerationUnavailableReason::ProviderUnavailable);
                     if is_streaming {
                         stream_error = Some(error);
                     }
@@ -279,10 +283,9 @@ impl ProviderModelOwner {
         if let Some(error) = stream_error {
             return Err(error);
         }
-        Ok(if unavailable {
-            ProviderTextGenerationOutcome::Unavailable
-        } else {
-            ProviderTextGenerationOutcome::Rejected
+        Ok(match unavailable {
+            Some(reason) => ProviderTextGenerationOutcome::Unavailable { reason },
+            None => ProviderTextGenerationOutcome::Rejected,
         })
     }
 
@@ -603,6 +606,7 @@ impl ProviderModelOwner {
         runtime: &dyn ProviderRuntimeDirectory,
         cascade: &mut ProviderCascade,
         account_id: &ProviderAccountId,
+        diagnostic: &mut Option<ProviderTextGenerationUnavailableReason>,
     ) -> ProviderModelDiscoverOutcome {
         if cascade.reload().is_err() {
             return ProviderModelDiscoverOutcome::Unavailable;
@@ -653,9 +657,24 @@ impl ProviderModelOwner {
             }
             return ProviderModelDiscoverOutcome::Discovered(discovery_views(drafts));
         }
-        let private_resolver = self.private_resolver.clone();
+        if provider_discovery_endpoint(&account).is_none() {
+            return ProviderModelDiscoverOutcome::Rejected;
+        }
+        let api_key = match account.configuration().auth_mode() {
+            ProviderAccountAuthMode::Local => None,
+            ProviderAccountAuthMode::ApiKey | ProviderAccountAuthMode::Token => {
+                match provider_api_key(&account, &self.private_resolver).await {
+                    Ok(key) => Some(key),
+                    Err(reason) => {
+                        *diagnostic = Some(reason);
+                        return ProviderModelDiscoverOutcome::Unavailable;
+                    }
+                }
+            }
+            _ => return ProviderModelDiscoverOutcome::Rejected,
+        };
         tokio::task::spawn_blocking(move || {
-            match discover_provider_models(&account, &private_resolver) {
+            match discover_provider_models(&account, api_key) {
                 Ok(models) => ProviderModelDiscoverOutcome::Discovered(discovery_views(models)),
                 Err(ProviderModelDiscoveryError::Rejected) => {
                     ProviderModelDiscoverOutcome::Rejected
@@ -949,7 +968,7 @@ fn discovery_views(drafts: Vec<ProviderModelDraft>) -> Vec<ProviderModelDiscover
 
 fn discover_provider_models(
     account: &ProviderAccount,
-    private_resolver: &Resolver,
+    api_key: Option<String>,
 ) -> Result<Vec<ProviderModelDraft>, ProviderModelDiscoveryError> {
     let configuration = account.configuration();
     let provider = account.provider().as_str();
@@ -958,18 +977,6 @@ fn discover_provider_models(
     }
     let base_url =
         provider_discovery_endpoint(account).ok_or(ProviderModelDiscoveryError::Rejected)?;
-    let api_key = match configuration.auth_mode() {
-        ProviderAccountAuthMode::Local => None,
-        ProviderAccountAuthMode::ApiKey | ProviderAccountAuthMode::Token => Some(
-            provider_api_key(account, private_resolver)
-                .map_err(|_| ProviderModelDiscoveryError::Unavailable)?,
-        ),
-        ProviderAccountAuthMode::CliReuse
-        | ProviderAccountAuthMode::OAuthBrowser
-        | ProviderAccountAuthMode::OAuthDevice => {
-            return Err(ProviderModelDiscoveryError::Rejected);
-        }
-    };
     if provider == "provider:ollama" {
         return discover_ollama_models(account.id(), base_url);
     }
@@ -1348,32 +1355,39 @@ fn provider_generation_protocol(account: &ProviderAccount) -> Option<ProviderApi
         .or_else(|| default_discovery_protocol(account.provider().as_str()))
 }
 
-fn provider_generation_credential(
+async fn provider_generation_credential(
     account: &ProviderAccount,
     private_resolver: &Resolver,
-) -> Result<Option<LlmCredential>, ()> {
+) -> Result<Option<LlmCredential>, ProviderTextGenerationUnavailableReason> {
     match account.configuration().auth_mode() {
         ProviderAccountAuthMode::ApiKey => provider_api_key(account, private_resolver)
+            .await
             .map(LlmCredential::api_key)
             .map(Some),
         ProviderAccountAuthMode::Token
         | ProviderAccountAuthMode::OAuthBrowser
         | ProviderAccountAuthMode::OAuthDevice => provider_api_key(account, private_resolver)
+            .await
             .map(LlmCredential::bearer)
             .map(Some),
         ProviderAccountAuthMode::CliReuse | ProviderAccountAuthMode::Local => Ok(None),
     }
 }
 
-fn provider_api_key(account: &ProviderAccount, private_resolver: &Resolver) -> Result<String, ()> {
-    let credential = account.configuration().credential().ok_or(())?;
-    let reference =
-        ConnectorSecretRef::try_new(credential.as_str()).map_err(|InvalidConnectorSecretRef| ())?;
-    let resolved = private_resolver.resolve(&reference).map_err(|_| ())?;
-    let ConnectorSecretResolution::Resolved { value, .. } = resolved else {
-        return Err(());
-    };
-    connector_secret_to_string(&value)
+async fn provider_api_key(
+    account: &ProviderAccount,
+    private_resolver: &Resolver,
+) -> Result<String, ProviderTextGenerationUnavailableReason> {
+    use ProviderTextGenerationUnavailableReason::{CredentialMissing, CredentialUnavailable};
+    let credential = account.configuration().credential().ok_or(CredentialMissing)?;
+    let reference = ConnectorSecretRef::try_new(credential.as_str())
+        .map_err(|InvalidConnectorSecretRef| CredentialUnavailable)?;
+    match private_resolver.resolve(&reference).await.map_err(|_| CredentialUnavailable)? {
+        ConnectorSecretResolution::Resolved { value, .. } =>
+            connector_secret_to_string(&value).map_err(|_| CredentialUnavailable),
+        ConnectorSecretResolution::NotFound { .. } => Err(CredentialMissing),
+        ConnectorSecretResolution::Unavailable { .. } => Err(CredentialUnavailable),
+    }
 }
 
 fn connector_secret_to_string(value: &ConnectorSecretValue) -> Result<String, ()> {

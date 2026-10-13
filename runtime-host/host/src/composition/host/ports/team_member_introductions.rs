@@ -4,6 +4,7 @@ use organization::{MemberIntroductionError, MemberIntroductionRequest, TeamMembe
 use platform::trace::{current_session_trace, identifier_hash, session_trace, with_session_trace};
 use provider_module::{
     ProviderHandle, ProviderTextGenerationOutcome, ProviderTextGenerationRequest,
+    ProviderTextGenerationUnavailableReason,
     llm_client::{LlmFinishReason, LlmGenerationOptions, LlmMessage, LlmRole},
 };
 use runtime_directory::OwnedRuntimeFuture;
@@ -114,7 +115,7 @@ impl TeamMemberIntroductions for ProviderTeamMemberIntroductions {
                         !response.text.trim().is_empty(),
                     ),
                     ProviderTextGenerationOutcome::Rejected => ("Rejected", "None", 0, false),
-                    ProviderTextGenerationOutcome::Unavailable => ("Unavailable", "None", 0, false),
+                    ProviderTextGenerationOutcome::Unavailable { .. } => ("Unavailable", "None", 0, false),
                     ProviderTextGenerationOutcome::Cancelled => ("Cancelled", "None", 0, false),
                 };
                 json!({
@@ -133,9 +134,17 @@ impl TeamMemberIntroductions for ProviderTeamMemberIntroductions {
                 ProviderTextGenerationOutcome::Rejected => {
                     Err(MemberIntroductionError::Unsupported)
                 }
-                ProviderTextGenerationOutcome::Unavailable => {
-                    Err(MemberIntroductionError::Unavailable)
-                }
+                ProviderTextGenerationOutcome::Unavailable { reason } => Err(match reason {
+                    ProviderTextGenerationUnavailableReason::CredentialMissing => {
+                        MemberIntroductionError::CredentialMissing
+                    }
+                    ProviderTextGenerationUnavailableReason::CredentialUnavailable => {
+                        MemberIntroductionError::CredentialUnavailable
+                    }
+                    ProviderTextGenerationUnavailableReason::ProviderUnavailable => {
+                        MemberIntroductionError::Unavailable
+                    }
+                }),
                 ProviderTextGenerationOutcome::Cancelled => Err(MemberIntroductionError::Cancelled),
             }
         })

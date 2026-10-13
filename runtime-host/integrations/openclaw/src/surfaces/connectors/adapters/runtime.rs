@@ -17,6 +17,7 @@ impl ConnectorOps for OpenClawDriver {
                 &catalog,
                 secrets,
             )
+            .await
         })
     }
 

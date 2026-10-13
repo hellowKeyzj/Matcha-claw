@@ -34,7 +34,7 @@ where
         webhook_token,
         runtime_host_transport_port,
         control_input,
-        control_output,
+        mut control_output,
     } = app;
     let team_mcp = crate::team_mcp::Discovery::prepare(
         &input.open_claw.runtime_host_mcp_state_dir,
@@ -47,7 +47,23 @@ where
         &input.open_claw.runtime_host_mcp_state_dir,
     )
     .map_err(|_| ControlError::Transport("Matcha MCP projection"))?;
-    let mut runtime = runtime::start(input).await?;
+    let mut runtime = match runtime::start(input).await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            if matches!(
+                error,
+                ControlError::Construction(crate::ConstructionError::ProviderMigration(_))
+            ) {
+                let output = crate::control::wire::Output::StartupFailure(
+                    crate::control::wire::StartupFailure::provider_migration(),
+                );
+                if let Ok(bytes) = crate::control::wire::encode(&output) {
+                    let _ = crate::control::frame::encode(&mut control_output, &bytes).await;
+                }
+            }
+            return Err(error);
+        }
+    };
 
     let provider_private_resolver =
         provider_credential_resolver.unwrap_or_else(provider_module::Resolver::disabled);

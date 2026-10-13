@@ -560,7 +560,7 @@ impl SessionShared {
             )
             .await
             .map_err(|_| SessionModelSelectionOutcome::Unavailable)?;
-        self.provider_selection_outcome(outcome)
+        self.provider_selection_outcome(outcome).await
     }
 
     async fn resolve_session_model_selection(
@@ -584,16 +584,16 @@ impl SessionShared {
             )
             .await
             .map_err(|_| SessionModelSelectionOutcome::Unavailable)?;
-        self.provider_selection_outcome(outcome)
+        self.provider_selection_outcome(outcome).await
     }
 
-    fn provider_selection_outcome(
+    async fn provider_selection_outcome(
         &self,
         outcome: ProviderSessionModelSelectionOutcome,
     ) -> Result<ResolvedSessionModelSelection, SessionModelSelectionOutcome> {
         match outcome {
             ProviderSessionModelSelectionOutcome::Selected(selection) => {
-                self.resolved_provider_selection(selection)
+                self.resolved_provider_selection(selection).await
             }
             ProviderSessionModelSelectionOutcome::Unsupported => {
                 Err(SessionModelSelectionOutcome::Unsupported)
@@ -609,7 +609,7 @@ impl SessionShared {
         }
     }
 
-    fn resolved_provider_selection(
+    async fn resolved_provider_selection(
         &self,
         selection: ProviderSessionModelSelection,
     ) -> Result<ResolvedSessionModelSelection, SessionModelSelectionOutcome> {
@@ -625,7 +625,7 @@ impl SessionShared {
             }
             ProviderSessionEndpoint::MatchaAgentLocal => {
                 let provider_runtime =
-                    matcha_provider_runtime_config(&selection, &self.private_resolver)?;
+                    matcha_provider_runtime_config(&selection, &self.private_resolver).await?;
                 SessionModelSelectionBinding::Matcha {
                     model: selection.model_id.clone(),
                     provider_fingerprint: selection.provider_fingerprint.clone(),
@@ -1974,14 +1974,14 @@ fn host_session_endpoint(endpoint: ProviderSessionEndpoint) -> NativeEndpoint {
     }
 }
 
-fn matcha_provider_runtime_config(
+async fn matcha_provider_runtime_config(
     selection: &ProviderSessionModelSelection,
     private_resolver: &StdMutex<Arc<dyn ConnectorSecretResolverPort>>,
 ) -> Result<MatchaProviderRuntimeConfig, SessionModelSelectionOutcome> {
     trace_matcha_selection("runtime.matcha.model-selection.prepare.selected", selection, "selected");
     let api_key = match selection.auth_mode {
         "local" => None,
-        "api_key" => Some(matcha_provider_api_key(selection, private_resolver)?),
+        "api_key" => Some(matcha_provider_api_key(selection, private_resolver).await?),
         _ => {
             trace_matcha_selection("runtime.matcha.model-selection.prepare.failed", selection, "auth_unsupported");
             return Err(
@@ -2022,7 +2022,7 @@ fn matcha_provider_runtime_config(
     result
 }
 
-fn matcha_provider_api_key(
+async fn matcha_provider_api_key(
     selection: &ProviderSessionModelSelection,
     private_resolver: &StdMutex<Arc<dyn ConnectorSecretResolverPort>>,
 ) -> Result<MatchaProviderSecret, SessionModelSelectionOutcome> {
@@ -2047,7 +2047,7 @@ fn matcha_provider_api_key(
         .expect("Session private resolver lock poisoned")
         .clone();
     trace_matcha_selection("runtime.matcha.model-selection.credential.resolve.start", selection, "credential_reference_valid");
-    let resolved = resolver.resolve(&reference).map_err(|_| {
+    let resolved = resolver.resolve(&reference).await.map_err(|_| {
         trace_matcha_selection("runtime.matcha.model-selection.credential.resolve.failed", selection, "credential_resolver_error");
         SessionModelSelectionOutcome::target_rejected_with_diagnostic(
             SessionModelSelectionRejection::MatchaProviderRuntimeUnavailable,

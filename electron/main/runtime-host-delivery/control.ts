@@ -94,7 +94,8 @@ export type RuntimeHostControlErrorKind =
   | 'timeout-exceeded'
   | 'disconnected'
   | 'write-failed'
-  | 'protocol-invalid';
+  | 'protocol-invalid'
+  | 'provider-migration-failed';
 
 export class RuntimeHostControlError extends Error {
   readonly retryable = false;
@@ -147,6 +148,7 @@ interface PendingCommand {
 
 type IncomingMessage =
   | { readonly kind: 'ready' }
+  | { readonly kind: 'startup-failed'; readonly code: 'provider-migration-failed' }
   | {
       readonly kind: 'outcome';
       readonly id: string;
@@ -316,6 +318,10 @@ export class RuntimeHostControlClient {
   }
 
   private handleIncomingMessage(message: IncomingMessage): void {
+    if (message.kind === 'startup-failed') {
+      this.disconnect(this.isReady ? 'protocol-invalid' : message.code);
+      return;
+    }
     if (!this.isReady && message.kind !== 'ready') {
       this.disconnect('protocol-invalid');
       return;
@@ -359,7 +365,7 @@ export class RuntimeHostControlClient {
     ));
   }
 
-  private disconnect(kind: Extract<RuntimeHostControlErrorKind, 'disconnected' | 'protocol-invalid'>): void {
+  private disconnect(kind: Extract<RuntimeHostControlErrorKind, 'disconnected' | 'protocol-invalid' | 'provider-migration-failed'>): void {
     if (this.isClosed) return;
 
     const error = new RuntimeHostControlError(kind, 'not-delivered');
@@ -400,6 +406,10 @@ function decodeIncomingMessage(body: Buffer): IncomingMessage | undefined {
   if (!isRecord(raw) || raw.version !== RUNTIME_HOST_CONTROL_VERSION) return undefined;
   if (raw.type === 'ready') {
     return hasExactKeys(raw, ['version', 'type']) ? { kind: 'ready' } : undefined;
+  }
+  if (raw.type === 'startup-failed') {
+    return hasExactKeys(raw, ['version', 'type', 'code']) && raw.code === 'provider-migration-failed'
+      ? { kind: 'startup-failed', code: raw.code } : undefined;
   }
   if (raw.type === 'outcome') return decodeOutcomeMessage(raw);
   if (raw.type === 'event') return decodeEvent(raw);
@@ -599,5 +609,7 @@ function controlErrorMessage(kind: RuntimeHostControlErrorKind): string {
       return 'Runtime-host control write failed.';
     case 'protocol-invalid':
       return 'Runtime-host control stream violated protocol v1.';
+    case 'provider-migration-failed':
+      return 'Model configuration recovery failed during startup.';
   }
 }

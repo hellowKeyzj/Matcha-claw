@@ -127,7 +127,12 @@ export function ManualTeamCreationProgress({ creation }: { creation: ManualTeamC
               return (
                 <li key={member.roleId} className="flex items-center gap-3 rounded-xl bg-muted/25 p-2.5">
                   <AgentAvatar agentId={member.agentId} agentName={member.agentName} alt="" className="h-8 w-8 border border-border" />
-                  <span className="min-w-0 flex-1 truncate text-sm text-foreground">{member.agentName}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm text-foreground">{member.agentName}</div>
+                    {creation.progress?.memberErrors?.[index] ? (
+                      <p className="mt-1 break-words text-xs text-destructive">{t(`create.manualProgress.memberErrors.${creation.progress.memberErrors[index]}`)}</p>
+                    ) : null}
+                  </div>
                   <span className={`flex items-center gap-1.5 text-xs ${status === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>
                     <StatusIcon status={status} />
                     {t(`create.manualProgress.memberStatus.${status}`)}

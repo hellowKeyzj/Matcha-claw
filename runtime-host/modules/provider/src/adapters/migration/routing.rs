@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path, path::PathBuf};
+use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
@@ -7,20 +7,13 @@ use crate::{
     ProviderRoutingCapability, ProviderRoutingRevision,
 };
 
-use super::{ProviderMigrationFault, legacy_source, write_atomic};
+use super::{ProviderMigrationFault, SelectedSource, legacy_source};
 
 const LEGACY_VERSION: u8 = 1;
 
-pub(super) fn migrate<Sources, Source>(
-    path: &Path,
-    sources: Sources,
-) -> Result<(), ProviderMigrationFault>
-where
-    Sources: IntoIterator<Item = Source>,
-    Source: Into<PathBuf>,
-{
-    let Some(legacy) = legacy_source::<_, _, LegacyRouting>(sources, path)? else {
-        return Ok(());
+pub(super) fn prepare(source: &SelectedSource) -> Result<Option<Vec<u8>>, ProviderMigrationFault> {
+    let Some(legacy) = legacy_source::<LegacyRouting>(source)? else {
+        return Ok(None);
     };
     if legacy.schema_version != LEGACY_VERSION {
         return Err(ProviderMigrationFault::Decode);
@@ -40,9 +33,14 @@ where
         routes,
     )
     .map_err(|_| ProviderMigrationFault::Decode)?;
-    let bytes = crate::adapters::routing_store::migration_bytes(&routing)
-        .map_err(|_| ProviderMigrationFault::Encode)?;
-    write_atomic(path, &bytes)
+    crate::adapters::routing_store::migration_bytes(&routing)
+        .map(Some)
+        .map_err(|error| match error {
+            crate::ProviderRoutingStoreFault::RecordTooLarge => {
+                ProviderMigrationFault::RecordTooLarge
+            }
+            _ => ProviderMigrationFault::Encode,
+        })
 }
 
 #[derive(Deserialize)]

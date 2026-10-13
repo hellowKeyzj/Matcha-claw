@@ -1,23 +1,16 @@
-use std::{collections::HashSet, path::Path, path::PathBuf};
+use std::collections::HashSet;
 
 use serde::Deserialize;
 
 use crate::{ProviderAccountId, ProviderModel, ProviderModelCapability, ProviderModelCatalog};
 
-use super::{ProviderMigrationFault, legacy_source, write_atomic};
+use super::{ProviderMigrationFault, SelectedSource, legacy_source};
 
 const LEGACY_VERSION: u8 = 1;
 
-pub(super) fn migrate<Sources, Source>(
-    path: &Path,
-    sources: Sources,
-) -> Result<(), ProviderMigrationFault>
-where
-    Sources: IntoIterator<Item = Source>,
-    Source: Into<PathBuf>,
-{
-    let Some(legacy) = legacy_source::<_, _, LegacyModels>(sources, path)? else {
-        return Ok(());
+pub(super) fn prepare(source: &SelectedSource) -> Result<Option<Vec<u8>>, ProviderMigrationFault> {
+    let Some(legacy) = legacy_source::<LegacyModels>(source)? else {
+        return Ok(None);
     };
     if legacy.schema_version != LEGACY_VERSION {
         return Err(ProviderMigrationFault::Decode);
@@ -38,9 +31,14 @@ where
     }
     let catalog =
         ProviderModelCatalog::try_new(models).map_err(|_| ProviderMigrationFault::Decode)?;
-    let bytes = crate::adapters::model_store::migration_bytes(&catalog)
-        .map_err(|_| ProviderMigrationFault::Encode)?;
-    write_atomic(path, &bytes)
+    crate::adapters::model_store::migration_bytes(&catalog)
+        .map(Some)
+        .map_err(|error| match error {
+            crate::ProviderModelStoreFault::RecordTooLarge => {
+                ProviderMigrationFault::RecordTooLarge
+            }
+            _ => ProviderMigrationFault::Encode,
+        })
 }
 
 #[derive(Deserialize)]

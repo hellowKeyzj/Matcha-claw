@@ -96,7 +96,7 @@ impl OpenClawDoctorRepair {
                 LogStream::Stderr,
                 b"[doctor] child cleanup unconfirmed; repair failed",
             );
-            return DoctorRepairOutcome::Failed;
+            return DoctorRepairOutcome::CleanupUnconfirmed;
         }
         outcome
     }
@@ -159,6 +159,7 @@ pub enum DoctorRepairOutcome {
     TimedOut,
     Cancelled,
     SpawnFailed,
+    CleanupUnconfirmed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

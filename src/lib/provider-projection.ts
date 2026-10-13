@@ -203,8 +203,11 @@ async function mutate(
     : { accountId: input.accountId, accountRevision: input.revision };
   try {
     if (isTraceEnabled()) logProviderConfigTrace('request-start', { channel, ...providerMutationInputTrace(input) });
+    const response = await invokePrivate<unknown>(channel, input);
+    const admissionError = privateMutationError(response, success);
+    if (admissionError) return { success: false, error: admissionError };
     const receipt = await waitForProviderMutation(
-      await invokePrivate<unknown>(channel, input),
+      response,
       success === 'stored' ? 'providerAccounts.replace' : 'providerAccounts.delete',
       target,
     );
@@ -217,23 +220,46 @@ async function mutate(
       const warning = nativeProjectionError(receipt);
       return { success: true, receipt, ...(warning ? { warning } : {}) };
     }
-    return { success: false, error: outcomeError(receipt), receipt };
-  } catch (error) {
-    if (isTraceEnabled()) logProviderConfigTrace('request-failed', {
-      channel,
-      errorName: error instanceof Error ? error.name : typeof error,
-    });
-    return { success: false, error: 'Provider account request outcome is unknown; reopen before retrying' };
+    return { success: false, error: outcomeError(receipt, success), receipt };
+  } catch {
+    if (isTraceEnabled()) logProviderConfigTrace('request-failed', { channel, outcome: 'unknown' });
+    return { success: false, error: mutationUnknownError(success) };
   }
 }
 
-function outcomeError(receipt: ProviderCallDetail): string {
-  if (receipt.outcome === 'rejected' || receipt.outcome === 'missing') return 'Provider account request was rejected';
-  if (receipt.phase !== 'terminal' || receipt.outcome === 'unknown'
-    || receipt.commit === 'unknown' || receipt.persisted === 'unknown') {
-    return 'Provider account request outcome is unknown; reopen before retrying';
+function mutationUnknownError(success: 'stored' | 'deleted'): string {
+  const operation = success === 'stored' ? '保存' : '删除';
+  return `${operation}结果暂时无法确认，操作可能已执行。请重新打开供应商设置核对状态，确认前不要重复操作。`;
+}
+
+function privateMutationError(value: unknown, success: 'stored' | 'deleted'): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).length !== 2 || !Object.hasOwn(value, 'status') || !Object.hasOwn(value, 'reason')
+    || !('status' in value) || !('reason' in value)) return undefined;
+  if (value.status === 'unknown' && value.reason === 'outcome-unknown') return mutationUnknownError(success);
+  if (value.status !== 'rejected') return undefined;
+  const operation = success === 'stored' ? '保存' : '删除';
+  switch (value.reason) {
+    case 'not-admitted':
+      return `服务暂时无法受理请求，本次${operation}未执行。请稍后重试；若持续失败，请重启应用。`;
+    case 'invalid-request':
+      return `请求参数无效，本次${operation}未执行。请重新打开供应商设置，核对账号信息后重试。`;
+    case 'rejected':
+      return `请求被拒绝，本次${operation}未执行。请核对账号信息和凭据后重试。`;
+    default:
+      return undefined;
   }
-  return 'Provider accounts are unavailable';
+}
+
+function outcomeError(receipt: ProviderCallDetail, success: 'stored' | 'deleted'): string {
+  if (receipt.phase !== 'terminal' || receipt.outcome === 'unknown'
+    || receipt.commit === 'unknown' || receipt.persisted === 'unknown'
+    || receipt.diagnostic?.reason === 'private-transaction-settle-failed') return mutationUnknownError(success);
+  if (receipt.outcome === 'rejected' || receipt.outcome === 'missing') {
+    const operation = success === 'stored' ? '保存' : '删除';
+    return `请求被拒绝，本次${operation}未执行。请重新打开供应商设置，核对账号信息和凭据后重试。`;
+  }
+  return mutationUnknownError(success);
 }
 
 export function buildProviderCredentialPayload(input: {

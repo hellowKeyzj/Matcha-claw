@@ -8,7 +8,7 @@ use crate::{
     native_config::connector::{config, external, preset::PresetMcpProjection},
 };
 
-pub fn apply_runtime_mcp_projection(
+pub async fn apply_runtime_mcp_projection(
     state_dir: CanonicalStateDir,
     preset: Option<ports::McpPreset<'_>>,
     catalog: &ConnectorCatalog,
@@ -21,6 +21,7 @@ pub fn apply_runtime_mcp_projection(
         )
     });
     external::project_runtime_mcp_connectors(state_dir, preset, catalog, secrets)
+        .await
         .map(|(effect, _)| map_projection_effect(effect))
         .unwrap_or(ports::ConnectorProjectionEffect::Unavailable)
 }

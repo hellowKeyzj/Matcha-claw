@@ -18,6 +18,16 @@
     "avatarCleared": "User avatar cleared",
     "avatarUpdateFailed": "Failed to update user avatar: {{error}}"
   },
+  "providerRecovery": {
+    "title": "Model configuration reset",
+    "description": "Your old model configuration could not be converted and has been backed up. Please add your models again.",
+    "backupDirectory": "Backup location",
+    "openBackup": "Open backup folder",
+    "acknowledge": "Got it",
+    "loadFailed": "Could not load the model recovery notice. Restart the app to try again.",
+    "acknowledgeFailed": "Could not confirm. Click the button again to retry.",
+    "openBackupFailed": "Could not open the backup folder. Try again or open the path above manually."
+  },
   "aiProviders": {
     "title": "Models",
     "description": "Configure models and API keys",
@@ -247,7 +257,7 @@
     "repair": {
       "action": "Repair",
       "confirmTitle": "Repair OpenClaw?",
-      "confirmDescription": "This will stop OpenClaw and run its native repair tool, which may change configuration and migrate legacy data. OpenClaw will then be prepared and started again. Running tasks will be interrupted. Continue?",
+      "confirmDescription": "This will stop OpenClaw and run its native repair tool, which may change configuration and migrate legacy data. After confirming the repair process is no longer running, we'll prepare OpenClaw and try to start it again, even if repair fails. Running tasks will be interrupted. Continue?",
       "confirmAction": "Stop and repair",
       "automatic": "Automatic repair",
       "manual": "Manual repair",
@@ -266,12 +276,12 @@
       },
       "failures": {
         "stopFailed": "Could not stop OpenClaw. Check the logs.",
-        "doctorFailed": "OpenClaw's native repair failed. Check the logs.",
+        "doctorFailed": "The repair process could not be stopped. Quit Matcha completely, then try again.",
         "doctorTimedOut": "OpenClaw's native repair timed out. Check the logs.",
         "doctorCancelled": "OpenClaw's native repair was cancelled. Check the logs.",
         "doctorSpawnFailed": "Could not start OpenClaw's native repair process. Check the logs.",
         "preparationFailed": "Could not prepare OpenClaw for startup after repair. Check the logs.",
-        "startFailed": "Could not start OpenClaw after repair. Check the logs."
+        "startFailed": "OpenClaw still could not start after repair. Check the logs."
       }
     },
     "tabs": {

@@ -166,7 +166,7 @@ async fn repair_workflow(
         let doctor = driver.repair_native_state(cancellation.clone());
         tokio::pin!(doctor);
         tokio::select! {
-            result = &mut doctor => result?,
+            result = &mut doctor => { result?; },
             _ = async {
                 loop {
                     if matches!(host_state.borrow_and_update().phase(), crate::HostPhase::ShuttingDown | crate::HostPhase::ShutDown) {

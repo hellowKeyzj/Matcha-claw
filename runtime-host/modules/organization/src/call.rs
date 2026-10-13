@@ -767,15 +767,22 @@ impl crate::TeamProvisionReporter for CallScope {
                     }
                     progress.stage = stage;
                 }
-                crate::TeamProvisionUpdate::Member { index, status } => {
-                    let Some(member) = provision.progress.as_mut()
-                        .and_then(|progress| progress.members.get_mut(index)) else {
+                crate::TeamProvisionUpdate::Member { index, status, error } => {
+                    let Some(progress) = &mut provision.progress else {
                         return;
                     };
-                    if *member == status {
+                    let Some(member) = progress.members.get_mut(index) else {
+                        return;
+                    };
+                    if *member == status && progress.member_errors.get(&index).copied() == error {
                         return;
                     }
                     *member = status;
+                    if let Some(error) = error {
+                        progress.member_errors.insert(index, error);
+                    } else {
+                        progress.member_errors.remove(&index);
+                    }
                 }
             }
             if self.context.update(&detail).await.is_err() {
