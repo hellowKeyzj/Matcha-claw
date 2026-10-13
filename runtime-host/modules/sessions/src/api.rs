@@ -42,7 +42,7 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    pub fn new(
+    pub(crate) fn new(
         owner: OwnerRuntimeHandle<SessionCommand, SessionQuery>,
         runtime_directory: Arc<dyn SessionRuntimeDirectory>,
     ) -> Self {

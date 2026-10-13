@@ -1,4 +1,26 @@
-use organization::{GraphRunId, OrganizationStore, TeamId};
+use std::collections::HashMap;
+
+use organization::{GraphRunId, OrganizationStore, RoleSessionIdentityResolver, RoleSessionReceipt, TeamId};
+use platform::endpoint::runtime_address::SessionIdentity;
+
+pub(crate) fn session_ownership(
+    receipts: Vec<RoleSessionReceipt>,
+    queries: Vec<(SessionIdentity, String)>,
+    resolver: &dyn RoleSessionIdentityResolver,
+) -> Option<HashMap<SessionIdentity, RoleSessionReceipt>> {
+    let mut bindings = HashMap::with_capacity(receipts.len());
+    for receipt in receipts {
+        bindings.insert(resolver.ownership_receipt_key(&receipt)?, receipt);
+    }
+    let mut ownership = HashMap::new();
+    for (identity, endpoint_session_id) in queries {
+        let key = resolver.ownership_query_key(&identity, &endpoint_session_id);
+        if let Some(receipt) = bindings.get(&key) {
+            ownership.insert(identity, receipt.clone());
+        }
+    }
+    Some(ownership)
+}
 
 pub(crate) fn team_public_projection(
     store: &OrganizationStore,

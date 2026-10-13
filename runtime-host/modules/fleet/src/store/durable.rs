@@ -20,7 +20,7 @@ use super::{
     },
 };
 
-pub struct FleetStore {
+pub(crate) struct FleetStore {
     path: PathBuf,
     lock_path: PathBuf,
     facts: FleetFacts,

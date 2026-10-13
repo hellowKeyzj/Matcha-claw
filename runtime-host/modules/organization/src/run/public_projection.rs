@@ -1087,7 +1087,7 @@ impl TeamRunPublicSnapshotRequest {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct TeamRunPublicSnapshotProducer;
+pub(crate) struct TeamRunPublicSnapshotProducer;
 
 impl TeamRunPublicSnapshotProducer {
     pub fn produce(
@@ -1109,7 +1109,7 @@ impl TeamRunPublicSnapshotProducer {
     }
 }
 
-pub fn produce_team_run_public_snapshot(
+pub(crate) fn produce_team_run_public_snapshot(
     facts: &OrganizationFacts,
     request: &TeamRunPublicSnapshotRequest,
 ) -> TeamRunPublicSnapshotQueryOutcome {
@@ -1118,7 +1118,7 @@ pub fn produce_team_run_public_snapshot(
 
 /// Queries a complete safe snapshot when the caller has only a run identity. The team association
 /// comes from the same durable run fact that the pair-identity producer validates.
-pub fn produce_team_run_public_snapshot_for_run(
+pub(crate) fn produce_team_run_public_snapshot_for_run(
     facts: &OrganizationFacts,
     run_id: &GraphRunId,
     event_cursor: u64,
@@ -1136,7 +1136,7 @@ pub fn produce_team_run_public_snapshot_for_run(
 
 /// Queries the complete safe TeamRun snapshot from Organization durable facts. This is separate
 /// from `query_team_public_projection`: the compact graph view must never stand in for this API.
-pub fn query_team_run_public_snapshot(
+pub(crate) fn query_team_run_public_snapshot(
     facts: &OrganizationFacts,
     team_id: &TeamId,
     run_id: &GraphRunId,
@@ -1145,7 +1145,7 @@ pub fn query_team_run_public_snapshot(
     produce_team_run_public_snapshot(facts, &request)
 }
 
-pub fn query_team_run_public_diagnostics(
+pub(crate) fn query_team_run_public_diagnostics(
     facts: &OrganizationFacts,
     team_id: &TeamId,
     run_id: &GraphRunId,
@@ -1628,7 +1628,7 @@ const fn event_action(action: crate::run::event::ApprovalAction) -> TeamPublicEv
 /// A missing/tombstoned Team or a run that belongs to another Team is unavailable. An absent
 /// runtime receipt, an indeterminate delivery, or an unresolved terminal observation is retained
 /// as the explicit `runtime: unknown` state while durable graph facts stay visible.
-pub fn query_team_public_projection(
+pub(crate) fn query_team_public_projection(
     facts: &OrganizationFacts,
     team_id: &TeamId,
     run_id: &GraphRunId,

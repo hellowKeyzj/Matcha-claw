@@ -10,7 +10,7 @@ use super::CapabilityVerifier;
 pub(crate) fn runtime_module_install_plan(
     handles: &HostHandles,
     verifier: CapabilityVerifier,
-    webhook_token: organization::adapters::loopback::trigger::WebhookToken,
+    webhook_token: organization::WebhookToken,
 ) -> (
     Vec<ModuleDescriptor>,
     Vec<ModuleDescriptor>,

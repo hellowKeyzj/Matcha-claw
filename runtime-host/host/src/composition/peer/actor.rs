@@ -107,6 +107,18 @@ impl PeerShared {
         &self.runtime_directory
     }
 
+    fn runtime_state(&self, key: &PeerKey) -> crate::RuntimeState {
+        if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::matcha_agent().endpoint() {
+            super::status::matcha_state(&self.runtime_directory, &self.matcha_startup_diagnostics)
+        } else if *key
+            == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint()
+        {
+            super::status::open_claw_state(&self.runtime_directory, &self.openclaw_startup_diagnostics)
+        } else {
+            unreachable!("registered peer runtime must have a fixed status projection")
+        }
+    }
+
     pub(super) fn open_claw_runtime_events(&self) -> Option<&tokio::sync::mpsc::Sender<()>> {
         self.open_claw_runtime_events.as_ref()
     }
@@ -116,6 +128,12 @@ impl PeerShared {
             .matcha_start
             .lock()
             .expect("Matcha peer start result lock poisoned") = Some(result);
+    }
+
+    pub(super) fn open_claw_start_result(
+        &self,
+    ) -> &Mutex<Option<Result<StartOutcome, DriverStartFailure>>> {
+        &self.open_claw_start
     }
 
     pub(super) fn record_open_claw_start(&self, result: Result<StartOutcome, DriverStartFailure>) {
@@ -263,10 +281,12 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, mut command: PeerCom
     };
     match command {
         PeerCommand::AutostartMatcha => {
-            super::matcha::autostart(shared, lifecycle).await;
+            if let Err(error) = super::matcha::autostart(lifecycle).await {
+                shared.record_matcha_start(Err(error));
+            }
         }
         PeerCommand::AutostartOpenClaw { reply, .. } => {
-            let _ = reply.send(super::openclaw::autostart(shared, lifecycle).await);
+            let _ = reply.send(super::openclaw::autostart(shared).await);
         }
         PeerCommand::StartRuntime { call, .. } => {
             if !run_lifecycle_call(&call, key).await {
@@ -284,7 +304,7 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, mut command: PeerCom
             let state = result
                 .as_ref()
                 .cloned()
-                .unwrap_or_else(|_| runtime_state(shared, key));
+                .unwrap_or_else(|_| shared.runtime_state(key));
             finish_manual_lifecycle_call(
                 Some(call),
                 key,
@@ -323,7 +343,7 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, mut command: PeerCom
             let state = result
                 .as_ref()
                 .cloned()
-                .unwrap_or_else(|_| runtime_state(shared, key));
+                .unwrap_or_else(|_| shared.runtime_state(key));
             finish_manual_lifecycle_call(
                 call,
                 key,
@@ -347,9 +367,9 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, mut command: PeerCom
             if !run_lifecycle_call(&call, key).await {
                 return;
             }
-            let result = super::openclaw::repair_manual(shared, lifecycle).await;
+            let result = super::openclaw::repair_manual(shared).await;
             let repair = shared.open_claw().repair_snapshot();
-            let state = result.as_ref().cloned().unwrap_or_else(|_| runtime_state(shared, key));
+            let state = result.as_ref().cloned().unwrap_or_else(|_| shared.runtime_state(key));
             let status = if result.is_ok()
                 && state.lifecycle() == crate::RuntimeLifecycle::Running
                 && repair.phase == runtime_directory::RuntimeRepairPhase::Succeeded
@@ -361,7 +381,7 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, mut command: PeerCom
                 platform::call::CallStatus::Unknown
             };
             let mut detail = runtime_directory::call::RuntimeControlCallDetail::new(key);
-            let observation = crate::composition::runtime_ports::runtime_control_status(&state);
+            let observation = super::status::runtime_control_status(&state);
             detail.lifecycle = Some(observation.lifecycle);
             detail.failure = observation.failure;
             detail.startup_diagnostic = observation.startup_diagnostic;
@@ -375,7 +395,7 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, mut command: PeerCom
             runtime_directory::call::finish_runtime_control_call(Some(call.context), status, &detail).await;
         }
         PeerCommand::RestartOpenClawAfterPluginChange { reply, .. } => {
-            let _ = reply.send(super::openclaw::restart_admitted(shared, lifecycle).await);
+            let _ = reply.send(super::openclaw::restart_admitted(shared).await);
         }
         PeerCommand::RestartRuntime { call, .. } => {
             if !run_lifecycle_call(&call, key).await {
@@ -395,7 +415,7 @@ async fn handle_command(shared: &PeerShared, key: &PeerKey, mut command: PeerCom
             let state = result
                 .as_ref()
                 .cloned()
-                .unwrap_or_else(|_| runtime_state(shared, key));
+                .unwrap_or_else(|_| shared.runtime_state(key));
             finish_manual_lifecycle_call(
                 Some(call),
                 key,
@@ -417,11 +437,11 @@ async fn start_runtime(
     lifecycle: &dyn crate::composition::runtime_ports::LifecycleOps,
 ) -> Result<crate::RuntimeState, RuntimeStartCommandError> {
     if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
-        return super::openclaw::start_admitted(shared, lifecycle).await;
+        return super::openclaw::start_admitted(shared).await;
     }
     let result = lifecycle.start().await;
     super::status::runtime_start_result(result)
-        .map(|()| runtime_state(shared, key))
+        .map(|()| shared.runtime_state(key))
         .map_err(RuntimeStartCommandError::RuntimeStart)
 }
 
@@ -431,14 +451,14 @@ async fn stop_runtime(
     lifecycle: &dyn crate::composition::runtime_ports::LifecycleOps,
 ) -> Result<crate::RuntimeState, RuntimeStopCommandError> {
     if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
-        return super::openclaw::stop(shared, lifecycle).await;
+        return super::openclaw::stop(shared).await;
     }
     if shared.admission().admit_request().is_err() {
         return Err(RuntimeStopCommandError::AdmissionClosed);
     }
     let result = lifecycle.stop().await;
     super::status::runtime_stop_result(result)
-        .map(|()| runtime_state(shared, key))
+        .map(|()| shared.runtime_state(key))
         .map_err(RuntimeStopCommandError::RuntimeStop)
 }
 
@@ -448,36 +468,32 @@ async fn restart_runtime(
     lifecycle: &dyn crate::composition::runtime_ports::LifecycleOps,
 ) -> Result<crate::RuntimeState, RuntimeRestartCommandError> {
     if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint() {
-        return super::openclaw::restart_manual(shared, lifecycle).await;
+        return super::openclaw::restart_manual(shared).await;
     }
     let result = lifecycle.restart().await;
     super::status::runtime_restart_result(result)
-        .map(|()| runtime_state(shared, key))
+        .map(|()| shared.runtime_state(key))
         .map_err(RuntimeRestartCommandError::RuntimeRestart)
-}
-
-fn runtime_state(shared: &PeerShared, key: &PeerKey) -> crate::RuntimeState {
-    if *key == crate::composition::runtime_ports::RuntimeDriverIdentity::matcha_agent().endpoint() {
-        super::status::matcha_state(shared)
-    } else if *key
-        == crate::composition::runtime_ports::RuntimeDriverIdentity::open_claw().endpoint()
-    {
-        super::status::open_claw_state(shared)
-    } else {
-        unreachable!("registered peer runtime must have a fixed status projection")
-    }
 }
 
 async fn handle_query(shared: &PeerShared, query: PeerQuery) {
     match query {
         PeerQuery::State { reply } => {
-            let _ = reply.send(super::status::host_state(shared));
+            let _ = reply.send(super::status::host_state(
+                shared.admission(),
+                shared.runtime_directory(),
+                shared.matcha_startup_diagnostics(),
+                shared.openclaw_startup_diagnostics(),
+            ));
         }
         PeerQuery::OpenClawRepairStatus { reply } => {
             let _ = reply.send(shared.open_claw().repair_snapshot());
         }
         PeerQuery::OpenClawStatus { reply } => {
-            let _ = reply.send(super::status::open_claw_state(shared));
+            let _ = reply.send(super::status::open_claw_state(
+                shared.runtime_directory(),
+                shared.openclaw_startup_diagnostics(),
+            ));
         }
         PeerQuery::OpenClawLogs { cursor, reply } => {
             let result = match shared.admission().admit_request() {
@@ -526,28 +542,57 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
             cursor,
             reply,
         } => {
-            let _ = reply.send(runtime_logs(shared, endpoint, cursor).await);
+            let _ = reply.send(
+                runtime_logs(
+                    shared.admission(),
+                    shared.runtime_directory(),
+                    endpoint,
+                    cursor,
+                )
+                .await,
+            );
         }
         PeerQuery::RuntimeControlReadiness { endpoint, reply } => {
-            let _ = reply.send(runtime_control_readiness(shared, endpoint).await);
+            let _ = reply.send(
+                runtime_control_readiness(shared.admission(), shared.runtime_directory(), endpoint)
+                    .await,
+            );
         }
         PeerQuery::RuntimeGatewayHealth {
             endpoint,
             probe,
             reply,
         } => {
-            let _ = reply.send(runtime_gateway_health(shared, endpoint, probe).await);
+            let _ = reply.send(
+                runtime_gateway_health(
+                    shared.admission(),
+                    shared.runtime_directory(),
+                    endpoint,
+                    probe,
+                )
+                .await,
+            );
         }
         PeerQuery::RuntimeGatewayStatus {
             endpoint,
             include_channel_summary,
             reply,
         } => {
-            let _ =
-                reply.send(runtime_gateway_status(shared, endpoint, include_channel_summary).await);
+            let _ = reply.send(
+                runtime_gateway_status(
+                    shared.admission(),
+                    shared.runtime_directory(),
+                    endpoint,
+                    include_channel_summary,
+                )
+                .await,
+            );
         }
         PeerQuery::RuntimeControlUiUrl { endpoint, reply } => {
-            let _ = reply.send(runtime_control_ui_url(shared, endpoint).await);
+            let _ = reply.send(
+                runtime_control_ui_url(shared.admission(), shared.runtime_directory(), endpoint)
+                    .await,
+            );
         }
         PeerQuery::OpenClawBrowserRequest {
             request,
@@ -694,14 +739,15 @@ async fn reject_missing_lifecycle(shared: &PeerShared, command: PeerCommand) {
 }
 
 async fn runtime_logs(
-    shared: &PeerShared,
+    admission: &HostAdmission,
+    directory: &RuntimeDriverDirectory,
     endpoint: PeerKey,
     cursor: Option<u64>,
 ) -> Result<
     crate::composition::runtime_ports::RuntimeLogSnapshot,
     crate::composition::runtime_ports::RuntimeControlFailure,
 > {
-    let driver = runtime_control_driver(shared, &endpoint)?;
+    let driver = runtime_control_driver(admission, directory, &endpoint)?;
     match driver.runtime_control_ops() {
         Some(ops) => ops.logs(cursor).await,
         None => Err(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported),
@@ -709,13 +755,14 @@ async fn runtime_logs(
 }
 
 async fn runtime_control_readiness(
-    shared: &PeerShared,
+    admission: &HostAdmission,
+    directory: &RuntimeDriverDirectory,
     endpoint: PeerKey,
 ) -> Result<
     crate::composition::runtime_ports::RuntimeControlReadiness,
     crate::composition::runtime_ports::RuntimeControlFailure,
 > {
-    let driver = runtime_control_driver(shared, &endpoint)?;
+    let driver = runtime_control_driver(admission, directory, &endpoint)?;
     match driver.runtime_control_ops() {
         Some(ops) => ops.control_readiness().await,
         None => Err(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported),
@@ -723,14 +770,15 @@ async fn runtime_control_readiness(
 }
 
 async fn runtime_gateway_health(
-    shared: &PeerShared,
+    admission: &HostAdmission,
+    directory: &RuntimeDriverDirectory,
     endpoint: PeerKey,
     probe: bool,
 ) -> Result<
     crate::composition::runtime_ports::RuntimeGatewayHealth,
     crate::composition::runtime_ports::RuntimeControlFailure,
 > {
-    let driver = runtime_control_driver(shared, &endpoint)?;
+    let driver = runtime_control_driver(admission, directory, &endpoint)?;
     match driver.runtime_control_ops() {
         Some(ops) => ops.gateway_health(probe).await,
         None => Err(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported),
@@ -738,14 +786,15 @@ async fn runtime_gateway_health(
 }
 
 async fn runtime_gateway_status(
-    shared: &PeerShared,
+    admission: &HostAdmission,
+    directory: &RuntimeDriverDirectory,
     endpoint: PeerKey,
     include_channel_summary: bool,
 ) -> Result<
     crate::composition::runtime_ports::RuntimeGatewayStatus,
     crate::composition::runtime_ports::RuntimeControlFailure,
 > {
-    let driver = runtime_control_driver(shared, &endpoint)?;
+    let driver = runtime_control_driver(admission, directory, &endpoint)?;
     match driver.runtime_control_ops() {
         Some(ops) => ops.gateway_status(include_channel_summary).await,
         None => Err(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported),
@@ -753,10 +802,11 @@ async fn runtime_gateway_status(
 }
 
 async fn runtime_control_ui_url(
-    shared: &PeerShared,
+    admission: &HostAdmission,
+    directory: &RuntimeDriverDirectory,
     endpoint: PeerKey,
 ) -> Result<String, crate::composition::runtime_ports::RuntimeControlFailure> {
-    let driver = runtime_control_driver(shared, &endpoint)?;
+    let driver = runtime_control_driver(admission, directory, &endpoint)?;
     match driver.runtime_control_ops() {
         Some(ops) => ops.control_ui_url().await,
         None => Err(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported),
@@ -764,18 +814,17 @@ async fn runtime_control_ui_url(
 }
 
 fn runtime_control_driver(
-    shared: &PeerShared,
+    admission: &HostAdmission,
+    directory: &RuntimeDriverDirectory,
     endpoint: &PeerKey,
 ) -> Result<
     std::sync::Arc<dyn crate::composition::runtime_ports::RuntimeDriver>,
     crate::composition::runtime_ports::RuntimeControlFailure,
 > {
-    shared
-        .admission()
+    admission
         .admit_request()
         .map_err(|_| crate::composition::runtime_ports::RuntimeControlFailure::Unavailable)?;
-    shared
-        .runtime_directory()
+    directory
         .lookup(endpoint)
         .ok_or(crate::composition::runtime_ports::RuntimeControlFailure::Unsupported)
 }
@@ -874,9 +923,7 @@ fn lifecycle_success_status(
     runtime_directory::call::RuntimeControlCallDetail::lifecycle_result(
         endpoint,
         operation,
-        &Ok(crate::composition::runtime_ports::runtime_control_status(
-            state,
-        )),
+        &Ok(super::status::runtime_control_status(state)),
     )
     .0
 }
@@ -919,7 +966,7 @@ async fn finish_manual_lifecycle_call(
     error: Option<runtime_directory::RuntimeControlLifecycleError>,
 ) {
     let mut detail = runtime_directory::call::RuntimeControlCallDetail::new(endpoint);
-    let observation = crate::composition::runtime_ports::runtime_control_status(state);
+    let observation = super::status::runtime_control_status(state);
     detail.lifecycle = Some(observation.lifecycle);
     detail.failure = observation.failure;
     detail.startup_diagnostic = observation.startup_diagnostic;

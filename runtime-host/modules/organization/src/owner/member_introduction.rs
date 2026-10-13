@@ -5,7 +5,7 @@ use platform::trace::{identifier_hash, session_trace};
 use serde_json::json;
 
 use crate::{
-    MemberIntroductionError, MemberIntroductionRequest, OrganizationRuntimeDirectory,
+    MemberIntroductionError, OrganizationRuntimeDirectory,
     OrganizationFacts, RoleMaterializationAgent, TeamMaterialization, TeamMemberIntroductions,
     TeamProvisionMemberStatus, TeamProvisionObserver, TeamProvisionProgress, TeamProvisionStage,
     TeamProvisionUpdate, team::LEADER_ROLE_ID,
@@ -186,18 +186,9 @@ pub(super) async fn prepare_manual_team(
             .into_iter()
             .zip(profiles)
             .enumerate()
-            .map(|(index, ((name, role_id), profile))| {
-                (
-                    index,
-                    MemberIntroductionRequest {
-                        name,
-                        role_id,
-                        profile,
-                    },
-                )
-            })
+            .map(|(index, ((name, role_id), profile))| (index, name, role_id, profile))
             .collect();
-        let sections = map_concurrent(INTRODUCTION_CONCURRENCY, requests, |(index, request)| {
+        let sections = map_concurrent(INTRODUCTION_CONCURRENCY, requests, |(index, member_name, member_role_id, profile)| {
             let pipeline = pipeline.clone();
             let introductions = Arc::clone(introductions);
             let observer = observer.cloned();
@@ -209,9 +200,9 @@ pub(super) async fn prepare_manual_team(
                         error: None,
                     }).await;
                 }
-                let name = markdown_text(&request.name);
-                let role_id = markdown_text(request.role_id.as_str());
-                let role_hash = platform::trace::enabled().then(|| identifier_hash(request.role_id.as_str()));
+                let name = markdown_text(&member_name);
+                let role_id = markdown_text(member_role_id.as_str());
+                let role_hash = platform::trace::enabled().then(|| identifier_hash(member_role_id.as_str()));
                 let generated_started = platform::trace::enabled().then(Instant::now);
                 session_trace("runtime.team.introduction.start", || json!({"memberIndex": index, "roleIdHash": role_hash}));
                 let result = pipeline
@@ -223,9 +214,19 @@ pub(super) async fn prepare_manual_team(
                                 _ = cancellation.cancelled() => {
                                     return Err(MemberIntroductionError::Cancelled);
                                 }
-                                output = introductions.generate(request, cancellation.clone()) => output?,
+                                output = async {
+                                    let request = crate::application::member_introduction::prepare(
+                                        &member_name,
+                                        member_role_id,
+                                        profile,
+                                    );
+                                    introductions.generate(request, cancellation.clone()).await
+                                } => output?,
                             };
-                            let output = output.trim();
+                            if !output.complete {
+                                return Err(MemberIntroductionError::InvalidOutput);
+                            }
+                            let output = output.text.trim();
                             if output.is_empty()
                                 || output.contains(TEAMRUN_MARKER_PREFIX)
                                 || output.len() > MAX_LEADER_MARKDOWN_BYTES

@@ -2,7 +2,6 @@ use platform::state_dir::CanonicalStateDir;
 use std::{
     fs,
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
-    num::NonZeroU32,
     path::PathBuf,
     sync::{
         Arc,
@@ -17,12 +16,7 @@ use openclaw::{
     driver::OpenClawInput,
     gateway::{auth::GatewaySecret, client::GatewayClientMetadata},
 };
-use organization::{
-    DeliveryLedgerSnapshot, GraphDefinition, GraphRunFacts, GraphRunId, GraphState, MemberId,
-    NodeDefinition, NodeId, OrganizationFacts, RoleAssignment, RoleId, RoleKind, StartTrigger,
-    TeamDefinition, TeamFacts, TeamId, TeamMember, TeamRevision, TeamRole, TriggerFireRequest,
-    TriggerRegistration, TriggerSource,
-};
+use organization::{GraphRunId, TeamId, TriggerFireRequest, TriggerSource};
 use provider_module::{
     ProviderAccountId, ProviderAccountStore, ProviderModelCapability, ProviderModelReference,
     ProviderModelStore, ProviderRoute, ProviderRouting, ProviderRoutingCapability,
@@ -290,6 +284,7 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
 #[test]
 fn construction_is_atomic_and_does_not_materialize_runtime_files() {
     let root = TestRoot::new();
+    let _store_guard = organization::open_organization_store(&root.state_parent).unwrap();
     let mut input = host_input(&root);
     input.open_claw.port = 0;
     let entries_before_construction = root.relative_entries();
@@ -721,52 +716,29 @@ fn team_run_private_control_is_not_in_framed_wire() {
 }
 
 #[tokio::test]
-async fn team_run_trigger_actor_projects_record_replay_and_conflict() {
+async fn team_run_trigger_actor_rejects_unknown_run() {
     let root = TestRoot::new();
-    let mut input = host_input(&root);
-    input
-        .organization_store
-        .replace_facts(facts_with_armed_webhook_run())
-        .unwrap();
-    let (host, events, handles) = Host::new(input).unwrap();
+    let (host, events, handles) = Host::new(host_input(&root)).unwrap();
     let mut owner = crate::host_actor::Owner::spawn(host, events);
     let handle = handles.organization.clone();
-    let request = trigger_fire_request("start", "request:one");
 
-    let recorded = handle
-        .trigger_fire(request.clone(), 2)
-        .await
-        .unwrap()
-        .unwrap();
     assert_eq!(
-        recorded.registration(),
-        &TriggerRegistration::Recorded(request.clone())
+        handle
+            .trigger_fire(trigger_fire_request("start", "request:one"), 2)
+            .await
+            .unwrap()
+            .unwrap_err(),
+        organization::StoreFault::TriggerFire(organization::TriggerFireError::RunMismatch)
     );
     assert!(matches!(
-        recorded.run(),
-        &organization::TeamRunCommandOutcome::Unavailable
-    ));
-
-    let replayed = handle.trigger_fire(request, 3).await.unwrap().unwrap();
-    assert_eq!(
-        replayed.registration(),
-        &TriggerRegistration::Replayed(trigger_fire_request("start", "request:one"))
-    );
-
-    let conflicted = handle
-        .trigger_fire(trigger_fire_request("alternate", "request:one"), 4)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        conflicted.registration(),
-        &TriggerRegistration::ConflictingIdempotencyKey {
-            idempotency_key: "request:one".to_owned(),
-        }
-    );
-    assert!(matches!(
-        conflicted.run(),
-        &organization::TeamRunCommandOutcome::Unavailable
+        handle
+            .run_snapshot(organization::TeamRunQuery::get(
+                TeamId::try_new("team:one").unwrap(),
+                GraphRunId::new("run:one"),
+            ))
+            .await
+            .unwrap(),
+        organization::TeamRunQueryOutcome::Unavailable
     ));
 
     assert!(owner.handle().shutdown().await.unwrap().terminal);
@@ -802,6 +774,7 @@ fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
     let root_actor = include_str!("../../host_actor/actor.rs");
     let organization_actor = include_str!("../../../../modules/organization/src/owner/actor.rs");
     let organization_handle = include_str!("../../../../modules/organization/src/owner/handle.rs");
+    let organization_runtime = include_str!("../../../../modules/organization/src/api.rs");
     let supervisor = include_str!("../../../../modules/organization/src/owner/supervisor.rs");
     let run_actor = include_str!("../../../../modules/organization/src/owner/run_actor.rs");
     let receipt_router =
@@ -817,17 +790,31 @@ fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
     assert!(organization_actor.contains("OrganizationQuery::ActivityTarget"));
     assert!(organization_actor.contains("OrganizationCommand::ClaimActivity"));
     assert!(organization_actor.contains("OrganizationCommand::SettleActivity"));
-    assert!(organization_handle.contains("pub async fn schedule_ready_nodes("));
-    assert!(organization_handle.contains("pub async fn activity_target("));
-    assert!(organization_handle.contains("pub async fn claim_activity("));
-    assert!(organization_handle.contains("pub async fn settle_activity("));
+    assert!(organization_handle.contains("pub(crate) async fn schedule_ready_nodes("));
+    assert!(organization_handle.contains("pub(crate) async fn activity_target("));
+    assert!(organization_handle.contains("pub(crate) async fn claim_activity("));
+    assert!(organization_handle.contains("pub(crate) async fn settle_activity("));
     assert!(
         organization_handle.contains(
             ".send_command(OrganizationCommand::ScheduleReadyNodes { run_id, now, reply })"
         )
     );
-    assert!(owners.contains("TeamRunCoordinator::spawn"));
+    assert!(organization_runtime.contains("TeamRunCoordinator::spawn"));
+    assert!(owners.contains("organization::OrganizationRuntime::new("));
+    assert!(owners.contains("organization_runtime.start_coordinator("));
     assert!(owners.contains("admission.subscribe()"));
+    assert!(!owners.contains("TeamRunCoordinator::spawn"));
+    assert!(!owners.contains("struct OrganizationRuntime"));
+    assert!(owners.contains("self.organization.quiesce().await"));
+    assert!(owners.contains("self.organization.drain_and_join().await"));
+    assert!(
+        owners.find("self.organization.quiesce().await").unwrap()
+            < owners.find("self.dispose_module_scope(\"sessions\")").unwrap()
+    );
+    assert!(
+        owners.find("self.dispose_module_scope(\"sessions\")").unwrap()
+            < owners.find("self.organization.drain_and_join().await").unwrap()
+    );
     assert!(!host.contains("team_run_coordinator: organization::TeamRunCoordinatorHandle"));
     assert!(!host.contains("self.team_run_coordinator.wake()"));
     assert!(!host.contains("PeerMaintenanceHandle"));
@@ -837,7 +824,7 @@ fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
     assert!(!receipt_router.contains("\nstruct DeliveryReconciliationState"));
     assert!(!receipt_router.contains("\npub(super) async fn reconcile_deliveries("));
     assert!(run_actor.contains("struct TeamRunActor"));
-    assert!(run_actor.contains(".schedule_ready_nodes(run_id, now)"));
+    assert!(run_actor.contains(".schedule_ready_nodes(run_id.clone(), now)"));
     assert!(run_actor.contains("claim_activity(run_id.clone(), activity_id.clone(), claimed_at)"));
     assert!(run_actor.contains(".route_activity_receipt("));
     assert!(supervisor.contains(".active_run_ids()"));
@@ -881,18 +868,37 @@ fn fleet_owner_is_spawned_by_host_owner_runtime_system() {
 }
 
 #[tokio::test]
-async fn host_startup_resubmits_pending_fleet_dispatches_without_replaying_unknown() {
+async fn host_startup_resubmits_pending_fleet_dispatches() {
     let root = TestRoot::new();
-    let facts_path = root.state_parent.join("runtime-host/fleet-facts.log");
+    let input = host_input(&root);
     let at = SystemTime::UNIX_EPOCH;
-    let pending_command = fleet::command::CommandId::try_new("command-pending").unwrap();
-    let unknown_command = fleet::command::CommandId::try_new("command-unknown").unwrap();
+    let command_id = fleet::command::CommandId::try_new("command-pending").unwrap();
+    let target_id = fleet::TargetId::try_new("docker-a").unwrap();
 
     {
-        let mut owner = fleet::FleetDeliveryOwner::open(&facts_path).unwrap();
-        owner
+        let mut system = foundation::execution::OwnerRuntimeSystem::spawn(Default::default());
+        let (module, mut task) = fleet::spawn_owner(
+            &system,
+            fleet::FleetOwnerInput::new(
+                input.runtime_state_dir.join("fleet-facts.log"),
+                resources::provision_fleet_private_root(resources::fleet_private_root_path(
+                    &input.runtime_state_dir,
+                ))
+                .unwrap(),
+                std::collections::BTreeMap::from([(
+                    "com.matchaclaw.remote-fleet.managed".to_owned(),
+                    "true".to_owned(),
+                )]),
+                Default::default(),
+                64,
+                foundation::execution::LaneRetention::LowFrequency,
+            ),
+        )
+        .unwrap();
+        let handle = module.handle();
+        handle
             .put_target(
-                fleet::TargetId::try_new("docker-a").unwrap(),
+                target_id.clone(),
                 fleet::FleetTargetConfig::Docker(
                     fleet::DockerTargetConfig::try_new(
                         "https://docker.example.test",
@@ -903,111 +909,84 @@ async fn host_startup_resubmits_pending_fleet_dispatches_without_replaying_unkno
                     .unwrap(),
                 ),
             )
+            .await
+            .unwrap()
             .unwrap();
-        owner
-            .submit(
-                fleet_delivery_request("command-pending", "key-pending", "dispatch-pending", at),
-                at,
-            )
-            .unwrap();
-        owner
-            .submit(
-                fleet_delivery_request("command-unknown", "key-unknown", "dispatch-unknown", at),
-                at,
-            )
-            .unwrap();
-        owner
-            .begin_dispatch(
-                &fleet::outbox::DispatchId::try_new("dispatch-unknown").unwrap(),
-                at,
-            )
-            .unwrap();
+        assert_eq!(
+            handle
+                .submit(
+                    fleet::FleetDeliveryRequest::try_new(
+                        fleet::command::CommandIntent::new(
+                            command_id.clone(),
+                            fleet::command::IdempotencyKey::try_new("key-pending").unwrap(),
+                            fleet::command::CommandTarget::Node(
+                                fleet::topology::NodeId::try_new("node-1").unwrap(),
+                            ),
+                            fleet::command::CommandKind::ProbeNode,
+                            at,
+                        ),
+                        fleet::outbox::DispatchIntent::for_target(
+                            fleet::outbox::DispatchId::try_new("dispatch-pending").unwrap(),
+                            command_id.clone(),
+                            platform::endpoint::NativeAgentId::try_new("agent-1").unwrap(),
+                            fleet::FleetTargetSelector::new(target_id, 1, fleet::TargetKind::Docker),
+                        ),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+            fleet::FleetSubmitOutcome::Submitted
+        );
+        let snapshot = handle.query_snapshot(at).await.unwrap().unwrap();
+        assert!(matches!(
+            snapshot.commands()[0].state(),
+            fleet::query::CommandSummaryState::Queued { .. }
+        ));
+        task.drain_and_join().await.unwrap();
+        system.drain_and_join().await.unwrap();
     }
 
-    let baseline = fleet::FleetDeliveryOwner::open_live(&facts_path).unwrap();
-    let pending_begun_before =
-        fleet_audit_count(&baseline, &pending_command, "fleet.delivery.begun");
-    let unknown_begun_before =
-        fleet_audit_count(&baseline, &unknown_command, "fleet.delivery.begun");
-    let unknown_replay_before =
-        fleet_audit_count(&baseline, &unknown_command, "fleet.delivery.replay");
-
-    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, handles) = Host::new(input).unwrap();
     host.start_admission_only().await.unwrap();
+    assert_eq!(host.admission_state().phase(), HostPhase::Ready);
 
     let restored = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let owner = match fleet::FleetDeliveryOwner::open_live(&facts_path) {
-                Ok(owner) => owner,
-                Err(fleet::store::StoreFault::WriterBusy) => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    continue;
-                }
-                Err(error) => panic!("failed to poll Fleet facts: {error:?}"),
-            };
-            if owner
-                .record_for_command(&pending_command)
-                .is_some_and(|record| record.phase() == fleet::outbox::DispatchPhase::Delivered)
-            {
-                break owner;
+            let snapshot = handles.fleet.query_snapshot(at).await.unwrap().unwrap();
+            if snapshot.commands().iter().any(|command| {
+                command.command_id() == &command_id
+                    && matches!(
+                        command.state(),
+                        fleet::query::CommandSummaryState::Failed {
+                            failure: fleet::command::CommandFailure::Rejected,
+                            ..
+                        }
+                    )
+            }) {
+                break snapshot;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .unwrap();
-
-    assert_eq!(
-        restored
-            .record_for_command(&unknown_command)
-            .unwrap()
-            .phase(),
-        fleet::outbox::DispatchPhase::OutcomeUnknown
-    );
-    assert_eq!(
-        restored
-            .record_for_command(&unknown_command)
-            .unwrap()
-            .attempt()
-            .unwrap()
-            .sequence(),
-        1
-    );
-    assert_eq!(
-        fleet_audit_count(&restored, &pending_command, "fleet.delivery.begun")
-            - pending_begun_before,
-        1
-    );
-    assert_eq!(
-        fleet_audit_count(&restored, &unknown_command, "fleet.delivery.begun")
-            - unknown_begun_before,
-        0
-    );
-    assert_eq!(
-        fleet_audit_count(&restored, &unknown_command, "fleet.delivery.replay")
-            - unknown_replay_before,
-        0
-    );
-    assert!(restored.pending_dispatches().next().is_none());
+    for event_name in ["fleet.delivery.begun", "fleet.delivery.rejected"] {
+        assert_eq!(
+            restored
+                .audit()
+                .iter()
+                .filter(|entry| {
+                    entry.event_name() == event_name
+                        && entry.relations().command_id() == Some(command_id.as_str())
+                })
+                .count(),
+            1
+        );
+    }
 
     host.shutdown().await.unwrap();
-}
-
-fn fleet_audit_count(
-    owner: &fleet::FleetDeliveryOwner,
-    command_id: &fleet::command::CommandId,
-    event_name: &str,
-) -> usize {
-    owner
-        .facts()
-        .audit_entries()
-        .iter()
-        .filter(|entry| {
-            let event = entry.event();
-            event.event_name() == event_name
-                && event.relations().command_id() == Some(command_id.as_str())
-        })
-        .count()
 }
 
 #[test]
@@ -1221,38 +1200,6 @@ async fn ready_host_rejects_runtime_operations_when_runtimes_are_not_running() {
     host.shutdown().await.unwrap();
 }
 
-fn fleet_delivery_request(
-    command: &str,
-    key: &str,
-    dispatch: &str,
-    at: SystemTime,
-) -> fleet::FleetDeliveryRequest {
-    let command_id = fleet::command::CommandId::try_new(command).unwrap();
-    let selector = fleet::FleetTargetSelector::new(
-        fleet::TargetId::try_new("docker-a").unwrap(),
-        1,
-        fleet::TargetKind::Docker,
-    );
-    fleet::FleetDeliveryRequest::try_new(
-        fleet::command::CommandIntent::new(
-            command_id.clone(),
-            fleet::command::IdempotencyKey::try_new(key).unwrap(),
-            fleet::command::CommandTarget::Node(
-                fleet::topology::NodeId::try_new("node-1").unwrap(),
-            ),
-            fleet::command::CommandKind::ProbeNode,
-            at,
-        ),
-        fleet::outbox::DispatchIntent::for_target(
-            fleet::outbox::DispatchId::try_new(dispatch).unwrap(),
-            command_id,
-            platform::endpoint::NativeAgentId::try_new("agent-1").unwrap(),
-            selector,
-        ),
-    )
-    .unwrap()
-}
-
 fn host_input(root: &TestRoot) -> HostInput {
     let state_dir = CanonicalStateDir::provision(root.state_parent.join("openclaw")).unwrap();
 
@@ -1297,10 +1244,7 @@ fn host_input(root: &TestRoot) -> HostInput {
             guardian_executable: absolute_path("bin/runtime-host-guardian"),
         },
         open_claw_secret: GatewaySecret::new(entropy()).unwrap(),
-        organization_store: organization::OrganizationStore::open(
-            root.state_parent.join("organization-facts.log"),
-        )
-        .unwrap(),
+        organization_store: organization::open_organization_store(&root.state_parent).unwrap(),
         runtime_state_dir: root.state_parent.join("runtime-host"),
         app_log_dir: root.state_parent.join("userdata-logs"),
         parent_callback_base_url: "http://127.0.0.1:34100".into(),
@@ -1314,68 +1258,6 @@ fn unused_ports() -> [u16; 2] {
         TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("reserve test port")
     });
     listeners.map(|listener| listener.local_addr().expect("read test port").port())
-}
-
-fn facts_with_armed_webhook_run() -> OrganizationFacts {
-    let team = TeamId::try_new("team:one").unwrap();
-    let definition = GraphDefinition::new(
-        "graph:one",
-        "plan:one",
-        GraphRunId::new("run:one"),
-        "display",
-        vec![
-            NodeDefinition::start(
-                NodeId::new("start"),
-                "webhook start",
-                NonZeroU32::new(2).unwrap(),
-                Some(StartTrigger::Webhook {
-                    path: "private-webhook-path".to_owned(),
-                }),
-            ),
-            NodeDefinition::start(
-                NodeId::new("alternate"),
-                "alternate webhook start",
-                NonZeroU32::new(2).unwrap(),
-                Some(StartTrigger::Webhook {
-                    path: "alternate".to_owned(),
-                }),
-            ),
-        ],
-        Vec::new(),
-    )
-    .unwrap();
-    OrganizationFacts::restore(
-        vec![TeamFacts::new(
-            team_definition(team.clone()),
-            TeamRevision::initial(),
-            false,
-        )],
-        [],
-        vec![
-            GraphRunFacts::new(
-                team,
-                TeamRevision::initial(),
-                GraphState::initialize(definition, 1),
-                None,
-            )
-            .unwrap(),
-        ],
-        DeliveryLedgerSnapshot::new(Vec::new()),
-    )
-    .unwrap()
-}
-
-fn team_definition(team_id: TeamId) -> TeamDefinition {
-    let member_id = MemberId::try_new("member:leader").unwrap();
-    let role_id = RoleId::try_new("leader").unwrap();
-    TeamDefinition::try_new(
-        team_id,
-        "Team One",
-        vec![TeamMember::try_new(member_id.clone(), "Leader").unwrap()],
-        vec![TeamRole::try_new(role_id.clone(), "Leader", RoleKind::Leader).unwrap()],
-        vec![RoleAssignment::new(member_id, role_id)],
-    )
-    .unwrap()
 }
 
 fn trigger_fire_request(start_node_id: &str, idempotency_key: &str) -> TriggerFireRequest {

@@ -710,7 +710,7 @@ mod tests {
         }
     }
 
-    impl super::super::coordinator::TeamRunAdmission for NoRuntime {
+    impl crate::ports::TeamRunAdmission for NoRuntime {
         fn is_admitted(&self) -> bool {
             false
         }

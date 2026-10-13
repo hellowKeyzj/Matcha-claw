@@ -13,11 +13,12 @@ use std::{
 };
 
 use organization::{
-    DeliveryLedgerSnapshot, GraphDefinition, GraphRunFacts, GraphRunId, GraphState, MemberId,
-    NodeDefinition, NodeId, OrganizationFacts, RoleAssignment, RoleId, RoleKind, TeamDefinition,
-    TeamFacts, TeamId, TeamMember, TeamRevision, TeamRole,
+    GraphDefinition, GraphRunId, MaterializationOperationOutcome, NodeDefinition, NodeId,
+    OrganizationNativeRuntime, OrganizationRuntimeDirectory, RoleId, RuntimeEndpointReference,
+    TeamId,
 };
 use platform::state_dir::CanonicalStateDir;
+use runtime_directory::OwnedRuntimeFuture;
 use serde_json::{Value, json};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -310,10 +311,7 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
 #[test]
 fn records_and_replays_a_standard_team_evidence_reference_call() {
     let home = Home::new();
-    organization::OrganizationStore::open(home.0.join("state/organization-facts.log"))
-        .unwrap()
-        .replace_facts(evidence_run_facts())
-        .unwrap();
+    prepare_evidence_run(&home);
     let arguments = json!({
         "evidenceId": "evidence:one",
         "runId": "run:one",
@@ -632,10 +630,7 @@ fn run_with_host(home: &Home, input: &[u8]) -> std::process::Output {
             "mcp-test-openclaw-secret".into(),
         )
         .unwrap(),
-        organization_store: organization::OrganizationStore::open(
-            home.0.join("state/organization-facts.log"),
-        )
-        .unwrap(),
+        organization_store: organization::open_organization_store(&home.0.join("state")).unwrap(),
         runtime_state_dir: home.0.join("state"),
         app_log_dir: home.0.join("logs"),
         parent_callback_base_url: "http://127.0.0.1:1".into(),
@@ -656,7 +651,7 @@ fn run_with_host(home: &Home, input: &[u8]) -> std::process::Output {
                 )
                 .unwrap(),
                 provider_credential_resolver: None,
-                webhook_token: organization::adapters::loopback::trigger::WebhookToken::try_new(
+                webhook_token: organization::WebhookToken::try_new(
                     "mctwh_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 )
                 .unwrap(),
@@ -766,59 +761,207 @@ fn prepare_state_parent(path: &std::path::Path) {
     unsafe { F::LocalFree(descriptor) };
 }
 
-fn evidence_run_facts() -> OrganizationFacts {
-    let team_id = TeamId::try_new("team:one").unwrap();
-    let graph = GraphDefinition::new(
-        "graph:one",
-        "plan:one",
-        GraphRunId::new("run:one"),
-        "Evidence graph",
-        vec![NodeDefinition::start(
-            NodeId::new("start"),
-            "Start",
-            NonZeroU32::new(1).unwrap(),
-            None,
-        )],
-        Vec::new(),
-    )
-    .unwrap();
-    OrganizationFacts::restore(
-        vec![TeamFacts::new(
-            TeamDefinition::try_new(
-                team_id.clone(),
-                "Team One",
-                vec![
-                    TeamMember::try_new(MemberId::try_new("member:leader").unwrap(), "Leader")
-                        .unwrap(),
-                ],
-                vec![
-                    TeamRole::try_new(
-                        RoleId::try_new("leader").unwrap(),
-                        "Leader",
-                        RoleKind::Leader,
+fn prepare_evidence_run(home: &Home) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut system = foundation::execution::OwnerRuntimeSystem::spawn(Default::default());
+            let (module, mut owner) = organization::spawn_owner(
+                &system,
+                organization::OrganizationOwnerInput {
+                    store: organization::open_organization_store(&home.0.join("state")).unwrap(),
+                    runtime_directory: Arc::new(EvidenceRuntime),
+                    member_introductions: None,
+                    team_skill_selections: organization::package::TeamSkillSelectionResolver::open(
+                        home.0.join("state/team-skill-selections.v1.json"),
                     )
                     .unwrap(),
-                ],
-                vec![RoleAssignment::new(
-                    MemberId::try_new("member:leader").unwrap(),
-                    RoleId::try_new("leader").unwrap(),
+                },
+            );
+            let team_id = TeamId::try_new("team:one").unwrap();
+            let run_id = GraphRunId::new("run:one");
+            let materialized = module
+                .handle()
+                .manual_team_materialize(
+                    team_id.clone(),
+                    "Team One".into(),
+                    RuntimeEndpointReference::try_new(
+                        runtime_directory::RuntimeDriverIdentity::open_claw()
+                            .runtime_endpoint_reference(),
+                    )
+                    .unwrap(),
+                    vec![organization::ManualTeamRoleBinding::try_new(
+                        RoleId::try_new("leader").unwrap(),
+                        "Leader",
+                        organization::ManagedAgentReference::try_new("leader").unwrap(),
+                        true,
+                    )
+                    .unwrap()],
+                    organization::IdempotencyKey::try_new("materialize:evidence").unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                materialized,
+                organization::TeamMaterializationCommandOutcome::Materialized { .. }
+            ));
+            assert_eq!(
+                module
+                    .handle()
+                    .run_create(
+                        team_id,
+                        run_id.clone(),
+                        "create:evidence".into(),
+                        organization::WorkflowPlan::new(
+                            "plan:one",
+                            "run:one",
+                            "Evidence graph",
+                            "ready",
+                            vec![organization::WorkflowTask::new(
+                                "evidence",
+                                "leader",
+                                "Evidence",
+                                "Record evidence",
+                                Vec::new(),
+                                None,
+                            )],
+                            "create:evidence",
+                            1,
+                        ),
+                        "mcp-test".into(),
+                        1,
+                        1,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                organization::CreateGraphRunOutcome::Created(run_id.clone()),
+            );
+            let graph = GraphDefinition::new(
+                "graph:one",
+                "plan:one",
+                run_id,
+                "Evidence graph",
+                vec![NodeDefinition::start(
+                    NodeId::new("start"),
+                    "Start",
+                    NonZeroU32::new(1).unwrap(),
+                    None,
                 )],
+                Vec::new(),
             )
-            .unwrap(),
-            TeamRevision::initial(),
-            false,
-        )],
-        [],
-        [GraphRunFacts::new(
-            team_id,
-            TeamRevision::initial(),
-            GraphState::initialize(graph, 1),
-            None,
-        )
-        .unwrap()],
-        DeliveryLedgerSnapshot::new(Vec::new()),
-    )
-    .unwrap()
+            .unwrap();
+            let saved = module
+                .handle()
+                .graph_save(
+                    organization::RunCommand::new(
+                        organization::run::event::OpaqueId::try_new("run:one").unwrap(),
+                        organization::run::event::OpaqueId::try_new("save:evidence").unwrap(),
+                        organization::run::event::OpaqueId::try_new("save:evidence").unwrap(),
+                        organization::CommandPayload::GraphReplace(graph.clone()),
+                        1,
+                    ),
+                    graph,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(saved, organization::TeamRunCommandOutcome::OutcomeUnknown));
+            owner.drain_and_join().await.unwrap();
+            system.drain_and_join().await.unwrap();
+        });
+}
+
+struct EvidenceRuntime;
+
+impl OrganizationRuntimeDirectory for EvidenceRuntime {
+    fn team_runtime_for_endpoint(
+        &self,
+        _endpoint: &RuntimeEndpointReference,
+    ) -> Option<Arc<dyn OrganizationNativeRuntime>> {
+        Some(Arc::new(Self))
+    }
+
+    fn open_claw_runtime(&self) -> Option<Arc<dyn OrganizationNativeRuntime>> {
+        Some(Arc::new(Self))
+    }
+}
+
+impl OrganizationNativeRuntime for EvidenceRuntime {
+    fn materialize_team(
+        &self,
+        request: organization::TeamMaterializationRequest,
+    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome> {
+        Box::pin(async move {
+            let intent = request.intent();
+            let [role] = intent.agents() else {
+                panic!("expected one leader")
+            };
+            let organization::RoleMaterializationAgent::External { agent } = role.agent() else {
+                panic!("expected a selected native agent")
+            };
+            let mut receipt = organization::RoleMaterializationReceipt::with_ownership(
+                role.role().clone(),
+                agent.clone(),
+                organization::RoleMaterializationOwnership::External,
+                intent.endpoint().clone(),
+            );
+            if let Some(markdown) = role.agents_markdown() {
+                receipt = receipt.with_agents_markdown(markdown);
+            }
+            MaterializationOperationOutcome::Confirmed {
+                receipt: organization::MaterializationReceipt::try_new(
+                    intent.team().clone(),
+                    intent.endpoint().clone(),
+                    vec![receipt],
+                )
+                .unwrap(),
+            }
+        })
+    }
+
+    fn remove_team(
+        &self,
+        _removal: organization::TeamMaterializationRemoval,
+    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome> {
+        panic!("unexpected team removal")
+    }
+
+    fn recover_team_materialization(
+        &self,
+        _request: organization::TeamMaterializationRequest,
+    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome> {
+        panic!("unexpected materialization recovery")
+    }
+
+    fn confirm_team_run_receipt(
+        &self,
+        _receipt: organization::RunRuntimeReceipt,
+    ) -> OwnedRuntimeFuture<organization::RuntimeReceiptOutcome> {
+        panic!("unexpected native run receipt")
+    }
+
+    fn abort_role_sessions(
+        &self,
+        _bindings: Vec<organization::RoleSessionReceipt>,
+    ) -> OwnedRuntimeFuture<organization::RoleAbortOutcome> {
+        panic!("unexpected session abort")
+    }
+
+    fn delete_role_sessions(
+        &self,
+        _run_id: GraphRunId,
+        _bindings: Vec<organization::RoleSessionReceipt>,
+        _abort_first: bool,
+    ) -> OwnedRuntimeFuture<organization::NativeDeletionEvidence> {
+        panic!("unexpected session deletion")
+    }
+
+    fn installed_skill_names(&self) -> OwnedRuntimeFuture<Option<Vec<String>>> {
+        panic!("unexpected skill lookup")
+    }
 }
 
 fn decode_responses(bytes: &[u8]) -> Vec<Value> {

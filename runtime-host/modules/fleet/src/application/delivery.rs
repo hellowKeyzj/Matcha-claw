@@ -146,7 +146,7 @@ impl From<RuntimeAgentError> for FleetDeliveryError {
 
 impl std::error::Error for FleetDeliveryError {}
 
-pub struct FleetDeliveryOwner {
+pub(crate) struct FleetDeliveryOwner {
     store: FleetStore,
 }
 
@@ -2113,15 +2113,36 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cold_restore_keeps_unknown_dispatch_out_of_pending_until_replay_is_authorized() {
+    #[tokio::test]
+    async fn cold_restore_keeps_unknown_dispatch_out_of_pending_until_replay_is_authorized() {
+        use foundation::execution::{LaneRetention, OwnerRuntimeConfig, OwnerRuntimeSystem};
+
         let at = SystemTime::UNIX_EPOCH;
         let path = store_path();
         let command_id = CommandId::try_new("command-replay").unwrap();
         let dispatch_id = DispatchId::try_new("dispatch-replay").unwrap();
+        let pending_command = CommandId::try_new("command-pending").unwrap();
+        let audit_count = |owner: &FleetDeliveryOwner, command_id: &CommandId, event_name: &str| {
+            owner
+                .facts()
+                .audit_entries()
+                .iter()
+                .filter(|entry| {
+                    let event = entry.event();
+                    event.event_name() == event_name
+                        && event.relations().command_id() == Some(command_id.as_str())
+                })
+                .count()
+        };
 
         {
             let mut owner = owner_at(path.clone());
+            owner
+                .submit(
+                    request("command-pending", "key-pending", "dispatch-pending", at),
+                    at,
+                )
+                .unwrap();
             owner
                 .submit(
                     request("command-replay", "key-replay", "dispatch-replay", at),
@@ -2131,12 +2152,74 @@ mod tests {
             owner.begin_dispatch(&dispatch_id, at).unwrap();
         }
 
-        let mut restored = FleetDeliveryOwner::open(path).unwrap();
+        let baseline = FleetDeliveryOwner::open_live(&path).unwrap();
+        let pending_begun_before = audit_count(&baseline, &pending_command, "fleet.delivery.begun");
+        let unknown_begun_before = audit_count(&baseline, &command_id, "fleet.delivery.begun");
+        let unknown_replay_before = audit_count(&baseline, &command_id, "fleet.delivery.replay");
+        let mut system = OwnerRuntimeSystem::spawn(OwnerRuntimeConfig::default());
+        let (module, mut task) = crate::spawn_owner(
+            &system,
+            crate::FleetOwnerInput::new(
+                path.clone(),
+                path.parent().unwrap().join("private"),
+                Default::default(),
+                Default::default(),
+                64,
+                LaneRetention::LowFrequency,
+            ),
+        )
+        .unwrap();
+        module.begin_startup_dispatches().await;
+
+        let mut restored = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let owner = match FleetDeliveryOwner::open_live(&path) {
+                    Ok(owner) => owner,
+                    Err(StoreFault::WriterBusy) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                    Err(error) => panic!("failed to poll Fleet facts: {error:?}"),
+                };
+                if owner
+                    .record_for_command(&pending_command)
+                    .is_some_and(|record| record.phase() == DispatchPhase::Delivered)
+                {
+                    break owner;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(
             restored.record_for_command(&command_id).unwrap().phase(),
             DispatchPhase::OutcomeUnknown
         );
+        assert_eq!(
+            restored
+                .record_for_command(&command_id)
+                .unwrap()
+                .attempt()
+                .unwrap()
+                .sequence(),
+            1
+        );
+        assert_eq!(
+            audit_count(&restored, &pending_command, "fleet.delivery.begun") - pending_begun_before,
+            1
+        );
+        assert_eq!(
+            audit_count(&restored, &command_id, "fleet.delivery.begun") - unknown_begun_before,
+            0
+        );
+        assert_eq!(
+            audit_count(&restored, &command_id, "fleet.delivery.replay") - unknown_replay_before,
+            0
+        );
         assert!(restored.pending_dispatches().next().is_none());
+        task.drain_and_join().await.unwrap();
+        system.drain_and_join().await.unwrap();
 
         assert_eq!(
             restored.authorize_replay(&command_id, &dispatch_id, at),

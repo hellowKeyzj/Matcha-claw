@@ -1,6 +1,7 @@
 pub mod decision;
 pub(crate) mod design;
 pub(crate) mod design_prompt;
+pub(crate) mod member_introduction;
 pub mod projection;
 pub mod review;
 pub mod start_gate_control;
@@ -11,7 +12,7 @@ pub mod team_runtime;
 pub mod team_runtime_control;
 
 pub use decision::{
-    TeamDecisionCompositionError, TeamDecisionFacade, TeamDecisionReceiptProjection,
+    TeamDecisionCompositionError, TeamDecisionReceiptProjection,
     TeamDecisionRequest,
 };
 pub use team_runtime::{

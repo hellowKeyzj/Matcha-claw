@@ -10,7 +10,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use matcha_agent::lifecycle::secret::Secret;
 use openclaw::gateway::client::GatewayClientMetadata;
-use organization::adapters::loopback::trigger::WebhookToken;
+use organization::WebhookToken;
 use platform::state_dir::CanonicalStateDir;
 use runtime_host::{
     HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, open_organization_store,

@@ -27,7 +27,8 @@ pub use materialization::{
     TeamMaterializationRequest,
 };
 pub use member_introduction::{
-    MemberIntroductionError, MemberIntroductionRequest, MemberProfile, TeamMemberIntroductions,
+    MemberIntroductionError, MemberIntroductionOutput, MemberIntroductionRequest, MemberProfile,
+    TeamMemberIntroductions,
 };
 pub use native_effects::{
     NativeEffectFailure, OrganizationNativeRuntime, OrganizationRuntimeDirectory,
@@ -43,6 +44,10 @@ pub use session::{
     InvalidRoleSessionRef, ROLE_SESSION_REF_INITIAL, RoleSessionIdentityResolver, RoleSessionPort,
     RoleSessionReceipt, RoleSessionRef, RoleSessionSlot, RoleSessionWindow,
 };
+
+pub trait TeamRunAdmission: Send + Sync {
+    fn is_admitted(&self) -> bool;
+}
 
 #[cfg(test)]
 mod tests;

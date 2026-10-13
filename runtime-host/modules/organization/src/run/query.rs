@@ -106,7 +106,7 @@ pub struct TeamRunListEntry {
     pub runtime: TeamRuntimeState,
 }
 
-pub fn query_team_run_list(facts: &OrganizationFacts, team_id: &TeamId) -> Vec<TeamRunListEntry> {
+pub(crate) fn query_team_run_list(facts: &OrganizationFacts, team_id: &TeamId) -> Vec<TeamRunListEntry> {
     let Some(team) = facts.team(team_id).filter(|team| !team.tombstoned()) else {
         return Vec::new();
     };
@@ -165,7 +165,7 @@ impl fmt::Debug for TeamRunQueryOutcome {
 /// Lists the role sessions of every proven, available TeamRun of one team. Tombstoned,
 /// cancelling, and recovery-unknown runs deliberately contribute nothing so stale session
 /// selections cannot survive a durable lifecycle transition.
-pub fn query_team_role_sessions(
+pub(crate) fn query_team_role_sessions(
     facts: &OrganizationFacts,
     team: &TeamId,
 ) -> TeamRoleSessionQueryOutcome {
@@ -224,7 +224,7 @@ pub enum TeamRoleSessionQueryOutcome {
 /// A TeamRun is unavailable without an extant, non-tombstoned team and its confirmed
 /// materialization receipt. A confirmed materialization remains conservative when no runtime
 /// receipt exists or delivery recovery recorded an unknown outcome.
-pub fn query_team_run(facts: &OrganizationFacts, query: &TeamRunQuery) -> TeamRunQueryOutcome {
+pub(crate) fn query_team_run(facts: &OrganizationFacts, query: &TeamRunQuery) -> TeamRunQueryOutcome {
     let Some(team) = facts.team(query.team()) else {
         return TeamRunQueryOutcome::Unavailable;
     };

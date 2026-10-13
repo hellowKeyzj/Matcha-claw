@@ -3,62 +3,81 @@ use foundation::process::supervision::{
 };
 
 use crate::{
-    HostState, RuntimeState,
+    HostState, RuntimeFailure, RuntimeLifecycle, RuntimeState,
     composition::{
+        admission::HostAdmission,
         host::diagnostics::project_host_lifecycle,
         runtime_ports::{
-            RuntimeDriverIdentity, RuntimeLifecycleFailure as DriverLifecycleFailure,
+            RuntimeDriverDirectory, RuntimeDriverIdentity,
+            RuntimeLifecycleFailure as DriverLifecycleFailure,
             RuntimeStartFailure as DriverStartFailure,
         },
     },
 };
 
-use super::actor::PeerShared;
+use ::diagnostics::{RuntimeStartupDiagnostic, RuntimeStartupDiagnostics};
+use runtime_directory::{
+    RuntimeControlLifecycle, RuntimeControlLifecycleFailure, RuntimeControlLifecycleStatus,
+    RuntimeControlStartupDiagnostic,
+};
 
-pub(super) fn host_state(shared: &PeerShared) -> HostState {
-    let matcha = matcha_lifecycle_snapshot(shared);
-    let open_claw = open_claw_lifecycle_snapshot(shared);
-    let phase = shared.admission().state().phase();
+pub(super) fn host_state(
+    admission: &HostAdmission,
+    directory: &RuntimeDriverDirectory,
+    matcha_diagnostics: &RuntimeStartupDiagnostics,
+    openclaw_diagnostics: &RuntimeStartupDiagnostics,
+) -> HostState {
+    let matcha = matcha_lifecycle_snapshot(directory);
+    let open_claw = open_claw_lifecycle_snapshot(directory);
+    let phase = admission.state().phase();
     HostState::from_runtime_states(
         phase == crate::composition::HostPhase::Ready,
         project_host_lifecycle(phase),
         RuntimeState::from_snapshot_with_startup_diagnostic(
             &matcha,
-            shared.matcha_startup_diagnostics().category(),
+            matcha_diagnostics.category(),
         ),
         RuntimeState::from_snapshot_with_startup_diagnostic(
             &open_claw,
-            shared.openclaw_startup_diagnostics().category(),
+            openclaw_diagnostics.category(),
         ),
     )
 }
 
-pub(super) fn matcha_state(shared: &PeerShared) -> RuntimeState {
+pub(super) fn matcha_state(
+    directory: &RuntimeDriverDirectory,
+    diagnostics: &RuntimeStartupDiagnostics,
+) -> RuntimeState {
     RuntimeState::from_snapshot_with_startup_diagnostic(
-        &matcha_lifecycle_snapshot(shared),
-        shared.matcha_startup_diagnostics().category(),
+        &matcha_lifecycle_snapshot(directory),
+        diagnostics.category(),
     )
 }
 
-pub(super) fn open_claw_state(shared: &PeerShared) -> RuntimeState {
+pub(super) fn open_claw_state(
+    directory: &RuntimeDriverDirectory,
+    diagnostics: &RuntimeStartupDiagnostics,
+) -> RuntimeState {
     RuntimeState::from_snapshot_with_startup_diagnostic(
-        &open_claw_lifecycle_snapshot(shared),
-        shared.openclaw_startup_diagnostics().category(),
+        &open_claw_lifecycle_snapshot(directory),
+        diagnostics.category(),
     )
 }
 
-pub(super) fn matcha_lifecycle_snapshot(shared: &PeerShared) -> SupervisorSnapshot {
-    lifecycle_snapshot(shared, RuntimeDriverIdentity::matcha_agent())
+pub(super) fn matcha_lifecycle_snapshot(directory: &RuntimeDriverDirectory) -> SupervisorSnapshot {
+    lifecycle_snapshot(directory, RuntimeDriverIdentity::matcha_agent())
 }
 
-pub(super) fn open_claw_lifecycle_snapshot(shared: &PeerShared) -> SupervisorSnapshot {
-    lifecycle_snapshot(shared, RuntimeDriverIdentity::open_claw())
+pub(super) fn open_claw_lifecycle_snapshot(directory: &RuntimeDriverDirectory) -> SupervisorSnapshot {
+    lifecycle_snapshot(directory, RuntimeDriverIdentity::open_claw())
 }
 
-fn lifecycle_snapshot(shared: &PeerShared, identity: RuntimeDriverIdentity) -> SupervisorSnapshot {
+fn lifecycle_snapshot(
+    directory: &RuntimeDriverDirectory,
+    identity: RuntimeDriverIdentity,
+) -> SupervisorSnapshot {
     let endpoint = identity.endpoint();
-    let driver = shared
-        .runtime_directory()
+    let driver = directory
         .lookup(&endpoint)
         .expect("peer runtime lifecycle driver must be registered");
     driver
@@ -100,6 +119,76 @@ pub(super) fn runtime_restart_result(
         Ok(RestartOutcome::Restarted) => Ok(()),
         Ok(RestartOutcome::Cancelled { .. }) => Err(crate::RuntimeLifecycleFailure::Cancelled),
         Err(error) => Err(map_lifecycle_failure(error)),
+    }
+}
+
+pub(super) fn runtime_control_status(state: &RuntimeState) -> RuntimeControlLifecycleStatus {
+    RuntimeControlLifecycleStatus {
+        lifecycle: runtime_control_lifecycle(state.lifecycle()),
+        failure: state.failure().map(runtime_control_failure),
+        startup_diagnostic: state
+            .startup_diagnostic()
+            .map(runtime_control_startup_diagnostic),
+    }
+}
+
+const fn runtime_control_lifecycle(lifecycle: RuntimeLifecycle) -> RuntimeControlLifecycle {
+    match lifecycle {
+        RuntimeLifecycle::Unavailable => RuntimeControlLifecycle::Unavailable,
+        RuntimeLifecycle::Idle => RuntimeControlLifecycle::Idle,
+        RuntimeLifecycle::Starting => RuntimeControlLifecycle::Starting,
+        RuntimeLifecycle::Running => RuntimeControlLifecycle::Running,
+        RuntimeLifecycle::Stopping => RuntimeControlLifecycle::Stopping,
+        RuntimeLifecycle::WaitingToRestart => RuntimeControlLifecycle::WaitingToRestart,
+        RuntimeLifecycle::Failed => RuntimeControlLifecycle::Failed,
+        RuntimeLifecycle::ShutDown => RuntimeControlLifecycle::ShutDown,
+    }
+}
+
+const fn runtime_control_failure(failure: RuntimeFailure) -> RuntimeControlLifecycleFailure {
+    match failure {
+        RuntimeFailure::ArtifactUnavailable => RuntimeControlLifecycleFailure::ArtifactUnavailable,
+        RuntimeFailure::PermissionDenied => RuntimeControlLifecycleFailure::PermissionDenied,
+        RuntimeFailure::ResourceUnavailable => RuntimeControlLifecycleFailure::ResourceUnavailable,
+        RuntimeFailure::PlatformRejected => RuntimeControlLifecycleFailure::PlatformRejected,
+        RuntimeFailure::Stdio => RuntimeControlLifecycleFailure::Stdio,
+        RuntimeFailure::Readiness => RuntimeControlLifecycleFailure::Readiness,
+        RuntimeFailure::UnexpectedExit => RuntimeControlLifecycleFailure::UnexpectedExit,
+        RuntimeFailure::AuthorityLost => RuntimeControlLifecycleFailure::AuthorityLost,
+        RuntimeFailure::CleanupUnconfirmed => RuntimeControlLifecycleFailure::CleanupUnconfirmed,
+        RuntimeFailure::MaterialCleanupFailed => {
+            RuntimeControlLifecycleFailure::MaterialCleanupFailed
+        }
+    }
+}
+
+const fn runtime_control_startup_diagnostic(
+    diagnostic: RuntimeStartupDiagnostic,
+) -> RuntimeControlStartupDiagnostic {
+    match diagnostic {
+        RuntimeStartupDiagnostic::PortConflict => RuntimeControlStartupDiagnostic::PortConflict,
+        RuntimeStartupDiagnostic::ConfigurationRejected => {
+            RuntimeControlStartupDiagnostic::ConfigurationRejected
+        }
+        RuntimeStartupDiagnostic::AppServerReportedError => {
+            RuntimeControlStartupDiagnostic::AppServerReportedError
+        }
+        RuntimeStartupDiagnostic::UnclassifiedStderr => {
+            RuntimeControlStartupDiagnostic::UnclassifiedStderr
+        }
+        RuntimeStartupDiagnostic::InvalidUtf8 => RuntimeControlStartupDiagnostic::InvalidUtf8,
+        RuntimeStartupDiagnostic::LineTooLong => RuntimeControlStartupDiagnostic::LineTooLong,
+        RuntimeStartupDiagnostic::ListenerReported => {
+            RuntimeControlStartupDiagnostic::ListenerReported
+        }
+        RuntimeStartupDiagnostic::BindRejected => RuntimeControlStartupDiagnostic::BindRejected,
+        RuntimeStartupDiagnostic::StartupFailed => RuntimeControlStartupDiagnostic::StartupFailed,
+        RuntimeStartupDiagnostic::InvalidEncoding => {
+            RuntimeControlStartupDiagnostic::InvalidEncoding
+        }
+        RuntimeStartupDiagnostic::DiagnosticLimitReached => {
+            RuntimeControlStartupDiagnostic::DiagnosticLimitReached
+        }
     }
 }
 

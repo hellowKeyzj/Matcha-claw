@@ -160,7 +160,7 @@ impl TeamRunPurgeRequest {
 }
 
 /// Organization is the sole producer of the physical TeamRun purge transition.
-pub fn purge_team_run(
+pub(crate) fn purge_team_run(
     store: &mut OrganizationStore,
     request: TeamRunPurgeRequest,
 ) -> Result<GraphRunPurgeOutcome, StoreFault> {

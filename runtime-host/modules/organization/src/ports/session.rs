@@ -138,6 +138,25 @@ impl RoleSessionReceipt {
 
 pub trait RoleSessionIdentityResolver: Send + Sync {
     fn session_key(&self, session: &RoleSessionReceipt) -> Option<String>;
+
+    fn ownership_receipt_key(
+        &self,
+        session: &RoleSessionReceipt,
+    ) -> Option<(
+        platform::endpoint::runtime_address::RuntimeEndpoint,
+        Option<String>,
+        String,
+    )>;
+
+    fn ownership_query_key(
+        &self,
+        identity: &platform::endpoint::runtime_address::SessionIdentity,
+        endpoint_session_id: &str,
+    ) -> (
+        platform::endpoint::runtime_address::RuntimeEndpoint,
+        Option<String>,
+        String,
+    );
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

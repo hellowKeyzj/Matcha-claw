@@ -79,7 +79,7 @@ pub enum TeamPendingApprovalsQueryOutcome {
     Unavailable,
 }
 
-pub fn query_team_pending_approvals(
+pub(crate) fn query_team_pending_approvals(
     facts: &OrganizationFacts,
     team_id: &TeamId,
     run_id: &GraphRunId,

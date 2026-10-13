@@ -7,7 +7,7 @@ mod events;
 mod owner;
 pub mod ports;
 mod projection;
-pub mod store;
+mod store;
 
 use std::sync::Arc;
 
@@ -35,8 +35,7 @@ pub mod terminal_stream {
 
 pub use api::{FleetModule, FleetOwnerInput};
 pub use application::delivery::{
-    FleetDeliveryError, FleetDeliveryOutcome, FleetDeliveryOwner, FleetDeliveryRequest,
-    FleetSubmitOutcome,
+    FleetDeliveryError, FleetDeliveryOutcome, FleetDeliveryRequest, FleetSubmitOutcome,
 };
 pub use domain::{
     audit, command, connection, effect, environment, lease, outbox, query, reachability, reconcile,
@@ -50,6 +49,10 @@ pub use ports::{
     FleetTopologySnapshot,
 };
 pub use secret_ref::FleetSecretRef;
+pub use store::{
+    AgentIngressIdentity, FleetFactsError, IngressAuthentication, IngressCredential, IngressEnrollment,
+    StoreFault,
+};
 pub use ssh_authority::{
     SshHostKeyAuthority, SshHostKeyAuthorityDocument, SshHostKeyAuthorityError,
     SshHostKeyAuthorityInput, SshHostKeyAuthorityRecord, SshHostKeyAuthorityState,

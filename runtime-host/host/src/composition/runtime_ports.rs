@@ -5,23 +5,14 @@ use std::sync::{
 
 use matcha_agent::driver::MatchaRuntimeDriver;
 use openclaw::driver::OpenClawDriver;
-use platform::endpoint::runtime_address::RuntimeEndpoint;
-use runtime_directory::{
-    RuntimeDriverRegistry,
-    control_loopback::{RuntimeControlLifecycleFuture, RuntimeControlLifecyclePort},
-};
+use platform::endpoint::runtime_address::{RuntimeEndpoint, SessionIdentity};
+use runtime_directory::RuntimeDriverRegistry;
 
 pub(crate) use runtime_directory::{
-    LifecycleOps, RuntimeControlFailure, RuntimeControlLifecycle, RuntimeControlLifecycleError,
-    RuntimeControlLifecycleFailure, RuntimeControlLifecycleStatus, RuntimeControlOps,
-    RuntimeControlReadiness, RuntimeControlStartupDiagnostic, RuntimeDriverIdentity,
-    RuntimeGatewayHealth, RuntimeGatewayStatus, RuntimeLifecycleFailure, RuntimeLogSnapshot,
-    RuntimeStartFailure,
+    LifecycleOps, RuntimeControlFailure, RuntimeControlOps, RuntimeControlReadiness,
+    RuntimeDriverIdentity, RuntimeGatewayHealth, RuntimeGatewayStatus, RuntimeLifecycleFailure,
+    RuntimeLogSnapshot, RuntimeStartFailure,
 };
-
-use ::diagnostics::RuntimeStartupDiagnostic;
-
-use crate::{RuntimeFailure, RuntimeLifecycle, composition::PeerHandle};
 
 pub(crate) trait RuntimeDriver:
     sessions_module::RuntimeDriver + organization::OrganizationNativeRuntime + Send + Sync
@@ -73,6 +64,12 @@ pub(crate) trait RuntimeDriver:
     fn provider_module_model_discovery_ops(
         &self,
     ) -> Option<&dyn provider_module::ProviderModelDiscoveryOps> {
+        None
+    }
+
+    fn provider_module_runtime_identity_ops(
+        &self,
+    ) -> Option<&dyn provider_module::ProviderRuntimeIdentityOps> {
         None
     }
 
@@ -212,7 +209,16 @@ impl provider_module::ProviderRuntimeDirectory for RuntimeDriverDirectory {
     fn provider_runtime_identity_ops(
         &self,
     ) -> Option<&dyn provider_module::ProviderRuntimeIdentityOps> {
-        (!self.is_closed()).then_some(self)
+        if self.is_closed() {
+            return None;
+        }
+        Some(
+            self.drivers
+                .lookup_ref(&RuntimeDriverIdentity::open_claw().endpoint())
+                .expect("OpenClaw provider identity driver must be registered")
+                .provider_module_runtime_identity_ops()
+                .expect("OpenClaw provider identity ops must be registered"),
+        )
     }
 
     fn provider_private_projection_ops(
@@ -220,50 +226,6 @@ impl provider_module::ProviderRuntimeDirectory for RuntimeDriverDirectory {
     ) -> Option<&dyn provider_module::ProviderPrivateProjectionOps> {
         self.openclaw_driver_ref()?
             .provider_module_private_projection_ops()
-    }
-}
-
-impl provider_module::ProviderRuntimeIdentityOps for RuntimeDriverDirectory {
-    fn runtime_identities(
-        &self,
-        accounts: &[provider_module::ProviderAccount],
-    ) -> Result<Vec<provider_module::ProviderRuntimeIdentity>, ()> {
-        openclaw::provider::public_provider_model_identities(accounts)
-            .map(|identities| {
-                identities
-                    .into_iter()
-                    .map(|(account_id, identity)| {
-                        provider_module::ProviderRuntimeIdentity::new(
-                            account_id,
-                            identity.provider_key(),
-                        )
-                    })
-                    .collect()
-            })
-            .map_err(|_| ())
-    }
-
-    fn runtime_identity(
-        &self,
-        account: &provider_module::ProviderAccount,
-    ) -> Result<provider_module::ProviderRuntimeIdentity, ()> {
-        openclaw::provider::public_provider_model_identity(account)
-            .map(|identity| {
-                provider_module::ProviderRuntimeIdentity::new(
-                    account.id().as_str(),
-                    identity.provider_key(),
-                )
-            })
-            .map_err(|_| ())
-    }
-
-    fn runtime_model_ref(
-        &self,
-        identity: &provider_module::ProviderRuntimeIdentity,
-        kind: provider_module::ProviderAccountKind,
-        model_id: &str,
-    ) -> String {
-        openclaw::provider::public_provider_model_ref(identity.provider_key(), kind, model_id)
     }
 }
 
@@ -292,6 +254,51 @@ impl organization::RoleSessionIdentityResolver for RuntimeDriverDirectory {
             session.agent().as_str(),
             session.endpoint_session_id().as_str(),
         )
+    }
+
+    fn ownership_receipt_key(
+        &self,
+        receipt: &organization::RoleSessionReceipt,
+    ) -> Option<(RuntimeEndpoint, Option<String>, String)> {
+        let runtime = RuntimeDriverIdentity::from_reference(receipt.endpoint().as_str())?;
+        Some(if runtime == RuntimeDriverIdentity::matcha_agent() {
+            matcha_agent::session::projection::session_ownership_key(
+                runtime.endpoint(),
+                receipt.agent().as_str(),
+                "",
+                receipt.endpoint_session_id().as_str(),
+            )
+        } else {
+            let session_key = self.session_key(receipt)?;
+            openclaw::session::session_ownership_key(
+                runtime.endpoint(),
+                receipt.agent().as_str(),
+                &session_key,
+                receipt.endpoint_session_id().as_str(),
+            )
+        })
+    }
+
+    fn ownership_query_key(
+        &self,
+        identity: &SessionIdentity,
+        endpoint_session_id: &str,
+    ) -> (RuntimeEndpoint, Option<String>, String) {
+        if identity.endpoint() == &RuntimeDriverIdentity::matcha_agent().endpoint() {
+            matcha_agent::session::projection::session_ownership_key(
+                identity.endpoint().clone(),
+                identity.agent_id(),
+                identity.session_key(),
+                endpoint_session_id,
+            )
+        } else {
+            openclaw::session::session_ownership_key(
+                identity.endpoint().clone(),
+                identity.agent_id(),
+                identity.session_key(),
+                endpoint_session_id,
+            )
+        }
     }
 }
 
@@ -371,210 +378,6 @@ impl RuntimeDriverDirectory {
     }
 }
 
-impl openclaw::gateway::loopback::OpenClawGatewayCapabilityPort for PeerHandle {
-    fn browser_request(
-        &self,
-        request: openclaw::gateway::request::OpenClawBrowserGatewayRequest,
-        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
-    ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
-        Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
-    > {
-        let peer = self.clone();
-        Box::pin(async move {
-            peer.open_claw_browser_request(request, call)
-                .await
-                .map_err(|_| ())
-        })
-    }
-
-    fn mcp_app_request(
-        &self,
-        request: openclaw::gateway::request::OpenClawMcpAppGatewayRequest,
-        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
-    ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
-        Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
-    > {
-        let peer = self.clone();
-        Box::pin(async move {
-            peer.open_claw_mcp_app_request(request, call)
-                .await
-                .map_err(|_| ())
-        })
-    }
-
-    fn question_list(
-        &self,
-        request: openclaw::gateway::request::OpenClawQuestionListGatewayRequest,
-    ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
-        Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
-    > {
-        let peer = self.clone();
-        Box::pin(async move { peer.open_claw_question_list(request).await.map_err(|_| ()) })
-    }
-
-    fn question_resolve(
-        &self,
-        request: openclaw::gateway::request::OpenClawQuestionResolveGatewayRequest,
-        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
-    ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
-        Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
-    > {
-        let peer = self.clone();
-        Box::pin(async move {
-            peer.open_claw_question_resolve(request, call)
-                .await
-                .map_err(|_| ())
-        })
-    }
-}
-
-impl RuntimeControlLifecyclePort for PeerHandle {
-    fn repair_status<'a>(
-        &'a self,
-        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
-    ) -> RuntimeControlLifecycleFuture<'a, Result<runtime_directory::RuntimeRepairSnapshot, RuntimeControlLifecycleError>> {
-        Box::pin(async move {
-            if endpoint != runtime_directory::RuntimeDriverIdentity::open_claw().endpoint() {
-                return Err(RuntimeControlLifecycleError::Unsupported);
-            }
-            self.runtime_repair_status().await.map_err(|_| RuntimeControlLifecycleError::Unavailable)
-        })
-    }
-
-    fn admit_lifecycle_repair<'a>(
-        &'a self,
-        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
-        call: runtime_directory::call::RuntimeControlCallContext,
-    ) -> RuntimeControlLifecycleFuture<'a, Result<platform::call::CallReceipt, RuntimeControlLifecycleError>> {
-        Box::pin(self.admit_runtime_repair(endpoint, call))
-    }
-
-    fn lifecycle_status<'a>(
-        &'a self,
-        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
-    ) -> RuntimeControlLifecycleFuture<
-        'a,
-        Result<RuntimeControlLifecycleStatus, RuntimeControlLifecycleError>,
-    > {
-        Box::pin(async move {
-            let state = self
-                .state()
-                .await
-                .map_err(|_| RuntimeControlLifecycleError::Unavailable)?;
-            if endpoint == runtime_directory::RuntimeDriverIdentity::open_claw().endpoint() {
-                return Ok(runtime_control_status(state.open_claw()));
-            }
-            if endpoint == runtime_directory::RuntimeDriverIdentity::matcha_agent().endpoint() {
-                return Ok(runtime_control_status(state.matcha()));
-            }
-            Err(RuntimeControlLifecycleError::Unsupported)
-        })
-    }
-
-    fn admit_lifecycle_start<'a>(
-        &'a self,
-        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
-        call: runtime_directory::call::RuntimeControlCallContext,
-    ) -> RuntimeControlLifecycleFuture<
-        'a,
-        Result<platform::call::CallReceipt, RuntimeControlLifecycleError>,
-    > {
-        Box::pin(self.admit_runtime_start(endpoint, call))
-    }
-
-    fn admit_lifecycle_stop<'a>(
-        &'a self,
-        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
-        call: runtime_directory::call::RuntimeControlCallContext,
-    ) -> RuntimeControlLifecycleFuture<
-        'a,
-        Result<platform::call::CallReceipt, RuntimeControlLifecycleError>,
-    > {
-        Box::pin(self.admit_runtime_stop(endpoint, call))
-    }
-
-    fn admit_lifecycle_restart<'a>(
-        &'a self,
-        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
-        call: runtime_directory::call::RuntimeControlCallContext,
-    ) -> RuntimeControlLifecycleFuture<
-        'a,
-        Result<platform::call::CallReceipt, RuntimeControlLifecycleError>,
-    > {
-        Box::pin(self.admit_runtime_restart(endpoint, call))
-    }
-}
-
-pub(super) fn runtime_control_status(state: &crate::RuntimeState) -> RuntimeControlLifecycleStatus {
-    RuntimeControlLifecycleStatus {
-        lifecycle: runtime_control_lifecycle(state.lifecycle()),
-        failure: state.failure().map(runtime_control_failure),
-        startup_diagnostic: state
-            .startup_diagnostic()
-            .map(runtime_control_startup_diagnostic),
-    }
-}
-
-const fn runtime_control_lifecycle(lifecycle: RuntimeLifecycle) -> RuntimeControlLifecycle {
-    match lifecycle {
-        RuntimeLifecycle::Unavailable => RuntimeControlLifecycle::Unavailable,
-        RuntimeLifecycle::Idle => RuntimeControlLifecycle::Idle,
-        RuntimeLifecycle::Starting => RuntimeControlLifecycle::Starting,
-        RuntimeLifecycle::Running => RuntimeControlLifecycle::Running,
-        RuntimeLifecycle::Stopping => RuntimeControlLifecycle::Stopping,
-        RuntimeLifecycle::WaitingToRestart => RuntimeControlLifecycle::WaitingToRestart,
-        RuntimeLifecycle::Failed => RuntimeControlLifecycle::Failed,
-        RuntimeLifecycle::ShutDown => RuntimeControlLifecycle::ShutDown,
-    }
-}
-
-const fn runtime_control_failure(failure: RuntimeFailure) -> RuntimeControlLifecycleFailure {
-    match failure {
-        RuntimeFailure::ArtifactUnavailable => RuntimeControlLifecycleFailure::ArtifactUnavailable,
-        RuntimeFailure::PermissionDenied => RuntimeControlLifecycleFailure::PermissionDenied,
-        RuntimeFailure::ResourceUnavailable => RuntimeControlLifecycleFailure::ResourceUnavailable,
-        RuntimeFailure::PlatformRejected => RuntimeControlLifecycleFailure::PlatformRejected,
-        RuntimeFailure::Stdio => RuntimeControlLifecycleFailure::Stdio,
-        RuntimeFailure::Readiness => RuntimeControlLifecycleFailure::Readiness,
-        RuntimeFailure::UnexpectedExit => RuntimeControlLifecycleFailure::UnexpectedExit,
-        RuntimeFailure::AuthorityLost => RuntimeControlLifecycleFailure::AuthorityLost,
-        RuntimeFailure::CleanupUnconfirmed => RuntimeControlLifecycleFailure::CleanupUnconfirmed,
-        RuntimeFailure::MaterialCleanupFailed => {
-            RuntimeControlLifecycleFailure::MaterialCleanupFailed
-        }
-    }
-}
-
-const fn runtime_control_startup_diagnostic(
-    diagnostic: RuntimeStartupDiagnostic,
-) -> RuntimeControlStartupDiagnostic {
-    match diagnostic {
-        RuntimeStartupDiagnostic::PortConflict => RuntimeControlStartupDiagnostic::PortConflict,
-        RuntimeStartupDiagnostic::ConfigurationRejected => {
-            RuntimeControlStartupDiagnostic::ConfigurationRejected
-        }
-        RuntimeStartupDiagnostic::AppServerReportedError => {
-            RuntimeControlStartupDiagnostic::AppServerReportedError
-        }
-        RuntimeStartupDiagnostic::UnclassifiedStderr => {
-            RuntimeControlStartupDiagnostic::UnclassifiedStderr
-        }
-        RuntimeStartupDiagnostic::InvalidUtf8 => RuntimeControlStartupDiagnostic::InvalidUtf8,
-        RuntimeStartupDiagnostic::LineTooLong => RuntimeControlStartupDiagnostic::LineTooLong,
-        RuntimeStartupDiagnostic::ListenerReported => {
-            RuntimeControlStartupDiagnostic::ListenerReported
-        }
-        RuntimeStartupDiagnostic::BindRejected => RuntimeControlStartupDiagnostic::BindRejected,
-        RuntimeStartupDiagnostic::StartupFailed => RuntimeControlStartupDiagnostic::StartupFailed,
-        RuntimeStartupDiagnostic::InvalidEncoding => {
-            RuntimeControlStartupDiagnostic::InvalidEncoding
-        }
-        RuntimeStartupDiagnostic::DiagnosticLimitReached => {
-            RuntimeControlStartupDiagnostic::DiagnosticLimitReached
-        }
-    }
-}
-
 impl RuntimeDriver for MatchaRuntimeDriver {
     fn host_lifecycle_ops(&self) -> Option<&dyn LifecycleOps> {
         Some(self)
@@ -629,6 +432,12 @@ impl RuntimeDriver for OpenClawDriver {
     fn provider_module_model_discovery_ops(
         &self,
     ) -> Option<&dyn provider_module::ProviderModelDiscoveryOps> {
+        Some(self)
+    }
+
+    fn provider_module_runtime_identity_ops(
+        &self,
+    ) -> Option<&dyn provider_module::ProviderRuntimeIdentityOps> {
         Some(self)
     }
 

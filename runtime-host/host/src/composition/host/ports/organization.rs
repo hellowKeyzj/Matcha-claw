@@ -45,40 +45,26 @@ impl sessions_module::ports::SessionOwnershipReader for OrganizationSessionOwner
         Option<HashMap<platform::endpoint::runtime_address::SessionIdentity, SessionSourceBinding>>,
     > {
         Box::pin(async move {
-            let receipts = self.organization.role_session_receipts().await.ok()?.ok()?;
-            let mut bindings = HashMap::with_capacity(receipts.len());
-            for receipt in &receipts {
-                let runtime = RuntimeDriverIdentity::from_reference(receipt.endpoint().as_str())?;
-                // Matcha addresses native sessions globally; its catalog's default agent is not ownership.
-                let (agent, session_key) = if runtime == RuntimeDriverIdentity::matcha_agent() {
-                    (None, receipt.endpoint_session_id().as_str().to_owned())
-                } else {
-                    (
-                        Some(receipt.agent().as_str()),
-                        self.runtime_directory.session_key(receipt)?,
-                    )
-                };
-                bindings.insert((runtime.endpoint(), agent, session_key), receipt);
-            }
-            let mut ownership = HashMap::new();
-            for query in queries {
-                let (agent, session_key) = if query.identity.endpoint()
-                    == &RuntimeDriverIdentity::matcha_agent().endpoint()
-                {
-                    (None, query.endpoint_session_id.as_str())
-                } else {
-                    (Some(query.identity.agent_id()), query.identity.session_key())
-                };
-                if let Some(receipt) = bindings.get(&(
-                    query.identity.endpoint().clone(),
-                    agent,
-                    session_key.to_owned(),
-                )) {
-                    let binding = SessionSourceBinding::team_from_receipt(receipt);
-                    ownership.insert(query.identity, binding);
-                }
-            }
-            Some(ownership)
+            let receipts = self
+                .organization
+                .session_ownership(
+                    queries
+                        .into_iter()
+                        .map(|query| (query.identity, query.endpoint_session_id))
+                        .collect(),
+                    self.runtime_directory.clone(),
+                )
+                .await
+                .ok()?
+                .ok()??;
+            Some(
+                receipts
+                    .into_iter()
+                    .map(|(identity, receipt)| {
+                        (identity, SessionSourceBinding::team_from_receipt(&receipt))
+                    })
+                    .collect(),
+            )
         })
     }
 }

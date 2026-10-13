@@ -1,6 +1,6 @@
 mod client;
 mod discovery;
-mod route;
+pub(crate) mod route;
 
 pub use client::team_provider;
 pub(crate) use discovery::{Discovery, project_matcha};
@@ -10,18 +10,6 @@ const PRINCIPAL: &str = "team-mcp-local";
 const SCOPE: &str = "team.mcp";
 const CAPABILITY: &str = "team.mcp";
 const MAX_BYTES: usize = 1024 * 1024;
-
-fn is_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "team_graph_context"
-            | "team_graph_patch"
-            | "team_node_event"
-            | "team_approval_resolve"
-            | "team_run_decision_submit"
-            | "team_evidence_record"
-    )
-}
 
 fn revision(body: &[u8]) -> String {
     use sha2::{Digest, Sha256};

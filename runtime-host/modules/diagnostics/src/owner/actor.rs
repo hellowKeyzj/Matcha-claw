@@ -3,23 +3,27 @@ use std::sync::Arc;
 use foundation::execution::{LaneRetention, OwnerSpec};
 
 use crate::{
-    DiagnosticsArchiveError, DiagnosticsArchiveReceipt,
+    DiagnosticsArchiveError, DiagnosticsArchiveProducer, DiagnosticsArchiveReceipt,
     application::{
         call::{self, DiagnosticsCallDetail},
         commands::{DiagnosticsCommand, DiagnosticsOwnerKey, DiagnosticsQuery},
     },
-    ports::{DiagnosticsArchiveCancellation, DiagnosticsArchivePort, DiagnosticsRequestAdmission},
+    ports::{DiagnosticsArchiveCancellation, DiagnosticsRequestAdmission},
 };
+
+use super::archive::ArchiveCollection;
 
 pub struct DiagnosticsOwnerInput {
     pub admission: Arc<dyn DiagnosticsRequestAdmission>,
-    pub archive: Arc<dyn DiagnosticsArchivePort>,
+    pub producer: crate::DiagnosticsArchiveProducer,
+    pub host: Arc<dyn crate::DiagnosticsHostPort>,
 }
 
 #[derive(Clone)]
 pub(crate) struct DiagnosticsShared {
     admission: Arc<dyn DiagnosticsRequestAdmission>,
-    archive: Arc<dyn DiagnosticsArchivePort>,
+    producer: DiagnosticsArchiveProducer,
+    archive: ArchiveCollection,
 }
 
 pub(crate) struct DiagnosticsGlobalState;
@@ -34,7 +38,8 @@ impl DiagnosticsOwner {
         Self {
             shared: DiagnosticsShared {
                 admission: input.admission,
-                archive: input.archive,
+                producer: input.producer,
+                archive: ArchiveCollection::new(input.host),
             },
         }
     }
@@ -125,7 +130,7 @@ impl OwnerSpec for DiagnosticsOwner {
                 let result = if call::running(call.as_ref()).await.is_err() {
                     Err(DiagnosticsArchiveError::OutputUnavailable)
                 } else {
-                    download_archive(&shared, archive_id).await
+                    download_archive(&shared, archive_id)
                 };
                 let status = match &result {
                     Ok(image) => {
@@ -158,15 +163,18 @@ async fn collect_archive(
     shared: &DiagnosticsShared,
     cancellation: DiagnosticsArchiveCancellation,
 ) -> Result<DiagnosticsArchiveReceipt, DiagnosticsArchiveError> {
-    shared.archive.collect_archive(cancellation).await
+    shared
+        .archive
+        .collect(shared.admission.as_ref(), &shared.producer, cancellation)
+        .await
 }
 
-async fn download_archive(
+fn download_archive(
     shared: &DiagnosticsShared,
     archive_id: String,
 ) -> Result<Vec<u8>, DiagnosticsArchiveError> {
     if shared.admission.admit_diagnostics_request().is_err() {
         return Err(DiagnosticsArchiveError::OutputUnavailable);
     }
-    shared.archive.download_archive(archive_id).await
+    shared.producer.download(&archive_id)
 }

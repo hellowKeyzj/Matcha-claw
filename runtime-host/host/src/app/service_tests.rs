@@ -386,10 +386,7 @@ fn host_input(root: &TestRoot) -> HostInput {
             guardian_executable: absolute_path("bin/runtime-host-guardian"),
         },
         open_claw_secret: GatewaySecret::new(entropy()).unwrap(),
-        organization_store: organization::OrganizationStore::open(
-            root.state_parent.join("organization-facts.log"),
-        )
-        .unwrap(),
+        organization_store: organization::open_organization_store(&root.state_parent).unwrap(),
         runtime_state_dir: root.state_parent.join("runtime-host"),
         app_log_dir: root.state_parent.join("userdata-logs"),
         parent_callback_base_url: "http://127.0.0.1:34100".into(),

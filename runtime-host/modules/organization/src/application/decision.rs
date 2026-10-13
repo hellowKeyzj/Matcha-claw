@@ -9,7 +9,7 @@ use crate::owner::team_run::TeamRunOwner;
 ///
 /// Authorization and public DTO parsing stay outside this facade. This seam records the typed
 /// Organization decision command and exposes a typed durable receipt projection for later consumers.
-pub struct TeamDecisionFacade {
+pub(crate) struct TeamDecisionFacade {
     store: OrganizationStore,
     team_run: TeamRunOwner,
 }

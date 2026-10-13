@@ -1,5 +1,7 @@
 use std::fmt;
 
+use platform::endpoint::runtime_address::RuntimeEndpoint;
+
 use super::{
     approval::ApprovalRecord,
     catalog::SessionCatalogFacts,
@@ -15,6 +17,16 @@ use super::{
         WorkerRuntimeState,
     },
 };
+
+/// Matches ownership by native session id, independent of the agent-scoped address.
+pub fn session_ownership_key(
+    endpoint: RuntimeEndpoint,
+    _agent_id: &str,
+    _session_key: &str,
+    endpoint_session_id: &str,
+) -> (RuntimeEndpoint, Option<String>, String) {
+    (endpoint, None, endpoint_session_id.to_owned())
+}
 
 /// Provenance for an ordered native fact. Transcript positions and native
 /// event sequences are separate coordinates and are never substituted for one

@@ -49,7 +49,7 @@ pub use flight_recorder::{
 };
 pub use owner::actor::DiagnosticsOwnerInput;
 pub use ports::{
-    DiagnosticsArchiveCancellation, DiagnosticsArchiveCancellationGuard, DiagnosticsArchivePort,
+    DiagnosticsArchiveCancellation, DiagnosticsArchiveCancellationGuard, DiagnosticsHostPort,
     DiagnosticsFuture, DiagnosticsRequestAdmission, DiagnosticsRequestAdmissionClosed,
 };
 

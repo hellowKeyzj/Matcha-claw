@@ -1,3 +1,5 @@
+use serde_json::Value;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeCapabilitySurface {
     session: RuntimeFamilyAvailability,
@@ -77,6 +79,43 @@ impl RuntimeCapabilitySurface {
         RuntimeCapabilityFamily::for_descriptor(descriptor_id)
             .map(|family| self.availability(family))
     }
+
+    pub fn supports_descriptor_for_scope(descriptor_id: &str, scope: &Value) -> bool {
+        let Some(identity) = runtime_identity_for_scope(scope) else {
+            return true;
+        };
+        Self::for_identity(identity)
+            .availability_for_descriptor(descriptor_id)
+            .is_none_or(|availability| availability.is_supported())
+    }
+}
+
+fn runtime_identity_for_scope(scope: &Value) -> Option<crate::RuntimeDriverIdentity> {
+    match scope.get("kind").and_then(Value::as_str)? {
+        "runtime-instance" | "agent" | "workspace" | "team-run" => {
+            runtime_identity_for_endpoint(scope.get("endpoint")?)
+        }
+        "session" => runtime_identity_for_endpoint(scope.get("identity")?.get("endpoint")?),
+        _ => None,
+    }
+}
+
+fn runtime_identity_for_endpoint(endpoint: &Value) -> Option<crate::RuntimeDriverIdentity> {
+    let object = endpoint.as_object()?;
+    if object.get("kind").and_then(Value::as_str)? != "native-runtime" {
+        return None;
+    }
+    let adapter = object.get("runtimeAdapterId").and_then(Value::as_str)?;
+    let instance = object.get("runtimeInstanceId").and_then(Value::as_str)?;
+    for identity in [
+        crate::RuntimeDriverIdentity::open_claw(),
+        crate::RuntimeDriverIdentity::matcha_agent(),
+    ] {
+        if adapter == identity.runtime_adapter_id() && instance == identity.runtime_instance_id() {
+            return Some(identity);
+        }
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -13,7 +13,7 @@ use platform::{
         ModuleDescriptor as PlatformModuleDescriptor, ModuleId as PlatformModuleId,
     },
 };
-use runtime_directory::{RuntimeCapabilitySurface, RuntimeDriverIdentity};
+use runtime_directory::RuntimeCapabilitySurface;
 use serde_json::{Map, Value, json};
 
 use super::CapabilityVerifier;
@@ -85,7 +85,10 @@ impl CapabilityCatalog {
             .describe_capability(&request.id, &request.scope)
         {
             CapabilityDescribeOutcome::Available(descriptor)
-                if capability_supported_for_scope(&request.id, &request.scope) =>
+                if RuntimeCapabilitySurface::supports_descriptor_for_scope(
+                    &request.id,
+                    &request.scope,
+                ) =>
             {
                 DescribeProjection::Available(descriptor)
             }
@@ -258,43 +261,6 @@ struct DescribeRequest {
 enum DescribeProjection {
     Available(Value),
     InvalidInput,
-}
-
-fn capability_supported_for_scope(id: &str, scope: &Value) -> bool {
-    let Some(identity) = runtime_identity_for_scope(scope) else {
-        return true;
-    };
-    RuntimeCapabilitySurface::for_identity(identity)
-        .availability_for_descriptor(id)
-        .is_none_or(|availability| availability.is_supported())
-}
-
-fn runtime_identity_for_scope(scope: &Value) -> Option<RuntimeDriverIdentity> {
-    match scope.get("kind").and_then(Value::as_str)? {
-        "runtime-instance" | "agent" | "workspace" | "team-run" => {
-            runtime_identity_for_endpoint(scope.get("endpoint")?)
-        }
-        "session" => runtime_identity_for_endpoint(scope.get("identity")?.get("endpoint")?),
-        _ => None,
-    }
-}
-
-fn runtime_identity_for_endpoint(endpoint: &Value) -> Option<RuntimeDriverIdentity> {
-    let object = endpoint.as_object()?;
-    if object.get("kind").and_then(Value::as_str)? != "native-runtime" {
-        return None;
-    }
-    let adapter = object.get("runtimeAdapterId").and_then(Value::as_str)?;
-    let instance = object.get("runtimeInstanceId").and_then(Value::as_str)?;
-    for identity in [
-        RuntimeDriverIdentity::open_claw(),
-        RuntimeDriverIdentity::matcha_agent(),
-    ] {
-        if adapter == identity.runtime_adapter_id() && instance == identity.runtime_instance_id() {
-            return Some(identity);
-        }
-    }
-    None
 }
 
 fn is_runtime_scope(value: &Value) -> bool {

@@ -11,13 +11,15 @@ use fleet::topology::{
 };
 use foundation::execution::{CommandRoute, OwnerSpec, QueryRoute};
 
-use crate::application::reachability_owner::DurableReachabilityMutation;
+use crate::application::{
+    delivery::FleetDeliveryOwner, reachability_owner::DurableReachabilityMutation,
+};
 
 use super::command::{FleetCommand, FleetQuery};
 
 use fleet::{
-    FleetDeliveryError, FleetDeliveryOutcome, FleetDeliveryOwner, FleetDeliveryRequest,
-    FleetSubmitOutcome, FleetTargetConfig, FleetTargetSelector, TargetId, TargetSnapshot,
+    FleetDeliveryError, FleetDeliveryOutcome, FleetDeliveryRequest, FleetSubmitOutcome,
+    FleetTargetConfig, FleetTargetSelector, TargetId, TargetSnapshot,
     command::{CommandId, CommandIntent, CommandKind, CommandTarget, IdempotencyKey},
     connection::{
         ConnectionId, ConnectionKind, ConnectionMutation, ConnectionRecord, ProbeOutcome,

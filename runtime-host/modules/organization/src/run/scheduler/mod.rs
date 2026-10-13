@@ -9,9 +9,9 @@ pub(crate) use cron::validate_cron_expression;
 pub use retry_due::{
     NodePromptRetryDueInvalidReason, NodePromptRetryDueItem, NodePromptRetryDuePlan,
     NodePromptRetryDueQuery, NodePromptRetryDueQueryError, NodePromptRetryDueQueryOutcome,
-    NodePromptRetryDueResolution, NodePromptRetryDueUnknownReason, produce_node_prompt_retry_due,
-    query_node_prompt_retry_due,
+    NodePromptRetryDueResolution, NodePromptRetryDueUnknownReason,
 };
+pub(crate) use retry_due::query_node_prompt_retry_due;
 pub use terminal_observation::{TerminalObservationPlan, plan_terminal_observations};
 
 use super::{

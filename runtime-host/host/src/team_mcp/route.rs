@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use super::{CAPABILITY, MAX_BYTES, PRINCIPAL, ROUTE, SCOPE, is_tool, now_millis, revision};
+use super::{CAPABILITY, MAX_BYTES, PRINCIPAL, ROUTE, SCOPE, now_millis, revision};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,7 +20,7 @@ struct ToolRequest {
     arguments: Value,
 }
 
-pub(super) fn descriptor(
+pub(crate) fn descriptor(
     owner: organization::OrganizationHandle,
     verifier: CapabilityDecisionVerifier,
     resolver: Arc<dyn organization::RoleSessionIdentityResolver>,
@@ -72,7 +72,7 @@ async fn handle(
     let Ok(tool) = serde_json::from_slice::<ToolRequest>(&request.body) else {
         return Response::bad_request();
     };
-    if !is_tool(&tool.name) || !tool.arguments.is_object() {
+    if !organization::is_team_tool(&tool.name) || !tool.arguments.is_object() {
         return Response::bad_request();
     }
     let Ok(now) = now_millis() else {

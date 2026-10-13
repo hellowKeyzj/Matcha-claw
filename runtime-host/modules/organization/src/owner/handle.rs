@@ -1,9 +1,11 @@
 use std::{
+    collections::HashMap,
     path::PathBuf,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{ActivityExecutionOutcome, NativeRunSettled};
+use crate::{ActivityExecutionOutcome, NativeRunSettled, run::event::{TeamRunWake, TeamRunWakeReason}};
 use foundation::execution::OwnerRuntimeHandle;
 use runtime_directory::RuntimeDriverIdentity;
 
@@ -39,7 +41,6 @@ use crate::{
 
 use super::{
     OrganizationCommand, OrganizationQuery,
-    coordinator::{TeamRunWake, TeamRunWakeReason},
     team_run::{
         ArmedTrigger, ManualTeamCreateOutcome, TeamDeleteOutcome,
         TeamMaterializationCommandOutcome, TeamNodeTerminalResolution, TeamNodeTerminalResult,
@@ -56,7 +57,7 @@ pub struct OrganizationHandle {
 }
 
 impl OrganizationHandle {
-    pub fn new(inner: OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>) -> Self {
+    pub(crate) fn new(inner: OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>) -> Self {
         let (schedule_changes, _) =
             tokio::sync::watch::channel(TeamRunWake::new(TeamRunWakeReason::GraphChanged, None));
         Self {
@@ -351,7 +352,7 @@ impl OrganizationHandle {
         })
     }
 
-    pub async fn manual_team_create(
+    pub(crate) async fn manual_team_create(
         &self,
         team_id: TeamId,
         team_name: String,
@@ -572,17 +573,27 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn role_session_receipts(
+    pub async fn session_ownership(
         &self,
-    ) -> Result<Result<Vec<organization::RoleSessionReceipt>, StoreFault>, RequestAdmissionClosed>
-    {
+        queries: Vec<(platform::endpoint::runtime_address::SessionIdentity, String)>,
+        resolver: Arc<dyn crate::RoleSessionIdentityResolver>,
+    ) -> Result<
+        Result<
+            Option<HashMap<platform::endpoint::runtime_address::SessionIdentity, crate::RoleSessionReceipt>>,
+            StoreFault,
+        >,
+        RequestAdmissionClosed,
+    > {
         let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::RoleSessionReceipts { reply })
             .await
             .map_err(closed)?;
         self.call_admitted().await;
-        reply_rx.await.map_err(|_| closed_error())
+        let receipts = reply_rx.await.map_err(|_| closed_error())?;
+        Ok(receipts.map(|receipts| {
+            crate::application::projection::session_ownership(receipts, queries, resolver.as_ref())
+        }))
     }
 
     async fn run_start(
@@ -1057,7 +1068,7 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn task_board_mutate(
+    pub(crate) async fn task_board_mutate(
         &self,
         team_id: TeamId,
         run_id: GraphRunId,
@@ -1111,7 +1122,7 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn native_delivery_by_run(
+    pub(crate) async fn native_delivery_by_run(
         &self,
         native_run_id: String,
     ) -> Result<Option<DeliveryId>, RequestAdmissionClosed> {
@@ -1126,7 +1137,7 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn schedule_ready_nodes(
+    pub(crate) async fn schedule_ready_nodes(
         &self,
         run_id: GraphRunId,
         now: u64,
@@ -1147,7 +1158,7 @@ impl OrganizationHandle {
         Ok(outcome)
     }
 
-    pub async fn pending_run_activity_ids(
+    pub(crate) async fn pending_run_activity_ids(
         &self,
         run_id: GraphRunId,
         now: u64,
@@ -1160,7 +1171,7 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn activity_target(
+    pub(crate) async fn activity_target(
         &self,
         activity_id: ActivityId,
     ) -> Result<Option<TeamRunActivityTarget>, RequestAdmissionClosed> {
@@ -1172,7 +1183,7 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn claim_activity(
+    pub(crate) async fn claim_activity(
         &self,
         run_id: GraphRunId,
         activity_id: ActivityId,
@@ -1191,7 +1202,7 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn settle_activity(
+    pub(crate) async fn settle_activity(
         &self,
         run_id: GraphRunId,
         claim: ActivityClaim,
@@ -1210,7 +1221,7 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn team_message_terminal_observed(
+    pub(crate) async fn team_message_terminal_observed(
         &self,
         native_run_id: String,
         delivery_context: Option<(DeliveryId, crate::EndpointSessionId)>,
@@ -1255,7 +1266,7 @@ impl OrganizationHandle {
         Ok(outcome)
     }
 
-    pub async fn team_message_repair_queued(
+    pub(crate) async fn team_message_repair_queued(
         &self,
         requested_run_id: String,
         repair: organization::TeamMessageRepairDispatch,
@@ -1272,7 +1283,7 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn team_message_repair_rejected(
+    pub(crate) async fn team_message_repair_rejected(
         &self,
         repair: organization::TeamMessageRepairDispatch,
     ) -> Result<Result<(), StoreFault>, RequestAdmissionClosed> {
@@ -1288,7 +1299,7 @@ impl OrganizationHandle {
         Ok(outcome)
     }
 
-    pub async fn native_run_settled(
+    pub(crate) async fn native_run_settled(
         &self,
         run_id: GraphRunId,
         delivery_id: DeliveryId,
@@ -1321,7 +1332,7 @@ impl OrganizationHandle {
 
     /// Settles a team node terminal by native run id alone, resolving the owning delivery first.
     /// Native run ids without a team delivery are not team dispatches and settle nothing.
-    pub async fn team_message_terminal_context(
+    pub(crate) async fn team_message_terminal_context(
         &self,
         native_run_id: String,
     ) -> Result<Option<organization::TeamMessageTerminalContext>, RequestAdmissionClosed> {
@@ -1336,7 +1347,7 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn native_run_settled_by_native_run_id(
+    pub(crate) async fn native_run_settled_by_native_run_id(
         &self,
         native_run_id: String,
         settled: NativeRunSettled,
@@ -1368,7 +1379,7 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn active_run_ids(&self) -> Result<Vec<GraphRunId>, RequestAdmissionClosed> {
+    pub(crate) async fn active_run_ids(&self) -> Result<Vec<GraphRunId>, RequestAdmissionClosed> {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_query(OrganizationQuery::ActiveRunIds { reply })
@@ -1377,7 +1388,7 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
-    pub async fn native_terminal_target(
+    pub(crate) async fn native_terminal_target(
         &self,
         delivery_id: DeliveryId,
     ) -> Result<Option<NativeTerminalReceiptTarget>, RequestAdmissionClosed> {

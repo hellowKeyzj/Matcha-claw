@@ -69,21 +69,20 @@ flowchart TB
   Modules --> Ports
   PublicTransport -. compatibility health/stop .-> Root
   Host --> Root
-  Host --> Facade
-  Host --> Owners
+  Host --> Modules
   Host --> OwnerRuntime
-  Host --> TeamCoordinator
-  Facade --> Directory
-  Owners --> OwnerRuntime
-  Owners --> Directory
-  TeamCoordinator --> Owners
+  Host --> Directory
+  Modules --> OwnerRuntime
+  Modules --> Directory
+  Organization --> TeamCoordinator
+  TeamCoordinator --> Organization
   TeamCoordinator --> Directory
   Host --> Foundation
   Host --> Platform
   OwnerRuntime --> Foundation
   Modules --> Products
-  Owners --> Fleet
-  Owners --> Organization
+  Modules --> Fleet
+  Modules --> Organization
   Directory --> OpenClaw
   Directory --> Matcha
   OpenClaw --> Foundation
@@ -96,7 +95,7 @@ flowchart TB
   Matcha --> Native
 ```
 
-箭头表示当前调用或编译依赖允许的方向，不表示所有 crate 都互相依赖。`runtime-host` 仅在 composition 处同时看见具体 Domain 与 Integration；其他 crate 不通过反向依赖、全局 registry 或 generic runtime map 获得对 Host 的控制权。
+箭头表示当前调用或组合方向，不是 Cargo 编译图或 capability 安装图；两种 DAG 分别见 §7.1、§7.2。`runtime-host` 仅在 composition 处同时看见具体 Domain 与 Integration；其他 crate 不通过反向依赖、全局 registry 或 generic runtime map 获得对 Host 的控制权。Organization runtime 持有自己的 actor task/coordinator，Host 决定跨 owner 顺序。
 
 ## 3. Delivery：Renderer、Electron 与 Rust 的三个 contract
 
@@ -247,9 +246,11 @@ flowchart LR
 | owner modules | Session、Provider、Settings、Security、Channel、Connector、Fleet、Organization、Plugins、Skills、Task、Workspace、Usage 等业务 module；Interface 是各自 typed handle / port / loopback adapter | `runtime-host/modules/**` |
 | integration ports | OpenClaw / matcha-agent peer-specific lifecycle、driver ops 与 owner module port implementation；不保存 Host canonical facts | `runtime-host/integrations/openclaw/src/**`, `runtime-host/integrations/matcha-agent/src/**` |
 | module registry | canonical module install；校验 provides/requires/effects，生成 installed route registry、private-control snapshot 与 capability catalog projection；不手写业务 descriptor directory | `host/src/module_registry/install.rs`, `host/src/module_registry/capability_catalog.rs`, `host/src/module_registry/private_control.rs`, `platform/src/module.rs` |
-| runtime surface | fixed OpenClaw/Matcha peer identity、RuntimeDriver ops surface、Runtime Endpoint Directory public projection 与 installed capability catalog projection | `runtime-host/host/src/composition/runtime_ports.rs`, `runtime-host/modules/runtime-directory/src/**`, `runtime-host/host/src/module_registry/capability_catalog.rs`, `runtime-host/integrations/openclaw/src/driver/**`, `runtime-host/integrations/matcha-agent/src/driver/**` |
+| runtime surface | fixed OpenClaw/Matcha peer identity、RuntimeDriver ops 聚合与 directory lookup、peer Gateway/Lifecycle adapters 与 status 转换、descriptor/scope 支持性判定、Runtime Endpoint Directory public projection 与 installed capability catalog projection | `runtime-host/host/src/composition/runtime_ports.rs`, `runtime-host/host/src/composition/peer/ports.rs`, `runtime-host/host/src/composition/peer/status.rs`, `runtime-host/modules/runtime-directory/src/**`, `runtime-host/host/src/module_registry/capability_catalog.rs`, `runtime-host/integrations/openclaw/src/driver/**`, `runtime-host/integrations/matcha-agent/src/driver/**` |
 | control | private framed stdin/stdout wire、ready signal、EOF shutdown、SafeEvent/outcome encode 与 service loop；dispatch 只查 installed private-control snapshot | `host/src/control/**`, `host/src/module_registry/private_control.rs` |
 | http / module loopback | 统一 loopback server、route lookup 与 Response/Stream/Upgrade 写回；authorization decision 验证和业务 DTO decode 在具体 module adapter/facade | `host/src/http/**`, `runtime-host/modules/**/src/adapters/loopback/**` |
+
+`composition/runtime_ports.rs` 只聚合 fixed peer driver 与 typed directory lookup；`PeerHandle` 的 Gateway capability / runtime lifecycle adapters 位于 `composition/peer/ports.rs`，lifecycle/failure/startup diagnostic 的纯转换位于 `peer/status.rs`。Provider native identity/provider key/model ref 转换由 OpenClaw 既有 `surfaces/providers/adapter.rs` 实现 `ProviderRuntimeIdentityOps`，Host 仅在 directory 未 closed 时返回固定 OpenClaw identity port；原 provider identity、错误、receipt、scope 与公开 DTO 不变。[VERIFY: runtime-host/host/src/composition/runtime_ports.rs:191-230] [VERIFY: runtime-host/host/src/composition/peer/ports.rs:8-140] [VERIFY: runtime-host/host/src/composition/peer/status.rs:125-193] [VERIFY: runtime-host/integrations/openclaw/src/surfaces/providers/adapter.rs:56-98]
 
 ### 5.1 Root owner 与 typed Interface 的不变量
 
@@ -291,6 +292,8 @@ Sessions、Workspace、Browser 与 team.runCreate 不在此批；短查询、登
 
 `ModuleDescriptor.effects` 是模块声明的 effect ownership 清单；`ModuleCatalog::validate_effects()` 用 `EffectRegistration` 校验 unknown module、未声明 effect 与缺失 scoped effect，其中可选 loopback descriptor 会自动计入该 module 的 scoped `Route` registration。当前 Host 安装路径由 `module_registry/install` 把 Foundation `ModuleScope` registrations 映射为 Platform effect registrations，并调用 `install_with_capabilities_and_effects()` 同时校验 capability dependency 与 scoped effects，随后派生 installed route registry、private-control snapshot 与 capability catalog projection。[VERIFY: runtime-host/platform/src/module.rs:141-204] [VERIFY: runtime-host/platform/src/module.rs:239-304] [VERIFY: runtime-host/host/src/module_registry/install.rs]
 
+Runtime descriptor/scope 支持性由 `runtime-directory::RuntimeCapabilitySurface` 判定；Host capability catalog 仍严格验证 scope、查询 installed descriptor 后作原 `Available` veto，auth、404 与支持矩阵不变。surface 的未识别 peer/family 默认值不是授权或 grammar 校验。[VERIFY: runtime-host/modules/runtime-directory/src/domain/surface.rs:83-119] [VERIFY: runtime-host/host/src/module_registry/capability_catalog.rs:70-98] [VERIFY: runtime-host/host/src/module_registry/capability_catalog.rs:266-354]
+
 Foundation lifecycle `ModuleScope` 是运行期 effect 生命周期 mechanism：它注册 disposer/owned task/process/listener/runtime endpoint 并按 LIFO dispose；`EffectGuard` 当前只携带 scope/effect identity。它向 Platform catalog 提供 scoped registration 事实，但不拥有 `ModuleDescriptor.effects` 契约，也不赋予普通模块 Host transport ownership。[VERIFY: runtime-host/foundation/src/lifecycle.rs:9-74] [VERIFY: runtime-host/foundation/src/lifecycle.rs:131-214] [VERIFY: runtime-host/host/src/composition/host/owner_runtime.rs:55-107]
 
 **Invocation outcome / Immediate Receipt** 只表达调用边界能知道的事实：明确拒绝、同步完成、取消，或 effect 可能已到达目标但终局未知。它不等同最终 execution success。需要恢复的 command、attempt、delivery 和 terminal outcome 仍由真正的 Domain 或 Native Runtime owner 保存；无法判定的 effect 使用 `Unknown`，不自动重试。
@@ -299,7 +302,7 @@ Foundation lifecycle `ModuleScope` 是运行期 effect 生命周期 mechanism：
 
 - `modules/provider`、`modules/connectors`、`modules/settings`、`modules/security` 分别拥有 account/model/routing、connector catalog、settings desired、security policy/effect stores；Host composition 逐个 spawn，不存在 Environment 聚合状态或 `modules/environment`。[VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:244-287]
 - 无消费者的旧 `domains/environment` 聚合 revision/grant/reconciliation 模型退役，不视为这些业务 owner 的新增能力或等价迁移。OpenClaw `crate::environment` 安装检查与 Fleet environment/resource 生命周期保留。
-- `fleet` 只保留当前能证明的本地 durable facts；历史 RemoteFleet control plane 删除不构成新的 executor 依据。
+- `fleet` 只保留当前能证明的本地 durable facts；adapters/application/domain/owner/store 实现 namespace private，公开 delivery/ingress/errors/ports/领域 DTO 保留，Host 经正式 OwnerInput/spawn_owner/handle 装配，不读写 FleetStore/FleetFacts。历史 RemoteFleet control plane 删除不构成新的 executor 依据。[VERIFY: runtime-host/modules/fleet/src/lib.rs:1-65] [VERIFY: runtime-host/modules/fleet/src/lib.rs:83-101]
 - `organization` 负责 Team 与 TeamRun 的 graph、attempt、approval、delivery、evidence、trigger 和恢复。OpenClaw materialization 是 Integration effect，不拥有 TeamRun command ledger。
 
 没有横切的 `session`、`approval`、`reconciliation`、`job`、`storage` 或 `facts` crate。共同字段形状不证明共同 owner。
@@ -375,73 +378,93 @@ Electron Delivery
 
 Electron 不拥有 OpenClaw 或 matcha-agent 的 semantic lifecycle policy。Electron 启动并连接 Rust `runtime-host`；Rust Host 组合具体 peer Integration、决定 runtime dependency 与 shutdown order。
 
-OpenClaw repair 的手动按钮与自动启动恢复共用 PeerOwner 的 `repair_workflow`：停止确认 → native doctor → 原 owner 准备 → start/readiness/ready projection。doctor 成功、报错、无法启动或超时后已确认自有 child 回收，均继续尝试启动；doctor 异常保留日志，不决定修复终态。停止/端口检查失败、doctor 取消或 child 回收未确认仍阻断，修复成功以原启动就绪与 ready projection 完成为准。Integration 单写有界 repair 快照与 lifecycle permit；入 lane 前拒绝冲突，Host 只组合原 owner 投影与关停。普通启动和准备失败只记录启动结果，只有已进入 repair workflow 的失败才写修复终态。自动资格只来自停止旧进程后重新采集的 native 明确迁移信号，不凭 Host 配置准备失败猜测，不加版本升级 marker。端口占用不授权 kill；Host shutdown 取消 doctor 后等待自有 child 回收。Main/Renderer 只消费签名 API、CallReceipt 与安全进度，不建立第二修复 owner。[VERIFY: runtime-host/host/src/composition/peer/openclaw.rs:33-67] [VERIFY: runtime-host/host/src/composition/peer/openclaw.rs:158-239] [VERIFY: runtime-host/integrations/openclaw/src/driver/repair.rs:10-88] [VERIFY: runtime-host/host/src/composition/peer/handle.rs:173-224] [VERIFY: electron/api/routes/gateway.ts:64-81]
+OpenClaw repair 的手动按钮与自动启动恢复共用 Integration `OpenClawDriver::repair`；`start_with_effects`、`repair` 与 `confirm_stopped` 固定使用 driver 自身的 `LifecycleOps`，不接受外传 lifecycle。`start_with_effects` 拥有自动资格与停止确认，repair 拥有 phase/失败决策：停止确认 → native doctor → 原 owner 准备 → start/readiness/ready projection。Host 通过 `StartupEffects` 保留 Provider/Settings/Security 准备、Organization receipt recovery、shutdown signal、原始 start cache/notify 与公开错误投影，native 准备时序不变。doctor 成功、报错、无法启动或超时后已确认自有 child 回收，均继续尝试启动；doctor 异常只留日志。停止/端口检查失败、doctor 取消或 child 回收未确认仍阻断，修复成功以原启动就绪与 ready projection 完成为准。Integration 单写有界 repair 快照与 lifecycle permit；入 lane 前拒绝冲突。普通启动和准备失败只记录启动结果，只有进入 repair 的失败才写修复终态。自动资格仍只来自停止旧进程后重新采集的 native 明确迁移信号，不凭 Host 准备失败猜测，不加版本升级 marker。端口占用不授权 kill；shutdown 由 Host signal 触发 Integration 取消 doctor 并等待自有 child 回收。Main/Renderer 只消费原签名 API、CallReceipt 与安全进度，不建立第二修复 owner。[VERIFY: runtime-host/integrations/openclaw/src/driver/repair.rs:17-120] [VERIFY: runtime-host/integrations/openclaw/src/driver/repair.rs:133-200] [VERIFY: runtime-host/integrations/openclaw/src/driver/lifecycle.rs:17-57] [VERIFY: runtime-host/host/src/composition/peer/openclaw.rs:32-60] [VERIFY: runtime-host/host/src/composition/peer/openclaw.rs:119-234] [VERIFY: runtime-host/host/src/composition/peer/openclaw.rs:243-330] [VERIFY: runtime-host/host/src/composition/peer/handle.rs:173-224] [VERIFY: electron/api/routes/gateway.ts:64-81]
 
-### 7.1 当前 crate 依赖 DAG
+Peer helpers 按实际调用收窄依赖：查询 helper 只接 admission、directory 与查询参数，Matcha autostart 只接 `LifecycleOps`，启动结果留在 actor 记录；状态参数组装集中到既有 `PeerShared::runtime_state`，status 仍只接实际依赖。OpenClaw prepare/ready helpers 接实际 owner/driver 引用，既有 `OpenClawStartupEffects::new(shared, bool)` 统一提取借用，不保存整个 `PeerShared`。这不禁止 Host 组合 Provider/Settings/Security/Organization/TeamRun 的跨 owner 启动 effects，也不改变原准备顺序、receipt recovery 或 Integration fixed-self repair ownership。[VERIFY: runtime-host/host/src/composition/peer/actor.rs:110-120] [VERIFY: runtime-host/host/src/composition/peer/actor.rs:283-287] [VERIFY: runtime-host/host/src/composition/peer/actor.rs:741-830] [VERIFY: runtime-host/host/src/composition/peer/matcha.rs:5-9] [VERIFY: runtime-host/host/src/composition/peer/openclaw.rs:142-196] [VERIFY: runtime-host/host/src/composition/peer/openclaw.rs:243-330]
 
-下图和表摘录 `runtime-host/Cargo.toml` 与各 crate `Cargo.toml` 的主要编译依赖，不是完整 workspace 清单或逻辑调用图；Products 节点仅合并展示四个独立 module，不代表新聚合 crate。具体边以各 crate manifest 为准。
+### 7.1 Cargo 编译依赖 DAG
+
+箭头为编译消费者 → 被依赖 crate。下图摘录当前全部 17 对 module→module 声明边；Six 节点合并六个独立 module，不是聚合 crate，基础层与 Integration/Host 的其他边见表。实际图来自 `cargo metadata --offline --no-deps`，包含 optional、target、dev/build 声明，不按当前激活 feature 缩减。[VERIFY: scripts/check-runtime-host-crate-dag.mjs:7-112]
 
 ```mermaid
 flowchart BT
-  Foundation[foundation]
-  Platform[platform]
-  Products[provider / connectors / settings / security]
-  RuntimeDirectory[runtime-directory]
-  Fleet[fleet]
+  Directory["runtime-directory"]
+  Six["channels · cron · platform-tools · plugins\ntask-manager · workspace"]
   Organization[organization]
-  ClawHub[clawhub]
-  OpenClaw[openclaw]
-  Matcha[matcha-agent]
-  Host[runtime-host]
+  Provider[provider]
+  Connectors[connectors]
+  Sessions[sessions]
+  Sealed["sealed-resource"]
+  Skills[skills]
+  Subagents[subagents]
 
-  Products --> Foundation
-  Products --> Platform
-  Products -. provider only .-> RuntimeDirectory
-  RuntimeDirectory --> Foundation
-  RuntimeDirectory --> Platform
-  Fleet --> Platform
-  Fleet --> Foundation
-  OpenClaw --> Foundation
-  OpenClaw --> Platform
-  OpenClaw --> Products
-  OpenClaw --> Organization
-  Organization --> Foundation
-  Organization --> Platform
-  Organization --> RuntimeDirectory
-  Matcha --> Foundation
-  Matcha --> Platform
-  Host --> Foundation
-  Host --> Platform
-  Host --> Products
-  Host --> Fleet
-  Host --> Organization
-  Host --> ClawHub
-  Host --> OpenClaw
-  Host --> Matcha
+  Six --> Directory
+  Skills --> Directory
+  Subagents --> Directory
+  Organization --> Directory
+  Provider --> Connectors
+  Provider --> Directory
+  Sessions --> Connectors
+  Sessions --> Organization
+  Sessions --> Provider
+  Sessions --> Directory
+  Sealed --> Skills
+  Sealed --> Subagents
 ```
 
-| Crate | 当前可依赖的 workspace crate | 架构含义 |
+| Crate | 当前 workspace 编译依赖（摘录） | 架构含义 |
 |---|---|---|
-| `foundation` | 无 | 最低层 mechanism，不能看见产品或 peer |
-| `platform` | 无 | 中性 contract，不引入 Domain 或 Integration policy |
-| `provider` | `foundation`, `platform`, `connectors`, `runtime-directory` | 非秘密 account/model/routing facts 与 owner-local effect |
-| `connectors`、`settings`、`security` | `foundation`, `platform` | 各自持久化、operation 与 typed port，不依赖聚合 Environment |
-| `fleet` | `foundation`, `platform` | Fleet durable facts 使用 endpoint/exchange language，不依赖 Host |
-| `organization` | `foundation`, `platform`, `runtime-directory` | Team/TeamRun 领域模型与 store、owner-local execution |
-| `clawhub` | 无 | 第三方 registry/CLI client；不拥有 Domain facts，也不是 peer runtime |
-| `openclaw` | `foundation`, `platform`、`provider`/`connectors`/`settings`/`security`/`organization` 等业务 modules、`clawhub` | 实现具体业务 typed ports 与 OpenClaw native effects，不依赖旧聚合 Environment |
-| `matcha-agent` | `foundation`, `platform` | 只翻译 app-server lifecycle/session peer semantics |
-| `runtime-host` | 所有当前 workspace crate | 唯一 concrete composition 与 Delivery-facing Interface graph |
+| `foundation`、`platform` | 均无内部 workspace 依赖 | mechanism 与中性 contract 不看见业务或 peer |
+| `channels`、`cron`、`platform-tools`、`plugins`、`skills`、`subagents`、`task-manager`、`workspace` | `foundation`, `platform`, `runtime-directory` | 固定 peer identity/capability/lifecycle 语言，不导入具体 driver |
+| `runtime-directory` | `foundation`, `platform` | 固定 peer 目录与中性能力语言 |
+| `provider` | `foundation`, `platform`, `connectors`, `runtime-directory` | 消费 Connector secret port，不取其 owner/store |
+| `sessions` | `foundation`, `platform`, `connectors`, `organization`, `provider`, `runtime-directory` | 消费正式 ports、Role receipt 与 Provider API，不反向迁移事实 |
+| `connectors`、`settings`、`security`、`fleet` | `foundation`, `platform` | 各自业务 owner，不依赖 Host |
+| `organization` | `foundation`, `platform`, `runtime-directory` | Team/TeamRun 模型、私有 store 与 owner-local execution |
+| `sealed-resource` | `platform`, `skills`, `subagents` | 实现二者声明的 sealed store ports |
+| `clawhub` | 无内部 workspace 依赖 | 第三方 client，不是 peer runtime |
+| `openclaw` | `foundation`, `platform`、具体业务 modules、`clawhub`, `toolchain` | 实现业务 ports 与 OpenClaw native effects |
+| `matcha-agent` | `diagnostics`, `foundation`, `organization`, `platform`, `runtime-directory`, `sessions`, `toolchain` | 实现 app-server lifecycle/session/Team ports |
+| `runtime-host` | 当前具体基础、业务、Integration 与 external crates | 唯一 concrete composition |
 
-该 DAG 也解释了为什么 `organization` 不能直接 import OpenClaw：TeamRun 通过 `organization::ports` 定义的 materialization、role-session、prompt-delivery 等 typed interface 表达所需 effect，具体 OpenClaw adapter 只能在 Host composition 处注入。
+Organization 不能直接 import OpenClaw：所需 effect 通过正式 ports 表达，只在 Host composition 注入具体 adapter。边界脚本以实际 metadata 校验分层、环与固定 17 对边；source lexical guard 仅辅助检查本文件 direct/grouped/import alias/extern alias/pub use，不是 Rust parser、跨文件名称解析或 macro 展开。实现 namespace 的 private 约束由 Rust visibility 与 compiler 执行，不据此宣称整个 workspace owner-first 已完成。[VERIFY: scripts/check-runtime-host-crate-dag.mjs:122-240] [VERIFY: runtime-host/modules/organization/src/lib.rs:5-14] [VERIFY: runtime-host/modules/fleet/src/lib.rs:1-10]
+
+### 7.2 Runtime capability 安装 DAG
+
+箭头为 descriptor 消费者 → 提供 required capability 的 module 或 Host 注入源；这是 `ModuleDescriptor.provides/requires` 的安装校验图，不是上面的 Cargo 图、peer 支持矩阵或授权图。下图只展示本轮相关子图：Organization、runtime-directory、sealed-resource 无 requires；`host.team-mcp` 不提供 capability，只声明 Route effect。[VERIFY: runtime-host/platform/src/module.rs:141-204] [VERIFY: runtime-host/host/src/module_registry/system_modules.rs:5-40]
+
+```mermaid
+flowchart BT
+  Organization["organization\nprovides organization · team.runtime"]
+  Directory["runtime-directory\nprovides runtime.directory"]
+  Mcp["host.team-mcp\nprovides none · Route"]
+  Sessions["sessions"]
+  Provider["provider\nprovides providers"]
+  Sealed["sealed-resource\nprovides sealed-skill-store.read · sealed-agent-store.read"]
+  Skills[skills]
+  Subagents[subagents]
+  Injected["Host 注入的 capability keys\n不是新的 module / native authority"]
+
+  Mcp -->|organization| Organization
+  Mcp -->|runtime.directory| Directory
+  Sessions -->|providers| Provider
+  Sessions -->|runtime.sessions| Injected
+  Provider -->|runtime.provider| Injected
+  Skills -->|sealed-skill-store.read| Sealed
+  Skills -->|runtime.skills · external.clawhub| Injected
+  Subagents -->|sealed-agent-store.read| Sealed
+  Subagents -->|runtime.subagents| Injected
+```
+
+`sealed-resource → skills/subagents` 是编译时实现 ports；`skills/subagents → sealed-resource` 是运行期消费 sealed read capability，两图的反向边不构成同一图里的环。MCP requires Organization/Directory 不代表获得 native caller 身份；availability 和 signed capability decision 仍沿各自原边界。[VERIFY: runtime-host/modules/skills/src/lib.rs:29-35] [VERIFY: runtime-host/modules/subagents/src/lib.rs:21-30] [VERIFY: runtime-host/modules/sealed-resource/src/ports.rs:27-32] [VERIFY: runtime-host/modules/sessions/src/lib.rs:78-99] [VERIFY: runtime-host/modules/provider/src/lib.rs:24-29] [VERIFY: runtime-host/host/src/module_registry/install.rs:17-99]
 
 ## 8. 启动、transport 与 shutdown 的真实结构
 
 ### 8.1 Bootstrap 与启动
 
-Electron `bootstrapMainApplication()` 创建 `DirectRuntimeHost`，将一次性 bootstrap bytes 写入 Rust stdin。Rust `host/src/main.rs` 只完成三件事：读取 bootstrap、拆出 typed input/runtime-host transport port/verifier、调用 `run_delivery_transports()`。
+Electron `bootstrapMainApplication()` 创建 `DirectRuntimeHost`，将一次性 bootstrap bytes 写入 Rust stdin。Rust `host/src/main.rs` 在 Host 模式读取 bootstrap、拆出 typed input/runtime-host transport port/verifier，再调用 `run_app_service()`；`mcp` 子命令在 Host/bootstrap 前分流。[VERIFY: runtime-host/host/src/main.rs:11-60]
 
-`run_delivery_transports()` 的顺序是：
+Host 模式的顺序是：
 
 ```text
 bootstrap typed inputs
@@ -452,15 +475,20 @@ bootstrap typed inputs
   → assemble thin Host + HostHandles
 → read settings auto-start through SettingsHandle
 → host.start_admission_only()
+→ prepare module install plan（包含 host.team-mcp descriptor）
+→ route_snapshot → Router → 注册各 module 的实际 Route disposer
+→ install ModuleCatalog，校验 capability DAG / scoped effects
+→ derive private-control / capability catalog snapshot
+→ bind one Host-owned loopback server
 → spawn Root lifecycle host actor
-→ module_registry::install installs ModuleCatalog
-→ derive route registry, private-control snapshot, capability catalog snapshot
-→ bind one Host-owned loopback server from installed route descriptors
+→ publish private Team MCP discovery
 → run private framed control with root handle + installed private-control snapshot
 → request peer autostart through PeerHandle
 ```
 
-Host-owned loopback transport 已收敛为一个 loopback port/listener，但不会共享单一 Root owner Interface。每个业务 Adapter 仍只绑定自身需要的 typed owner module handle / port；`owner::Handle` 只保留给 Root lifecycle projection/shutdown 路径，例如 host-private health/snapshot。常规 Rust module 通过 `platform::module::ModuleDescriptor` 声明 provides/requires/effects 与可选 loopback descriptor；`module_registry/install` 收集 Foundation `ModuleScope` registrations，调用 `ModuleCatalog::install_with_capabilities_and_effects()` 校验依赖与 scoped effects，并输出 installed route registry、private-control snapshot 与 capability catalog projection。loopback router 只消费 installed route descriptors；legacy compatibility module 已删除，不在 router 中硬编码。Organization/Team、Sessions、Fleet 等业务 HTTP/SSE/WS 入口由各自 module descriptor 注册。普通模块不拥有 Host transport/listener，也不能把 route descriptor 反推为通用 Host registry。[VERIFY: runtime-host/platform/src/module.rs:141-204] [VERIFY: runtime-host/platform/src/module.rs:239-304] [VERIFY: runtime-host/host/src/module_registry/install.rs] [VERIFY: runtime-host/host/src/http/router.rs] [VERIFY: runtime-host/modules/organization/src/adapters/loopback/mod.rs:50-58] [VERIFY: runtime-host/modules/fleet/src/adapters/loopback/mod.rs:61-69] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/mod.rs:73-85] Platform loopback outcome 类型支持 `Response`、`Stream`、`Upgrade`；当前 Host server 直接写回该 outcome，Session SSE 与 Fleet terminal WS 是统一 server 的 route outcome，不是独立 Host-owned listener。统一 listener 自身作为 Host HTTP extension scope 管理，不归普通模块所有。[VERIFY: runtime-host/platform/src/loopback.rs:152-218] [VERIFY: runtime-host/host/src/http/server.rs:20-40] [VERIFY: runtime-host/host/src/http/server.rs:83-104] [VERIFY: runtime-host/modules/fleet/src/adapters/loopback/mod.rs:120-164] OpenClaw gateway、Matcha app-server、Matcha MCP stdio 仍是 peer/native 边界。Host capability catalog 来自 installed `ModuleCatalog` 中各 owner module 的 `CapabilityDescriptorProvider`；Runtime Endpoint Directory 由 `runtime-directory` module 投影 fixed local OpenClaw/Matcha endpoints。Host `PeerHandle` 只提供 peer lifecycle source，不存在单独的 `peer_directory.rs` Host owner，public response 不暴露 PID、token、path 或 raw peer state。因此 HTTP/control 请求不能绕过自己的 typed Interface 直接访问 `Host`，也不会为每条 route 创建第二个 Host 或第二份 peer lifecycle state。对应实现为 `runtime-host/host/src/main.rs`、`runtime-host/host/src/control/**`、`runtime-host/host/src/host_actor/**`、`runtime-host/host/src/composition/host/mod.rs`、`runtime-host/host/src/composition/runtime_ports.rs`、`runtime-host/host/src/module_registry/**`、`runtime-host/modules/runtime-directory/src/**`、`runtime-host/host/src/composition/peer/handle.rs`、`runtime-host/host/src/http/**` 与 `runtime-host/modules/**/src/adapters/loopback/**`。
+[VERIFY: runtime-host/host/src/app/runtime.rs:30-42] [VERIFY: runtime-host/host/src/app/service.rs:111-156]
+
+Host-owned loopback transport 已收敛为一个 loopback port/listener，但不会共享单一 Root owner Interface。每个业务 Adapter 仍只绑定自身需要的 typed owner module handle / port；`owner::Handle` 只保留给 Root lifecycle projection/shutdown 路径，例如 host-private health/snapshot。常规 Rust module 通过 `platform::module::ModuleDescriptor` 声明 provides/requires/effects 与可选 loopback descriptor；`module_registry/install` 收集 Foundation `ModuleScope` registrations，调用 `ModuleCatalog::install_with_capabilities_and_effects()` 校验依赖与 scoped effects，并输出 installed route registry、private-control snapshot 与 capability catalog projection。Router 与 Route effects 消费同一完整 install-plan route snapshot，catalog 校验成功后才 bind listener；legacy compatibility module 已删除，不在 router 中硬编码。Organization/Team、Sessions、Fleet 等业务 HTTP/SSE/WS 入口由各自 module descriptor 注册；Team MCP 同样是唯一 catalog 中的 `host.team-mcp`，不是 Router 外侧追加路由，其 `host.team-mcp.call` 实际注册到同名 ModuleScope，dispose 时 unregister。普通模块不拥有 Host transport/listener，也不能把 route descriptor 反推为通用 Host registry。[VERIFY: runtime-host/platform/src/module.rs:141-204] [VERIFY: runtime-host/platform/src/module.rs:239-304] [VERIFY: runtime-host/host/src/module_registry/install.rs:34-103] [VERIFY: runtime-host/host/src/app/service.rs:111-149] [VERIFY: runtime-host/host/src/composition/host/mod.rs:429-458] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:535-560] [VERIFY: runtime-host/host/src/http/router.rs] [VERIFY: runtime-host/modules/organization/src/adapters/loopback/mod.rs:50-58] [VERIFY: runtime-host/modules/fleet/src/adapters/loopback/mod.rs:61-69] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/mod.rs:73-85] Platform loopback outcome 类型支持 `Response`、`Stream`、`Upgrade`；当前 Host server 直接写回该 outcome，Session SSE 与 Fleet terminal WS 是统一 server 的 route outcome，不是独立 Host-owned listener。统一 listener 自身作为 Host HTTP extension scope 管理，不归普通模块所有。[VERIFY: runtime-host/platform/src/loopback.rs:152-218] [VERIFY: runtime-host/host/src/http/server.rs:20-40] [VERIFY: runtime-host/host/src/http/server.rs:83-104] [VERIFY: runtime-host/modules/fleet/src/adapters/loopback/mod.rs:120-164] OpenClaw gateway、Matcha app-server、Matcha MCP stdio 仍是 peer/native 边界。Host capability catalog 来自 installed `ModuleCatalog` 中各 owner module 的 `CapabilityDescriptorProvider`；Runtime Endpoint Directory 由 `runtime-directory` module 投影 fixed local OpenClaw/Matcha endpoints。Host `PeerHandle` 只提供 peer lifecycle source，不存在单独的 `peer_directory.rs` Host owner，public response 不暴露 PID、token、path 或 raw peer state。因此 HTTP/control 请求不能绕过自己的 typed Interface 直接访问 `Host`，也不会为每条 route 创建第二个 Host 或第二份 peer lifecycle state。对应实现为 `runtime-host/host/src/main.rs`、`runtime-host/host/src/control/**`、`runtime-host/host/src/host_actor/**`、`runtime-host/host/src/composition/host/mod.rs`、`runtime-host/host/src/composition/runtime_ports.rs`、`runtime-host/host/src/module_registry/**`、`runtime-host/modules/runtime-directory/src/**`、`runtime-host/host/src/composition/peer/handle.rs`、`runtime-host/host/src/http/**` 与 `runtime-host/modules/**/src/adapters/loopback/**`。
 
 ### 8.2 Transport family 与职责
 
@@ -474,20 +502,28 @@ Host-owned loopback transport 已收敛为一个 loopback port/listener，但不
 | Provider / Settings / Security / Channel / Connector | `provider`、`settings`、`security`、`channels`、`connectors` owner modules | `modules/provider/**`, `modules/settings/**`, `modules/security/**`, `modules/channels/**`, `modules/connectors/**` |
 | External ClawHub marketplace | `ClawHubRegistryClient`；search 直连 external registry，install 经 `skills` owner module / OpenClaw skills port | `external/clawhub/**`, `modules/skills/src/**`, `integrations/openclaw/src/skill.rs` |
 | OpenClaw products | `cron`、`subagents`、`task-manager`、`plugins`、`skills`、`usage` owner modules；session/task/team prompt effect 经 OpenClaw Gateway / owner module ports 投递 | `modules/cron/**`, `modules/subagents/**`, `modules/task-manager/**`, `modules/plugins/**`, `modules/skills/**`, `modules/usage/**`, `integrations/openclaw/src/**` |
-| diagnostics | `diagnostics` owner module constrained archive receipt | `modules/diagnostics/src/**`, `host/src/composition/host/diagnostics_archive.rs` |
+| diagnostics | `diagnostics` owner module archive collection 与 constrained receipt；Host port 只提供 state / admission signal | `modules/diagnostics/src/**`, `host/src/composition/host/ports/diagnostics_archive.rs` |
 
 这个划分不是把每个 transport 变成一个新的事实 owner：例如 Cron native job facts仍由 OpenClaw，TeamRun graph facts 仍由 Organization，security desired/effect facts 仍由其 dedicated owner。transport 只是其入站 adapter。Host health/status 读取 Host admission、peer supervisor projection、Gateway health/control readiness 时保持独立字段；`Host Ready` 只表示 admission open，不等同 Gateway connected、Matcha Running 或 OpenClaw control ready。
+
+Diagnostics module 在 `owner/archive.rs` 持有 active slot/coalescing、`OwnedTask` 与 blocking collection 的 cancel + join：admission closed 或 task cancellation 时 cancel 后等待 collection，清对应 active slot 再发布终态，等待 receipt 时 join owned task。Host 只以 `DiagnosticsHostPort` 提供 state 与 admission-closed future，composition 注入 admission、producer、Host port，不持有 archive operation state；原 bundle、receipt 与 archive/download route 不变，不新增 Host job queue。[VERIFY: runtime-host/modules/diagnostics/src/owner/archive.rs:14-140] [VERIFY: runtime-host/modules/diagnostics/src/owner/actor.rs:16-43] [VERIFY: runtime-host/modules/diagnostics/src/ports.rs:16-20] [VERIFY: runtime-host/host/src/composition/host/ports/diagnostics_archive.rs:5-48] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:523-532]
 
 ### 8.3 Shutdown 是显式顺序，不依赖 drop 偶然收束
 
 Host shutdown 由 `composition/host/shutdown.rs` 定义，并由 Root owner shutdown path 串行触发 `Host::shutdown()`；本轮新增的 drain/call-log scope 是源码接线，完整关停验证仍 OPEN。[VERIFY: runtime-host/host/src/composition/host/shutdown.rs:83-115]
 
+Plugins/Skills 在 `handle_wiring::build_handles` 构造后即向已有同名 `ModuleScope` 注册 `OwnerTask` disposer；不由 `assemble_host` 事后补登记、不新增 owner registry，关停仍在 Organization/Wiki call workflows 排空后依次调用 Skills、Plugins 的 `stop_operations()`，原 shutdown order 不变。[VERIFY: runtime-host/host/src/composition/host/handle_wiring.rs:28-69] [VERIFY: runtime-host/host/src/composition/host/mod.rs:343-355] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:61-94]
+
 ```text
 begin Host shutdown admission
 → drain/join OwnerRuntimeTasks
-  → peer/security/channel/fleet/connector/settings/provider/session owners
-  → Organization coordinator before Organization owner join
-  → OwnerRuntimeSystem
+  → Organization/Wiki call workflows；Skills/Plugins operations
+  → OrganizationRuntime.quiesce（cancel + join coordinator）
+  → 逆序 dispose 非 runtime-dependency scopes（含 host.team-mcp）
+  → peer task
+  → Settings/Security/Sessions/Provider scopes；Provider 独立 system
+  → OrganizationRuntime.drain_and_join（dispose 自有 scope、actor task）
+  → runtime-directory scope；共享 OwnerRuntimeSystem
 → close session delta sink
 → cancel CronHandle bounded operations and settle OpenClaw session shutdown
 → close OpenClaw event sink when session slot settles
@@ -497,7 +533,7 @@ begin Host shutdown admission
 → only when all slots settle, publish HostPhase::ShutDown
 ```
 
-每一步都会保留 `ShutdownOutcome` 或 typed failure；未 resolved/join 的 peer 使 Host shutdown 保持失败，而不是假报成功。由此产生两个维护规则：
+Organization 内部 `OrganizationRuntime` 真正持有 actor OwnedTask disposer 与 coordinator，正式 `effect_registrations()` 将其实际 scope 登记交给 catalog；`quiesce` 先停止调度，`drain_and_join` 最后释放其 scope，Host 只决定上述跨 owner 顺序。目前 coordinator join 结果被丢弃，不能宣称该 failure 已完整进入 Host shutdown report；actor join failure 沿原 callback 记录。未 resolved/join 的 peer 仍使 Host shutdown 保持失败，而不是假报成功。[VERIFY: runtime-host/modules/organization/src/api.rs:20-70] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:34-94] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:346-374] 由此产生两个维护规则：
 
 1. 新增长操作时，拥有该语义的 concrete owner、facade 或 coordinator 必须定义 cancellation 与 join 位置。
 2. 新增 peer 时，不能仅在 `Host::new()` 构造；必须同时明确 start dependency、event sink、shutdown order 与 failure report。
@@ -537,7 +573,7 @@ Session identity 是 endpoint、非空 agentId、sessionKey 组成的地址，�
 
 Matcha session catalog 的 authority 是 native `session.list` 合并的 SessionIndex、registry 与 history，包括未发送空会话；Rust adapter 经既有 `list_history` 链投影，不以 transcript 文件集合当目录，unavailable 不 fallback 扫描。native RFC3339 `updatedAt` 转毫秒，identity 与 `model_state: None` 不变；window/content 仍为 local bounded read，不新增 Host session store。[VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/runtime.rs:397-441] [VERIFY: runtime-host/integrations/matcha-agent/src/peer/lifecycle.rs:1597-1624] [VERIFY: matcha-agent/src/app-server/main.ts:779-794] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/timeline.rs:18-26] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/timeline.rs:111-127]
 
-Session list/catalog 与 create/load/window 的 `ownership` 是只读归属投影：`null` 表示未知，`ordinary` 表示成功查无 Team binding，`team` 必须带完整 `teamId/teamRunId/roleId/sessionRef`。Sessions 经批量 `SessionOwnershipReader` 读取 Organization，不使用内存默认 `source_binding` 判归属；Electron strict decode 后进入 Renderer meta/graph，普通 history/Agent open 只接受 ordinary，不依赖 Teams store hydrate 或旧前缀。Team 记录保留，仍由显式 `openSessionIdentity` 打开。[VERIFY: runtime-host/modules/sessions/src/owner/session_ownership.rs:10-114] [VERIFY: runtime-host/modules/sessions/src/ports.rs:27-41] [VERIFY: src/types/desktop/session-ownership.ts:1-21] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/list.ts:118-143] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/session-contract.ts:190-214] [VERIFY: src/stores/chat/session-runtime-graph.ts:149-159] [VERIFY: src/stores/chat/types.ts:77-81] [VERIFY: src/components/layout/AgentSessionsPane.tsx:972-985] [VERIFY: src/pages/Teams/TeamChat.tsx:152-159]
+Session list/catalog 与 create/load/window 的 `ownership` 是只读归属投影：`null` 表示未知，`ordinary` 表示成功查无 Team binding，`team` 必须带完整 `teamId/teamRunId/roleId/sessionRef`。Sessions 经批量 `SessionOwnershipReader` 读取 Organization，不使用内存默认 `source_binding` 判归属；SessionHandle::new 收为 pub(crate)，SessionModule::new 保持私有；原 command/query/domain 正式出口保留，不等于全 raw 消息封口。[VERIFY: runtime-host/modules/sessions/src/lib.rs:1-69] [VERIFY: runtime-host/modules/sessions/src/lib.rs:121-129] [VERIFY: runtime-host/modules/sessions/src/api.rs:44-54] Electron strict decode 后进入 Renderer meta/graph，普通 history/Agent open 只接受 ordinary，不依赖 Teams store hydrate 或旧前缀。Team 记录保留，仍由显式 `openSessionIdentity` 打开。[VERIFY: runtime-host/modules/sessions/src/owner/session_ownership.rs:10-114] [VERIFY: runtime-host/modules/sessions/src/ports.rs:27-41] [VERIFY: src/types/desktop/session-ownership.ts:1-21] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/list.ts:118-143] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/session-contract.ts:190-214] [VERIFY: src/stores/chat/session-runtime-graph.ts:149-159] [VERIFY: src/stores/chat/types.ts:77-81] [VERIFY: src/components/layout/AgentSessionsPane.tsx:972-985] [VERIFY: src/pages/Teams/TeamChat.tsx:152-159]
 
 普通 Session 取消保持公开 DTO/签名不变：Renderer 固定点击时的 session/run，无审批时省略 `approvalIds`，`stopping` 只是本地请求中投影；unknown/rejected/timeout 可见，成功回执也只等原生终态，单次 deadline 不重发。Rust `SessionHandle::abort_session` 经 `SessionQuery::Abort` / `QueryRoute::Direct` → `SessionShared::handle_abort`（`owner/abort.rs`）直接调用 native，绕开 Send keyed FIFO，旧 command Abort 已删除；仍复用既有 scope-managed owner runtime、CallRecorder 与 native ingress，不新增 registry/state store。OpenClaw 有 run 只用 `chat.abort(sessionKey, runId)`，无 run 只用 `sessions.abort(key)`，无 fallback；不改变 TeamRun 或引入 embedded 恢复场景设计。[VERIFY: src/stores/chat/abort-handlers.ts:38-71] [VERIFY: src/stores/chat/abort-handlers.ts:99-128] [VERIFY: runtime-host/modules/sessions/src/api.rs:171-177] [VERIFY: runtime-host/modules/sessions/src/application/queries.rs:105-108] [VERIFY: runtime-host/modules/sessions/src/owner/actor.rs:1583-1585] [VERIFY: runtime-host/modules/sessions/src/owner/abort.rs:83-98] [VERIFY: runtime-host/modules/sessions/src/call.rs:266-274] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:382] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:526] [VERIFY: runtime-host/host/src/composition/host/session_ingress.rs:5-27] [VERIFY: runtime-host/integrations/openclaw/src/session/adapters/runtime.rs:104-158]
 
@@ -551,6 +587,8 @@ Renderer canonical latest 与已加载 nonlatest 阅读页不是同一展示列�
 
 Sessions 的已加载消息与来源覆盖由同一 sync 候选归并：有效同源连续范围可保留，不被后一次较小尾页无条件覆盖；显示淘汰或来源失效后不声称旧范围仍完整。分支事实仅沿内部 `SessionSync.source_branch` 传递，native epoch 仍只表示事件源世代，不作为 transcript revision。来源跨度与展示项数各限200，未证明覆盖使用既有 Incomplete/BoundedHistory，公共 schema 不扩展。[VERIFY: runtime-host/modules/sessions/src/ports.rs:103-116] [VERIFY: runtime-host/modules/sessions/src/domain/model.rs:1749-1762] [VERIFY: runtime-host/modules/sessions/src/domain/model.rs:2787-2865]
 
+Native ownership key 的解释归 Integration：OpenClaw 用 endpoint + agent + 完整 sessionKey，不比较 history UUID 与 receipt suffix；Matcha 用 endpoint + native endpointSessionId，不以 catalog 默认 agent 判断归属。Host Directory 只按固定 peer 分派 projection，Organization 经 `OrganizationHandle::session_ownership` 持有 canonical receipts 的 O(N+M) batch matcher；Host reader 只转发 query 并映射 receipt→SessionSourceBinding。Sessions 每次 enrich 重读，读失败或 receipt key 无法解析保持 unknown，成功未命中才 ordinary；不增加逐条 RPC、跨请求 cache 或 store。[VERIFY: runtime-host/integrations/openclaw/src/session/mod.rs:26-33] [VERIFY: runtime-host/integrations/matcha-agent/src/session/projection.rs:21-29] [VERIFY: runtime-host/modules/organization/src/application/projection.rs:6-23] [VERIFY: runtime-host/modules/organization/src/owner/handle.rs:576-597] [VERIFY: runtime-host/host/src/composition/runtime_ports.rs:248-303] [VERIFY: runtime-host/host/src/composition/host/ports/organization.rs:39-70] [VERIFY: runtime-host/modules/sessions/src/owner/session_ownership.rs:10-114]
+
 #### OpenClaw Goal：原生事实与运行归属
 
 Goal 的持久状态、token 计量、状态迁移与 start/resume 执行属于 OpenClaw native runtime；Sessions 只保存完整 identity 下的 bounded Goal 投影，不建立 Host Goal store、续轮 scheduler 或第二执行 queue。`sessionKey` 是地址，`endpointSessionId` 是原生窗口 ID；OpenClaw create/list 分别使用原生创建回执与目录行的 `sessionId`，不从地址后缀推导。公开 `SessionView.goal` 区分 `known {goal}`、`known {goal:null}`、`unknown` 与 `unsupported`；`GoalChanged` 沿原 Session delta 链同步，不由聊天正文或工具输出猜状态。[VERIFY: runtime-host/modules/sessions/src/domain/goal.rs] [VERIFY: runtime-host/modules/sessions/src/domain/model.rs] [VERIFY: src/types/session-goal.ts]
@@ -559,11 +597,15 @@ Goal 的持久状态、token 计量、状态迁移与 start/resume 执行属于 
 
 ### 9.2 TeamRun：Organization 事实与 OpenClaw effect 分离
 
+Organization 的 adapters/application/owner/store 实现 namespace 已 private；正式 root API 保留 WebhookToken、TeamRunMcpFacade/is_team_tool、Admission ports、TeamRunWake/Reason、OwnerInput/package::TeamSkillSelectionResolver 与公开 domain DTO/functions。`OrganizationStore` 是可交给 owner 的 opaque 装配资源，open/refresh/facts/mutation 都为 crate 内部方法；Host 只调用 `open_organization_store`，不能取 raw facts。显式离线 `migrate_legacy_log` 只读源文件、创建全新输出目录并验证 artifact，不发布到运行中的 canonical owner；发现只有旧日志而无 DB 时正常 open 返回 MigrationRequired，不自动导入。[VERIFY: runtime-host/modules/organization/src/lib.rs:5-14] [VERIFY: runtime-host/modules/organization/src/lib.rs:289-320] [VERIFY: runtime-host/modules/organization/src/lib.rs:326-349] [VERIFY: runtime-host/modules/organization/src/package/mod.rs:16-23] [VERIFY: runtime-host/modules/organization/src/lib.rs:426-446] [VERIFY: runtime-host/modules/organization/src/store/durable.rs:42-124] [VERIFY: runtime-host/modules/organization/src/store/migration.rs:74-152]
+
+`TeamRunWake { reason, run_id: Option<GraphRunId> }` 是 Organization 正式调度提示，十二类 reason 经 watch/send_replace 发布，允许合并覆盖；consumer 必须重读当前 scheduler/facts。它不是 durable event ledger、可靠逐条历史、节点完成证明或下游派发回执，Host 的 unit changed 事件也不转移该权威。[VERIFY: runtime-host/modules/organization/src/run/event/mod.rs:1-50] [VERIFY: runtime-host/modules/organization/src/owner/handle.rs:52-87]
+
 Organization 结构化事实写入单一 `organization/state.sqlite`，按领域记录持久化，不保存全组织或整 Run 快照 BLOB；大正文按 Team/Run 的哈希目录保存不可变内容。写事务在 `BEGIN IMMEDIATE` 内刷新已提交记录、执行领域变更、校验并写入变更键，提交后沿原路径唤醒调度器；内存回滚只恢复触及记录。Run lane 复用连接并增量刷新，不逐调用冷读全库。旧 `organization-facts.log` 只供显式离线迁移，正常启动不双写、不自动导入。Run purge 删除结构记录并留 marker；未引用正文暂留，避免破坏尚在读取的快照，不引入后台 GC。用户授权适配测试后，Windows Organization 456/456 全通过，Host 生产编译检查通过；SQLite 锁、事务隔离/回滚、逐记录幂等及离线迁移保真由真实存储测试验证。实际数据迁移状态见验证记录，不以测试通过冒充现场 Run 已恢复。[VERIFY: runtime-host/modules/organization/src/store/durable.rs] [VERIFY: runtime-host/modules/organization/src/store/sqlite.rs] [VERIFY: runtime-host/modules/organization/src/store/content.rs] [VERIFY: runtime-host/modules/organization/src/store/migration.rs] [VERIFY: runtime-host/modules/organization/src/owner/actor.rs]
 
-Team MCP 保留原六工具。原 `team_graph_context` 保留脱敏 current_node/graph_summary 与设计读取，运行读取用 view=run_prompts 加 `<team_run_context>` 四 ID；原 `team_graph_patch` 用单一根 object schema 统一设计 operations 与 set_node_prompt，无 mode 或新增工具。任一操作为 set_node_prompt 即进入运行分支并逐项拒绝混批；外层 nodeId 是当前执行节点，operation.nodeId 是目标节点，不猜测转换参数，阶段、版本与幂等保护保留。[VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs:6-28] [VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs:91-146] [VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs:273-332] [VERIFY: runtime-host/modules/organization/src/application/team_mcp.rs:41-148] [VERIFY: runtime-host/modules/organization/src/run/scheduler/mod.rs:220-223]
+Team MCP 经共享 `runtime-host mcp --state-dir <absolute directory>` binary 的 ToolCatalog，仍保留原六工具及私有 signed HTTP 边界（`team-mcp-local` / `team.mcp`）；tool+body hash revision 校验不变。`host.team-mcp` descriptor requires Organization/runtime.directory，实际 Route scope 归 Host composition；四业务 ID 不是 native caller 认证，也不转移 Wiki 工具的 owner。[VERIFY: runtime-host/host/src/main.rs:11-18] [VERIFY: runtime-host/host/src/mcp.rs:11-55] [VERIFY: runtime-host/host/src/team_mcp/route.rs:28-98] [VERIFY: runtime-host/host/src/module_registry/install.rs:17-99] 原 `team_graph_context` 保留脱敏 current_node/graph_summary 与设计读取，运行读取用 view=run_prompts 加 `<team_run_context>` 四 ID；原 `team_graph_patch` 用单一根 object schema 统一设计 operations 与 set_node_prompt，无 mode 或新增工具。任一操作为 set_node_prompt 即进入运行分支并逐项拒绝混批；外层 nodeId 是当前执行节点，operation.nodeId 是目标节点，不猜测转换参数，阶段、版本与幂等保护保留。[VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs:6-28] [VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs:91-146] [VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs:273-332] [VERIFY: runtime-host/modules/organization/src/application/team_mcp.rs:41-148] [VERIFY: runtime-host/modules/organization/src/run/scheduler/mod.rs:220-223]
 
-Team MCP 业务失败由 Host 专属 client 将 Organization 的 `success:false` 映射为 typed `ToolCallError::Execution`；Platform MCP 仅将其编码为 `content + isError:true`，保留原安全错误正文，不解释 Team 字段。成功响应及 JSON-RPC 参数/传输错误边界不变，其他 MCP provider 不按 JSON 字段自动分类。[VERIFY: runtime-host/host/src/team_mcp/client.rs:90-96] [VERIFY: runtime-host/platform/src/mcp/server.rs:131-150]
+Team 六工具识别与业务失败分类属于 Organization MCP adapter：`is_team_tool` 供 facade 与 Host route 共用，`TeamRunMcpFacade::call_host` 仅将严格布尔 `success:false` 映射为 typed `ToolCallError::Execution`。Host client 只处理私有 HTTP、签名/discovery 与 Value 解码；Platform MCP 仅编码 `content + isError:true`，保留原安全正文。成功响应、early 400、auth、JSON-RPC 参数/传输错误边界不变，其他 MCP provider 不按 JSON 字段自动分类。[VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs:18-33] [VERIFY: runtime-host/modules/organization/src/adapters/mcp/team_run.rs:16-26] [VERIFY: runtime-host/host/src/team_mcp/client.rs:28-90] [VERIFY: runtime-host/host/src/team_mcp/route.rs:69-98] [VERIFY: runtime-host/platform/src/mcp/server.rs:132-149]
 
 Sessions 终态快照只提供 exact native runId 的 Final 助手正文集合，保持消息边界；Host 透传，协议结果识别仍属于 Organization。TeamRun 复用唯一 `TeamNodeOutput` parser 与节点端口规则，选择唯一有效结果，冲突或缺失通过原链最多补答三次；不以首条/末条助手或裸 JSON 兜底。同一 SQLite 写事务提交可信 native observation 与最终 graph resolution，协议失败复用 Failed/failed 和原 evidence，不伪造 native 状态、不新建结果 store。snapshot 的持久协议错误按当前 failed fence、精确系统 receipt/evidence 派生，优先于下述瞬时调度错误。Run 列表独立按非 tombstone 存在性投影，异常不隐藏运行；执行查询、角色权限和调度 admission 仍保持保守校验。[VERIFY: runtime-host/modules/sessions/src/domain/model.rs:1436-1449] [VERIFY: runtime-host/modules/organization/src/application/team_message.rs] [VERIFY: runtime-host/modules/organization/src/store/durable.rs:1053-1073] [VERIFY: runtime-host/modules/organization/src/application/design.rs:450-456] [VERIFY: runtime-host/modules/organization/src/run/query.rs:101-143]
 
@@ -585,7 +627,7 @@ ExistingTeam 讨论与设计共用同一 Run 的 graph/startGate，门禁只有 
 
 运行期任务调整仍由同一 Organization canonical graph 承担：run_prompts 返回全图任务正文、角色、连线端口/action 与 definition version；set_node_prompt 仅改 work/review 正文，经原 ReplaceNode、fingerprint/command ledger 与 SQLite 写事务保存，不发布 scheduler wake。四 ID（teamId/runId/nodeId/nodeExecutionId）只是业务 scope，不是 caller 身份认证；owner 同锁核 Active Started、未 tombstone、当前 node/exec，再用原 scheduler key 查 ActivityLedger、由 activity_id 派生 delivery，保留当前 fence、在途状态与 task/role/session/prompt 一致性。Host 保留 MCP transport 签名认证，不再签发或注入执行 token；Session 原样发送 delivery.message，不修改 OpenClaw、不新增插件或 native 私有授权字段。设计 epoch/generation guard、已有 Activity/同次 retry 快照与新 Activity/rework 使用新正文均保留。`team_message` 仍只接受 summary/decision；摘要实现上限为 4096 UTF-8 字节，生产提示保留 512 要求。旧日志 schema 27 的 output tag 2 与旧 tag 1 仍由离线 reader 保真读取；在线使用逐记录 codec。此处是源码事实，非实机验收。[VERIFY: runtime-host/modules/organization/src/store/runtime_graph.rs:52-266] [VERIFY: runtime-host/modules/organization/src/store/durable.rs:1398-1421] [VERIFY: runtime-host/modules/organization/src/owner/handle.rs:642-661] [VERIFY: runtime-host/host/src/team_mcp/route.rs:69-98] [VERIFY: runtime-host/host/src/composition/host/ports/organization.rs:395-417] [VERIFY: runtime-host/modules/organization/src/run/delivery/model.rs:383-385] [VERIFY: runtime-host/modules/organization/src/run/scheduler/mod.rs:220-223]
 
-手工 Team 只选择已有 agent，单个 Team intent 绑定一个 endpoint；Organization 在两条 manual 入口持久化前读取非 leader 资料并准备完整成员介绍，代码保序填 name/role_id/Markdown，仅 leader 的 role request/receipt 保存 `agents_markdown`（不含 block markers）。生成机制通过窄 `TeamMemberIntroductions` port 与 runtime 分离，Host 注入 Provider 一成员一文本调用，不要求 JSON 或 TeamRun repair；TeamSkill、graph/delivery、HTTP contract 不扩展。复用 Organization 持久化：物化结构在 SQLite，成员介绍正文在 Team 内容目录，恢复引用原始正文；schema 27 的 request 4/5 与 receipt 2/3 tags 仅保留于旧日志离线 reader，不新增业务 store/job。[VERIFY: runtime-host/modules/organization/src/owner/actor.rs:385-493] [VERIFY: runtime-host/modules/organization/src/owner/member_introduction.rs:66-159] [VERIFY: runtime-host/modules/organization/src/team/materialization.rs:31-58] [VERIFY: runtime-host/modules/organization/src/ports/materialization.rs:103-108] [VERIFY: runtime-host/host/src/composition/host/ports/team_member_introductions.rs:21-79] [VERIFY: runtime-host/modules/organization/src/store/codec.rs:69] [VERIFY: runtime-host/modules/organization/src/store/codec.rs:445-494] [VERIFY: runtime-host/modules/organization/src/store/codec.rs:534-559] [VERIFY: runtime-host/modules/organization/src/store/codec.rs:1720-1756] [VERIFY: runtime-host/modules/organization/src/store/codec.rs:1800-1836]
+手工 Team 只选择已有 agent，单个 Team intent 绑定一个 endpoint；Organization 在两条 manual 入口持久化前读取非 leader 资料并准备完整成员介绍，代码保序填 name/role_id/Markdown，仅 leader 的 role request/receipt 保存 `agents_markdown`（不含 block markers）。生成机制通过窄 `TeamMemberIntroductions` port 与 runtime 分离；Organization application 准备既有 prompt、资料段和生成 options，Host 只转换 Provider DTO、调用、取消、错误与安全 trace，并将 native `Some(Stop)` 映射为输出完成事实；Organization 在原 pipeline 生成后、trim 前拒绝未完成输出，一成员一文本调用，不要求 JSON 或 TeamRun repair；TeamSkill、graph/delivery、HTTP contract 不扩展。复用 Organization 持久化：物化结构在 SQLite，成员介绍正文在 Team 内容目录，恢复引用原始正文；schema 27 的 request 4/5 与 receipt 2/3 tags 仅保留于旧日志离线 reader，不新增业务 store/job。[VERIFY: runtime-host/modules/organization/src/owner/actor.rs:385-493] [VERIFY: runtime-host/modules/organization/src/owner/member_introduction.rs:66-159] [VERIFY: runtime-host/modules/organization/src/team/materialization.rs:31-58] [VERIFY: runtime-host/modules/organization/src/ports/materialization.rs:103-108] [VERIFY: runtime-host/modules/organization/src/application/member_introduction.rs:3-30] [VERIFY: runtime-host/modules/organization/src/owner/member_introduction.rs:185-241] [VERIFY: runtime-host/host/src/composition/host/ports/team_member_introductions.rs:27-72] [VERIFY: runtime-host/host/src/composition/host/ports/team_member_introductions.rs:114-136] [VERIFY: runtime-host/modules/organization/src/store/codec.rs:69] [VERIFY: runtime-host/modules/organization/src/store/codec.rs:445-494] [VERIFY: runtime-host/modules/organization/src/store/codec.rs:534-559] [VERIFY: runtime-host/modules/organization/src/store/codec.rs:1720-1756] [VERIFY: runtime-host/modules/organization/src/store/codec.rs:1800-1836]
 
 成员准备 pipeline 最多同时推进 4 个 future；Provider `GenerateText` 走 Direct，以一次 snapshot 固定 accounts/catalog/routing 与 models handle。Host 中唯一 Provider owner 使用独立的既有 Foundation `OwnerRuntimeSystem`（4 workers、ready queue 8、mailbox 64），其余 owner 仍使用原共享 system；避免 Organization 等待 Provider 时占用同一共享单 worker。沿用 bounded ready queue 背压，先 dispose Provider scope 再 drain/join 独立 system，不新增模型 executor/store/job，也不承诺所有负载下必达 4 并发。[VERIFY: runtime-host/modules/organization/src/owner/member_introduction.rs:109-159] [VERIFY: runtime-host/modules/provider/src/api.rs:862-875] [VERIFY: runtime-host/modules/provider/src/owner/actor.rs:815-837] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:337-364] [VERIFY: runtime-host/host/src/composition/host/owners/runtime.rs:94-104] [VERIFY: runtime-host/foundation/src/execution/owner_runtime.rs:1450-1461]
 

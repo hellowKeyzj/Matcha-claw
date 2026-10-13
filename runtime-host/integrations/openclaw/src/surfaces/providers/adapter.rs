@@ -53,6 +53,50 @@ impl provider_module::ProviderModelDiscoveryOps for OpenClawDriver {
     }
 }
 
+impl provider_module::ProviderRuntimeIdentityOps for OpenClawDriver {
+    fn runtime_identities(
+        &self,
+        accounts: &[provider_module::ProviderAccount],
+    ) -> Result<Vec<provider_module::ProviderRuntimeIdentity>, ()> {
+        super::public_provider_model_identities(accounts)
+            .map(|identities| {
+                identities
+                    .into_iter()
+                    .map(|(account_id, identity)| {
+                        provider_module::ProviderRuntimeIdentity::new(
+                            account_id,
+                            identity.provider_key(),
+                        )
+                    })
+                    .collect()
+            })
+            .map_err(|_| ())
+    }
+
+    fn runtime_identity(
+        &self,
+        account: &provider_module::ProviderAccount,
+    ) -> Result<provider_module::ProviderRuntimeIdentity, ()> {
+        super::public_provider_model_identity(account)
+            .map(|identity| {
+                provider_module::ProviderRuntimeIdentity::new(
+                    account.id().as_str(),
+                    identity.provider_key(),
+                )
+            })
+            .map_err(|_| ())
+    }
+
+    fn runtime_model_ref(
+        &self,
+        identity: &provider_module::ProviderRuntimeIdentity,
+        kind: provider_module::ProviderAccountKind,
+        model_id: &str,
+    ) -> String {
+        super::public_provider_model_ref(identity.provider_key(), kind, model_id)
+    }
+}
+
 impl provider_module::ProviderPrivateProjectionOps for OpenClawDriver {
     fn prepare_private_projection(
         &self,

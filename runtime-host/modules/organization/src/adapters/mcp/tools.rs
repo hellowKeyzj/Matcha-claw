@@ -16,16 +16,20 @@ impl ToolProvider for TeamRunMcpFacade {
     }
 
     fn call(&mut self, name: &str, arguments: &Map<String, Value>) -> Option<ToolCallOutcome> {
-        match name {
-            "team_graph_context"
+        is_team_tool(name).then(|| self.call_host(name, arguments))
+    }
+}
+
+pub fn is_team_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "team_graph_context"
             | "team_graph_patch"
             | "team_node_event"
             | "team_approval_resolve"
             | "team_run_decision_submit"
-            | "team_evidence_record" => Some(self.call_host(name, arguments)),
-            _ => None,
-        }
-    }
+            | "team_evidence_record"
+    )
 }
 
 fn schema(properties: Value, required: &[&str]) -> Value {

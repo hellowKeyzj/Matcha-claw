@@ -1,4 +1,12 @@
-use crate::owner::handle::OrganizationHandle;
+use foundation::{
+    execution::OwnedTask,
+    lifecycle::{EffectRegistration, ModuleScope, ScopedEffectKind},
+};
+
+use crate::owner::{
+    coordinator::{TeamRunCoordinator, TeamRunCoordinatorHandle, TeamRunCoordinatorInput},
+    handle::OrganizationHandle,
+};
 
 pub use crate::application::start_gate_control::{
     StartGatePromptPlan, StartGateRuntimeBindingLookup,
@@ -8,6 +16,59 @@ pub use crate::application::team_message::{
     TeamMessageTerminalPlan, plan_team_message_terminal,
 };
 pub use crate::owner::actor::OrganizationOwnerInput;
+
+pub struct OrganizationRuntime {
+    scope: ModuleScope,
+    coordinator: Option<TeamRunCoordinator>,
+}
+
+impl OrganizationRuntime {
+    pub fn new(
+        mut owner_task: OwnedTask<()>,
+        on_join_failure: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        let mut scope = ModuleScope::new("organization");
+        scope.register_effect_disposer(
+            ScopedEffectKind::OwnerTask,
+            "owner-task",
+            move || async move {
+                if owner_task.drain_and_join().await.is_err() {
+                    on_join_failure();
+                }
+            },
+        );
+        Self { scope, coordinator: None }
+    }
+
+    pub fn scope_mut(&mut self) -> &mut ModuleScope {
+        &mut self.scope
+    }
+
+    pub fn effect_registrations(&self) -> &[EffectRegistration] {
+        self.scope.effect_registrations()
+    }
+
+    pub fn start_coordinator<T: Send + Sync + 'static>(
+        &mut self,
+        input: TeamRunCoordinatorInput,
+        admission_changes: tokio::sync::watch::Receiver<T>,
+    ) -> TeamRunCoordinatorHandle {
+        let (coordinator, handle) = TeamRunCoordinator::spawn(input, admission_changes);
+        self.coordinator = Some(coordinator);
+        handle
+    }
+
+    pub async fn quiesce(&mut self) {
+        if let Some(coordinator) = &mut self.coordinator {
+            coordinator.cancel();
+            let _ = coordinator.join().await;
+        }
+    }
+
+    pub async fn drain_and_join(&mut self) {
+        self.scope.dispose_all_lifo().await;
+    }
+}
 
 #[derive(Clone)]
 pub struct OrganizationModule {

@@ -218,7 +218,7 @@ pub enum TeamGraphContextResult {
     OutcomeUnknown,
 }
 
-pub fn query_team_graph_context(
+pub(crate) fn query_team_graph_context(
     facts: &OrganizationFacts,
     query: &TeamGraphContextQuery,
 ) -> TeamGraphContextResult {

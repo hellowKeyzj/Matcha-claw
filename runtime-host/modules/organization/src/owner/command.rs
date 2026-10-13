@@ -23,13 +23,13 @@ use super::team_run::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TeamDeleteRunNativeSettlement {
+pub(crate) enum TeamDeleteRunNativeSettlement {
     Cancellation,
     Cancelled,
     Tombstoned,
 }
 
-pub enum OrganizationCommand {
+pub(crate) enum OrganizationCommand {
     TeamSkillAuthorize {
         package_root: PathBuf,
         reply: crate::call::CallReply<Result<TeamSkillSelectionId, TeamSkillSelectionError>>,

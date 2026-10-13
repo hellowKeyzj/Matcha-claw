@@ -394,7 +394,11 @@ impl FleetQuerySnapshot {
     ///
     /// Connection, environment, and managed-resource summaries intentionally
     /// omit endpoint/config/secret material and command payload details.
-    pub fn from_facts(facts: &FleetFacts, leases: &LeaseBook<EndpointId>, now: SystemTime) -> Self {
+    pub(crate) fn from_facts(
+        facts: &FleetFacts,
+        leases: &LeaseBook<EndpointId>,
+        now: SystemTime,
+    ) -> Self {
         let mut snapshot = Self::from_sources(
             facts.topology(),
             facts.command_ledger(),

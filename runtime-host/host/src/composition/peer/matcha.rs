@@ -1,10 +1,9 @@
-use crate::composition::runtime_ports::LifecycleOps;
+use foundation::process::supervision::StartOutcome;
 
-use super::actor::PeerShared;
+use crate::composition::runtime_ports::{LifecycleOps, RuntimeStartFailure};
 
-pub(super) async fn autostart(shared: &PeerShared, lifecycle: &dyn LifecycleOps) {
-    let result = lifecycle.start().await;
-    if result.is_err() {
-        shared.record_matcha_start(result);
-    }
+pub(super) async fn autostart(
+    lifecycle: &dyn LifecycleOps,
+) -> Result<StartOutcome, RuntimeStartFailure> {
+    lifecycle.start().await
 }

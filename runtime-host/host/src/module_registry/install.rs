@@ -1,4 +1,7 @@
-use platform::module::{ModuleCatalog, ModuleInstallError, PrivateControlCatalogSnapshot};
+use platform::module::{
+    CapabilityKey, EffectKind, ModuleCatalog, ModuleDescriptor, ModuleId, ModuleInstallError,
+    PrivateControlCatalogSnapshot,
+};
 
 use crate::composition::HostHandles;
 
@@ -11,10 +14,16 @@ use super::{
     system_modules::{install_plan_capabilities, system_module_install_plan},
 };
 
+const TEAM_MCP_REQUIRES: &[CapabilityKey] = &[
+    CapabilityKey::new("organization"),
+    CapabilityKey::new("runtime.directory"),
+];
+
 pub(crate) struct InstallModulesInput<'a> {
     pub(crate) handles: &'a HostHandles,
     pub(crate) verifier: CapabilityVerifier,
-    pub(crate) webhook_token: organization::adapters::loopback::trigger::WebhookToken,
+    pub(crate) webhook_token: organization::WebhookToken,
+    pub(crate) team_mcp: platform::loopback::ModuleDescriptor,
 }
 
 pub(crate) struct ModuleInstallPlan {
@@ -27,10 +36,16 @@ pub(crate) fn prepare_module_install(input: InstallModulesInput<'_>) -> ModuleIn
         handles,
         verifier,
         webhook_token,
+        team_mcp,
     } = input;
     let capability_catalog = CapabilityCatalog::new();
-    let descriptors =
-        module_descriptors(handles, verifier, webhook_token, capability_catalog.clone());
+    let descriptors = module_descriptors(
+        handles,
+        verifier,
+        webhook_token,
+        capability_catalog.clone(),
+        team_mcp,
+    );
     ModuleInstallPlan {
         descriptors,
         capability_catalog,
@@ -61,8 +76,9 @@ impl ModuleInstallPlan {
 fn module_descriptors(
     handles: &HostHandles,
     verifier: CapabilityVerifier,
-    webhook_token: organization::adapters::loopback::trigger::WebhookToken,
+    webhook_token: organization::WebhookToken,
     capability_catalog: CapabilityCatalog,
+    team_mcp: platform::loopback::ModuleDescriptor,
 ) -> Vec<platform::module::ModuleDescriptor> {
     let (capability_catalog, private_control) =
         system_module_install_plan(verifier.clone(), capability_catalog);
@@ -72,6 +88,15 @@ fn module_descriptors(
     let mut descriptors = before_capability_catalog;
     descriptors.push(capability_catalog);
     descriptors.extend(after_capability_catalog);
+    descriptors.push(ModuleDescriptor::new(
+        ModuleId::new("host.team-mcp"),
+        &[],
+        TEAM_MCP_REQUIRES,
+        &[EffectKind::Route],
+        &["host.team-mcp.call"],
+        &[],
+        Some(team_mcp),
+    ));
     descriptors.push(private_control);
     descriptors.extend(process_modules);
     descriptors

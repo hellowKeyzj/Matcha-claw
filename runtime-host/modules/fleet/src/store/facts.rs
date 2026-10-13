@@ -36,7 +36,7 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct FleetFacts {
+pub(crate) struct FleetFacts {
     command_ledger: CommandLedger,
     outbox: Outbox,
     secret_references: BTreeMap<String, FleetSecretRef>,
@@ -52,7 +52,7 @@ pub struct FleetFacts {
     leases: LeaseBook<platform::endpoint::EndpointId>,
 }
 
-pub struct FleetFactsRestoreInput {
+pub(crate) struct FleetFactsRestoreInput {
     pub commands: Vec<CommandRecord>,
     pub dispatches: Vec<OutboxRecord>,
     pub secret_references: Vec<FleetSecretRef>,

@@ -801,7 +801,7 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
     assert!(
         organization_module.contains("StartGateSendHook")
             && organization_module.contains("OrganizationSessionTerminal")
-            && organization_module.contains("team_run_mcp_provider")
+            && organization_module.contains("TeamRunMcpFacade")
             && organization_send_hook.contains("start_gate_prompt_plan")
             && organization_terminal.contains("team_message_terminal_observed")
             && host_mcp.contains("ToolCatalog::new")

@@ -3,6 +3,7 @@ mod command;
 mod handle;
 mod matcha;
 mod openclaw;
+mod ports;
 mod query;
 mod status;
 

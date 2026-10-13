@@ -1288,21 +1288,49 @@ fn trigger_registration_restore_requires_matching_graph_attempt() {
     );
 }
 
-#[test]
-fn durable_trigger_fire_records_once_replays_without_refiring_and_survives_reopen() {
+#[tokio::test]
+async fn durable_trigger_fire_records_once_replays_without_refiring_and_survives_reopen() {
+    struct EmptyRuntimeDirectory;
+
+    impl crate::OrganizationRuntimeDirectory for EmptyRuntimeDirectory {
+        fn team_runtime_for_endpoint(
+            &self,
+            _endpoint: &crate::RuntimeEndpointReference,
+        ) -> Option<std::sync::Arc<dyn crate::OrganizationNativeRuntime>> {
+            None
+        }
+
+        fn open_claw_runtime(&self) -> Option<std::sync::Arc<dyn crate::OrganizationNativeRuntime>> {
+            None
+        }
+    }
+
     let path = test_path("trigger-fire");
     let mut store = OrganizationStore::open(&path).unwrap();
     store.replace_facts(facts_with_armed_webhook_run()).unwrap();
+    let mut system = foundation::execution::OwnerRuntimeSystem::spawn(Default::default());
+    let (module, mut owner) = crate::spawn_owner(
+        &system,
+        crate::OrganizationOwnerInput {
+            store,
+            runtime_directory: std::sync::Arc::new(EmptyRuntimeDirectory),
+            member_introductions: None,
+            team_skill_selections: crate::package::TeamSkillSelectionResolver::open(
+                path.parent().unwrap().join("team-skill-selections.json"),
+            )
+            .unwrap(),
+        },
+    );
+    let handle = module.handle();
     let request =
         TriggerFireRequest::try_new("run:one", "start", TriggerSource::Webhook, "request:one")
             .unwrap();
 
-    assert_eq!(
-        store.fire_trigger(request.clone(), 2),
-        Ok(TriggerRegistration::Recorded(request.clone()))
-    );
-    let graph = store
-        .facts()
+    let recorded = handle.trigger_fire(request.clone(), 2).await.unwrap().unwrap();
+    assert_eq!(recorded.registration(), &TriggerRegistration::Recorded(request.clone()));
+    assert!(matches!(recorded.run(), &crate::TeamRunCommandOutcome::Unavailable));
+    let (_, persisted) = sqlite_facts(&path);
+    let graph = persisted
         .run(&GraphRunId::new("run:one"))
         .unwrap()
         .graph();
@@ -1333,14 +1361,12 @@ fn durable_trigger_fire_records_once_replays_without_refiring_and_survives_reope
         Some(StartTrigger::Webhook { path }) if path == "/team/release"
     ));
 
-    assert_eq!(
-        store.fire_trigger(request.clone(), 3),
-        Ok(TriggerRegistration::Replayed(request.clone()))
-    );
+    let replayed = handle.trigger_fire(request.clone(), 3).await.unwrap().unwrap();
+    assert_eq!(replayed.registration(), &TriggerRegistration::Replayed(request.clone()));
     assert_eq!(sqlite_snapshot(&path), after_first_fire);
+    let (_, persisted) = sqlite_facts(&path);
     assert_eq!(
-        store
-            .facts()
+        persisted
             .run(&GraphRunId::new("run:one"))
             .unwrap()
             .graph()
@@ -1350,7 +1376,22 @@ fn durable_trigger_fire_records_once_replays_without_refiring_and_survives_reope
             .get(),
         1
     );
-    drop(store);
+    let conflict = TriggerFireRequest::try_new(
+        "run:one", "alternate", TriggerSource::Webhook, "request:one",
+    )
+    .unwrap();
+    let conflicted = handle.trigger_fire(conflict, 4).await.unwrap().unwrap();
+    assert_eq!(
+        conflicted.registration(),
+        &TriggerRegistration::ConflictingIdempotencyKey {
+            idempotency_key: "request:one".to_owned(),
+        }
+    );
+    assert!(matches!(conflicted.run(), &crate::TeamRunCommandOutcome::Unavailable));
+    assert_eq!(sqlite_snapshot(&path), after_first_fire);
+    owner.drain_and_join().await.unwrap();
+    system.drain_and_join().await.unwrap();
+    drop(module);
 
     let mut reopened = OrganizationStore::open(&path).unwrap();
     assert_eq!(

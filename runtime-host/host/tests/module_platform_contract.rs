@@ -446,13 +446,17 @@ fn module_registry_install_collects_owner_scope_effect_registrations() {
     );
     assert!(
         !MODULE_REGISTRY_INSTALL.contains("append_installed_route_effects")
-            && !MODULE_REGISTRY_INSTALL.contains("EffectKind::Route"),
+            && !MODULE_REGISTRY_INSTALL.contains("EffectRegistration::new("),
         "module_registry/install must not synthesize route registrations outside ModuleScope"
     );
 }
 
 #[test]
 fn host_owner_scopes_remain_effect_registration_sources() {
+    let host_owner_runtime = without_whitespace(HOST_OWNER_RUNTIME);
+    let organization_runtime =
+        without_whitespace(include_str!("../../modules/organization/src/api.rs"));
+
     assert!(
         FOUNDATION_LIFECYCLE.contains("pub struct EffectRegistration")
             && FOUNDATION_LIFECYCLE.contains("effect_registrations(&self)"),
@@ -461,13 +465,27 @@ fn host_owner_scopes_remain_effect_registration_sources() {
     assert!(
         HOST_OWNER_RUNTIME.contains("module_scopes: Vec<ModuleScope>")
             && HOST_OWNER_RUNTIME.contains("module_scope(")
-            && HOST_OWNER_RUNTIME.contains("register_owned_task"),
+            && host_owner_runtime.contains(
+                "scope.register_effect_disposer(ScopedEffectKind::OwnerTask,\"owner-task\","
+            )
+            && HOST_OWNER_RUNTIME.contains("task.drain_and_join().await"),
         "Host owner scopes must remain concrete ModuleScope registration sources"
     );
     assert!(
-        HOST_OWNER_RUNTIME.contains("scope: ModuleScope")
-            && HOST_OWNER_RUNTIME.contains("module_scope(\"organization\", organization_task)"),
-        "organization owner task must be registered through its ModuleScope"
+        organization_runtime.contains("scope:ModuleScope")
+            && organization_runtime.contains("ModuleScope::new(\"organization\")")
+            && organization_runtime.contains(
+                "scope.register_effect_disposer(ScopedEffectKind::OwnerTask,\"owner-task\","
+            )
+            && organization_runtime.contains("owner_task.drain_and_join().await")
+            && organization_runtime.contains("self.scope.effect_registrations()")
+            && organization_runtime
+                .contains("pubfnscope_mut(&mutself)->&mutModuleScope{&mutself.scope}")
+            && host_owner_runtime
+                .contains("organization::OrganizationRuntime::new(organization_task,")
+            && host_owner_runtime.contains("self.organization.effect_registrations()")
+            && host_owner_runtime.contains("self.organization.scope_mut()"),
+        "organization owner task and effects must come from OrganizationRuntime's ModuleScope through Host accessors"
     );
     assert!(
         !MODULE_REGISTRY_INSTALL.contains("ModuleId::new(\"organization\")")

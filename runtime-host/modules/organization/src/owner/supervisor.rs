@@ -5,8 +5,10 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::run::event::TeamRunWake;
+
 use super::{
-    coordinator::{TeamRunCoordinatorInput, TeamRunCoordinatorRequest, TeamRunWake},
+    coordinator::{TeamRunCoordinatorInput, TeamRunCoordinatorRequest},
     receipt_router::TeamRunReceiptRouter,
     run_actor::{CompletedActivity, TeamRunActors},
     team_run::{CronReconciliation, TeamTriggerCron},
@@ -252,7 +254,7 @@ mod tests {
         let (_requests, mut requests) = mpsc::channel(1);
         let (_admission, mut admission) = watch::channel(());
         let (changes, mut changes_rx) = watch::channel(TeamRunWake::new(
-            super::super::coordinator::TeamRunWakeReason::GraphChanged,
+            crate::run::event::TeamRunWakeReason::GraphChanged,
             None,
         ));
         let mut actors = TeamRunActors::default();
@@ -261,11 +263,11 @@ mod tests {
             Duration::from_secs(30),
         );
         changes.send_replace(TeamRunWake::new(
-            super::super::coordinator::TeamRunWakeReason::GraphChanged,
+            crate::run::event::TeamRunWakeReason::GraphChanged,
             None,
         ));
         changes.send_replace(TeamRunWake::new(
-            super::super::coordinator::TeamRunWakeReason::NativeRunSettled,
+            crate::run::event::TeamRunWakeReason::NativeRunSettled,
             Some(organization::GraphRunId::new("run:one")),
         ));
         assert!(matches!(
@@ -281,7 +283,7 @@ mod tests {
             .await,
             Next::ScheduleChanged(wake)
                 if wake.reason()
-                    == super::super::coordinator::TeamRunWakeReason::NativeRunSettled
+                    == crate::run::event::TeamRunWakeReason::NativeRunSettled
                     && wake
                         .run_id()
                         .is_some_and(|run_id| run_id.as_str() == "run:one")
@@ -294,14 +296,14 @@ mod tests {
         let (_requests, mut requests) = mpsc::channel(1);
         let (_admission, mut admission) = watch::channel(());
         let (changes, mut changes_rx) = watch::channel(TeamRunWake::new(
-            super::super::coordinator::TeamRunWakeReason::GraphChanged,
+            crate::run::event::TeamRunWakeReason::GraphChanged,
             None,
         ));
         let mut actors = TeamRunActors::default();
         let mut maintenance = tokio::time::interval(Duration::from_secs(30));
         let cancellation = CancellationToken::new();
         changes.send_replace(TeamRunWake::new(
-            super::super::coordinator::TeamRunWakeReason::GraphChanged,
+            crate::run::event::TeamRunWakeReason::GraphChanged,
             None,
         ));
         cancellation.cancel();

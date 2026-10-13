@@ -1,26 +1,23 @@
-pub mod actor;
-pub mod admission;
-pub mod command;
-pub mod coordinator;
-pub mod handle;
+pub(crate) mod actor;
+pub(crate) mod admission;
+pub(crate) mod command;
+pub(crate) mod coordinator;
+pub(crate) mod handle;
 mod member_introduction;
-pub mod query;
+pub(crate) mod query;
 mod receipt_router;
 mod run_actor;
 mod run_scheduler;
 mod step_runtime;
 mod supervisor;
-pub mod team_run;
+pub(crate) mod team_run;
 mod terminal_settlement;
 
-pub use actor::{OrganizationOwner, OrganizationOwnerInput};
 pub use admission::{OrganizationPhase, RequestAdmissionClosed};
-pub use command::OrganizationCommand;
-pub use coordinator::{
-    TeamRunAdmission, TeamRunCoordinator, TeamRunCoordinatorHandle, TeamRunCoordinatorInput,
-};
+pub(crate) use command::OrganizationCommand;
+pub use coordinator::{TeamRunCoordinatorHandle, TeamRunCoordinatorInput};
 pub use handle::OrganizationHandle;
-pub use query::OrganizationQuery;
+pub(crate) use query::OrganizationQuery;
 pub use team_run::{
     ArmedTrigger, ManualTeamCreateOutcome, TeamDeleteOutcome, TeamMaterializationCommandOutcome,
     TeamNodeTerminalResolution, TeamNodeTerminalResult, TeamRunCommandOutcome,

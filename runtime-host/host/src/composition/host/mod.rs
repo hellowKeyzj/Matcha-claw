@@ -350,32 +350,8 @@ fn assemble_host(
             runtime_observation: runtime_observation.clone(),
             session_delta_source: session_delta_source.clone(),
         },
-        &owners,
+        &mut owners,
     );
-    let plugins = handles.plugins.clone();
-    owners
-        .tasks
-        .module_scope_mut("plugins")
-        .expect("plugins module scope must exist")
-        .register_effect_disposer(
-            foundation::lifecycle::ScopedEffectKind::OwnerTask,
-            "owner-task",
-            move || async move {
-                plugins.stop_operations().await;
-            },
-        );
-    let skills = handles.skills.clone();
-    owners
-        .tasks
-        .module_scope_mut("skills")
-        .expect("skills module scope must exist")
-        .register_effect_disposer(
-            foundation::lifecycle::ScopedEffectKind::OwnerTask,
-            "owner-task",
-            move || async move {
-                skills.stop_operations().await;
-            },
-        );
     let cron_handle = handles.cron.clone();
     let shutdown_failures = shutdown::ShutdownState::new(owners.tasks.join_failures());
     let call_scope = shutdown_failures.call_log_scope(calls);

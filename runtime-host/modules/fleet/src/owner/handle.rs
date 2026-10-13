@@ -17,7 +17,7 @@ pub struct FleetHandle {
 }
 
 impl FleetHandle {
-    pub fn new(owner: OwnerRuntimeHandle<FleetCommand, FleetQuery>) -> Self {
+    pub(crate) fn new(owner: OwnerRuntimeHandle<FleetCommand, FleetQuery>) -> Self {
         Self {
             owner,
             recorder: None,
@@ -220,7 +220,7 @@ impl FleetHandle {
         Ok(Ok(()))
     }
 
-    pub async fn terminal_open_allocated(
+    pub(crate) async fn terminal_open_allocated(
         &self,
         selector: crate::owner::actor::FleetTerminalTargetSelector,
         dimensions: fleet::terminal::Dimensions,
@@ -255,8 +255,8 @@ impl FleetHandle {
 
     pub async fn terminal_provider_open(
         &self,
-        context: crate::application::terminal::TerminalContext,
-    ) -> Result<crate::application::terminal::TerminalProviderOpen, ()> {
+        context: crate::terminal_stream::TerminalContext,
+    ) -> Result<crate::terminal_stream::ProviderOpen, ()> {
         let target_id = fleet::TargetId::try_from(context.target.as_str()).map_err(|_| ())?;
         let (reply, reply_rx) = oneshot::channel();
         self.admit(FleetCommand::TerminalProviderOpen {
@@ -273,7 +273,7 @@ impl FleetHandle {
         &self,
         summary: fleet::terminal::SessionSummary,
     ) -> Result<
-        Result<Option<crate::application::terminal::TerminalContext>, fleet::FleetDeliveryError>,
+        Result<Option<crate::terminal_stream::TerminalContext>, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
@@ -283,12 +283,12 @@ impl FleetHandle {
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn terminal_resolve_context(
+    pub(crate) async fn terminal_resolve_context(
         &self,
         selector: crate::owner::actor::FleetTerminalTargetSelector,
         summary: fleet::terminal::SessionSummary,
     ) -> Result<
-        Result<Option<crate::application::terminal::TerminalContext>, fleet::FleetDeliveryError>,
+        Result<Option<crate::terminal_stream::TerminalContext>, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();
@@ -491,7 +491,7 @@ impl FleetHandle {
             .map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn snapshot(
+    pub(crate) async fn snapshot(
         &self,
         now: SystemTime,
     ) -> Result<
@@ -528,7 +528,7 @@ impl FleetHandle {
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn target_summaries(
+    pub(crate) async fn target_summaries(
         &self,
     ) -> Result<
         Result<Vec<crate::owner::actor::FleetTargetSummary>, fleet::FleetDeliveryError>,
@@ -562,7 +562,7 @@ impl FleetHandle {
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn topology_summary(
+    pub(crate) async fn topology_summary(
         &self,
     ) -> Result<
         Result<crate::owner::actor::FleetTopologySummary, fleet::FleetDeliveryError>,
@@ -611,7 +611,7 @@ impl FleetHandle {
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn node_command_request(
+    pub(crate) async fn node_command_request(
         &self,
         request: crate::owner::actor::FleetNodeCommandRequest,
     ) -> Result<
@@ -683,7 +683,7 @@ impl FleetHandle {
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn begin_dispatch(
+    pub(crate) async fn begin_dispatch(
         &self,
         dispatch_id: fleet::outbox::DispatchId,
     ) -> Result<
@@ -832,7 +832,7 @@ impl FleetHandle {
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn run_connection_probe(
+    pub(crate) async fn run_connection_probe(
         &self,
         id: fleet::connection::ConnectionId,
         command_id: fleet::command::CommandId,
@@ -860,7 +860,7 @@ impl FleetHandle {
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn run_environment_deployment(
+    pub(crate) async fn run_environment_deployment(
         &self,
         id: fleet::environment::EnvironmentId,
         command_id: fleet::command::CommandId,
@@ -890,7 +890,7 @@ impl FleetHandle {
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn run_environment_deletion(
+    pub(crate) async fn run_environment_deletion(
         &self,
         id: fleet::environment::EnvironmentId,
         command_id: fleet::command::CommandId,
@@ -920,7 +920,7 @@ impl FleetHandle {
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn run_resource_provisioning(
+    pub(crate) async fn run_resource_provisioning(
         &self,
         id: fleet::environment::ManagedResourceId,
         command_id: fleet::command::CommandId,
@@ -946,7 +946,7 @@ impl FleetHandle {
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn run_resource_deletion(
+    pub(crate) async fn run_resource_deletion(
         &self,
         id: fleet::environment::ManagedResourceId,
         command_id: fleet::command::CommandId,
@@ -1063,7 +1063,7 @@ impl FleetHandle {
         reply_rx.await.map_err(|_| RequestAdmissionClosed)
     }
 
-    pub async fn write_credential(
+    pub(crate) async fn write_credential(
         &self,
         request: crate::application::credentials::FleetCredentialWriteRequest,
     ) -> Result<
@@ -1489,9 +1489,9 @@ impl FleetHandle {
 
     pub async fn authenticate_runtime_agent_ingress(
         &self,
-        identity: fleet::store::AgentIngressIdentity,
+        identity: fleet::AgentIngressIdentity,
     ) -> Result<
-        Result<fleet::store::IngressAuthentication, fleet::FleetDeliveryError>,
+        Result<fleet::IngressAuthentication, fleet::FleetDeliveryError>,
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();

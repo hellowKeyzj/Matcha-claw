@@ -39,19 +39,8 @@ pub(in crate::composition::host) struct OwnerRuntimeTasks {
     organization_calls: OrganizationModule,
     wiki_calls: wiki::WikiHandle,
     join_failures: Arc<Mutex<Vec<&'static str>>>,
-    pub(in crate::composition::host) organization: OrganizationRuntime,
+    pub(in crate::composition::host) organization: organization::OrganizationRuntime,
     closed: bool,
-}
-
-pub(in crate::composition::host) struct OrganizationRuntime {
-    scope: ModuleScope,
-    pub(in crate::composition::host) coordinator: organization::TeamRunCoordinator,
-}
-
-impl OrganizationRuntime {
-    async fn dispose_after_session(&mut self) {
-        self.scope.dispose_all_lifo().await;
-    }
 }
 
 impl OwnerRuntimeTasks {
@@ -64,8 +53,8 @@ impl OwnerRuntimeTasks {
     ) -> Vec<EffectRegistration> {
         self.module_scopes
             .iter()
-            .chain(std::iter::once(&self.organization.scope))
             .flat_map(|scope| scope.effect_registrations().iter().copied())
+            .chain(self.organization.effect_registrations().iter().copied())
             .collect()
     }
 
@@ -77,8 +66,7 @@ impl OwnerRuntimeTasks {
         self.wiki_calls.shutdown_call_workflows().await;
         self.dispose_module_scope("skills").await;
         self.dispose_module_scope("plugins").await;
-        self.organization.coordinator.cancel();
-        let _ = self.organization.coordinator.join().await;
+        self.organization.quiesce().await;
         for scope in self
             .module_scopes
             .iter_mut()
@@ -97,7 +85,7 @@ impl OwnerRuntimeTasks {
         if self.provider_system.drain_and_join().await.is_err() {
             record_join_failure(&self.join_failures, "provider-runtime-system");
         }
-        self.organization.dispose_after_session().await;
+        self.organization.drain_and_join().await;
         self.dispose_module_scope("runtime-directory").await;
         if self.system.drain_and_join().await.is_err() {
             record_join_failure(&self.join_failures, "owner-runtime-system");
@@ -119,7 +107,7 @@ impl OwnerRuntimeTasks {
         module_id: &'static str,
     ) -> Option<&mut ModuleScope> {
         if module_id == "organization" {
-            return Some(&mut self.organization.scope);
+            return Some(self.organization.scope_mut());
         }
         self.module_scope_mut(module_id)
     }
@@ -366,7 +354,11 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     );
     let organization_module = organization_module.with_call_recorder(calls.clone());
     let organization_handle = organization_module.handle().clone();
-    let mut organization_scope = module_scope("organization", organization_task);
+    let failures = Arc::clone(&join_failures);
+    let mut organization_runtime =
+        organization::OrganizationRuntime::new(organization_task, move || {
+            record_join_failure(&failures, "organization");
+        });
 
     let session_terminal = Arc::new(
         super::super::ports::organization::OrganizationSessionTerminal::start(
@@ -375,9 +367,11 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         ),
     );
     let session_terminal_scope = Arc::clone(&session_terminal);
-    organization_scope.register_event_subscription("sessions.run-terminal", move || async move {
-        let _ = session_terminal_scope.close_and_join().await;
-    });
+    organization_runtime
+        .scope_mut()
+        .register_event_subscription("sessions.run-terminal", move || async move {
+            let _ = session_terminal_scope.close_and_join().await;
+        });
 
     let (session_module, session_task) = sessions_module::spawn_owner(
         &owner_runtime_system,
@@ -485,16 +479,15 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         session_handle.clone(),
         Arc::clone(&runtime_directory),
     ));
-    let (team_run_coordinator, team_run_coordinator_handle) =
-        organization::TeamRunCoordinator::spawn(
-            organization::TeamRunCoordinatorInput {
-                admission: admission.clone() as Arc<dyn organization::TeamRunAdmission>,
-                organization: organization_handle.clone(),
-                activity_executor,
-                observation: runtime_observation.sink(),
-            },
-            admission.subscribe(),
-        );
+    let team_run_coordinator_handle = organization_runtime.start_coordinator(
+        organization::TeamRunCoordinatorInput {
+            admission: admission.clone() as Arc<dyn organization::TeamRunAdmission>,
+            organization: organization_handle.clone(),
+            activity_executor,
+            observation: runtime_observation.sink(),
+        },
+        admission.subscribe(),
+    );
 
     let peer_startup = crate::composition::peer::PeerStartupState::new();
     let peer_owner = crate::composition::peer::PeerOwner::new(
@@ -524,9 +517,9 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         &owner_runtime_system,
         ::diagnostics::DiagnosticsOwnerInput {
             admission: admission.clone(),
-            archive: Arc::new(super::super::ports::HostDiagnosticsArchive::new(
+            producer: diagnostics,
+            host: Arc::new(super::super::ports::HostDiagnostics::new(
                 admission.clone(),
-                diagnostics,
                 peer_handle.clone(),
             )),
         },
@@ -564,14 +557,12 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
                 route_only_scope("plugins"),
                 route_only_scope("sealed-resource"),
                 route_only_scope("skills"),
+                route_only_scope("host.team-mcp"),
             ],
             organization_calls: organization_module.clone(),
             wiki_calls: wiki.handle().clone(),
             join_failures,
-            organization: OrganizationRuntime {
-                scope: organization_scope,
-                coordinator: team_run_coordinator,
-            },
+            organization: organization_runtime,
             closed: false,
         },
         runtime_directory,

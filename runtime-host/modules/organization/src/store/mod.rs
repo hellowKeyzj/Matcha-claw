@@ -16,16 +16,16 @@ pub(crate) use runtime_graph::{NodePromptPatch, RuntimePromptPatch};
 
 pub use durable::OrganizationStore;
 pub use migration::{MigrationError, MigrationReport, migrate_legacy_log};
-pub use facts::TeamRunFactsRestoreInput;
-pub use facts::{
-    ApprovalResolutionInput, ApprovalResolutionOutcome,
-    GraphRunFacts, OrganizationFacts, OrganizationFactsError,
+#[cfg(test)]
+pub(crate) use facts::{ApprovalResolutionOutcome, TeamRunFactsRestoreInput, TeamTombstoneOutcome};
+pub use facts::OrganizationFactsError;
+pub(crate) use facts::{
+    GraphRunFacts, OrganizationFacts,
     PendingWorkflowPlanAdmission, RunStartGate, TeamFacts,
-    TeamTombstoneOutcome, WorkflowPlanAdmissionOutcome, WorkflowPlanSubmitOutcome,
     WorkflowTemplateFacts,
 };
 pub use fault::{DesignError, RuntimeGraphError, StoreFault};
-pub use terminal_observation::NativeTerminalReceiptTarget;
+pub(crate) use terminal_observation::NativeTerminalReceiptTarget;
 
 #[cfg(test)]
 mod tests;

@@ -53,7 +53,7 @@ pub struct OrganizationOwnerInput {
 }
 
 #[derive(Clone)]
-pub struct OrganizationShared {
+pub(crate) struct OrganizationShared {
     runtime_directory: Arc<dyn OrganizationRuntimeDirectory>,
     member_introductions: Option<Arc<dyn crate::TeamMemberIntroductions>>,
     store_path: PathBuf,
@@ -61,7 +61,7 @@ pub struct OrganizationShared {
     schedule_errors: Arc<Mutex<BTreeMap<GraphRunId, StoreFault>>>,
 }
 
-pub struct OrganizationGlobalState {
+pub(crate) struct OrganizationGlobalState {
     store: OrganizationStore,
     team_run: TeamRunOwner,
     team_skill_selections: TeamSkillSelectionResolver,
@@ -77,7 +77,7 @@ struct PendingTeamDelete {
     outcome: Result<TeamDeleteOutcome, StoreFault>,
 }
 
-pub struct OrganizationRunLane {
+pub(crate) struct OrganizationRunLane {
     store_path: PathBuf,
     store: Option<OrganizationStore>,
     team_run: TeamRunOwner,
@@ -87,13 +87,13 @@ struct TeamSkillRuntime {
     runtime: Arc<dyn OrganizationNativeRuntime>,
 }
 
-pub struct OrganizationOwner {
+pub(crate) struct OrganizationOwner {
     shared: OrganizationShared,
     global: OrganizationGlobalState,
 }
 
 impl OrganizationOwner {
-    pub fn new(input: OrganizationOwnerInput) -> Self {
+    pub(crate) fn new(input: OrganizationOwnerInput) -> Self {
         let store_path = input.store.path().to_owned();
         Self {
             shared: OrganizationShared {
@@ -116,13 +116,13 @@ impl OrganizationOwner {
         }
     }
 
-    pub fn command_target(
+    pub(crate) fn command_target(
         &self,
     ) -> Arc<OnceLock<OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>>> {
         Arc::clone(&self.shared.command_target)
     }
 
-    pub const fn lane_retention() -> LaneRetention {
+    pub(crate) const fn lane_retention() -> LaneRetention {
         LaneRetention::LowFrequency
     }
 }

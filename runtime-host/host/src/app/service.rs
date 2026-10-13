@@ -16,7 +16,7 @@ pub struct AppInput<R, W> {
     pub host: HostInput,
     pub verifier: platform::capability::CapabilityDecisionVerifier,
     pub provider_credential_resolver: Option<provider_module::Resolver>,
-    pub webhook_token: organization::adapters::loopback::trigger::WebhookToken,
+    pub webhook_token: organization::WebhookToken,
     pub runtime_host_transport_port: u16,
     pub control_input: R,
     pub control_output: W,
@@ -112,14 +112,13 @@ where
         handles: &runtime.handles,
         verifier: Arc::clone(&verifier),
         webhook_token,
+        team_mcp: team_mcp.descriptor(
+            runtime.handles.organization.clone(),
+            runtime.handles.runtime_directory.clone(),
+        ),
     });
     let route_snapshot = install_plan.route_snapshot();
-    let mut routes = route_snapshot.clone();
-    routes.push(team_mcp.descriptor(
-        runtime.handles.organization.clone(),
-        runtime.handles.runtime_directory.clone(),
-    ));
-    let router = crate::http::Router::new(routes);
+    let router = crate::http::Router::new(route_snapshot.clone());
     if let Err(error) = runtime
         .host_mut()
         .register_route_effects(&route_snapshot, router.clone())

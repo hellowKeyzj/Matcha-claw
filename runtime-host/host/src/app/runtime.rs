@@ -100,16 +100,19 @@ where
     W: AsyncWrite + Send + Unpin,
 {
     let mut runtime = start(input).await?;
-    let verifier = Arc::new(tokio::sync::Mutex::new(
-        platform::capability::CapabilityDecisionVerifier::try_new(TEST_VERIFICATION_KEY)
-            .expect("test verifier key"),
-    ));
+    let verifier = platform::capability::CapabilityDecisionVerifier::try_new(TEST_VERIFICATION_KEY)
+        .expect("test verifier key");
     let webhook_token =
-        organization::adapters::loopback::trigger::WebhookToken::try_new(TEST_WEBHOOK_TOKEN)
+        organization::WebhookToken::try_new(TEST_WEBHOOK_TOKEN)
             .expect("test webhook token");
     let install_plan = prepare_module_install(InstallModulesInput {
         handles: &runtime.handles,
-        verifier,
+        team_mcp: crate::team_mcp::route::descriptor(
+            runtime.handles.organization.clone(),
+            verifier.clone(),
+            runtime.handles.runtime_directory.clone(),
+        ),
+        verifier: Arc::new(tokio::sync::Mutex::new(verifier)),
         webhook_token,
     });
     let route_snapshot = install_plan.route_snapshot();

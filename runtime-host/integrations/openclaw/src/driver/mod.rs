@@ -10,6 +10,7 @@ mod repair;
 pub(crate) mod projection;
 
 pub use instance::{ConstructionError, OpenClawDriver, OpenClawInput, PreparedOpenClaw};
+pub use repair::StartupEffects;
 pub use owner::{
     PendingSupervisorJoin, SupervisorJoinError, SupervisorLifecycleHandle, SupervisorOwner,
     SupervisorShutdownFailureKind,

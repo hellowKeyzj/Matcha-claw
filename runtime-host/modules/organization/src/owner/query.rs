@@ -16,7 +16,7 @@ use crate::application::start_gate_control::{StartGatePromptPlan, StartGateRunti
 
 use super::team_run::{ArmedTrigger, TeamRunActivityTarget};
 
-pub enum OrganizationQuery {
+pub(crate) enum OrganizationQuery {
     TeamSkillValidate {
         package_root: PathBuf,
         reply: crate::call::CallReply<TeamSkillPackageValidation>,

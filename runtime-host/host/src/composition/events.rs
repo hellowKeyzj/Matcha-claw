@@ -23,7 +23,7 @@ pub struct HostEvents {
     matcha_lifecycle: mpsc::Receiver<SupervisorSnapshot>,
     calls: Option<broadcast::Receiver<platform::call::CallChanged>>,
     organization:
-        Option<tokio::sync::watch::Receiver<organization::owner::coordinator::TeamRunWake>>,
+        Option<tokio::sync::watch::Receiver<organization::TeamRunWake>>,
     open_claw_open: bool,
     cron_open: bool,
     open_claw_runtime_open: bool,
@@ -40,7 +40,7 @@ impl HostEvents {
 
     pub(super) fn set_organization_changes(
         &mut self,
-        changes: tokio::sync::watch::Receiver<organization::owner::coordinator::TeamRunWake>,
+        changes: tokio::sync::watch::Receiver<organization::TeamRunWake>,
     ) {
         self.organization = Some(changes);
     }

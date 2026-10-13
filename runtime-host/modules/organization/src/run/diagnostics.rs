@@ -498,7 +498,7 @@ pub enum TeamRunDiagnosticsQueryOutcome {
 ///
 /// The query is read-only. It does not consult Host state, runtime state, workspace state, or
 /// in-memory dispatch registries; every available fact comes from Organization durable facts.
-pub fn query_team_run_diagnostics(
+pub(crate) fn query_team_run_diagnostics(
     facts: &OrganizationFacts,
     team_id: &TeamId,
     run_id: &GraphRunId,

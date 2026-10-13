@@ -12,7 +12,7 @@ pub(super) struct HostHandleInput {
     pub(super) session_delta_source: sessions_module::SessionDeltaSource,
 }
 
-pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> HostHandles {
+pub(super) fn build_handles(input: HostHandleInput, owners: &mut RuntimeOwners) -> HostHandles {
     let HostHandleInput {
         admission,
         calls,
@@ -32,6 +32,18 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> H
     ));
     let plugins_handle = plugins_module::PluginsModule::new(plugins_adapter)
         .with_call_recorder(calls.recorder());
+    let plugins = plugins_handle.clone();
+    owners
+        .tasks
+        .module_scope_mut("plugins")
+        .expect("plugins module scope must exist")
+        .register_effect_disposer(
+            foundation::lifecycle::ScopedEffectKind::OwnerTask,
+            "owner-task",
+            move || async move {
+                plugins.stop_operations().await;
+            },
+        );
     let skills_adapter = Arc::new(openclaw::skill::OpenClawSkillsPort::new(
         admission.clone(),
         open_claw.clone(),
@@ -43,6 +55,18 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &RuntimeOwners) -> H
         sealed_resource.skills_port(),
     )
     .with_call_recorder(calls.recorder());
+    let skills = skills_handle.clone();
+    owners
+        .tasks
+        .module_scope_mut("skills")
+        .expect("skills module scope must exist")
+        .register_effect_disposer(
+            foundation::lifecycle::ScopedEffectKind::OwnerTask,
+            "owner-task",
+            move || async move {
+                skills.stop_operations().await;
+            },
+        );
     let cron_handle = owners.cron.clone();
     let agents_handle = owners.subagents.clone();
     let task_manager_handle = owners.task_manager.clone();

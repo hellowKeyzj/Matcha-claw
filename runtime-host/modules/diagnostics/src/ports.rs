@@ -2,7 +2,7 @@ use std::{future::Future, pin::Pin};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{DiagnosticsArchiveError, DiagnosticsArchiveReceipt};
+use crate::{DiagnosticsArchiveError, HostState};
 
 pub type DiagnosticsFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -13,16 +13,10 @@ pub trait DiagnosticsRequestAdmission: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DiagnosticsRequestAdmissionClosed;
 
-pub trait DiagnosticsArchivePort: Send + Sync {
-    fn collect_archive<'a>(
-        &'a self,
-        cancellation: DiagnosticsArchiveCancellation,
-    ) -> DiagnosticsFuture<'a, Result<DiagnosticsArchiveReceipt, DiagnosticsArchiveError>>;
+pub trait DiagnosticsHostPort: Send + Sync {
+    fn state(&self) -> DiagnosticsFuture<'_, Result<HostState, DiagnosticsArchiveError>>;
 
-    fn download_archive<'a>(
-        &'a self,
-        archive_id: String,
-    ) -> DiagnosticsFuture<'a, Result<Vec<u8>, DiagnosticsArchiveError>>;
+    fn wait_for_admission_closed(&self) -> DiagnosticsFuture<'static, ()>;
 }
 
 #[derive(Clone)]

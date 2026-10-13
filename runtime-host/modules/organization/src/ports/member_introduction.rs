@@ -34,11 +34,31 @@ impl fmt::Debug for MemberProfile {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct MemberIntroductionRequest {
-    pub name: String,
     pub role_id: RoleId,
-    pub profile: MemberProfile,
+    pub system_prompt: &'static str,
+    pub prompt: String,
+    pub max_output_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+}
+
+impl fmt::Debug for MemberIntroductionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MemberIntroductionRequest")
+            .field("role_id", &self.role_id)
+            .field("system_prompt", &self.system_prompt)
+            .field("prompt", &"<redacted>")
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("temperature", &self.temperature)
+            .finish()
+    }
+}
+
+pub struct MemberIntroductionOutput {
+    pub text: String,
+    pub complete: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
@@ -82,5 +102,5 @@ pub trait TeamMemberIntroductions: Send + Sync {
         &self,
         request: MemberIntroductionRequest,
         cancellation: CancellationToken,
-    ) -> OwnedRuntimeFuture<Result<String, MemberIntroductionError>>;
+    ) -> OwnedRuntimeFuture<Result<MemberIntroductionOutput, MemberIntroductionError>>;
 }

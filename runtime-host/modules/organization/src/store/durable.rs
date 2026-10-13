@@ -49,7 +49,7 @@ pub struct OrganizationStore {
 }
 
 impl OrganizationStore {
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreFault> {
+    pub(crate) fn open(path: impl Into<PathBuf>) -> Result<Self, StoreFault> {
         let mut store = Self::open_live(path)?;
         let observed_at = now_millis()?;
         store.transact(|facts| {
@@ -62,7 +62,7 @@ impl OrganizationStore {
         Ok(store)
     }
 
-    pub fn open_live(path: impl Into<PathBuf>) -> Result<Self, StoreFault> {
+    pub(crate) fn open_live(path: impl Into<PathBuf>) -> Result<Self, StoreFault> {
         let path = path.into();
         ensure_parent_directory(&path)?;
         let fresh = match OpenOptions::new().write(true).create_new(true).open(&path) {
@@ -95,21 +95,21 @@ impl OrganizationStore {
         })
     }
 
-    pub fn facts(&self) -> &OrganizationFacts {
+    pub(crate) fn facts(&self) -> &OrganizationFacts {
         &self.facts
     }
 
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
-    pub fn reopen(&mut self) -> Result<(), StoreFault> {
+    pub(crate) fn reopen(&mut self) -> Result<(), StoreFault> {
         let reopened = Self::open(self.path.clone())?;
         *self = reopened;
         Ok(())
     }
 
-    pub fn refresh(&mut self) -> Result<(), StoreFault> {
+    pub(crate) fn refresh(&mut self) -> Result<(), StoreFault> {
         if self.requires_reopen {
             *self = Self::open_live(self.path.clone())?;
             return Ok(());
@@ -123,11 +123,11 @@ impl OrganizationStore {
         Ok(())
     }
 
-    pub fn task_board(&self) -> &crate::run::TaskBoardFacts {
+    pub(crate) fn task_board(&self) -> &crate::run::TaskBoardFacts {
         self.facts.task_board()
     }
 
-    pub fn task_board_mutate<T>(
+    pub(crate) fn task_board_mutate<T>(
         &mut self,
         mutation: impl FnOnce(&mut crate::run::TaskBoardFacts) -> Result<T, crate::run::TaskBoardError>,
     ) -> Result<T, StoreFault> {
@@ -138,15 +138,15 @@ impl OrganizationStore {
         })
     }
 
-    pub fn decision(&self, run_id: &str, idempotency_key: &str) -> Option<&crate::TeamDecision> {
+    pub(crate) fn decision(&self, run_id: &str, idempotency_key: &str) -> Option<&crate::TeamDecision> {
         self.facts.decision(run_id, idempotency_key)
     }
 
-    pub fn decisions(&self) -> impl Iterator<Item = &crate::TeamDecision> {
+    pub(crate) fn decisions(&self) -> impl Iterator<Item = &crate::TeamDecision> {
         self.facts.decisions()
     }
 
-    pub fn record_decision(
+    pub(crate) fn record_decision(
         &mut self,
         command: TeamDecisionCommand,
     ) -> Result<TeamDecisionReceipt, StoreFault> {
@@ -166,7 +166,7 @@ impl OrganizationStore {
     }
 
     /// Explicit whole-state replacement; normal owner mutations use record transactions.
-    pub fn replace_facts(&mut self, facts: OrganizationFacts) -> Result<(), StoreFault> {
+    pub(crate) fn replace_facts(&mut self, facts: OrganizationFacts) -> Result<(), StoreFault> {
         self.ensure_writable()?;
         let mut transaction = self.database.begin()?;
         let (epoch, changes) = transaction.read_since(self.epoch)?;
@@ -204,7 +204,7 @@ impl OrganizationStore {
         }
     }
 
-    pub fn replace_workflow_template(
+    pub(crate) fn replace_workflow_template(
         &mut self,
         template: crate::WorkflowTemplateFacts,
     ) -> Result<(), StoreFault> {
@@ -215,7 +215,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn purge_graph_run(
+    pub(crate) fn purge_graph_run(
         &mut self,
         request: crate::TeamRunPurgeRequest,
     ) -> Result<crate::GraphRunPurgeOutcome, StoreFault> {
@@ -230,7 +230,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn replace_workflow_plan_template(
+    pub(crate) fn replace_workflow_plan_template(
         &mut self,
         team: crate::TeamId,
         source_identity: impl Into<String>,
@@ -242,7 +242,7 @@ impl OrganizationStore {
         self.replace_workflow_template(template)
     }
 
-    pub fn create_graph_run(
+    pub(crate) fn create_graph_run(
         &mut self,
         run: GraphRunFacts,
         creation_idempotency_key: &str,
@@ -255,7 +255,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn admit_workflow_plan_run(
+    pub(crate) fn admit_workflow_plan_run(
         &mut self,
         admission: PendingWorkflowPlanAdmission,
     ) -> Result<WorkflowPlanAdmissionOutcome, StoreFault> {
@@ -267,7 +267,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn submit_workflow_plan(
+    pub(crate) fn submit_workflow_plan(
         &mut self,
         team: TeamId,
         run_id: GraphRunId,
@@ -291,7 +291,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn create_workflow_plan_run(
+    pub(crate) fn create_workflow_plan_run(
         &mut self,
         team: TeamId,
         run_id: GraphRunId,
@@ -379,7 +379,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn begin_graph_run_cancellation(
+    pub(crate) fn begin_graph_run_cancellation(
         &mut self,
         run_id: &GraphRunId,
         idempotency_key: &str,
@@ -393,7 +393,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn settle_graph_run_cancellation(
+    pub(crate) fn settle_graph_run_cancellation(
         &mut self,
         run_id: &GraphRunId,
         idempotency_key: &str,
@@ -408,7 +408,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn tombstone_graph_run(
+    pub(crate) fn tombstone_graph_run(
         &mut self,
         run_id: &GraphRunId,
         idempotency_key: &str,
@@ -422,11 +422,11 @@ impl OrganizationStore {
         })
     }
 
-    pub fn resume_graph_runs(&self, team_id: &crate::TeamId) -> Vec<ResumeOutcome> {
+    pub(crate) fn resume_graph_runs(&self, team_id: &crate::TeamId) -> Vec<ResumeOutcome> {
         self.facts.resume_graph_runs(team_id)
     }
 
-    pub fn register_delivery(
+    pub(crate) fn register_delivery(
         &mut self,
         request: crate::DeliveryRequest,
     ) -> Result<crate::RegisterOutcome, StoreFault> {
@@ -438,7 +438,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn register_activity_and_start_attempt(
+    pub(crate) fn register_activity_and_start_attempt(
         &mut self,
         request: ActivityRequest,
         started_at: u64,
@@ -466,7 +466,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn register_activity(
+    pub(crate) fn register_activity(
         &mut self,
         request: ActivityRequest,
     ) -> Result<ActivityRegistrationOutcome, StoreFault> {
@@ -478,7 +478,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn resolve_human_decision(
+    pub(crate) fn resolve_human_decision(
         &mut self,
         command: HumanDecisionCommand,
     ) -> Result<HumanDecisionOutcome, StoreFault> {
@@ -490,7 +490,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn record_artifact(
+    pub(crate) fn record_artifact(
         &mut self,
         record: ArtifactRecord,
     ) -> Result<ArtifactRecordOutcome, StoreFault> {
@@ -502,7 +502,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn record_evidence(&mut self, record: EvidenceRecord) -> Result<RecordOutcome, StoreFault> {
+    pub(crate) fn record_evidence(&mut self, record: EvidenceRecord) -> Result<RecordOutcome, StoreFault> {
         self.transact(|facts| {
             let outcome = facts
                 .record_evidence(record)
@@ -513,7 +513,7 @@ impl OrganizationStore {
 
     /// Tombstone is the Organization lifecycle boundary: facts remain durable and
     /// provider cleanup is not implied by this local transition.
-    pub fn tombstone_team(
+    pub(crate) fn tombstone_team(
         &mut self,
         team_id: &TeamId,
         cleanup_idempotency_key: IdempotencyKey,
@@ -528,7 +528,7 @@ impl OrganizationStore {
 
     /// Returns only materializations which may be settled by native readback.
     /// These requests must never be replayed as mutations after process recovery.
-    pub fn materialization_receipt_recovery_teams(&self) -> Vec<TeamId> {
+    pub(crate) fn materialization_receipt_recovery_teams(&self) -> Vec<TeamId> {
         self.facts
             .materialization_lifecycles()
             .filter_map(|lifecycle| {
@@ -539,21 +539,21 @@ impl OrganizationStore {
             .collect()
     }
 
-    pub fn team_materialization_recovery_request(
+    pub(crate) fn team_materialization_recovery_request(
         &self,
         team_id: &TeamId,
     ) -> Option<crate::TeamMaterializationRequest> {
         self.facts.materialization_recovery_request(team_id)
     }
 
-    pub fn team_materialization_removal(
+    pub(crate) fn team_materialization_removal(
         &self,
         team_id: &TeamId,
     ) -> Option<crate::TeamMaterializationRemoval> {
         self.facts.team_materialization_removal(team_id)
     }
 
-    pub fn team_unconfirmed_materialization_cleanup_request(
+    pub(crate) fn team_unconfirmed_materialization_cleanup_request(
         &self,
         team_id: &TeamId,
     ) -> Option<crate::TeamMaterializationRequest> {
@@ -561,11 +561,11 @@ impl OrganizationStore {
             .team_unconfirmed_materialization_cleanup_request(team_id)
     }
 
-    pub fn team_materialization_cleanup_confirmed(&self, team_id: &TeamId) -> bool {
+    pub(crate) fn team_materialization_cleanup_confirmed(&self, team_id: &TeamId) -> bool {
         self.facts.team_materialization_cleanup_confirmed(team_id)
     }
 
-    pub fn record_team_materialization_cleanup_outcome(
+    pub(crate) fn record_team_materialization_cleanup_outcome(
         &mut self,
         team_id: &TeamId,
         outcome: crate::MaterializationOperationOutcome,
@@ -578,7 +578,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn create_team_materialization(
+    pub(crate) fn create_team_materialization(
         &mut self,
         materialization: crate::TeamMaterialization,
     ) -> Result<crate::MaterializationRecordOutcome, StoreFault> {
@@ -592,7 +592,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn record_team_materialization_outcome(
+    pub(crate) fn record_team_materialization_outcome(
         &mut self,
         team_id: &crate::TeamId,
         outcome: crate::MaterializationOperationOutcome,
@@ -605,7 +605,7 @@ impl OrganizationStore {
     }
 
     /// Persists provider facts only after an explicitly requested native readback.
-    pub fn confirm_team_materialization(
+    pub(crate) fn confirm_team_materialization(
         &mut self,
         receipt: crate::MaterializationReceipt,
     ) -> Result<crate::MaterializationRecordOutcome, StoreFault> {
@@ -616,7 +616,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn install_runtime_receipt(
+    pub(crate) fn install_runtime_receipt(
         &mut self,
         receipt: crate::RunRuntimeReceipt,
     ) -> Result<(), StoreFault> {
@@ -627,7 +627,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn claim_agent_activity(
+    pub(crate) fn claim_agent_activity(
         &mut self,
         activity_id: &ActivityId,
         delivery: crate::DeliveryRequest,
@@ -677,7 +677,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn settle_agent_activity_dispatch(
+    pub(crate) fn settle_agent_activity_dispatch(
         &mut self,
         claim: &ActivityClaim,
         receipt: DeliveryReceipt,
@@ -755,7 +755,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn claim_activity(
+    pub(crate) fn claim_activity(
         &mut self,
         activity_id: &ActivityId,
         claimed_at: u64,
@@ -768,7 +768,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn dispatch_activity(
+    pub(crate) fn dispatch_activity(
         &mut self,
         claim: &ActivityClaim,
         dispatched_at: u64,
@@ -781,7 +781,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn settle_activity(
+    pub(crate) fn settle_activity(
         &mut self,
         claim: &ActivityClaim,
         settlement: ActivitySettlement,
@@ -793,7 +793,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn claim_delivery(
+    pub(crate) fn claim_delivery(
         &mut self,
         delivery_id: &DeliveryId,
         claimed_at: u64,
@@ -806,7 +806,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn settle_delivery(
+    pub(crate) fn settle_delivery(
         &mut self,
         claim: &DeliveryClaim,
         receipt: DeliveryReceipt,
@@ -819,7 +819,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn fire_trigger(
+    pub(crate) fn fire_trigger(
         &mut self,
         request: TriggerFireRequest,
         fired_at: u64,
@@ -875,14 +875,14 @@ impl OrganizationStore {
         result
     }
 
-    pub fn native_terminal_target(
+    pub(crate) fn native_terminal_target(
         &self,
         delivery_id: &DeliveryId,
     ) -> Option<NativeTerminalReceiptTarget> {
         self.facts.native_terminal_target(delivery_id)
     }
 
-    pub fn observe_native_terminal(
+    pub(crate) fn observe_native_terminal(
         &mut self,
         target: NativeTerminalReceiptTarget,
         native_terminal: NativeTerminalStatus,
@@ -957,7 +957,7 @@ impl OrganizationStore {
         result
     }
 
-    pub fn resolve_native_run_output(
+    pub(crate) fn resolve_native_run_output(
         &mut self,
         target: NativeTerminalReceiptTarget,
         receipt: crate::AuthorizedGraphResolutionReceipt,
@@ -992,7 +992,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn apply_graph_patch(
+    pub(crate) fn apply_graph_patch(
         &mut self,
         run_id: &GraphRunId,
         patch: GraphPatch,
@@ -1001,7 +1001,7 @@ impl OrganizationStore {
         self.transact(|facts| facts.apply_graph_patch(run_id, &patch, applied_at))
     }
 
-    pub fn replace_team_graph(
+    pub(crate) fn replace_team_graph(
         &mut self,
         command: crate::RunCommand,
         definition: GraphDefinition,
@@ -1061,7 +1061,7 @@ impl OrganizationStore {
         result
     }
 
-    pub fn team_graph_patch(
+    pub(crate) fn team_graph_patch(
         &mut self,
         command: crate::RunCommand,
         patch: GraphPatch,
@@ -1088,7 +1088,7 @@ impl OrganizationStore {
         result
     }
 
-    pub fn team_node_event(
+    pub(crate) fn team_node_event(
         &mut self,
         command: crate::RunCommand,
         event: crate::TeamNodeEvent,
@@ -1109,7 +1109,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn apply_agent_node_event_resolution(
+    pub(crate) fn apply_agent_node_event_resolution(
         &mut self,
         resolution: AgentNodeEventResolution,
     ) -> Result<AuthorizedGraphResolutionOutcome, StoreFault> {
@@ -1121,7 +1121,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn apply_authorized_graph_resolution(
+    pub(crate) fn apply_authorized_graph_resolution(
         &mut self,
         resolution: AuthorizedGraphResolution,
     ) -> Result<AuthorizedGraphResolutionOutcome, StoreFault> {
@@ -1132,7 +1132,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn resolve_approval(
+    pub(crate) fn resolve_approval(
         &mut self,
         input: ApprovalResolutionInput,
     ) -> Result<super::facts::ApprovalResolutionOutcome, StoreFault> {
@@ -1163,7 +1163,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn apply_graph_event(
+    pub(crate) fn apply_graph_event(
         &mut self,
         run_id: &GraphRunId,
         event: GraphEvent,
@@ -1175,7 +1175,7 @@ impl OrganizationStore {
         })
     }
 
-    pub fn apply_control_execution_step(
+    pub(crate) fn apply_control_execution_step(
         &mut self,
         run_id: &GraphRunId,
         step: ControlExecutionStep,
@@ -1225,7 +1225,7 @@ impl OrganizationStore {
         }
     }
 
-    pub fn apply_control_node_resolution(
+    pub(crate) fn apply_control_node_resolution(
         &mut self,
         resolution: ControlNodeResolution,
     ) -> Result<ControlNodeResolutionOutcome, StoreFault> {

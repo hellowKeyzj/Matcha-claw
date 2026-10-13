@@ -3,9 +3,12 @@ mod durable;
 mod facts;
 mod fault;
 
-pub use durable::{AgentIngressIdentity, FleetStore, IngressAuthentication};
-pub(crate) use facts::TargetMatchError;
-pub use facts::{FleetFacts, FleetFactsError, FleetFactsRestoreInput};
+pub(crate) use durable::FleetStore;
+pub use durable::{
+    AgentIngressIdentity, IngressAuthentication, IngressCredential, IngressEnrollment,
+};
+pub(crate) use facts::{FleetFacts, FleetFactsRestoreInput, TargetMatchError};
+pub use facts::FleetFactsError;
 pub use fault::StoreFault;
 
 #[cfg(test)]

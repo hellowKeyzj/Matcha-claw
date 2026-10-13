@@ -7,6 +7,8 @@ use std::{
 use serde_json::{Map, Value};
 use tokio::time::timeout;
 
+use crate::application::delivery::FleetDeliveryOwner;
+
 pub const PATH: &str = "/api/remote-fleet/runtime-agent/ingress";
 const ENROLLMENT_HEADER: &str = "x-matchaclaw-runtime-agent-ingress-credential";
 const AUTHORIZATION_HEADER: &str = "authorization";
@@ -37,7 +39,7 @@ pub type IngressAuthenticationFuture = Pin<
     Box<
         dyn Future<
                 Output = Result<
-                    Result<crate::store::IngressAuthentication, crate::FleetDeliveryError>,
+                    Result<crate::IngressAuthentication, crate::FleetDeliveryError>,
                     (),
                 >,
             > + Send,
@@ -60,7 +62,7 @@ pub type IngressRecordFuture = Pin<
 pub trait RuntimeAgentIngressPort: Send + Sync {
     fn authenticate_runtime_agent_ingress(
         &self,
-        identity: crate::store::AgentIngressIdentity,
+        identity: crate::AgentIngressIdentity,
     ) -> IngressAuthenticationFuture;
 
     fn record_runtime_agent_heartbeat(
@@ -92,7 +94,7 @@ pub trait RuntimeAgentIngressPort: Send + Sync {
 impl RuntimeAgentIngressPort for crate::owner::handle::FleetHandle {
     fn authenticate_runtime_agent_ingress(
         &self,
-        identity: crate::store::AgentIngressIdentity,
+        identity: crate::AgentIngressIdentity,
     ) -> IngressAuthenticationFuture {
         let owner = self.recording(None);
         Box::pin(async move {
@@ -235,12 +237,12 @@ pub async fn handle(
     } else {
         None
     };
-    let presented_hash = match crate::FleetDeliveryOwner::hash_ingress_credential(bearer) {
+    let presented_hash = match FleetDeliveryOwner::hash_ingress_credential(bearer) {
         Ok(hash) => hash,
         Err(_) => return Some(rejected(Some(&request), "unauthorized", 401)),
     };
     let enrollment_hash = match enrollment
-        .map(crate::FleetDeliveryOwner::hash_ingress_credential)
+        .map(FleetDeliveryOwner::hash_ingress_credential)
         .transpose()
     {
         Ok(hash) => hash,
@@ -257,8 +259,8 @@ pub async fn handle(
     )
     .await
     {
-        Ok(Ok(crate::store::IngressAuthentication::Authenticated { .. })) => {}
-        Ok(Ok(crate::store::IngressAuthentication::Unauthorized)) => {
+        Ok(Ok(crate::IngressAuthentication::Authenticated { .. })) => {}
+        Ok(Ok(crate::IngressAuthentication::Unauthorized)) => {
             return Some(rejected(Some(&request), "unauthorized", 401));
         }
         Ok(Err(())) | Err(_) => {
@@ -314,10 +316,10 @@ async fn authenticate_runtime_agent_ingress(
     agent_id: crate::runtime_agent::RuntimeAgentId,
     presented_hash: crate::topology::CredentialHash,
     enrollment_hash: Option<crate::topology::CredentialHash>,
-) -> Result<crate::store::IngressAuthentication, ()> {
+) -> Result<crate::IngressAuthentication, ()> {
     let at = SystemTime::now();
     let initial = owner
-        .authenticate_runtime_agent_ingress(crate::store::AgentIngressIdentity::new(
+        .authenticate_runtime_agent_ingress(crate::AgentIngressIdentity::new(
             agent_id.clone(),
             presented_hash.clone(),
             None,
@@ -328,7 +330,7 @@ async fn authenticate_runtime_agent_ingress(
         .map_err(|_| ())?;
     if matches!(
         &initial,
-        crate::store::IngressAuthentication::Authenticated { .. }
+        crate::IngressAuthentication::Authenticated { .. }
     ) {
         return Ok(initial);
     }
@@ -336,7 +338,7 @@ async fn authenticate_runtime_agent_ingress(
         return Ok(initial);
     };
     owner
-        .authenticate_runtime_agent_ingress(crate::store::AgentIngressIdentity::new(
+        .authenticate_runtime_agent_ingress(crate::AgentIngressIdentity::new(
             agent_id,
             presented_hash,
             Some(enrollment_hash),

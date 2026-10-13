@@ -2,15 +2,15 @@
 
 extern crate self as organization;
 
-pub mod adapters;
+mod adapters;
 mod api;
 mod call;
-pub mod application;
+mod application;
 pub mod capability;
-pub mod owner;
+mod owner;
 pub mod package;
 pub mod ports;
-pub mod store;
+mod store;
 mod trace;
 
 use std::sync::Arc;
@@ -146,8 +146,8 @@ pub mod run {
     };
     pub use approval_projection::{
         TeamPendingApproval, TeamPendingApprovals, TeamPendingApprovalsQueryOutcome,
-        query_team_pending_approvals,
     };
+    pub(crate) use approval_projection::query_team_pending_approvals;
     pub use artifact::{
         ArtifactEvidenceProvenance, ArtifactId, ArtifactIdError, ArtifactKindError, ArtifactLedger,
         ArtifactRecord, ArtifactRecordError, ArtifactRecordOutcome, AssertArtifactExists,
@@ -164,8 +164,8 @@ pub mod run {
     pub use context::{
         ContextEdge, ContextNode, TeamGraphContext, TeamGraphContextQuery,
         TeamGraphContextQueryError, TeamGraphContextResult, TeamGraphContextView,
-        query_team_graph_context,
     };
+    pub(crate) use context::query_team_graph_context;
     pub use control::{
         AgentNodeEvent, AgentNodeEventResolution, AgentNodeEventResolutionError, ControlAuthority,
         ControlExecutionStep, ControlNodeResolution, ControlNodeResolutionError,
@@ -201,8 +201,8 @@ pub mod run {
         TeamRunDiagnosticsQueryOutcome, TeamRunDiagnosticsRetrySummary,
         TeamRunDiagnosticsStaleExecution, TeamRunDiagnosticsStatus,
         TeamRunDiagnosticsUnavailableReason, TeamRunDiagnosticsUnavailableSection,
-        query_team_run_diagnostics,
     };
+    pub(crate) use diagnostics::query_team_run_diagnostics;
     pub use event::{
         ApprovalAction, CommandPayload, CommandReceipt, CommandRejection, NodeEventKind,
         NodeProgressCommand, RecordCommandError, RunCommand,
@@ -244,35 +244,35 @@ pub mod run {
         TeamRunPublicEvent, TeamRunPublicLifecycle, TeamRunPublicRun, TeamRunPublicSnapshot,
         TeamRunPublicSnapshotQueryOutcome, TeamRunPublicSnapshotUnavailable,
         TeamRunPublicStartGate, TeamRunPublicUnavailableSection, TeamRuntimeState,
-        project_team_run_public_event, query_team_public_projection,
-        query_team_run_public_diagnostics, query_team_run_public_snapshot,
+        project_team_run_public_event,
     };
     pub use purge::{
         GraphRunPurgeOutcome, GraphRunPurgeRejection, GraphRunPurgeUnknown, NativeDeletionEvidence,
         NativeDeletionProof, NativeDeletionProofError, RoleSessionDeletionConfirmation,
-        TeamRunPurgeRequest, purge_team_run,
+        TeamRunPurgeRequest,
     };
+    pub(crate) use purge::purge_team_run;
     pub use query::{
         TeamRoleSessionQueryOutcome, TeamRunListEntry, TeamRunProjection, TeamRunQuery,
-        TeamRunQueryOutcome, query_team_role_sessions, query_team_run, query_team_run_list,
+        TeamRunQueryOutcome,
     };
+    pub(crate) use query::{query_team_role_sessions, query_team_run};
     pub use recovery::{
         AttemptRecoveryItem, CancellationRecoveryAction, DeliveryRecoveryAction,
         DeliveryRecoveryItem, DeliveryRecoverySummary, LedgerRecoverySummary,
         OrganizationRecoveryApply, OrganizationRecoveryPlan, RecoveryQueryError,
         ReviewRecoveryStatus, ReviewRecoverySummary, RunRecoveryStatus, TeamRunRecoveryPlan,
-        TeamRunRecoveryQuery, apply_organization_recovery, plan_organization_recovery,
-        query_team_run_recovery,
     };
+    pub(crate) use recovery::query_team_run_recovery;
     pub use scheduler::{
         ArmedCronTrigger, CronScheduleError, CronTriggerScheduleError, DueCronTriggerPlan,
         NodePromptRetryDueInvalidReason, NodePromptRetryDueItem, NodePromptRetryDuePlan,
         NodePromptRetryDueQuery, NodePromptRetryDueQueryError, NodePromptRetryDueQueryOutcome,
         NodePromptRetryDueResolution, NodePromptRetryDueUnknownReason, ReadyNodeSchedule,
         ReadyScheduleError, TerminalObservationPlan, next_cron_slot_after, plan_due_cron_trigger,
-        plan_terminal_observations, produce_node_prompt_retry_due, query_node_prompt_retry_due,
-        schedule_ready_nodes,
+        plan_terminal_observations, schedule_ready_nodes,
     };
+    pub(crate) use scheduler::query_node_prompt_retry_due;
     pub use task_board::{
         AutoRunnerFacts, MailboxKind, MailboxMessage, RunnerStatus, TaskBoardError, TaskBoardFacts,
         TaskId, TaskPlanInput, TaskRecord, TaskStatus, claim_next, close_runner, heartbeat,
@@ -286,7 +286,8 @@ pub mod run {
     };
 }
 
-pub use adapters::mcp::TeamRunMcpFacade;
+pub use adapters::loopback::trigger::WebhookToken;
+pub use adapters::mcp::{TeamRunMcpFacade, is_team_tool};
 pub use adapters::session_terminal::{
     OrganizationRunPhase, OrganizationRunTerminalSnapshot, OrganizationSessionTerminal,
     TeamMessageRepairSessionOutcome, TeamMessageRepairSessionPort, TeamMessageRepairSessionRequest,
@@ -296,13 +297,14 @@ pub use adapters::start_gate_send_hook::{
     StartGateSendRequest,
 };
 pub use api::{
-    OrganizationModule, OrganizationOwnerInput, StartGatePromptPlan, StartGateRuntimeBindingLookup,
+    OrganizationModule, OrganizationOwnerInput, OrganizationRuntime, StartGatePromptPlan,
+    StartGateRuntimeBindingLookup,
     TeamMessageRepairDispatch, TeamMessageTerminalContext, TeamMessageTerminalObservation,
     TeamMessageTerminalPlan, plan_team_message_terminal,
 };
 pub use application::{
     ManualTeamProvision, TEAM_PUBLIC_PLACEHOLDER_PATH, TeamDecisionCompositionError,
-    TeamDecisionFacade, TeamDecisionReceiptProjection, TeamDecisionRequest, TeamGraphPatchDraft,
+    TeamDecisionReceiptProjection, TeamDecisionRequest, TeamGraphPatchDraft,
     TeamNodeEventCommandOutcome, TeamRuntimeCapabilityRequest, TeamRuntimeCommand,
     TeamRuntimeCommandOutcome, TeamRuntimeControlOutcome, TeamRuntimeCreateSource,
     TeamRuntimeDecodeError, TeamRuntimeStatus, decode_team_runtime_capability_request,
@@ -311,10 +313,9 @@ pub use application::{
     summarize_team_runtime_control_outcome, team_public_unavailable_section_name,
 };
 pub use owner::{
-    ArmedTrigger, ManualTeamCreateOutcome, OrganizationCommand, OrganizationHandle,
-    OrganizationOwner, OrganizationPhase, OrganizationQuery, RequestAdmissionClosed,
-    TeamDeleteOutcome, TeamMaterializationCommandOutcome, TeamNodeTerminalResolution,
-    TeamNodeTerminalResult, TeamRunAdmission, TeamRunCommandOutcome, TeamRunCoordinator,
+    ArmedTrigger, ManualTeamCreateOutcome, OrganizationHandle, OrganizationPhase,
+    RequestAdmissionClosed, TeamDeleteOutcome, TeamMaterializationCommandOutcome,
+    TeamNodeTerminalResolution, TeamNodeTerminalResult, TeamRunCommandOutcome,
     TeamRunCoordinatorHandle, TeamRunCoordinatorInput, TeamRunTriggerOutcome, TeamTrigger,
 };
 pub use package::{
@@ -329,7 +330,8 @@ pub use ports::{
     InvalidRoleAgentMaterialization, InvalidRoleSessionRef, InvalidRunRuntimeReceipt,
     InvalidTeamMaterializationIntent, ManagedAgentReference, MaterializationOperationOutcome,
     MaterializationOperationReceipt, MaterializationReceipt, MaterializationRejection,
-    MaterializationSource, MemberIntroductionError, MemberIntroductionRequest, MemberProfile,
+    MaterializationSource, MemberIntroductionError, MemberIntroductionOutput,
+    MemberIntroductionRequest, MemberProfile,
     NativeEffectFailure, NativeRunSettled, NativeWorkspaceReceipt,
     OrganizationNativeRuntime, OrganizationRuntimeDirectory, ROLE_SESSION_REF_INITIAL,
     RoleAgentMaterialization, RoleMaterializationAgent, RoleMaterializationOwnership,
@@ -339,12 +341,12 @@ pub use ports::{
     RoleSessionRef, RoleSessionSlot, RoleSessionWindow, RunRuntimeReceipt,
     RuntimeEndpointReference, RuntimeReceiptOutcome, SessionWindowReference, TeamActivityExecutor,
     TeamMaterializationIntent, TeamMaterializationPort, TeamMaterializationRemoval,
-    TeamMaterializationRequest, TeamMemberIntroductions, TeamNativeEffectsPort,
+    TeamMaterializationRequest, TeamMemberIntroductions, TeamNativeEffectsPort, TeamRunAdmission,
     TeamProvisionMemberStatus, TeamProvisionObserver, TeamProvisionProgress,
     TeamProvisionReporter, TeamProvisionStage, TeamProvisionUpdate,
 };
 pub use run::delivery::{NativeRunReceiptReference, NativeTerminalStatus};
-pub use run::event::ApprovalAction;
+pub use run::event::{ApprovalAction, TeamRunWake, TeamRunWakeReason};
 pub use run::lifecycle::{
     BeginCancellationOutcome, CancellationPlan, CreateGraphRunOutcome, GraphRunLifecycle,
     GraphRunLifecycleState, ResumeOutcome, RoleAbortOutcome, SettleCancellationOutcome,
@@ -407,26 +409,29 @@ pub use run::{
     TeamRunDiagnosticsUnavailableReason, TeamRunDiagnosticsUnavailableSection, TeamRunListEntry,
     TeamRunProjection,
     TeamRunPublicStartGate, TeamRunPurgeRequest, TeamRunQuery, TeamRunQueryOutcome,
-    TeamRunRecoveryPlan, TeamRunRecoveryQuery, TeamRuntimeState, TeamTriggerFireOutcome,
+    TeamRunRecoveryPlan, TeamRuntimeState, TeamTriggerFireOutcome,
     TeamTriggerFireRequest, TeamTriggerFireRequestError, TerminalObservationError,
     TerminalObservationOutcome, TerminalObservationPlan, TriggerFireError, TriggerFireRequest,
     TriggerFireRequestError, TriggerLedger, TriggerRegistration, TriggerSource, WaitOutcome,
     WebhookTriggerResolution, WebhookTriggerResolutionError, WorkAssignment, WorkflowPlan, WorkflowTask, abort_pending_approvals,
-    apply_graph_patch, apply_organization_recovery, begin_delivery, claim_activity,
+    apply_graph_patch, begin_delivery, claim_activity,
     dispatch_activity, export_yaml, import_for_run, import_yaml, next_cron_slot_after,
-    plan_due_cron_trigger, plan_organization_recovery, plan_terminal_observations, project,
-    query_team_graph_context, query_team_public_projection, query_team_run,
-    query_team_run_diagnostics, query_team_run_recovery, recover_interrupted_activity,
+    plan_due_cron_trigger, plan_terminal_observations, project, recover_interrupted_activity,
     recover_interrupted_delivery, recovery_oracle, reduce, register_delivery, resolve_approval,
     resolve_webhook_trigger, restore_oracle, settle_activity, settle_delivery,
 };
-pub use store::{
-    GraphRunFacts, MigrationError, MigrationReport, migrate_legacy_log,
-    NativeTerminalReceiptTarget, OrganizationFacts, OrganizationFactsError, OrganizationStore,
-    PendingWorkflowPlanAdmission, RunStartGate, StoreFault, TeamFacts, TeamRunExecutionScope,
-    TeamTombstoneOutcome, WorkflowPlanAdmissionOutcome, WorkflowPlanSubmitOutcome,
-    WorkflowTemplateFacts,
+pub(crate) use run::{
+    query_team_graph_context, query_team_run, query_team_run_diagnostics, query_team_run_recovery,
 };
+pub use store::{
+    DesignError, MigrationError, MigrationReport, OrganizationFactsError, OrganizationStore,
+    RuntimeGraphError, StoreFault, TeamRunExecutionScope, migrate_legacy_log,
+};
+pub(crate) use store::{
+    GraphRunFacts, NativeTerminalReceiptTarget, OrganizationFacts, RunStartGate, WorkflowTemplateFacts,
+};
+#[cfg(test)]
+pub(crate) use store::{TeamFacts, TeamTombstoneOutcome};
 pub fn open_organization_store(
     state_dir: &std::path::Path,
 ) -> Result<OrganizationStore, StoreFault> {
@@ -457,7 +462,7 @@ impl OrganizationModule {
     pub fn descriptor(
         &self,
         verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
-        webhook_token: adapters::loopback::trigger::WebhookToken,
+        webhook_token: WebhookToken,
         role_session_identity: Arc<dyn RoleSessionIdentityResolver>,
     ) -> ModuleDescriptor {
         ModuleDescriptor::with_capabilities(

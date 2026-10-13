@@ -15,7 +15,7 @@ use crate::{
 /// Planning never writes a fact and never produces a dispatch. A delivery that was
 /// claimed when the process stopped is reported as `OutcomeUnknown`; the caller must
 /// use the existing delivery owner to decide whether and how to observe it.
-pub struct TeamRunRecoveryQuery<'a> {
+pub(crate) struct TeamRunRecoveryQuery<'a> {
     facts: &'a OrganizationFacts,
     run_id: GraphRunId,
     reviews: Option<&'a ReviewLedger>,
@@ -177,7 +177,7 @@ impl<'a> TeamRunRecoveryQuery<'a> {
 /// This is a producer, not a dispatcher: active runs and resumable graph work are
 /// identified from durable facts, while interrupted native work is explicitly retained
 /// as `OutcomeUnknown` until a native readback supplies a receipt.
-pub fn plan_organization_recovery(
+pub(crate) fn plan_organization_recovery(
     facts: &OrganizationFacts,
 ) -> Result<OrganizationRecoveryPlan, RecoveryQueryError> {
     facts.durable_recovery_plan()
@@ -189,7 +189,7 @@ pub fn plan_organization_recovery(
 /// turns an unconfirmed cancellation or delivery into success. Callers that own a
 /// durable store should apply this to a candidate facts value and persist it through
 /// the store's normal transition/commit path.
-pub fn apply_organization_recovery(
+pub(crate) fn apply_organization_recovery(
     facts: &mut OrganizationFacts,
     observed_at: u64,
 ) -> Result<OrganizationRecoveryApply, RecoveryQueryError> {
@@ -235,7 +235,7 @@ impl OrganizationFacts {
     }
 }
 
-pub fn query_team_run_recovery(
+pub(crate) fn query_team_run_recovery(
     facts: &OrganizationFacts,
     run_id: GraphRunId,
     reviews: Option<&ReviewLedger>,

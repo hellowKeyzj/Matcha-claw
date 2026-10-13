@@ -169,7 +169,7 @@ pub enum NodePromptRetryDueQueryOutcome {
 /// Only `DeliveryPhase::RetryScheduled { retry_at, .. }` can produce `Due` or `NotDue`. Pending,
 /// in-flight, terminal-observed, terminal, and outcome-unknown phases remain explicit `Unknown`
 /// facts; this producer never claims that a scheduler loop or a native dispatch succeeded.
-pub fn produce_node_prompt_retry_due(
+pub(crate) fn produce_node_prompt_retry_due(
     facts: &OrganizationFacts,
     query: &NodePromptRetryDueQuery,
 ) -> NodePromptRetryDueQueryOutcome {
@@ -257,7 +257,7 @@ pub fn produce_node_prompt_retry_due(
 }
 
 /// Query alias for callers that name this read-only producer as a query.
-pub fn query_node_prompt_retry_due(
+pub(crate) fn query_node_prompt_retry_due(
     facts: &OrganizationFacts,
     query: &NodePromptRetryDueQuery,
 ) -> NodePromptRetryDueQueryOutcome {

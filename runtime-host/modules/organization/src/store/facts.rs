@@ -61,26 +61,26 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TeamFacts {
+pub(crate) struct TeamFacts {
     definition: TeamDefinition,
     revision: TeamRevision,
     tombstoned: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TeamTombstoneOutcome {
+pub(crate) enum TeamTombstoneOutcome {
     Tombstoned,
     Replayed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ApprovalResolutionOutcome {
+pub(crate) enum ApprovalResolutionOutcome {
     Recorded,
     Replayed,
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct PendingWorkflowPlanAdmission {
+pub(crate) struct PendingWorkflowPlanAdmission {
     team_id: TeamId,
     run_id: GraphRunId,
     creation_idempotency_key: String,
@@ -192,7 +192,7 @@ impl PurgedRunMarker {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WorkflowPlanAdmissionOutcome {
+pub(crate) enum WorkflowPlanAdmissionOutcome {
     Recorded(PendingWorkflowPlanAdmission),
     Replayed(PendingWorkflowPlanAdmission),
     AlreadySubmitted(GraphRunId),
@@ -201,13 +201,13 @@ pub enum WorkflowPlanAdmissionOutcome {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WorkflowPlanSubmitOutcome {
+pub(crate) enum WorkflowPlanSubmitOutcome {
     Submitted(GraphRunId),
     Replayed(GraphRunId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RunStartGate {
+pub(crate) enum RunStartGate {
     Intake,
     Designing {
         design_epoch: String,
@@ -262,7 +262,7 @@ impl RunStartGate {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct WorkflowTemplateFacts {
+pub(crate) struct WorkflowTemplateFacts {
     team: TeamId,
     source_identity: String,
     revision: u64,
@@ -351,7 +351,7 @@ impl WorkflowTemplateFacts {
     }
 }
 
-pub struct TeamRunFactsRestoreInput {
+pub(crate) struct TeamRunFactsRestoreInput {
     pub teams: Vec<TeamFacts>,
     pub materializations: Vec<MaterializationReceipt>,
     pub runs: Vec<GraphRunFacts>,
@@ -381,7 +381,7 @@ pub(crate) struct MaterializationLifecycleFactsRestoreInput {
     pub(crate) evidence: Vec<EvidenceRecord>,
 }
 
-pub struct ApprovalResolutionInput {
+pub(crate) struct ApprovalResolutionInput {
     pub run_id: GraphRunId,
     pub approval_id: String,
     pub stage_id: String,
@@ -428,7 +428,7 @@ impl TeamFacts {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GraphRunFacts {
+pub(crate) struct GraphRunFacts {
     team: TeamId,
     frozen_team_revision: TeamRevision,
     graph: GraphState,
@@ -546,7 +546,7 @@ impl GraphRunFacts {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
-pub struct OrganizationFacts {
+pub(crate) struct OrganizationFacts {
     teams: BTreeMap<String, TeamFacts>,
     materializations: BTreeMap<String, TeamMaterializationLifecycle>,
     runs: BTreeMap<String, GraphRunFacts>,
